@@ -266,7 +266,7 @@ if [ "${FM_FIXTURE_ORPHAN_HERE:-0}" = 1 ]; then
   done
 fi
 printf '%s\n' "$$" > "$FM_HOME/state/session-pid"
-printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+printf '%s\n' "${FM_FIXTURE_LOCK_PID:-$$}" > "$FM_HOME/state/.lock"
 "$FM_HOME/bin/fm-claude-stop-autoarm.sh" </dev/null > "$FM_HOME/state/hook.out" 2>&1
 printf '%s\n' "$?" > "$FM_HOME/state/hook.rc"
 SH
@@ -292,9 +292,11 @@ run_fixture_tree() {  # <dir> <session-bin> [<daemon-bin>]
   local dir=$1 session_bin=$2 daemon_bin=${3:-} i
   if [ -n "$daemon_bin" ]; then
     FM_HOME="$dir" FM_SESSION_BIN="$session_bin" FM_FIXTURE_ORPHAN_HERE=0 \
+      FM_FIXTURE_LOCK_PID="${FM_FIXTURE_LOCK_PID:-}" \
       bash -c '"$0" "$1" &' "$daemon_bin" "$dir/daemon.sh"
   else
     FM_HOME="$dir" FM_FIXTURE_ORPHAN_HERE=1 \
+      FM_FIXTURE_LOCK_PID="${FM_FIXTURE_LOCK_PID:-}" \
       bash -c '"$0" "$1" &' "$session_bin" "$dir/session.sh"
   fi
   i=0
@@ -363,3 +365,206 @@ test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
+
+# --- owner-record layer: which harness process actually holds THIS home ------
+
+# A process table where one live pid is an unrelated background daemon that
+# merely carries a verified harness command name (the ChatGPT desktop app ships
+# its Codex app-server exactly this way), a second live pid is this session's own
+# harness, and everything else is an ordinary shell descending from that session.
+#
+# FM_PROC_ROOT_OVERRIDE is pointed at an empty directory by the callers so both
+# platforms resolve process identity through this table instead of a real /proc.
+write_owner_record_ps() {  # <fakebin> <foreign-pid> <session-pid>
+  local fakebin=$1 foreign=$2 session=$3
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+fields= pid=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o) fields="\$fields \$2"; shift 2 ;;
+    -p) pid=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+foreign_path='/Applications/ChatGPT.app/Contents/Resources/codex'
+case "\$pid" in
+  $foreign)
+    case "\$fields" in
+      *lstart*) printf '%s\n' "\${FM_TEST_FOREIGN_START:-Mon Jan  1 00:00:00 2020} \$foreign_path app-server" ;;
+      *comm*) printf '%s\n' "\$foreign_path" ;;
+      *args*|*command*) printf '%s\n' "\$foreign_path app-server" ;;
+      *ppid*) printf '%s\n' 1 ;;
+    esac ;;
+  $session)
+    case "\$fields" in
+      *lstart*) printf '%s\n' 'Tue Feb  2 00:00:00 2021 claude --resume' ;;
+      *comm*) printf '%s\n' claude ;;
+      *args*|*command*) printf '%s\n' 'claude --resume' ;;
+      *ppid*) printf '%s\n' 1 ;;
+    esac ;;
+  *)
+    case "\$fields" in
+      *lstart*) printf '%s\n' 'Tue Feb  2 00:00:00 2021 bash' ;;
+      *comm*) printf '%s\n' bash ;;
+      *args*|*command*) printf '%s\n' 'bash bin/fm-lock.sh' ;;
+      *ppid*) printf '%s\n' $session ;;
+    esac ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/ps"
+}
+
+# Start one real live process per fixture pid so kill -0 answers honestly, and
+# reap them when the case ends. The pid is returned through a named variable
+# rather than command substitution, whose subshell would wait on the background
+# process's inherited stdout instead of returning.
+OWNER_FIXTURE_PIDS=""
+start_fixture_process() {  # <output-variable>
+  sleep 300 >/dev/null 2>&1 &
+  OWNER_FIXTURE_PIDS="$OWNER_FIXTURE_PIDS $!"
+  printf -v "$1" '%s' "$!"
+}
+stop_fixture_processes() {
+  local p
+  for p in $OWNER_FIXTURE_PIDS; do
+    kill "$p" 2>/dev/null || true
+    wait "$p" 2>/dev/null || true
+  done
+  OWNER_FIXTURE_PIDS=""
+}
+
+# The reported lockout: an unrelated harness-named daemon took a whole home
+# read-only because the lock record was a bare pid and nothing tied that pid to a
+# firstmate session in this home.
+test_unrelated_harness_named_process_never_holds_the_home() {
+  local dir fakebin foreign session out status
+  dir="$TMP_ROOT/foreign-daemon"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/noproc"
+  start_fixture_process foreign
+  start_fixture_process session
+  write_owner_record_ps "$fakebin" "$foreign" "$session"
+  printf '%s\n' "$foreign" > "$dir/state/.lock"
+
+  status=0
+  out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  stop_fixture_processes
+
+  expect_code 0 "$status" \
+    "an unrelated ChatGPT-app codex daemon still took this home read-only: $out"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$session" ] \
+    || fail "the lock was not reclaimed for this session: $(cat "$dir/state/.lock")"
+  assert_contains "$out" "$foreign" \
+    "the reclaim said nothing about which process had been holding the home"
+  assert_contains "$out" "ChatGPT.app" \
+    "the reclaim did not name the real process an operator has to go find"
+  pass "session-lock: an unrelated harness-named process never holds this home's lock"
+}
+
+test_owner_record_still_refuses_a_genuine_second_session() {
+  local dir fakebin foreign session out status
+  dir="$TMP_ROOT/genuine-second"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/noproc"
+  start_fixture_process foreign
+  start_fixture_process session
+  write_owner_record_ps "$fakebin" "$foreign" "$session"
+  # The competing pid is recorded as this home's owner exactly as its own
+  # acquire would have recorded it, so it IS a live firstmate session here.
+  FM_PROC_ROOT_OVERRIDE="$dir/noproc" PATH="$fakebin:$PATH" \
+    fm_record_session_lock_owner "$dir/state" "$foreign"
+
+  status=0
+  out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  stop_fixture_processes
+
+  expect_code 1 "$status" "a genuine second live session in this home was not refused: $out"
+  assert_contains "$out" "another live firstmate session holds the lock" \
+    "the refusal lost its established wording"
+  assert_contains "$out" "$foreign" "the refusal did not name the holding pid"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$foreign" ] \
+    || fail "a refused session rewrote the live owner's lock"
+  pass "session-lock: a genuine second live session in the same home is still refused"
+}
+
+test_recycled_pid_never_inherits_the_previous_owners_lock() {
+  local dir fakebin foreign session out status
+  dir="$TMP_ROOT/recycled-pid"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/noproc"
+  start_fixture_process foreign
+  start_fixture_process session
+  write_owner_record_ps "$fakebin" "$foreign" "$session"
+  # Record the owner while that pid still belongs to the session that acquired
+  # the lock, then let the pid come back as a different process - the reboot
+  # case, where no harness-named app is involved at all.
+  FM_TEST_FOREIGN_START='Sun Dec 31 23:00:00 2019' FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" fm_record_session_lock_owner "$dir/state" "$foreign"
+
+  status=0
+  out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  stop_fixture_processes
+
+  expect_code 0 "$status" "a recycled pid kept holding a dead session's lock: $out"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$session" ] \
+    || fail "the lock was not reclaimed from the recycled pid: $(cat "$dir/state/.lock")"
+  assert_contains "$out" "$foreign" "the reclaim did not name the recycled pid"
+  pass "session-lock: a recycled pid does not inherit the previous owner's lock"
+}
+
+test_unrelated_harness_named_process_never_holds_the_home
+test_owner_record_still_refuses_a_genuine_second_session
+test_recycled_pid_never_inherits_the_previous_owners_lock
+
+# The Stop auto-arm reads the same ownership decision, so the reported lockout
+# reaches supervision continuity too: a home whose lock names an unrelated
+# harness-named process would keep every hook firing inert forever. These run the
+# REAL hook against a REAL unrelated process with no fake process table at all.
+start_unrelated_harness_process() {  # <output-variable>
+  "$NAMED_CLAUDE" -c 'sleep 60; :' >/dev/null 2>&1 &
+  OWNER_FIXTURE_PIDS="$OWNER_FIXTURE_PIDS $!"
+  printf -v "$1" '%s' "$!"
+}
+
+test_e2e_unrelated_harness_process_does_not_freeze_supervision() {
+  local dir foreign
+  dir="$TMP_ROOT/e2e-unrelated-holder"
+  make_primary_home "$dir"
+  start_unrelated_harness_process foreign
+  FM_FIXTURE_LOCK_PID="$foreign" run_fixture_tree "$dir" "$NAMED_CLAUDE"
+  stop_fixture_processes
+
+  expect_code 2 "$(hook_rc "$dir")" \
+    "an unrelated harness-named process holding the lock left supervision inert"
+  [ -e "$dir/state/arm-ran" ] || fail "supervision never armed once the unowned lock was reclaimed"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$(tr -d '[:space:]' < "$dir/state/session-pid")" ] \
+    || fail "the hook did not reclaim the home from the unrelated process"
+  pass "session-lock e2e: an unrelated harness-named lock holder does not freeze supervision"
+}
+
+test_e2e_verified_live_owner_still_keeps_a_competing_hook_inert() {
+  local dir foreign
+  dir="$TMP_ROOT/e2e-verified-holder"
+  make_primary_home "$dir"
+  start_unrelated_harness_process foreign
+  # Same process, but now recorded as this home's owner exactly as its own
+  # acquire would have recorded it: a real competing session, still untouchable.
+  fm_record_session_lock_owner "$dir/state" "$foreign"
+  FM_FIXTURE_LOCK_PID="$foreign" run_fixture_tree "$dir" "$NAMED_CLAUDE"
+
+  expect_code 0 "$(hook_rc "$dir")" "a competing hook did not stand down for a verified live owner"
+  assert_absent "$dir/state/arm-ran" "a competing session armed supervision over a verified live owner"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$foreign" ] \
+    || fail "a competing session took the lock from a verified live owner"
+  stop_fixture_processes
+  pass "session-lock e2e: a verified live owner still keeps a competing session's hook inert"
+}
+
+test_e2e_unrelated_harness_process_does_not_freeze_supervision
+test_e2e_verified_live_owner_still_keeps_a_competing_hook_inert

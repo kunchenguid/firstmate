@@ -3,6 +3,18 @@
 # Writes the harness (agent) process PID found by walking the shell's ancestry,
 # which lives as long as the firstmate session - unlike the transient subshell
 # PID of any one tool call, which is dead moments after it is written.
+#
+# state/.lock stays a bare pid for every other reader. Alongside it, each acquire
+# records state/.lock-owner, which is what proves that pid belongs to a firstmate
+# session started in THIS home rather than to any unrelated process that happens
+# to carry a verified harness command name or to have inherited a recycled pid.
+# bin/fm-session-lock-lib.sh owns that record's format and verification.
+#
+# A lock whose owner cannot be verified is never trusted and never fatal: it is
+# reclaimed with a note naming the process that had been holding the home, so a
+# legacy bare-pid lock written before owner records existed upgrades on the next
+# acquire instead of stranding the operator.
+#
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -23,13 +35,30 @@ mkdir -p "$STATE" 2>/dev/null || {
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
+# One line naming what actually holds the lock, so an operator inspecting a
+# refusal can find that process instead of being handed a bare number.
+owner_detail() {
+  local detail=''
+  [ -z "$FM_LOCK_OWNER_COMMAND" ] || detail=" ($FM_LOCK_OWNER_COMMAND)"
+  [ -z "$FM_LOCK_OWNER_SINCE" ] || detail="$detail, holding this home since $FM_LOCK_OWNER_SINCE"
+  printf '%s' "$detail"
+}
+
 if [ "${1:-}" = "status" ]; then
-  if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
-  old=$(cat "$LOCK" 2>/dev/null) || {
-    echo "lock: unreadable"
+  if [ ! -e "$LOCK" ] && [ ! -L "$LOCK" ]; then echo "lock: free"; exit 0; fi
+  if fm_session_lock_live_owner "$STATE"; then
+    echo "lock: held by live harness pid $FM_LOCK_OWNER_PID$(owner_detail)"
     exit 0
-  }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  fi
+  case "$FM_LOCK_OWNER_STATUS" in
+    free) echo "lock: free" ;;
+    malformed) echo "lock: unreadable" ;;
+    dead) echo "lock: stale (pid $FM_LOCK_OWNER_PID dead or not a harness)" ;;
+    reused)
+      echo "lock: stale (pid $FM_LOCK_OWNER_PID was recycled and now belongs to an unrelated process$(owner_detail)); the next session start reclaims it" ;;
+    *)
+      echo "lock: unverified (pid $FM_LOCK_OWNER_PID$(owner_detail) is a live harness process, but no session in this home recorded it as the owner); the next session start reclaims it" ;;
+  esac
   exit 0
 fi
 
@@ -55,15 +84,37 @@ release_claim_lock() {
 trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
 
+refuse_live_owner() {
+  echo "error: another live firstmate session holds the lock: pid $FM_LOCK_OWNER_PID$(owner_detail); operate read-only until resolved" >&2
+  exit 1
+}
+
+# Why this lock is being taken over, when it was held by something that failed
+# verification. Reported after the claim so the operator can connect a home that
+# had gone read-only to the process that was actually responsible.
+RECLAIMED_FROM=''
+note_reclaim() {
+  case "$FM_LOCK_OWNER_STATUS" in
+    unverified)
+      RECLAIMED_FROM="note: reclaimed the session lock from pid $FM_LOCK_OWNER_PID$(owner_detail): no session in this home ever recorded that pid as its owner, so it is not a firstmate session here." ;;
+    reused)
+      RECLAIMED_FROM="note: reclaimed the session lock from pid $FM_LOCK_OWNER_PID$(owner_detail): that pid was recycled and now belongs to an unrelated process." ;;
+    *) RECLAIMED_FROM='' ;;
+  esac
+}
+
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
   if [ "$old" = "$me" ]; then
-    echo "lock acquired: harness pid $me"
-    exit 0
-  fi
-  if fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
-    exit 1
+    # Our own lock, but only shortcut past the claim when its owner record backs
+    # that up. A lock of ours carrying no verifiable record is republished below,
+    # so a later session can tell this session apart from a pid collision.
+    if fm_session_lock_live_owner "$STATE" && [ "$FM_LOCK_OWNER_PID" = "$me" ]; then
+      echo "lock acquired: harness pid $me"
+      exit 0
+    fi
+  elif fm_session_lock_live_owner "$STATE"; then
+    refuse_live_owner
   fi
 fi
 
@@ -86,10 +137,16 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
-    exit 1
+  if [ "$old" != "$me" ]; then
+    if fm_session_lock_live_owner "$STATE"; then
+      refuse_live_owner
+    fi
+    note_reclaim
   fi
+fi
+if ! fm_session_lock_record_owner "$STATE" "$me"; then
+  echo "error: cannot record session-lock ownership; operate read-only until resolved" >&2
+  exit 1
 fi
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
@@ -103,5 +160,10 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
+if ! fm_session_lock_live_owner "$STATE" || [ "$FM_LOCK_OWNER_PID" != "$me" ]; then
+  echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
+  exit 1
+fi
 release_claim_lock
+[ -z "$RECLAIMED_FROM" ] || printf '%s\n' "$RECLAIMED_FROM"
 echo "lock acquired: harness pid $me"

@@ -150,7 +150,14 @@ mkdir -p "$LIVE_OWNER_HOME/state" "$LIVE_OWNER_HOME/config"
 printf 'project=fixture\n' > "$LIVE_OWNER_HOME/state/task.meta"
 "$FAKE_CLAUDE" -c 'sleep 3; :' &
 LIVE_OWNER_PID=$!
-printf '%s\n' "$LIVE_OWNER_PID" > "$LIVE_OWNER_HOME/state/.lock"
+# The competing process must be recorded as that home's owner the way its own
+# acquire would record it; a bare pid is not evidence of a session there.
+(
+  # shellcheck source=bin/fm-session-lock-lib.sh
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  printf '%s\n' "$LIVE_OWNER_PID" > "$LIVE_OWNER_HOME/state/.lock"
+  fm_session_lock_record_owner "$LIVE_OWNER_HOME/state" "$LIVE_OWNER_PID"
+) || fail "could not record the competing live owner"
 LIVE_OWNER_RC=0
 printf '%s\n' '{"session_id":"live-owner-control"}' \
   | FM_HOME="$LIVE_OWNER_HOME" FM_ROOT_OVERRIDE="$PROJECT" "$FAKE_CLAUDE" -c '"$FM_ROOT_OVERRIDE/bin/fm-claude-stop-autoarm.sh"' \

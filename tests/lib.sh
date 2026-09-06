@@ -283,6 +283,23 @@ fm_git_worktree() {
   git -C "$repo" worktree add --quiet -b "$branch" "$worktree"
 }
 
+# --- session-lock fixtures ---------------------------------------------------
+
+# fm_record_session_lock_owner <state> <pid>
+# Stage <pid> as this home's verified session-lock owner the way an acquire does,
+# so a fixture can present a genuine competing session instead of hand-writing
+# the lock's internal owner record. Runs in a subshell so sourcing the
+# session-lock library never leaks into the calling suite.
+fm_record_session_lock_owner() {
+  local state=$1 pid=$2
+  (
+    # shellcheck source=bin/fm-session-lock-lib.sh
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    printf '%s\n' "$pid" > "$state/.lock" || exit 1
+    fm_session_lock_record_owner "$state" "$pid"
+  )
+}
+
 # --- state/<id>.meta writers ------------------------------------------------
 
 # fm_write_meta <file> <key=val> ...: write the given key=val lines to a meta
