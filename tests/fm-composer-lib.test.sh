@@ -330,6 +330,10 @@ test_matrix_omp_status_row_bounds_bare_composer() {
   # to begin with a short word and a spaced middle dot is composer input.
   _fm_composer_row_is_omp_status 'fix · tests before pushing' \
     && fail "wrapped typed text with a middle dot must not be mistaken for omp status furniture"
+  # The ascii preset's identity cell is `pi`, but that preset separates its
+  # cells with ` - `, so a row opening `pi ·` is never omp furniture.
+  _fm_composer_row_is_omp_status 'pi · e · phi as the three constants' \
+    && fail "typed text opening 'pi ·' must not be mistaken for omp status furniture"
   _fm_composer_row_is_omp_status ' ⣾ 3s  · ◔ GPT-6-Astra' \
     || fail "the status-set omp spinner row must be recognized as furniture"
   assert_screen "idle omp (unicode preset)" empty "$CAPS_STYLED" "$idle_unicode"
@@ -342,6 +346,8 @@ test_matrix_omp_status_row_bounds_bare_composer() {
   # proven wrap region and reads pending, exactly as it did before the rule.
   wrapped=$'transcript line\n\n❯ please run the suite and then\nfix · tests before pushing'
   assert_screen "wrapped typed text with a middle dot stays pending" pending "$CAPS_TMUX" "$wrapped" 3
+  wrapped=$'transcript line\n\n❯ document the constants in the order\npi · e · phi with one example each'
+  assert_screen "wrapped typed text opening 'pi ·' stays pending" pending "$CAPS_TMUX" "$wrapped" 3
   pass "matrix: omp's status row bounds the bare composer's wrap region"
 }
 

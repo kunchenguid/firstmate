@@ -402,13 +402,16 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # wrap region walks straight into that row and an idle omp pane reads
 # `pending`, the false verdict that skipped the doorbell on the first live omp
 # worker. A row is omp status furniture when it opens with omp's identity cell
-# then a middle dot (`π` under the unicode preset, `󰵗` under nerd, `pi` under
-# ascii: the `icon.omp` of each omp 18.1.11 preset, never an arbitrary short
-# token, so a wrapped typed row such as `fix · tests` stays composer input),
-# when it opens with one of omp's spinner frames then an elapsed cell, or when
-# it carries the context-usage cell after a middle dot. It is consulted only as
-# the boundary BELOW a bare composer, never on the composer row itself.
-FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗|pi)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
+# then a middle dot (`π` under the unicode preset, `󰵗` under nerd: the
+# `icon.omp` of those omp 18.1.11 presets, never an arbitrary short token, so
+# a wrapped typed row such as `fix · tests` stays composer input; the ascii
+# preset's `pi` is deliberately absent because that preset's `sep.dot` is
+# ` - `, so its status row never carries a middle dot and a `pi ·` alternative
+# could only ever match typed text), when it opens with one of omp's spinner
+# frames then an elapsed cell, or when it carries the context-usage cell after
+# a middle dot. It is consulted only as the boundary BELOW a bare composer,
+# never on the composer row itself.
+FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
 
 # The bounded row window adapters should capture for a composer read. One
 # shared policy (previously three per-backend variables that had drifted to
