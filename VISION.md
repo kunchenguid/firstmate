@@ -56,7 +56,7 @@ A new task shape earns its way in only when existing primitives genuinely cannot
 
 The first mate is not another harness and not another orchestrator app.
 The experience it creates is a new way of working, orthogonal to which agent harness or session manager the captain already uses.
-It is an agent distro, not an app: instructions, skills, scripts, and state conventions that any verified harness can inhabit - Claude Code, Codex, Pi, and others - and that run across session managers such as tmux, Herdr, and Orca.
+It is an agent distro, not an app: instructions, skills, scripts, and state conventions that any verified harness can inhabit - Claude Code, Codex, Pi, and others - and that run across session managers such as tmux and Herdr.
 The first mate can read, understand, and evolve every part of itself: plain instructions, scripts, and text records keep the whole system introspectable, hot-modifiable, and self-evolving by the very agent that runs it.
 When something is not working well, the captain can ask the first mate and it figures it out; captains using their own firstmate to improve the shared surface is how the fleet evolves in the open.
 Harness adapters earn trust through verification, and the fleet keeps sailing when any one vendor's tool degrades.
