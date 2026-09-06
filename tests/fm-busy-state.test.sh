@@ -309,8 +309,8 @@ Ctrl+c:cancel')
 # captures from docs/verification/grok-queued-enter.md (grok 1.0.13,
 # 2026-09-06); legacy_tail is the older recorded Ctrl+c:cancel token, which
 # that session never observed. quoted_tail is an idle pane whose finished turn
-# quoted the token in prose: the signature matches the measured footer row, so
-# only the row classifies busy. approve_tail carries the --always-approve
+# quoted the keys in prose, on one row and separately: the signature matches
+# the measured footer row, so only the row classifies busy. approve_tail carries the --always-approve
 # segment every real grok worker is launched with, whose footer position the
 # record never captured, so nothing may be required between the measured keys. This file sources bin/fm-busy-lib.sh without
 # its canonical owner bin/fm-composer-lib.sh, so the plain calls exercise the
@@ -324,6 +324,7 @@ test_grok_regex_active_turn_busy() {
   legacy_tail='Ctrl+c:cancel'
   idle_tail='  Shift+Tab:mode  │  Ctrl+x:shortcuts'
   quoted_tail='The measured busy footer is `Esc:cancel`, not `esc interrupt`.
+The busy row carries Shift+Tab:mode and then Esc:cancel, unlike the idle bar.
   Shift+Tab:mode  │  Ctrl+x:shortcuts'
   approve_tail='  Shift+Tab:mode  ·  always-approve  │  Esc:cancel  │  Ctrl+x:shortcuts'
 
@@ -338,7 +339,7 @@ test_grok_regex_active_turn_busy() {
     || fail "grok's measured idle footer must classify idle, got '$out'"
   out=$(fm_busy_classify tmux w1 grok t1 "$state" "$quoted_tail")
   [ "$out" = "idle grok-regex" ] \
-    || fail "a finished turn quoting Esc:cancel must classify idle, got '$out'"
+    || fail "a finished turn quoting the measured keys must classify idle, got '$out'"
   out=$(fm_busy_classify tmux w1 grok t1 "$state" "$approve_tail")
   [ "$out" = "busy grok-regex" ] \
     || fail "a footer segment between the measured keys must stay busy, got '$out'"

@@ -295,13 +295,20 @@ fm_composer_strip_ghost() {
 # that order (measured live on grok 1.0.13, 2026-09-06:
 # docs/verification/grok-queued-enter.md, which captured no thinking-only frame
 # and claims none, so that sub-state is still owed a measurement). The
-# alternative requires both measured keys on ONE ROW rather than the bare
-# token, for the same reason the Kimi signature below is anchored: ordinary
-# output quoting "Esc:cancel" must not classify an idle pane busy. What sits
-# between them is deliberately unconstrained: the record was captured without
-# "--always-approve", which bin/fm-spawn.sh launches every real grok worker
-# with and which renders its own "always-approve" footer segment at an
-# unmeasured position. "Ctrl+c:cancel" is the older recorded Grok footer and is
+# alternative requires both measured keys on ONE ROW, separated by the measured
+# separator glyph, rather than the bare token: ordinary output quoting either
+# key - including this file's own comments and the verification record - must
+# not classify an idle pane busy, the same reason the Kimi signature below is
+# anchored. One intervening segment is tolerated because the record was
+# captured without "--always-approve", which bin/fm-spawn.sh launches every
+# real grok worker with and which renders its own "always-approve" footer
+# segment at an unmeasured position.
+# This is the LAST incremental refinement of this rendered-footer regex. If a
+# further false-busy or false-idle case appears, do not add another pattern:
+# record the limitation of classifying grok from a rendered pane and
+# investigate whether Grok exposes a non-rendered busy signal, since it has no
+# semantic writer today.
+# "Ctrl+c:cancel" is the older recorded Grok footer and is
 # kept so a build that still renders it does not read idle mid-turn. Neither
 # footer appears in Grok's idle bar ("Shift+Tab:mode  |  Ctrl+x:shortcuts"),
 # and this regex is Grok's ONLY busy source (bin/fm-busy-lib.sh has no semantic
@@ -343,7 +350,7 @@ FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
-FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Shift\+Tab:mode.*Esc:cancel|Ctrl\+c:cancel'
+FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Shift\+Tab:mode[^│]*│[^│]*Esc:cancel|Ctrl\+c:cancel'
 # cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
 # same version rendered both `Working` and `Running` beside its braille spinner
 # in two consecutive turns, while `ctrl+c to stop` was present for the whole

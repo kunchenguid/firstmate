@@ -369,10 +369,10 @@ test_grok_busy_signature_uses_measured_footer() {
   printf '  Shift+Tab:mode  ·  always-approve  │  Esc:cancel  │  Ctrl+x:shortcuts\n' > "$composer"
   pane_busy approve grok || fail "an intervening footer segment must stay busy for Grok"
 
-  # An idle pane whose finished turn quoted the token is still idle: the
-  # signature matches the footer row, not the bare token.
-  printf 'The measured busy footer is `Esc:cancel`, not `esc interrupt`.\n  Shift+Tab:mode  │  Ctrl+x:shortcuts\n' > "$composer"
-  pane_busy quoted grok && fail "quoted Esc:cancel prose must not make an idle Grok pane busy"
+  # An idle pane whose finished turn quoted both keys on one row is still idle:
+  # the signature matches the separated footer row, not the keys alone.
+  printf 'The busy row carries Shift+Tab:mode and then Esc:cancel, unlike the idle bar.\n  Shift+Tab:mode  │  Ctrl+x:shortcuts\n' > "$composer"
+  pane_busy quoted grok && fail "prose quoting both measured keys must not make an idle Grok pane busy"
   pass "fm_pane_is_busy: Grok's measured footer row is busy, per-harness, and not a bare token"
 }
 
