@@ -154,6 +154,17 @@ fm_backend_tmux_current_command() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
 }
 
+# fm_backend_tmux_pane_pid: <target>'s root process pid, tmux's own
+# `#{pane_pid}` (the shell the window was created with). Prints nothing and
+# returns 1 on any tmux error or a non-numeric answer, so a caller can never walk
+# a process tree from a guessed root.
+fm_backend_tmux_pane_pid() {  # <target>
+  local pid
+  pid=$(tmux display-message -p -t "$1" '#{pane_pid}' 2>/dev/null) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$pid"
+}
+
 # fm_backend_tmux_classify_process_name: the single owner of the process-name
 # vocabulary shared by every liveness signal below - `agent` for a verified
 # harness, `shell` for an idle login/interactive shell, `other` for anything

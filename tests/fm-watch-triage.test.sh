@@ -3604,6 +3604,185 @@ test_terminal_first_sight_drops_a_finished_write_deferral_chain() {
 
 # --- triage debug log stays size capped -------------------------------------
 
+# --- process-tree progress: a quiet pane whose agent keeps starting work -------
+# The 2026-09-02 case: several Claude Code crews each waited on a one-to-two-hour
+# test suite. Each pane was quiet only because its worker was blocked on the
+# running suite, so the busy-turn bound routed it through the wedge timer and it
+# escalated as a possible wedge once per FM_STALE_ESCALATE_SECS, costing a
+# supervision turn each time to find the agent's fresh test child by hand. The
+# process table is the liveness input that shows this: a live descendant of the
+# pane's root process that started AFTER the quiet window opened is work neither
+# the pane nor the run step can show. The probe reads that table through
+# FM_PROCESS_TREE_PS_BIN, so a canned ps stands in for the real tree here, and the
+# fake tmux hands out the pane's root pid through FM_FAKE_TMUX_PANE_PID.
+
+make_fake_ps() {  # <dir> -> echoes the fake ps path; serves the probe's exact read from FM_FAKE_PS_TABLE
+  cat > "$1/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ $# -eq 2 ] && [ "$1" = -eo ] && [ "$2" = 'pid=,ppid=,etime=' ] || exit 64
+[ -n "${FM_FAKE_PS_TABLE:-}" ] && [ -f "$FM_FAKE_PS_TABLE" ] || exit 1
+cat "$FM_FAKE_PS_TABLE"
+SH
+  chmod +x "$1/ps"
+  printf '%s\n' "$1/ps"
+}
+
+test_crew_process_tree_started_since_classifier() {
+  local dir ps table now since
+  dir="$TMP_ROOT/process-tree-classifier"; mkdir -p "$dir"
+  ps=$(make_fake_ps "$dir"); table="$dir/table"
+  now=$(date +%s); since=$(( now - 500 ))
+  # Root 4242 (the pane shell) runs 4243 (the agent), whose child 4244 started
+  # 180s ago, inside the 500s quiet window. 9999 started 5s ago in an unrelated
+  # tree and must never count.
+  printf '%s\n' '4242 1 05:00:00' '4243 4242 04:59:50' '4244 4243 03:00' '9999 1 00:05' > "$table"
+  FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$table" crew_process_tree_started_since 4242 "$since" \
+    || fail "a grandchild that started inside the quiet window was not reported as progress"
+  FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$table" crew_process_tree_started_since 4243 "$since" \
+    || fail "a child that started inside the quiet window was not reported as progress from the agent pid"
+  # The newest descendant is 1200s old, older than the quiet window: no evidence.
+  printf '%s\n' '4242 1 05:00:00' '4243 4242 04:59:50' '4244 4243 20:00' '9999 1 00:05' > "$table"
+  ! FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$table" crew_process_tree_started_since 4242 "$since" \
+    || fail "a descendant older than the quiet window was reported as progress"
+  # A root with no descendants is not progress, however fresh the root itself or
+  # an unrelated tree is.
+  printf '%s\n' '4242 1 00:05' '9999 1 00:05' '9998 9999 00:01' > "$table"
+  ! FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$table" crew_process_tree_started_since 4242 "$since" \
+    || fail "a root with no descendants was reported as progress"
+  # The day form of elapsed time parses: a descendant started one day ago is
+  # progress against a window that opened two days ago, not one that opened an
+  # hour ago.
+  printf '%s\n' '4242 1 3-00:00:00' '4243 4242 1-00:00:00' > "$table"
+  FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$table" crew_process_tree_started_since 4242 $(( now - 172800 )) \
+    || fail "a day-form elapsed time was not parsed"
+  ! FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$table" crew_process_tree_started_since 4242 $(( now - 3600 )) \
+    || fail "a day-old descendant counted as progress inside a one-hour window"
+  # No pid, a malformed pid, a malformed anchor, or an unreadable table: no evidence.
+  ! FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$table" crew_process_tree_started_since "" "$since" \
+    || fail "an empty root pid reported progress"
+  ! FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$table" crew_process_tree_started_since 42x "$since" \
+    || fail "a malformed root pid reported progress"
+  ! FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$table" crew_process_tree_started_since 4242 "" \
+    || fail "an empty anchor reported progress"
+  ! FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$dir/absent" crew_process_tree_started_since 4242 "$since" \
+    || fail "a failed process-table read reported progress"
+  pass "crew_process_tree_started_since: a descendant started inside the quiet window is progress; older, unrelated, absent and unreadable trees are not"
+}
+
+# The reproduction: a busy pane past its completed-turn bound with an unchanged
+# capture past the wedge threshold. With a fresh descendant the escalation is
+# deferred on the same bounded cadence as a written worktree; with only a stale
+# descendant the unchanged escalation fires. Both phases land straight on the
+# at-threshold wedge branch, which never re-reads crew state, so the process
+# tree is the only input that can change the outcome.
+test_busy_quiet_pane_deferred_while_its_process_tree_starts_work() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid ps table back
+  dir=$(make_case busy-quiet-process-tree); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-suite"; ps=$(make_fake_ps "$dir"); table="$dir/table"
+  printf 'Running the full suite...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/suite.meta"
+  record_pi_busy "$state" suite
+  printf 'working: running the full suite\n' > "$state/suite.status"
+  sig=$(seen_sig "$state/suite.status"); printf '%s' "$sig" > "$state/.seen-suite_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Running the full suite...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # No turn has completed for longer than the busy bound (the spawn record is
+  # aged), and the wedge timer's idle window opened 500s ago.
+  touch -t 200001010000 "$state/suite.meta"
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+
+  # Phase A: the pane shell (4242) runs the agent (4243), whose test child (4244)
+  # started 180s ago, inside the quiet window. Deferred, never escalated.
+  printf '%s\n' '4242 1 05:00:00' '4243 4242 04:59:50' '4244 4243 03:00' > "$table"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_PANE_PID=4242 FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$table" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher wedge-escalated a busy quiet pane whose agent had just started a child: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a process-tree deferral printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a process-tree deferral enqueued a wake"; }
+  [ -e "$state/.writing-since-$key" ] || { reap "$pid"; fail "the deferral chain marker was not recorded"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "a process-tree deferral advanced the wedge escalation counter"; }
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || echo 0)" -gt "$back" ] \
+    || { reap "$pid"; fail "a process-tree deferral did not restart the idle timer, so the next window cannot re-probe"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+
+  # Phase B: same pane, but its newest descendant started 1200s ago, before this
+  # quiet window opened. Nothing new was started, so the unchanged schedule fires.
+  printf '%s\n' '4242 1 05:00:00' '4243 4242 04:59:50' '4244 4243 20:00' > "$table"
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_PANE_PID=4242 FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$table" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a busy quiet pane whose agent started nothing new did not wedge-escalate on the existing schedule"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the stale-tree escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the stale-tree escalation did not flag a possible wedge"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the stale-tree escalation was not counted"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the idle timer was not cleared after a real escalation"
+  [ ! -e "$state/.writing-since-$key" ] || fail "the deferral chain outlived a real escalation"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the stale-tree escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the stale-tree escalation was not queued"
+  pass "a busy quiet pane whose agent keeps starting descendants is deferred, while one whose newest descendant predates the quiet window still wedge-escalates on the unchanged schedule"
+}
+
+# A process-tree deferral shares the written-worktree chain, so it re-surfaces on
+# the same bounded cadence, labeled by its own evidence rather than as a wedge.
+test_process_tree_deferral_resurfaces_on_the_bounded_cadence() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid ps table back
+  dir=$(make_case process-tree-resurface); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-suite-churn"; ps=$(make_fake_ps "$dir"); table="$dir/table"
+  printf 'Running the full suite...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/suitechurn.meta"
+  record_pi_busy "$state" suitechurn
+  printf 'working: running the full suite\n' > "$state/suitechurn.status"
+  sig=$(seen_sig "$state/suitechurn.status"); printf '%s' "$sig" > "$state/.seen-suitechurn_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Running the full suite...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  touch -t 200001010000 "$state/suitechurn.meta"
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  # This pane has been deferring on process-tree evidence for 500s already.
+  : > "$state/.writing-since-$key"
+  set_mtime "$back" "$state/.writing-since-$key"
+  printf '%s\n' '4242 1 05:00:00' '4243 4242 04:59:50' '4244 4243 03:00' > "$table"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_PANE_PID=4242 FM_PROCESS_TREE_PS_BIN="$ps" FM_FAKE_PS_TABLE="$table" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a long-running process-tree deferral never re-surfaced on the bounded cadence"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the process-tree recheck did not print a stale wake"
+  grep -F "starting new processes" "$out" >/dev/null || fail "the process-tree recheck was not labeled by its evidence: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a process-tree recheck was mislabeled a possible wedge"
+  [ -e "$state/.writing-resurfaced-$key" ] || fail "the re-surface throttle marker was not recorded"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a process-tree recheck advanced the wedge escalation counter"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the process-tree recheck failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the process-tree recheck was not queued"
+  pass "a process-tree deferral re-surfaces once on the bounded pause cadence, labeled by its evidence, so a churning tree cannot stay invisible"
+}
+
 test_triage_log_size_cap_accepts_spaced_wc_counts() {
   local dir state fakebin out status_file pid lines i
   dir=$(make_case triage-log-spaced-wc); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -4186,6 +4365,9 @@ test_write_deferral_resurfaces_on_the_bounded_cadence
 test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain
+test_crew_process_tree_started_since_classifier
+test_busy_quiet_pane_deferred_while_its_process_tree_starts_work
+test_process_tree_deferral_resurfaces_on_the_bounded_cadence
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled

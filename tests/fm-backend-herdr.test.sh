@@ -778,6 +778,40 @@ test_create_task_refuses_when_preexisting_husk_tab_remains() {
   pass "fm_backend_herdr_create_task: refuses success when a preexisting husk tab remains after replacement"
 }
 
+# fm_backend_herdr_pane_pid: the wedge detector's process-tree probe roots at the
+# pane's shell pid from `pane process-info`, and only when the response echoes
+# the exact pane id back, so a shape change or a foreign pane can never hand the
+# probe a root to walk from.
+test_pane_pid_reads_shell_pid_only_for_the_exact_pane() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/pane-pid"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"claude","argv0":"claude"}]}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_pid fmtest:w1:p2' "$ROOT" ) \
+    || fail "pane_pid should read the shell pid from a well-formed process-info response"
+  [ "$out" = 4242 ] || fail "pane_pid should print the shell pid, got '$out'"
+  assert_contains "$(cat "$log")" $'pane\x1fprocess-info\x1f--pane\x1fw1:p2' "pane_pid did not ask for the exact pane's process-info"
+
+  : > "$log"; rm -f "$resp"/*.out
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p9","shell_pid":4242}}}\n' > "$resp/1.out"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_pid fmtest:w1:p2' "$ROOT" ) \
+    && fail "pane_pid accepted a response echoing a different pane id: '$out'"
+  [ -z "$out" ] || fail "pane_pid printed a pid for a foreign pane: '$out'"
+
+  : > "$log"; rm -f "$resp"/*.out
+  printf '{"error":{"code":"pane_not_found","message":"pane w1:p2 not found"}}\n' > "$resp/1.out"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_pid fmtest:w1:p2' "$ROOT" ) \
+    && fail "pane_pid accepted an error response: '$out'"
+  [ -z "$out" ] || fail "pane_pid printed a pid for an error response: '$out'"
+
+  out=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_pid fmtest' "$ROOT" 2>/dev/null ) \
+    && fail "pane_pid accepted a target with no pane: '$out'"
+  pass "fm_backend_herdr_pane_pid: prints the shell pid only for an exact-pane process-info response; a foreign pane, an error, and a bare target yield nothing"
+}
+
 test_create_task_refuses_when_agent_state_ambiguous() {
   # An unexpected error code from agent get (neither agent_not_found nor a
   # successful read) must not be misread as a husk - fail-safe toward
@@ -4520,6 +4554,7 @@ test_create_task_refuses_duplicate_label
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk
+test_pane_pid_reads_shell_pid_only_for_the_exact_pane
 test_create_task_closes_and_replaces_no_agent_husk
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains

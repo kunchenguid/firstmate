@@ -35,12 +35,14 @@
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active. A pane whose own task
-#                          worktree was written during the quiet window is
-#                          deferred rather than escalated (wedge_defer_writing),
-#                          because files appearing there are liveness the pane and
-#                          the run step cannot show; that deferral still
-#                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
-#                          that writes nothing keeps the unchanged schedule.
+#                          worktree was written during the quiet window, or whose
+#                          agent started a new descendant process during it, is
+#                          deferred rather than escalated (wedge_defer_progress),
+#                          because files appearing there and children appearing
+#                          under the agent are liveness the pane and the run step
+#                          cannot show; that deferral still re-surfaces once per
+#                          PAUSE_RESURFACE_SECS, and a pane that shows neither
+#                          keeps the unchanged schedule.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -745,30 +747,35 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope]
   wake "$reason"
 }
 
-# Defer ONE wedge escalation for a pane that went quiet while its own task
-# worktree is demonstrably still being written (crew_worktree_written_since in
-# fm-classify-lib.sh). The pane and the run step both say nothing is happening;
-# the worktree says otherwise, and files appearing in it is the harder signal to
-# fake, so the escalation is deferred rather than fired. Deliberately a DEFERRAL,
-# not a cancellation: the idle timer restarts, so the next window probes again,
-# and a .writing-since-<key> marker ages the whole deferral chain so the pane
-# still re-surfaces once every PAUSE_RESURFACE_SECS through the shared
-# resurface_absorbed above - literally the same bounded cadence a declared pause
-# uses, throttled by its own .writing-resurfaced-<key> marker - and a crew whose
-# worktree churns without real progress cannot stay invisible. The escalation
-# counter is left alone: it is neither advanced (this is not an escalation) nor
-# reset (a later genuine escalation must still carry the demand-deep-inspection
-# history it had already earned).
-wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
-  local win=$1 since_file=$2 label=$3 age=$4 key wsf wage
+# Defer ONE wedge escalation for a pane that went quiet while its own task shows
+# liveness the pane and the run step cannot: its worktree is demonstrably still
+# being written (crew_worktree_written_since in fm-classify-lib.sh), or its agent
+# has started a new descendant process since the idle window opened
+# (crew_process_tree_started_since there). The pane and the run step both say
+# nothing is happening; files appearing in the worktree and children appearing
+# under the agent say otherwise, and both are harder to fake than a rendered
+# footer, so the escalation is deferred rather than fired. Deliberately a
+# DEFERRAL, not a cancellation: the idle timer restarts, so the next window
+# probes again, and one .writing-since-<key> marker ages the whole deferral
+# chain whichever evidence each window found, so the pane still re-surfaces
+# once every PAUSE_RESURFACE_SECS through the shared resurface_absorbed above -
+# literally the same bounded cadence a declared pause uses, throttled by its own
+# .writing-resurfaced-<key> marker - and a crew whose worktree or process tree
+# churns without real progress cannot stay invisible. The escalation counter is
+# left alone: it is neither advanced (this is not an escalation) nor reset (a
+# later genuine escalation must still carry the demand-deep-inspection history
+# it had already earned). <evidence> names what was seen, in the re-surface
+# reason and the triage log, and <hint> tells the reader what to confirm.
+wedge_defer_progress() {  # <window> <since-file> <triage-label> <idle-age> <evidence> <hint>
+  local win=$1 since_file=$2 label=$3 age=$4 evidence=$5 hint=$6 key wsf wage
   key=$(window_key "$win")
   wsf="$STATE/.writing-since-$key"
   [ -e "$wsf" ] || date +%s > "$wsf"
   wage=$(age_of "$wsf")
   date +%s > "$since_file"
   resurface_absorbed "$win" "$STATE/.writing-resurfaced-$key" "$wage" \
-    "stale: $win (idle ${age}s, writing its worktree for ${wage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress)"
-  triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
+    "stale: $win (idle ${age}s, $evidence for ${wage}s, rechecked on a long cadence not a wedge; $hint)"
+  triage_log "absorbed $label ($evidence since the idle window opened, idle ${age}s): $win"
 }
 
 # Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
@@ -787,9 +794,11 @@ clear_write_tracking() {  # <window-key>
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-# The worktree write probe runs ONLY here, inside the at-threshold branch that is
-# about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
-# never per poll.
+# The worktree write and process-tree probes run ONLY here, inside the
+# at-threshold branch that is about to escalate: at most one bounded walk and one
+# process-table read per window per STALE_ESCALATE_SECS, never per poll. The
+# process-tree probe roots at the pane's own process (fm_backend_pane_pid), and a
+# pane whose root the backend cannot determine keeps the unchanged schedule.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -805,7 +814,14 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
-          wedge_defer_writing "$win" "$since_file" "$label" "$age"
+          wedge_defer_progress "$win" "$since_file" "$label" "$age" \
+            "writing its worktree" "confirm the writes are real progress"
+          return 0
+        fi
+        if crew_process_tree_started_since \
+          "$(fm_backend_pane_pid "$(window_backend "$win")" "$win" 2>/dev/null || true)" "$since"; then
+          wedge_defer_progress "$win" "$since_file" "$label" "$age" \
+            "starting new processes" "confirm the child processes are real progress"
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))

@@ -38,8 +38,9 @@
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
 # log every time. crew_worktree_written_since reads the task's meta file and walks
-# a bounded slice of its worktree instead of a status file, so callers run it only
-# at the moment they would otherwise escalate.
+# a bounded slice of its worktree, and crew_process_tree_started_since reads the
+# process table, instead of a status file, so callers run them only at the moment
+# they would otherwise escalate.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -1882,6 +1883,72 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
       -type f -newer "$anchor" -print -quit 2>/dev/null || true)
   fi
   [ -n "$hit" ]
+}
+
+# The process-table reader for the probe below, overridable so a portable test can
+# stand a canned tree in for the live one. The read is one POSIX `ps -eo` of the
+# whole table, and the probe never reads a harness name, a command line, or a
+# process state: only pids, parents, and elapsed times.
+FM_PROCESS_TREE_PS_BIN=${FM_PROCESS_TREE_PS_BIN:-ps}
+
+# 0 when some live descendant of <root-pid> started after <since-epoch>: positive
+# evidence the crew behind a quiet pane is still starting work. This is the fourth
+# liveness input the wedge detector has, after pane quietness, the run step, and
+# the worktree write probe above, and it exists for the crew that is neither
+# rendering nor writing because it is blocked on one long tool call - the
+# 2026-09-02 case of several crews each waiting on a one-to-two-hour test suite,
+# each escalated as a possible wedge once per FM_STALE_ESCALATE_SECS while the
+# suite's own child processes kept appearing under the agent the whole time.
+#
+# <root-pid> is the pane's root process (fm_backend_pane_pid in bin/fm-backend.sh),
+# so the agent and everything it runs are its descendants; the agent itself
+# predates any quiet window and can never satisfy the freshness test on its own.
+# Start times come from ps's elapsed-time column, the one portable start-time
+# field, so the comparison is against now at one-second resolution and a process
+# that started in the anchor's own second is not counted.
+#
+# 1 for every other outcome, including an empty or malformed pid, a malformed
+# anchor, a failed table read, a root with no descendants, and a tree whose newest
+# descendant predates the window. Absence of evidence always leaves the caller's
+# existing escalation schedule untouched, so a crew whose one long-running child
+# started before the pane went quiet, or that started nothing at all, escalates
+# exactly as before. Not a status-file read: one process-table read per call,
+# which callers reach only when they are otherwise about to escalate, never on
+# every poll.
+crew_process_tree_started_since() {  # <root-pid> <since-epoch>
+  local root=$1 since=$2 now table
+  case "$root" in ''|*[!0-9]*) return 1 ;; esac
+  case "$since" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s)
+  table=$("$FM_PROCESS_TREE_PS_BIN" -eo pid=,ppid=,etime= 2>/dev/null) || return 1
+  printf '%s\n' "$table" | awk -v root="$root" -v now="$now" -v since="$since" '
+    # etime is [[dd-]hh:]mm:ss on every POSIX ps.
+    function elapsed(s,    days, n, parts, k, secs) {
+      days = 0
+      if (index(s, "-") > 0) {
+        days = substr(s, 1, index(s, "-") - 1) + 0
+        s = substr(s, index(s, "-") + 1)
+      }
+      n = split(s, parts, ":")
+      secs = 0
+      for (k = 1; k <= n; k++) secs = secs * 60 + parts[k]
+      return days * 86400 + secs
+    }
+    NF == 3 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+      parent[$1] = $2
+      started[$1] = now - elapsed($3)
+    }
+    END {
+      newest = -1
+      for (p in parent) {
+        if (p == root) continue
+        q = parent[p]
+        hops = 0
+        while (q != root && (q in parent) && hops < 4096) { q = parent[q]; hops++ }
+        if (q == root && started[p] > newest) newest = started[p]
+      }
+      exit !(newest > since)
+    }'
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably

@@ -95,6 +95,9 @@ fi
 if [ "${1:-}" = "display-message" ]; then
   case "$*" in
     *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+    # The pane's root process pid; unset means the pane pid cannot be determined,
+    # which is the tmux error path, so the watcher keeps today's behaviour.
+    *pane_pid*) [ -n "${FM_FAKE_TMUX_PANE_PID:-}" ] || exit 1; printf '%s\n' "$FM_FAKE_TMUX_PANE_PID"; exit 0 ;;
   esac
 fi
 exit 1

@@ -911,6 +911,25 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_pane_pid: the pid of <target>'s root process - the shell the
+# backend created the pane with, so the harness agent and everything it runs
+# are its descendants. tmux (#{pane_pid}) and Herdr (pane process-info shell_pid)
+# serve it structurally; zellij, orca, and cmux return 1, so the caller keeps
+# its unchanged schedule. It is the anchor the wedge detector's process-tree
+# probe walks from (crew_process_tree_started_since in bin/fm-classify-lib.sh).
+# Prints nothing and returns 1 when the backend cannot determine it, which
+# leaves that probe with no evidence rather than a guessed root.
+fm_backend_pane_pid() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_pane_pid "$@" ;;
+    herdr) fm_backend_herdr_pane_pid "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks
