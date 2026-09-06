@@ -825,6 +825,7 @@ SH
     launch=$(cat "$LAUNCH_LOG")
     for pane_shell in /bin/sh /bin/bash /bin/zsh; do
       [ -x "$pane_shell" ] || continue
+      # shellcheck disable=SC2016 # Expand PATH inside the spawned shell.
       pane_path=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
         "$pane_shell" -c 'printf %s "$PATH"') \
         || fail "could not observe the $pane_shell startup environment"
