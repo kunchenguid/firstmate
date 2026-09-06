@@ -402,6 +402,132 @@ test_matrix_claude_inside_zellij_ansi_dump() {
   pass "matrix: the real claude-in-zellij --ansi dump reads empty in both locales"
 }
 
+test_matrix_claude_mode_label_rule() {
+  # Real Claude Code with the ultracode session mode active (2.1.258 and
+  # 2.1.259), captured byte-for-byte through `herdr pane read --format ansi`
+  # on Herdr 0.8.2 (2026-09-03, task afk-inject-fullscreen-wedge): the
+  # composer's TOP rule carries the mode label right-aligned in a contrasting
+  # truecolor, the bottom rule stays solid, and the rows are identical under
+  # the classic renderer (`/tui default`) and the fullscreen renderer with
+  # focus view on or off. Before titled rules were recognised the labelled
+  # rule was not a rule, the solid rule below the bare `❯` read as a lone
+  # separator, and every cursorless read returned `unknown`: the away-mode
+  # daemon deferred its digest all night. Herdr rows end in CR, kept here.
+  local CR gray dashes top solid footer idle typed ghost shell out extracted
+  CR=$(printf '\r')
+  gray="${ESC}[0m${ESC}[38;2;136;136;136m"
+  dashes='────────────────────────────────'
+  top="${gray}${dashes} ${ESC}[0m${ESC}[38;2;175;135;255multracode ${gray}─${ESC}[0m${CR}"
+  solid="${gray}${dashes}${ESC}[0m${CR}"
+  footer="  ${ESC}[0m${ESC}[38;2;255;107;128m⏵⏵ bypass permissions on${ESC}[0m${ESC}[38;2;153;153;153m (shift+tab to cycle) · ← for agents      ${ESC}[0m${ESC}[38;2;78;186;101m/rc${ESC}[0m${ESC}[38;2;153;153;153m · focus${ESC}[0m"
+  idle=$'transcript\n'"${top}"$'\n'"❯${NBSP}${CR}"$'\n'"${solid}"$'\n'"${footer}"
+  typed=$'transcript\n'"${top}"$'\n'"❯${NBSP}hello from the probe${CR}"$'\n'"${solid}"$'\n'"${footer}"
+  # A completed turn adds claude's dim prompt suggestion inside the same rules.
+  ghost=$'transcript\n'"${top}"$'\n'"❯${NBSP}${ESC}[0m${ESC}[2mcheck on the background sleep${ESC}[0m${CR}"$'\n'"${solid}"$'\n'"${footer}"
+
+  # NON-VACUOUSNESS: the captured top rule really is a titled rule and really
+  # is NOT a solid separator; if claude ever stopped labelling the rule this
+  # case would collapse into the plain claude fixture above.
+  local top_plain
+  top_plain=$(printf '%s\n' "$top" | fm_composer_strip_ansi)
+  fm_composer_normalize_trim_var top_plain
+  _fm_composer_pi_separator_row "$top_plain" \
+    && fail "the labelled top rule must not read as a solid separator"
+  _fm_composer_titled_rule_row "$top_plain" \
+    || fail "the labelled top rule must read as a titled rule"
+  _fm_composer_titled_rule_row "$dashes" \
+    && fail "a solid rule must not read as a titled rule"
+
+  # The failing path: every cursorless profile, in both locales.
+  assert_screen "claude ultracode idle on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "claude ultracode idle on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "claude ultracode idle on cmux/orca" empty "$CAPS_PLAIN" "$(printf '%s\n' "$idle" | fm_composer_strip_ansi)"
+  # The titled pair is claude's, never pi's: an identity-capable profile must
+  # not ask the adapter to probe, and a pi identity cannot turn the glyph row
+  # into pi's blank composer either way.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$idle")
+  [ "$out" != need-identity ] \
+    || fail "a titled rule pair must anchor the bare glyph row without an identity probe"
+  assert_screen "claude ultracode idle with pi identity" empty "$CAPS_STYLED" "$idle" '' "$(printf 'pi\tidle')"
+  # The proven path never changed: tmux's cursor anchoring already read empty.
+  assert_screen "claude ultracode idle on tmux" empty "$CAPS_TMUX" "$idle" 2 probe-absent
+
+  # DIVERGENCE: the verdict rests on the titled rule being the container's top
+  # edge, not on the glyph alone. Delete that one row and the solid rule below
+  # the glyph is a lone separator again, which must still mark the row stale.
+  assert_screen "bare glyph over a lone solid rule stays unknown" unknown \
+    "$CAPS_STYLED" $'transcript\n'"❯${NBSP}${CR}"$'\n'"${solid}"$'\n'"${footer}"
+  # The smallest counterfactual measured live: ultracode off restores a solid
+  # top rule, and that shape already read empty.
+  assert_screen "claude idle with the label removed" empty \
+    "$CAPS_STYLED" $'transcript\n'"${solid}"$'\n'"❯${NBSP}${CR}"$'\n'"${solid}"$'\n'"${footer}" '' probe-absent
+
+  # Typed text inside the labelled rules is pending when styling proves it and
+  # degrades to unknown, never a false pending, on an unstyled capture.
+  assert_screen "claude ultracode typed on herdr" pending "$CAPS_STYLED" "$typed"
+  assert_screen "claude ultracode typed on zellij" pending "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "claude ultracode typed on cmux/orca" unknown "$CAPS_PLAIN" "$(printf '%s\n' "$typed" | fm_composer_strip_ansi)"
+  extracted=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed")
+  [ "$extracted" = 'hello from the probe' ] \
+    || fail "the typed text inside the labelled rules must be the selected content, got '$extracted'"
+  assert_screen "claude ultracode ghost suggestion on herdr" empty "$CAPS_STYLED" "$ghost"
+  assert_screen "claude ultracode ghost suggestion on cmux/orca" unknown "$CAPS_PLAIN" "$(printf '%s\n' "$ghost" | fm_composer_strip_ansi)"
+
+  # SAFETY: a titled rule never loosens the dead-shell rules. The real login
+  # shell claude exits to (captured after `/exit`, host and path generalised),
+  # a bare `$` prompt under a titled rule, and a blank region between a titled
+  # and a solid rule all stay unknown, the last even for an idle pi.
+  shell="${ESC}[0m${ESC}[1m${ESC}[38;5;2muser@host${ESC}[0m:${ESC}[0m${ESC}[1m${ESC}[38;5;4m~/repo${ESC}[0m\$ "
+  assert_screen "login shell after /exit" unknown "$CAPS_STYLED" $'Resume this session with:\nclaude --resume 0081d15b\n'"$shell"
+  assert_screen "dead shell under a titled rule" unknown "$CAPS_STYLED" "${top}"$'\n$ '
+  assert_screen "dead shell between titled and solid rules" unknown "$CAPS_STYLED" "${top}"$'\n$ \n'"${solid}"
+  assert_screen "blank titled pair never proves pi" unknown "$CAPS_STYLED" "${top}"$'\n\n'"${solid}" '' "$(printf 'pi\tidle')"
+  assert_screen "blank titled pair on tmux never proves pi" unknown "$CAPS_TMUX" "${top}"$'\n\n'"${solid}" 1 "$(printf 'pi\tidle')"
+  # A labelled row that carries box-drawing glyphs is some other structure,
+  # not a rule, so it can neither open nor close a pair.
+  _fm_composer_titled_rule_row "${dashes} │ table │ ${dashes}" \
+    && fail "a rule-like row carrying box glyphs must not read as a titled rule"
+  # Tees and crosses in every weight, dashed rule glyphs, and eighth-block
+  # edges are table rows and box edges too: none is a titled rule, so none is
+  # a pair boundary, and the bare glyph over a lone solid rule beneath such a
+  # row stays stale (unknown) exactly as it does with no row above it at all.
+  local structural
+  for structural in '───────────┬───────────' '──────── ├ x ┤ ────────' \
+      '────────╌╌╌╌────────' '───────────╋───────────' '───────────╬───────────' \
+      '────────┄┄┄┄────────' '────────▏x▕────────'; do
+    _fm_composer_titled_rule_row "$structural" \
+      && fail "'$structural' must not read as a titled rule"
+    assert_screen "structural row '$structural' never anchors a stale glyph row" unknown \
+      "$CAPS_STYLED" $'transcript\n'"${structural}${CR}"$'\n'"❯${NBSP}${CR}"$'\n'"${solid}"$'\n'"${footer}"
+  done
+
+  # LOCALE: the label bound is 64 BYTES in every locale. A label of 32 two-byte
+  # `é` (64 bytes) is a titled rule and 33 (66 bytes) is not, under the
+  # ambient UTF-8 locale and under LC_ALL=C alike; measured in characters the
+  # 33-glyph label would anchor the glyph row under UTF-8 only. The finding's
+  # own case, 40 `é` (80 bytes), is refused by the predicate in both locales.
+  local multi labelled
+  printf -v multi '%*s' 32 ''
+  multi=${multi// /é}
+  labelled="${gray}${dashes} ${ESC}[0m${ESC}[38;2;175;135;255m${multi} ${gray}─${ESC}[0m${CR}"
+  assert_screen "multibyte label at the 64-byte bound" empty "$CAPS_STYLED" \
+    $'transcript\n'"${labelled}"$'\n'"❯${NBSP}${CR}"$'\n'"${solid}"$'\n'"${footer}"
+  labelled="${gray}${dashes} ${ESC}[0m${ESC}[38;2;175;135;255m${multi}é ${gray}─${ESC}[0m${CR}"
+  assert_screen "multibyte label past the 64-byte bound" unknown "$CAPS_STYLED" \
+    $'transcript\n'"${labelled}"$'\n'"❯${NBSP}${CR}"$'\n'"${solid}"$'\n'"${footer}"
+  _fm_composer_titled_rule_row "${dashes} ${multi} ─" \
+    || fail "a 64-byte multibyte label must read as a titled rule"
+  ( LC_ALL=C; _fm_composer_titled_rule_row "${dashes} ${multi} ─" ) \
+    || fail "a 64-byte multibyte label must read as a titled rule under LC_ALL=C"
+  printf -v multi '%*s' 40 ''
+  multi=${multi// /é}
+  _fm_composer_titled_rule_row "${dashes} ${multi} ─" \
+    && fail "an 80-byte multibyte label must not read as a titled rule"
+  ( LC_ALL=C; _fm_composer_titled_rule_row "${dashes} ${multi} ─" ) \
+    && fail "an 80-byte multibyte label must not read as a titled rule under LC_ALL=C"
+  pass "matrix: claude's mode-labelled top rule anchors the bare composer on every cursorless profile; shells, blank regions, structural rows, and over-long labels stay unknown"
+}
+
 test_strict_blank_row_divergence() {
   # THE STRICT POSTURE PIN (captain decision blank-row-injection-posture,
   # 2026-08-09): a blank or otherwise unidentified input row with no positive
@@ -622,6 +748,7 @@ test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
+test_matrix_claude_mode_label_rule
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies
 test_contiguous_transcript_reanchors_on_live_prompt

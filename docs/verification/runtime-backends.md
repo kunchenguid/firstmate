@@ -316,6 +316,40 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### 2026-09-03 cursorless verdict and the mode-labelled rule
+
+On 2026-09-03, on Linux (WSL2) with tmux 3.4 and Claude Code 2.1.259 and Pi 0.84.4 installed, the guard gained a cursorless step: it classifies the real tmux `capture-pane -e` tail with the Herdr capability profile (`styled=1`, `cursor=0`, `identity=1`), idle and with a never-submitted probe typed, once plain and once launched with `--settings '{"ultracode":true}'`.
+The ultracode session mode writes its label into the composer's top rule (`──── ultracode ─`, truecolor 175;135;255 on a 136;136;136 rule) under both renderers and with focus view on or off; the same rows were captured through Herdr 0.8.2 `pane read --format ansi` on Claude Code 2.1.258 and 2.1.259, and `tests/fm-composer-lib.test.sh` pins those bytes.
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - claude (2.1.259 (Claude Code)): real idle composer classifies empty
+# harness absent, not verified here: codex
+# harness absent, not verified here: opencode
+ok - pi (0.84.4): real idle composer classifies empty
+# harness absent, not verified here: grok
+# harness absent, not verified here: kimi
+# harness absent, not verified here: muse
+ok - claude plain (2.1.259 (Claude Code)): cursorless verdict reads the real composer empty when idle and pending when typed
+ok - claude ultracode (2.1.259 (Claude Code)): cursorless verdict reads the real composer empty when idle and pending when typed
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+# harness absent, not verified here: zellij (false-positive regression not exercised)
+ok - live composer-matrix guard verified 5 live surface(s)
+```
+
+Against the classifier as it stood before titled rules were recognised, the same run failed loudly and named the harness and version:
+
+```text
+not ok - claude ultracode (2.1.259 (Claude Code)): idle composer classified unknown under the cursorless profile, expected empty
+```
+
+Codex, OpenCode, Grok, Kimi, Muse, and zellij were not installed on this machine, so their rows above remain the 2026-08-10 evidence.
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
@@ -887,6 +921,7 @@ ok - forced teardown retains a nested secondmate home and its grandchild's Herdr
 Real captures verified these active distinctions:
 
 - Claude and Codex use bare `❯` and `›` agent composers.
+- Claude's session-mode label inside the composer's top rule (`──── ultracode ─`, Claude Code 2.1.258 and 2.1.259, Herdr 0.8.2) is a titled rule that pairs with the solid rule below and never proves a Pi region.
 - Pi uses content between complete separator rows and requires exact native Pi identity.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.

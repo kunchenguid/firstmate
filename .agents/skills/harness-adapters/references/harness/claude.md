@@ -29,6 +29,13 @@ Never send Enter to that one either: it was observed rendering in the same shape
 Firstmate cannot move a selection with Enter, Escape, and C-c alone, so it cannot accept this dialog at all, and an operator accepts it once per machine instead.
 Inspect the pane to identify which dialog is on screen, and report it rather than answering it.
 
+## Composer shape
+
+Claude draws a bare `❯` plus U+00A0 composer row between two horizontal `─` rules, with the permission and `/rc` footer below the bottom rule.
+Verified on 2.1.258 and 2.1.259, those rows are byte-identical under `/tui default` and `/tui fullscreen` and with focus view on or off, so neither renderer setting changes composer classification.
+While a session mode is active, the top rule carries that mode's label right-aligned in a contrasting truecolor (`──── ultracode ─` for `/effort ultracode`), and `../../../bin/fm-composer-lib.sh` recognises it as a titled rule so the cursorless backends still read the composer empty when idle and pending when typed.
+`../../../docs/verification/runtime-backends.md` under "Composer classification matrix" owns the captures and the live refresh guard.
+
 ## Composer ghost
 
 Completed turns can render dim predicted text inside an empty composer, indistinguishable in plain `tmux capture-pane`.

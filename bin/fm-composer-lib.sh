@@ -68,6 +68,27 @@
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
 #
+# RULE ROWS AND THE TITLED RULE (task afk-inject-fullscreen-wedge, 2026-09-03):
+# claude draws its bare `❯` composer between two horizontal `─` rules, and
+# while a session mode is active it writes that mode's label INTO the top
+# rule, right-aligned, in a contrasting colour (`──── ultracode ─`, verified
+# on Claude Code 2.1.258 and 2.1.259, byte-identical under the classic and
+# the fullscreen renderer and with focus view on or off). Both rules are pair
+# boundaries for the cursorless scan below, and a solid rule below a bare
+# glyph row that no rule precedes marks that glyph row stale (a transcript
+# echo of an old prompt). Before titled rules were recognised the labelled
+# top rule was not a rule at all, so every cursorless read of such a pane
+# returned `unknown` and the away-mode daemon deferred its digest for a whole
+# night; tmux's cursor anchoring never asks the staleness question, which is
+# why only the cursorless backends (herdr, zellij, cmux, orca) failed. A
+# titled rule - `─` at both ends, at least 8 consecutive `─`, and a short
+# label (at most 64 bytes, counted the same way in every locale) with no
+# box-drawing, tee, dashed-rule, or edge glyph - is a container edge and a
+# pair boundary exactly like a solid rule, but a pair with a titled member
+# is never a pi separator pair: pi draws solid rules only, so such a pair
+# anchors a bare glyph row without an identity read and can never prove a
+# blank region.
+#
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
 # genuine empty agent composer ONLY inside a bordered container. On a bare row
@@ -584,6 +605,55 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
   return 1
 }
 
+# Glyphs a titled rule's label may never contain: a row whose label carries
+# a box-drawing side or corner, a tee or cross in any weight, a dashed rule
+# glyph, or a block edge is some other structure (a table row, a boxed
+# banner, a dashed or half-block rule) and must not become a pair boundary.
+FM_COMPOSER_TITLED_RULE_FORBIDDEN_GLYPHS=$(printf '%s\n' \
+  '│' '┃' '║' '╭' '╮' '╰' '╯' '┌' '┐' '└' '┘' '╔' '╗' '╚' '╝' '┏' '┓' '┗' '┛' \
+  '├' '┤' '┬' '┴' '┼' '┣' '┫' '┳' '┻' '╋' '╠' '╣' '╦' '╩' '╬' \
+  '╌' '╍' '┄' '┅' '┈' '┉' \
+  '━' '═' '▀' '▄' '▁' '▔' '▏' '▕' '|' '+')
+
+# _fm_composer_titled_rule_row: a `─` rule carrying a short embedded label
+# (see RULE ROWS AND THE TITLED RULE in the header): `─` at both ends, at
+# least 8 consecutive `─` somewhere in the row (the same floor as the solid
+# separator, and a literal substring test so it is byte-exact in every
+# locale), and a residue - the row with every `─` removed - that is a
+# non-blank label of at most 64 BYTES carrying no box-drawing, tee,
+# dashed-rule, or edge glyph. The bound is measured in bytes under LC_ALL=C
+# because `${#label}` counts characters under UTF-8 and bytes under C, and
+# the verdict must not depend on the ambient locale; the subshell runs only
+# for a row that has already passed every cheaper structural test.
+# Claude Code's session-mode label (`──── ultracode ─`) is the verified
+# instance. A solid rule is not a titled rule; test the solid form first.
+_fm_composer_titled_rule_row() {  # <trimmed-row>
+  local row=$1 label glyph label_bytes
+  [ -n "$row" ] || return 1
+  case "$row" in
+    '─'*'─') ;;
+    *) return 1 ;;
+  esac
+  case "$row" in
+    *────────*) ;;
+    *) return 1 ;;
+  esac
+  label=${row//─/}
+  fm_composer_normalize_trim_var label
+  [ -n "$label" ] || return 1
+  label_bytes=$( LC_ALL=C; printf '%s' "${#label}" )
+  [ "$label_bytes" -le 64 ] || return 1
+  while IFS= read -r glyph; do
+    [ -n "$glyph" ] || continue
+    case "$label" in
+      *"$glyph"*) return 1 ;;
+    esac
+  done <<EOF
+$FM_COMPOSER_TITLED_RULE_FORBIDDEN_GLYPHS
+EOF
+  return 0
+}
+
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
@@ -609,7 +679,8 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_OPEN=-1
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
-  local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
+  FM_COMPOSER_SCAN_PI_PAIR_TITLED=0
+  local leftbar_start=-1 pi_open=-1 pi_open_titled=0 pi_lines=0 pi_max rule_kind
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
   while IFS= read -r line; do
@@ -630,22 +701,39 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       '┗'*'┛') kind=bottom; family=heavy ;;
       '+'*'+') kind=ascii; family=ascii ;;
     esac
-    # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
-    # closes the preceding candidate and immediately opens the next, so an
-    # earlier transcript rule can never outrank the live bottom composer pair.
+    # Rule rows: a solid `─` separator at least 8 columns wide, or a TITLED
+    # rule carrying claude's session-mode label. Either kind closes the
+    # preceding candidate pair and immediately opens the next, so an earlier
+    # transcript rule can never outrank the live bottom composer pair. Only a
+    # pair of two SOLID rules can be pi's separated composer: a pair with a
+    # titled member is recorded and bounded like any other, so it can anchor
+    # the bare glyph row between claude's rules, but it is marked titled and
+    # never valid, so it can never prove a blank region.
+    rule_kind=
     if _fm_composer_pi_separator_row "$trimmed"; then
+      rule_kind=solid
+    elif _fm_composer_titled_rule_row "$trimmed"; then
+      rule_kind=titled
+    fi
+    if [ -n "$rule_kind" ]; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
       if [ "$pi_open" -ge 0 ]; then
         FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
         FM_COMPOSER_SCAN_PI_OPEN=$pi_open
         FM_COMPOSER_SCAN_PI_CLOSE=$row
-        if [ "$pi_lines" -le "$pi_max" ]; then
+        if [ "$pi_open_titled" = 1 ] || [ "$rule_kind" = titled ]; then
+          FM_COMPOSER_SCAN_PI_PAIR_TITLED=1
+        else
+          FM_COMPOSER_SCAN_PI_PAIR_TITLED=0
+        fi
+        if [ "$pi_lines" -le "$pi_max" ] && [ "$FM_COMPOSER_SCAN_PI_PAIR_TITLED" = 0 ]; then
           FM_COMPOSER_SCAN_PI_PAIR_VALID=1
         else
           FM_COMPOSER_SCAN_PI_PAIR_VALID=0
         fi
       fi
       pi_open=$row
+      if [ "$rule_kind" = titled ]; then pi_open_titled=1; else pi_open_titled=0; fi
       pi_lines=0
     elif [ "$pi_open" -ge 0 ]; then
       pi_lines=$((pi_lines + 1))
@@ -1355,6 +1443,13 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled>
 
 _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <identity> <bare-row>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 row=$5 agent
+  # A pair with a titled member is claude's rule pair around its bare
+  # composer, never pi's: the glyph row is the composer and no identity read
+  # can change that, so the adapter is not asked to probe.
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_TITLED" = 1 ]; then
+    _fm_composer_classify_bare_row "$screen" "$styled" "$row"
+    return 0
+  fi
   if [ "$has_identity" != 1 ]; then
     _fm_composer_classify_bare_row "$screen" "$styled" "$row"
     return 0
@@ -1387,6 +1482,12 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then
+    printf 'unknown'
+    return 0
+  fi
+  # A pair with a titled member is never pi's (pi draws solid rules only), so
+  # no identity can prove its blank region: refuse before asking for a probe.
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_TITLED" = 1 ]; then
     printf 'unknown'
     return 0
   fi

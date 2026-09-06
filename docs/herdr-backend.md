@@ -247,6 +247,10 @@ A blocked Pi is parked on an interactive prompt, so its blank composer region is
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
 
+Claude draws its bare `❯` composer between two `─` rules, and while a session mode such as ultracode is active it writes that mode's label into the top rule, identically under the classic and fullscreen renderers and with focus view on or off.
+Because Herdr's read has no cursor row, the classifier proves that composer from its rules, and a labelled top rule is a titled rule that pairs with the solid rule below exactly like a solid one; a pair with a titled member is never Pi's, so it anchors the glyph row without an identity read and never proves a blank region.
+Without that recognition the solid rule under the glyph reads as a lone separator and every cursorless read of such a pane returns `unknown`, which defers away-mode delivery until the captain returns; `tests/fm-composer-lib.test.sh` pins the captured rows, and the cursorless step of the live guard recorded under [`verification/runtime-backends.md`](verification/runtime-backends.md#composer-classification-matrix) refreshes the proof after a Claude upgrade.
+
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
 If the ANSI capture ever fails, the plain fallback declares itself unstyled and the classifier degrades a glyph row carrying trailing text to `unknown` instead of misreading ghost suggestions as typed input, which safely defers injection and eventually raises the wedge alarm.
@@ -293,6 +297,7 @@ There is still one watcher process; the event reader is a bounded child of that 
 The away daemon supports tmux and Herdr supervisor panes only.
 It refuses Zellij, Orca, and cmux as supervisor backends rather than applying the wrong transport.
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
+Delivery therefore rests on the cursorless composer verdict alone: a verdict that never reaches `empty` defers every digest until the captain returns, so every composer shape a Claude primary can draw, including the mode-labelled rule described under "Composer and injection safety", must stay pinned by the composer regressions and be refreshed by the live guard after a Claude upgrade.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
 Harnesses with native tracked background execution can run the daemon in their terminal.

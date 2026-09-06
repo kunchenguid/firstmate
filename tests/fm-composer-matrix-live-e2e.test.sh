@@ -14,7 +14,13 @@
 #   - the zellij false-positive regression live (when zellij is installed): a
 #     pane whose content changes for reasons unrelated to submission must NOT
 #     report a delivered send, and a real claude-in-zellij `dump-screen
-#     --ansi` capture must classify empty through the zellij thin adapter.
+#     --ansi` capture must classify empty through the zellij thin adapter;
+#   - claude's CURSORLESS verdict (the herdr/zellij/cmux/orca profile, which
+#     has no cursor row to anchor on) against the real tmux `capture-pane -e`
+#     tail, idle and with typed text, both plain and with the ultracode
+#     session mode whose label claude writes into the composer's top rule
+#     (task afk-inject-fullscreen-wedge; the cursor-anchored check above
+#     cannot see that failure).
 #
 # Run explicitly with FM_COMPOSER_MATRIX_LIVE=1. No prompt is ever submitted
 # to any harness, so no model tokens are spent. An absent harness is reported
@@ -124,6 +130,116 @@ for h in claude codex opencode pi grok kimi muse; do
     note "harness absent, not verified here: $h"
   fi
 done
+
+# --- 1b. claude: the cursorless verdict, plain and mode-labelled -------------
+# The cursor-anchored read above never asks whether the bare `❯` row's rules
+# pair up, so it passed all along while every cursorless backend deferred for
+# a night: claude's ultracode session mode writes its label into the composer's
+# top rule (`──── ultracode ─`), the labelled rule was not a rule, and the
+# solid rule below the glyph read as a lone separator. Classify the real tmux
+# tail with the cursorless herdr capability profile instead, idle and with a
+# never-submitted probe typed, resolving `need-identity` exactly as an adapter
+# without a live identity would. The labelled rule is the one shape this step
+# exists to prove, so a launch whose top rule carries no label (the mode is
+# unavailable on this machine, or claude moved the label) fails naming the
+# harness and version instead of passing over it: the plain check alone must
+# never let the guard exit green with the titled rule unread. Run the guard
+# where the mode is available before trusting refreshed evidence.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-composer-lib.sh"
+CAPS_CURSORLESS=$'styled=1\ncursor=0\nidentity=1\nrows=20'
+
+# tmux prints every visible row of the grid, trailing blank rows included,
+# while `herdr pane read --source recent` ends at the last written row. The
+# classic renderer draws its composer near the top of a fresh 50-row grid, so
+# a raw 20-row tail of the grid is blank there and reads unknown, whereas the
+# fullscreen renderer parks its composer at the bottom and the two tails
+# agree. Drop the rows that are blank after ANSI stripping and whitespace
+# trimming first, then keep the last 20 exactly as the herdr adapter bounds
+# its read, so either renderer is read the same way without forcing a tui.
+content_tail() {  # <window> [capture-pane flags...] -> the last 20 rows ending at the last written row
+  local win=$1 captured plain row n=0 last=0
+  shift
+  captured=$(tmux -L "$SOCKET" capture-pane -p "$@" -t "$SESSION:$win" 2>/dev/null) || return 1
+  plain=$(printf '%s\n' "$captured" | fm_composer_strip_ansi)
+  while IFS= read -r row; do
+    n=$((n + 1))
+    fm_composer_normalize_trim_var row
+    [ -z "$row" ] || last=$n
+  done <<EOF
+$plain
+EOF
+  printf '%s\n' "$captured" | head -n "$last" | tail -n 20
+}
+
+cursorless_verdict() {  # <window> -> verdict, resolving need-identity like an adapter without identity
+  local screen verdict
+  screen=$(content_tail "$1" -e)
+  verdict=$(fm_composer_classify_screen "$CAPS_CURSORLESS" "$screen")
+  [ "$verdict" != need-identity ] \
+    || verdict=$(fm_composer_classify_screen "$CAPS_CURSORLESS" "$screen" '' probe-absent)
+  printf '%s' "$verdict"
+}
+
+check_claude_cursorless() {  # <label> <want-mode-label:0|1> <launch-cmd...>
+  local label=$1 want_label=$2 win="cl-$1" verdict='' i=0 budget=${FM_COMPOSER_MATRIX_LIVE_POLLS:-45} version plain
+  shift 2
+  version=$(harness_version claude)
+  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" -- "$@" \
+    || fail "claude $label ($version): could not launch in the isolated tmux server"
+  while [ "$i" -lt "$budget" ]; do
+    verdict=$(fm_tmux_composer_state "$SESSION:$win")
+    [ "$verdict" = empty ] && break
+    i=$((i + 1))
+    sleep 1
+  done
+  if [ "$verdict" != empty ]; then
+    FAILED=1
+    printf 'not ok - claude %s (%s): idle composer never reached empty under the cursor-anchored read (last verdict: %s)\n' \
+      "$label" "$version" "${verdict:-unreadable}" >&2
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    return 0
+  fi
+  plain=$(content_tail "$win")
+  if [ "$want_label" = 1 ] && ! printf '%s\n' "$plain" | grep -q '─.*ultracode'; then
+    FAILED=1
+    printf 'not ok - claude %s (%s): the ultracode label was not drawn in the composer rule (mode unavailable on this machine, or the shape changed); cursorless mode-label case NOT verified\n' \
+      "$label" "$version" >&2
+    printf '# claude %s pane tail at failure:\n' "$label" >&2
+    printf '%s\n' "$plain" | grep '[^[:space:]]' | tail -6 | sed 's/^/#   /' >&2
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    return 0
+  fi
+  verdict=$(cursorless_verdict "$win")
+  if [ "$verdict" != empty ]; then
+    FAILED=1
+    printf 'not ok - claude %s (%s): idle composer classified %s under the cursorless profile, expected empty\n' \
+      "$label" "$version" "${verdict:-unreadable}" >&2
+    printf '# claude %s pane tail at failure:\n' "$label" >&2
+    printf '%s\n' "$plain" | grep '[^[:space:]]' | tail -6 | sed 's/^/#   /' >&2
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    return 0
+  fi
+  tmux -L "$SOCKET" send-keys -t "$SESSION:$win" -l 'audit probe never submitted' 2>/dev/null || true
+  sleep 1
+  verdict=$(cursorless_verdict "$win")
+  if [ "$verdict" != pending ]; then
+    FAILED=1
+    printf 'not ok - claude %s (%s): typed text classified %s under the cursorless profile, expected pending\n' \
+      "$label" "$version" "${verdict:-unreadable}" >&2
+  else
+    CHECKED=$((CHECKED + 1))
+    pass "claude $label ($version): cursorless verdict reads the real composer empty when idle and pending when typed"
+  fi
+  tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+}
+
+if command -v claude >/dev/null 2>&1; then
+  check_claude_cursorless plain 0 claude
+  check_claude_cursorless ultracode 1 claude --settings '{"ultracode":true}'
+else
+  note "harness absent, not verified here: claude (cursorless verdict not exercised)"
+fi
 
 # --- 2. The strict blank-row posture, live ----------------------------------
 # A plain shell pane parked on a blank line between two rules (the audit's
