@@ -66,17 +66,18 @@
 # not genuinely this task's destroys another worker's live work. Before the first
 # cleanup step, teardown evaluates two independent ownership sources and refuses
 # with both tasks and the slot untouched when either contradicts:
-#   1. Record exclusivity - no OTHER task record in this home or any Firstmate
-#      home discoverable as a linked worktree of the same project may name the
-#      same live path in its worktree= or home=. One live path with two task
+#   1. Record exclusivity - no OTHER task record in this home or any locally
+#      registered Firstmate home may name the same live path in its worktree= or
+#      home=. One live path with two task
 #      records is the reuse collision itself, whichever record is stale.
 #   2. Endpoint agreement - when the recorded endpoint answers with a live
 #      working directory, it must resolve inside the recorded slot. A pane that
 #      has been rebound to another slot contradicts the record even when this
 #      home holds only one task record for the path.
-# The scan and destructive return hold a lock in the project's git common
-# directory. Fresh Treehouse spawns for that project hold the same lock from
-# before slot allocation through metadata publication, closing the publication
+# The scan and destructive return hold a project-identity lock in the root
+# Firstmate home's state directory. Fresh Treehouse spawns for that project in
+# every local Firstmate home hold the same lock from before slot allocation
+# through metadata publication, closing the publication
 # gap; forced secondmate teardown takes it and runs the same checks for every
 # descendant Treehouse slot before touching any child.
 # Neither refusal is relaxed by --force: --force authorizes discarding THIS
@@ -2055,31 +2056,58 @@ teardown_live_slot_path() {
   canonical_existing_dir "$WT"
 }
 
-# See "Worktree-slot ownership" in the header. Check 1: task records in every
-# home sharing this Treehouse project must not name the same live slot twice.
-require_exclusive_worktree_slot_record() {
-  local record_meta=$1 record_id=$2 record_state=$3 project=$4 worktree=$5
-  local slot listing line state_dir known other other_id field other_path other_slot
-  local -a states
-  slot=$(canonical_existing_dir "$worktree") || return 0
-  listing=$(git -C "$project" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || {
-    echo "REFUSED: cannot enumerate the homes sharing Treehouse project $project; nothing was changed" >&2
+collect_local_firstmate_states() {
+  local record_state=$1 root home reg line child known existing i=0
+  local -a homes
+  TREEHOUSE_OWNER_STATES=("$record_state")
+  root=$(fm_firstmate_root_home "$FM_HOME") || {
+    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
     return 1
   }
-  states=("$record_state")
-  while IFS= read -r line; do
-    case "$line" in
-      worktree\ *)
-        state_dir="${line#worktree }/state"
-        known=0
-        for other in "${states[@]}"; do
-          [ "$other" != "$state_dir" ] || known=1
-        done
-        [ "$known" = 1 ] || states+=("$state_dir")
-        ;;
-    esac
-  done <<< "$listing"
-  for state_dir in "${states[@]}"; do
+  homes=("$root")
+  while [ "$i" -lt "${#homes[@]}" ]; do
+    home=${homes[$i]}
+    i=$((i + 1))
+    known=0
+    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
+      [ "$existing" != "$home/state" ] || known=1
+    done
+    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
+    reg="$home/data/secondmates.md"
+    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
+    [ -f "$reg" ] && [ ! -L "$reg" ] || {
+      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
+      return 1
+    }
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "- "*)
+          secondmate_registry_parse_line "$line" || {
+            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
+            return 1
+          }
+          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+          child=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || {
+            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
+            return 1
+          }
+          known=0
+          for existing in "${homes[@]}"; do
+            [ "$existing" != "$child" ] || known=1
+          done
+          [ "$known" = 1 ] || homes+=("$child")
+          ;;
+      esac
+    done < "$reg"
+  done
+}
+
+require_exclusive_worktree_slot_record() {
+  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
+  local slot state_dir other other_id field other_path other_slot
+  slot=$(canonical_existing_dir "$worktree") || return 0
+  collect_local_firstmate_states "$record_state" || return 1
+  for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
       [ "$other" != "$record_meta" ] || continue
@@ -2101,7 +2129,7 @@ require_exclusive_worktree_slot_record() {
 require_exclusive_task_worktree_slot() {
   local slot
   slot=$(teardown_live_slot_path) || return 0
-  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$PROJ" "$slot"
+  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
 }
 
 # The live working directory the recorded endpoint reports, for the backends
@@ -2654,7 +2682,7 @@ preflight_descendant_treehouse_slots() {
     project=$(meta_value "$meta" project)
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
     target=$FM_BACKEND_VALIDATED_TARGET
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$project" "$worktree" || return 1
+    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
     require_endpoint_slot_agreement "$task_id" "$backend" "$target" "$worktree" || return 1
   done
 }

@@ -461,20 +461,23 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
 }
 
 test_cross_home_pool_slot_collision_refuses() {
-  local dir id=stale-task other=secondmate-task second_home rc
+  local dir id=stale-task other=secondmate-task second_home second_project rc
   dir=$(make_case slot-reuse-cross-home)
   printf 'fixture\n' > "$dir/project/tracked"
   git -C "$dir/project" add tracked
   git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
   second_home="$dir/secondmate-home"
-  git -C "$dir/project" worktree add -q -b secondmate-fixture "$second_home"
-  mkdir -p "$second_home/state"
+  second_project="$second_home/projects/project"
+  mkdir -p "$second_home/projects" "$second_home/state" "$second_home/data"
+  git clone -q "$dir/project" "$second_project"
+  printf '%s\n' "- mate - fixture (home: $second_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   fm_write_meta "$second_home/state/$other.meta" \
     "window=firstmate:fm-$other" "endpoint_task_id=$other" \
-    "worktree=$dir/worktree" "project=$second_home" "kind=scout"
+    "worktree=$dir/worktree" "project=$second_project" "kind=scout"
 
   set +e
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"

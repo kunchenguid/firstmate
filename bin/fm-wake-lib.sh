@@ -1088,15 +1088,44 @@ fm_task_set_lock_path() {  # <state-dir>
   printf '%s/.task-set.lock\n' "$state"
 }
 
+fm_firstmate_root_home() {
+  local home=${1:-$FM_HOME} marker parent seen="|" depth=0
+  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
+  while [ -e "$home/.fm-secondmate-parent" ] || [ -L "$home/.fm-secondmate-parent" ]; do
+    marker="$home/.fm-secondmate-parent"
+    command -v fm_secondmate_parent_record_parse >/dev/null 2>&1 \
+      || . "$FM_WAKE_LIB_DIR/fm-secondmate-parent-lib.sh"
+    fm_secondmate_parent_record_parse "$marker" || return 1
+    [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 1
+    parent=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || return 1
+    case "$seen" in *"|$parent|"*) return 1 ;; esac
+    seen="$seen$home|"
+    home=$parent
+    depth=$((depth + 1))
+    [ "$depth" -le 64 ] || return 1
+  done
+  printf '%s\n' "$home"
+}
+
 fm_treehouse_project_lock_path() {  # <project-dir>
-  local project=$1 common
+  local project=$1 root origin identity hash top
   [ -d "$project" ] || return 1
-  common=$(git -C "$project" rev-parse --git-common-dir 2>/dev/null) || return 1
-  case "$common" in
-    /*) common=$(CDPATH='' cd -- "$common" 2>/dev/null && pwd -P) || return 1 ;;
-    *) common=$(CDPATH='' cd -- "$project/$common" 2>/dev/null && pwd -P) || return 1 ;;
-  esac
-  printf '%s/.fm-treehouse-project.lock\n' "$common"
+  root=$(fm_firstmate_root_home "$FM_HOME") || return 1
+  origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
+  if [ -n "$origin" ]; then
+    case "$origin" in
+      /*) [ ! -d "$origin" ] || origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 1 ;;
+      ./*|../*) [ ! -d "$project/$origin" ] || origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 1 ;;
+    esac
+    identity=$origin
+  else
+    top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
+    top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+    identity=$top
+  fi
+  hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
+  [ -d "$root/state" ] || return 1
+  printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
 fm_failure_episode_reset() {
