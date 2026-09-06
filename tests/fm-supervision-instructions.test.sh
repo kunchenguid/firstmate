@@ -24,6 +24,8 @@ test_unknown_fallback() {
   out=$("$RENDER" --harness not-real)
   assert_contains "$out" "primary harness: unknown" "unknown heading missing"
   assert_contains "$out" "Mode: Unknown harness fallback." "unknown fallback snippet missing"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "unknown fallback omitted the guarded foreground entry point"
+  assert_not_contains "$out" "bin/fm-watch.sh" "unknown fallback still recommends the forbidden direct watcher"
   pass "renderer falls back to unknown.md for unverified harness names"
 }
 
