@@ -89,6 +89,81 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
 }
 
+# 0 if run head $2 is consistent with worktree $1 owning an IN-FLIGHT run.
+#
+# fm_nm_head_matches_worktree above answers a question about code that is
+# already in hand, and rejects a head it cannot resolve. That is right for its
+# callers - teardown must never act on a run it cannot prove it owns - but it is
+# wrong for a liveness read, because a running pipeline's head is routinely
+# unresolvable here: no-mistakes commits its fixes in its own gate repository and
+# does not push them until the push step, so from the first auto-fix round until
+# then `axi status` reports a commit this object store has never seen. Requiring
+# it to resolve makes a healthy run indistinguishable from a dead one for the
+# whole review step, which is exactly the period the read exists to cover.
+#
+# So resolvability selects the question rather than deciding the answer:
+#   - not a commit-ish token: reject, so prose or a truncated read can never be
+#     mistaken for the unresolvable case below
+#   - unreadable worktree: reject, so a broken checkout is never read as in-flight
+#   - head resolves here: apply the strict rule above unchanged, which still
+#     rejects a run validating superseded or rewritten code
+#   - head does not resolve here: accept as a pipeline commit not yet pushed
+#
+# Accepting the unresolvable case does NOT weaken attribution, because it is not
+# what binds the run to the task. `axi status` resolves its repository from the
+# invoking directory and refuses outright outside a registered one, and within a
+# repository git allows a branch to be checked out by only one worktree, so the
+# caller's branch match is what proves ownership. This function's remaining job
+# is to reject a run on that branch that is not the current work, and it keeps
+# doing that whenever the head is resolvable. Callers must still bound the
+# loosening on the run's own non-terminal state, which fm_nm_head_binds_run
+# below owns.
+fm_nm_head_allows_inflight() {  # <worktree> <run_head>
+  local wt=$1 run_head=$2
+  case "$run_head" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
+  [ "${#run_head}" -ge 7 ] && [ "${#run_head}" -le 40 ] || return 1
+  git -C "$wt" rev-parse --verify --quiet HEAD >/dev/null 2>&1 || return 1
+  if git -C "$wt" rev-parse --verify --quiet "${run_head}^{commit}" >/dev/null 2>&1; then
+    fm_nm_head_matches_worktree "$wt" "$run_head"
+    return
+  fi
+  return 0
+}
+
+# 0 if run head $2 binds a run in state $3 with outcome $4 to worktree $1.
+#
+# The two rules above answer different questions, and picking between them is
+# itself part of attribution, so the choice lives here rather than at each call
+# site. A TERMINAL run must prove its head: its fixes were pushed at the push
+# step, so an unresolvable head means the run is not this worktree's work, and a
+# terminal verdict is exactly the evidence that would justify tearing down or
+# restarting. An IN-FLIGHT run must not be required to, for the reason
+# fm_nm_head_allows_inflight documents: from the first auto-fix round until the
+# push step the reported head exists only in no-mistakes' own gate repository,
+# so demanding resolution rejects every run between those two points.
+#
+# That window is not an edge case. It spans the review, test, document, and lint
+# steps, which is where a run parks at awaiting_approval or fix_review, so a
+# strict-only reader loses attribution for precisely the state supervision must
+# surface.
+#
+# In-flight is an ALLOW-LIST of the run states no-mistakes actually reports for a
+# live run, so the loosening can never widen on its own: a state this list does
+# not name (including an empty one, and any terminal or gate value invented
+# later) keeps the strict proof. A run carrying an outcome is terminal whatever
+# its status word says, and keeps it too.
+fm_nm_head_binds_run() {  # <worktree> <run_head> <run_status> [run_outcome]
+  local wt=$1 run_head=$2 run_status=$3 run_outcome=${4:-}
+  if [ -z "$run_outcome" ]; then
+    case "$run_status" in
+      running|fixing|pending|awaiting_approval|fix_review)
+        fm_nm_head_allows_inflight "$wt" "$run_head"
+        return ;;
+    esac
+  fi
+  fm_nm_head_matches_worktree "$wt" "$run_head"
+}
+
 # branch_sync.state from captured `axi status` TOON $1: the scalar directly
 # under the top-level `branch_sync:` block. The first `state:` inside the
 # block is the direct child (the nested local/pipeline/target/remote
