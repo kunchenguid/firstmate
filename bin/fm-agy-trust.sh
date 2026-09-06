@@ -134,9 +134,15 @@ CONFIG_DIR="$HOME_REAL/.gemini/antigravity-cli"
 # agy is ordinary rather than an error. Create the directory for the same reason,
 # and refuse only when it genuinely cannot be written, since a store this cannot
 # reach means the worker meets the dialog after all.
+#
+# Created under `umask 022`, because the guard further down refuses a settings
+# directory anyone but this user can write: a home running the umask-002 default
+# would otherwise get a 0775 directory here and be refused over one this script
+# had just created itself. agy's own first run creates it 0755; this matches that
+# rather than inventing a laxer one.
 CONFIG_DIR_REAL=$(real_dir "$CONFIG_DIR") || true
 if [ -z "$CONFIG_DIR_REAL" ] && [ "$MODE" = register ]; then
-  mkdir -p "$CONFIG_DIR" 2>/dev/null || true
+  (umask 022 && mkdir -p "$CONFIG_DIR") 2>/dev/null || true
   CONFIG_DIR_REAL=$(real_dir "$CONFIG_DIR") || true
 fi
 if [ "$MODE" = remove ]; then
@@ -210,25 +216,28 @@ command -v node >/dev/null 2>&1 || refuse "node is required to record workspace 
 # removing the symlink support a dotfile manager or synced folder legitimately
 # needs. Reported by Greptile on kunchenguid/firstmate#3858.
 #
-# World-writable is unsafe everywhere. Group-writable is judged against the
-# user's OWN primary group, because a private user group (the umask-002 default
-# that leaves a home directory 0775 user:user) has no other members and refusing
-# it would fail ordinary homes closed for no gain. A group that is NOT this
-# user's primary group is a shared one and is refused.
-# Known boundary: where the primary group is itself shared - macOS `staff` - a
-# deliberately group-writable directory is not caught by this test. World-write
-# and every foreign group are.
+# Write for GROUP or for OTHER is refused, with no carve-out for the caller's own
+# primary group. An earlier version of this guard made exactly that carve-out - a
+# private user group has no members but its owner, so refusing it looked like
+# failing ordinary homes closed for no gain - and the carve-out WAS the hole:
+# where the primary group is itself shared, as macOS `staff` is, every other
+# member of it could still plant the link.
+#
+# The bits cannot distinguish a shared group from a private one, and membership
+# cannot be enumerated portably or completely: `getent` does not exist on macOS,
+# a group's primary members are not listed in its group entry on any platform,
+# and a directory service is free not to enumerate at all. An unanswerable
+# question is not guessed at here - mode 0022 is the whole test, and the refusal
+# names the chmod that fixes it. That costs a one-time `chmod g-w` on a settings
+# directory some other tool created group-writable, which is the price of a guard
+# that cannot be wrong in the unsafe direction.
 #
 # node, not stat: `stat -c` is GNU-only and `stat -f` is BSD-only, and node is
 # already required below as this script's JSON writer.
 dir_writable_by_others() {  # <dir>
   node -e '
     const fs = require("node:fs");
-    const st = fs.statSync(process.argv[1]);
-    const worldWritable = (st.mode & 0o002) !== 0;
-    const groupWritable = (st.mode & 0o020) !== 0;
-    const foreignGroup = st.gid !== process.getgid();
-    process.exit(worldWritable || (groupWritable && foreignGroup) ? 0 : 1);
+    process.exit((fs.statSync(process.argv[1]).mode & 0o022) !== 0 ? 0 : 1);
   ' "$1" 2>/dev/null
 }
 

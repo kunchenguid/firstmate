@@ -22,6 +22,14 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT \
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
+# fm-agy-trust.sh refuses a settings directory - or a directory holding a
+# resolved store symlink - that group or other can write, so the fixtures have to
+# be built the way a real installation looks: agy creates its own store directory
+# 0755 whatever the umask is. A suite run under the umask-002 default would
+# otherwise hand every case a 0775 directory and fail on its own fixtures. The
+# permission cases below set their modes explicitly and do not depend on this.
+umask 022
+
 TMP_ROOT=$(fm_test_tmproot fm-agy-harness)
 TRUST="$ROOT/bin/fm-agy-trust.sh"
 HOOK="$ROOT/bin/fm-agy-turnend-hook.sh"
@@ -469,6 +477,52 @@ test_store_directory_writable_by_others_is_refused() {
   [ "$(cat "$victim")" = "$before" ] || \
     fail "an unrelated file this user owns was overwritten through the store symlink"
   pass "fm-agy-trust.sh: refuses a store directory other accounts can write"
+}
+
+# macOS `staff` is a SHARED primary group: a group-writable settings directory
+# owned by the caller's own primary group is writable by every other member of
+# it, and the mode bits cannot tell that group apart from a private user group.
+# An earlier guard exempted the caller's own primary group for exactly that
+# reason and left this shape open; group-write is refused outright now. Reported
+# by Greptile as still open on kunchenguid/firstmate#3858 after the first fix.
+test_store_directory_writable_by_the_primary_group_is_refused() {
+  local rec out store dir victim before
+  rec=$(make_case store-dir-group-writable)
+  read_case "$rec"
+  store=$(store_path "$AGY_HOME")
+  dir=$(dirname "$store")
+  mkdir -p "$dir"
+  victim="$CASE_DIR/unrelated.json"
+  printf '%s\n' '{"unrelated":true}' > "$victim"
+  before=$(cat "$victim")
+  ln -s "$victim" "$store"
+  # The caller's OWN primary group, and deliberately not world-writable, so this
+  # is the shape the already-covered world-write case cannot stand in for.
+  chgrp "$(id -g)" "$dir"
+  chmod g+w,o-w "$dir"
+  out=$(run_trust "$AGY_HOME" "$WT" "$PROJ")
+  expect_code 1 $? "a store directory the primary group can write must be refused: $out"
+  assert_contains "$out" "writable by other users" "the refusal did not name the directory permission"
+  [ "$(cat "$victim")" = "$before" ] || \
+    fail "an unrelated file this user owns was overwritten through the store symlink"
+  pass "fm-agy-trust.sh: refuses a store directory the caller's own primary group can write"
+}
+
+# The guard above judges a directory this script may have created itself, so a
+# plain `mkdir -p` under the umask-002 default would leave 0775 here and refuse
+# on its own work. Creation is pinned to 0755 instead, and a fresh home must
+# still register.
+test_created_store_directory_is_not_group_writable() {
+  local rec out dir mode
+  rec=$(make_case created-dir-mode)
+  read_case "$rec"
+  dir=$(dirname "$(store_path "$AGY_HOME")")
+  [ ! -e "$dir" ] || fail "the fixture home already holds an agy settings directory"
+  out=$(umask 002; run_trust "$AGY_HOME" "$WT" "$PROJ")
+  expect_code 0 $? "a fresh home under a permissive umask must still register: $out"
+  mode=$(stat -c %a "$dir" 2>/dev/null || stat -f %Lp "$dir")
+  [ "$mode" = 755 ] || fail "the created settings directory is mode $mode, not 755"
+  pass "fm-agy-trust.sh: creates its settings directory 0755 under a permissive umask"
 }
 
 test_symlinked_store_to_an_owned_target_is_accepted() {
@@ -1178,6 +1232,8 @@ test_worktree_subdirectory_is_refused
 test_symlinked_store_to_a_foreign_owned_target_is_refused
 test_symlinked_store_to_an_owned_target_is_accepted
 test_store_directory_writable_by_others_is_refused
+test_store_directory_writable_by_the_primary_group_is_refused
+test_created_store_directory_is_not_group_writable
 test_corrupt_store_fails_closed
 test_non_array_trusted_workspaces_fails_closed
 test_missing_node_is_refused

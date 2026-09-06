@@ -1595,6 +1595,11 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
   pass "fractional legacy retry wait remains supported without arithmetic"
 }
 
+# agy creates its own settings directory 0755 on first run, and fm-agy-trust.sh
+# refuses one anyone but its owner can write, so the fixtures below match that
+# rather than inheriting the 0775 a umask-002 default would give them.
+make_agy_store_dir() { mkdir -p "$1" && chmod go-w "$1"; }
+
 # The agy spawn's workspace-trust entry is the one task artifact written outside
 # this home, into the operator's own vendor settings file, so teardown has to
 # take it back or every task leaves a dead absolute path there forever.
@@ -1604,7 +1609,7 @@ test_teardown_retires_the_agy_workspace_trust_entry() {
   write_meta "$case_dir" local-only ship
   agyhome="$case_dir/agyhome"
   store="$agyhome/.gemini/antigravity-cli/settings.json"
-  mkdir -p "$(dirname "$store")"
+  make_agy_store_dir "$(dirname "$store")"
   printf '%s\n' '{"enableTelemetry":false,"trustedWorkspaces":["/already/trusted"]}' > "$store"
   HOME="$agyhome" "$ROOT/bin/fm-agy-trust.sh" "$case_dir/wt" "$case_dir/project" >/dev/null \
     || fail "agy-trust-retire: the fixture could not register workspace trust"
@@ -1631,7 +1636,7 @@ test_teardown_retires_the_agy_trust_entry_when_the_worktree_is_gone() {
   write_meta "$case_dir" local-only ship
   agyhome="$case_dir/agyhome"
   store="$agyhome/.gemini/antigravity-cli/settings.json"
-  mkdir -p "$(dirname "$store")"
+  make_agy_store_dir "$(dirname "$store")"
   printf '%s\n' '{"enableTelemetry":false,"trustedWorkspaces":["/already/trusted"]}' > "$store"
   HOME="$agyhome" "$ROOT/bin/fm-agy-trust.sh" "$case_dir/wt" "$case_dir/project" >/dev/null \
     || fail "agy-trust-retire-gone: the fixture could not register workspace trust"
@@ -1660,7 +1665,7 @@ test_teardown_retires_the_agy_trust_before_releasing_the_worktree() {
   agyhome="$case_dir/agyhome"
   store="$agyhome/.gemini/antigravity-cli/settings.json"
   observed="$case_dir/store-at-return.json"
-  mkdir -p "$(dirname "$store")"
+  make_agy_store_dir "$(dirname "$store")"
   printf '%s\n' '{"enableTelemetry":false,"trustedWorkspaces":["/already/trusted"]}' > "$store"
   HOME="$agyhome" "$ROOT/bin/fm-agy-trust.sh" "$case_dir/wt" "$case_dir/project" >/dev/null \
     || fail "agy-trust-before-release: the fixture could not register workspace trust"
@@ -1693,7 +1698,7 @@ test_teardown_leaves_an_operator_trust_entry_this_task_never_registered() {
   write_meta "$case_dir" local-only ship
   agyhome="$case_dir/agyhome"
   store="$agyhome/.gemini/antigravity-cli/settings.json"
-  mkdir -p "$(dirname "$store")"
+  make_agy_store_dir "$(dirname "$store")"
   # The operator trusted this very path themselves; no firstmate spawn registered
   # it, so there is no state/<id>.agy-trust record beside the task.
   HOME="$agyhome" "$ROOT/bin/fm-agy-trust.sh" "$case_dir/wt" "$case_dir/project" >/dev/null \
@@ -1720,7 +1725,7 @@ test_teardown_names_a_trust_entry_it_could_not_withdraw() {
   write_meta "$case_dir" local-only ship
   agyhome="$case_dir/agyhome"
   store="$agyhome/.gemini/antigravity-cli/settings.json"
-  mkdir -p "$(dirname "$store")"
+  make_agy_store_dir "$(dirname "$store")"
   # A non-array trustedWorkspaces is one of the store shapes the trust script
   # refuses outright rather than rewriting.
   printf '%s\n' '{"enableTelemetry":false,"trustedWorkspaces":"not-an-array"}' > "$store"
