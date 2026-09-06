@@ -195,6 +195,14 @@ test_paseo_autodetect_notice_and_explicit_override() {
     "the paseo auto-detect notice should name the winning signal"
   assert_contains "$(cat "$errfile")" "EXPERIMENTAL" \
     "the paseo auto-detect notice should say the backend is experimental"
+  # The notice must describe what actually happens: paseo is not in
+  # FM_BACKEND_SPAWN, so the very next thing every spawn caller does is refuse.
+  assert_contains "$(cat "$errfile")" "every spawn refuses" \
+    "the paseo auto-detect notice should say spawns refuse, not that a spawn is happening"
+  case "$(cat "$errfile")" in
+    *"spawning into the EXPERIMENTAL paseo backend"*)
+      fail "the paseo auto-detect notice claims a spawn that fm_backend_validate_spawn refuses: $(cat "$errfile")" ;;
+  esac
 
   out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; \
     PATH="$FAKE_NONDARWIN_BIN:$PATH" PASEO_TERMINAL_ID='terminal-uuid' \

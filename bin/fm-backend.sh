@@ -282,8 +282,9 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # today's default-path behavior and callers must see zero change. The cmux
 # notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
-# distinct from the primary-marker case. paseo prints the same shape of notice
-# and names which of its two markers won.
+# distinct from the primary-marker case. paseo prints the same shape of notice,
+# names which of its two markers won, and says spawns refuse rather than
+# claiming a spawn, because paseo is not in FM_BACKEND_SPAWN.
 fm_backend_name() {
   local line v detected marker
   if [ -n "${FM_BACKEND:-}" ]; then
@@ -315,7 +316,7 @@ fm_backend_name() {
       echo "NOTICE: auto-detected cmux runtime ($marker) - spawning into the EXPERIMENTAL cmux backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
     if [ "$detected" = paseo ]; then
-      echo "NOTICE: auto-detected paseo runtime ($FM_BACKEND_DETECT_SIGNAL) - spawning into the EXPERIMENTAL paseo backend. Set config/backend or pass --backend tmux to opt out." >&2
+      echo "NOTICE: auto-detected paseo runtime ($FM_BACKEND_DETECT_SIGNAL) - the EXPERIMENTAL paseo backend has no lifecycle adapter yet, so every spawn refuses. Set config/backend or pass --backend tmux to select a spawn-capable backend." >&2
     fi
     printf '%s' "$detected"
     return 0
