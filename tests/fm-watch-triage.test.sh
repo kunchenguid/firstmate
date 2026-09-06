@@ -2521,6 +2521,7 @@ test_stale_churn_without_a_captain_call_still_alarms() {
     || { echo "skip: tasks-axi not found (unheld stale alarm)"; return 0; }
   for spec in \
     'unheld-delivery|done: PR https://example.invalid/pull/1 checks green' \
+    'unheld-blocker|blocked: cannot reach the release host' \
     'unheld-worker-line|working: still tidying the branch'
   do
     name=${spec%%|*}; line=${spec#*|}
@@ -2548,33 +2549,39 @@ test_stale_churn_without_a_captain_call_still_alarms() {
 # never do. bin/fm-captain-hold.sh owns that lifecycle and reports it through
 # `open --identity`.
 test_reheld_captain_call_starts_its_own_resurface_window() {
-  local dir state out capture wakes
+  local spec name line dir state out capture wakes
   command -v tasks-axi >/dev/null 2>&1 \
     || { echo "skip: tasks-axi not found (re-held captain call)"; return 0; }
-  dir=$(make_hold_home reheld-call 'done: PR https://example.invalid/pull/1 checks green' hold) \
-    || fail "could not build a captain-held backlog fixture"
-  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  for spec in \
+    'reheld-delivery|done: PR https://example.invalid/pull/1 checks green' \
+    'reheld-declared|captain-held [key=merge]: awaiting the captain on the merge'
+  do
+    name=${spec%%|*}; line=${spec#*|}
+    dir=$(make_hold_home "$name" "$line" hold) \
+      || fail "[$name] could not build a captain-held backlog fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    set_mtime "$(( $(date +%s) - 5000 ))" "$state/held-merge.status"
+    printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
 
-  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
-    || fail "first sight of the first captain call did not surface"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the first call's surface"
-  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 1 \
-    || fail "the first call's churn was not absorbed"
-  [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail "the first call's churn re-alarmed"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+      || fail "[$name] first sight of the first captain call did not surface"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first call's surface"
+    hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 1 \
+      || fail "[$name] the first call's churn was not absorbed"
+    [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail "[$name] the first call's churn re-alarmed"
 
-  # Answer and release, then re-hold: a second, distinct captain call on the same
-  # task, with no status append, so the status signature alone cannot tell them apart.
-  printf 'go ahead\n' > "$dir/decision.txt"
-  run_hold "$dir" answer held-merge --decision-file "$dir/decision.txt" --release \
-    || fail "could not record the captain's answer"
-  run_hold "$dir" hold held-merge --reason 'awaiting the captain a second time' \
-    || fail "could not re-hold the task as a second captain call"
+    printf 'go ahead\n' > "$dir/decision.txt"
+    run_hold "$dir" answer held-merge --decision-file "$dir/decision.txt" --release \
+      || fail "[$name] could not record the captain's answer"
+    run_hold "$dir" hold held-merge --reason 'awaiting the captain a second time' \
+      || fail "[$name] could not re-hold the task as a second captain call"
 
-  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 3s' \
-    || fail "the second captain call inherited the first call's silence"
-  wakes=$(hold_stale_wakes "$state")
-  [ "$wakes" -eq 1 ] \
-    || fail "the second captain call produced $wakes first wakes instead of one"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 3s' \
+      || fail "[$name] the second captain call inherited the first call's silence"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] \
+      || fail "[$name] the second captain call produced $wakes first wakes instead of one"
+  done
   pass "a released-then-re-held task is a distinct captain call whose first sight still alarms"
 }
 

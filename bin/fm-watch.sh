@@ -853,8 +853,9 @@ busy_turn_over_age() {  # <task>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason scope_due=0
   key=$(window_key "$win")
+  [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" = "$h" ] || scope_due=1
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
@@ -870,8 +871,15 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration"
+  if [ "$scope_due" -eq 0 ] && [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] \
+    && [ "$(age_of "$STATE/.paused-resurfaced-$key")" -ge "$PAUSE_RESURFACE_SECS" ]; then
+    scope_due=1
+  fi
+  if [ "$scope_due" -eq 1 ]; then
+    stale_wait_declaration "$task" 1
+    resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" \
+      "stale: $win ($reason)" "$STALE_WAIT_DECLARATION"
+  fi
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
@@ -1048,17 +1056,24 @@ task_captain_call_open() {  # <task>
   return 0
 }
 
-# The identity a re-surface throttle is bound to. Both forms carry the task's
+# The identity a re-surface throttle is bound to. It always carries the task's
 # whole status-log signature, so any new status event - a replacement wait, a
 # fresh delivery, a blocker - starts its own window instead of inheriting the
-# silence of the one before it. The captain-call form additionally carries the
-# call's own lifecycle identity, so a released-then-re-held task does too.
-stale_wait_declaration() {  # <task>
-  printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
-}
-
-captain_call_declaration() {  # <task> <call-identity>
-  printf 'captain-hold:%s:%s' "$2" "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+# silence of the one before it. When a captain call is open it also carries that
+# call's lifecycle identity, so a released-then-re-held task does too. With no
+# open call, a status-declared wait retains its existing declared:<signature>
+# scope exactly.
+stale_wait_declaration() {  # <task> <status-declared: 0|1>
+  local task=$1 status_declared=$2 declaration
+  declaration="declared:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
+  STALE_WAIT_DECLARATION=
+  if task_captain_call_open "$task"; then
+    STALE_WAIT_DECLARATION="$declaration:captain-hold:$CAPTAIN_CALL_IDENTITY"
+    return 0
+  fi
+  [ "$status_declared" -eq 1 ] || return 1
+  STALE_WAIT_DECLARATION=$declaration
+  return 0
 }
 
 # 0 when <declaration> has already been alarmed for this window inside the
@@ -1087,8 +1102,7 @@ stale_wait_record() {  # <window-key>
 captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
-  task_captain_call_open "$task" || return 1
-  STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
+  stale_wait_declaration "$task" 0 || return 1
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
@@ -1112,21 +1126,15 @@ captain_call_stale_bound() {  # <window-key> <task>
 # line the worker declared, and the backlog hold firstmate recorded once the
 # captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1
+  local win=$1 h=$2 key task last declared=0 bounded=1 throttled=1
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
   STALE_WAIT_DECLARATION=
-  if status_is_paused_or_captain_held "$last"; then
-    declared=0
+  status_is_paused_or_captain_held "$last" && declared=1
+  if stale_wait_declaration "$task" "$declared"; then
     bounded=0
-    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
     stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
-  elif captain_call_stale_bound "$key" "$task"; then
-    bounded=0
-    throttled=0
-  elif [ -n "$STALE_WAIT_DECLARATION" ]; then
-    bounded=0
   fi
   if [ "$throttled" -ne 0 ]; then
     fm_wake_append stale "$win" "stale: $win" || exit 1
@@ -1135,7 +1143,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
-  if [ "$declared" -eq 0 ]; then
+  if [ "$declared" -eq 1 ]; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
   elif [ "$bounded" -eq 0 ]; then
