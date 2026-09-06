@@ -1328,6 +1328,17 @@ puts JSON.generate(
   pass "Herdr CI family-run step times out at 20 min under a 75 min job backstop"
 }
 
+test_coverage_is_locale_independent() {
+  local locale_name output expected=''
+  for locale_name in C C.UTF-8 en_US.UTF-8; do
+    output=$(LC_ALL="$locale_name" "$RUNNER" --check-coverage) \
+      || fail "coverage guard failed with locale $locale_name"
+    [ -n "$expected" ] || expected=$output
+    [ "$output" = "$expected" ] || fail "coverage changed with locale $locale_name"
+  done
+  pass "coverage guard uses identical collation across caller locales"
+}
+
 test_aggregate_json() {
   local tmp a b
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggjson.XXXXXX")
@@ -1387,6 +1398,7 @@ test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_coverage_is_locale_independent
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
 test_portable_serial_shard_lane_refusals
