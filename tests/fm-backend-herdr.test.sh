@@ -4351,6 +4351,56 @@ test_wait_transition_not_capable_returns_2() {
   pass "fm_backend_herdr_wait_transition: below-capability protocol/schema falls back to polling (rc 2)"
 }
 
+test_events_capable_true_when_both_markers_present() {
+  local dir log resp fb rc
+  dir="$TMP_ROOT/events-capable-true"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}' > "$resp/1.out"
+  printf '%s\n' '{"schemas":{"methods":["events.subscribe","pane.agent_status_changed"]}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable sess' "$ROOT"
+  rc=$?
+  [ "$rc" = 0 ] || fail "events_capable must succeed when both markers are present in the schema, got $rc"
+  pass "fm_backend_herdr_events_capable: both markers present in schema returns capable"
+}
+
+test_events_capable_false_when_a_marker_is_missing() {
+  local dir log resp fb rc
+  dir="$TMP_ROOT/events-capable-missing"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}' > "$resp/1.out"
+  printf '%s\n' '{"schemas":{"methods":["events.subscribe"]}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable sess' "$ROOT"
+  rc=$?
+  [ "$rc" = 1 ] || fail "events_capable must fail when pane.agent_status_changed is absent from the schema, got $rc"
+  pass "fm_backend_herdr_events_capable: a missing marker returns incapable"
+}
+
+test_events_capable_large_schema_produces_no_broken_pipe_noise() {
+  local dir log resp fb schema pad out rc
+  dir="$TMP_ROOT/events-capable-large"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}' > "$resp/1.out"
+  # Put both markers near the start, then pad well past a pipe buffer so a
+  # substring check that still shelled out to `grep -q` would let grep exit
+  # (and close the pipe) long before the padding finished writing, forcing
+  # printf to take EPIPE and bash to log "write error: Broken pipe".
+  pad=$(printf 'x%.0s' $(seq 1 300000))
+  schema="{\"schemas\":{\"methods\":[\"events.subscribe\",\"pane.agent_status_changed\"]},\"pad\":\"$pad\"}"
+  printf '%s\n' "$schema" > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_events_capable sess' "$ROOT" 2>&1)
+  rc=$?
+  [ "$rc" = 0 ] || fail "events_capable must still succeed against a large schema, got $rc: $out"
+  case "$out" in *"Broken pipe"*) fail "events_capable must not leak an EPIPE 'Broken pipe' line on a large schema: $out" ;; esac
+  [ -z "$out" ] || fail "events_capable must print nothing on stdout/stderr for a passing probe: $out"
+  pass "fm_backend_herdr_events_capable: a large schema produces no broken-pipe stderr noise"
+}
+
 test_wait_transition_reconcile_blocked_returns_record() {
   local dir state agent temp fb reader lines out rc marker
   dir="$TMP_ROOT/wt-reconcile"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"; mkdir -p "$state" "$agent" "$temp"
@@ -4658,6 +4708,9 @@ test_clear_transition_removes_task_marker
 test_apply_transition_defer_and_fallback_are_noops
 test_wait_transition_no_panes_returns_2
 test_wait_transition_not_capable_returns_2
+test_events_capable_true_when_both_markers_present
+test_events_capable_false_when_a_marker_is_missing
+test_events_capable_large_schema_produces_no_broken_pipe_noise
 test_wait_transition_reconcile_blocked_returns_record
 test_wait_transition_subscribes_before_reconcile
 test_wait_transition_reconcile_dedupes_when_marked
