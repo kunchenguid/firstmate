@@ -1671,33 +1671,40 @@ EOF
 }
 
 _fm_status_open_decision_origins() {  # <status-file>
-  local f=$1 line open='' after key verb note number=0 origins=''
+  local f=$1 line open='' after keys key verb note number=0 origins=''
   local resolve held
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     number=$((number + 1))
     after=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
-    key=$(_fm_decision_key "$line") || { open=$after; continue; }
+    keys=$(_fm_decision_keys "$line") || { open=$after; continue; }
     verb=$(status_line_verb "$line")
     note=$(status_line_note "$line")
-    case "$verb" in
-      needs-decision|blocked)
-        if _fm_open_set_has "$after" "$key" \
-          && [ "$(_fm_open_set_verb "$after" "$key")" = "$verb" ]; then
-          case "$after" in
-            "$key"$'\t'"$verb"$'\t'"$note"|*$'\n'"$key"$'\t'"$verb"$'\t'"$note")
-              origins=$(_fm_decision_origin_drop "$origins" "$key")
-              [ -n "$origins" ] && origins="${origins}"$'\n'
-              origins="${origins}${key}"$'\t'"${number}"
-              ;;
-          esac
-        fi
-        ;;
-      "$resolve"|"$held")
-        _fm_open_set_has "$after" "$key" || origins=$(_fm_decision_origin_drop "$origins" "$key")
-        ;;
-    esac
+    # Same multi-key-every-named-key rule as _fm_decision_fold_line, so this
+    # origin tracker cannot disagree with the fold it is explaining.
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      case "$verb" in
+        needs-decision|blocked)
+          if _fm_open_set_has "$after" "$key" \
+            && [ "$(_fm_open_set_verb "$after" "$key")" = "$verb" ]; then
+            case "$after" in
+              "$key"$'\t'"$verb"$'\t'"$note"|*$'\n'"$key"$'\t'"$verb"$'\t'"$note")
+                origins=$(_fm_decision_origin_drop "$origins" "$key")
+                [ -n "$origins" ] && origins="${origins}"$'\n'
+                origins="${origins}${key}"$'\t'"${number}"
+                ;;
+            esac
+          fi
+          ;;
+        "$resolve"|"$held")
+          _fm_open_set_has "$after" "$key" || origins=$(_fm_decision_origin_drop "$origins" "$key")
+          ;;
+      esac
+    done <<EOF
+$keys
+EOF
     open=$after
   done < "$f"
   printf '%s' "$origins"
@@ -1705,7 +1712,7 @@ _fm_status_open_decision_origins() {  # <status-file>
 
 status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
   local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file full_file prefix_file result
-  local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
+  local line verb key keys allowed_keys note live origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
@@ -1746,20 +1753,29 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
     verb=$(status_line_verb "$line")
     case "$verb" in
       needs-decision|blocked)
-        key=$(_fm_decision_key "$line") || {
+        keys=$(_fm_decision_keys "$line") || {
           [ -n "$events" ] && events="${events} ; "
           events="${events}${line}"
           [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
           rc=0
           continue
         }
-        _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || {
+        note=$(status_line_note "$line")
+        allowed_keys=''
+        while IFS= read -r key; do
+          [ -n "$key" ] || continue
+          _fm_decision_key_transition_allowed "$key" "$note" || continue
+          allowed_keys="${allowed_keys}${key}"$'\n'
+        done <<EOF
+$keys
+EOF
+        if [ -z "$allowed_keys" ]; then
           [ -n "$events" ] && events="${events} ; "
           events="${events}reconciliation-required: ${line}"
           [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
           rc=0
           continue
-        }
+        fi
         if [ "$folded" -eq 0 ]; then
           _fm_status_read_span "$f" 0 "$size" > "$full_file" 2>/dev/null \
             || { failed=1; break; }
@@ -1771,19 +1787,29 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
           origins=$(_fm_status_open_decision_origins "$full_file") || { failed=1; break; }
           folded=1
         fi
-        live_line=$(while IFS=$(printf '\t') read -r _key _line; do
-          [ "$_key" = "$key" ] && { printf '%s' "$_line"; break; }
-        done <<EOF
+        # A multi-key line is still the live opening if ANY of its keys still
+        # points at this exact line, mirroring the fold's OR semantics.
+        live=0
+        while IFS= read -r key; do
+          [ -n "$key" ] || continue
+          live_line=$(while IFS=$(printf '\t') read -r _key _line; do
+            [ "$_key" = "$key" ] && { printf '%s' "$_line"; break; }
+          done <<EOF
 $origins
 EOF
 )
-        [ -n "$live_line" ] && [ "$((prefix_lines + line_number))" -eq "$live_line" ] || continue
+          if [ -n "$live_line" ] && [ "$((prefix_lines + line_number))" -eq "$live_line" ]; then
+            live=1
+            [ "$verb" = blocked ] && _fm_is_pending_reply_escalation "$key" "$note" \
+              && _fm_span_needs_decision=1
+          fi
+        done <<EOF
+$allowed_keys
+EOF
+        [ "$live" -eq 1 ] || continue
         [ -n "$events" ] && events="${events} ; "
         events="${events}${line}"
-        if [ "$verb" = needs-decision ] || { [ "$verb" = blocked ] &&
-          _fm_is_pending_reply_escalation "$key" "$(status_line_note "$line")"; }; then
-          _fm_span_needs_decision=1
-        fi
+        [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
         rc=0
         ;;
       *)

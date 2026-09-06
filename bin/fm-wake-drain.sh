@@ -268,7 +268,7 @@ EOF
 }
 
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
-  local snapshot=$1 task endpoint ident event event_endpoint line verb key receipt store lock ready
+  local snapshot=$1 task endpoint ident event event_endpoint line verb receipt store lock ready
   local output='' used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000 rc=0
   [ "$ACTOR" = main ] || return 0
 
@@ -307,13 +307,12 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
     verb=$(status_line_verb "$event")
     case "$verb" in
       needs-decision|blocked)
-        key=$(_fm_decision_key "$event") || key=
         # Parseable decisions belong exclusively to the durable fold. That
         # includes reserved-key transitions the fold rejects; resurfacing one
-        # here would let a foreign writer bypass the namespace guard. A line
-        # with malformed key syntax has no fold representation, so the
-        # captain-facing backstop remains its only safe presentation path.
-        [ -z "$key" ] || continue
+        # here would let a foreign writer bypass the namespace guard. Only a
+        # line with genuinely malformed key syntax has no fold representation,
+        # so the captain-facing backstop remains its only safe presentation path.
+        if _fm_decision_keys "$event" >/dev/null; then continue; fi
         ;;
     esac
     load_branch_outcome_index "$task"
