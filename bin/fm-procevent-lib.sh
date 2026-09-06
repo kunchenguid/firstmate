@@ -575,8 +575,20 @@ fm_procevent_claim_mark_terminal_locked() {
 }
 
 # fm_procevent_claim_release_locked <source-id> <home> <pid> <token>
+# The live owner uses this path for its own release. Reservation cleanup must
+# succeed normally; stale-generation relaxation is never consulted.
 fm_procevent_claim_release_locked() {
-  local id=$1 home=$2 pid=$3 token=$4 claim
+  fm_procevent_claim_release_mode_locked release "$@"
+}
+
+# fm_procevent_claim_reclaim_locked <source-id> <home> <pid> <token>
+# Lifecycle commands use this only after proving or stopping a dead generation.
+fm_procevent_claim_reclaim_locked() {
+  fm_procevent_claim_release_mode_locked reclaim "$@"
+}
+
+fm_procevent_claim_release_mode_locked() {
+  local mode=$1 id=$2 home=$3 pid=$4 token=$5 claim
   fm_procevent_source_id_valid "$id" || return 1
   claim=$(fm_procevent_claim_path "$id")
   [ -e "$claim" ] || return 0
@@ -584,7 +596,11 @@ fm_procevent_claim_release_locked() {
     && [ "$FM_PROCEVENT_CLAIM_HOME" = "$home" ] \
     && [ "$FM_PROCEVENT_CLAIM_PID" = "$pid" ] \
     && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$token" ]; then
-    fm_procevent_claim_capture_reservation_reclaim_locked || return 1
+    if [ "$mode" = reclaim ]; then
+      fm_procevent_claim_capture_reservation_reclaim_locked || return 1
+    else
+      fm_procevent_claim_capture_reservation_remove_locked || return 1
+    fi
     rm -f -- "$claim"
     return $?
   fi

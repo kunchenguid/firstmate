@@ -962,7 +962,7 @@ cmd_reconcile() {
     stop_state=$?
     case "$stop_state" in
       0|1)
-        if fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+        if fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
           rm -f -- "$(staging_file "$id" "$token")"
           rm -f -- "$(runner_file "$id")"
           stopped=$((stopped + 1))
@@ -1002,7 +1002,7 @@ cmd_reconcile() {
             && rm -f -- "$(source_file "$id")" \
             && [ ! -e "$(source_file "$id")" ] \
             && [ ! -L "$(source_file "$id")" ] \
-            && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+            && fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
             stopped=$((stopped + 1))
           else
             uncertain=$((uncertain + 1))
@@ -1024,7 +1024,7 @@ cmd_reconcile() {
           fi
           if [ "$stop_state" -eq 0 ] \
             && cleanup_extension_registration_invocations_locked "$id" \
-            && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+            && fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
             rm -f -- "$(staging_file "$id" "$token")"
             rm -f -- "$(runner_file "$id")"
             fm_procevent_source_lock_release "$id"
@@ -1213,7 +1213,7 @@ cmd_retire() {
         fm_procevent_source_lock_release "$id"
         die "cannot prove external adapter cleanup; source remains registered: $id"
       fi
-      if ! fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token"; then
+      if ! fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token"; then
         fm_procevent_source_lock_release "$id"
         die "cannot release source ownership: $id"
       fi
