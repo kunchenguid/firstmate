@@ -1137,6 +1137,7 @@ crew_dispatch_validate() {
       | map("\(.h):\(.e)")
       | unique;
     def home_profiles: configured_profiles | map(select(has("home")));
+    def receipt_profiles: configured_profiles | map(select(has("requiresSelectionReceipt")));
     def unusable_homes:
       home_profiles
       | map(.home)
@@ -1172,6 +1173,8 @@ crew_dispatch_validate() {
         elif (home_profiles | any(((.home | type) != "string") or ((.home | length) == 0))) then "profile home must be a non-empty string when present"
         elif ($non_codex_homes | length) > 0 then "home is only valid for the codex harness: " + ($non_codex_homes | join(", "))
         elif (unusable_homes | length) > 0 then "home must be an absolute path: " + (unusable_homes | join(", "))
+        elif (receipt_profiles | any(.requiresSelectionReceipt != true)) then "requiresSelectionReceipt must be true when present"
+        elif (receipt_profiles | any((.harness | type) != "string" or (.harness | length) == 0 or (.model | type) != "string" or (.model | length) == 0)) then "requiresSelectionReceipt needs a profile with non-empty harness and model"
         else empty
         end
     end

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--codex-home <path>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--codex-home <path>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--codex-home <path>] [--selection-receipt <path>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--codex-home <path>] [--selection-receipt <path>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -26,7 +26,7 @@
 #   Ship/scout launches always supply fm-dod-lib.sh's current worker role scope
 #   using the same private launch-brief overlay. This never rewrites a project's
 #   instruction files or a secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--selection-receipt <path>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -57,6 +57,16 @@
 #   An accepted value prefixes CODEX_HOME= onto this one launch, so the worker
 #   and everything it runs (its no-mistakes pipeline included) use that account.
 #   The value is recorded as codex_home= in state/<id>.meta.
+#
+# --selection-receipt is the current primary selection receipt required only
+#   when the resolved dispatch profile sets requiresSelectionReceipt=true for
+#   its exact harness/model tuple. Its versioned schema, freshness, and
+#   quota snapshot digest are owned by bin/fm-dispatch-receipt-lib.sh. A
+#   successful guarded dispatch records selection_receipt=,
+#   selection_receipt_sha256=, selection_receipt_created_at=, and
+#   quota_snapshot_sha256= in the task
+#   metadata. The guard proves evidence integrity only; it never routes a task
+#   or ranks a provider.
 #   Nothing else in this home's environment changes, and a spawn without the
 #   flag behaves exactly as it did before the flag existed.
 #   bin/fm-control.sh relaunch carries the recorded value forward
@@ -344,6 +354,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-dispatch-receipt-lib.sh
+. "$SCRIPT_DIR/fm-dispatch-receipt-lib.sh"
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved raw_bytes
@@ -440,6 +452,7 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 CODEX_HOME_ARG=
+SELECTION_RECEIPT_ARG=
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -448,6 +461,7 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 CODEX_HOME_SET=0
+SELECTION_RECEIPT_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -465,6 +479,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       codex-home) CODEX_HOME_ARG=$a; CODEX_HOME_SET=1 ;;
+      selection-receipt) SELECTION_RECEIPT_ARG=$a; SELECTION_RECEIPT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
@@ -486,6 +501,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --codex-home) want_value=codex-home ;;
     --codex-home=*) CODEX_HOME_ARG=${a#--codex-home=}; CODEX_HOME_SET=1 ;;
+    --selection-receipt) want_value=selection-receipt ;;
+    --selection-receipt=*) SELECTION_RECEIPT_ARG=${a#--selection-receipt=}; SELECTION_RECEIPT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     --mode) want_value=mode ;;
@@ -502,6 +519,7 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$CODEX_HOME_SET" -eq 0 ] || [ -n "$CODEX_HOME_ARG" ] || { echo "error: --codex-home requires a non-empty value" >&2; exit 1; }
+[ "$SELECTION_RECEIPT_SET" -eq 0 ] || [ -n "$SELECTION_RECEIPT_ARG" ] || { echo "error: --selection-receipt requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
@@ -1102,6 +1120,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$CODEX_HOME_ARG" ] || shared_args+=(--codex-home "$CODEX_HOME_ARG")
+  [ -z "$SELECTION_RECEIPT_ARG" ] || shared_args+=(--selection-receipt "$SELECTION_RECEIPT_ARG")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -1673,6 +1692,35 @@ if [ -n "$CODEX_HOME_ARG" ]; then
     echo "error: --codex-home has no auth.json: $CODEX_HOME_ARG (log that account in with CODEX_HOME=$CODEX_HOME_ARG codex login)" >&2
     exit 1
   fi
+fi
+
+# Astra is not inferred from a model name alone. A primary explicitly opts an
+# configured harness/model tuple into this evidence gate with
+# requiresSelectionReceipt=true. Secondmates are primary supervisors rather
+# than dispatch candidates, so they are deliberately outside the profile gate.
+SELECTION_RECEIPT_REQUIRED=0
+FM_DISPATCH_RECEIPT_PATH=
+FM_DISPATCH_RECEIPT_SHA256=
+FM_DISPATCH_RECEIPT_CREATED_AT=
+FM_DISPATCH_QUOTA_SNAPSHOT_SHA256=
+if [ "$KIND" != secondmate ]; then
+  if fm_dispatch_selection_receipt_required "$CONFIG/crew-dispatch.json" "$HARNESS" "${MODEL:-default}"; then
+    SELECTION_RECEIPT_REQUIRED=1
+  else
+    receipt_requirement_rc=$?
+    [ "$receipt_requirement_rc" -eq 1 ] || exit "$receipt_requirement_rc"
+  fi
+fi
+if [ "$SELECTION_RECEIPT_REQUIRED" = 1 ] && [ "$SELECTION_RECEIPT_SET" = 0 ]; then
+  echo "error: resolved dispatch profile requires a current --selection-receipt for $HARNESS/${MODEL:-default}/${EFFORT:-default}; refusing before endpoint, worktree, or backlog mutation" >&2
+  exit 1
+fi
+if [ "$SELECTION_RECEIPT_REQUIRED" = 0 ] && [ "$SELECTION_RECEIPT_SET" = 1 ]; then
+  echo "error: --selection-receipt is valid only for a resolved dispatch profile that requires it" >&2
+  exit 1
+fi
+if [ "$SELECTION_RECEIPT_REQUIRED" = 1 ]; then
+  fm_dispatch_selection_receipt_validate "$SELECTION_RECEIPT_ARG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" || exit 1
 fi
 
 case "$HARNESS" in
@@ -3583,7 +3631,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort codex_home busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort codex_home selection_receipt selection_receipt_sha256 selection_receipt_created_at quota_snapshot_sha256 busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3604,6 +3652,10 @@ preserve_relaunch_meta() {
   # Only a profile that named a Codex home writes codex_home=; its absence means
   # the worker uses whatever Codex home its own environment resolves.
   [ -z "$CODEX_HOME_ARG" ] || echo "codex_home=$CODEX_HOME_ARG"
+  [ -z "$FM_DISPATCH_RECEIPT_PATH" ] || echo "selection_receipt=$FM_DISPATCH_RECEIPT_PATH"
+  [ -z "$FM_DISPATCH_RECEIPT_SHA256" ] || echo "selection_receipt_sha256=$FM_DISPATCH_RECEIPT_SHA256"
+  [ -z "$FM_DISPATCH_RECEIPT_CREATED_AT" ] || echo "selection_receipt_created_at=$FM_DISPATCH_RECEIPT_CREATED_AT"
+  [ -z "$FM_DISPATCH_QUOTA_SNAPSHOT_SHA256" ] || echo "quota_snapshot_sha256=$FM_DISPATCH_QUOTA_SNAPSHOT_SHA256"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.

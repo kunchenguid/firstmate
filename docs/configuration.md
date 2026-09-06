@@ -388,6 +388,7 @@ Regression coverage executes emitted launch commands with synthetic nonsecret va
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes concrete `--harness`, `--model`, and `--effort` flags plus `--codex-home <home>` whenever the selected Codex candidate carries `home`.
+When a selected profile requires a primary selection receipt, firstmate also passes its current `--selection-receipt <path>`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
@@ -400,13 +401,13 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>", "home": "<optional absolute Codex home, codex only>" }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>", "home": "<optional absolute Codex home, codex only>", "requiresSelectionReceipt": true }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
   ],
   "default": [
-    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>", "home": "<optional absolute Codex home, codex only>" }
+    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>", "home": "<optional absolute Codex home, codex only>", "requiresSelectionReceipt": true }
   ]
 }
 ```
@@ -421,6 +422,13 @@ It is valid only for `harness: "codex"`, and any other harness carrying it is a 
 [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md) owns how such a candidate's quota is measured, and `fm-spawn.sh` exports `CODEX_HOME=<home>` into that one worker's launch while recording the choice in the task's own record.
 A profile with no `home` omits `--codex-home` and launches against whatever ambient default Codex account the worker's environment resolves.
 Bootstrap and `fm-spawn.sh` both refuse a path containing control bytes, a relative path, a missing directory, or a directory holding no `auth.json`, so a mistyped home is an actionable error rather than a silent fall back to `~/.codex`; neither ever reads that file's contents.
+`requiresSelectionReceipt` is optional and can only be literal `true` on a profile with an explicit harness and model.
+It makes every effort of that exact harness/model profile refuse before a worker endpoint, worktree, or backlog record changes unless Firstmate supplies a current version-1 selection receipt.
+The receipt binds the task and selected harness/model/effort, a task-fit rationale, candidate accounting, catalog evidence, and the SHA-256 of one saved `quota-axi` snapshot.
+`fm-spawn.sh` and `fm-control.sh` verify the schema, tuple, exactly one selected candidate that matches the tuple, receipt and snapshot digests, and a 15-minute maximum age by default (`FM_DISPATCH_RECEIPT_MAX_AGE_SECONDS` may narrow or extend that local bound).
+The saved quota snapshot must itself carry a current `generatedAt` in normal quota-axi TOON output or the JSON fallback shape, so a fresh receipt cannot bless stale quota evidence.
+They do not infer a provider, score candidates, or select a route.
+Every relaunch requires a newly current receipt too, rather than reusing the task's prior dispatch evidence.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
@@ -441,10 +449,23 @@ A two-account Codex rule looks like this, with one candidate per logged-in home:
 }
 ```
 
+An Astra profile can opt into the durable primary-evidence gate without adding a second router:
+
+```json
+{
+  "default": {
+    "harness": "codex",
+    "model": "gpt-6-astra",
+    "effort": "high",
+    "requiresSelectionReceipt": true
+  }
+}
+```
+
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-Malformed JSON, an empty or malformed rule/default array, an unverified harness, an effort value unsupported by that harness, or an unusable `home` is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+Malformed JSON, an empty or malformed rule/default array, an unverified harness, an effort value unsupported by that harness, an unusable `home`, or a misplaced `requiresSelectionReceipt` is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 

@@ -200,12 +200,47 @@ run_spawn() {  # <case-dir> <args...>
     "$SPAWN" "$@" 2>&1
 }
 
+wait_for_marker_or_child_exit() {  # <marker> <child-pid> <child-output> <description>
+  local marker=$1 child_pid=$2 child_output=$3 description=$4 deadline child_rc
+  deadline=$((SECONDS + 8))
+  while [ ! -e "$marker" ] && [ "$SECONDS" -lt "$deadline" ]; do
+    if ! kill -0 "$child_pid" 2>/dev/null; then
+      wait "$child_pid"; child_rc=$?
+      fail "$description exited before its rendezvous (exit $child_rc): $(cat "$child_output" 2>/dev/null || true)"
+    fi
+    /bin/sleep 0.01
+  done
+  [ -e "$marker" ] && return 0
+  if kill -0 "$child_pid" 2>/dev/null; then
+    kill "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
+    fail "$description did not reach its rendezvous within the bounded wait; child output: $(cat "$child_output" 2>/dev/null || true)"
+  fi
+  wait "$child_pid"; child_rc=$?
+  fail "$description exited before its rendezvous (exit $child_rc): $(cat "$child_output" 2>/dev/null || true)"
+}
+
 meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
 }
 
 journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
+}
+
+make_control_selection_receipt() {  # <case-dir> <task-id>
+  local dir=$1 id=$2 snapshot="$1/quota-axi.json" receipt="$1/selection-receipt.json" digest created_at
+  created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf 'generatedAt: "%s"\nquota: []\n' "$created_at" > "$snapshot"
+  digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
+  jq -n --arg id "$id" --arg created_at "$created_at" --arg snapshot "$snapshot" --arg digest "$digest" '
+    {version: 1, createdAt: $created_at, task: $id, harness: "codex",
+     model: "gpt-6-astra", effort: "high", taskFit: "relaunch remains in scope",
+     candidates: [{harness: "codex", model: "gpt-6-astra", effort: "high",
+                   disposition: "selected", rationale: "current primary evidence"}],
+     catalogEvidence: ["synthetic catalog evidence"],
+     quotaSnapshot: {path: $snapshot, sha256: $digest}}' > "$receipt"
+  printf '%s\n' "$receipt"
 }
 
 make_git_failure_stub() {  # <case-dir>
@@ -403,15 +438,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_RELEASE="$launch_release" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 200 ]; do
-    /bin/sleep 0.01
-    i=$((i + 1))
-  done
-  [ -e "$prepare" ] || {
-    kill "$control_pid" 2>/dev/null || true
-    wait "$control_pid" 2>/dev/null || true
-    fail "relaunch did not reach trace delivery"
-  }
+  wait_for_marker_or_child_exit "$prepare" "$control_pid" "$dir/control.out" "relaunch trace delivery"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_REAL_MV="$(command -v mv)" \
     FM_FAKE_LOCK_WAITING="$waiting" \
@@ -694,6 +721,31 @@ test_control_byte_codex_home_refuses_before_stopping_anything() {
   [ ! -e "$dir/home/state/rl6d.control-relaunch" ] \
     || fail "an unsafe recorded Codex home must refuse before creating a durable journal"
   pass "fm-control relaunch: an unsafe Codex home refuses before the worker is touched"
+}
+
+test_astra_relaunch_requires_and_revalidates_a_selection_receipt_before_stop() {
+  local dir out rc receipt
+  dir=$(new_case astrareceipt rl-astra)
+  add_ship_task "$dir" rl-astra codex
+  mkdir -p "$dir/home/config"
+  printf '%s\n' '{"default":{"harness":"codex","model":"gpt-6-astra","effort":"high","requiresSelectionReceipt":true}}' \
+    > "$dir/home/config/crew-dispatch.json"
+  {
+    echo "model=gpt-6-astra"
+    echo "effort=high"
+  } >> "$dir/home/state/rl-astra.meta"
+
+  out=$(run_control "$dir" rl-astra relaunch --note "revalidate primary evidence"); rc=$?
+  expect_code 1 "$rc" "an Astra relaunch without a receipt should refuse"
+  assert_contains "$out" "requires a current --selection-receipt" "missing relaunch receipt did not name the configured gate"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "missing relaunch receipt stopped the current agent"
+  [ ! -e "$dir/home/state/rl-astra.control-relaunch" ] || fail "missing relaunch receipt began a durable transaction"
+
+  receipt=$(make_control_selection_receipt "$dir" rl-astra)
+  out=$(run_control "$dir" rl-astra relaunch --note "revalidate primary evidence" --selection-receipt "$receipt"); rc=$?
+  expect_code 0 "$rc" "a current Astra receipt should permit relaunch: $out"
+  assert_grep "selection_receipt=$receipt" "$dir/home/state/rl-astra.meta" "relaunch did not record its current receipt"
+  pass "fm-control relaunch: Astra receipt validation happens before stop and reaches fm-spawn"
 }
 
 test_explicit_model_wins_over_the_recorded_one() {
@@ -1643,6 +1695,7 @@ test_same_harness_relaunch_keeps_the_profile_axes
 test_relaunch_keeps_the_codex_account_until_the_harness_changes
 test_missing_codex_home_refuses_before_stopping_anything
 test_control_byte_codex_home_refuses_before_stopping_anything
+test_astra_relaunch_requires_and_revalidates_a_selection_receipt_before_stop
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared

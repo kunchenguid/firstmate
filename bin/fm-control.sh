@@ -6,6 +6,7 @@
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
+#                                         [--selection-receipt <path>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -43,6 +44,9 @@
 #              bin/fm-spawn.sh's --codex-home) is carried into a replacement on
 #              the same harness, so the task keeps the account it was dispatched
 #              against; a harness change drops it with the other profile axes.
+#              A tuple whose configured dispatch profile requires a primary
+#              selection receipt must receive a current --selection-receipt on
+#              every replacement; it is revalidated before the old agent stops.
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
 #              --note is required for a ship or scout, whose replacement
@@ -124,6 +128,7 @@ fi
 }
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 [ -d "$STATE" ] || {
   echo "error: state dir '$STATE' is missing; fm-control cannot resolve tasks for FM_HOME '$FM_HOME'" >&2
   exit 1
@@ -139,6 +144,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-dispatch-receipt-lib.sh
+. "$SCRIPT_DIR/fm-dispatch-receipt-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -195,9 +202,11 @@ fi
 NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
+NEW_SELECTION_RECEIPT=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+SELECTION_RECEIPT_SET=0
 NOTE=
 NOTE_SET=0
 control_want_value=
@@ -210,6 +219,7 @@ for control_arg in "$@"; do
       harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
+      selection-receipt) NEW_SELECTION_RECEIPT=$control_arg; SELECTION_RECEIPT_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
@@ -227,6 +237,8 @@ for control_arg in "$@"; do
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --selection-receipt) control_want_value=selection-receipt ;;
+    --selection-receipt=*) NEW_SELECTION_RECEIPT=${control_arg#--selection-receipt=}; SELECTION_RECEIPT_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -244,12 +256,13 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$SELECTION_RECEIPT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--harness, --model, --effort, --selection-receipt, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
+[ "$SELECTION_RECEIPT_SET" = 0 ] || [ -n "$NEW_SELECTION_RECEIPT" ] || die "--selection-receipt requires a non-empty value"
 case "$NEW_EFFORT" in
   ''|default|low|medium|high|xhigh|max) ;;
   *) die "--effort must be one of default, low, medium, high, xhigh, max" ;;
@@ -707,6 +720,23 @@ resolve_relaunch_profile() {
     [ -f "$TARGET_CODEX_HOME/auth.json" ] \
       || die "--codex-home has no auth.json: $TARGET_CODEX_HOME (log that account in with CODEX_HOME=$TARGET_CODEX_HOME codex login); refusing to stop $ID before bin/fm-spawn.sh applies its authoritative validation"
   fi
+  TARGET_SELECTION_RECEIPT=
+  if [ "$KIND" != secondmate ]; then
+    if fm_dispatch_selection_receipt_required "$CONFIG/crew-dispatch.json" "$TARGET_HARNESS" "$TARGET_MODEL"; then
+      [ "$SELECTION_RECEIPT_SET" = 1 ] \
+        || die "resolved dispatch profile requires a current --selection-receipt for $TARGET_HARNESS/$TARGET_MODEL/$TARGET_EFFORT; refusing to stop $ID before endpoint, worktree, or backlog mutation"
+      fm_dispatch_selection_receipt_validate "$NEW_SELECTION_RECEIPT" "$ID" "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" \
+        || die "--selection-receipt validation failed; refusing to stop $ID before bin/fm-spawn.sh applies its authoritative launch validation"
+      TARGET_SELECTION_RECEIPT=$NEW_SELECTION_RECEIPT
+    else
+      receipt_requirement_rc=$?
+      [ "$receipt_requirement_rc" -eq 1 ] || die "could not evaluate configured selection-receipt requirements; refusing to stop $ID"
+      [ "$SELECTION_RECEIPT_SET" = 0 ] \
+        || die "--selection-receipt is valid only for a resolved dispatch profile that requires it"
+    fi
+  elif [ "$SELECTION_RECEIPT_SET" = 1 ]; then
+    die "--selection-receipt is valid only for a crew or scout dispatch profile that requires it"
+  fi
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
@@ -858,6 +888,7 @@ do_relaunch() {
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   [ -z "$TARGET_CODEX_HOME" ] || spawn_args+=(--codex-home "$TARGET_CODEX_HOME")
+  [ -z "$TARGET_SELECTION_RECEIPT" ] || spawn_args+=(--selection-receipt "$TARGET_SELECTION_RECEIPT")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1

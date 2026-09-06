@@ -1174,6 +1174,10 @@ a relative home is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home"
 an empty home is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - profile home must be a non-empty string when present
 a missing home directory is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":"$homes/absent"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - codex home directory not found: $homes/absent
 a home with no login is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":"$never"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - codex home has no auth.json: $never (log that account in with CODEX_HOME=$never codex login)
+an exact Astra receipt requirement is accepted^{"default":{"harness":"codex","model":"gpt-6-astra","effort":"high","requiresSelectionReceipt":true}}^empty^
+a non-codex receipt requirement is accepted^{"default":{"harness":"claude","model":"claude-opus","effort":"high","requiresSelectionReceipt":true}}^empty^
+a receipt requirement without a model is flagged^{"default":{"harness":"codex","requiresSelectionReceipt":true}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - requiresSelectionReceipt needs a profile with non-empty harness and model
+a non-boolean receipt requirement is flagged^{"default":{"harness":"codex","model":"gpt-6-astra","effort":"high","requiresSelectionReceipt":"yes"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - requiresSelectionReceipt must be true when present
 ROWS
   pass "bootstrap accepts a per-account codex home and reports every unusable one"
 }
