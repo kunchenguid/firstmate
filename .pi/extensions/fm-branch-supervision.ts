@@ -78,6 +78,7 @@ import {
   getAgentDir,
   keyHint,
   ModelRuntime,
+  type ModelRegistry,
   SessionManager,
   ToolExecutionComponent,
   type AgentSession,
@@ -644,6 +645,11 @@ export default function (pi: ExtensionAPI) {
   // extension plus its model_select event, because createBranch runs at wake
   // time with no context of its own. It is what "follow main" applies.
   let mainModel: { provider: string; id: string } | null = null;
+  // Main's own model registry, captured from the contexts Pi hands this
+  // extension the same way mainModel is. It is the ONLY read path to
+  // providers an extension registered at runtime (pi-devin-auth's "devin"),
+  // which the branch's isolated ModelRuntime cannot see on its own.
+  let mainModelRegistry: ModelRegistry | null = null;
 
   // Main's own current effort needs no such tracking: Pi answers it directly
   // on demand, including at wake time. It throws only when the extension
@@ -657,8 +663,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function rememberMainModel(ctx?: { model?: { provider: string; id: string } }): void {
+  function rememberMainModel(ctx?: { model?: { provider: string; id: string }; modelRegistry?: ModelRegistry }): void {
     if (ctx?.model) mainModel = { provider: ctx.model.provider, id: ctx.model.id };
+    if (ctx?.modelRegistry) mainModelRegistry = ctx.modelRegistry;
   }
 
   function deliverBranchHealthNote(text: string): void {
@@ -708,10 +715,55 @@ export default function (pi: ExtensionAPI) {
   // and same user as main, so stored credentials keep their own semantics
   // (OAuth stays OAuth, an API key stays an API key) and nothing is ever
   // installed, converted, derived, or overwritten here.
+  // A provider that exists only because an extension registered it into
+  // main's runtime (pi-devin-auth's "devin", whose streamSimple is the custom
+  // gRPC path no static catalog can express) is invisible to an isolated
+  // branch runtime until its registration is copied across. The config object
+  // carries that streamSimple and oauth wiring by reference, so copying it
+  // reuses the provider's own registration rather than reimplementing its
+  // wire protocol; the copy is never persisted and stays scoped to this one
+  // runtime. One registration that fails to compose must not blind the rest,
+  // so each copy is isolated. A just-registered provider's auth check has not
+  // run yet, so the copied providers are refreshed here and every caller's
+  // hasConfiguredAuth verdict is real rather than the provisional entry
+  // registration leaves behind.
+  async function copyExtensionProviders(modelRuntime: ModelRuntime): Promise<void> {
+    if (!mainModelRegistry) return;
+    let providerIds: readonly string[];
+    try {
+      providerIds = mainModelRegistry.getRegisteredProviderIds();
+    } catch {
+      return;
+    }
+    const copied: string[] = [];
+    for (const providerId of providerIds) {
+      try {
+        const config = mainModelRegistry.getRegisteredProviderConfig(providerId);
+        if (config) {
+          modelRuntime.registerProvider(providerId, config);
+          copied.push(providerId);
+        }
+      } catch {
+        // A registration that fails to compose in the isolated runtime leaves
+        // that provider unavailable, exactly as if it were never copied.
+      }
+    }
+    if (copied.length === 0) return;
+    try {
+      await modelRuntime.refresh({ providers: copied, allowNetwork: false });
+    } catch {
+      // A failed availability refresh is answered by hasConfiguredAuth.
+    }
+  }
+
   async function resolveBranchModel(provider: string, modelId: string): Promise<BranchModelResolution> {
     const label = `${provider}/${modelId}`;
     const modelRuntime = await ModelRuntime.create();
-    const model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
+    let model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
+    if (!model) {
+      await copyExtensionProviders(modelRuntime);
+      model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
+    }
     if (!model) return { ok: false, reason: `${label} is unavailable to the isolated branch runtime` };
     if (!modelRuntime.hasConfiguredAuth(provider)) {
       return { ok: false, reason: `${label} has no configured credentials in the isolated branch runtime` };
@@ -1659,6 +1711,7 @@ ${context.command}
       let available: string[];
       try {
         const modelRuntime = await ModelRuntime.create();
+        await copyExtensionProviders(modelRuntime);
         available = ctx.modelRegistry
           .getAvailable()
           .filter((model) => modelRuntime.getModel(model.provider, model.id) && modelRuntime.hasConfiguredAuth(model.provider))
