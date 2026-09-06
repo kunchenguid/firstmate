@@ -515,6 +515,38 @@
     {
       "path": "tests/fixtures/claude-herdr-2.1.258/idle-background-narrow.ansi.txt",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/pi-0.85.0-calm-composer/herdr-calm-off-idle.ansi.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/pi-0.85.0-calm-composer/herdr-calm-on-idle.ansi.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/pi-0.85.0-calm-composer/herdr-calm-on-pending.ansi.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/pi-0.85.0-calm-composer/herdr-calm-on-working.ansi.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/pi-0.85.0-calm-composer/tmux-calm-off-idle.ansi.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/pi-0.85.0-calm-composer/tmux-calm-off-idle.cursor.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/pi-0.85.0-calm-composer/tmux-calm-on-idle.ansi.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/pi-0.85.0-calm-composer/tmux-calm-on-idle.cursor.txt",
+      "audience": "maintainer-verification"
     }
   ]
 }

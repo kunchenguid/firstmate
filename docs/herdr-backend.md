@@ -258,9 +258,10 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape - bordered boxes, bare agent-glyph rows (including muse's `⟩`, which the adapter's retired local pattern silently omitted), opencode's left bar, and the Pi separator region this adapter pioneered, admitted when native `agent get` identity is exactly Pi; an `empty` verdict additionally requires Pi state `idle` or `done`.
+The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape - bordered boxes, bare agent-glyph rows (including muse's `⟩`, which the adapter's retired local pattern silently omitted), opencode's left bar, and the Pi separator region this adapter pioneered, admitted when native `agent get` identity is exactly Pi.
+A cursorless Pi footer may report `empty` only with Pi state `idle` or `done`, a valid path/usage/MCP-status footer layout, and two byte-identical plain captures across the bounded `FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP` window.
 A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's; that state defers instead of proving emptiness.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
+With no visible draft, a working Pi, a working indicator, spinner, streaming or partial footer text, a missing MCP-status row, an incomplete separator pair, a changing settle capture, or an over-tall candidate remains unknown; visible draft text remains pending.
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
 
 ANSI capture preserves de-emphasized placeholder style.

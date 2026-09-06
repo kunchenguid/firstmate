@@ -3284,6 +3284,24 @@ test_composer_state_pi_separator_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real Pi composer text remains pending"
 }
 
+test_composer_state_calm_draft_arrives_after_initial_idle() {
+  local dir log resp fb out fixture_root idle pending
+  dir="$TMP_ROOT/composer-calm-arrived-draft"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fixture_root="$ROOT/tests/fixtures/pi-0.85.0-calm-composer"
+  idle=$(printf '%b' "$(cat "$fixture_root/herdr-calm-on-idle.ansi.txt")")
+  pending=$(printf '%b' "$(cat "$fixture_root/herdr-calm-on-pending.ansi.txt")")
+  printf '%s' "$idle" > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '%s' "$pending" > "$resp/3.out"
+  printf '%s' "$pending" > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = pending ] \
+    || fail "a Calm draft arriving before the settled reads must remain pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: a draft arriving after the initial Calm idle read is not classified from stale bytes"
+}
+
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-pi-separated-incomplete"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5122,6 +5140,7 @@ test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_parked_prompt_is_not_empty
 test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
+test_composer_state_calm_draft_arrives_after_initial_idle
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty

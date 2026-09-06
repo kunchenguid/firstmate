@@ -140,7 +140,8 @@ The daemon escalates captain-relevant events, plus a bounded recheck for a decla
 Its supervisor injection path supports tmux and herdr panes, with `FM_SUPERVISOR_BACKEND` and `FM_SUPERVISOR_TARGET` resolved independently from the task-spawn backend.
 Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`: tmux keeps the same submit core used by the tmux send backend, while Herdr uses the harness-aware confirmation policy in [Current transport behavior](herdr-backend.md#current-transport-behavior).
 The retries-exhausted queued-Enter decision is owned by `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh`; tmux and Herdr provide only their backend-specific delivery signals.
-Composer classification has one shared owner, `bin/fm-composer-lib.sh`: tmux, herdr, Zellij, Orca, and cmux contribute only a screen capture plus declarative styled, cursor, identity, and row capabilities, while the shared classifier owns every shape and the `empty`/`pending`/`pending-unproven`/`unknown` verdict.
+Composer classification has one shared owner, `bin/fm-composer-lib.sh`: tmux, herdr, Zellij, Orca, and cmux contribute only screen captures plus declarative styled, cursor, identity, and row capabilities.
+Herdr additionally supplies the bounded settle proof for its cursorless Pi fallback, while the shared classifier owns every shape and the `empty`/`pending`/`pending-unproven`/`unknown` verdict.
 `fm-spawn.sh` also routes Kimi launch readiness through that classifier instead of carrying another shape copy.
 The daemon injects only into an affirmatively `empty` composer, so every other or future verdict defers; positive container proof is required, and a blank unidentified row or bare dead-shell prompt cannot receive an escalation.
 The current operator boundary is in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).

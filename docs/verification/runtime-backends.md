@@ -312,6 +312,31 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### Pi Calm composer on Herdr
+
+The cursorless Pi Calm composer path was verified on 2026-09-06 with Pi 0.85.0, Herdr 0.8.2, tmux 3.7c, and macOS 26.5.1 arm64.
+The exact Calm-on and Calm-off idle pane bytes from the named Herdr lab and the isolated tmux control are pinned under `tests/fixtures/pi-0.85.0-calm-composer/`.
+The Herdr capture places Pi's blank separator composer above a dollar-prefixed usage footer, while the tmux cursor remains anchored inside the same separator pair.
+The shared classifier requires the valid pair plus native Pi idle/done identity and, for the cursorless fallback, two byte-identical plain captures separated by the existing FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP window (0.6 seconds by default) before reporting empty; visible draft text remains pending.
+Any changed capture, including a Calm working indicator, spinner, or streaming row, remains unknown.
+
+The live guard was run with:
+
+```sh
+HERDR_LAB_HELPER=/Users/ivan/Projects/firstmate/bin/fm-herdr-lab.sh FM_HERDR_PI_CALM_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-herdr-pi-calm-composer-live-e2e.test.sh
+```
+
+Bounded output:
+
+```text
+FM_TEST_BEGIN 2026-09-06T00:35:33Z tests/fm-herdr-pi-calm-composer-live-e2e.test.sh family=live-harness-optin expected_gate_skip=optin-env
+ok - live Herdr Pi Calm composer: Pi (0.85.0) on Herdr (herdr 0.8.2) is empty when idle and pending with visible text
+FM_TEST_END 2026-09-06T00:35:40Z tests/fm-herdr-pi-calm-composer-live-e2e.test.sh exit=0 duration_ms=7372 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=7449
+```
+
+Refresh this evidence after a Pi, Calm, or Herdr upgrade by rerunning the same guard with the tracked `bin/fm-herdr-lab.sh` helper.
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
