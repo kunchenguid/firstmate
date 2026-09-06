@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, carry a valid missing-Review override
-# receipt forward when the recorded PR is unchanged, then atomically arm a
-# static merge poll. The override receipt is the missing_review_override_ts=
-# line in state/<id>.meta, carried forward only while pr= is unchanged.
+# exact pr_head=<sha> when available, carry the valid captain-authorized
+# override receipts forward when the recorded PR is unchanged, then atomically
+# arm a static merge poll. Those receipts are the missing_review_override_ts=
+# line and the red_override_ts=, red_override_pr=, red_override_head= and
+# red_override_condition= lines in state/<id>.meta, each carried forward only
+# while pr= is unchanged.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -105,6 +107,11 @@ pr_check_meta_identity_matches() {
 # parser requires it to follow pr=, so it is re-emitted after the identity lines
 # rather than left in place, and a malformed value is dropped without a notice
 # because no authorization it could name was ever readable.
+# Every field below is read to be re-emitted, so the read and the rewrite are
+# one transaction: without the lock held across both, a concurrent metadata
+# writer can publish between them and this rewrite silently drops its fields.
+fm_pr_meta_lock "$META" \
+  || { echo "error: task metadata is unavailable" >&2; exit 1; }
 PRIOR_PR=$(sed -n 's/^pr=//p' "$META" | tail -n 1)
 OVERRIDE_TS=$(sed -n 's/^missing_review_override_ts=//p' "$META" | tail -n 1)
 META_LINES=("pr=$URL")
@@ -116,10 +123,26 @@ if fm_pr_override_ts_valid "$OVERRIDE_TS"; then
     echo "warning: discarding the captain-authorized missing-Review override recorded for ${PRIOR_PR:-another pull request}; $URL needs its own authorization" >&2
   fi
 fi
+# The non-green override is one receipt across four lines, so a partial or
+# self-inconsistent set carries nothing forward rather than a half-record.
+RED_TS=$(sed -n 's/^red_override_ts=//p' "$META" | tail -n 1)
+RED_PR=$(sed -n 's/^red_override_pr=//p' "$META" | tail -n 1)
+RED_HEAD=$(sed -n 's/^red_override_head=//p' "$META" | tail -n 1)
+RED_CONDITION=$(sed -n 's/^red_override_condition=//p' "$META" | tail -n 1)
+if fm_pr_override_ts_valid "$RED_TS" && fm_pr_head_valid "$RED_HEAD" \
+  && [ -n "$RED_CONDITION" ] && [ "$RED_PR" = "$PRIOR_PR" ]; then
+  if [ "$PRIOR_PR" = "$URL" ]; then
+    META_LINES+=("red_override_ts=$RED_TS" "red_override_pr=$RED_PR" \
+      "red_override_head=$RED_HEAD" "red_override_condition=$RED_CONDITION")
+  else
+    echo "warning: discarding the captain-authorized non-green merge override recorded for ${PRIOR_PR:-another pull request}; $URL needs its own authorization" >&2
+  fi
+fi
 fm_pr_meta_rewrite "$META" "$STATE" .fm-pr-meta \
-  pr:pr_head:missing_review_override_ts \
+  pr:pr_head:missing_review_override_ts:red_override_ts:red_override_pr:red_override_head:red_override_condition \
   pr_check_meta_identity_matches "${META_LINES[@]}" \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
+fm_pr_meta_unlock
 
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2

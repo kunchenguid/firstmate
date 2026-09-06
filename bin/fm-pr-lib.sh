@@ -167,7 +167,7 @@ fm_pr_gitlab_path_valid() {
 # them empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
 # instead, so a merge request on any instance resolves without a hardcoded host.
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path owner repo number
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -176,20 +176,27 @@ fm_pr_url_parse() {
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
-  pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
+  # The owner segment is captured loosely here and judged by
+  # fm_pr_github_login_valid, the single owner of the GitHub account grammar.
+  pattern='^https://github\.com/([A-Za-z0-9-]{1,100})/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
-    [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
-    [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
+    # Captured before any other match runs: fm_pr_github_login_valid does its
+    # own [[ =~ ]], which replaces BASH_REMATCH.
+    owner=${BASH_REMATCH[1]}
+    repo=${BASH_REMATCH[2]}
+    number=${BASH_REMATCH[3]}
+    fm_pr_github_login_valid "$owner" || return 1
+    [ "$repo" != . ] && [ "$repo" != .. ] || return 1
     FM_PR_PROVIDER=github
     FM_PR_URL=$raw
     FM_PR_HOST=github.com
-    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    FM_PR_PATH="$owner/$repo"
     # Consumed by bin/fm-pr-merge.sh, which addresses GitHub by owner/repository.
     # shellcheck disable=SC2034
-    FM_PR_OWNER=${BASH_REMATCH[1]}
+    FM_PR_OWNER=$owner
     # shellcheck disable=SC2034
-    FM_PR_REPO=${BASH_REMATCH[2]}
-    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    FM_PR_REPO=$repo
+    FM_PR_NUMBER=$number
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last
@@ -212,6 +219,20 @@ fm_pr_head_valid() {
   local head=${1-}
   local LC_ALL=C
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+}
+
+# The GitHub account-name grammar this repository already enforces on a pull
+# request owner: 1-39 characters, alphanumeric at both edges, single hyphens
+# inside. An app's reviews carry a "[bot]" suffix on that same base name, so
+# the suffix is stripped before the grammar is applied. This is the one owner
+# of what a GitHub account identity may look like; every consumer uses it
+# rather than restating a looser character class.
+fm_pr_github_login_valid() {  # <login>
+  local login=${1-}
+  local LC_ALL=C
+  login=${login%'[bot]'}
+  [[ "$login" =~ ^([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])$ ]] || return 1
+  [[ "$login" != *--* ]]
 }
 
 fm_pr_override_ts_valid() {
@@ -318,6 +339,7 @@ fm_pr_regular_destination_on_device_or_absent() {
 
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 override_count=0 seen_pr=0 post_pr_invalid=0
+  local red_ts_count=0 red_pr_count=0 red_head_count=0 red_condition_count=0
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
@@ -354,6 +376,37 @@ fm_pr_metadata_identity_parse() {
           post_pr_invalid=1
         fi
         ;;
+      red_override_ts=*)
+        red_ts_count=$((red_ts_count + 1))
+        value=${line#red_override_ts=}
+        if [ "$seen_pr" -ne 1 ] || [ "$red_ts_count" -ne 1 ] \
+          || ! fm_pr_override_ts_valid "$value"; then
+          post_pr_invalid=1
+        fi
+        ;;
+      red_override_pr=*)
+        red_pr_count=$((red_pr_count + 1))
+        value=${line#red_override_pr=}
+        if [ "$seen_pr" -ne 1 ] || [ "$red_pr_count" -ne 1 ] \
+          || [ "$value" != "$FM_PR_META_URL" ]; then
+          post_pr_invalid=1
+        fi
+        ;;
+      red_override_head=*)
+        red_head_count=$((red_head_count + 1))
+        value=${line#red_override_head=}
+        if [ "$seen_pr" -ne 1 ] || [ "$red_head_count" -ne 1 ] \
+          || ! fm_pr_head_valid "$value"; then
+          post_pr_invalid=1
+        fi
+        ;;
+      red_override_condition=*)
+        red_condition_count=$((red_condition_count + 1))
+        value=${line#red_override_condition=}
+        if [ "$seen_pr" -ne 1 ] || [ "$red_condition_count" -ne 1 ] || [ -z "$value" ]; then
+          post_pr_invalid=1
+        fi
+        ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
         ;;
       *)
@@ -369,6 +422,43 @@ fm_pr_metadata_identity_parse() {
 fm_pr_meta_cleanup() {
   [ -z "$FM_PR_META_TMP" ] || rm -f -- "$FM_PR_META_TMP"
   FM_PR_META_TMP=
+  fm_pr_meta_unlock
+}
+
+_FM_PR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_PR_META_LOCK=
+
+# The per-task metadata lock is fm-wake-lib.sh's, and every other metadata
+# writer already serializes on it. Source it lazily for the callers that do not
+# already have it, the way bin/fm-lease-lib.sh does, so this library's own
+# consumers do not each pull that graph in.
+fm_pr_meta_lock_helpers() {
+  command -v fm_lock_acquire_wait >/dev/null 2>&1 && return 0
+  # shellcheck source=/dev/null
+  . "$_FM_PR_LIB_DIR/fm-wake-lib.sh"
+}
+
+# fm_pr_meta_lock <meta>: hold one task's metadata across a read-stage-publish
+# transaction, so a concurrent writer can neither stage from a file this
+# transaction is about to replace nor publish over what it just wrote. A caller
+# that reads fields it intends to re-emit - bin/fm-pr-check.sh's receipt
+# preservation - must hold this across that read as well as the rewrite.
+# The lock is not reentrant, so a nested acquisition is refused rather than
+# deadlocking or silently proceeding unserialized.
+fm_pr_meta_lock() {
+  local lock
+  [ -z "$FM_PR_META_LOCK" ] || return 1
+  fm_pr_meta_lock_helpers || return 1
+  lock=$(fm_meta_lock_path "$1") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  FM_PR_META_LOCK=$lock
+}
+
+fm_pr_meta_unlock() {
+  local lock=$FM_PR_META_LOCK
+  [ -n "$lock" ] || return 0
+  FM_PR_META_LOCK=
+  fm_lock_release "$lock"
 }
 
 # Sole owner of the PR-identity metadata rewrite: drop the lines each writer
@@ -380,6 +470,23 @@ fm_pr_meta_cleanup() {
 # FM_PR_META_* values parsed from the staged file and again from the published
 # one; it is the only part of the sequence a caller supplies.
 fm_pr_meta_rewrite() {  # <meta> <state> <tmp-prefix> <drop-keys> <identity-check> [<line> ...]
+  local meta=$1 state=$2 tmp_prefix=$3 drop_keys=$4 identity_check=$5
+  shift 5
+  local held=0 rc=0
+  # A caller already inside a metadata transaction keeps its own wider critical
+  # section; anyone else gets one around this read-stage-publish.
+  if [ -n "$FM_PR_META_LOCK" ]; then
+    held=1
+  else
+    fm_pr_meta_lock "$meta" || return 1
+  fi
+  _fm_pr_meta_rewrite_locked "$meta" "$state" "$tmp_prefix" "$drop_keys" \
+    "$identity_check" "$@" || rc=$?
+  [ "$held" -eq 1 ] || fm_pr_meta_unlock
+  return "$rc"
+}
+
+_fm_pr_meta_rewrite_locked() {
   local meta=$1 state=$2 tmp_prefix=$3 drop_keys=$4 identity_check=$5
   shift 5
   local device line

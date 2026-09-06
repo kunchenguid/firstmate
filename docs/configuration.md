@@ -222,7 +222,7 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: false` and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
 Test evidence stays in a temporary directory outside this repository, while the worktree's `.no-mistakes/` remains local state and CI rejects tracked entries under that path.
-`bin/fm-pr-merge.sh` uses the user-writable PR-body Review receipt as an omission guard for Firstmate self-merges, not as proof that the review ran; its header owns the explicit captain-authorized escape, which fails closed unless it can first leave a timestamped receipt in the task metadata.
+`bin/fm-pr-merge.sh` gates a Firstmate self-merge on an independent review the forge itself recorded at the exact commit the merge carries, rather than on pull request prose the change's own author can write; its header owns that evidence contract, the explicit captain-authorized escapes, and the receipts that fail closed unless they can first be written to the task metadata under the per-task metadata lock.
 It does not set `commands.test` to a complete `tests/*.test.sh` walk.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.

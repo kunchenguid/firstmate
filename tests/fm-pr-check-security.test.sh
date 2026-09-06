@@ -160,7 +160,31 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr checks") printf '%s\n' 'summary: "2 passed, 0 failed, 2 total"' ;;
-  api\ *) printf '%s\n' true ;;
+  api\ *)
+    # The merge gate reads one live pull request identity before merging.
+    case "$*" in
+      */reviews*)
+        # One independent approval at the head, in the record shape the merge
+        # gate's own review query emits.
+        printf 'reviewer-one\tAPPROVED\t2026-09-05T10:00:00Z\t1\tverdict\tscope\t%s\n' \
+          "${FM_TEST_GH_PR_HEAD:-1111111111111111111111111111111111111111}"
+        ;;
+      *'"head="'*)
+        # The base repository is the one the request path already named, so a
+        # case reading any pull request URL gets that URL's own identity back.
+        api_repo=$*
+        api_repo=${api_repo#*/repos/}
+        api_repo=${api_repo%%/pulls/*}
+        printf 'head=%s\nauthor=%s\nmerged=false\nref=%s\nheadrepo=%s\nbaserepo=%s\n' \
+          "${FM_TEST_GH_PR_HEAD:-1111111111111111111111111111111111111111}" \
+          "${FM_TEST_GH_PR_AUTHOR:-pr-author}" \
+          "${FM_TEST_GH_PR_HEAD_REF:-fm/task-branch}" \
+          "${FM_TEST_GH_PR_HEAD_REPO:-example/repo}" \
+          "${FM_TEST_GH_PR_BASE_REPO-$api_repo}"
+        ;;
+      *) printf '%s\n' true ;;
+    esac
+    ;;
   "pr view")
     [ "$#" -eq 5 ] && [ "${4:-}" = --repo ] || exit 2
     printf 'pull_request:\n  number: %s\n  state: %s\n' "$3" "${FM_TEST_GH_MERGE_STATE:-merged}"
@@ -571,8 +595,9 @@ test_valid_recording_and_merge_derivation() {
   : > "$dir/gh-axi.log"
   run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
-  grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
-    || fail "merge wrapper did not preserve repository derivation and method"
+  grep -Eq '^api PUT /repos/my-org/repo_name\.with-dots/pulls/37/merge --field sha=[0-9a-f]{40} --field merge_method=merge$' \
+    "$dir/gh-axi.log" \
+    || fail "merge wrapper did not preserve repository derivation, method and head binding"
   # A merge this home performed leaves its own durable outcome, so the poll's
   # confirmation is no longer the first the captain hears of it. Acknowledge that
   # record before the watcher cycle below, which is what still retires the poll.

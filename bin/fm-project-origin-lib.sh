@@ -178,3 +178,29 @@ fm_project_origin_safe() { # <url>; 0 when the URL is an accepted clone URL
   esac
   return 0
 }
+
+# fm_project_origin_is_canonical_github <url> <owner/repo>: whether a clone URL
+# is one of the exact spellings GitHub itself hands out for that repository.
+#
+# This is an authorization comparison, not a convenience one, so it is byte
+# exact and normalizes nothing. Userinfo, a port, another transport, a case
+# variant of the host or of the repository path, and a trailing slash are all
+# different values, and a caller that has to guess which of them "counts" has
+# no comparison at all. The repository path is compared exactly as the pull
+# request URL spells it, because GitHub's own URLs carry the canonical case.
+fm_project_origin_is_canonical_github() { # <url> <owner/repo>
+  local url=${1-} path=${2-}
+
+  fm_project_origin_safe "$url" || return 1
+  case $path in
+    '' | */*/* | */ | /*) return 1 ;;
+    */*) ;;
+    *) return 1 ;;
+  esac
+
+  case $url in
+    "https://github.com/$path" | "https://github.com/$path.git") return 0 ;;
+    "git@github.com:$path.git") return 0 ;;
+  esac
+  return 1
+}
