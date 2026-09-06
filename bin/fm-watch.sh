@@ -735,9 +735,19 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # window; wake() itself exits the cycle, exactly as it does inline.
 resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope]
   local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-}
+  # The absorb age always gates: a freshly declared wait is absorbed while it is
+  # fresh, which is this path's whole contract, and a REPLACEMENT wait is no
+  # different from the first one - the status append that declared it already woke
+  # firstmate through the signal path, so firing here as well would nag twice for
+  # one event, on the path that exists not to nag.
+  [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
+  # The throttle, by contrast, bounds ONE declared wait. A caller that passes a
+  # scope names the declaration its marker was written for, so a marker written
+  # for a DIFFERENT declaration must not suppress this one: the replacement serves
+  # its own window instead of the remainder of the previous wait's. A scope-less
+  # caller keeps the pure timestamp cadence it always had.
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
-    [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
     [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
@@ -853,24 +863,27 @@ busy_turn_over_age() {  # <task>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration
+  local win=$1 task=$2 h=$3 key statusf mtime age last detail reason declaration
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
+  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  last=$(last_status_line "$statusf")
+  # This read order is load-bearing: taking mtime last means a concurrent append
+  # can pair an old declaration only with a fresher age, never the reverse.
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
-  if status_is_captain_held "$(last_status_line "$statusf")"; then
+  if status_is_captain_held "$last"; then
     detail="captain-held, awaiting the captain"
     reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
   else
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
   resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
