@@ -86,9 +86,14 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 # This test asserts the per-home FLAT workspace shape, so both homes opt out of
 # the default-on presentation projection rather than depending on that default.
+# The primary home opts in to human-readable task-tab labels, so its own
+# crewmate (cm1) gets a "<short title> (<id>)" label and the flag inherits into
+# the secondmate home at spawn convergence (primary-authoritative, so a local
+# secondmate-home copy is not the way to opt a secondmate in).
 PRIMARY_HOME="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/config"
 printf 'off\n' > "$PRIMARY_HOME/config/herdr-presentation-spaces"
+printf '' > "$PRIMARY_HOME/config/herdr-task-titles"
 cat > "$PRIMARY_HOME/data/cm1/brief.md" <<'EOF'
 # Task
 ## Captain's intent
@@ -214,27 +219,69 @@ CM2_WSID=$(herdr pane get "$CM2_PANE" --session "$SESSION" 2>/dev/null | jq -r '
 [ "$CM2_WSID" != "$CM1_WSID" ] || fail "a crewmate spawned FROM the secondmate home must NOT land in the primary's workspace"
 pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands in the secondmate's OWN workspace - falls out of per-home resolution, no glue needed"
 
-# New workers keep their human-readable labels, and list_live discovers those
-# labels alongside historical legacy labels. Verify the real labels before
-# adding explicit legacy-label fixtures for the compatibility checks below.
+# Labels follow the home that owns each endpoint: the opted-in primary labels
+# its own crewmate with a human-readable title, the secondmate spawn inherits
+# that opt-in into its own home (so its endpoint and its crewmate get human
+# labels too), and standing the primary back down returns new workers to the
+# historical fm-<id> default. Verify the real labels before adding explicit
+# legacy-label fixtures for the compatibility checks below.
 CM1_LABEL=$(herdr tab list --workspace "$CM1_WSID" --session "$SESSION" 2>/dev/null \
   | jq -r --arg tab "$CM1_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
 SM_LABEL=$(herdr tab list --workspace "$SM_WSID" --session "$SESSION" 2>/dev/null \
   | jq -r --arg tab "$SM_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
 CM2_LABEL=$(herdr tab list --workspace "$CM2_WSID" --session "$SESSION" 2>/dev/null \
   | jq -r --arg tab "$CM2_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
-assert_contains_local "$CM1_LABEL" " (cm1)" "the primary worker did not receive a human-readable task label"
-assert_contains_local "$SM_LABEL" " (e2esm1)" "the secondmate worker did not receive a human-readable task label"
+assert_contains_local "$CM1_LABEL" " (cm1)" "the opted-in primary home did not give its own worker a human-readable task label"
+assert_not_contains_local "$CM1_LABEL" "fm-cm1" "the opted-in primary home's worker kept the legacy task label"
+[ -f "$SM_HOME/config/herdr-task-titles" ] \
+  || fail "the secondmate spawn did not inherit the primary's task-title opt-in before creating its endpoint"
+assert_contains_local "$SM_LABEL" " (e2esm1)" "the inherited opt-in did not give the secondmate's own worker a human-readable task label"
+assert_not_contains_local "$SM_LABEL" "fm-e2esm1" "the inherited opt-in still left the secondmate's own worker on the legacy task label"
 assert_contains_local "$CM2_LABEL" " (cm2)" "the secondmate-owned crewmate did not receive a human-readable task label"
-assert_not_contains_local "$CM1_LABEL" "fm-cm1" "the new primary worker kept the legacy task label"
-assert_not_contains_local "$SM_LABEL" "fm-e2esm1" "the new secondmate worker kept the legacy task label"
-assert_not_contains_local "$CM2_LABEL" "fm-cm2" "the new secondmate-owned crewmate kept the legacy task label"
-pass "real herdr E2E: new workers use human-readable labels with their exact task ids and existing labels are not rewritten"
+assert_not_contains_local "$CM2_LABEL" "fm-cm2" "the secondmate-owned crewmate kept the legacy task label"
+pass "real herdr E2E: new workers on opted-in homes use human-readable labels with their exact task ids, and the opt-in inherits through the spawn"
+
+# Standing the opt-in down returns new workers to the historical fm-<id>
+# default without touching any live tab.
+rm -f "$PRIMARY_HOME/config/herdr-task-titles"
+mkdir -p "$PRIMARY_HOME/data/cm3"
+cat > "$PRIMARY_HOME/data/cm3/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise the stood-down label default.
+
+## Firstmate spec
+Verify the crewmate keeps the historical fm-<id> label.
+EOF
+CM3_OUT="$TMP_ROOT/cm3.out"; CM3_ERR="$TMP_ROOT/cm3.err"
+FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-spawn.sh" cm3 "$PROJ1" "sh -c 'echo primary-crew-ok'" --mode no-mistakes --yolo off --backend herdr \
+  >"$CM3_OUT" 2>"$CM3_ERR"
+rc=$?
+[ "$rc" -eq 0 ] || fail "the stood-down default crewmate cm3 failed to spawn"$'\n'"--- stdout ---"$'\n'"$(cat "$CM3_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$CM3_ERR")"
+CM3_META="$PRIMARY_HOME/state/cm3.meta"
+[ -f "$CM3_META" ] || fail "no meta written for cm3"
+CM3_PANE=$(grep '^herdr_pane_id=' "$CM3_META" | cut -d= -f2-)
+[ -n "$CM3_PANE" ] || fail "cm3 meta missing herdr_pane_id"
+CM3_TAB=$(grep '^herdr_tab_id=' "$CM3_META" | cut -d= -f2-)
+[ -n "$CM3_TAB" ] || fail "cm3 meta missing herdr_tab_id"
+CM3_WSID=$(herdr pane get "$CM3_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
+[ "$CM3_WSID" = "$CM1_WSID" ] || fail "cm3 did not land in the primary's own workspace"
+CM3_LABEL=$(herdr tab list --workspace "$CM3_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$CM3_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+[ "$CM3_LABEL" = "fm-cm3" ] \
+  || fail "a stood-down home's new worker kept the historical fm-<id> default, got '$CM3_LABEL'"
+CM1_LABEL_AFTER=$(herdr tab list --workspace "$CM1_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$CM1_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+[ "$CM1_LABEL_AFTER" = "$CM1_LABEL" ] \
+  || fail "standing the opt-in down rewrote a live worker's task label"
+pass "real herdr E2E: standing the task-title opt-in down restores the fm-<id> default for new workers and never renames live tabs"
 
 # --- 4. list-live recovery: each home sees only its own tabs ---------------
 
-# Add separate historical legacy fixtures here without renaming any
-# newly-created worker pane.
+# The primary's cm3 tab already wears the legacy fm-<id> label (its home stood
+# the opt-in down), and these historical fixtures add one more legacy label to
+# each home's workspace without renaming any newly-created worker pane.
 herdr tab create --workspace "$CM1_WSID" --cwd "$TMP_ROOT" --label fm-cm1 --no-focus --session "$SESSION" >/dev/null \
   || fail "could not create the primary home's legacy list_live fixture"
 herdr tab create --workspace "$SM_WSID" --cwd "$TMP_ROOT" --label fm-e2esm1 --no-focus --session "$SESSION" >/dev/null \
@@ -243,8 +290,9 @@ herdr tab create --workspace "$SM_WSID" --cwd "$TMP_ROOT" --label fm-cm2 --no-fo
   || fail "could not create the secondmate home's second legacy list_live fixture"
 
 PRIMARY_LIVE=$(FM_HOME="$PRIMARY_HOME" fm_backend_herdr_list_live "$SESSION")
-assert_contains_local "$PRIMARY_LIVE" "$CM1_LABEL" "the primary home's list_live did not see its human-readable task"
-assert_contains_local "$PRIMARY_LIVE" "fm-cm1" "the primary home's list_live did not see its own task"
+assert_contains_local "$PRIMARY_LIVE" "$CM1_LABEL" "the primary home's list_live did not see its human-labeled task"
+assert_contains_local "$PRIMARY_LIVE" "fm-cm3" "the primary home's list_live did not see its stood-down legacy task"
+assert_contains_local "$PRIMARY_LIVE" "fm-cm1" "the primary home's list_live did not see its legacy fixture"
 assert_not_contains_local "$PRIMARY_LIVE" "fm-e2esm1" "the primary home's list_live must not see the secondmate's own task"
 assert_not_contains_local "$PRIMARY_LIVE" "fm-cm2" "the primary home's list_live must not see the secondmate-owned crewmate's task"
 pass "real herdr E2E: list_live from the primary's own context sees only the primary's own task"
@@ -255,6 +303,7 @@ assert_contains_local "$SM_LIVE" "$CM2_LABEL" "the secondmate home's list_live d
 assert_contains_local "$SM_LIVE" "fm-e2esm1" "the secondmate home's list_live did not see its own task"
 assert_contains_local "$SM_LIVE" "fm-cm2" "the secondmate home's list_live did not see the crewmate spawned from it"
 assert_not_contains_local "$SM_LIVE" "fm-cm1" "the secondmate home's list_live must not see the primary's task"
+assert_not_contains_local "$SM_LIVE" "fm-cm3" "the secondmate home's list_live must not see the primary's stood-down task"
 pass "real herdr E2E: list_live from the secondmate's own context sees only tasks in the secondmate's own workspace (both its own tab and its crewmate's)"
 
 # --- 5. teardown closes the RIGHT tab, and no other ------------------------
@@ -293,6 +342,19 @@ if ! herdr pane get "$SM_PANE" --session "$SESSION" >/dev/null 2>&1; then
 fi
 WT2=
 pass "real herdr E2E: tearing down cm2 closes only its own tab - the secondmate's own tab (same workspace) survives untouched"
+
+TD3_OUT="$TMP_ROOT/td3.out"
+FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
+  FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
+  "$ROOT/bin/fm-teardown.sh" cm3 >"$TD3_OUT" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || fail "fm-teardown.sh failed for the stood-down crewmate cm3"$'\n'"$(cat "$TD3_OUT")"
+[ -f "$CM3_META" ] && fail "fm-teardown.sh did not remove cm3's meta"
+if herdr pane get "$CM3_PANE" --session "$SESSION" >/dev/null 2>&1; then
+  fail "fm-teardown.sh did not close cm3's pane"
+fi
+WT1=
+pass "real herdr E2E: tearing down cm3 closes its own fm-<id> labeled tab"
 
 fm_backend_herdr_kill "$SESSION:$SM_PANE"
 

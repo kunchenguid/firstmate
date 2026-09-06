@@ -505,6 +505,12 @@ touch "$HOME_DIR/state/.last-watcher-beat"
 # Presentation spaces are on by default, so the flat baseline below opts out
 # explicitly; the projected cases each restate the setting they exercise.
 printf 'off\n' > "$HOME_DIR/config/herdr-presentation-spaces"
+# Human-readable task-tab labels are default-off opt-in (VISION keeps
+# presentation features opt-in), so this home opts in explicitly to exercise
+# the "<short title> (<id>)" label shape across flat, projected, and recovered
+# spawns; the flag-less default shape is covered by the per-home E2E and unit
+# tests.
+printf '' > "$HOME_DIR/config/herdr-task-titles"
 write_ship_brief "$HOME_DIR" anchor 'Projection anchor fixture.'
 write_ship_brief "$HOME_DIR" shape 'Projection E2E fixture.'
 write_ship_brief "$HOME_DIR" order-a 'Projection ordering fixture A.'
@@ -979,7 +985,7 @@ touch "$SECOND_HOME_A/state/.last-watcher-beat" "$SECOND_HOME_B/state/.last-watc
 # may write config/herdr-presentation-spaces.
 git -C "$SECOND_HOME_A" init -q
 git -C "$SECOND_HOME_B" init -q
-printf 'config/herdr-presentation-spaces\nconfig/crew-harness\nconfig/crew-dispatch.json\nconfig/backlog-backend\nconfig/backend\nconfig/startup-memory-budget\n' \
+printf 'config/herdr-presentation-spaces\nconfig/herdr-task-titles\nconfig/crew-harness\nconfig/crew-dispatch.json\nconfig/backlog-backend\nconfig/backend\nconfig/startup-memory-budget\n' \
   > "$SECOND_HOME_A/.gitignore"
 cp "$SECOND_HOME_A/.gitignore" "$SECOND_HOME_B/.gitignore"
 git -C "$SECOND_HOME_A" add .gitignore
@@ -1027,6 +1033,10 @@ propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME_B/config" \
   || fail "primary presentation setting did not reach secondmate A"
 [ -f "$SECOND_HOME_B/config/herdr-presentation-spaces" ] \
   || fail "primary presentation setting did not reach secondmate B"
+[ -f "$SECOND_HOME_A/config/herdr-task-titles" ] \
+  || fail "primary task-title opt-in did not reach secondmate A"
+[ -f "$SECOND_HOME_B/config/herdr-task-titles" ] \
+  || fail "primary task-title opt-in did not reach secondmate B"
 pass "real Herdr lab: the primary presentation setting inherits into real secondmate homes"
 
 # Keep the pre-existing 2ndmate-alpha/bravo workspaces as owning parents and captain focus.

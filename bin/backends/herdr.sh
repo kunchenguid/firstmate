@@ -179,6 +179,29 @@ fm_backend_herdr_presentation_preference() {  # <config-dir>
 # candidate is unparseable. Any prerelease or build suffix is stripped first, so
 # a 0.8.0-preview build compares as 0.8.0 (it is built from the 0.8.0 line and
 # carries its fixes) while a 0.7.5-preview build compares as 0.7.5.
+# The config item a home writes to opt in to human-readable task-tab labels.
+FM_BACKEND_HERDR_TASK_TITLES_CONFIG="herdr-task-titles"
+
+# fm_backend_herdr_task_titles_preference <config-dir>: the single owner of
+# config/herdr-task-titles parsing. VISION keeps presentation features opt-in,
+# so the unconfigured default is "off": a new Herdr worker's task tab keeps the
+# historical fm-<id> label unless this home deliberately opts in. Echoes exactly
+# one of "on" (the file is present and does not say "off"; an empty file is the
+# plain presence opt-in form) or "off" (the file is absent, or says "off"), so a
+# home that opted in can stand down without deleting history around it.
+fm_backend_herdr_task_titles_preference() {  # <config-dir>
+  local config_dir=${1:-} file value
+  [ -n "$config_dir" ] || { printf 'off\n'; return 0; }
+  file="$config_dir/$FM_BACKEND_HERDR_TASK_TITLES_CONFIG"
+  [ -f "$file" ] || { printf 'off\n'; return 0; }
+  value=$(tr -d '[:space:]' < "$file" 2>/dev/null | tr '[:upper:]' '[:lower:]') || value=""
+  if [ "$value" = off ]; then
+    printf 'off\n'
+  else
+    printf 'on\n'
+  fi
+}
+
 fm_backend_herdr_version_at_least() {  # <candidate> <floor>
   local candidate=${1:-} floor=${2:-} c f
   candidate=${candidate%%[-+]*}

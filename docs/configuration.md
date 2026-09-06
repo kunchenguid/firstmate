@@ -147,7 +147,8 @@ Legacy tmux metadata remains cleanup-compatible when its exact window name is `f
 `FM_HOME` determines Herdr's home label: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
 [`herdr-backend.md`](herdr-backend.md#watching-and-task-containers) owns launcher-bound workspace placement, the label-only fallback, collision handling, and recovery behavior.
 The local `config/herdr-presentation-spaces` file instead opts a home out of, or explicitly in to, Herdr's default-on disposable single-task visual projection; [Presentation spaces](herdr-backend.md#presentation-spaces) owns its accepted values, default, Herdr version floor, migration, behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.
-The setting is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+The local `config/herdr-task-titles` presence flag separately opts a home into default-off human-readable task-tab labels for new workers; ["Herdr task-title labels"](#herdr-task-title-labels-configherdr-task-titles) owns its exact behavior.
+Both settings are inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
 Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](herdr-backend.md) instead of `herdr server stop`.
 For normal zellij operations, `FM_ZELLIJ_SESSION` selects the named session and defaults to `firstmate`.
@@ -199,6 +200,15 @@ An invalid value fails closed and surfaces the wake.
 The bound is required rather than cosmetic because churn and pane staleness read the same pane.
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
+
+## Herdr task-title labels (config/herdr-task-titles)
+
+The optional local, gitignored `config/herdr-task-titles` presence flag opts this home into default-off human-readable Herdr task-tab labels: a new worker's tab is labeled `<short title> (<id>)`, derived from the backlog row title or, without one, the task brief, instead of the historical `fm-<id>`.
+With the flag absent (or carrying the value `off`), new workers keep the `fm-<id>` label exactly as before.
+Existing tabs are never renamed, a relaunch adopts the recorded tab without relabeling it, and `fm_backend_herdr_list_live` and the duplicate/husk guards in `bin/backends/herdr.sh` discover and match both label shapes regardless of this flag, so a home can opt in or stand down without stranding live work.
+The flag stays opt-in because VISION keeps presentation and convenience features out of the unconfigured default.
+A `--secondmate` spawn reads the secondmate home's own copy of the flag, the same home-authority rule the presentation projection follows, and the flag is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
+`bin/backends/herdr.sh`'s `fm_backend_herdr_task_titles_preference` owns the exact parsing, and [herdr-backend.md](herdr-backend.md#watching-and-task-containers) owns the label, recovery, and duplicate-identity behavior.
 
 ## Gate defaults (.no-mistakes.yaml)
 

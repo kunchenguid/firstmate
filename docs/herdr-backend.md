@@ -36,7 +36,8 @@ Real harness credential tests remain opt-in rather than part of default CI.
 ## Watching and task containers
 
 The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
-A new worker's task tab is labeled `<short title> (<id>)`, derived from its backlog row title or, without one, its task brief; historical `fm-<id>` task tabs remain valid and discoverable, and existing task operations never rename them.
+A new worker's task tab keeps the historical `fm-<id>` label by default; a home that opts in through `config/herdr-task-titles` labels its new workers `<short title> (<id>)`, derived from the backlog row title or, without one, the task brief (a `--secondmate` spawn follows the secondmate home's own config, the same home-authority rule the presentation projection follows).
+Historical `fm-<id>` task tabs remain valid and discoverable, and existing task operations never rename them.
 When the launcher has no Herdr workspace to inherit, the adapter maintains one durable home-labeled workspace instead.
 The primary home label is `firstmate`.
 A secondmate home label is `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker.
@@ -195,13 +196,13 @@ herdr_session=<session>
 herdr_workspace_id=<workspace-id>
 herdr_tab_id=<tab-id>
 herdr_pane_id=<pane-id>
-herdr_task_label=<short title> (<id>)
+herdr_task_label=<task-tab label>
 ```
 
 A Herdr pane id contains a colon, so the adapter splits `window=` on the first colon only.
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
-The recorded `herdr_task_label` survives a relaunch unchanged, because a relaunch adopts the recorded tab without renaming it.
+The recorded `herdr_task_label` is the exact task-tab label, `fm-<id>` by default or `<short title> (<id>)` on an opted-in home, and it survives a relaunch unchanged, because a relaunch adopts the recorded tab without renaming it.
 
 ## Current transport behavior
 

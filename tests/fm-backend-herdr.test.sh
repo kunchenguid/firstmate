@@ -1342,6 +1342,28 @@ test_presentation_preference_reports_three_distinct_states() {
   pass "herdr presentation: config parsing separates a deliberate choice from an unconfigured default"
 }
 
+test_task_titles_preference_defaults_off_and_opts_in() {
+  local dir config got
+  dir="$TMP_ROOT/task-titles-preference"; config="$dir/config"; mkdir -p "$config"
+  preference() {
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_titles_preference "$1"' "$ROOT" "$1" 2>/dev/null
+  }
+  got=$(preference "$config")
+  [ "$got" = off ] || fail "an absent file must keep the historical fm-<id> default, got '$got'"
+  got=$(preference "")
+  [ "$got" = off ] || fail "a missing config directory must keep the fm-<id> default, got '$got'"
+  printf '' > "$config/herdr-task-titles"
+  got=$(preference "$config")
+  [ "$got" = on ] || fail "an empty presence file is the plain opt-in form, got '$got'"
+  printf 'ON\n' > "$config/herdr-task-titles"
+  got=$(preference "$config")
+  [ "$got" = on ] || fail "an explicit on (any case) must report on, got '$got'"
+  printf 'off\n' > "$config/herdr-task-titles"
+  got=$(preference "$config")
+  [ "$got" = off ] || fail "an explicit off must let a home stand down, got '$got'"
+  pass "herdr task titles: config parsing keeps the unconfigured default off and honors a deliberate opt-in"
+}
+
 test_projection_journal_is_atomic_and_uses_128_bit_token() {
   local dir state out token parsed status
   dir="$TMP_ROOT/projection-journal"; state="$dir/state"; mkdir -p "$state"
@@ -4676,6 +4698,7 @@ test_presentation_running_server_release_is_load_bearing
 test_release_floor_verdict_matches_the_measured_releases
 test_release_floor_verdict_survives_losing_either_signal
 test_presentation_preference_reports_three_distinct_states
+test_task_titles_preference_defaults_off_and_opts_in
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane

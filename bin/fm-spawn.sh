@@ -78,6 +78,10 @@
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
 #   opt in below that floor; an empty file remains the historical opt-in form.
+#   A new worker's task tab keeps the historical fm-<id> label unless the home
+#   that owns the endpoint opts in through config/herdr-task-titles, which
+#   labels new tabs "<short title> (<id>)" instead (existing tabs are never
+#   renamed, and a relaunch adopts the recorded label verbatim).
 #   A clean fresh task first writes state/<id>.herdr-presentation atomically,
 #   then creates a disposable
 #   workspace containing only the ordinary task pane. A successful clean create
@@ -2195,18 +2199,32 @@ fi
 W="fm-$ID"
 HERDR_TASK_LABEL=$W
 if [ "$BACKEND" = herdr ]; then
-  HERDR_TASK_TITLE=${FM_BACKLOG_ROW_TITLE:-}
-  if [ -z "$HERDR_TASK_TITLE" ]; then
-    HERDR_TASK_TITLE=$(awk '
-      /^# Task[[:space:]]*$/ { in_task=1; next }
-      in_task && /^#/ { exit }
-      in_task && NF { print; exit }
-    ' "$BRIEF")
+  # Human-readable task-tab labels are an OPT-IN presentation choice (VISION:
+  # presentation and convenience features ship opt-in, never as a new
+  # unconfigured default), so the unconfigured default stays the historical
+  # fm-<id> label and only a home that writes config/herdr-task-titles gets
+  # "<short title> (<id>)". The home that owns the endpoint decides, matching
+  # the presentation-projection authority rule: for every kind except
+  # --secondmate that is this process's own config, and a --secondmate spawn
+  # stands up the secondmate's own home, so the secondmate's config decides.
+  HERDR_TASK_LABEL_HOME=$CONFIG
+  if [ "$KIND" = secondmate ]; then
+    HERDR_TASK_LABEL_HOME=$PROJ_ABS/config
   fi
-  if [ -z "$HERDR_TASK_TITLE" ]; then
-    HERDR_TASK_TITLE=$(awk '!/^#/ && NF { print; exit }' "$BRIEF")
+  if [ "$(fm_backend_herdr_task_titles_preference "$HERDR_TASK_LABEL_HOME")" = on ]; then
+    HERDR_TASK_TITLE=${FM_BACKLOG_ROW_TITLE:-}
+    if [ -z "$HERDR_TASK_TITLE" ]; then
+      HERDR_TASK_TITLE=$(awk '
+        /^# Task[[:space:]]*$/ { in_task=1; next }
+        in_task && /^#/ { exit }
+        in_task && NF { print; exit }
+      ' "$BRIEF")
+    fi
+    if [ -z "$HERDR_TASK_TITLE" ]; then
+      HERDR_TASK_TITLE=$(awk '!/^#/ && NF { print; exit }' "$BRIEF")
+    fi
+    HERDR_TASK_LABEL=$(fm_backend_herdr_task_label "$HERDR_TASK_TITLE" "$ID")
   fi
-  HERDR_TASK_LABEL=$(fm_backend_herdr_task_label "$HERDR_TASK_TITLE" "$ID")
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
