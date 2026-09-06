@@ -2372,6 +2372,11 @@ EOF
 
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
+  if ! git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
+    # No origin configured: there is nothing remote to be stale against, so
+    # this local-only pooled worktree is launched as-is.
+    return 0
+  fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
