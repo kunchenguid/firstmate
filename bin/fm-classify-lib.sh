@@ -325,7 +325,11 @@ _fm_classify_is_corr_token() {  # <word>
   return 1
 }
 
-status_line_verb() {  # <status-line> -> leading verb word
+# Printed, or assigned to <out-var> when one is given, so a per-line caller on a
+# hot path can take the verb without forking a command substitution. Under bash's
+# dynamic scope an <out-var> named like one of this function's own locals (v, out,
+# word) would be assigned here and lost, so callers pass a distinct name.
+status_line_verb() {  # <status-line> [<out-var>] -> leading verb word
   local v=${1%%:*} out='' word
   v=${v%%\[*}
   v=${v#"${v%%[![:space:]]*}"}
@@ -532,10 +536,12 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
-# most-recently-opened-last order; prints nothing when none are open. Pure read of
-# the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
-# is the durable open-set the fleet snapshot and any point-in-time consumer must use
-# instead of trusting the last status line.
+# most-recently-opened-last order; prints nothing when none are open. Reads the
+# status file, plus its sibling `.meta` for the task kind the terminal rule needs
+# when the caller passes no <kind>; no globals beyond the optional
+# FM_CLASSIFY_RESOLVE_VERB override. This is the durable open-set the fleet
+# snapshot and any point-in-time consumer must use instead of trusting the last
+# status line.
 # The scan_open_decisions wrapper below enumerates a whole directory rather than
 # a single caller-chosen path, so a status file that is itself a symlink (e.g.
 # escaping the state directory) is rejected outright with a plain [ -L ] check
@@ -700,6 +706,12 @@ EOF
 # status_open_decisions uses - so the two strategies can never disagree on what
 # is open. Cost is bounded by NEW appends since the last drain, not by the
 # status file's total lifetime size.
+#
+# Correctness invariant (unchanged from the whole-file fold): cursor advancement,
+# age, and being buried under later appends never drop an open decision - the
+# persisted open-set carries every still-open key forward across calls regardless
+# of how much new unrelated log content has since been folded in. Only a line the
+# shared fold rule retires removes one.
 #
 # The cursor format is `version` (FM_OPEN_DECISIONS_FOLD_VERSION plus the task
 # kind, as `<n>:<kind>`), `offset`, `ident`, then the folded open set.

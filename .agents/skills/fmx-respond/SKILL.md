@@ -152,7 +152,7 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
 
 1. **Gather live fleet state once.** Compose answers from what this instance genuinely knows right now:
    - `data/backlog.md` "## In flight" - the work currently moving.
-   - `state/*.status` - the latest line of each in-flight job, for fresh phase detail.
+   - `state/*.status` - the latest status event of each in-flight job, for fresh phase detail.
    - `data/projects.md` - the active projects, for naming what you work on in plain terms.
    Translate every internal item into an outcome. Example: a backlog line `fix-login-k3 - repair OAuth redirect (repo: yourapp)` becomes "patching a sign-in redirect bug on one of the apps" - no id, no repo name unless it is already public.
 2. **Drain every pending mention.** For each `state/x-inbox/*.json` file:
