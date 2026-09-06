@@ -247,10 +247,8 @@ land_on_origin_main() {
 }
 
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
-# Optional third argument is the merge commit oid (squash commit on the default
-# branch). The four-field pattern must stay above the three-field substring.
 add_gh_pr_merged_for_head() {
-  local case_dir=$1 head=$2 merge=${3:-}
+  local case_dir=$1 head=$2
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
@@ -266,9 +264,7 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
-      *"state,headRefOid,url,mergeCommit"*) printf '%s\t%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' '$merge' ; exit 0 ;;
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
-      *"mergeCommit"*) printf '%s\n' '$merge' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
@@ -283,9 +279,9 @@ SH
 # edited the same shared file. Per-commit patch ids against the rebased head
 # differ, and merge-tree against main conflicts, which is the false-refusal case.
 # local_mode: rebased | stale | stale-plus-unlanded
-# Echoes: <pr_head> <merge_commit>
+# Echoes: <pr_head>
 setup_squash_rebased_history() {
-  local case_dir=$1 local_mode=$2 tmp local_head pr_head merge_commit
+  local case_dir=$1 local_mode=$2 tmp local_head pr_head
   tmp="$case_dir/_shared_base"
   git clone -q "$case_dir/origin.git" "$tmp"
   printf '%s\n' base > "$tmp/shared.txt"
@@ -327,7 +323,6 @@ setup_squash_rebased_history() {
   git -C "$tmp" merge -q --squash fm/task-x1
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "feat: squash (#7)"
   git -C "$tmp" push -q origin main
-  merge_commit=$(git -C "$tmp" rev-parse HEAD)
   rm -rf "$tmp"
 
   git -C "$case_dir/project" fetch -q origin
@@ -347,7 +342,7 @@ setup_squash_rebased_history() {
       fail "setup_squash_rebased_history: unknown local_mode $local_mode"
       ;;
   esac
-  printf '%s %s\n' "$pr_head" "$merge_commit"
+  printf '%s\n' "$pr_head"
 }
 
 append_pr_meta_for_current_head() {
@@ -931,14 +926,14 @@ test_merged_pr_with_later_local_commit_refuses() {
 }
 
 test_squash_merged_rebased_branch_allows() {
-  local case_dir rc pr_head merge_commit
+  local case_dir rc pr_head
   case_dir=$(make_case squash-rebased)
   write_meta "$case_dir" no-mistakes ship
-  read -r pr_head merge_commit < <(setup_squash_rebased_history "$case_dir" rebased)
+  pr_head=$(setup_squash_rebased_history "$case_dir" rebased)
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
     "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head" "$merge_commit"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -951,17 +946,17 @@ test_squash_merged_rebased_branch_allows() {
 }
 
 test_squash_merged_same_file_different_content_refuses() {
-  local case_dir rc pr_head merge_commit
+  local case_dir rc pr_head
   case_dir=$(make_case squash-same-path-diverged)
   write_meta "$case_dir" no-mistakes ship
   # Reviewer's exact sequence: pipeline rebase produced a different blob for
   # shared.txt than the stale local still holds, then squash-merged. Same path
   # is not proof the local content landed.
-  read -r pr_head merge_commit < <(setup_squash_rebased_history "$case_dir" stale)
+  pr_head=$(setup_squash_rebased_history "$case_dir" stale)
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
     "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head" "$merge_commit"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -974,14 +969,14 @@ test_squash_merged_same_file_different_content_refuses() {
 }
 
 test_squash_merged_stale_local_with_unlanded_commit_refuses() {
-  local case_dir rc pr_head merge_commit
+  local case_dir rc pr_head
   case_dir=$(make_case squash-stale-unlanded)
   write_meta "$case_dir" no-mistakes ship
-  read -r pr_head merge_commit < <(setup_squash_rebased_history "$case_dir" stale-plus-unlanded)
+  pr_head=$(setup_squash_rebased_history "$case_dir" stale-plus-unlanded)
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
     "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head" "$merge_commit"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -997,7 +992,7 @@ test_squash_merged_stale_local_refuses_when_forge_unreachable() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-stale-offline)
   write_meta "$case_dir" no-mistakes ship
-  read -r pr_head _ < <(setup_squash_rebased_history "$case_dir" stale)
+  pr_head=$(setup_squash_rebased_history "$case_dir" stale)
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
     "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"

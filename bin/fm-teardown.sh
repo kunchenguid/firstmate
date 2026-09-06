@@ -833,10 +833,6 @@ if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
-if ! fm_pr_head_valid "$PR_HEAD"; then
-  PR_HEAD=
-fi
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
@@ -1179,28 +1175,6 @@ ensure_commit_object() {
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
-fetch_default_ref() {
-  local name
-  name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
-    printf '%s\n' "refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
-    printf '%s\n' "refs/heads/$name"
-  else
-    return 1
-  fi
-}
-
-trees_merge_equal() {
-  local landed=$1 other=$2 landed_tree merged_tree
-  landed_tree=$(git -C "$WT" rev-parse --quiet --verify "$landed^{tree}" 2>/dev/null) || return 1
-  [ -n "$landed_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$landed" "$other" 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$landed_tree" ]
-}
-
 patch_id_for_commit() {
   local commit=$1
   git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
@@ -1235,12 +1209,11 @@ EOF
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Recorded pr_head= is used only when the live
-# head object cannot be fetched. Returns non-zero when the PR is not merged, the
+# for both the PR state and head. Returns non-zero when the PR is not merged, the
 # current work is not contained in the PR head, no PR is found, or any gh error
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current cover_head landed=0
+  local branch=$1 target view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
@@ -1259,16 +1232,11 @@ pr_is_merged() {
     *) return 1 ;;
   esac
   [ -n "$head" ] || return 1
-  cover_head=$head
-  if ! ensure_commit_object "$target" "$cover_head"; then
-    cover_head=$PR_HEAD
-    [ -n "$cover_head" ] || return 1
-    ensure_commit_object "$target" "$cover_head" || return 1
-  fi
+  ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  if git -C "$WT" merge-base --is-ancestor "$current" "$cover_head" 2>/dev/null; then
+  if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
-  elif unpushed_patches_are_in_pr_head "$cover_head"; then
+  elif unpushed_patches_are_in_pr_head "$head"; then
     landed=1
   fi
   [ "$landed" = 1 ] || return 1
@@ -1287,9 +1255,21 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local ref
-  ref=$(fetch_default_ref) || return 1
-  trees_merge_equal "$ref" HEAD
+  local name ref default_tree merged_tree
+  name=$(default_branch) || return 1
+  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    ref="refs/remotes/origin/$name"
+  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+    ref="refs/heads/$name"
+  else
+    return 1
+  fi
+  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  [ -n "$default_tree" ] || return 1
+  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  [ "$merged_tree" = "$default_tree" ]
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
