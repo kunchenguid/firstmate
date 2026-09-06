@@ -68,9 +68,9 @@ case "${1:-}" in
           if [ -e "$D/remote-relaunch-start" ] && [ ! -e "$D/remote-relaunch-end" ]; then
             : > "$D/local-relaunch-during-remote"
           fi
-          printf 'zsh' > "$D/command"
+          printf 'zsh' > "$D/command.$target"
           ;;
-        *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
+        *'encode launch-brief'*) cat "$D/becomes" > "$D/command.$target" ;;
         ': Firstmate instruction waiting: list '*)
           printf 'doorbell\n' >> "$D/rings"
           if [ -x "$D/on-doorbell" ]; then
@@ -95,12 +95,18 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
+    target=
+    prev=
     for a in "$@"; do
+      if [ "$prev" = -t ]; then target=$a; fi
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
-        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_command*)
+          if [ -f "$D/command.$target" ]; then cat "$D/command.$target"; else cat "$D/command"; fi
+          printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
+      prev=$a
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '> \n'; exit 0 ;;
@@ -159,7 +165,7 @@ add_local_mate() {
     echo "home=$smhome"
     [ -z "$backend" ] || echo "backend=$backend"
   } > "$home/state/$id.meta"
-  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s\n' "fm-$id" >> "$dir/fake/windows"
   printf '%s' "$smhome" > "$dir/fake/cwd"
 }
 
