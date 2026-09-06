@@ -106,6 +106,15 @@ run_pr_merge() {  # <home> <id> <url>
     FM_TEST_GH_AXI_LOG="$home/gh-axi.log" "$ROOT/bin/fm-pr-merge.sh" "$@"
 }
 
+wait_for_test_path() {  # <path> <description>
+  local path=$1 description=$2 i=0
+  while [ ! -e "$path" ] && [ "$i" -lt 500 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$path" ] || fail "$description"
+}
+
 # The retired command surface, kept for one release as a shim; in-flight
 # pre-collapse work still drives the lifecycle through these spellings.
 run_shim() {  # <home> <command args...>
@@ -2500,6 +2509,8 @@ test_pr_merge_entrypoint_refuses_a_captain_held_task() {
     "the PR merge entrypoint reached the irreversible forge call for a held task"
   assert_grep "$pr_id is still held for the captain" "$home/pr.err" \
     "the PR merge refusal did not name the held task"
+  assert_absent "$home/state/.control-$pr_id.lock" \
+    "the refused PR merge left its task control lock held"
   pass "the PR merge entrypoint refuses a captain-held task before merging"
 }
 
@@ -2538,7 +2549,129 @@ test_local_merge_entrypoint_refuses_a_captain_held_task() {
   [ "$after" = "$before" ] || fail "the local merge entrypoint moved main for a held task"
   assert_grep "$local_id is still held for the captain" "$home/local.err" \
     "the local merge refusal did not name the held task"
+  assert_absent "$home/state/.control-$local_id.lock" \
+    "the refused local merge left its task control lock held"
   pass "the local merge entrypoint refuses a captain-held task before merging"
+}
+
+test_pr_merge_serializes_a_concurrent_rehold() {
+  local home id pr repo wt merge_pid rehold_pid i json
+  local entered observe return_from_forge observed waiting merge_state
+  home=$(make_home merge-rehold-race)
+  configure_merged_github "$home"
+  id=sample-serialized-rehold
+  pr=https://github.com/sample/sample/pull/33
+  repo="$home/projects/sample-serialized-rehold-repo"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" "fm/$id"
+  tasks_in "$home" add "$id" "Ship the serialized pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the serialized merge fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$pr" "spawn_gen=fixture-$id"
+  printf 'done: merge ready\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain merge approval pending" >/dev/null \
+    || fail "could not hold the serialized merge fixture"
+  printf 'Merge the serialized pull request.\n' > "$home/merge-answer.txt"
+  run_captain "$home" answer "$id" --release \
+    --decision-file "$home/merge-answer.txt" >/dev/null \
+    || fail "could not release the serialized merge fixture"
+
+  entered="$home/forge-entered"
+  observe="$home/forge-observe"
+  observed="$home/forge-observed"
+  return_from_forge="$home/forge-return"
+  waiting="$home/rehold-waiting"
+  merge_state="$home/forge-merge-state"
+  cat > "$home/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_TEST_REHOLD_WAITING:-}" ] || : > "$FM_TEST_REHOLD_WAITING"
+exec /bin/sleep "$@"
+SH
+  cat > "$home/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge")
+    : > "$FM_TEST_FORGE_ENTERED"
+    while [ ! -e "$FM_TEST_FORGE_OBSERVE" ]; do /bin/sleep 0.01; done
+    hold_status=0
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$FM_STATE_OVERRIDE" \
+      "$FM_ROOT_OVERRIDE/bin/fm-captain-hold.sh" open "$FM_TEST_TASK_ID" \
+      >/dev/null 2>&1 || hold_status=$?
+    case "$hold_status" in
+      0) printf 'held\n' > "$FM_TEST_MERGE_STATE" ;;
+      1) printf 'released\n' > "$FM_TEST_MERGE_STATE" ;;
+      *) printf 'unknown\n' > "$FM_TEST_MERGE_STATE" ;;
+    esac
+    : > "$FM_TEST_FORGE_OBSERVED"
+    while [ ! -e "$FM_TEST_FORGE_RETURN" ]; do /bin/sleep 0.01; done
+    printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}"
+    ;;
+  "pr view") printf 'pull_request:\n  number: %s\n  state: merged\n' "${3:-}" ;;
+esac
+SH
+  chmod +x "$home/fakebin/sleep" "$home/fakebin/gh-axi"
+
+  # Without the shared control lock, the re-hold completes after the guard but
+  # before the forge observes the merge, cleanup retains that held row, and the
+  # final Recently Landed assertion fails because the delivery is absent.
+  (
+    export FM_TEST_FORGE_ENTERED="$entered"
+    export FM_TEST_FORGE_OBSERVE="$observe"
+    export FM_TEST_FORGE_OBSERVED="$observed"
+    export FM_TEST_FORGE_RETURN="$return_from_forge"
+    export FM_TEST_MERGE_STATE="$merge_state"
+    export FM_TEST_TASK_ID="$id"
+    run_pr_merge "$home" "$id" "$pr"
+  ) > "$home/merge-race.out" 2> "$home/merge-race.err" &
+  merge_pid=$!
+  wait_for_test_path "$entered" "the merge never reached the synchronized forge boundary"
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_TEST_REHOLD_WAITING="$waiting" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" hold "$id" \
+    --reason "captain follow-up arrived during merge" \
+    > "$home/rehold.out" 2> "$home/rehold.err" &
+  rehold_pid=$!
+  i=0
+  while [ ! -e "$waiting" ] && kill -0 "$rehold_pid" 2>/dev/null \
+    && [ "$i" -lt 500 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$waiting" ] && kill -0 "$rehold_pid" 2>/dev/null; then
+    kill "$rehold_pid" "$merge_pid" 2>/dev/null || true
+    wait "$rehold_pid" 2>/dev/null || true
+    wait "$merge_pid" 2>/dev/null || true
+    fail "the concurrent re-hold reached neither contention nor completion"
+  fi
+  : > "$observe"
+  wait_for_test_path "$observed" "the synchronized forge did not observe the merge state"
+  if [ -e "$waiting" ]; then
+    kill "$rehold_pid" 2>/dev/null || true
+    wait "$rehold_pid" 2>/dev/null || true
+  else
+    wait "$rehold_pid" || fail "the unblocked counterfactual re-hold failed unexpectedly"
+  fi
+  : > "$return_from_forge"
+  wait "$merge_pid" || fail "the serialized merge failed: $(cat "$home/merge-race.err")"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/race-teardown.out" 2> "$home/race-teardown.err" \
+    || fail "serialized merge cleanup failed: $(cat "$home/race-teardown.err")"
+  json=$(run_bearings "$home") || fail "Bearings failed after the serialized merge"
+  printf '%s' "$json" | jq -e --arg id "$id" --arg pr "$pr" \
+    '.landed | any(.id == $id and .artifact == $pr)' >/dev/null \
+    || fail "the serialized approved merge was absent from Recently Landed: $json"
+  assert_grep 'released' "$merge_state" \
+    "the forge performed the merge after a concurrent re-hold took effect"
+  assert_present "$waiting" "the re-hold never contended on the merge's task control lock"
+  assert_absent "$home/state/.control-$id.lock" \
+    "the successful PR merge left its task control lock held"
+  pass "a concurrent re-hold cannot cross the PR merge boundary"
 }
 
 test_released_merge_passes_the_entrypoint_and_lands() {
@@ -2655,6 +2788,7 @@ test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task
 test_local_merge_entrypoint_refuses_a_captain_held_task
+test_pr_merge_serializes_a_concurrent_rehold
 test_released_merge_passes_the_entrypoint_and_lands
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
 test_verify_resolves_a_hold_migrated_to_beads_notes

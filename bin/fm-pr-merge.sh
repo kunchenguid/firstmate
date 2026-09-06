@@ -75,12 +75,20 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # Role partition: merging is MAIN-owned; the Pi supervision branch reports the
 # green PR and never merges (contract: bin/fm-lease-lib.sh; no-op in homes
 # without a branch actor).
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "PR merge (fm-pr-merge)"
+
+MERGE_CONTROL_LOCK=
+merge_control_cleanup() {
+  [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
+}
+trap merge_control_cleanup EXIT
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -656,12 +664,17 @@ case "$PROVIDER" in
       FM_PR_GITHUB_AUTO_REQUESTED=true
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
+    MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
+    fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
     require_released_captain_hold || exit 1
-    if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
-      "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
+    merge_status=0
+    merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+      "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?
+    fm_lock_release "$MERGE_CONTROL_LOCK" || true
+    MERGE_CONTROL_LOCK=
+    if [ "$merge_status" -eq 0 ]; then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
     else
-      merge_status=$?
       [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
       if github_read_outcome; then
         if [ "$FM_PR_GITHUB_MERGED" != true ] && [ "$FM_PR_GITHUB_QUEUED" != true ]; then
@@ -696,9 +709,15 @@ case "$PROVIDER" in
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;
     # the conditions above are what authorize the merge.
+    MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
+    fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
     require_released_captain_hold || exit 1
+    merge_status=0
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
-      --sha "$FM_PR_MERGE_HEAD" --yes "$@"
+      --sha "$FM_PR_MERGE_HEAD" --yes "$@" || merge_status=$?
+    fm_lock_release "$MERGE_CONTROL_LOCK" || true
+    MERGE_CONTROL_LOCK=
+    [ "$merge_status" -eq 0 ] || exit "$merge_status"
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
