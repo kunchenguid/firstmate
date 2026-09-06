@@ -1547,7 +1547,7 @@ EOF
   printf 'domain\n' > "$lease"
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-fake/pane.txt" \
     FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain >/dev/null 2>/dev/null \
     || fail "teardown failed for empty secondmate home"
   grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null || fail "teardown did not release the secondmate home lease via treehouse return"
   [ ! -e "$lease" ] || fail "teardown left the secondmate home lease held after retirement"
@@ -1555,6 +1555,57 @@ EOF
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove secondmate registry route"
   pass "secondmate teardown retires empty homes and releases routing"
+}
+
+# Per-target authority. A persistent home is retired only by a decision naming
+# that exact home, so a cleanup list a caller assembled - from a worktree path
+# glob, a pane sweep, an idle-looking queue - cannot retire one as a side effect.
+# The authorized pass is test_secondmate_teardown_retires_empty_home above, which
+# retires only because it names its target; these are the refusals.
+test_secondmate_teardown_requires_authority_naming_this_home() {
+  local case_name home sub fakebin log err meta_before registry_before expect
+  local -a args
+  for case_name in no-authority names-another-home; do
+    home="$TMP_ROOT/teardown-authority-$case_name-home"
+    sub="$TMP_ROOT/teardown-authority-$case_name-sub"
+    mkdir -p "$home/state" "$home/data" "$sub/state" "$sub/data" "$sub/config" "$sub/projects"
+    printf 'domain\n' > "$sub/.fm-secondmate-home"
+    fm_write_secondmate_meta "$home/state/domain.meta" "$sub"
+    printf -- '- domain - design domain (home: %s; scope: design domain; projects: alpha; added 2026-06-22)\n' \
+      "$sub" > "$home/data/secondmates.md"
+    case "$case_name" in
+      no-authority)
+        args=()
+        expect='is a persistent secondmate home'
+        ;;
+      names-another-home)
+        args=(--retire-secondmate other-domain)
+        expect='names other-domain, but this teardown targets domain'
+        ;;
+    esac
+    meta_before="$TMP_ROOT/teardown-authority-$case_name.meta.before"
+    registry_before="$TMP_ROOT/teardown-authority-$case_name.registry.before"
+    cp "$home/state/domain.meta" "$meta_before"
+    cp "$home/data/secondmates.md" "$registry_before"
+    fakebin=$(make_fake_tmux "$TMP_ROOT/teardown-authority-$case_name-fake")
+    log="$TMP_ROOT/teardown-authority-$case_name-fake/tmux.log"
+    err="$TMP_ROOT/teardown-authority-$case_name.err"
+    if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+      FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-authority-$case_name-fake/pane.txt" \
+      "$ROOT/bin/fm-teardown.sh" domain "${args[@]+"${args[@]}"}" >/dev/null 2>"$err"; then
+      fail "secondmate teardown retired a persistent home with $case_name"
+    fi
+    grep -F "$expect" "$err" >/dev/null \
+      || fail "teardown ($case_name) did not explain the refusal (expected '$expect'): $(cat "$err")"
+    [ -d "$sub" ] || fail "teardown ($case_name) removed the home after refusing"
+    cmp -s "$meta_before" "$home/state/domain.meta" \
+      || fail "teardown ($case_name) changed metadata after refusing"
+    cmp -s "$registry_before" "$home/data/secondmates.md" \
+      || fail "teardown ($case_name) changed the registry after refusing"
+    grep -F 'kill-window' "$log" >/dev/null \
+      && fail "teardown ($case_name) killed an endpoint before refusing"
+  done
+  pass "secondmate teardown refuses without authority naming that exact home"
 }
 
 test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings() {
@@ -1593,7 +1644,7 @@ EOF
     err="$TMP_ROOT/teardown-binding-$case_name.err"
     if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
       FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-binding-$case_name-fake/pane.txt" \
-      "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+      "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err"; then
       fail "secondmate teardown accepted $case_name registry binding"
     fi
     [ -d "$sub" ] || fail "secondmate teardown removed the home after $case_name refusal"
@@ -1624,7 +1675,7 @@ test_secondmate_teardown_sweeps_process_events_before_removal() {
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/procevent-teardown-fake/pane.txt" \
     FM_FAKE_PROCEVENT_SWEEP_LOG="$sweep_log" \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain >/dev/null 2>/dev/null \
     || fail "normal secondmate teardown failed after process-event sweep"
   grep -Fx "$subhome_abs" "$sweep_log" >/dev/null || fail "normal secondmate teardown did not invoke the child home's sweep"
   [ ! -d "$subhome" ] || fail "normal secondmate teardown retained a successfully swept home"
@@ -1650,7 +1701,7 @@ test_secondmate_teardown_refuses_process_events_without_sweep_script() {
 
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$claim_root" \
       FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/procevent-refusal-fake/pane.txt" \
-      "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+      "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err"; then
     fail "force teardown removed process-event state without a sweep-capable child script"
   fi
   grep -F 'no sweep-capable bin/fm-procevent.sh' "$err" >/dev/null || fail "missing sweep capability refusal was not explained"
@@ -1689,7 +1740,7 @@ SH
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
       FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/procevent-later-refusal-fake/pane.txt" \
       FM_FAKE_PROCEVENT_SWEEP_LOG="$sweep_log" \
-      "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
+      "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain >/dev/null 2>"$err"; then
     fail "teardown bypassed a later public-followup refusal"
   fi
   grep -F 'still owes a public reply' "$err" >/dev/null || fail "later public-followup refusal was not reached"
@@ -1729,7 +1780,7 @@ EOF
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/procevent-force-fake/pane.txt" \
     FM_FAKE_PROCEVENT_SWEEP_LOG="$sweep_log" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>/dev/null \
     || fail "force teardown failed after recursively sweeping process events"
   grep -Fx "$subhome_abs" "$sweep_log" >/dev/null || fail "force teardown did not sweep the parent secondmate home"
   grep -Fx "$childhome_abs" "$sweep_log" >/dev/null || fail "force teardown did not sweep the nested secondmate home"
@@ -1775,7 +1826,7 @@ EOF
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/procevent-nested-fail-fake/pane.txt" \
     FM_FAKE_PROCEVENT_SWEEP_LOG="$sweep_log" FM_FAKE_PROCEVENT_REARM_LOG="$rearm_log" \
     FM_FAKE_TREEHOUSE_RETURN_FAIL=1 FM_FAKE_PROCEVENT_REARM_FAIL=1 \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err"
   rc=$?
   set -e
 
@@ -1825,7 +1876,7 @@ EOF
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-return-fail-fake/pane.txt" \
     FM_FAKE_PROCEVENT_SWEEP_LOG="$sweep_log" FM_FAKE_PROCEVENT_REARM_LOG="$rearm_log" \
     FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain >/dev/null 2>"$err"
   rc=$?
   set -e
 
@@ -1842,7 +1893,7 @@ EOF
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-return-fail-fake/pane.txt" \
     FM_FAKE_PROCEVENT_SWEEP_LOG="$sweep_log" FM_FAKE_PROCEVENT_REARM_LOG="$rearm_log" \
     FM_FAKE_TREEHOUSE_RETURN_FAIL=1 FM_FAKE_PROCEVENT_REARM_FAIL=1 \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain >/dev/null 2>"$err"
   rc=$?
   set -e
 
@@ -1879,7 +1930,7 @@ EOF
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/plain-clone-teardown-fake/pane.txt" \
     FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain >/dev/null 2>/dev/null \
     || fail "teardown failed for plain-clone secondmate home"
   grep -F "treehouse return --force $subhome_abs" "$log" >/dev/null && fail "teardown tried to return a plain-clone home through treehouse"
   [ ! -d "$subhome" ] || fail "teardown did not remove the plain-clone secondmate home"
@@ -1921,11 +1972,11 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-teardown-fake")
   log="$TMP_ROOT/force-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>&1; then
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain >/dev/null 2>&1; then
     fail "teardown allowed a secondmate with in-flight child work"
   fi
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>/dev/null \
     || fail "force teardown failed to discard child work"
   [ ! -d "$subhome" ] || fail "force teardown did not remove the retired secondmate home"
   [ ! -d "$childwt" ] || fail "force teardown did not remove child worktree"
@@ -2008,7 +2059,7 @@ SH
   set +e
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-lock-child-fake/pane.txt" \
     FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err"
   rc=$?
   set -e
 
@@ -2047,7 +2098,7 @@ EOF
     fakebin=$(make_fake_tmux "$TMP_ROOT/symlink-inside-teardown-fake-$opdir")
     log="$TMP_ROOT/symlink-inside-teardown-fake-$opdir/tmux.log"
     PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-inside-teardown-fake-$opdir/pane.txt" \
-      "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
+      "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err" \
       || fail "force teardown refused $opdir symlinked inside the secondmate home"
     [ ! -e "$subhome" ] || fail "force teardown did not remove subhome with inside $opdir symlink"
     [ ! -e "$home/state/domain.meta" ] || fail "force teardown did not clear parent meta for inside $opdir symlink"
@@ -2080,7 +2131,7 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/symlink-state-teardown-fake")
   log="$TMP_ROOT/symlink-state-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-state-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err"; then
     fail "force teardown accepted a symlinked secondmate state directory"
   fi
   [ -d "$subhome" ] || fail "force teardown removed subhome after symlinked state refusal"
@@ -2138,7 +2189,7 @@ SH
     err="$base/teardown.err"
     if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" \
       FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$base/fake/pane.txt" \
-      "$ROOT/bin/fm-teardown.sh" "$tid" >/dev/null 2>"$err"; then
+      "$ROOT/bin/fm-teardown.sh" "$tid" --retire-secondmate "$tid" >/dev/null 2>"$err"; then
       fail "teardown ($row) accepted a hazardous secondmate home"
     fi
     grep -F "$expect" "$err" >/dev/null || fail "teardown ($row) did not explain the refusal (expected '$expect'): $(cat "$err")"
@@ -2193,7 +2244,7 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/nested-teardown-fake")
   log="$TMP_ROOT/nested-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/nested-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain >/dev/null 2>"$err"; then
     fail "teardown removed a home containing another registered secondmate home"
   fi
   [ -d "$subhome" ] || fail "teardown removed registered ancestor home after refusal"
@@ -2230,7 +2281,7 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-registry-teardown-fake")
   log="$TMP_ROOT/child-registry-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-registry-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain >/dev/null 2>"$err"; then
     fail "teardown removed a home containing a child-registry secondmate home"
   fi
   [ -d "$subhome" ] || fail "teardown removed ancestor home after child-registry refusal"
@@ -2273,7 +2324,7 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/prevalidate-teardown-fake")
   log="$TMP_ROOT/prevalidate-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/prevalidate-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err"; then
     fail "force teardown discarded child work before validating subhome"
   fi
   [ -d "$subhome" ] || fail "force teardown removed unmarked subhome after refusal"
@@ -2398,7 +2449,7 @@ EOF
   log="$TMP_ROOT/taskset-state-file-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/taskset-state-file-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err"; then
     fail "forced teardown accepted a non-directory descendant state path"
   fi
   [ -d "$subhome" ] || fail "state-path refusal removed the descendant home"
@@ -2423,7 +2474,7 @@ EOF
   log="$TMP_ROOT/taskset-state-symlink-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/taskset-state-symlink-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err"; then
     fail "forced teardown accepted a symlinked descendant state path"
   fi
   [ -d "$subhome" ] || fail "symlinked state-path refusal removed the descendant home"
@@ -2465,7 +2516,7 @@ SH
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/taskset-state-absent-fake/pane.txt" \
     XDG_STATE_HOME="$TMP_ROOT/taskset-state-absent-xdg" \
     FM_TASK_SET_TEST_READY="$ready" FM_TASK_SET_TEST_RELEASE="$release" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" &
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err" &
   # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   pid=$!
   while [ ! -e "$ready" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 200 ]; do
@@ -2509,7 +2560,7 @@ EOF
   log="$TMP_ROOT/taskset-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/taskset-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err"; then
     fail "forced teardown proceeded while a task was being published"
   fi
   [ -d "$subhome" ] || fail "forced teardown removed the home despite refusing"
@@ -2614,7 +2665,7 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-active-descendant-fake")
   log="$TMP_ROOT/child-active-descendant-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-active-descendant-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err"; then
     fail "force teardown removed a child worktree inside active FM_HOME"
   fi
   [ -d "$home/data" ] || fail "force teardown removed active home data"
@@ -2665,7 +2716,7 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-repo-descendant-fake")
   log="$TMP_ROOT/child-repo-descendant-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-repo-descendant-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err"; then
     fail "force teardown removed a child worktree inside FM_ROOT"
   fi
   [ -d "$childwt" ] || fail "force teardown removed repo descendant worktree"
@@ -2710,7 +2761,7 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/unregistered-child-fake")
   log="$TMP_ROOT/unregistered-child-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unregistered-child-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --retire-secondmate domain --force >/dev/null 2>"$err"; then
     fail "force teardown removed an unregistered child worktree"
   fi
   [ -d "$childwt" ] || fail "force teardown removed unregistered child worktree"
@@ -2945,6 +2996,7 @@ test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
+test_secondmate_teardown_requires_authority_naming_this_home
 test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings
 test_secondmate_teardown_sweeps_process_events_before_removal
 test_secondmate_teardown_refuses_process_events_without_sweep_script

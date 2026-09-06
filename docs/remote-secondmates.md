@@ -239,9 +239,10 @@ A completed sync reports which watched instruction paths its advance changed, be
 Retire a remote second mate with the normal guarded command:
 
 ```sh
-bin/fm-teardown.sh <id>
+bin/fm-teardown.sh <id> --retire-secondmate <id>
 ```
 
+The `--retire-secondmate` value must name the exact home being retired; a remote route carries the same per-target authority as a local one, and the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns that contract.
 Retirement is executed on the configured host and refuses while the remote home has child work, while the primary has an unfinished backlog outbox, or while a routed reply remains unresolved.
 It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`; it never stops the shared session or removes a sibling secondmate's workspace or panes.
 SSH exit 255 preserves both the route and local records because completion is unknown.

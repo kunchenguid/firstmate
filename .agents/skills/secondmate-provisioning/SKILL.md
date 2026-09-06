@@ -240,10 +240,19 @@ It never initiates a survey or audit during recovery.
 
 A secondmate is persistent by default.
 An empty queue is healthy and does not trigger teardown.
-Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent second mate.
+Run `bin/fm-teardown.sh <id> --retire-secondmate <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent second mate.
+
+That flag is the decision, and its value must be the exact home being retired.
+Without it teardown refuses and changes nothing, so a cleanup list a caller assembled cannot retire standing homes as a side effect, and `--force` never substitutes for it: discarding work and choosing which home to retire are separate decisions.
+Offering the flag for any other kind also refuses, because that mismatch means the target was selected wrong.
+Teardown acts on one target per invocation; extra task ids are refused before anything is locked, naming the count and any secondmates among them, so a mistaken selection list is caught while every seat is still alive.
+Choose targets from `bin/fm-fleet-view.sh --cleanup-candidates`, which labels every live task with its kind.
+That report prints a runnable teardown command only for a disposable task; a persistent home carries a pointer back to this contract instead, so no report a caller runs can be piped to a shell to retire standing homes.
+Never select them by matching a worktree path: a path suffix cannot tell a crewmate worktree of the firstmate project from a secondmate home, and both are laid out the same way.
 
 The safety check is the secondmate's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.
+An empty queue is not that check and never authorizes retirement; it is a healthy second mate waiting for routed work.
 A remote route delegates the same guard to its configured host and additionally refuses while the primary has a pending handoff outbox or unresolved routed reply.
 SSH exit 255 preserves the route and local records because remote completion is unknown.
 When safe, teardown kills the direct endpoint, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.

@@ -428,10 +428,16 @@ spawn_secondmate_task() {
 
 teardown_task() {  # <id> <home>
   local id=$1 home=$2
+  local -a authority=()
+  # Retiring a persistent home takes authority naming that exact home, which
+  # --force never supplies; ordinary crewmates take no such flag.
+  if grep -qx 'kind=secondmate' "$home/state/$id.meta" 2>/dev/null; then
+    authority=(--retire-secondmate "$id")
+  fi
   FM_GATE_REFUSE_BYPASS=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-teardown.sh" "$id" --force
+    "$ROOT/bin/fm-teardown.sh" "$id" --force "${authority[@]+"${authority[@]}"}"
 }
 
 finish_concurrent_teardown() {  # <id> <status> <stdout> <stderr>
