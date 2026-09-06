@@ -40,7 +40,7 @@
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #   (q2) no-mistakes + squash-merged, local followed pipeline rebase -> ALLOW
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
-#   (q4) no-mistakes + squash-merged stale local plus extra commit   -> REFUSE
+#   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
@@ -278,7 +278,7 @@ SH
 # Squash-merged history whose pipeline rebased the branch onto a newer main that
 # edited the same shared file. Per-commit patch ids against the rebased head
 # differ, and merge-tree against main conflicts, which is the false-refusal case.
-# local_mode: rebased | stale | stale-plus-unlanded
+# local_mode: rebased | stale | rebased-plus-unlanded
 # Echoes: <pr_head>
 setup_squash_rebased_history() {
   local case_dir=$1 local_mode=$2 tmp local_head pr_head
@@ -334,8 +334,8 @@ setup_squash_rebased_history() {
     stale)
       git -C "$case_dir/wt" reset -q --hard "$local_head"
       ;;
-    stale-plus-unlanded)
-      git -C "$case_dir/wt" reset -q --hard "$local_head"
+    rebased-plus-unlanded)
+      git -C "$case_dir/wt" reset -q --hard "$pr_head"
       wt_commit_file "$case_dir" later.txt local-only "local follow-up"
       ;;
     *)
@@ -968,11 +968,14 @@ test_squash_merged_same_file_different_content_refuses() {
   pass "squash-merged same-path different content still refuses"
 }
 
-test_squash_merged_stale_local_with_unlanded_commit_refuses() {
+# The local branch followed the pipeline rebase, so without later.txt this is the
+# q2 ALLOW case exactly. The one unlanded follow-up commit is the sole difference
+# and must be the sole reason teardown refuses.
+test_squash_merged_rebased_local_with_unlanded_commit_refuses() {
   local case_dir rc pr_head
-  case_dir=$(make_case squash-stale-unlanded)
+  case_dir=$(make_case squash-rebased-unlanded)
   write_meta "$case_dir" no-mistakes ship
-  pr_head=$(setup_squash_rebased_history "$case_dir" stale-plus-unlanded)
+  pr_head=$(setup_squash_rebased_history "$case_dir" rebased-plus-unlanded)
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
     "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
@@ -983,9 +986,9 @@ test_squash_merged_stale_local_with_unlanded_commit_refuses() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "squash-stale-unlanded: teardown should refuse extra local commits that never landed"$'\n'"$(cat "$case_dir/stderr")"
-  grep -q REFUSED "$case_dir/stderr" || fail "squash-stale-unlanded: no REFUSED line in stderr"
-  pass "squash-merged stale local still refuses genuinely unlanded commits"
+  expect_code 1 "$rc" "squash-rebased-unlanded: teardown should refuse extra local commits that never landed"$'\n'"$(cat "$case_dir/stderr")"
+  grep -q REFUSED "$case_dir/stderr" || fail "squash-rebased-unlanded: no REFUSED line in stderr"
+  pass "squash-merged rebased local still refuses a genuinely unlanded follow-up commit"
 }
 
 test_squash_merged_stale_local_refuses_when_forge_unreachable() {
@@ -3650,7 +3653,7 @@ test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows
 test_squash_merged_same_file_different_content_refuses
-test_squash_merged_stale_local_with_unlanded_commit_refuses
+test_squash_merged_rebased_local_with_unlanded_commit_refuses
 test_squash_merged_stale_local_refuses_when_forge_unreachable
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
