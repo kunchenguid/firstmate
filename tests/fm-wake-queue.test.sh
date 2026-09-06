@@ -1232,36 +1232,52 @@ test_self_announced_append_guards() {
   pass "self-announced appends suppress only their own bytes and fail toward waking"
 }
 
-# A trap that fires inside a lock's critical section abandons the holding
-# frame, and the exit path then re-acquires the same lock (a TERM inside a
-# recovery-marker section is the reproduced case: the watcher's reap wedged
-# forever spinning against its own pid). The same-process re-acquire must
-# reclaim the abandoned hold, while a SUBSHELL still waits on its parent's
-# live hold exactly as before.
-test_self_held_lock_reclaims_instead_of_deadlocking() {
-  local dir state rc
+# Reproduce the watcher interruption inside recovery-marker publication. The
+# interrupt path must release that caller-owned lock before EXIT cleanup publishes
+# downtime, while ordinary nested and subshell acquisitions still preserve a live
+# outer critical section.
+test_watcher_interrupt_releases_recovery_marker_lock() {
+  local dir state fakebin out real_mv pid rc=0
   dir=$(make_case self-held-lock)
   state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "$FM_INTERRUPT_MARKER" ] && [ ! -e "$FM_INTERRUPT_ONCE" ]; then
+  : > "$FM_INTERRUPT_ONCE"
+  kill -TERM "$PPID"
+  exit 1
+fi
+exec "$FM_REAL_MV" "$@"
+SH
+  chmod +x "$fakebin/mv"
+  printf 'blocked: interrupt marker publication\n' > "$state/task.status"
+  PATH="$fakebin:$PATH" FM_REAL_MV="$real_mv" \
+    FM_INTERRUPT_MARKER="$state/.watcher-down" FM_INTERRUPT_ONCE="$dir/interrupted" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  wait_for_exit "$pid" 50 || rc=$?
+  [ "$rc" -ne 124 ] || fail "interrupted watcher wedged during EXIT cleanup"
+  [ -e "$dir/interrupted" ] || fail "watcher never entered recovery-marker publication"
+  [ ! -e "$state/.watcher-down.lock" ] && [ ! -L "$state/.watcher-down.lock" ] \
+    || fail "interrupted watcher retained its recovery-marker lock"
   rc=0
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     lock="$2/.fixture.lock"
     fm_lock_acquire_wait "$lock" || exit 10
-    fm_lock_try_acquire "$lock" || exit 11
-    fm_lock_release "$lock"
-    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 12
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
-  [ "$rc" -eq 0 ] || fail "self-held lock was not reclaimed cleanly (rc=$rc)"
-  rc=0
-  FM_STATE_OVERRIDE="$state" bash -c '
-    . "$1"
-    lock="$2/.fixture2.lock"
-    fm_lock_acquire_wait "$lock" || exit 10
+    fm_lock_try_acquire "$lock" && exit 11
+    [ -d "$lock" ] || exit 12
     ( fm_lock_try_acquire "$lock" && exit 13; exit 0 ) || exit 13
     fm_lock_release "$lock"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
-  [ "$rc" -eq 0 ] || fail "a subshell reclaimed its parent's live hold (rc=$rc)"
-  pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
+  [ "$rc" -eq 0 ] || fail "a nested acquisition disturbed its parent's live hold (rc=$rc)"
+  pass "watcher interruption releases only its recovery-marker lock"
 }
 
 test_subshell_lock_ownership_without_bashpid() {
@@ -1281,14 +1297,14 @@ test_subshell_lock_ownership_without_bashpid() {
     (
       fm_lock_acquire_wait "$lock" || exit 13
       [ "$(cat "$lock/pid")" != "$$" ] || exit 14
-      fm_lock_try_acquire "$lock" || exit 15
+      fm_lock_try_acquire "$lock" && exit 15
       fm_lock_set_role "$lock" terminal-check || exit 16
       fm_lock_release "$lock"
       [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 17
     ) || exit $?
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
   [ "$rc" -eq 0 ] || fail "subshell lock ownership without BASHPID failed (rc=$rc)"
-  pass "without BASHPID a subshell cannot release or reclaim its parent lock and owns its own hold"
+  pass "without BASHPID a subshell cannot disturb parent or nested live holds"
 }
 
 # A bounded waiter acquires in a helper process, but the caller must own the
@@ -1584,7 +1600,7 @@ test_historical_annotation_skips_announced_status() {
   pass "historical annotations replay nothing already announced and keep everything new"
 }
 
-test_self_held_lock_reclaims_instead_of_deadlocking
+test_watcher_interrupt_releases_recovery_marker_lock
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
