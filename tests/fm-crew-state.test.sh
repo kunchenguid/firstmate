@@ -2066,14 +2066,17 @@ make_unpushed_pipeline_head() {  # <gate-dir> <seed-repo> -> echoes short sha
 }
 
 # Arms the case both symptoms share: a crew parked at a review gate whose run
-# head is an unpushed pipeline commit. Echoes that head.
-arm_parked_on_pipeline_head() {  # <case-dir> <branch> -> echoes gate head
-  local d=$1 branch=$2 gate_head
+# head is an unpushed pipeline commit. Echoes that head. The fixture function
+# defaults to the awaiting_approval shape but also takes the scalar-gate and
+# nested-gate-block shapes, which carry the same gate detail without the
+# literal top-level status.
+arm_parked_on_pipeline_head() {  # <case-dir> <branch> [fixture-fn] -> echoes gate head
+  local d=$1 branch=$2 fixture=${3:-run_parked} gate_head
   gate_head=$(make_unpushed_pipeline_head "$d/gate" "$d/wt")
   git -C "$d/wt" rev-parse --verify --quiet "${gate_head}^{commit}" >/dev/null 2>&1 \
     && fail "the fixture's pipeline head resolves in the crew worktree, so it proves nothing"
   FM_FAKE_RUN_HEAD="$gate_head"
-  FM_FAKE_AXI_STATUS="$(run_parked "$branch")"
+  FM_FAKE_AXI_STATUS="$($fixture "$branch")"
   # The coarse listing carries the same unresolvable head, so it cannot rescue
   # this case either - the run object is the only way through.
   FM_FAKE_RUNS_LIST="  running    $branch ${gate_head}  2026-08-25 10:00"
@@ -2217,6 +2220,47 @@ test_parked_allowance_still_rejects_a_resolvable_diverged_head() {
   pass "the parked-gate allowance still rejects a resolvable head that diverged"
 }
 
+# The parked predicate must recognize gate detail carried only through the
+# broader shapes - a scalar `gate:` field, or a nested `gate: {}` block - not
+# just a literal top-level `status: awaiting_approval|fix_review`. Both
+# shapes leave the top-level status as `running`, which is exactly what
+# nm_run_parked_at_gate_binds_worktree used to miss on an unresolvable head.
+test_parked_on_pipeline_head_scalar_gate_attributed() {
+  reset_fakes
+  local d out
+  d=$(new_case parked-pipeline-head-scalar-gate)
+  make_repo_on_branch "$d/wt" fm/feat-parked-scalar
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/parked-scalar.meta" "window=fm:fm-parked-scalar" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: started validation\n' > "$d/state/parked-scalar.status"
+  arm_parked_on_pipeline_head "$d" fm/feat-parked-scalar run_parked_scalar_gate_running >/dev/null
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" parked-scalar
+  out=$(run_crew_state "$d" parked-scalar)
+  assert_contains "$out" "state: parked" "a scalar-gate run on an unpushed pipeline head reports parked"
+  assert_contains "$out" "source: run-step" "the run object, not a fallback, is the source"
+  assert_contains "$out" "parked at review" "the gate is named"
+  pass "a scalar-gate parked run on an unresolvable pipeline head is attributed"
+}
+
+test_parked_on_pipeline_head_gate_block_attributed() {
+  reset_fakes
+  local d out
+  d=$(new_case parked-pipeline-head-gate-block)
+  make_repo_on_branch "$d/wt" fm/feat-parked-block
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/parked-block.meta" "window=fm:fm-parked-block" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: started validation\n' > "$d/state/parked-block.status"
+  arm_parked_on_pipeline_head "$d" fm/feat-parked-block run_parked_in_gate_block >/dev/null
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" parked-block
+  out=$(run_crew_state "$d" parked-block)
+  assert_contains "$out" "state: parked" "a gate-block run on an unpushed pipeline head reports parked"
+  assert_contains "$out" "source: run-step" "the run object, not a fallback, is the source"
+  assert_contains "$out" "parked at review" "the gate is named"
+  pass "a gate-block parked run on an unresolvable pipeline head is attributed"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -2295,5 +2339,7 @@ test_parked_on_pipeline_head_beats_an_exhausted_fallback
 test_parked_on_pipeline_head_is_not_absorbed_as_working
 test_terminal_run_on_unresolvable_head_is_not_attributed
 test_parked_allowance_still_rejects_a_resolvable_diverged_head
+test_parked_on_pipeline_head_scalar_gate_attributed
+test_parked_on_pipeline_head_gate_block_attributed
 
 echo "all fm-crew-state tests passed"

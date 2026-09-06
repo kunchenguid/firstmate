@@ -466,8 +466,25 @@ nm_run_head_matches_worktree() {
   fm_nm_head_matches_worktree "$WT" "$run_head"
 }
 
+# 0 if the captured run ($RUN_OUT) is genuinely PARKED AT A GATE: a non-empty
+# awaiting_agent field, status in {awaiting_approval, fix_review}, a non-empty
+# scalar gate name (`gate: <name>`), or a nested `gate: {step, status}` block.
+# ONE owner for "parked" so the worktree-binding check below and the run-step
+# classification that reports `state: parked` cannot drift apart - each shape
+# `axi status` uses to carry gate detail must bind the same way it classifies.
+nm_run_is_parked_at_gate() {
+  local status awaiting gate_status has_gate
+  status=$(strip_quotes "$(nm_field status)")
+  awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
+  gate_status=$(nm_gate_status)
+  has_gate=0
+  nm_has_gate && has_gate=1
+  [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] \
+    || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]
+}
+
 # 0 if the active axi-status run binds to this worktree's code identity, for a
-# run genuinely PARKED AT A GATE (awaiting_approval/fix_review). Branch match
+# run genuinely PARKED AT A GATE (nm_run_is_parked_at_gate above). Branch match
 # is a precondition (caller).
 #
 # Getting this wrong is what produced the parked-gate misreport this path
@@ -477,22 +494,16 @@ nm_run_head_matches_worktree() {
 # all. A parked run's head is routinely unresolvable here (no-mistakes commits
 # its fixes in its own gate repository and does not push them until the push
 # step), so fm_nm_head_binds_run's in-flight allowance is applied
-# unconditionally for these two states. Unlike the caller's separate
+# unconditionally for every parked shape. Unlike the caller's separate
 # pipeline-owned exemption (below), a gate state cannot be a same-status row
 # for some OTHER branch's run, because the branch match above already came
 # from `axi status` resolving THIS worktree's own directory.
 nm_run_parked_at_gate_binds_worktree() {
-  local status
-  status=$(strip_quotes "$(nm_field status)")
-  case "$status" in
-    awaiting_approval|fix_review)
-      fm_nm_head_binds_run "$WT" \
-        "$(strip_quotes "$(nm_field head)")" \
-        "$status" \
-        "$(strip_quotes "$(nm_field outcome)")"
-      ;;
-    *) return 1 ;;
-  esac
+  nm_run_is_parked_at_gate || return 1
+  fm_nm_head_binds_run "$WT" \
+    "$(strip_quotes "$(nm_field head)")" \
+    "$(strip_quotes "$(nm_field status)")" \
+    "$(strip_quotes "$(nm_field outcome)")"
 }
 
 HAVE_RUN=0
@@ -569,10 +580,6 @@ if [ "$HAVE_RUN" = 1 ]; then
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
     outcome=$(strip_quotes "$(nm_field outcome)")
-    awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
-    gate_status=$(nm_gate_status)
-    has_gate=0
-    nm_has_gate && has_gate=1
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
@@ -582,7 +589,9 @@ if [ "$HAVE_RUN" = 1 ]; then
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
-    elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
+    elif nm_run_is_parked_at_gate; then
+      has_gate=0
+      nm_has_gate && has_gate=1
       if [ "$has_gate" = 1 ]; then
         gate=$(nm_gate_line_name)
       else
