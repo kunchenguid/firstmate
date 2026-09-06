@@ -1154,6 +1154,15 @@ Reverse video is neither dim nor a dark foreground, so ghost stripping leaves a 
 After teaching the shared classifier the glyph, both placeholders, and the plain-row remnant rule, the same captures read `empty` on the styled cursorless backends, while real typed text - including text typed to exactly match the placeholder - still read `pending`.
 An unstyled capture has no ghost-strip proof and correctly stays `unknown`.
 
+While cursor-agent is WORKING it also right-aligns a dim `ctrl+c to stop` on that same composer row (Composer 2.5, captured live under tmux 2026-09-05):
+
+```
+ESC[48;2;33;36;40m ESC[2m→ ESC[0;7mESC[48;2;33;36;40mAESC[0;2mESC[48;2;33;36;40mdd a follow-upESC[0mESC[48;2;33;36;40m<spaces>ESC[2mctrl+c to stopESC[0m
+```
+
+Ghost stripping removes the hint with the placeholder, but the plain row the remnant is proven against then ends in it and no longer matches the anchored placeholder, so a busy pane's empty composer read `pending`.
+The remnant is now proven against the plain row's first column only, and the same live panes read `empty` while a pane genuinely holding an unsent line still read `pending`.
+
 #### tmux composer verdict, corrected 2026-08-13
 
 The 2026-08-11 record that a Cursor pane's tmux composer verdict is `unknown` in every state described the cursor-ANCHORED read, which remains true: `#{cursor_y}` was 25 with `#{cursor_flag}` 0 on an idle pane, pointing below the footer, so tmux's cursor row is not a composer locator for Cursor.
