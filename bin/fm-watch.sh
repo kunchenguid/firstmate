@@ -1037,10 +1037,15 @@ pause_state_class() {  # <window> <task>
 # it would put backlog reads into windows deliberately skipped on ordinary polls.
 STALE_WAIT_DECLARATION=
 
+CAPTAIN_CALL_IDENTITY=
+
 task_captain_call_open() {  # <task>
   local task=$1
+  CAPTAIN_CALL_IDENTITY=
   [ -n "$task" ] || return 1
-  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" >/dev/null 2>&1
+  CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
+    open "$task" --identity 2>/dev/null) || return 1
+  return 0
 }
 
 # The identity a re-surface throttle is bound to: the task's whole status-log
@@ -1049,6 +1054,18 @@ task_captain_call_open() {  # <task>
 # silence of the one before it.
 stale_wait_declaration() {  # <task>
   printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+}
+
+# The same scope for a captain call, carrying the CALL's own lifecycle identity
+# beside the status signature. The status log is not enough on its own: a task
+# can be answered with `--release` and held again as a genuinely different call
+# without any status append, and binding the throttle to the signature alone let
+# the second call inherit the first one's silence and absorbed its first sight.
+# That first sight is the one alarm this bound must never swallow - a decision
+# waiting on the captain that is never surfaced is invisible, where a delivery
+# announced twice is merely noise.
+captain_call_declaration() {  # <task> <call-identity>
+  printf 'captain-hold:%s:%s' "$2" "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
 }
 
 # 0 when <declaration> has already been alarmed for this window inside the
@@ -1085,7 +1102,7 @@ captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
   task_captain_call_open "$task" || return 1
-  STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
+  STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
