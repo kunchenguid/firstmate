@@ -201,6 +201,7 @@
 #   See docs/configuration.md for provider/Git setup and supported limits.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __CLAUDEBIN__ quoted concrete Claude executable path validated before launch
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -1338,7 +1339,7 @@ launch_template() {
     # alone disables the feature; keep both so a managed override of one still
     # leaves the other in force. Both are per-launch, scoped to this invocation only,
     # and never touch the captain's global ~/.claude/settings.json.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 __CLAUDEBIN__ --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1511,7 +1512,25 @@ case "$ARG3" in
 esac
 
 if [ "$HARNESS" = claude ]; then
-  CLAUDE_EXECUTABLE=${RAW_HARNESS_EXECUTABLE:-claude}
+  if [ "$RAW_LAUNCH" -eq 0 ]; then
+    CLAUDE_EXECUTABLE=$(command -v claude 2>/dev/null || true)
+    [ -n "$CLAUDE_EXECUTABLE" ] && [ -x "$CLAUDE_EXECUTABLE" ] || {
+      echo "error: Claude executable not found on PATH; install it or select a different verified harness" >&2
+      exit 1
+    }
+    case "$CLAUDE_EXECUTABLE" in
+      /*) ;;
+      *)
+        CLAUDE_EXECUTABLE_DIR=$(cd "$(dirname "$CLAUDE_EXECUTABLE")" 2>/dev/null && pwd -P) || {
+          echo "error: could not resolve Claude executable '$CLAUDE_EXECUTABLE' to an absolute path" >&2
+          exit 1
+        }
+        CLAUDE_EXECUTABLE="$CLAUDE_EXECUTABLE_DIR/$(basename "$CLAUDE_EXECUTABLE")"
+        ;;
+    esac
+  else
+    CLAUDE_EXECUTABLE=$RAW_HARNESS_EXECUTABLE
+  fi
   "$FM_ROOT/bin/fm-claude-rc-off.sh" check-default "$CLAUDE_EXECUTABLE" >/dev/null || {
     echo "error: Claude best-effort managed RC-off default preflight failed; refusing launch. Run '$FM_ROOT/bin/fm-claude-rc-off.sh install-policy' with system privileges." >&2
     exit 1
@@ -3508,6 +3527,7 @@ LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
+  claude) [ "$RAW_LAUNCH" -ne 0 ] || LAUNCH=${LAUNCH//__CLAUDEBIN__/"$(shell_quote "$CLAUDE_EXECUTABLE")"} ;;
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;

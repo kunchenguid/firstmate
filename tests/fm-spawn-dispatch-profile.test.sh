@@ -132,7 +132,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 '$FAKEBIN_DIR/claude' --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -496,6 +496,42 @@ test_claude_spawn_refuses_unsupported_version() {
   pass "identified Claude spawn refuses unsupported versions before launch"
 }
 
+test_claude_launch_uses_preflighted_executable() {
+  local rec id out status launch backend_bin execution_log
+  id="profile-claude-executable-${RANDOM}"
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  backend_bin="$CASE_DIR/backend-bin"
+  execution_log="$CASE_DIR/executed.log"
+  mkdir -p "$backend_bin"
+  cat > "$FAKEBIN_DIR/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '2.1.263 (Claude Code)'
+else
+  printf '%s\n' preflighted >> "$FM_EXECUTED_CLAUDE_LOG"
+fi
+SH
+  cat > "$backend_bin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '2.1.127 (Claude Code)'
+else
+  printf '%s\n' backend-path >> "$FM_EXECUTED_CLAUDE_LOG"
+fi
+SH
+  chmod +x "$FAKEBIN_DIR/claude" "$backend_bin/claude"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude spawn with supported Firstmate executable should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  FM_EXECUTED_CLAUDE_LOG="$execution_log" PATH="$backend_bin:$PATH" bash -c "$launch"
+  [ "$(cat "$execution_log")" = preflighted ] \
+    || fail "backend PATH selected a different Claude executable"$'\n'"launch: $launch"
+  pass "canonical Claude launch executes the same absolute binary that passed preflight"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -507,7 +543,7 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "'$FAKEBIN_DIR/claude' --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   assert_not_contains "$launch" "--tui-mode" "non-Pi launches must not receive Pi's TUI mode override"
   pass "claude receives --model and --effort profile flags"
@@ -863,7 +899,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 '$FAKEBIN_DIR/claude' --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -1221,6 +1257,7 @@ test_managed_default_allows_raw_claude_forms_unchanged
 test_claude_spawn_refuses_missing_managed_policy
 test_prefixed_raw_claude_refuses_missing_managed_policy
 test_claude_spawn_refuses_unsupported_version
+test_claude_launch_uses_preflighted_executable
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

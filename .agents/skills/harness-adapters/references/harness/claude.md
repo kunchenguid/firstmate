@@ -48,7 +48,7 @@ The controls are scoped to the launched process and never modify the captain's g
 
 Claude worker and secondmate launch templates use [`fm-claude-rc-off.sh`](../../../../../bin/fm-claude-rc-off.sh) to check the best-effort RC-off default.
 Firstmate must run `sudo bin/fm-claude-rc-off.sh install-policy` once on each host; Linux installs `/etc/claude-code/managed-settings.d/50-firstmate-remote-control.json`, while macOS installs `/Library/Application Support/ClaudeCode/managed-settings.d/50-firstmate-remote-control.json`.
-Every launch identified as Claude checks that fragment and the selected Claude executable's supported version before creating task state or launching a pane.
+Canonical Claude launches resolve and validate one absolute executable, then launch that same path in the backend pane; identified raw Claude launches retain their authored command while receiving the applicable best-effort preflight.
 The helper explicitly does not claim effective-state verification because later file-managed fragments and higher server-managed or MDM tiers can override the fragment.
 Non-Claude raw launches do not depend on Claude policy setup.
 The [runtime verification record](../../../../../docs/verification/runtime-backends.md#claude-remote-control-best-effort-default) owns the captain-authorized security boundary and opt-in real-harness observation.

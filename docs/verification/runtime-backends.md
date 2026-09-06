@@ -18,7 +18,8 @@ sudo bin/fm-claude-rc-off.sh install-policy
 Linux installs `/etc/claude-code/managed-settings.d/50-firstmate-remote-control.json`.
 macOS installs `/Library/Application Support/ClaudeCode/managed-settings.d/50-firstmate-remote-control.json`.
 The helper requires the production file to be regular, root-owned, and not writable by group or others.
-For launches identified as Claude, `fm-spawn.sh` checks that fragment and refuses Claude versions older than 2.1.128 before creating task state.
+For canonical Claude launches, `fm-spawn.sh` resolves Claude to an absolute executable, checks that fragment and the executable's 2.1.128 version floor before creating task state, and launches that same path in the backend pane.
+Identified raw Claude launches retain their authored command while receiving the applicable best-effort preflight.
 Raw launches identified as another harness remain independent of Claude policy setup.
 This preflight does not prove Claude's effective resolved setting.
 A later alphabetic file-managed fragment can override Firstmate's fragment, and a higher server-managed or MDM tier can replace the file-managed tier entirely.
