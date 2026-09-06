@@ -336,9 +336,6 @@ def cmd_poll_list():
             # classes have candidates, new mail always keeps at least one slot.
             retry_budget = max(1, cap // 4) if retry_candidates else 0
             new_budget = cap - retry_budget
-            if new_candidates and new_budget < 1:
-                new_budget = 1
-                retry_budget = cap - 1
         out = []
         new_emitted = 0
         retry_emitted = 0
@@ -385,7 +382,8 @@ def cmd_poll_list():
         # cursor over rows that never reached the bash wake layer. A failed
         # position write still fails the poll loudly, so the same bounded
         # window is re-scanned on the next poll rather than silently
-        # restarting from the old head.
+        # restarting from the old head. Leave the retry-scan position unchanged
+        # when retry_budget is 0 so an unexamined window is not skipped.
         try:
             m.logout()
         except Exception:
@@ -394,7 +392,8 @@ def cmd_poll_list():
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
         sys.stdout.flush()
-        save_retry_pos(retry_pos_path, len(retry_order), window, retry_pos)
+        if retry_budget > 0:
+            save_retry_pos(retry_pos_path, len(retry_order), window, retry_pos)
         return 0
     except Exception as e:
         # stderr, not stdout: the bash poll's command substitution captures

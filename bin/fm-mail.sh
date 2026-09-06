@@ -218,12 +218,49 @@ mail_retry_remove() {
   return 1
 }
 
+mail_retry_published() {
+  # $1 = generation, $2 = uid; 0 when the journal records a recovery/ok publish.
+  [ -s "$WOKEN" ] || return 1
+  awk -F '\t' -v g="$1" -v i="$2" \
+    '$1 == g && $2 == i && $3 == "retry" { found=1 } END { exit found ? 0 : 1 }' \
+    "$WOKEN"
+}
+
+mail_prune_journal() {
+  # Drop heal-only journal lines. Keep retry-tagged lines while the uid is
+  # still in the retry set (or the set cannot be read), so a post-publish
+  # retry-clear failure cannot re-append a recovery wake.
+  local jtmp jgen juid jtag
+  [ -s "$WOKEN" ] || return 0
+  jtmp=$(mktemp "$WOKEN.keep.XXXXXX") || return 1
+  while IFS=$'\t' read -r jgen juid jtag || [ -n "$jgen" ]; do
+    [ "$jtag" = retry ] || continue
+    if [ -f "$RETRY" ] && [ ! -r "$RETRY" ]; then
+      printf '%s\t%s\t%s\n' "$jgen" "$juid" "$jtag"
+      continue
+    fi
+    if [ -f "$RETRY" ] && grep -Fqx "$juid" "$RETRY"; then
+      printf '%s\t%s\t%s\n' "$jgen" "$juid" "$jtag"
+    fi
+  done < "$WOKEN" > "$jtmp"
+  mv -f -- "$jtmp" "$WOKEN" || {
+    rm -f -- "$jtmp"
+    return 1
+  }
+  return 0
+}
+
 mail_record_evidence() {
   # Write the journal and cursor records; return 0 when at least one landed.
   # At least one must survive with a queued wake row, or the drain could
-  # acknowledge the wake with no durable record of its uid.
-  local generation=$1 id=$2 journal_ok=0 cursor_ok=0
-  if printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN"; then
+  # acknowledge the wake with no durable record of its uid. A non-empty $3
+  # tags the journal line (retry) so a later poll can skip re-appending.
+  local generation=$1 id=$2 tag=${3:-} journal_ok=0 cursor_ok=0
+  if [ -n "$tag" ]; then
+    if printf '%s\t%s\t%s\n' "$generation" "$id" "$tag" >> "$WOKEN"; then
+      journal_ok=1
+    fi
+  elif printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN"; then
     journal_ok=1
   fi
   if printf '%s\n' "$id" >> "$CURSOR"; then
@@ -315,8 +352,9 @@ wake_for() {
   #       delivers it and the next poll's heal records the uid.
   #   3 - the wake row was never appended; nothing was delivered.
   #   4 - the wake was delivered but the optional retry-id cleanup failed.
-  local generation=$1 id=$2 summary=$3 retry_id=${4:-} lib="$SCRIPT_DIR/fm-wake-lib.sh" status=0
+  local generation=$1 id=$2 summary=$3 retry_id=${4:-} lib="$SCRIPT_DIR/fm-wake-lib.sh" status=0 tag=""
   local wake_key="mail:$id"
+  [ -n "$retry_id" ] && tag=retry
   if [ -n "$generation" ]; then
     wake_key="mail:$generation/$id"
   fi
@@ -329,12 +367,12 @@ wake_for() {
   . "$lib"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   if fm_wake_append_locked check "$wake_key" "check: mail $id - $summary"; then
-    if mail_record_evidence "$generation" "$id"; then
+    if mail_record_evidence "$generation" "$id" "$tag"; then
       :
     elif mail_rollback_wake_locked "$wake_key" "$generation" "$id"; then
       echo "fm-mail: wake for $id rolled back (journal and cursor writes failed); retried on next poll" >&2
       status=1
-    elif mail_record_evidence "$generation" "$id"; then
+    elif mail_record_evidence "$generation" "$id" "$tag"; then
       echo "fm-mail: wake for $id durably recorded after the queue rewrite failed" >&2
     else
       echo "fm-mail: wake for $id could not be rolled back or durably recorded; the wake stays queued and the next poll heals it - a possible duplicate, never a lost mail" >&2
@@ -398,10 +436,13 @@ mail_heal() {
         fi
       fi
     done < "$WOKEN"
-    # Clear the journal only when every uid it names was durably recorded; if
-    # any cursor write failed, keep the evidence so the next poll can retry it
-    # (and an acknowledged wake can never be surfaced twice for lack of it).
-    [ "$heal_ok" -eq 0 ] && : > "$WOKEN"
+    # Drop heal-only journal lines once every uid is durably recorded. Keep
+    # retry-tagged lines for uids still in the retry set so a post-publish
+    # retry-clear failure cannot re-append a recovery wake. If any cursor
+    # write failed, keep the whole journal so the next poll can retry it.
+    if [ "$heal_ok" -eq 0 ]; then
+      mail_prune_journal || true
+    fi
   fi
   while IFS= read -r k; do
     keyrest="${k#mail:}"
@@ -485,9 +526,18 @@ mail_poll() {
     need_wake=0
     case "$status" in
       retry)
-        # Already cursor-recorded from the degraded wake; surface the recovered
-        # metadata without gating on mail_seen.
-        need_wake=1
+        # Already cursor-recorded from the degraded wake. Surface recovered
+        # metadata once; if a recovery/ok publish is already journaled, retry
+        # the retry-set clear without appending another wake.
+        if mail_retry_published "$generation" "$uid"; then
+          if ! mail_retry_remove "$uid"; then
+            echo "fm-mail: could not clear retry for recovered $uid after publish; retried on next poll" >&2
+            fm_lock_release "$STATE_DIR/.mail-seen.lock"
+            return 1
+          fi
+        else
+          need_wake=1
+        fi
         ;;
       *)
         if ! mail_seen "$uid"; then
