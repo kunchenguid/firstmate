@@ -18,7 +18,7 @@
 # same as a valid one but --force never touches it.
 #
 # FM_HOME selects the operational home and FM_STATE_OVERRIDE selects its state
-# directory for tests; neither changes fm-crew-state.sh's authority over state.
+# directory for tests.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +26,6 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FM_HOME="${FM_HOME:-$ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOG="${FM_PIPELINE_LOG:-$STATE/pipeline-events.log}"
-CREW_STATE_BIN="${FM_PIPELINE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 
 CHECK_ID='pipeline-probe'
 PIPELINE_SCHEMA='fm-pipeline.v3'
@@ -1331,7 +1330,7 @@ pipeline_board_json() {
 
 probe_task() {  # <id> [quiet]
   local id=$1 quiet=${2:-} status_file meta
-  local pauses line_no key line current current_state now ts since kind step gen attempt wait rule action probe evidence
+  local pauses line_no key line now ts since kind step gen attempt wait rule action probe evidence
   fm_task_id_path_safe "$id" || die "invalid task id: $id"
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
   status_file="$STATE/$id.status"
@@ -1349,10 +1348,6 @@ probe_task() {  # <id> [quiet]
   [ -f "$status_file" ] || return 0
   pauses=$(active_paused "$status_file")
   [ -n "$pauses" ] || return 0
-  current=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_ROOT_OVERRIDE="$ROOT" \
-    "$CREW_STATE_BIN" "$id" 2>/dev/null) || current=
-  current_state=${current#state: }
-  current_state=${current_state%% · *}
   now=$(date +%s)
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   kind=${PIPELINE_RECORD_KIND:--}
@@ -1367,30 +1362,9 @@ probe_task() {  # <id> [quiet]
   while IFS=$'\t' read -r line_no key line; do
     wait=$(wait_identity "$key")
     evidence="state/$id.status:$line_no"
+    probe=unknown
     rule=-
     action=none
-    case "$current_state" in
-      paused)
-        if [ "$key" = unkeyed ]; then
-          probe=unknown
-        else
-          probe=ok
-        fi
-        ;;
-      working|parked)
-        probe=unknown
-        rule=-
-        action=none
-        ;;
-      done|blocked|failed)
-        probe=stall
-        rule=recheck-external
-        action=would-heal
-        ;;
-      *)
-        probe=unknown
-        ;;
-    esac
     since=$(observation_elapsed_since "$id" "$wait" "$step" "$gen" "$evidence" "$now") || die "cannot record pipeline observation"
     append_event_locked "ts=$ts task=$id kind=$kind step=$step since=$since probe=$probe rule=$rule action=$action mode=shadow evidence=$evidence gen=$gen attempt=$attempt wait=$wait snap=-" || die "cannot append event log"
   done <<EOF

@@ -19,89 +19,22 @@ new_state() {
   printf '%s\n' "$dir"
 }
 
-# --- real crew-state path fixtures (for the false-stale regression) ----------
-# These drive the REAL bin/fm-crew-state.sh (no FM_PIPELINE_CREW_STATE_BIN fake)
-# over a throwaway git worktree, a fake no-mistakes that reports no run, and a
-# fake tmux pane, plus a real busy/idle record armed through bin/fm-busy-event.sh.
-# This is the same hermetic machinery tests/fm-crew-state.test.sh uses, so the
-# probe exercises the actual state-derivation the false-stale defect lives in.
-fm_git_identity fmtest fmtest@example.invalid
-
-make_crew_repo() {  # <dir> <branch>
-  local dir=$1 branch=$2
-  mkdir -p "$dir"
-  git -C "$dir" init -q
-  git -C "$dir" commit -q --allow-empty -m init
-  git -C "$dir" checkout -q -b "$branch"
-}
-
-make_crew_fakebin() {  # <dir> -> echoes fakebin path
-  local fb="$1/fakebin"
-  mkdir -p "$fb"
-  cat > "$fb/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  axi)
-    shift
-    case "${1:-}" in
-      status)
-        shift
-        if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
-        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
-      logs) printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
-    esac ;;
-  runs) printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
-esac
-exit 0
-SH
-  cat > "$fb/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  display-message)
-    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    printf '%%1\n' ;;
-  capture-pane)
-    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
-    else printf 'all quiet\n> \n'; fi ;;
-esac
-exit 0
-SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux"
-  printf '%s\n' "$fb"
-}
-
-arm_busy_record() {  # <state-dir> <id>
-  local state=$1 id=$2 gen
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
-  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
-    --source claude-hook --event user-prompt-submit
-}
-
-arm_idle_record() {  # <state-dir> <id>
-  local state=$1 id=$2 gen
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
-  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle --gen "$gen" \
-    --source claude-hook --event stop
-}
-
-run_real_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$ROOT/bin/fm-crew-state.sh" "$2"
-}
-
 test_line_format_and_unknown_preservation() {
   local root output line rc=0
   root=$(new_state unknown)
   printf 'paused: [key=vendor-release] waiting on vendor\n' > "$root/state/task.status"
   printf 'kind=ship\nspawn_gen=gen-unknown\nworktree=%s/worktree\nharness=tmux\n' "$root" > "$root/state/task.meta"
+  cat > "$root/fake-crew-state.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'state: paused · source: pane · fixture'
+EOF
+  chmod +x "$root/fake-crew-state.sh"
   output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
     FM_PIPELINE_CREW_STATE_BIN="$root/fake-crew-state.sh" "$SCRIPT" probe 2>&1) || rc=$?
   expect_code 0 "$rc" "probe should succeed for a declared wait"
   line=$(tail -1 "$root/state/pipeline-events.log")
   assert_contains "$line" 'ts=' "every event must have a timestamp"
-  assert_contains "$line" 'probe=unknown' "unreadable current state must remain unknown"
+  assert_contains "$line" 'probe=unknown' "an unobserved wait must remain unknown"
   assert_contains "$line" 'mode=shadow' "every event must be shadow-only"
   assert_contains "$line" 'wait=ext:vendor-release' "the keyed wait must be recorded"
   [ "$(printf '%s' "$line" | awk '{print NF}')" -eq 14 ] || fail "event line did not have 14 fields: $line"
@@ -156,89 +89,49 @@ test_stale_wait_is_shadow_only() {
   root=$(new_state stale)
   printf 'paused: [key=vendor-release] waiting on vendor\n' > "$root/state/task.status"
   printf 'kind=ship\nstep=working\nspawn_gen=gen-1\nworktree=%s/worktree\nharness=tmux\n' "$root" > "$root/state/task.meta"
-  # A declared wait is genuinely contradicted only by a state the existing
-  # contract treats as positive disproof: done/blocked/failed. working and
-  # parked are concurrent activity, not disproof (see
-  # test_working_does_not_contradict_keyed_wait and
-  # test_parked_does_not_contradict_keyed_wait), so this case uses done to keep
-  # exercising the stall/would-heal shadow-only path under the corrected contract.
   cat > "$root/fake-crew-state.sh" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' 'state: done · source: run-step · run passed'
+printf '%s\n' 'state: done · source: run-step · fixture'
 EOF
   chmod +x "$root/fake-crew-state.sh"
   output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
     FM_PIPELINE_CREW_STATE_BIN="$root/fake-crew-state.sh" "$SCRIPT" probe 2>&1) || rc=$?
-  expect_code 0 "$rc" "a contradicted declared wait should be observed successfully"
+  expect_code 0 "$rc" "a declared wait should be observed successfully"
   line=$(tail -1 "$root/state/pipeline-events.log")
-  assert_contains "$line" 'probe=stall' "a positively contradicted wait must be a stall"
-  assert_contains "$line" 'rule=recheck-external' "stale waits must identify the shadow rule"
-  assert_contains "$line" 'action=would-heal' "stale waits must never execute a heal"
-  assert_contains "$line" 'mode=shadow' "stale waits must remain shadow-only"
+  assert_contains "$line" 'probe=unknown' "an unobserved wait must remain unknown"
+  assert_contains "$line" 'rule=-' "an unobserved wait must have no rule"
+  assert_contains "$line" 'action=none' "an unobserved wait must not request healing"
+  assert_contains "$line" 'mode=shadow' "wait observations must remain shadow-only"
   assert_contains "$line" 'since=0' "first observations must start their lower-bound duration at zero"
   assert_contains "$line" 'gen=gen-1' "events must use the spawn incarnation"
   [ -f "$root/state/task.pipeline" ] || fail "the first observation was not recorded"
-  pass "fm-pipeline.sh: contradicted waits log a would-heal without acting"
+  pass "fm-pipeline.sh: unobserved waits remain unknown without a healing action"
 }
 
-# An open keyed external wait remains live while the crew is concurrently
-# working: the worker's busy pane is not evidence about the wait. The probe must
-# map working to probe=unknown / rule=- / action=none, not stall/would-heal.
-# Before the fix this fails red: working shares the stall arm and emits
-# action=would-heal.
-test_working_does_not_contradict_keyed_wait() {
-  local d crew_state out line rc=0
-  d=$(new_state working-live)
-  make_crew_repo "$d/worktree" fm/feat-work
-  make_crew_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-work.meta" "window=fm:fm-feat-work" "worktree=$d/worktree" "kind=ship" "spawn_gen=gen-work" "harness=claude"
-  printf '%s\n' \
-    'paused: [key=vendor-release] holding for the upstream vendor cut' \
-    'working: [key=impl-slice] continuing the unrelated implementation slice' > "$d/state/feat-work.status"
-  FM_FAKE_AXI_STATUS=""; FM_FAKE_RUNS_LIST=""; FM_FAKE_BUSY=1
-  export FM_FAKE_AXI_STATUS FM_FAKE_RUNS_LIST FM_FAKE_BUSY
-  arm_busy_record "$d/state" feat-work
-  crew_state=$(run_real_crew_state "$d" feat-work)
-  assert_contains "$crew_state" "state: working" "fixture must report working through the real crew-state path"
-  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" "$SCRIPT" probe 2>&1) || rc=$?
-  expect_code 0 "$rc" "probe should succeed for a live keyed wait while the crew is working"
-  line=$(tail -1 "$d/state/pipeline-events.log")
-  assert_contains "$line" 'probe=unknown' "a concurrent working state must not contradict a keyed wait"
-  assert_contains "$line" 'rule=-' "a non-contradicting state carries no rule"
-  assert_contains "$line" 'action=none' "a live keyed wait must not be flagged for healing"
-  assert_contains "$line" 'mode=shadow' "the probe must remain shadow-only"
-  assert_contains "$line" 'wait=ext:vendor-release' "the keyed wait identity must be recorded"
-  pass "fm-pipeline.sh: a working crew does not falsify a live keyed wait"
-}
-
-# An open keyed external wait remains live while the crew is gate-parked: a
-# needs-decision on a different key is concurrent activity, not disproof of the
-# wait. The probe must map parked to probe=unknown / rule=- / action=none.
-# Before the fix this fails red: parked shares the stall arm and emits
-# action=would-heal.
-test_parked_does_not_contradict_keyed_wait() {
-  local d crew_state out line rc=0
-  d=$(new_state parked-live)
-  make_crew_repo "$d/worktree" fm/feat-parked
-  make_crew_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-parked.meta" "window=fm:fm-feat-parked" "worktree=$d/worktree" "kind=ship" "spawn_gen=gen-parked" "harness=claude"
-  printf '%s\n' \
-    'paused: [key=vendor-release] holding for the upstream vendor cut' \
-    'needs-decision: [key=gate-question] which rollout order do we take' > "$d/state/feat-parked.status"
-  FM_FAKE_AXI_STATUS=""; FM_FAKE_RUNS_LIST=""; FM_FAKE_BUSY=0
-  export FM_FAKE_AXI_STATUS FM_FAKE_RUNS_LIST FM_FAKE_BUSY
-  arm_idle_record "$d/state" feat-parked
-  crew_state=$(run_real_crew_state "$d" feat-parked)
-  assert_contains "$crew_state" "state: parked" "fixture must report parked through the real crew-state path"
-  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" "$SCRIPT" probe 2>&1) || rc=$?
-  expect_code 0 "$rc" "probe should succeed for a live keyed wait while the crew is parked"
-  line=$(tail -1 "$d/state/pipeline-events.log")
-  assert_contains "$line" 'probe=unknown' "a concurrent parked state must not contradict a keyed wait"
-  assert_contains "$line" 'rule=-' "a non-contradicting state carries no rule"
-  assert_contains "$line" 'action=none' "a live keyed wait must not be flagged for healing"
-  assert_contains "$line" 'mode=shadow' "the probe must remain shadow-only"
-  assert_contains "$line" 'wait=ext:vendor-release' "the keyed wait identity must be recorded"
-  pass "fm-pipeline.sh: a parked crew does not falsify a live keyed wait"
+test_terminal_statuses_without_premise_are_unknown() {
+  local root status_line verb output line rc
+  for status_line in 'done: finished' 'blocked: x' 'failed: x'; do
+    root=$(new_state "terminal-${status_line%%:*}")
+    printf '%s\n' \
+      'paused: [key=vendor-release] waiting on vendor' \
+      "$status_line" > "$root/state/task.status"
+    printf 'kind=ship\nstep=working\nspawn_gen=gen-terminal\n' > "$root/state/task.meta"
+    verb=${status_line%%:*}
+    cat > "$root/fake-crew-state.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' 'state: $verb · source: run-step · fixture'
+EOF
+    chmod +x "$root/fake-crew-state.sh"
+    rc=0
+    output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
+      FM_PIPELINE_CREW_STATE_BIN="$root/fake-crew-state.sh" "$SCRIPT" probe 2>&1) || rc=$?
+    expect_code 0 "$rc" "$verb status should still produce an observation"
+    line=$(tail -1 "$root/state/pipeline-events.log")
+    assert_contains "$line" 'probe=unknown' "$verb status must not prove an external premise"
+    assert_contains "$line" 'rule=-' "$verb status must have no healing rule"
+    assert_contains "$line" 'action=none' "$verb status must not request healing"
+  done
+  pass "fm-pipeline.sh: done, blocked, and failed status lines remain unknown"
 }
 
 test_resumed_wait_is_not_reprobed() {
@@ -249,7 +142,7 @@ test_resumed_wait_is_not_reprobed() {
     '' \
     'working: [key=vendor-release] resumed after vendor release' > "$root/state/task.status"
   output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
-    FM_PIPELINE_CREW_STATE_BIN="$root/fake-crew-state.sh" "$SCRIPT" probe 2>&1) || rc=$?
+    "$SCRIPT" probe 2>&1) || rc=$?
   expect_code 0 "$rc" "a resumed wait should not be reprobed"
   [ ! -e "$root/state/pipeline-events.log" ] || fail "a later working transition was ignored"
   pass "fm-pipeline.sh: resumed waits are not selected from stale history"
@@ -262,13 +155,8 @@ test_note_preserves_active_wait() {
     'paused: [key=vendor-release] waiting on vendor' \
     'note: vendor contact recorded' > "$root/state/task.status"
   printf 'kind=ship\nstep=working\nspawn_gen=gen-1\n' > "$root/state/task.meta"
-  cat > "$root/fake-crew-state.sh" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' 'state: working · source: pane · pane is active'
-EOF
-  chmod +x "$root/fake-crew-state.sh"
   output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
-    FM_PIPELINE_CREW_STATE_BIN="$root/fake-crew-state.sh" "$SCRIPT" probe 2>&1) || rc=$?
+    "$SCRIPT" probe 2>&1) || rc=$?
   expect_code 0 "$rc" "an informational note should preserve an active pause"
   line=$(tail -1 "$root/state/pipeline-events.log")
   assert_contains "$line" 'wait=ext:vendor-release' "the active paused wait must survive a note"
@@ -280,13 +168,8 @@ test_configured_pause_verb_is_supported() {
   root=$(new_state custom-pause)
   printf 'waiting: [key=vendor-release] waiting on vendor\n' > "$root/state/task.status"
   printf 'kind=ship\nstep=working\nspawn_gen=gen-1\n' > "$root/state/task.meta"
-  cat > "$root/fake-crew-state.sh" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' 'state: paused · source: pane · pane is idle'
-EOF
-  chmod +x "$root/fake-crew-state.sh"
   output=$(FM_CLASSIFY_PAUSED_VERB=waiting FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
-    FM_PIPELINE_CREW_STATE_BIN="$root/fake-crew-state.sh" "$SCRIPT" probe 2>&1) || rc=$?
+    "$SCRIPT" probe 2>&1) || rc=$?
   expect_code 0 "$rc" "a configured pause verb should be probed"
   line=$(tail -1 "$root/state/pipeline-events.log")
   assert_contains "$line" 'wait=ext:vendor-release' "configured pause verbs must preserve the wait key"
@@ -300,17 +183,13 @@ test_all_active_waits_are_probed_independently() {
     'paused: [key=vendor-release] waiting on vendor' \
     'paused: [key=rate-limit] waiting on provider' > "$root/state/task.status"
   printf 'kind=ship\nstep=working\nspawn_gen=gen-1\n' > "$root/state/task.meta"
-  cat > "$root/fake-crew-state.sh" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' 'state: paused · source: pane · pane is idle'
-EOF
-  chmod +x "$root/fake-crew-state.sh"
   output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
-    FM_PIPELINE_CREW_STATE_BIN="$root/fake-crew-state.sh" "$SCRIPT" probe 2>&1) || rc=$?
+    "$SCRIPT" probe 2>&1) || rc=$?
   expect_code 0 "$rc" "all active waits should be probed"
   [ "$(wc -l < "$root/state/pipeline-events.log")" -eq 2 ] || fail "only one active wait was probed"
-  [ "$(grep -c 'wait=ext:vendor-release' "$root/state/pipeline-events.log")" -eq 1 ] || fail "vendor wait was not recorded"
-  [ "$(grep -c 'wait=ext:rate-limit' "$root/state/pipeline-events.log")" -eq 1 ] || fail "rate-limit wait was not recorded"
+  [ "$(rg -c 'probe=unknown' "$root/state/pipeline-events.log")" -eq 2 ] || fail "active waits were not recorded as unknown"
+  [ "$(rg -c 'wait=ext:vendor-release' "$root/state/pipeline-events.log")" -eq 1 ] || fail "vendor wait was not recorded"
+  [ "$(rg -c 'wait=ext:rate-limit' "$root/state/pipeline-events.log")" -eq 1 ] || fail "rate-limit wait was not recorded"
   local cache="$root/state/task.pipeline-seen"
   [ -f "$cache" ] || cache="$root/state/task.pipeline"
   [ "$(rg -c '^wait=ext:' "$cache")" -eq 2 ] || fail "wait timings were not kept independently"
@@ -327,6 +206,7 @@ test_pause_key_sentinels_remain_distinct() {
   output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" probe 2>&1) || rc=$?
   expect_code 0 "$rc" "pause key sentinel probing should succeed"
   [ "$(wc -l < "$root/state/pipeline-events.log")" -eq 2 ] || fail "invalid pause key changed active wait count"
+  [ "$(rg -c 'probe=unknown' "$root/state/pipeline-events.log")" -eq 2 ] || fail "active sentinel waits were not recorded as unknown"
   grep -F 'wait=ext:-' "$root/state/pipeline-events.log" >/dev/null \
     || fail "unkeyed pause lost its wait identity"
   grep -F 'wait=ext:%2D' "$root/state/pipeline-events.log" >/dev/null \
@@ -364,6 +244,8 @@ test_explicit_default_key_remains_distinct() {
   expect_code 0 "$rc" "explicit and unkeyed pause keys should be handled"
   [ "$(wc -l < "$root/state/pipeline-events.log")" -eq 3 ] \
     || fail "explicit default key changed the active wait count"
+  [ "$(rg -c 'probe=unknown' "$root/state/pipeline-events.log")" -eq 3 ] \
+    || fail "active default/sentinel waits were not recorded as unknown"
   grep -F 'wait=ext:-' "$root/state/pipeline-events.log" >/dev/null \
     || fail "unkeyed pause lost its wait identity"
   grep -F 'wait=ext:%64efault' "$root/state/pipeline-events.log" >/dev/null \
@@ -471,15 +353,9 @@ test_relative_arm_embeds_absolute_state() {
   state="$root/state"
   printf 'paused: [key=vendor-release] waiting on vendor\n' > "$state/task.status"
   printf 'kind=ship\nstep=working\nspawn_gen=gen-1\n' > "$state/task.meta"
-  cat > "$root/fake-crew-state.sh" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' 'state: working · source: pane · pane is active'
-EOF
-  chmod +x "$root/fake-crew-state.sh"
   (cd "$TMP_ROOT" && FM_HOME=relative-arm FM_STATE_OVERRIDE=relative-arm/state "$SCRIPT" arm >/dev/null) \
     || fail "relative arming failed"
-  output=$(cd / && FM_PIPELINE_CREW_STATE_BIN="$root/fake-crew-state.sh" \
-    "$state/pipeline-probe.check.sh" 2>&1) || rc=$?
+  output=$(cd / && "$state/pipeline-probe.check.sh" 2>&1) || rc=$?
   expect_code 0 "$rc" "an armed check should work from another directory"
   [ -s "$state/pipeline-events.log" ] || fail "relative arming did not preserve the absolute state"
   pass "fm-pipeline.sh: armed checks retain absolute state paths"
@@ -664,8 +540,8 @@ test_steps_print_ordered_graph() {
   pass "fm-pipeline.sh: steps owns ordered nodes and edges"
 }
 
-test_probe_cost_fixture_preserves_sensor_call_count() {
-  local root check fake count output rc=0 i start elapsed
+test_probe_cost_fixture_removes_sensor_calls() {
+  local root check fake count output rc=0 i start elapsed script_dir
   root=$(new_state probe-cost)
   fake="$root/fake-crew-state.sh"
   count="$root/crew-state-calls"
@@ -682,31 +558,39 @@ EOF
     printf 'paused: [key=fixture] waiting on the fixture\n' > "$root/state/task-$i.status"
     i=$((i + 1))
   done
-  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" FM_PIPELINE_CREW_STATE_BIN="$fake" \
-    FM_PIPELINE_TEST_CREW_COUNT="$count" "$SCRIPT" probe >/dev/null \
+  script_dir=$(cd "$(dirname "$SCRIPT")" && pwd)
+  mkdir "$root/bin"
+  cp -R "$script_dir/." "$root/bin/"
+  cp "$fake" "$root/bin/fm-crew-state.sh"
+  chmod +x "$root/bin/fm-crew-state.sh"
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" FM_PIPELINE_TEST_CREW_COUNT="$count" \
+    "$root/bin/fm-pipeline.sh" probe >/dev/null \
     || fail "could not initialize the 40-task probe fixture"
-  : > "$count"
-  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" arm >/dev/null \
+  [ "$(wc -l < "$count" | tr -d ' ')" -eq 0 ] \
+    || fail "the probe still made crew-state calls"
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$root/bin/fm-pipeline.sh" arm >/dev/null \
     || fail "could not arm the cost fixture"
   check="$root/state/pipeline-probe.check.sh"
   start=$(date +%s)
-  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" FM_PIPELINE_CREW_STATE_BIN="$fake" \
-    FM_PIPELINE_TEST_CREW_COUNT="$count" "$check" 2>&1) || rc=$?
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" FM_PIPELINE_TEST_CREW_COUNT="$count" \
+    "$check" 2>&1) || rc=$?
   elapsed=$(( $(date +%s) - start ))
   expect_code 0 "$rc" "the 40-task check fixture should succeed"
   [ -z "$output" ] || fail "the steady-state fixture emitted output: $output"
-  [ "$(wc -l < "$count" | tr -d ' ')" -eq 40 ] || fail "the steady-state probe did not make exactly 40 sensor calls"
+  [ "$(wc -l < "$count" | tr -d ' ')" -eq 0 ] \
+    || fail "the steady-state probe still made crew-state calls"
   [ "$elapsed" -lt 20 ] || fail "the 40-task check fixture exceeded its smoke bound"
   printf 'pr=https://github.com/example/project/pull/7\n' >> "$root/state/task-1.meta"
   : > "$count"
   rc=0
-  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" FM_PIPELINE_CREW_STATE_BIN="$fake" \
-    FM_PIPELINE_TEST_CREW_COUNT="$count" "$check" 2>&1) || rc=$?
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" FM_PIPELINE_TEST_CREW_COUNT="$count" \
+    "$check" 2>&1) || rc=$?
   expect_code 0 "$rc" "the changed-artifact fixture should succeed"
-  [ "$(wc -l < "$count" | tr -d ' ')" -eq 40 ] || fail "the changed-artifact probe did not make exactly 40 sensor calls"
+  [ "$(wc -l < "$count" | tr -d ' ')" -eq 0 ] \
+    || fail "the changed-artifact probe still made crew-state calls"
   assert_contains "$(cat "$root/state/task-1.pipeline")" 'step=pr-registered' \
     "changed artifact did not advance the owner record"
-  pass "fm-pipeline.sh: 40-task reconcile preserves sensor call count"
+  pass "fm-pipeline.sh: 40-task probes remove crew-state calls"
 }
 
 test_board_json_fixture_inventory_and_bound() {
@@ -1186,7 +1070,7 @@ test_registered_check_reaches_watcher() {
   prime_status_seen "$state" "$state/task.status" || fail "could not prime the task status marker"
 
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" \
-    FM_STATE_OVERRIDE="$state" FM_PIPELINE_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" &
   pid=$!
@@ -1234,7 +1118,7 @@ test_arm_refusal_watcher_reaches_supervision() {
   # and the test would prove nothing about ordinary signal handling.
   touch "$state/.last-check"
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" \
-    FM_STATE_OVERRIDE="$state" FM_PIPELINE_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" 2>"$dir/watch.err" &
   pid=$!
@@ -1285,7 +1169,7 @@ test_disarm_marker_persists_and_force_clears() {
   [ ! -e "$state/pipeline-probe.check-trust" ] || fail "disarm did not retire the trust artifact"
 
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" \
-    FM_STATE_OVERRIDE="$state" FM_PIPELINE_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" 2>"$dir/watch.err" &
   pid=$!
@@ -1336,7 +1220,7 @@ test_invalid_marker_refuses_and_preserves() {
   [ ! -e "$state/pipeline-probe.check-trust" ] || fail "arm armed the trust artifact despite a symlink marker"
 
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" \
-    FM_STATE_OVERRIDE="$state" FM_PIPELINE_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" 2>"$dir/watch.err" &
   pid=$!
@@ -1586,7 +1470,7 @@ EOF
   touch "$state/.last-check"
 
   PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" \
-    FM_STATE_OVERRIDE="$state" FM_PIPELINE_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" 2>"$dir/watch.err" &
   pid=$!
@@ -1616,8 +1500,7 @@ test_would_heal_without_evidence_is_rejected
 test_append_rejects_malformed_fields
 test_event_log_symlink_is_rejected
 test_stale_wait_is_shadow_only
-test_working_does_not_contradict_keyed_wait
-test_parked_does_not_contradict_keyed_wait
+test_terminal_statuses_without_premise_are_unknown
 test_resumed_wait_is_not_reprobed
 test_note_preserves_active_wait
 test_configured_pause_verb_is_supported
@@ -1641,7 +1524,7 @@ test_reconcile_ignores_status_testimony
  test_foreign_generation_is_refused
  test_pr_registration_and_merge_artifacts
  test_steps_print_ordered_graph
- test_probe_cost_fixture_preserves_sensor_call_count
+ test_probe_cost_fixture_removes_sensor_calls
  test_board_json_fixture_inventory_and_bound
  test_quiet_registered_probe_and_refusal_projection
  test_retire_owner_records
