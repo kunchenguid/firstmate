@@ -10,11 +10,16 @@ if [ "${FM_CLAUDE_RC_OFF_LIVE_E2E:-0}" != 1 ]; then
   exit 0
 fi
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-for tool in claude herdr jq; do
+for tool in herdr jq; do
   command -v "$tool" >/dev/null || { echo "not ok - required installed harness/tool absent: $tool" >&2; exit 1; }
 done
-VERSION=$(claude --version)
-"$ROOT/bin/fm-claude-rc-off.sh" check-default claude
+CLAUDE_EXECUTABLE=$(command -v claude 2>/dev/null) || { echo 'not ok - required installed harness/tool absent: claude' >&2; exit 1; }
+case "$CLAUDE_EXECUTABLE" in
+  /*) ;;
+  *) CLAUDE_EXECUTABLE=$(cd "$(dirname "$CLAUDE_EXECUTABLE")" && pwd -P)/$(basename "$CLAUDE_EXECUTABLE") ;;
+esac
+VERSION=$("$CLAUDE_EXECUTABLE" --version)
+"$ROOT/bin/fm-claude-rc-off.sh" check-default "$CLAUDE_EXECUTABLE"
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name claude-rc-off)
 cleanup() {
@@ -51,15 +56,15 @@ PREFIX="env -u CLAUDE_CODE_CHILD_SESSION CLAUDE_CONFIG_DIR=$(shell_quote "${CLAU
 COMMON="--tools '' --strict-mcp-config --mcp-config '{\"mcpServers\":{}}' --settings '{\"disableAllHooks\":true,\"disableRemoteControl\":false}'"
 
 OFF=$(run workspace create --cwd "$ROOT" --label rc-enforced | jq -er '.result.root_pane.pane_id')
-run pane run "$OFF" "$PREFIX claude --remote-control $COMMON"
+run pane run "$OFF" "$PREFIX $(shell_quote "$CLAUDE_EXECUTABLE") --remote-control $COMMON"
 wait_for "$OFF" '❯' enforced-start.txt
-"$ROOT/bin/fm-claude-rc-off.sh" check-default claude | tee "$EVIDENCE/default-preflight.txt"
+"$ROOT/bin/fm-claude-rc-off.sh" check-default "$CLAUDE_EXECUTABLE" | tee "$EVIDENCE/default-preflight.txt"
 submit "$OFF" /remote-control
 wait_for "$OFF" 'Unknown command: /remote-control' enforced-off.txt
 submit "$OFF" 'Reply with exactly RC_OFF_GUARD_OK and do not use any tools.'
 wait_for "$OFF" '● RC_OFF_GUARD_OK' completed-turn.txt
 submit "$OFF" /rc
 wait_for "$OFF" 'Unknown command: /rc' still-off.txt
-"$ROOT/bin/fm-claude-rc-off.sh" check-default claude | tee "$EVIDENCE/still-off-preflight.txt"
+"$ROOT/bin/fm-claude-rc-off.sh" check-default "$CLAUDE_EXECUTABLE" | tee "$EVIDENCE/still-off-preflight.txt"
 run pane process-info --pane "$OFF" > "$EVIDENCE/guard-process.json"
 echo "ok - $VERSION: observed the managed default beat CLI and settings overrides for this lab turn"
