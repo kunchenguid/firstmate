@@ -314,7 +314,7 @@ fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
       echo "error: cannot tell whether '$source' was deleted or is unreadable because '$project' is not a searchable directory; leaving '$target' in place" >&2
       return 1
     fi
-    if ! rm -f "$target"; then
+    if ! fm_env_local_retire_seeded_copy "$worktree"; then
       echo "error: could not retire the stale .env.local in '$worktree' after it disappeared from '$project'" >&2
       return 1
     fi
