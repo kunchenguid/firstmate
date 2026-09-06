@@ -693,6 +693,8 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
   sm=$(cd "$sm" && pwd -P)
+  cp "$ROOT/AGENTS.md" "$sm/AGENTS.md"
+  cp "$sm/data/charter.md" "$CASE_DIR/charter-before"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
@@ -700,9 +702,19 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   assert_contains "$out" "spawned $id harness=pi-signed kind=secondmate" \
     "pi-signed secondmate spawn did not preserve its runtime identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
+  cmp -s "$ROOT/AGENTS.md" "$sm/AGENTS.md" || fail "secondmate launch rewrote the supervisor contract"
+  cmp -s "$CASE_DIR/charter-before" "$sm/data/charter.md" || fail "secondmate launch rewrote the charter"
+  assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
   launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "< '$sm/data/charter.md'" "secondmate launch lost its original charter"
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# evidence begin: persistent secondmate\n%s\n' "$out"
+    printf 'launch command:\n%s\noriginal charter:\n' "$launch"
+    cat "$sm/data/charter.md"
+    printf 'supervisor AGENTS.md and charter remain byte-identical; no worker overlay created\n# evidence end\n'
+  fi
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
@@ -1014,6 +1026,69 @@ test_launch_environment_inaccessible_config_refuses
 test_launch_environment_inherited_by_secondmate
 test_launch_environment_inheritance_preserves_on_source_errors
 
+test_worker_launch_delivers_role_scope() {
+  local rec id out launch kind prompt brief_kind brief content
+  for brief_kind in heading legacy scaffold; do
+  for kind in no-mistakes direct-PR local-only scout; do
+    [ "$brief_kind" = heading ] && [ "$kind" != no-mistakes ] && continue
+    id="role-launch-$brief_kind-$kind"
+    rec=$(make_spawn_case "$id" codex)
+    read_case_record "$rec"
+    if [ "$brief_kind" != scaffold ]; then
+      fm_test_spawn_brief "$HOME_DIR" "$id"
+      if [ "$brief_kind" = heading ]; then
+        printf '\n# Worker role\nFollow the project instructions.\n' >> "$HOME_DIR/data/$id/brief.md"
+      fi
+    else
+      if [ "$kind" = scout ]; then
+        FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" arbitrary-project-name --scout >/dev/null || fail "scout scaffold failed"
+      else
+        FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" arbitrary-project-name --mode "$kind" >/dev/null || fail "$kind scaffold failed"
+      fi
+      brief="$HOME_DIR/data/$id/brief.md"
+      content=$(cat "$brief")
+      content=${content//'{TASK}'/brief for $id}
+      content=${content//'{FIRSTMATE_SPEC}'/Exercise the spawn behavior under test.}
+      printf '%s\n' "$content" > "$brief"
+    fi
+    cp "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/brief-before"
+    cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FM_ROLE_PROMPT"
+SH
+    chmod +x "$FAKEBIN_DIR/codex"
+    if [ "$kind" = scout ]; then
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+    else
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode "$kind" --yolo off)
+    fi
+    expect_code 0 "$?" "$kind worker spawn failed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    prompt="$CASE_DIR/prompt"
+    FM_ROLE_PROMPT="$prompt" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" || fail "could not consume $kind launch command"
+    # The final prompt delivered to the harness is the generated interface.
+    # An authored role heading must neither suppress nor duplicate the current
+    # worker contract; the launch section is its single, superseding owner.
+    assert_grep 'follow this brief instead of that supervisor contract' "$prompt" "$kind command did not deliver the role correction"
+    assert_grep 'brief for' "$prompt" "$kind command lost the task"
+    [ "$(grep -c '^# Current worker role contract$' "$prompt")" -eq 1 ] ||
+      fail "$brief_kind $kind duplicated the delivered worker contract"
+    if [ "$brief_kind" = heading ]; then
+      assert_grep 'Follow the project instructions' "$prompt" "$kind command dropped the authored role section"
+    fi
+    cmp -s "$CASE_DIR/brief-before" "$HOME_DIR/data/$id/brief.md" || fail "spawn rewrote the authored brief"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# evidence begin: %s %s worker\n%s\n' "$brief_kind" "$kind" "$out"
+      printf 'launch command executed with an argv-capture harness:\n%s\nreceived arguments and final prompt:\n' "$launch"
+      cat "$prompt"
+      printf 'authored brief remains byte-identical\n# evidence end\n'
+    fi
+  done
+  done
+  pass "fm-spawn: actual ship/scout launch commands deliver the worker role contract"
+}
+
+test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
