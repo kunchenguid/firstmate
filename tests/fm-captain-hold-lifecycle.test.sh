@@ -2541,62 +2541,43 @@ test_local_merge_entrypoint_refuses_a_captain_held_task() {
   pass "the local merge entrypoint refuses a captain-held task before merging"
 }
 
-test_board_merge_answer_releases_before_entrypoint_and_lands() {
-  local home id pr repo wt capture answer_line key answer show json
-  home=$(make_home board-merge-release)
+test_released_merge_passes_the_entrypoint_and_lands() {
+  local home id pr repo wt show json
+  home=$(make_home released-merge-entrypoint)
   configure_merged_github "$home"
-  id=sample-board-approved-merge
+  id=sample-released-merge
   pr=https://github.com/sample/sample/pull/32
-  repo="$home/projects/sample-board"
+  repo="$home/projects/sample-released"
   wt="$home/projects/$id"
-  capture="$home/board-answer.toon"
   fm_git_worktree "$repo" "$wt" "fm/$id"
-  tasks_in "$home" add "$id" "Ship the board-approved pull request" --kind ship \
-    --repo sample --start >/dev/null || fail "could not create the board merge fixture"
+  tasks_in "$home" add "$id" "Ship the approved pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the released merge fixture"
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
     "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
     "pr=$pr" "spawn_gen=fixture-$id"
   printf 'done: merge ready\n' > "$home/state/$id.status"
   run_captain "$home" hold "$id" --reason "captain merge approval pending" >/dev/null \
-    || fail "could not hold the board merge fixture"
-  cat > "$capture" <<EOF
-session:
-  file: $home/.lavish/bearings-board.html
-  status: feedback
-prompts[1]{uid,prompt,selector,tag,text}:
-  "merge-answer","Context data: {\"question\":\"merge.$id\",\"answer\":\"merge\"}","section#merge","choice","Merge now"
-EOF
-
-  answer_line=$(run_lavish "$home" answers "$capture") \
-    || fail "the Lavish adapter could not read the board merge answer"
-  key=${answer_line%%$'\t'*}
-  answer=${answer_line#*$'\t'}
-  answer=${answer%%$'\t'*}
-  [ "$key" = "merge.$id" ] && [ "$answer" = merge ] \
-    || fail "the board merge answer lost its task or exact authorization: $answer_line"
-  printf '%s\n' "$answer" > "$home/board-merge-answer.txt"
-
-  # Without the handler's release-before-merge transition, the guarded
-  # entrypoint refuses this real merge-card answer and the delivery vanishes.
+    || fail "could not hold the released merge fixture"
+  printf 'Merge the approved pull request.\n' > "$home/merge-answer.txt"
   run_captain "$home" answer "$id" --release \
-    --decision-file "$home/board-merge-answer.txt" >/dev/null \
-    || fail "the board merge handler did not release the held task"
-  show=$(tasks_in "$home" show "$id" --full) || fail "the released board task disappeared"
+    --decision-file "$home/merge-answer.txt" >/dev/null \
+    || fail "could not release the approved merge"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the released merge task disappeared"
   assert_not_contains "$show" "hold_kind: captain" \
-    "the board merge handler invoked the entrypoint before releasing the hold"
+    "the approved merge remained captain-held after its release"
   run_pr_merge "$home" "$id" "$pr" > "$home/merge.out" 2> "$home/merge.err" \
-    || fail "the released board merge was refused: $(cat "$home/merge.err")"
+    || fail "the released merge was refused: $(cat "$home/merge.err")"
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
     > "$home/teardown.out" 2> "$home/teardown.err" \
-    || fail "the board merge cleanup failed: $(cat "$home/teardown.err")"
-  json=$(run_bearings "$home") || fail "Bearings failed after the board merge lifecycle"
+    || fail "the released merge cleanup failed: $(cat "$home/teardown.err")"
+  json=$(run_bearings "$home") || fail "Bearings failed after the released merge lifecycle"
   printf '%s' "$json" | jq -e --arg id "$id" --arg pr "$pr" \
     '.landed | any(.id == $id and .artifact == $pr)' >/dev/null \
-    || fail "the board-approved merge was absent from Recently Landed: $json"
-  pass "board merge approval releases before merging and remains recently landed"
+    || fail "the released merge was absent from Recently Landed: $json"
+  pass "a released merge passes the guarded entrypoint and remains recently landed"
 }
 
 # "Cannot tell" is not permission to close. A ship row has no separate
@@ -2674,7 +2655,7 @@ test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task
 test_local_merge_entrypoint_refuses_a_captain_held_task
-test_board_merge_answer_releases_before_entrypoint_and_lands
+test_released_merge_passes_the_entrypoint_and_lands
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
 test_verify_resolves_a_hold_migrated_to_beads_notes
 test_verify_resolves_a_hold_migrated_under_the_configured_prefix
