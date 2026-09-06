@@ -5,9 +5,11 @@
 # CONTRACT (this header is the one owner of the store's format).
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
-#     "verdict":"routine"|"captain","summary":"...","silent":true|false,
-#     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
-#     or status provenance remain valid and are treated as visible.
+#     "verdict":"routine"|"captain"|"firstmate-action","summary":"...",
+#     "silent":true|false,"statusEndpoint":N,"statusIdent":"..."}.
+#     A wake-linked firstmate-action row carries `wake_seq`:N. Legacy rows
+#     without `silent` or status provenance remain valid and are treated as
+#     visible, including wake-linked rows with `wake_seq` but no provenance.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted by any
@@ -96,8 +98,9 @@
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
 #     field is true, and mark those leading routine rows read. Stop before the
-#     first captain row because only Pi's sequence-keyed visible entry may
-#     acknowledge that row. Prints nothing when nothing replayable is unread.
+#     first captain or handoff-eligible firstmate-action row because Pi's
+#     sequence-keyed visible or hidden handoff must acknowledge those rows.
+#     Prints nothing when nothing replayable is unread.
 #     Run it only when the session holds the lock (fm-session-start.sh owns the
 #     call site).
 set -eu
@@ -199,6 +202,17 @@ last_seq() {
           and (.silent | type) == "boolean"
           and ((.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint <= 9007199254740991 and .statusEndpoint == (.statusEndpoint | floor))
           and ((.statusIdent | type) == "string" and (.statusIdent | test("[\\t\\n]") | not))
+        )
+        or (
+          keys == ["epoch", "seq", "silent", "summary", "task", "verdict", "wake", "wake_seq"]
+          and (.silent | type) == "boolean"
+          and .verdict == "firstmate-action"
+          and ((.wake_seq | type) == "number" and .wake_seq >= 1 and .wake_seq <= 9007199254740991 and .wake_seq == (.wake_seq | floor))
+        )
+        or (
+          keys == ["epoch", "seq", "summary", "task", "verdict", "wake", "wake_seq"]
+          and .verdict == "firstmate-action"
+          and ((.wake_seq | type) == "number" and .wake_seq >= 1 and .wake_seq <= 9007199254740991 and .wake_seq == (.wake_seq | floor))
         )
         or (
           keys == ["epoch", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake", "wake_seq"]
@@ -1026,9 +1040,11 @@ case "$CMD" in
     UNREAD=$(print_unread)
     if [ -n "$UNREAD" ]; then
       REPLAYABLE=$(printf '%s\n' "$UNREAD" | jq -sc '
-        map(.verdict) as $verdicts
-        | ($verdicts | index("captain")) as $captain
-        | .[0:($captain // length)][]
+        . as $rows
+        | ($rows | to_entries
+           | map(select(.value.verdict == "captain" or (.value.verdict == "firstmate-action" and .value.wake_seq != null)))
+           | .[0].key) as $barrier
+        | $rows[0:($barrier // length)][]
       ')
       VISIBLE=$(printf '%s\n' "$REPLAYABLE" | jq -c 'select(.silent != true)')
       if [ -n "$VISIBLE" ]; then

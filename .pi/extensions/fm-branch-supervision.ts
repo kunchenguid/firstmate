@@ -209,6 +209,7 @@ type OutcomeRow = {
   verdict: Verdict;
   summary: string;
   silent: boolean;
+  wakeSeq?: string;
 };
 type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
 type ProviderRecovery = {
@@ -515,12 +516,17 @@ function parseOutcomeRow(value: unknown): OutcomeRow | null {
   const row = value as Record<string, unknown>;
   if (typeof row.seq !== "number" || !Number.isSafeInteger(row.seq) || row.seq < 1) return null;
   if (typeof row.task !== "string" || !row.task) return null;
-  if (row.verdict !== "routine" && row.verdict !== "captain") return null;
+  if (row.verdict !== "routine" && row.verdict !== "captain" && row.verdict !== "firstmate-action") return null;
   if (typeof row.summary !== "string" || !row.summary) return null;
   if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
+  let wakeSeq: string | undefined;
+  if (row.wake_seq !== undefined) {
+    if (row.verdict !== "firstmate-action" || typeof row.wake_seq !== "number" || !Number.isSafeInteger(row.wake_seq) || row.wake_seq < 1) return null;
+    wakeSeq = String(row.wake_seq);
+  }
   const silent = row.silent === true;
   if (silent && row.verdict !== "routine") return null;
-  return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent };
+  return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent, ...(wakeSeq ? { wakeSeq } : {}) };
 }
 
 function parseVisibleOutcomeRecord(value: unknown): VisibleOutcomeRecord | null {
@@ -1034,6 +1040,7 @@ export default function (pi: ExtensionAPI) {
       if (!runOutcomeScript(["processed-init"]).ok) return false;
       processedInitializedGeneration = expectedGeneration;
     }
+    activatePendingActionDeliveries(expectedGeneration);
     const unread = runOutcomeScript(["unread"]);
     if (!unread.ok) return false;
     if (unread.stdout) {
@@ -1048,6 +1055,16 @@ export default function (pi: ExtensionAPI) {
         if (!row || !generationOwnsLock(expectedGeneration)) return false;
         if (row.verdict === "captain") {
           if (!ensureVisibleCaptainOutcome(row)) return false;
+        } else if (row.verdict === "firstmate-action") {
+          const actionStatus = runOutcomeScript(["action-status", "--seq", String(row.seq)]);
+          if (!actionStatus.ok) return false;
+          if (actionStatus.stdout === "none" && row.wakeSeq === undefined) {
+            deliverRoutineOutcome(row);
+          } else if (actionStatus.stdout === "started") {
+            if (!runOutcomeScript(["mark-read", "--through", String(row.seq)]).ok) return false;
+            continue;
+          } else if (actionStatus.stdout === "pending") return true;
+          else return false;
         } else if (row.verdict !== "routine") {
           deliverRoutineOutcome(row);
         }
@@ -1121,19 +1138,20 @@ export default function (pi: ExtensionAPI) {
   function activatePendingActionDeliveries(expectedGeneration: number): void {
     if (rehydratedActionGeneration === expectedGeneration) return;
     if (!rehydratePendingActionDeliveries(expectedGeneration)) return;
-    rehydratedActionGeneration = expectedGeneration;
     const acknowledgedWakeSeqs = [...new Set(
       [...pendingActionDeliveries.values()]
         .filter((pending) => pending.generation === expectedGeneration && wakeRowsAcknowledged([pending.wakeSeq]))
         .map((pending) => pending.wakeSeq),
     )];
-    if (acknowledgedWakeSeqs.length > 0) deliverPendingActionDeliveries(expectedGeneration, acknowledgedWakeSeqs);
+    if (acknowledgedWakeSeqs.length === 0 || deliverPendingActionDeliveries(expectedGeneration, acknowledgedWakeSeqs)) {
+      rehydratedActionGeneration = expectedGeneration;
+    }
   }
 
   function deliverPendingActionDeliveries(
     expectedGeneration: number,
     eligibleWakeSeqs: readonly string[],
-  ): void {
+  ): boolean {
     const eligible = new Set(
       eligibleWakeSeqs
         .map((wakeSeq) => canonicalWakeSequence(wakeSeq))
@@ -1141,11 +1159,12 @@ export default function (pi: ExtensionAPI) {
     );
     for (const [seq, pending] of pendingActionDeliveries) {
       if (pending.generation !== expectedGeneration || !eligible.has(pending.wakeSeq)) continue;
-      if (!actingAsOwner(expectedGeneration)) return;
+      if (!actingAsOwner(expectedGeneration)) return false;
       const status = runOutcomeScript(["action-status", "--seq", seq]);
-      if (!status.ok) continue;
+      if (!status.ok) return false;
       if (status.stdout === "started") {
         if (runOutcomeScript(["mark-read", "--through", seq]).ok) pendingActionDeliveries.delete(seq);
+        else return false;
         continue;
       }
       if (status.stdout !== "pending") continue;
@@ -1156,10 +1175,15 @@ export default function (pi: ExtensionAPI) {
         details: { outcomeSeq: seq, wakeSeq: pending.wakeSeq, verdict: "firstmate-action" },
       };
       try {
-        if (!actingAsOwner(expectedGeneration)) return;
+        if (!actingAsOwner(expectedGeneration)) return false;
         pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
-      } catch {}
+      } catch (error) {
+        console.error(`Firstmate supervision: hidden action delivery failed for seq ${seq}: ${error instanceof Error ? error.message : String(error)}`);
+        if (rehydratedActionGeneration === expectedGeneration) rehydratedActionGeneration = -1;
+        return false;
+      }
     }
+    return true;
   }
 
   function createReportTool(toolGeneration: number): ToolDefinition {

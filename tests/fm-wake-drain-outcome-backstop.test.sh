@@ -328,6 +328,40 @@ test_missing_index_self_heals_on_first_drain() {
   pass "a missing outcome index self-heals on the first drain and suppresses its handled status"
 }
 
+test_legacy_action_store_rebuilds_without_replaying_the_presentation_cursor() {
+  local dir state first_out second_out cursor
+  dir=$(make_case legacy-action-store)
+  state="$dir/state"
+  first_out="$dir/first.out"
+  second_out="$dir/second.out"
+  cursor="$state/.status-presentation-cursor"
+
+  printf 'note: already presented before the outcome format changed\n' > "$state/legacy-action.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$first_out" \
+    || fail "fixture drain failed while establishing the presentation cursor"
+  grep -F 'already presented before the outcome format changed' "$first_out" >/dev/null \
+    || fail "fixture drain did not present the status line"
+  awk -F '\t' 'BEGIN { OFS="\t" } { print $1, $2, $3 }' "$cursor" > "$cursor.legacy"
+  mv "$cursor.legacy" "$cursor"
+
+  printf '%s\n' \
+    '{"seq":1,"epoch":1,"task":"legacy-action","wake":"signal: legacy-action.status","verdict":"firstmate-action","summary":"handled before status provenance","silent":false,"wake_seq":41}' \
+    > "$state/branch-outcomes.jsonl"
+  printf '1\n' > "$state/.branch-outcomes-cursor"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second_out" \
+    || fail "drain failed while rebuilding indexes from a legacy firstmate-action store"
+  if grep -F 'STATUS OUTCOME BACKSTOP SKIPPED:' "$second_out" >/dev/null; then
+    fail "legacy firstmate-action history disabled the drain backstop: $(cat "$second_out")"
+  fi
+  if grep -F 'already presented before the outcome format changed' "$second_out" >/dev/null; then
+    fail "the compatible presentation-cursor format replayed an already-presented status: $(cat "$second_out")"
+  fi
+  [ -f "$state/.branch-outcome-index-ready" ] \
+    || fail "drain did not rebuild the bounded outcome indexes from legacy action history"
+  pass "legacy action history rebuilds the backstop without replaying an older presentation-cursor format"
+}
+
 test_uncovered_event_surfaces_on_first_drain_without_index() {
   local dir state out body
   dir=$(make_case index-selfheal-uncovered)
@@ -516,6 +550,7 @@ test_output_failure_does_not_commit_the_backstop_receipt
 test_receipt_commit_failure_repeats_the_already_presented_backstop
 test_rejected_decision_line_surfaces_once_through_backstop
 test_missing_index_self_heals_on_first_drain
+test_legacy_action_store_rebuilds_without_replaying_the_presentation_cursor
 test_uncovered_event_surfaces_on_first_drain_without_index
 test_malformed_outcome_store_fails_closed_without_pi_advice
 test_held_lock_mode_rejects_an_unlocked_caller

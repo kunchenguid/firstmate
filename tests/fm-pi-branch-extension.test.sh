@@ -927,6 +927,340 @@ EOF
   pass "a captain outcome reaches main's model as one typed, sequence-keyed processing request while routine outcomes stay store-only"
 }
 
+test_firstmate_action_startup_recovery_hands_off_legacy_row() {
+  local repo home out status
+  repo="$TMP_ROOT/action-startup-root"
+  home="$TMP_ROOT/action-startup-home"
+  mkdir -p "$home/state/branch-action" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, settle, sentToMain, outcomeScript, defaultSessionCtx, realRoot, home }; })()`);
+const { fire, settle, sentToMain, outcomeScript, defaultSessionCtx, realRoot, home } = globalThis.__t;
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+
+const state = `${home}/state`;
+writeFileSync(`${state}/.lock`, `${process.ppid}\n`);
+writeFileSync(`${state}/.wake-queue`, "");
+writeFileSync(
+  `${state}/branch-outcomes.jsonl`,
+  `${JSON.stringify({
+    seq: 1,
+    epoch: 1,
+    task: "legacy-action",
+    wake: "signal: legacy-action",
+    verdict: "firstmate-action",
+    summary: "authorized action",
+    silent: false,
+    wake_seq: 41,
+  })}\n`,
+);
+writeFileSync(`${state}/.branch-outcomes-cursor`, "0\n");
+writeFileSync(
+  `${state}/branch-action/wake-41.json`,
+  `${JSON.stringify({
+    version: "fm-branch-action-v1",
+    wake_seq: 41,
+    outcome_seq: 1,
+    state: "pending",
+    task: "legacy-action",
+    verdict: "firstmate-action",
+    summary: "authorized action",
+    wake: "signal: legacy-action",
+    silent: false,
+  })}\n`,
+);
+
+const replay = spawnSync("bash", [`${realRoot}/bin/fm-branch-outcome.sh`, "startup-replay"], {
+  encoding: "utf8",
+  env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state },
+});
+if (replay.status !== 0) throw new Error(`startup replay failed: ${replay.stderr}`);
+if (replay.stdout !== "") throw new Error(`startup replay printed or consumed a legacy action: ${replay.stdout}`);
+if (readFileSync(`${state}/.branch-outcomes-cursor`, "utf8").trim() !== "0") {
+  throw new Error("startup replay advanced the cursor before the hidden action handoff started");
+}
+
+fire("session_start", {}, defaultSessionCtx);
+await settle(() => sentToMain.length === 1, "legacy action startup handoff");
+const delivery = sentToMain[0];
+if (delivery.message.customType !== "fm-branch-merge" || delivery.message.display !== false) {
+  throw new Error(`legacy action was not delivered as one hidden merge message: ${JSON.stringify(delivery)}`);
+}
+if (delivery.options.triggerTurn !== true || delivery.options.deliverAs !== "followUp") {
+  throw new Error(`legacy action did not open one hidden follow-up turn: ${JSON.stringify(delivery.options)}`);
+}
+if (delivery.message.details?.outcomeSeq !== "1" || delivery.message.details?.wakeSeq !== "41" || delivery.message.details?.verdict !== "firstmate-action") {
+  throw new Error(`legacy action delivery lost its durable identity: ${JSON.stringify(delivery.message.details)}`);
+}
+if (!delivery.message.content.includes("Perform that action now, then report the result.")) {
+  throw new Error(`legacy action delivery lost its action instruction: ${delivery.message.content}`);
+}
+await settle(() => outcomeScript(["action-status", "--seq", "1"]) === "started", "legacy action start marker");
+if (outcomeScript(["unread"]) !== "") throw new Error("startup handoff left the legacy action unread");
+if (readFileSync(`${state}/.branch-outcomes-cursor`, "utf8").trim() !== "1") {
+  throw new Error("startup handoff did not advance the cursor after the hidden turn started");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "legacy firstmate-action startup recovery must use the hidden handoff: $out"
+  [ -z "$out" ] || fail "legacy firstmate-action startup recovery printed output: $out"
+  pass "legacy firstmate-action startup recovery uses one hidden handoff before advancing the cursor"
+}
+
+test_pending_firstmate_action_blocks_later_outcome_reconciliation() {
+  local repo home out status
+  repo="$TMP_ROOT/action-barrier-root"
+  home="$TMP_ROOT/action-barrier-home"
+  mkdir -p "$home/state/branch-action" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, settle, sentToMain, outcomeScript, defaultSessionCtx, mainEntries, home }; })()`);
+const { fire, settle, sentToMain, outcomeScript, defaultSessionCtx, mainEntries, home } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+const state = `${home}/state`;
+writeFileSync(`${state}/.lock`, `${process.ppid}\n`);
+writeFileSync(`${state}/.wake-queue`, "");
+writeFileSync(
+  `${state}/branch-outcomes.jsonl`,
+  `${JSON.stringify({
+    seq: 1,
+    epoch: 1,
+    task: "legacy-action",
+    wake: "signal: legacy-action",
+    verdict: "firstmate-action",
+    summary: "authorized action",
+    silent: false,
+    wake_seq: 41,
+  })}\n${JSON.stringify({
+    seq: 2,
+    epoch: 2,
+    task: "later-captain",
+    wake: "signal: later-captain",
+    verdict: "captain",
+    summary: "must wait behind action",
+    silent: false,
+  })}\n`,
+);
+writeFileSync(`${state}/.branch-outcomes-cursor`, "0\n");
+writeFileSync(
+  `${state}/branch-action/wake-41.json`,
+  `${JSON.stringify({
+    version: "fm-branch-action-v1",
+    wake_seq: 41,
+    outcome_seq: 1,
+    state: "pending",
+    task: "legacy-action",
+    verdict: "firstmate-action",
+    summary: "authorized action",
+    wake: "signal: legacy-action",
+    silent: false,
+  })}\n`,
+);
+
+globalThis.__fmAutoStartMainMessage = false;
+fire("session_start", {}, defaultSessionCtx);
+await settle(() => sentToMain.some((sent) => sent.message.details?.verdict === "firstmate-action"), "pending action handoff");
+if (readFileSync(`${state}/.branch-outcomes-cursor`, "utf8").trim() !== "0") {
+  throw new Error("reconciliation crossed a pending firstmate-action barrier");
+}
+if (mainEntries.some((entry) => entry.data?.seq === 2)) {
+  throw new Error("reconciliation presented a later captain outcome before the action started");
+}
+if (!outcomeScript(["unread"]).includes('"seq":2')) {
+  throw new Error("the later captain outcome was not kept unread behind the action");
+}
+if (outcomeScript(["action-status", "--seq", "1"]) !== "pending") {
+  throw new Error("the handoff started before its message_end boundary");
+}
+
+const actionDeliveries = sentToMain.filter((sent) => sent.message.details?.verdict === "firstmate-action");
+if (actionDeliveries.length !== 1) {
+  throw new Error(`pending action was handed off ${actionDeliveries.length} times: ${JSON.stringify(sentToMain)}`);
+}
+const delivery = actionDeliveries[0];
+fire("message_end", {
+  message: {
+    role: "custom",
+    customType: delivery.message.customType,
+    content: delivery.message.content,
+    display: delivery.message.display,
+    details: delivery.message.details,
+  },
+});
+await settle(() => outcomeScript(["action-status", "--seq", "1"]) === "started", "action start after barrier");
+if (readFileSync(`${state}/.branch-outcomes-cursor`, "utf8").trim() !== "1") {
+  throw new Error("starting the hidden action did not acknowledge only that action");
+}
+if (!outcomeScript(["unread"]).includes('"seq":2')) {
+  throw new Error("the later captain outcome was skipped when the action started");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "pending firstmate-action must block later reconciliation: $out"
+  [ -z "$out" ] || fail "pending firstmate-action barrier regression printed output: $out"
+  pass "pending firstmate-action blocks later reconciliation until its handoff starts"
+}
+
+test_legacy_action_without_wake_seq_replays_visibly_without_migration() {
+  local repo home out status
+  repo="$TMP_ROOT/action-legacy-no-wake-root"
+  home="$TMP_ROOT/action-legacy-no-wake-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, sentToMain, outcomeScript, defaultSessionCtx, home, realRoot }; })()`);
+const { fire, sentToMain, outcomeScript, defaultSessionCtx, home, realRoot } = globalThis.__t;
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+
+const state = `${home}/state`;
+writeFileSync(`${state}/.lock`, `${process.ppid}\n`);
+writeFileSync(
+  `${state}/branch-outcomes.jsonl`,
+  `${JSON.stringify({
+    seq: 1,
+    epoch: 1,
+    task: "legacy-action",
+    wake: "signal: legacy-action",
+    verdict: "firstmate-action",
+    summary: "legacy visible action",
+  })}\n`,
+);
+writeFileSync(`${state}/.branch-outcomes-cursor`, "0\n");
+writeFileSync(`${state}/legacy-action.meta`, "kind=crew\n");
+const storeBefore = readFileSync(`${state}/branch-outcomes.jsonl`, "utf8");
+
+const replay = spawnSync("bash", [`${realRoot}/bin/fm-branch-outcome.sh`, "startup-replay"], {
+  encoding: "utf8",
+  env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state },
+});
+if (replay.status !== 0) throw new Error(`legacy startup replay failed: ${replay.stderr}`);
+if (!replay.stdout.includes("BRANCH OUTCOMES") || !replay.stdout.includes("legacy visible action")) {
+  throw new Error(`legacy no-wake action was not visibly replayed: ${replay.stdout}`);
+}
+if (readFileSync(`${state}/.branch-outcomes-cursor`, "utf8").trim() !== "1") {
+  throw new Error("legacy no-wake startup replay did not advance its visible row");
+}
+if (readFileSync(`${state}/branch-outcomes.jsonl`, "utf8") !== storeBefore) {
+  throw new Error("legacy no-wake startup replay rewrote the outcome store");
+}
+if (existsSync(`${state}/branch-action/wake-1.json`) || existsSync(`${state}/branch-action/outcome-1.json`)) {
+  throw new Error("legacy no-wake startup replay created an action marker");
+}
+
+writeFileSync(`${state}/.branch-outcomes-cursor`, "0\n");
+fire("session_start", {}, defaultSessionCtx);
+const visible = sentToMain.filter((sent) => sent.message.customType === "fm-branch-merge");
+if (visible.length !== 1 || visible[0].message.display !== true || !visible[0].message.content.includes("legacy visible action")) {
+  throw new Error(`legacy no-wake reconciliation was not a visible delivery: ${JSON.stringify(sentToMain)}`);
+}
+if (outcomeScript(["unread"]) !== "") throw new Error("legacy no-wake reconciliation left the row unread");
+if (readFileSync(`${state}/.branch-outcomes-cursor`, "utf8").trim() !== "1") {
+  throw new Error("legacy no-wake reconciliation did not acknowledge the visible row");
+}
+if (readFileSync(`${state}/branch-outcomes.jsonl`, "utf8") !== storeBefore) {
+  throw new Error("legacy no-wake reconciliation rewrote the outcome store");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "legacy firstmate-action without wake_seq must replay visibly: $out"
+  [ -z "$out" ] || fail "legacy no-wake replay regression printed output: $out"
+  pass "legacy firstmate-action without wake_seq replays visibly without migration"
+}
+
+test_pending_action_send_failure_retries_on_later_reconciliation() {
+  local repo home out status
+  repo="$TMP_ROOT/action-send-failure-root"
+  home="$TMP_ROOT/action-send-failure-home"
+  mkdir -p "$home/state/branch-action" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, settle, sentToMain, outcomeScript, defaultSessionCtx, home }; })()`);
+const { fire, settle, sentToMain, outcomeScript, defaultSessionCtx, home } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+const state = `${home}/state`;
+writeFileSync(`${state}/.lock`, `${process.ppid}\n`);
+writeFileSync(`${state}/.wake-queue`, "");
+writeFileSync(
+  `${state}/branch-outcomes.jsonl`,
+  `${JSON.stringify({
+    seq: 1,
+    epoch: 1,
+    task: "retry-action",
+    wake: "signal: retry-action",
+    verdict: "firstmate-action",
+    summary: "retryable authorized action",
+    silent: false,
+    wake_seq: 41,
+  })}\n`,
+);
+writeFileSync(`${state}/.branch-outcomes-cursor`, "0\n");
+writeFileSync(
+  `${state}/branch-action/wake-41.json`,
+  `${JSON.stringify({
+    version: "fm-branch-action-v1",
+    wake_seq: 41,
+    outcome_seq: 1,
+    state: "pending",
+    task: "retry-action",
+    verdict: "firstmate-action",
+    summary: "retryable authorized action",
+    wake: "signal: retry-action",
+    silent: false,
+  })}\n`,
+);
+
+globalThis.__fmSendMessageError = "synthetic send failure";
+fire("session_start", {}, defaultSessionCtx);
+if (sentToMain.length !== 0) throw new Error("the failed hidden send was recorded as delivered");
+if (outcomeScript(["action-status", "--seq", "1"]) !== "pending") {
+  throw new Error("the failed hidden send changed the action marker");
+}
+if (readFileSync(`${state}/.branch-outcomes-cursor`, "utf8").trim() !== "0") {
+  throw new Error("the failed hidden send advanced the outcome cursor");
+}
+if (!outcomeScript(["unread"]).includes('"seq":1')) throw new Error("the failed hidden send hid the action outcome");
+
+globalThis.__fmSendMessageError = undefined;
+fire("turn_end", {}, defaultSessionCtx);
+await settle(() => sentToMain.some((sent) => sent.message.details?.verdict === "firstmate-action"), "retried action handoff");
+await settle(() => outcomeScript(["action-status", "--seq", "1"]) === "started", "retried action start marker");
+if (sentToMain.filter((sent) => sent.message.details?.verdict === "firstmate-action").length !== 1) {
+  throw new Error(`retry delivered the action an unexpected number of times: ${JSON.stringify(sentToMain)}`);
+}
+if (outcomeScript(["unread"]) !== "") throw new Error("retried action remained unread");
+if (readFileSync(`${state}/.branch-outcomes-cursor`, "utf8").trim() !== "1") {
+  throw new Error("retried action did not advance the cursor");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "pending action send failure must retry: $out"
+  case "$out" in
+    *"synthetic send failure"*) ;;
+    *) fail "pending action send failure was not logged: $out" ;;
+  esac
+  pass "pending action send failure remains pending and retries on reconciliation"
+}
+
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery() {
   local repo home out status
   repo="$TMP_ROOT/requested-outcome-root"
@@ -3808,18 +4142,19 @@ test_real_pi_picker_primitives_stay_bounded_and_searchable() {
   fixture="$TMP_ROOT/real-picker-primitives"
   mkdir -p "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/lib/fm-branch-model-picker.ts"
-  ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$package_dir/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
   original_dir=$PWD
   cd "$fixture" || fail "could not enter the Pi picker primitives fixture"
-  LIB="$fixture/lib/fm-branch-model-picker.ts" PI_VERSION_FILE="$package_dir/package.json" \
+  LIB="$fixture/lib/fm-branch-model-picker.ts" PI_VERSION_FILE="$package_dir/package.json" PI_PACKAGE_DIR="$package_dir" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 import { readFileSync } from "node:fs";
 
 const version = JSON.parse(readFileSync(process.env.PI_VERSION_FILE, "utf8")).version;
 const { Input, SelectList, fuzzyFilter } = await import("@earendil-works/pi-tui");
-const { DynamicBorder } = await import("@earendil-works/pi-coding-agent");
+const { DynamicBorder } = await import(
+  pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/modes/interactive/components/dynamic-border.js`).href
+);
 for (const [name, value] of [
   ["Input", Input],
   ["SelectList", SelectList],
@@ -3894,18 +4229,25 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
     return
   fi
   fixture="$TMP_ROOT/stock-render-consumers"
-  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/node_modules/@earendil-works"
-  cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts"
-  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
-  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/.pi/extensions/lib/fm-branch-model-picker.ts"
-  cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/fm-operational-input.ts"
-  ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  install_pi_branch_extension_fixture "$fixture"
+  # Keep the extension on the hermetic SDK fixture: the installed package's
+  # root export eagerly imports optional experimental server dependencies.
+  # The consumers below still come from the installed package, and the
+  # extension's renderers use Pi's real TUI objects for the comparison.
+  rm -rf "$fixture/node_modules/@earendil-works/pi-tui"
   ln -s "$package_dir/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
-  ln -s "$package_dir/node_modules/@earendil-works/pi-ai" "$fixture/node_modules/@earendil-works/pi-ai"
-  ln -s "$package_dir/node_modules/typebox" "$fixture/node_modules/typebox"
+  mv "$fixture/node_modules/@earendil-works/pi-coding-agent/index.js" "$fixture/node_modules/@earendil-works/pi-coding-agent/stub-index.js"
+  cat > "$fixture/node_modules/@earendil-works/pi-coding-agent/index.js" <<'JS'
+import { pathToFileURL } from "node:url";
 
-  out=$(cd "$fixture" && EXT="$fixture/.pi/extensions/fm-branch-supervision.ts" PI_PACKAGE_DIR="$package_dir" node --input-type=module 2>&1 <<'JS'
+export * from "./stub-index.js";
+const installed = await import(pathToFileURL(process.env.FM_REAL_PI_TOOL_EXECUTION).href);
+const keybindings = await import(pathToFileURL(process.env.FM_REAL_PI_KEY_HINT).href);
+export const ToolExecutionComponent = installed.ToolExecutionComponent;
+export const keyHint = keybindings.keyHint;
+JS
+
+  out=$(cd "$fixture" && EXT="$fixture/.pi/extensions/fm-branch-supervision.ts" PI_PACKAGE_DIR="$package_dir" FM_REAL_PI_TOOL_EXECUTION="$package_dir/dist/modes/interactive/components/tool-execution.js" FM_REAL_PI_KEY_HINT="$package_dir/dist/modes/interactive/components/keybinding-hints.js" node --input-type=module 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
@@ -4024,6 +4366,10 @@ JS
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
+test_firstmate_action_startup_recovery_hands_off_legacy_row
+test_pending_firstmate_action_blocks_later_outcome_reconciliation
+test_legacy_action_without_wake_seq_replays_visibly_without_migration
+test_pending_action_send_failure_retries_on_later_reconciliation
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented

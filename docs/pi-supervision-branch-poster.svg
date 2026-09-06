@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 860" width="1200" height="860" role="img" aria-labelledby="poster-title poster-desc">
   <title id="poster-title">Multi-brain agent architecture</title>
-  <desc id="poster-desc">One agent. Two branches of attention. Events are commits. A git-graph poster of one fix: routine notes merge with zero turns, and the requested outcome persists visibly before a sequence-keyed processing turn.</desc>
+  <desc id="poster-desc">One agent. Two branches of attention. Events are commits. A git-graph poster of one fix: routine notes stay turn-free, captain outcomes persist visibly before a sequence-keyed processing turn, and authorized firstmate-actions use a hidden handoff.</desc>
   <defs>
     <pattern id="poster-grid" width="36" height="36" patternUnits="userSpaceOnUse">
       <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#8CAAE6" stroke-opacity="0.06" stroke-width="1"/>
@@ -42,8 +42,8 @@
         <text x="64" y="200" fill="#FFB454" font-size="24" font-weight="700">MAIN SESSION</text>
         <text x="64" y="230" fill="#E6EDF3" opacity="0.6" font-size="16">talks with the captain</text>
         <text x="64" y="480" fill="#56C8FF" font-size="24" font-weight="700">SUPERVISION SESSION</text>
-        <text x="64" y="510" fill="#E6EDF3" opacity="0.6" font-size="16">handles the routine,</text>
-        <text x="64" y="534" fill="#E6EDF3" opacity="0.6" font-size="16">decides routine note or exact captain entry</text>
+        <text x="64" y="510" fill="#E6EDF3" opacity="0.6" font-size="16">handles eligible wakes,</text>
+        <text x="64" y="534" fill="#E6EDF3" opacity="0.6" font-size="16">reports routine, captain, or action</text>
 
         <!-- ================= CROSS-LANE ARCS (all arrowed, drawn under chips) ================= -->
         <path id="arc-cherry" d="M 620 221 C 645 300, 675 400, 700 479" fill="none" stroke="#FFB454" stroke-width="2.5" stroke-dasharray="2 8" stroke-linecap="round" opacity="0.8" marker-end="url(#ah-amber)"></path>
