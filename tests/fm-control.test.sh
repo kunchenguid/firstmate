@@ -102,8 +102,11 @@ case "${1:-}" in
           # Late-success model: the agent stops only FM_FAKE_EXIT_DELAY seconds
           # after receiving its exit command, so the stop lands after the
           # control plane's primary exit window but inside its confirm window.
+          # printf, not print: awk's default %g OFMT renders an epoch-sized
+          # sum in scientific notation, which the deadline comparison below
+          # would then never reach.
           printf '%s' "$(awk -v now="${EPOCHREALTIME:-$SECONDS}" \
-            -v d="$FM_FAKE_EXIT_DELAY" 'BEGIN{print now + d}')" > "$D/exit-deadline"
+            -v d="$FM_FAKE_EXIT_DELAY" 'BEGIN{printf "%.6f\n", now + d}')" > "$D/exit-deadline"
         else
           printf 'zsh' > "$D/command"
         fi
