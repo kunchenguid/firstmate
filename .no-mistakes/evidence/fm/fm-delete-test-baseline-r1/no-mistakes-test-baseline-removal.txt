@@ -1,0 +1,19 @@
+Firstmate no-mistakes test baseline removal — end-user configuration evidence
+Target commit: 7147fc3cfa48e43789f4426d80730b290fb0e1eb
+Base commit:   f3b7e74479d6756d94b78ce7bfdf19a7391506b1
+
+Normalized configuration consumed from target .no-mistakes.yaml:
+commands={"lint"=>"bin/fm-lint.sh"}
+commands.test=<absent>
+
+Normalized configuration from the base revision (regression comparison):
+commands={"lint"=>"bin/fm-lint.sh", "test"=>"bin/fm-test-run.sh --changed --exclude-family real-herdr-gated"}
+commands.test="bin/fm-test-run.sh --changed --exclude-family real-herdr-gated"
+
+Focused executable contract through the repository test runner:
+FM_TEST_BEGIN 2026-09-06T20:06:48Z tests/fm-nm-test-contract.test.sh family=unclassified expected_gate_skip=none
+ok - no-mistakes does not configure commands.test
+FM_TEST_END 2026-09-06T20:06:49Z tests/fm-nm-test-contract.test.sh exit=0 duration_ms=305 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=440
+FM_TEST_SUMMARY_FAMILY family=unclassified count=1 duration_ms=305 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-nm-test-contract.test.sh duration_ms=305
