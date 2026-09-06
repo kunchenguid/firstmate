@@ -215,7 +215,7 @@ fm_pending_reply_mark_delivered "$PARENT/state" "$PENDING_CORR" \
 {
   printf 'working [key=version-audit]: family --version audit complete (data/reply/report.md)\n'
   printf 'needs-decision [key=rough-cut-version]: implement --version or retire the tool\n'
-  printf 'done [corr=%s]: release chain audited\n' "$PENDING_CORR"
+  printf 'done: login refreshed; ad-racers home authenticated, healthy, and idle \342\200\224 ready for routed work [corr=%s]\n' "$PENDING_CORR"
 } >> "$REMOTE/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
   || fail "the mirrored status stream was not captured"
@@ -224,7 +224,12 @@ remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR" > "$TMP_ROOT/handle-mirror.out
   || fail "an uncorrelated status line stopped the delta: $(cat "$TMP_ROOT/handle-mirror.out")"
 assert_grep 'working [key=version-audit]' "$PARENT/state/ios.status" "an uncorrelated progress line never reached the parent stream"
 assert_grep 'needs-decision [key=rough-cut-version]' "$PARENT/state/ios.status" "a newly raised remote decision never reached the parent stream"
-assert_grep "done [corr=$PENDING_CORR]" "$PARENT/state/ios.status" "the correlated answer sharing the delta was lost"
+EXPECTED_UNICODE_REPLY=$(printf 'done: login refreshed; ad-racers home authenticated, healthy, and idle \342\200\224 ready for routed work [corr=%s]' "$PENDING_CORR")
+assert_grep "$EXPECTED_UNICODE_REPLY" "$PARENT/state/ios.status" "the UTF-8 correlated answer sharing the delta was lost"
+printf '%s\n' "$EXPECTED_UNICODE_REPLY" > "$TMP_ROOT/expected-unicode-reply"
+grep -F "$EXPECTED_UNICODE_REPLY" "$PARENT/state/ios.status" > "$TMP_ROOT/actual-unicode-reply"
+cmp -s "$TMP_ROOT/expected-unicode-reply" "$TMP_ROOT/actual-unicode-reply" \
+  || fail "the relayed UTF-8 answer did not preserve its original bytes"
 mirror_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
 assert_grep "offset=$mirror_offset" "$PARENT/state/remote-replies/ios.cursor" \
   "the cursor did not advance past an uncorrelated line"
@@ -240,6 +245,33 @@ printf '%s' "$OPEN" | grep -q '^rough-cut-version	needs-decision	' \
 [ "$(fm_pending_reply_get "$PARENT/state/pending-replies/$PENDING_CORR" phase)" = resolved ] \
   || fail "the correlated answer in the same delta did not settle its pending-reply record"
 pass "a remote mate's new decision folds open exactly as a local mate's does"
+
+# A digest-valid payload still has to be valid UTF-8 before any line can enter
+# the parent status stream. Replace the three-byte Unicode punctuation above
+# with an invalid two-byte overlong sequence plus one ASCII byte, retaining the
+# payload size while recomputing its digest so this exercises the public ingest
+# boundary rather than the transport commitment.
+MALFORMED_RESULT="$TMP_ROOT/malformed-utf8.result"
+MALFORMED_PAYLOAD="$TMP_ROOT/malformed-utf8.payload"
+malformed_boundary=$(LC_ALL=C awk '$0 == "" { print NR; exit }' "$RESULT_FOUR")
+tail -n "+$((malformed_boundary + 1))" "$RESULT_FOUR" \
+  | perl -0pe 's/\xE2\x80\x94/\xC0\xAFX/' > "$MALFORMED_PAYLOAD"
+malformed_hash=$(sha256_file "$MALFORMED_PAYLOAD")
+head -n "$malformed_boundary" "$RESULT_FOUR" \
+  | sed "s/^payload_sha256=.*/payload_sha256=$malformed_hash/" > "$TMP_ROOT/malformed-utf8.header"
+cat "$TMP_ROOT/malformed-utf8.header" "$MALFORMED_PAYLOAD" > "$MALFORMED_RESULT"
+cp "$PARENT/state/ios.status" "$TMP_ROOT/status-before-malformed-utf8"
+cp "$PARENT/state/remote-replies/ios.cursor" "$TMP_ROOT/cursor-before-malformed-utf8"
+if remote_env "$ADAPTER" ingest ios "$MALFORMED_RESULT" > "$TMP_ROOT/malformed-utf8.out" 2>&1; then
+  fail "ingest accepted a digest-valid malformed UTF-8 payload"
+fi
+assert_grep 'remote reply payload is not valid UTF-8' "$TMP_ROOT/malformed-utf8.out" \
+  "malformed UTF-8 was rejected for an unrelated reason"
+cmp -s "$TMP_ROOT/status-before-malformed-utf8" "$PARENT/state/ios.status" \
+  || fail "malformed UTF-8 changed the parent status stream"
+cmp -s "$TMP_ROOT/cursor-before-malformed-utf8" "$PARENT/state/remote-replies/ios.cursor" \
+  || fail "malformed UTF-8 changed the committed cursor"
+pass "digest-valid malformed UTF-8 is rejected without changing status or cursor state"
 
 # Ingesting the same generation again is idempotent: no duplicated lines and no
 # cursor movement, so a replay can never wedge or double-count the stream.
