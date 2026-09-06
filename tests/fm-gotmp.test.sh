@@ -88,6 +88,12 @@ SH
   # requires the marker helper even for this ordinary-task teardown fixture.
   ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
+  # fm-env-local-lib.sh: teardown sources it to decide whether an untracked
+  # .env.local is the copy firstmate seeded. Inert in this fixture, whose
+  # worktree does not exist, but a real sibling teardown requires.
+  ln -s "$ROOT/bin/fm-env-local-lib.sh" "$fake/bin/fm-env-local-lib.sh"
+  ln -s "$ROOT/bin/fm-remote-job-reap-orphans.sh" "$fake/bin/fm-remote-job-reap-orphans.sh"
+  ln -s "$ROOT/bin/fm-remote-job-lib.sh" "$fake/bin/fm-remote-job-lib.sh"
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
   # Ordinary teardown reports any final ledger outcome before removing records.
   ln -s "$ROOT/bin/fm-inactive-reconcile.sh" "$fake/bin/fm-inactive-reconcile.sh"
@@ -186,6 +192,10 @@ SH
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
   ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
+  # fm-env-local-lib.sh: teardown sources it, so this hand-built fixture needs
+  # the same real sibling make_fake_root links; without it teardown cannot even
+  # load, and that surfaces as the tasktmp-absent assertion below failing.
+  ln -s "$ROOT/bin/fm-env-local-lib.sh" "$fake/bin/fm-env-local-lib.sh"
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
   ln -s "$ROOT/bin/fm-inactive-reconcile.sh" "$fake/bin/fm-inactive-reconcile.sh"
   ln -s "$ROOT/bin/fm-parent-channel-lib.sh" "$fake/bin/fm-parent-channel-lib.sh"

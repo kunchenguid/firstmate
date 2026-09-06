@@ -205,6 +205,10 @@ Crewmates never intentionally touch your project clone; [treehouse](https://gith
 The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation and fresh-base refusal rules, including spawns from linked homes.
 Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
 
+That same acquisition gate also invokes the shared `fm-env-local-lib.sh` lifecycle for checkout-local `.env.local` files, covering fresh and reissued ship and scout worktrees on every backend because no worktree provider seeds git-ignored files.
+`bin/fm-env-local-lib.sh` is the single owner of the lifecycle and its worktree-safety decisions, including the retire phase shared with `fm-teardown.sh`; its callers' headers and `tests/fm-spawn-pool-base-freshen.test.sh` own the integration points and regression coverage.
+[`configuration.md`](configuration.md#project-local-environment-file-envlocal) is the authoritative operator contract for when the copy is seeded or retired and how tracked, unignored, unverifiable, and task-authored files are handled.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.
