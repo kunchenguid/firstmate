@@ -99,6 +99,156 @@ test_stale_watch_lock_reclaimed() {
   pass "killed watcher stale lock is reclaimed"
 }
 
+test_concurrent_identity_reclaim_keeps_one_watcher() {
+  local dir state fakebin lockdir ready release barrier foreign_pid
+  local out1 out2 pid1 pid2 i live lock_pid lock_present owners survivor
+  dir=$(make_case identity-reclaim-race)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.watch.lock"
+  ready="$dir/barrier-ready"
+  release="$dir/barrier-release"
+  out1="$dir/watch-one.out"
+  out2="$dir/watch-two.out"
+
+  sleep 30 &
+  foreign_pid=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$foreign_pid" > "$lockdir/pid"
+  printf '%s\n' "$dir" > "$lockdir/fm-home"
+  printf '%s\n' "$WATCH" > "$lockdir/watcher-path"
+  printf '%s\n' "watcher-that-is-gone" > "$lockdir/pid-identity"
+  touch "$state/.last-watcher-beat"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$LIB" "$state/.watcher-down.lock" "$ready" "$release" &
+  barrier=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || fail "reclaim race barrier did not acquire the recovery lock"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out1" &
+  pid1=$!
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
+  pid2=$!
+  i=0
+  live=2
+  while [ "$i" -lt 50 ]; do
+    live=0
+    is_live_non_zombie "$pid1" && live=$((live + 1))
+    is_live_non_zombie "$pid2" && live=$((live + 1))
+    [ "$live" -eq 1 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$live" -ne 1 ]; then
+    touch "$release"
+    kill "$pid1" "$pid2" "$foreign_pid" 2>/dev/null || true
+    wait "$pid1" "$pid2" "$foreign_pid" 2>/dev/null || true
+    wait "$barrier" 2>/dev/null || true
+    fail "overlapping identity reclaimers both stayed live"
+  fi
+
+  touch "$release"
+  wait "$barrier" || fail "reclaim race barrier failed"
+  i=0
+  lock_pid=
+  while [ "$i" -lt 50 ]; do
+    lock_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+    case "$lock_pid" in
+      "$pid1"|"$pid2") [ -s "$lockdir/pid-identity" ] && break ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  live=0
+  survivor=
+  if is_live_non_zombie "$pid1"; then
+    live=$((live + 1))
+    survivor=$pid1
+  fi
+  if is_live_non_zombie "$pid2"; then
+    live=$((live + 1))
+    survivor=$pid2
+  fi
+  lock_present=0
+  [ ! -L "$lockdir" ] || lock_present=1
+  owners=$(find "$state" -maxdepth 1 -type d -name '.watch.lock.owner.*' | wc -l | tr -d '[:space:]')
+  kill "$pid1" "$pid2" "$foreign_pid" 2>/dev/null || true
+  wait "$pid1" "$pid2" "$foreign_pid" 2>/dev/null || true
+  [ "$live" -eq 1 ] || fail "expected exactly one live watcher after concurrent reclaim, got $live"
+  [ "$lock_pid" = "$survivor" ] \
+    || fail "reclaimed lock does not name the surviving watcher (got '$lock_pid')"
+  [ "$lock_present" -eq 1 ] || fail "concurrent reclaim left no watcher lock"
+  [ "$owners" -eq 1 ] || fail "concurrent reclaim left $owners watcher lock owners"
+  pass "concurrent identity reclaim leaves one live watcher and one lock"
+}
+
+test_foreign_home_watcher_pid_is_not_a_peer() {
+  # Pid reuse across sibling firstmate homes. A watcher dies, the OS recycles
+  # its pid onto another home's fm-watch.sh, and the dead watcher's lock is
+  # still here naming that number. Liveness alone reports the stranger as our
+  # peer, so the watcher declines and the arm layer - which applies the identity
+  # rule and correctly sees no watcher - reports a cycle that ended with no
+  # actionable reason, leaving the home unsupervised. The recorded identity is
+  # the proof: it belongs to the process we started, never to whatever now
+  # holds that number.
+  local dir state fakebin out foreign_pid pid live lock_pid i
+  dir=$(make_case foreign-home-pid)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+
+  sleep 30 &
+  foreign_pid=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$foreign_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "watcher-that-is-gone" > "$state/.watch.lock/pid-identity"
+  # A FRESH beacon, so the existing stale-heartbeat branch cannot be what lets
+  # this through - only the identity rule can.
+  touch "$state/.last-watcher-beat"
+
+  # NON-VACUOUSNESS: the recorded pid really is alive, so liveness alone would
+  # report it as a peer, and its real identity really does differ from the one
+  # the lock records.
+  kill -0 "$foreign_pid" 2>/dev/null || fail "fixture's foreign watcher pid is not alive"
+  [ "$(FM_PID_IDENTITY_PID=x bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$foreign_pid")" != "watcher-that-is-gone" ] \
+    || fail "fixture's foreign pid must not carry the recorded identity"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  live=0
+  lock_pid=
+  while [ "$i" -lt 50 ]; do
+    live=0
+    is_live_non_zombie "$pid" && live=1
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ "$live" -eq 1 ] && [ "$lock_pid" != "$foreign_pid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  kill "$foreign_pid" 2>/dev/null || true
+  wait "$foreign_pid" 2>/dev/null || true
+  grep -F 'already running' "$out" >/dev/null 2>&1 \
+    && fail "a sibling home's watcher pid was reported as this home's peer"
+  [ "$live" -eq 1 ] || fail "watcher did not arm behind a recycled foreign pid"
+  [ "$lock_pid" != "$foreign_pid" ] || fail "stale watch lock pid was not replaced"
+  pass "a live pid that is not this home's recorded watcher is no peer"
+}
+
 test_live_stale_watch_lock_is_actionable() {
   local dir state fakebin out err status
   dir=$(make_case live-stale-lock)
@@ -1107,6 +1257,8 @@ test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
+test_concurrent_identity_reclaim_keeps_one_watcher
+test_foreign_home_watcher_pid_is_not_a_peer
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings

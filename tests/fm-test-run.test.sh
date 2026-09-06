@@ -58,6 +58,50 @@ test_family_selection() {
   pass "family selection returns a proper subset of the suite"
 }
 
+test_inherited_live_home_never_reaches_a_test() {
+  # A shell that exported FM_HOME (a crewmate worktree, an operator terminal)
+  # used to aim the whole suite at that real firstmate home, because every
+  # isolation helper works by INVENTING an override an inherited value wins
+  # against. Both halves of the guard are proven here: the runner scrubs the
+  # overrides for every script it launches, including the smoke and e2e scripts
+  # that never source tests/lib.sh, and tests/lib.sh refuses outright so a
+  # direct `bash tests/<x>.test.sh` cannot slip past either.
+  local probe out status
+  probe=$(fm_test_tmproot fm-test-run-inherited-home) || fail "could not create a fixture root"
+  cat > "$probe/leak.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'SEEN FM_HOME=[%s] FM_ROOT_OVERRIDE=[%s] FM_STATE_OVERRIDE=[%s]\n' \
+  "${FM_HOME:-}" "${FM_ROOT_OVERRIDE:-}" "${FM_STATE_OVERRIDE:-}"
+printf 'ok - leak probe\n'
+SH
+  chmod +x "$probe/leak.test.sh"
+
+  # NON-VACUOUSNESS: the probe really does report what it inherits, so an empty
+  # reading below is the scrub working and not a silent fixture.
+  out=$(FM_HOME=/live/home bash "$probe/leak.test.sh")
+  case "$out" in
+    *'SEEN FM_HOME=[/live/home]'*) : ;;
+    *) fail "probe cannot observe an inherited FM_HOME, fixture is vacuous: $out" ;;
+  esac
+
+  out=$(FM_HOME=/live/home FM_ROOT_OVERRIDE=/live/root FM_STATE_OVERRIDE=/live/state \
+    "$RUNNER" "$probe/leak.test.sh" 2>&1) || true
+  case "$out" in
+    *'SEEN FM_HOME=[] FM_ROOT_OVERRIDE=[] FM_STATE_OVERRIDE=[]'*) : ;;
+    *) fail "the runner leaked an inherited live home into a test: $out" ;;
+  esac
+
+  status=0
+  out=$(FM_HOME=/live/home bash "$ROOT/tests/fm-lint.test.sh" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "a direct test run inherited a live FM_HOME instead of refusing"
+  case "$out" in
+    *'FM_HOME is set'*) : ;;
+    *) fail "the refusal must name the offending variable, got: $out" ;;
+  esac
+  pass "an inherited live home is scrubbed by the runner and refused on a direct run"
+}
+
 test_single_script_selection() {
   local listed
   listed=$("$RUNNER" --list tests/fm-lint.test.sh)
@@ -1373,6 +1417,7 @@ assert len(doc["scripts"])==3
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
+test_inherited_live_home_never_reaches_a_test
 test_changed_file_selection_is_conservative
 test_changed_runner_surfaces_select_their_family
 test_changed_dependency_selection_and_unmapped_failure

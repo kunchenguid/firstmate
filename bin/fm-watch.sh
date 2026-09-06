@@ -1421,7 +1421,37 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
-if ! fm_lock_try_acquire "$WATCH_LOCK"; then
+watch_lock_held=1
+if fm_lock_try_acquire "$WATCH_LOCK"; then
+  watch_lock_held=0
+elif [ -n "${FM_LOCK_HELD_PID:-}" ] && [ -s "$WATCH_LOCK/pid-identity" ] \
+     && ! fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$FM_LOCK_HELD_PID"; then
+  # A live recorded pid is a peer only while it is still the process this home
+  # recorded. On a machine running several firstmate homes the OS readily
+  # recycles a dead watcher's pid onto a SIBLING home's fm-watch.sh, and
+  # liveness alone then reports that stranger as our peer - while the arm layer
+  # applies this same identity rule (fm_watcher_healthy), sees no watcher, and
+  # starts a child that immediately declines, ending the cycle with no
+  # actionable reason and leaving the home unsupervised. The recorded identity
+  # not matching is positive proof the holder is gone, so clear the stale lock
+  # through the recovery transition (the downtime it records is real) and take
+  # it; an absent identity proves nothing and still defers below.
+  stale_watch_pid=$FM_LOCK_HELD_PID
+  stale_watch_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
+  if fm_lock_try_acquire "$WATCH_LOCK.steal"; then
+    watch_steal_owner=${FM_LOCK_OWNER_DIR:-}
+    if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$stale_watch_pid" ] \
+      && [ "$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)" = "$stale_watch_home" ] \
+      && ! fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$stale_watch_pid" \
+      && fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime \
+      && fm_lock_try_create "$WATCH_LOCK" "$watch_steal_owner"; then
+      watch_lock_held=0
+    fi
+    fm_lock_release "$WATCH_LOCK.steal"
+  fi
+  FM_LOCK_HELD_PID=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+fi
+if [ "$watch_lock_held" -eq 1 ]; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
     if [ -e "$BEAT" ]; then

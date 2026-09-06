@@ -35,6 +35,26 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Refuse to run against a REAL firstmate home. Every isolation helper below
+# works by inventing an override, which an inherited value silently wins
+# against - wake-helpers.sh only invents FM_ROOT_OVERRIDE when none is set - so
+# a shell that exported these (a crewmate worktree, an operator terminal) aimed
+# the whole suite at that live home: real state files written, config deleted,
+# the running watcher's lock stolen. Nothing in the suite, CI, or
+# bin/fm-test-run.sh sets them for a test, so any value here is ambient and
+# unintended. Refuse loudly rather than isolate around it, because a suite that
+# quietly relocates a home the operator meant to use is its own surprise.
+for _fm_test_live_home_var in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE \
+  FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE; do
+  if [ -n "${!_fm_test_live_home_var:-}" ]; then
+    printf 'not ok - %s is set (%s); the test suite must never run against a real firstmate home. Clear it and retry, e.g. env -u %s bash %s\n' \
+      "$_fm_test_live_home_var" "${!_fm_test_live_home_var}" \
+      "$_fm_test_live_home_var" "${BASH_SOURCE[1]:-$0}" >&2
+    exit 1
+  fi
+done
+unset _fm_test_live_home_var
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

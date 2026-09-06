@@ -123,6 +123,15 @@ RUN_STARTED_MS=$(now_ms)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# Scrub the home-selecting overrides out of every test's environment. Each test
+# isolates itself by inventing these, so an inherited value silently wins and
+# aims the suite at a real firstmate home. tests/lib.sh refuses outright when it
+# sees one, but the smoke and e2e scripts here do not source it, so the runner
+# clears them for every script it launches instead. Nothing downstream sets
+# them, so there is nothing legitimate to preserve.
+unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE \
+  FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE
+
 MODE=
 LIST_ONLY=0
 LIST_SCHEDULED=0

@@ -264,6 +264,50 @@ test_matrix_cursor_reverse_video_placeholder_remnant() {
   pass "matrix: cursor's reverse-video placeholder remnant reads empty; real typed text stays pending"
 }
 
+test_matrix_cursor_busy_hint_beside_placeholder() {
+  # Real BUSY cursor-agent (Composer 2.5) captured byte-for-byte from a live
+  # tmux pane: while it works it right-aligns `ctrl+c to stop` on the composer
+  # row itself, dim (SGR 2), far to the right of the dim `Add a follow-up`
+  # placeholder. Ghost stripping removes both and leaves only the reverse-video
+  # remnant, but the UNSTRIPPED plain row the remnant is proven against then
+  # ends in the hint, so the anchored placeholder no longer matched and an
+  # empty composer read `pending`. fm-send skipped its doorbell for exactly as
+  # long as the worker stayed busy, and five steers in a row arrived only on
+  # the watcher re-ring.
+  local gap row screen plain stripped out
+  gap='                                                  '
+  row="${ESC}[48;2;33;36;40m ${ESC}[2m→ ${ESC}[0;7m${ESC}[48;2;33;36;40mA"
+  row="${row}${ESC}[0;2m${ESC}[48;2;33;36;40mdd a follow-up${ESC}[0m"
+  row="${row}${ESC}[48;2;33;36;40m${gap}${ESC}[2mctrl+c to stop${ESC}[0m"
+  # The doorbell line from earlier deliveries sits in the transcript above the
+  # composer, where it must never reach the verdict.
+  screen=$'  → Firstmate instruction waiting: list /x/y/t.inbox/*.msg and, in numeric order, read and act on each.\n\n'"$row"
+
+  # NON-VACUOUSNESS: the hint really is ghost text that leaves the row, and the
+  # reverse-video remnant really does survive - so this case cannot go quiet if
+  # either signal changes.
+  stripped=$(printf '%s' "$row" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var stripped
+  [ "$stripped" = A ] \
+    || fail "the busy composer row must strip to the reverse-video remnant 'A', got '$stripped'"
+  plain=$(printf '%s\n' "$row" | fm_composer_strip_ansi)
+  case "$plain" in *'ctrl+c to stop') : ;; *) fail "fixture lost its right-aligned busy hint" ;; esac
+
+  assert_screen "cursor busy idle composer on tmux" empty "$CAPS_TMUX" "$screen" ''''''
+  assert_screen "cursor busy idle composer on herdr" empty "$CAPS_STYLED" "$screen"
+
+  # The dangerous direction stays closed: text typed to exactly match the
+  # placeholder is uniformly bright, so it survives stripping at the full width
+  # of the input column and must still read pending beside the same hint.
+  local typed
+  typed="${ESC}[48;2;33;36;40m ${ESC}[2m→ ${ESC}[0m${ESC}[38;2;224;222;244mAdd a follow-up${ESC}[0m"
+  typed="${typed}${ESC}[48;2;33;36;40m${gap}${ESC}[2mctrl+c to stop${ESC}[0m"
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" $'transcript\n\n'"$typed")
+  [ "$out" = pending ] \
+    || fail "typed placeholder text beside the busy hint must stay pending, got '$out'"
+  pass "matrix: cursor's right-aligned busy hint no longer makes an idle composer read pending"
+}
+
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
   # Herdr draws a composer's rules with half-block glyphs (▄ above, ▀ below)
   # rather than the box-drawing family. Without treating those as edges, a bare
@@ -616,6 +660,7 @@ test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
+test_matrix_cursor_busy_hint_beside_placeholder
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
