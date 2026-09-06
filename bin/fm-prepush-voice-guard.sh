@@ -280,12 +280,18 @@ FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}https?://[^[:space:]?#]*/ses
 # dotted name cannot be split into a false match.
 #
 # Root-qualified forms require evidence of a real machine path: "~", ".", "..",
-# /Users/<name>, or /home/<name>. The root must begin at start of line or after
-# whitespace, an opening quote, or an opening bracket, and home components accept
-# spaces. A root-relative web route such as /data/api/schema.json has none of
-# that machine-path evidence and remains legitimate. The relative alternative
-# above is unchanged and catches every private-path leak in merged history.
-FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}((^|[^[:alnum:]_/.-])data/[[:alnum:]_.-]+/[[:alnum:]_./-]+|(^|[[:space:]\"'([<])(~|\.\.?|/Users/[[:alnum:]_.-][[:alnum:]_. -]*|/home/[[:alnum:]_.-][[:alnum:]_. -]*)(/[[:alnum:]_.-][[:alnum:]_. -]*)*/data/[[:alnum:]_.-]+/[[:alnum:]_./-]+)${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
+# /Users/<name>, or /home/<name>. Their opening delimiters are the prose
+# characters that can introduce a path: whitespace, an opening quote or bracket,
+# or a backtick. This fleet normally formats paths as inline code, and a backtick
+# cannot occur inside a URL, so accepting it preserves the URL boundary. Home
+# components accept spaces, while a root-relative web route such as
+# /data/api/schema.json has no machine-path evidence and remains legitimate.
+# Earlier generic-shape variants overmatched legitimate text; this literal-format
+# rule stopped those false positives, and adding an omitted prose delimiter
+# completes its input set without changing the format it recognizes. The
+# relative alternative above is unchanged and catches every private-path leak in
+# merged history.
+FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}((^|[^[:alnum:]_/.-])data/[[:alnum:]_.-]+/[[:alnum:]_./-]+|(^|[[:space:]\"'([<\`])(~|\.\.?|/Users/[[:alnum:]_.-][[:alnum:]_. -]*|/home/[[:alnum:]_.-][[:alnum:]_. -]*)(/[[:alnum:]_.-][[:alnum:]_. -]*)*/data/[[:alnum:]_.-]+/[[:alnum:]_./-]+)${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
 
 # The local Lavish review artifact, which is the other private work-document
 # shape this repo produces. Keyed on the dot-prefixed directory path so the 59
