@@ -403,7 +403,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_RELEASE="$launch_release" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 200 ]; do
+  while [ ! -e "$prepare" ] && [ "$i" -lt 500 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done

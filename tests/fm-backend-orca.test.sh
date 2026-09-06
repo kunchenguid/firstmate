@@ -634,6 +634,90 @@ test_spawn_refuses_orca_nonisolated_worktree() {
   pass "fm-spawn.sh --backend orca: refuses non-isolated worktrees and closes implicit terminals"
 }
 
+test_spawn_preserves_orca_common_dir_mismatch() {
+  local proj foreign wt data state config id out status before
+  id="orcamixedfamilyz5"
+  proj="$TMP_ROOT/mixed-orca-project"
+  foreign="$TMP_ROOT/mixed-orca-foreign"
+  wt="$TMP_ROOT/mixed-orca-wt"
+  data="$TMP_ROOT/mixed-orca-data"
+  state="$TMP_ROOT/mixed-orca-state"
+  config="$TMP_ROOT/mixed-orca-config"
+  fm_git_init_commit "$proj"
+  fm_git_worktree "$foreign" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  write_spawn_brief "$data" "$id"
+  touch "$state/.last-watcher-beat"
+  before=$(git -C "$wt" rev-parse HEAD)
+  orca_case mixed-family-spawn
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-mixed-family"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-mixed-family","path":"%s"},"terminal":{"handle":"term-mixed-family"}}}\n' "$wt" > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  expect_code 1 "$status" "fm-spawn.sh --backend orca should refuse a foreign clone-family worktree"
+  assert_contains "$out" "Git common-directory mismatch after orca worktree create" \
+    "Orca spawn did not use the shared clone-family guard"
+  assert_contains "$out" "Orca worktree id 'wt-mixed-family', terminal 'term-mixed-family'" \
+    "Orca mismatch refusal did not retain precise allocation identifiers"
+  assert_contains "$out" "preserved in place" \
+    "Orca mismatch refusal did not explain that the allocation was retained"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$before" ] \
+    || fail "Orca mismatch refusal changed the allocated worktree HEAD"
+  assert_absent "$state/$id.meta" "Orca mismatch refusal must not publish launched-task metadata"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send' \
+    "Orca mismatch refusal sent a worker launch command"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "Orca mismatch refusal closed the preserved endpoint"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "Orca mismatch refusal used the provider's forced removal path"
+  pass "fm-spawn.sh --backend orca: preserves a foreign clone-family allocation before worker launch"
+}
+
+test_spawn_preserves_terminal_less_orca_common_dir_mismatch() {
+  local proj foreign wt data state config id out status before
+  id="orcamixednotermz6"
+  proj="$TMP_ROOT/mixed-orca-no-terminal-project"
+  foreign="$TMP_ROOT/mixed-orca-no-terminal-foreign"
+  wt="$TMP_ROOT/mixed-orca-no-terminal-wt"
+  data="$TMP_ROOT/mixed-orca-no-terminal-data"
+  state="$TMP_ROOT/mixed-orca-no-terminal-state"
+  config="$TMP_ROOT/mixed-orca-no-terminal-config"
+  fm_git_init_commit "$proj"
+  fm_git_worktree "$foreign" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  write_spawn_brief "$data" "$id"
+  touch "$state/.last-watcher-beat"
+  before=$(git -C "$wt" rev-parse HEAD)
+  orca_case mixed-family-no-terminal-spawn
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-mixed-no-terminal"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-mixed-no-terminal","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  expect_code 1 "$status" "fm-spawn.sh --backend orca should refuse a terminal-less foreign clone-family worktree"
+  assert_contains "$out" "task 'fm-$id', Orca worktree id 'wt-mixed-no-terminal'" \
+    "terminal-less Orca mismatch refusal did not retain available allocation identifiers"
+  assert_contains "$out" "allocated local copy and any existing endpoint are preserved in place" \
+    "terminal-less Orca mismatch refusal claimed a nonexistent endpoint was preserved"
+  assert_not_contains "$out" "terminal '" \
+    "terminal-less Orca mismatch refusal invented a terminal identifier"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$before" ] \
+    || fail "terminal-less Orca mismatch refusal changed the allocated worktree HEAD"
+  assert_absent "$state/$id.meta" "terminal-less Orca mismatch refusal must not publish launched-task metadata"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal' \
+    "terminal-less Orca mismatch refusal created, launched, or closed a terminal"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "terminal-less Orca mismatch refusal used the provider's forced removal path"
+  pass "fm-spawn.sh --backend orca: preserves a terminal-less foreign allocation before worker launch"
+}
+
 test_spawn_removes_orca_worktree_when_terminal_create_fails() {
   local proj wt data state config id out status
   id="orcatermfailz8"
@@ -1354,6 +1438,8 @@ test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
+test_spawn_preserves_orca_common_dir_mismatch
+test_spawn_preserves_terminal_less_orca_common_dir_mismatch
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_spawn_releases_orca_resources_when_metadata_write_fails
