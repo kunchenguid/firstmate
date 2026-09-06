@@ -342,7 +342,7 @@ fm_nm_pid_cpu_seconds() {  # <pid>
 # Two bounded no-mistakes calls: callers must reach this once per idle window,
 # never per poll.
 fm_nm_step_progress_probe() {  # <worktree> <timeout_secs>
-  local wt=$1 timeout_secs=$2 status_out run_id step bytes pid cpu branch run_branch
+  local wt=$1 timeout_secs=$2 status_out logs_out run_id step bytes pid cpu branch run_branch
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=''
   [ -n "$branch" ] || return 1
@@ -357,10 +357,11 @@ fm_nm_step_progress_probe() {  # <worktree> <timeout_secs>
   case "$pid" in *[!0-9]*) pid='' ;; esac
   cpu=$(fm_nm_pid_cpu_seconds "$pid" 2>/dev/null || true)
   if [ -n "$run_id" ]; then
-    bytes=$(fm_nm_run "$wt" "$timeout_secs" axi logs --run "$run_id" --step "$step" --full | wc -c | tr -d '[:space:]')
+    logs_out=$(fm_nm_run_checked "$wt" "$timeout_secs" axi logs --run "$run_id" --step "$step" --full) || return 1
   else
-    bytes=$(fm_nm_run "$wt" "$timeout_secs" axi logs --step "$step" --full | wc -c | tr -d '[:space:]')
+    logs_out=$(fm_nm_run_checked "$wt" "$timeout_secs" axi logs --step "$step" --full) || return 1
   fi
-  case "$bytes" in ''|*[!0-9]*) bytes='' ;; esac
+  bytes=$(printf '%s' "$logs_out" | wc -c | tr -d '[:space:]')
+  case "$bytes" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\t%s\t%s\t%s\t%s\n' "$run_id" "$step" "$bytes" "$pid" "${cpu:-}"
 }

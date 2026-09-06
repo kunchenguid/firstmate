@@ -139,7 +139,9 @@ SH
 # leaves the escalation schedule of every pre-existing test exactly as it was.
 # A case that needs an active step points FM_FAKE_NM_STATUS at a TOON fixture
 # file and, optionally, FM_FAKE_NM_LOG at a file standing in for the current
-# step's log; the stub then answers `axi status` and `axi logs` from those.
+# step's log; the stub then answers `axi status` and `axi logs` from those,
+# with the `axi logs` answer asserting the probe's real CLI signature against
+# the fixture (--step always; --run exactly when the fixture names a run id).
 make_fake_no_mistakes() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/no-mistakes" <<'SH'
@@ -150,6 +152,25 @@ if [ "${1:-}" = axi ] && [ "${2:-}" = status ] && [ -n "${FM_FAKE_NM_STATUS:-}" 
   exit 0
 fi
 if [ "${1:-}" = axi ] && [ "${2:-}" = logs ] && [ -n "${FM_FAKE_NM_LOG:-}" ]; then
+  shift 2
+  run='' step=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --run) run=${2:-}; shift 2 ;;
+      --step) step=${2:-}; shift 2 ;;
+      --full) shift ;;
+      *) exit 1 ;;
+    esac
+  done
+  [ -n "${FM_FAKE_NM_STATUS:-}" ] || exit 1
+  expect_run=$(sed -n 's/^[[:space:]]*id:[[:space:]]*//p' "$FM_FAKE_NM_STATUS" | head -1 | tr -d '"')
+  expect_step=$(sed -n '/active_steps\[/{n;s/^[[:space:]]*//;s/,.*//;p;}' "$FM_FAKE_NM_STATUS" | head -1)
+  [ -n "$step" ] && [ "$step" = "$expect_step" ] || exit 1
+  if [ -n "$expect_run" ]; then
+    [ "$run" = "$expect_run" ] || exit 1
+  else
+    [ -z "$run" ] || exit 1
+  fi
   cat "$FM_FAKE_NM_LOG" 2>/dev/null
   exit 0
 fi
