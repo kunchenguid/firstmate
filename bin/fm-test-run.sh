@@ -610,6 +610,7 @@ tests/fm-pi-branch-live-e2e.test.sh 56
 tests/fm-pi-branch-responsiveness-live-e2e.test.sh 21
 tests/fm-pi-primary-live-e2e.test.sh 20
 tests/fm-pi-watch-extension.test.sh 42970
+tests/fm-pi-windows-shell-invocation.test.sh 5121
 tests/fm-pr-check-security.test.sh 160475
 tests/fm-procevent-quota.test.sh 1949
 tests/fm-procevent-when.test.sh 17392
@@ -2166,7 +2167,7 @@ else
 
   worker_root_mode_is_enforceable() {
     case "$(uname -s)" in
-      CYGWIN*|MINGW*|MSYS*) return 1 ;;
+      MINGW*|MSYS*) return 1 ;;
       *) return 0 ;;
     esac
   }

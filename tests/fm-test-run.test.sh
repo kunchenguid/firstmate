@@ -457,7 +457,7 @@ test_windows_posix_mode_emulation_does_not_fail_parallel_runs() {
   mkdir -p "$fakebin"
   cat >"$fakebin/uname" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' MINGW64_NT-10.0
+printf '%s\n' "${FAKE_UNAME:-MINGW64_NT-10.0}"
 SH
   cat >"$fakebin/stat" <<'SH'
 #!/usr/bin/env bash
@@ -477,8 +477,18 @@ SH
   expect_code 0 "$rc" "native-Windows POSIX-mode emulation"
   assert_contains "$out" "FM_TEST_SUMMARY total=2 failed=0" \
     "Windows mode emulation did not complete both parallel scripts"
+
+  set +e
+  out=$(cd "$repo" && PATH="$fakebin:$PATH" REAL_STAT="$real_stat" FAKE_UNAME=CYGWIN_NT-10.0 \
+    bin/fm-test-run.sh --jobs 2 \
+      tests/fm-cd-pretool-check.test.sh tests/fm-ask-user-authority.test.sh 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "Cygwin POSIX-mode enforcement"
+  assert_contains "$out" "isolation failure: worker root mode is 755, expected 0700" \
+    "Cygwin mode enforcement did not reject a non-0700 worker root"
   rm -rf "$tmp"
-  pass "native-Windows mode emulation keeps parallel test runs runnable"
+  pass "Windows emulation exempts only synthetic POSIX modes"
 }
 
 # A local verification round names the subjects it cares about. Exercise begin/end
