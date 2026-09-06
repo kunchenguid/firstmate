@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, and rovo.
 user-invocable: false
 metadata:
   internal: true
@@ -90,7 +90,8 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "kimi": "references/harness/kimi.md",
     "cursor": "references/harness/cursor.md",
     "gemini": "references/harness/gemini.md",
-    "muse": "references/harness/muse.md"
+    "muse": "references/harness/muse.md",
+    "rovo": "references/harness/rovo.md"
   }
 }
 ```
