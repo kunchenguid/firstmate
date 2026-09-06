@@ -563,18 +563,18 @@ test_sole_slot_record_still_tears_down() {
   pass "fm-teardown: a task that solely holds its slot still returns it"
 }
 
-test_endpoint_outside_recorded_slot_refuses_before_mutation() {
-  local dir id=drifted-task rc
+test_recorded_endpoint_that_changed_directory_still_tears_down() {
+  local dir id=moved-task
 
-  dir=$(make_case slot-endpoint-drift)
+  dir=$(make_case slot-endpoint-moved)
   mark_case_as_treehouse_pool "$dir"
-  mkdir -p "$dir/other-worktree"
-  # The recorded pane answers from a DIFFERENT copy: the record no longer proves
-  # this task owns the slot it names.
+  mkdir -p "$dir/other-directory"
+  # The exact recorded worker may legitimately cd outside its worktree. Its
+  # endpoint identity still owns the lifecycle; cwd alone must not brick it.
   cat > "$dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = display-message ]; then
-  printf '%s\n' '$dir/other-worktree'
+  printf '%s\n' '$dir/other-directory'
   exit 0
 fi
 printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
@@ -587,40 +587,15 @@ SH
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
 
-  set +e
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "teardown returned a slot its own endpoint contradicts"
-  assert_present "$dir/worktree/sentinel" "contradicted teardown reset the recorded slot"
-  assert_present "$dir/home/state/$id.meta" "contradicted teardown removed the task record"
-  [ ! -s "$dir/runtime.log" ] \
-    || fail "contradicted teardown reached a mutating runtime call: $(cat "$dir/runtime.log")"
-
-  # A pane sitting in a subdirectory of its own slot is ordinary drift, not a
-  # contradiction, and must still tear down.
-  dir=$(make_case slot-endpoint-subdir)
-  mkdir -p "$dir/worktree/sub"
-  cat > "$dir/fakebin/tmux" <<SH
-#!/usr/bin/env bash
-if [ "\${1:-}" = display-message ]; then
-  printf '%s\n' '$dir/worktree/sub'
-  exit 0
-fi
-printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
-printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
-printf '\n' >> "\${FM_RUNTIME_LOG:?}"
-exit 0
-SH
-  chmod +x "$dir/fakebin/tmux"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
-    || fail "teardown refused an endpoint inside its own slot: $(cat "$dir/stderr")"
-  assert_absent "$dir/home/state/$id.meta" "in-slot endpoint teardown left the task record"
+    || fail "teardown refused its recorded endpoint after it changed directory: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "moved-endpoint teardown left the task record"
+  grep -Fq "tmux <kill-window> <-t> <=firstmate:=fm-$id>" "$dir/runtime.log" \
+    || fail "moved-endpoint teardown did not stop the exact recorded worker: $(cat "$dir/runtime.log")"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "moved-endpoint teardown did not return its uncontested pool slot: $(cat "$dir/runtime.log")"
 
-  pass "fm-teardown: an endpoint outside the recorded slot refuses, while in-slot drift still tears down"
+  pass "fm-teardown: an exact recorded endpoint still tears down after changing cwd outside its worktree"
 }
 
 test_invalid_endpoint_records_refuse_before_mutation
@@ -635,4 +610,4 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
-test_endpoint_outside_recorded_slot_refuses_before_mutation
+test_recorded_endpoint_that_changed_directory_still_tears_down
