@@ -209,6 +209,83 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
   return 0
 }
 
+# Run `tasks-axi` with an optional FM_TASKS_AXI_TIMEOUT bound. A caller that
+# holds a lock across the call - the spawn commit and its preservation
+# read-back run under the per-task meta lock - sets the bound, so an
+# unresponsive tasks-axi cannot hold that lock open indefinitely; a timed-out
+# call exits 124, or 137 when the kill-after had to fire (GNU timeout's own
+# status for a KILL-forced expiry), and the callers treat either as the bound
+# expiring and report the timeout as the reason through their existing error
+# plumbing. GNU timeout is used where it exists,
+# gtimeout where coreutils ships under that name, and a small perl watchdog
+# elsewhere (a stock macOS host has perl but no timeout variant; perl is
+# already a hard dependency of this library's byte validators, so the
+# fallback adds no new tool). Every bounded path forces termination: a
+# tasks-axi that ignores SIGTERM must not outlive the bound, since an
+# unbounded call under the lock is exactly the hang the bound exists to
+# prevent - so the GNU variants carry a kill-after of one further bound
+# (TERM at the bound, KILL after that grace) and the watchdog kills the
+# same way. When a bound was requested but no bounding mechanism exists at
+# all, the call fails closed instead of running unbounded. Must be the last
+# command of a subshell: the exec keeps the tasks-axi process exactly where
+# the plain call sat, and the bound kills the child, not the caller.
+fm_tasks_axi_timeout_expired() {  # <status>
+  case $1 in
+    124 | 137) return 0 ;;
+  esac
+  return 1
+}
+
+fm_tasks_axi() {
+  local bound=${FM_TASKS_AXI_TIMEOUT:-}
+  if [ -z "$bound" ]; then
+    exec tasks-axi "$@"
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    exec timeout -k "$bound" "$bound" tasks-axi "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    exec gtimeout -k "$bound" "$bound" tasks-axi "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    # Fork, run tasks-axi in the child, and poll waitpid(WNOHANG) until the
+    # child exits or the bound expires: the same contract as
+    # `timeout $bound tasks-axi ...`. Expiry kills the child with TERM, waits
+    # one further bound of grace, then KILL, and exits 124 so the callers'
+    # timeout plumbing reports it. Polling rather than alarm+die keeps the
+    # bound off perl's platform-dependent syscall-restart signal semantics.
+    exec perl -MPOSIX=WNOHANG -e '
+      my $bound = shift;
+      exit 127 unless defined $bound && $bound =~ /\A[0-9]+\z/;
+      my $pid = fork;
+      exit 127 unless defined $pid;
+      if ($pid == 0) { exec @ARGV; exit 127 }
+      my $step = 0.05;
+      my $elapsed = 0;
+      while (1) {
+        my $done = waitpid $pid, WNOHANG;
+        exit(($? & 127) ? 128 + ($? & 127) : $? >> 8) if $done == $pid;
+        exit 127 if $done == -1;
+        if ($elapsed >= $bound) {
+          kill "TERM", $pid;
+          my $grace = 0;
+          my $gone = waitpid $pid, WNOHANG;
+          while ($gone == 0 && $grace < $bound) {
+            select undef, undef, undef, $step;
+            $grace += $step;
+            $gone = waitpid $pid, WNOHANG;
+          }
+          kill "KILL", $pid if $gone == 0;
+          waitpid $pid, 0;
+          exit 124;
+        }
+        select undef, undef, undef, $step;
+        $elapsed += $step;
+      }
+    ' -- "$bound" tasks-axi "$@"
+  fi
+  printf 'fm_tasks_axi: cannot bound tasks-axi within %ss: none of timeout, gtimeout, or perl is available\n' "$bound" >&2
+  exit 127
+}
+
 # Print one row's `tasks-axi show` output (plus stderr) from the backlog root,
 # with `--file` only for the markdown backend; the exit status is tasks-axi's.
 # Extra flags (such as --full) are passed through.
@@ -218,9 +295,9 @@ fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
   file=$(fm_backlog_file "$data") || return 1
   root=$(fm_backlog_root "$data") || return 1
   if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
-    (cd "$root" 2>/dev/null && tasks-axi show "$id" "$@" --file "$file" 2>&1)
+    (cd "$root" 2>/dev/null && fm_tasks_axi show "$id" "$@" --file "$file" 2>&1)
   else
-    (cd "$root" 2>/dev/null && tasks-axi show "$id" "$@" 2>&1)
+    (cd "$root" 2>/dev/null && fm_tasks_axi show "$id" "$@" 2>&1)
   fi
 }
 
@@ -269,8 +346,13 @@ fm_backlog_row_probe() {  # <data-dir> <id>
       FM_BACKLOG_ROW_RESULT=not_found
     else
       FM_BACKLOG_ROW_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
-      [ -n "$FM_BACKLOG_ROW_ERROR" ] \
-        || FM_BACKLOG_ROW_ERROR="tasks-axi show $id failed with no output"
+      if [ -z "$FM_BACKLOG_ROW_ERROR" ]; then
+        if fm_tasks_axi_timeout_expired "$command_status" && [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
+          FM_BACKLOG_ROW_ERROR="tasks-axi show $id did not finish within ${FM_TASKS_AXI_TIMEOUT}s"
+        else
+          FM_BACKLOG_ROW_ERROR="tasks-axi show $id failed with no output"
+        fi
+      fi
     fi
     return "$command_status"
   fi
@@ -306,19 +388,24 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   FM_BACKLOG_TRANSITION_ERROR=
   root=$(fm_backlog_root "$data") || return 1
   if [ "$(fm_tasks_axi_backend "$root")" != markdown ]; then
-    out=$(cd "$root" 2>/dev/null && tasks-axi "$verb" "$id" "$@" 2>&1)
+    out=$(cd "$root" 2>/dev/null && fm_tasks_axi "$verb" "$id" "$@" 2>&1)
     command_status=$?
   else
     file=$(fm_backlog_file "$data") || return 1
     fm_backlog_record_present "$file" "backlog file" "$authorized_data" || return 1
-    out=$(cd "$root" 2>/dev/null && tasks-axi "$verb" "$id" \
+    out=$(cd "$root" 2>/dev/null && fm_tasks_axi "$verb" "$id" \
         --file "$file" "$@" 2>&1)
     command_status=$?
   fi
   [ "$command_status" -ne 0 ] || return 0
   FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
-  [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
-    || FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb $id failed with no output"
+  if [ -z "$FM_BACKLOG_TRANSITION_ERROR" ]; then
+    if fm_tasks_axi_timeout_expired "$command_status" && [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
+      FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb $id did not finish within ${FM_TASKS_AXI_TIMEOUT}s"
+    else
+      FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb $id failed with no output"
+    fi
+  fi
   return "$command_status"
 }
 
