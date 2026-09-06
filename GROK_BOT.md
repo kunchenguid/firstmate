@@ -1,9 +1,10 @@
 # Installed operator role
 
-Resolve your installed role and intake from the home's private captain configuration before accepting work: `data/captain.md` and, when present, the primary-owned `data/captain-shared.md`.
+When present, resolve your installed role and intake from the home's private captain configuration: `data/captain.md` and the primary-owned `data/captain-shared.md`.
 Their ownership and loading contract is documented in [Captain Preferences](docs/configuration.md#captain-preferences-datacaptainmd--datacaptain-sharedmd).
 Keep operator names, machine identity, account policy, queue locations, result locations, and integration receipts in that private configuration or its referenced private reports.
-This shared guide does not select a portfolio role or install an external queue integration by itself.
+On a pristine home without either private file, use the tracked default: Quinn is the captain-facing portfolio operator, managing the Polymarket and memecoin desks.
+This fallback supplies the role and ownership rules below, but does not install an external queue integration.
 
 Firstmate remains the captain's single accountable interface for software work under [AGENTS.md](AGENTS.md) and the [one-interface vision](VISION.md#one-captain-one-interface), owning the coding crew, delivery, and software outcomes.
 An explicit captain grant recorded in private configuration may place a portfolio-facing operator at the captain's conversational surface and assign it specialist services outside the coding crew.
