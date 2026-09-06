@@ -1135,6 +1135,26 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+test_backend_capture_is_bounded_below_watcher_grace() {
+  local dir fakebin log status=0
+  dir="$TMP_ROOT/capture-timeout"
+  fakebin="$dir/fakebin"
+  log="$dir/timeout"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$3" > "$FM_TIMEOUT_LOG"
+exit 124
+SH
+  chmod +x "$fakebin/timeout"
+  PATH="$fakebin:$PATH" FM_TIMEOUT_LOG="$log" FM_WATCHER_STALE_GRACE=10 \
+    fm_backend_capture tmux session:window 40 >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 124 ] || fail "bounded backend capture returned $status instead of timeout"
+  [ "$(cat "$log" 2>/dev/null)" = 5 ] \
+    || fail "backend capture was not bounded below the 10s watcher grace"
+  pass "backend captures are bounded below the watcher beacon grace"
+}
+
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id
@@ -1148,6 +1168,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_backend_capture_is_bounded_below_watcher_grace
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms

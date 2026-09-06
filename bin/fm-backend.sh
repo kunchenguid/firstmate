@@ -53,6 +53,8 @@ FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
 
 # Verified backend adapters. Extend only after a backend gets its own
 # bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md
@@ -697,7 +699,7 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
 # changing call sites.
 
 # fm_backend_capture: bounded plain-text session capture.
-fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
+_fm_backend_capture_unbounded() {  # <backend> <target> <lines> [expected-label]
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
@@ -709,6 +711,19 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     cmux) fm_backend_cmux_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
+}
+
+fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
+  local grace timeout
+  grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+  case "$grace" in ''|*[!0-9]*|0) grace=300 ;; esac
+  timeout=$((grace / 2))
+  [ "$timeout" -ge 1 ] || timeout=1
+  [ "$timeout" -le 30 ] || timeout=30
+  fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
+    FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" bash -c \
+    '. "$1"; shift; _fm_backend_capture_unbounded "$@"' _ \
+    "$FM_BACKEND_LIB_DIR/fm-backend.sh" "$@"
 }
 
 # fm_backend_send_key: one backend-supported named special key.
