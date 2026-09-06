@@ -1171,15 +1171,21 @@ families_for_changed_path() {
       # resolution in the caller; emit a marker family of __script__
       printf '%s\n' "__script__:$(basename "$path")"
       ;;
-    bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
+    bin/fm-test-run.sh)
       # Deliberately the WHOLE family, not just the two contract tests. This
       # runner executes every pure-contract-unit script, so a change to it is
       # only proven by running them: its own contract test passing says the
       # runner's logic is right, not that the suite it drives still runs.
       printf '%s\n' pure-contract-unit
-      # The runner's own fixture Git isolation is proven by a standalone-family
-      # script, which the family above never reaches.
+      # Only this script wraps each suite in run_script_bounded's fixture Git
+      # isolation, and only a standalone-family script proves it.
       printf '%s\n' "__script__:fm-test-fixtures.test.sh"
+      ;;
+    bin/fm-test-isolation-proof.sh)
+      # Same reason as the runner above: the proof drives every
+      # pure-contract-unit script. It runs each candidate directly, never
+      # through run_script_bounded, so it cannot regress fixture Git isolation.
+      printf '%s\n' pure-contract-unit
       ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh)
       printf '%s\n' real-herdr-gated
