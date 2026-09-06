@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Run one bounded foreground watcher checkpoint for harnesses that should not
 # rely on background-task completion to wake the model.
+# A child that yields ownership without delivering a wake is a failed wait,
+# never an empty success. The checkpoint does not attach to or stop its successor.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,6 +15,8 @@ Usage: fm-watch-checkpoint.sh [--seconds <n>]
 Run bin/fm-watch.sh in the foreground for a bounded checkpoint.
 On an actionable watcher wake, pass through the watcher output and exit 0.
 On a quiet checkpoint, print "checkpoint: no actionable wake within <n>s" and exit 124.
+An already-owned watcher or a child that exits zero without a wake exits 1.
+Drain pending wakes and inspect watcher ownership before starting another checkpoint.
 EOF
 }
 
@@ -106,4 +110,8 @@ fi
 
 [ ! -s "$OUT" ] || cat "$OUT"
 [ ! -s "$ERR" ] || cat "$ERR" >&2
+if [ "$RC" -eq 0 ]; then
+  echo "checkpoint: FAILED - watcher ended without an actionable wake; drain queued wakes and inspect watcher ownership before retrying" >&2
+  exit 1
+fi
 exit "$RC"

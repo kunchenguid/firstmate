@@ -81,6 +81,35 @@ test_existing_singleton_watcher_is_not_success() {
   pass "checkpoint rejects an existing watcher singleton as unowned"
 }
 
+test_self_evicted_watcher_is_not_empty_success() {
+  local home out err status replacer
+  home=$(make_home self-eviction)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  # Wait for the real watcher to publish its first beacon, then replace only
+  # this fixture's singleton owner. The watcher must yield without deleting
+  # the replacement lock, but its checkpoint must report the lost wait.
+  (
+    for ((i = 0; i < 200; i++)); do
+      if [ -f "$home/state/.last-watcher-beat" ]; then
+        printf '%s\n' "$$" > "$home/state/.watch.lock/pid"
+        exit 0
+      fi
+      sleep 0.1
+    done
+    exit 1
+  ) &
+  replacer=$!
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 30 >"$out" 2>"$err" || status=$?
+  wait "$replacer" || fail "real watcher never published its fixture beacon"
+  [ "$(cat "$home/state/.watch.lock/pid")" = "$$" ] || fail "checkpoint disturbed replacement owner"
+  expect_code 1 "$status" "self-evicted checkpoint exit"
+  assert_contains "$(cat "$err")" "ended without an actionable wake" "lost checkpoint wait was not explained"
+  pass "checkpoint reports self-eviction as failure and preserves the replacement owner"
+}
+
+test_self_evicted_watcher_is_not_empty_success
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment

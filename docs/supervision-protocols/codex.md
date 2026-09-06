@@ -10,7 +10,8 @@ When this session owns supervision and away mode is not active:
 6. Never use shell `&` or Codex background tasks for firstmate watcher supervision.
 7. Do not run `bin/fm-watch-arm.sh` as Codex's normal supervision command.
    If it is ever shelled anyway, a backgrounded, piped, or bundled anti-pattern is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.codex/hooks.json`.
-8. Failure or missing cycle only: drain queued wakes, inspect the failure, then start a fresh foreground checkpoint.
+8. Failure or missing cycle only: drain queued wakes and inspect the failure and current watcher ownership before starting a fresh foreground checkpoint.
+   A checkpoint that ends without a wake before its deadline is a failed wait; `bin/fm-watch-checkpoint.sh --help` owns its exit-status contract.
 
 Codex cannot reason while a foreground tool call is running.
 The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.
