@@ -49,7 +49,7 @@ type ArmResult = {
 type LockOwnership = "owned" | "missing" | "other";
 
 type CloseClassification = {
-  kind: "actionable" | "failure";
+  kind: "actionable" | "benign" | "failure";
   message: string;
 };
 
@@ -188,6 +188,7 @@ const armClose = new WeakMap<ChildProcess, Promise<void>>();
 // Children the extension itself asked to exit; their close is not a failure
 // of the successor and never earns a deferred retry.
 const armRetired = new WeakSet<ChildProcess>();
+const armBenign = new WeakSet<ChildProcess>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
 const armPendingActionable = new WeakMap<ChildProcess, PendingActionableClose>();
 
@@ -376,7 +377,7 @@ function clearReplacementHandoff(pending: PendingActionableClose): void {
   }
 }
 
-function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {
+export function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
   if (reason) return { kind: "actionable", message: reason };
@@ -400,6 +401,9 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
       kind: "failure",
       message: `watcher: FAILED - fm-watch-arm.sh exited ${code}${combined ? `\n${combined}` : ""}`,
     };
+  }
+  if (code === 0 && combined.split(/\r?\n/).includes("FM_WATCH_ARM_RESULT=busy-holder")) {
+    return { kind: "benign", message: "busy-holder" };
   }
   return {
     kind: "failure",
@@ -884,8 +888,10 @@ export default function (pi: ExtensionAPI) {
       if (!generationIsLive(owner)) return { failure: "" };
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
-        return { failure: "", recovery: armRecovery.get(successorChild) };
+      if (replacement.ok && successorChild) {
+        const ready = await waitForReadiness(successorChild);
+        if (ready) return { failure: "", recovery: armRecovery.get(successorChild) };
+        if (armBenign.has(successorChild)) return { failure: "" };
       }
       if (replacement.ok) {
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
@@ -1031,6 +1037,11 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (!generationIsLive(owner)) return;
+      if (classification.kind === "benign") {
+        armBenign.add(armChild);
+        owner.retryFailures = 0;
+        return;
+      }
       if (owner.restoring) {
         // The pipeline is still delivering the wake this successor was
         // started for. A verified successor that failed on its own keeps its

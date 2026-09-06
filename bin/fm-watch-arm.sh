@@ -587,6 +587,7 @@ owned_child_finished() {
     fi
     if [ "$wait_status" -eq 1 ]; then
       cycle_log_append "$rc" "$signal" busy-holder-still-running none
+      printf 'FM_WATCH_ARM_RESULT=busy-holder\n'
       return 0
     fi
     cycle_log_append "$rc" "$signal" busy-holder-ownership-changed none
