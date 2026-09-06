@@ -47,6 +47,8 @@ if [ "${FM_SESSIONSTART_HOOK_LIVE_E2E:-0}" != 1 ] && \
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/git-config-helpers.sh
+. "$ROOT/tests/git-config-helpers.sh"
 unset NO_MISTAKES_GATE
 
 fail() {
