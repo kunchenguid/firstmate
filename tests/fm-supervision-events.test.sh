@@ -114,7 +114,7 @@ reset_state
 fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 CAP_CALLS=0
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
-fm_backend_events_capable() { CAP_CALLS=$((CAP_CALLS + 1)); return 0; }
+fm_backend_events_capable_bounded() { CAP_CALLS=$((CAP_CALLS + 1)); return 0; }
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_wait_transition() {
   [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" = 1 ] || fail "cached capability verdict was not passed to the wait"
