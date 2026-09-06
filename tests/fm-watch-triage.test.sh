@@ -2357,6 +2357,159 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
   pass "a parked live worker surfaces once, absorbs pane churn for the whole re-surface window, then re-surfaces when it elapses"
 }
 
+# --- work the captain is already holding: pane churn must not re-alarm -------
+# The other record of a legitimate wait. The declared-wait bound above reads the
+# status LINE, and a delivered task's line stays `done: PR ...` while the wait
+# itself lives in the BACKLOG, written there by bin/fm-captain-hold.sh. No line
+# predicate can see that record, so both stale alarms - the captain-relevant one
+# and the inconclusive one - re-fired on every new pane hash for as long as the
+# captain was deciding, which is the 2026-09 loop observed on delivered work
+# awaiting their merge word.
+# Pinned here, in both directions: while the hold stands the first sight still
+# alarms, further sights of the SAME status-log state are absorbed, and the
+# window's end alarms once more; and the identical fixture WITHOUT the hold keeps
+# alarming on every hash, because a bound that swallowed an unheld delivery,
+# blocker, or failure would be worse than the churn it removes.
+#
+# The backlog is real rather than a fixture file: bin/fm-captain-hold.sh is the
+# only writer of a hold and tasks-axi the only reader, so a hand-written row
+# would pin this test's idea of a hold instead of the one the watcher consults.
+make_hold_home() {  # <name> <status-line> <hold|nohold>
+  local name=$1 line=$2 hold=$3 dir state
+  dir=$(make_case "$name"); state="$dir/state"
+  mkdir -p "$dir/data" "$dir/config"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml" || return 1
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  (cd "$dir" && tasks-axi add held-merge 'delivered work' --file data/backlog.md) >/dev/null 2>&1 \
+    || return 1
+  if [ "$hold" = hold ]; then
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+      FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-captain-hold.sh" hold held-merge \
+      --reason 'awaiting the captain on the merge' >/dev/null 2>&1 || return 1
+  fi
+  printf 'window=test:fm-held-merge\nkind=ship\nharness=grok\nbackend=tmux\n' \
+    > "$state/held-merge.meta"
+  printf '%s\n' "$line" > "$state/held-merge.status"
+  printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+  printf '%s\n' "$dir"
+}
+
+# One watcher round against a hold fixture, armed exactly as parked_watch_round
+# arms one, plus the home the backlog read resolves against. The crew reads
+# stopped: a delivered worker's agent has exited, and that is the population whose
+# alarm the hold must bound.
+hold_watch_round() {  # <dir> <out> <capture> <pane-text> <exit|absorb>
+  local dir=$1 out=$2 capture=$3 text=$4 mode=$5 pid cycles=0
+  local state="$dir/state"
+  printf '%s\n' "$text" > "$capture"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if [ "$mode" = exit ]; then
+    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+    return 0
+  fi
+  while [ "$cycles" -lt 4 ]; do
+    wait_poll_cycle "$state" "$pid" 300 || { reap "$pid"; return 1; }
+    cycles=$((cycles + 1))
+  done
+  reap "$pid"
+  return 0
+}
+
+hold_stale_wakes() {  # <state>
+  awk -F '\t' '$3 == "stale" && $4 == "test:fm-held-merge" { n++ } END { print n + 0 }' \
+    "$1/.wake-queue" 2>/dev/null || echo 0
+}
+
+# Both status lines a held task really carries: the delivery that routes through
+# the captain-relevant stale branch, and a worker line that routes through the
+# inconclusive one. The hold is invisible to the status line in both, so both
+# branches had the same blindness and both are covered.
+test_open_captain_call_bounds_stale_churn() {
+  local spec name line dir state out capture throttle round wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (captain-hold stale bound)"; return 0; }
+  for spec in \
+    'held-delivery|done: PR https://example.invalid/pull/1 checks green' \
+    'held-worker-line|working: still tidying the branch'
+  do
+    name=${spec%%|*}; line=${spec#*|}
+    dir=$(make_hold_home "$name" "$line" hold) \
+      || fail "[$name] could not build a captain-held backlog fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    throttle="$state/.paused-resurfaced-$(printf '%s' test:fm-held-merge | tr ':/.' '___')"
+
+    # First sight still alarms: the hold bounds repetition, never the first look.
+    hold_watch_round "$dir" "$out" "$capture" 'idle, elapsed 1s' exit \
+      || fail "[$name] first sight of held work did not surface"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] || fail "[$name] first sight produced $wakes wakes instead of one"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first surface"
+
+    # The pane churns while the SAME hold stands. Every one of these alarmed.
+    round=2
+    while [ "$round" -le 3 ]; do
+      hold_watch_round "$dir" "$out" "$capture" "idle, elapsed ${round}s" absorb \
+        || fail "[$name] watcher exited on churn round $round instead of supervising through it"
+      wakes=$(hold_stale_wakes "$state")
+      [ "$wakes" -eq 0 ] \
+        || fail "[$name] pane churn re-alarmed held work $wakes time(s) inside the re-surface window"
+      round=$((round + 1))
+    done
+
+    # End of the window: held work re-surfaces exactly once, so a forgotten hold
+    # cannot rot invisibly behind the bound that quieted its churn. The window is
+    # the shared PAUSE_RESURFACE_SECS one, so ageing its marker is how a test
+    # reaches the far side of it without waiting the cadence out.
+    [ -e "$throttle" ] || fail "[$name] the absorbed churn recorded no re-surface cadence to elapse"
+    set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+    hold_watch_round "$dir" "$out" "$capture" 'idle, elapsed 9s' exit \
+      || fail "[$name] held work did not re-surface once its re-surface window elapsed"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] \
+      || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
+  done
+  pass "work under an open captain call surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
+}
+
+# The other half of the same bound, and the one that decides whether widening the
+# wait was safe: the identical fixtures with NO hold must keep alarming on every
+# new hash. A delivery nobody is holding, and a blocker, are exactly the events
+# the stale alarm exists for.
+test_stale_churn_without_a_captain_call_still_alarms() {
+  local spec name line dir state out capture round wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (unheld stale alarm)"; return 0; }
+  for spec in \
+    'unheld-delivery|done: PR https://example.invalid/pull/1 checks green' \
+    'unheld-blocker|blocked: cannot reach the release host' \
+    'unheld-worker-line|working: still tidying the branch'
+  do
+    name=${spec%%|*}; line=${spec#*|}
+    dir=$(make_hold_home "$name" "$line" nohold) \
+      || fail "[$name] could not build an unheld backlog fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    round=1
+    while [ "$round" -le 2 ]; do
+      hold_watch_round "$dir" "$out" "$capture" "idle, elapsed ${round}s" exit \
+        || fail "[$name] an unheld stale window stopped alarming on round $round"
+      wakes=$(hold_stale_wakes "$state")
+      [ "$wakes" -eq 1 ] \
+        || fail "[$name] round $round produced $wakes wakes instead of one"
+      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge round $round"
+      round=$((round + 1))
+    done
+  done
+  pass "a stale window with no open captain call keeps alarming on every new hash"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4173,6 +4326,8 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
+test_open_captain_call_bounds_stale_churn
+test_stale_churn_without_a_captain_call_still_alarms
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

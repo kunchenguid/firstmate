@@ -1013,6 +1013,65 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
+# The two records of one legitimate wait, and why a stale alarm must read both.
+#
+# status_is_paused_or_captain_held reads the status LINE a worker wrote, which is
+# the only record when the worker itself is waiting. It is not the only record
+# there is: once firstmate hands work to the captain, the wait is written into the
+# BACKLOG by bin/fm-captain-hold.sh, and the worker's last line stays whatever it
+# was - routinely `done: PR ...` after a delivery, which no line predicate can
+# read as a wait. An alarm bounded only by the line therefore re-fires for the
+# captain's whole thinking time, on exactly the work they already have in hand.
+#
+# `open` is that record's own read-only predicate and owns its semantics: exit 0
+# still an open captain call, 1 not, 2 could not be established. Only a 0 bounds
+# an alarm here, so an unreadable backlog, an incompatible or absent tasks-axi,
+# and a row this home does not carry all keep alarming exactly as they do today -
+# a wait this watcher cannot prove is not a wait.
+#
+# The read costs one subprocess and runs only where the watcher is about to
+# alarm, so at most once per distinct stale hash per window, beside the crew-state
+# read the same paths already pay.
+task_captain_call_open() {  # <task>
+  local task=$1
+  [ -n "$task" ] || return 1
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" >/dev/null 2>&1
+}
+
+# The identity a re-surface throttle is bound to: the task's whole status-log
+# signature. Any new status event - a replacement wait, a fresh delivery, a
+# blocker - changes it and so starts its own window instead of inheriting the
+# silence of the one before it.
+stale_wait_declaration() {  # <task>
+  printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+}
+
+# 0 when <declaration> has already been alarmed for this window inside the
+# current PAUSE_RESURFACE_SECS. A pure read: recording an alarm is the caller's,
+# so the throttle is never advanced by a sighting it just absorbed.
+stale_wait_throttled() {  # <window-key> <declaration>
+  local throttle="$STATE/.paused-resurfaced-$1"
+  [ "$(cat "$throttle" 2>/dev/null || true)" = "$2" ] \
+    && [ "$(age_of "$throttle")" -lt "$PAUSE_RESURFACE_SECS" ]
+}
+
+# The same bound, for a stale window whose last line IS captain-relevant. That
+# line is real and its first sight must still reach the captain, but a delivery
+# they are already holding has nothing new to say on the next pane tick.
+# Returns 0 to absorb this sighting; 1 to alarm, having armed the throttle for
+# the next one -
+# and only ever when an open captain call bounds it, so an unheld delivery, a
+# blocker, and a failure are untouched. The caller alarms unconditionally on a 1,
+# so the marker cannot outlive the wake it records.
+captain_call_bounds_stale() {  # <window-key> <task>
+  local key=$1 task=$2 declaration
+  task_captain_call_open "$task" || return 1
+  declaration=$(stale_wait_declaration "$task")
+  stale_wait_throttled "$key" "$declaration" && return 0
+  printf '%s' "$declaration" > "$STATE/.paused-resurfaced-$key"
+  return 1
+}
+
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -1020,27 +1079,32 @@ pause_state_class() {  # <window> <task>
 # decision is never silenced - which routes every parked-but-live worker here, on
 # first sight of each distinct stale hash.
 #
-# So a declared wait bounds this path to the same once-per-PAUSE_RESURFACE_SECS
+# So a legitimate wait bounds this path to the same once-per-PAUSE_RESURFACE_SECS
 # cadence resurface_absorbed owns for the absorbed paths, throttled by this
 # window's own .paused-resurfaced-<key> marker: an idle parked pane still churns
 # its hash (a clock, a token counter), and each new hash re-enters this path, so
-# without that bound one declared wait re-alarms firstmate for its whole duration.
+# without that bound one wait re-alarms firstmate for its whole duration.
 # The FIRST sight still wakes, keeping the inspect-an-inconclusive-state intent,
 # and the throttle is read BEFORE anything is queued and advanced only by a wake
 # that really fires - a throttle written by the wake it should have prevented, or
 # read after that wake was already appended, bounds nothing.
+# Both records of a wait bound it (see task_captain_call_open above): the status
+# line the worker declared, and the backlog hold firstmate recorded once the
+# captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last declaration='' declared=1 throttled=1
+  local win=$1 h=$2 key task last declaration='' declared=1 bounded=1 throttled=1
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     declared=0
-    declaration="declared:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
-    if [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$declaration" ] \
-      && [ "$(age_of "$STATE/.paused-resurfaced-$key")" -lt "$PAUSE_RESURFACE_SECS" ]; then
-      throttled=0
-    fi
+    bounded=0
+  elif task_captain_call_open "$task"; then
+    bounded=0
+  fi
+  if [ "$bounded" -eq 0 ]; then
+    declaration=$(stale_wait_declaration "$task")
+    stale_wait_throttled "$key" "$declaration" && throttled=0
   fi
   if [ "$throttled" -ne 0 ]; then
     fm_wake_append stale "$win" "stale: $win" || exit 1
@@ -1051,12 +1115,22 @@ surface_nonterminal_stale() {  # <window> <hash>
   if [ "$declared" -eq 0 ]; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
-    [ "$throttled" -eq 0 ] || printf '%s' "$declaration" > "$STATE/.paused-resurfaced-$key"
+  elif [ "$bounded" -eq 0 ]; then
+    # A backlog hold is NOT a declared pause, and must not be dressed up as one:
+    # the loop-top reconciliation and pause_state_class both read the status LINE,
+    # so a .paused-* flag this line does not support would be cleared on the next
+    # poll - taking the throttle with it - and would hand the mate and dead-agent
+    # cadences a declaration they were never given. Only the shared re-surface
+    # marker is kept, which is the whole of what this bound needs.
+    rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
   else
     clear_pause_state "$key"
   fi
+  if [ "$bounded" -eq 0 ] && [ "$throttled" -ne 0 ]; then
+    printf '%s' "$declaration" > "$STATE/.paused-resurfaced-$key"
+  fi
   if [ "$throttled" -eq 0 ]; then
-    triage_log "absorbed non-terminal stale (declared wait already re-surfaced this window): $win"
+    triage_log "absorbed non-terminal stale (declared wait or open captain call already re-surfaced this window): $win"
     return 0
   fi
   wake "stale: $win"
@@ -1937,6 +2011,19 @@ EOF
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            elif captain_call_bounds_stale "$key" "$task"; then
+              # The line is captain-relevant and stays so, but the backlog says
+              # the captain already holds this work: further sights of the SAME
+              # status-log state have nothing to add, and the pane keeps churning
+              # a new hash into this branch for as long as they are deciding. Only
+              # that repetition is bounded - the first sight already alarmed and
+              # the window's end alarms once more - and the bookkeeping matches the
+              # alarm it replaces, so a stable hash stays as inert here as it
+              # already was after a first terminal alarm.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
