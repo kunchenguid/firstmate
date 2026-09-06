@@ -32,7 +32,7 @@ Work the list until live lanes reach the floor, or until the memory bound below 
 
 1. **Take the list in the order it prints.** Backlog items come first because they are already filed, already scoped, and already carry their delivery mode.
 2. **For a `backlog` line, dispatch it.** Resolve delivery mode and merge posture at intake exactly as any other dispatch, write the brief, and spawn.
-   An item whose hold you cannot dispatch under is one the enumeration should not have listed; a `captain` hold is already excluded, so a remaining blocker means the item's own note is wrong.
+   An item whose hold you cannot dispatch under is one the enumeration should not have listed; a `captain` hold, and a still-unmet `external`, `parked`, or `future` hold, are already excluded, so a remaining blocker means the item's own note is wrong.
    Fix the note by recording the exact blocking rule on the item, and move to the next line rather than dispatching blind.
 3. **For an `openspec` line, file a task first.** The Change is work the fleet has not tracked, so it has no item yet.
    File one with a title naming the Change, `repo` set to that project, and a note pointing at the Change's own `tasks.md` path.

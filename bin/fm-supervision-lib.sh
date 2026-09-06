@@ -703,13 +703,18 @@ fm_lane_floor_project_changes() {  # <project-root> <live-brief-text>
 #                                    has passed as queued rather than held, so an
 #                                    expired hold of any kind arrives here), or a
 #                                    held item whose hold kind is anything but
-#                                    captain - a load, blocked, or unkinded hold
-#                                    is firstmate's own call to make
+#                                    captain, external, parked, or future - a
+#                                    load, blocked, or unkinded hold is
+#                                    firstmate's own call to make
 #   openspec <project>:<change>:<n>  an openspec Change under a registered
 #                                    project clone with n unticked task boxes
 #                                    that no live task's brief names
-# A captain-kind hold is deliberately the ONLY backlog exclusion: it is the one
-# state where dispatching would answer a question the captain owns.
+# A captain-kind hold is excluded because it is a question the captain owns.
+# An external, parked, or future hold is excluded too, but only while still
+# actually held: tasks-axi's own ready listing already reads a hold whose
+# --until has passed as queued rather than held (see backlog above), so a row
+# that still reaches the held[ scan below is, by construction, one whose named
+# event has not yet fired - there is nothing here for firstmate to act on.
 fm_dispatchable_work() {  # <state-dir> [data-dir] [root]
   local state=$1 data=${2:-} root=${3:-$FM_IDLE_SELF_ROOT}
   local backlog ready_out row id hold_kind
@@ -737,7 +742,7 @@ fm_dispatchable_work() {  # <state-dir> [data-dir] [root]
       [ -n "$id" ] || continue
       hold_kind=${row%,*}; hold_kind=${hold_kind##*,}
       hold_kind=${hold_kind#\"}; hold_kind=${hold_kind%\"}
-      [ "$hold_kind" = captain ] && continue
+      case "$hold_kind" in captain | external | parked | future) continue ;; esac
       printf 'backlog %s\n' "$id"
     done < <(printf '%s\n' "$ready_out" | awk '
       /^held\[/ { rows = 1; next }

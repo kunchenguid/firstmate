@@ -80,6 +80,16 @@ add_hold() {  # <home> <id> <reason> [--until <date>]
     --file "$home/data/backlog.md" >/dev/null
 }
 
+# A hold of a named non-captain kind (external, parked, future), for the
+# lane-floor unmet-event-hold cases below.
+add_kind_hold() {  # <home> <id> <kind> [--until <date>]
+  local home=$1 id=$2 kind=$3; shift 3
+  tasks-axi add "$id" "kinded fixture $id" --kind ship \
+    --file "$home/data/backlog.md" >/dev/null
+  tasks-axi hold "$id" --reason "waiting on a named event" --kind "$kind" "$@" \
+    --file "$home/data/backlog.md" >/dev/null
+}
+
 # A held item exactly like the captain's own pool-capacity holds: --kind load,
 # with the spelling the pipeline itself writes ("pool capacity: dispatch when
 # a slot frees ... recheck daily").
@@ -876,6 +886,35 @@ test_lane_floor_counts_non_captain_work_only() {
   pass "lane floor: the breach counts openspec Changes and non-captain holds, never a captain hold"
 }
 
+# An external, parked, or future hold whose named event has not fired yet is
+# not dispatchable and would breach the floor forever if counted; a load hold
+# still counts, and once the named event's own date has passed tasks-axi's
+# ready listing itself moves the row to queued (never held), so it counts too.
+test_lane_floor_excludes_unmet_event_holds() {
+  local home out
+  home=$(make_home lane-floor-event-holds 3)
+  add_kind_hold "$home" future-ext external --until 2099-01-01
+  add_kind_hold "$home" future-parked parked --until 2099-01-01
+  add_kind_hold "$home" future-future future --until 2099-01-01
+  add_kind_hold "$home" past-ext external --until 2000-01-01
+  add_load_hold "$home" cap-held
+  : > "$home/state/live-1.meta"
+  out=$(lane_floor_report "$home")
+  case "$out" in
+    *"backlog past-ext"*) ;;
+    *) fail "an external hold whose --until has passed must count as dispatchable, got: $out" ;;
+  esac
+  case "$out" in
+    *"backlog cap-held"*) ;;
+    *) fail "a load hold must still count as dispatchable, got: $out" ;;
+  esac
+  case "$out" in
+    *future-ext*|*future-parked*|*future-future*) \
+      fail "an external, parked, or future hold whose named event has not fired must never be counted as dispatchable: $out" ;;
+  esac
+  pass "lane floor: an unmet external/parked/future hold is excluded, a past-due one counts like any other non-captain hold"
+}
+
 # The floor is the whole condition: identical work, enough lanes, no line.
 test_lane_floor_silent_at_the_floor() {
   local home out
@@ -1247,6 +1286,7 @@ test_away_idle_scan_buffers_idle_capacity
 test_away_scan_escalates_idle_capacity_once_per_unchanged_tuple
 test_away_idle_scan_buffers_capacity_held
 test_lane_floor_counts_non_captain_work_only
+test_lane_floor_excludes_unmet_event_holds
 test_lane_floor_silent_at_the_floor
 test_lane_floor_malformed_value_falls_back_to_default
 test_lane_floor_excludes_a_change_a_live_brief_names
