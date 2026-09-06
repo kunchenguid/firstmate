@@ -43,6 +43,12 @@
 # `quota-codex-<basename>-<8 hex of the physical path>`, one watch per account
 # even when callers use path aliases, and the result document adds a
 # `codex_home: <physical path>` line.
+# Arm also writes a private atomic binding from the validated original path
+# spelling to that source ID before registration, so retirement through a
+# removed alias still finds the canonical watch. Retirement removes the exact
+# binding only after the generic source retirement succeeds; an interruption
+# between those steps leaves an idempotently cleanable binding, not a live
+# source with lost identity.
 # Without the flag the registration, the poll, and the result are byte-identical
 # to before.
 set -u
@@ -72,6 +78,10 @@ CANONICAL_SOURCE_ID=
 PROVIDER=
 CODEX_HOME_ARG=
 CODEX_HOME_RESOLVED=
+CODEX_HOME_BINDING_FILE=
+CODEX_HOME_BOUND_SOURCE_ID=
+CODEX_HOME_BINDING_CREATED=0
+CODEX_HOME_BINDING_FOUND=0
 
 usage() {
   awk '
@@ -117,6 +127,85 @@ codex_home_slug() {
   printf '%s%s\n' "${base:+$base-}" "$hash"
 }
 
+codex_home_binding_path() {  # <original-spelling>
+  printf '%s/.quota-codex-home-%s.binding\n' \
+    "$(fm_procevent_registry_dir "$STATE")" "$(codex_home_slug "$1")"
+}
+
+# Load the exact private binding for one original account spelling.
+# Return 0 for a valid binding, 1 when absent, and 2 when unsafe or malformed.
+codex_home_binding_load() {  # <original-spelling>
+  local spelling=$1 file schema_line spelling_line source_line extra
+  CODEX_HOME_BINDING_FILE=$(codex_home_binding_path "$spelling") || return 2
+  CODEX_HOME_BOUND_SOURCE_ID=
+  if [ ! -e "$CODEX_HOME_BINDING_FILE" ] && [ ! -L "$CODEX_HOME_BINDING_FILE" ]; then
+    return 1
+  fi
+  file=$CODEX_HOME_BINDING_FILE
+  [ -f "$file" ] && [ ! -L "$file" ] || return 2
+  [ "$(fm_pr_file_mode "$file")" = 600 ] \
+    && [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 2
+  {
+    IFS= read -r schema_line \
+      && IFS= read -r spelling_line \
+      && IFS= read -r source_line \
+      && ! IFS= read -r extra
+  } < "$file" || return 2
+  [ -z "$extra" ] || return 2
+  [ "$schema_line" = schema=fm-procevent-quota-codex-home-binding.v1 ] || return 2
+  [ "$spelling_line" = "spelling=$spelling" ] || return 2
+  CODEX_HOME_BOUND_SOURCE_ID=${source_line#source_id=}
+  [ "$source_line" = "source_id=$CODEX_HOME_BOUND_SOURCE_ID" ] \
+    && fm_procevent_source_id_valid "$CODEX_HOME_BOUND_SOURCE_ID" || return 2
+}
+
+# Publish before registration so a crash can leave only a harmless recoverable
+# binding, never an active alias-armed watch whose source identity was lost.
+codex_home_binding_publish() {  # <original-spelling> <canonical-source-id>
+  local spelling=$1 source_id=$2 reg dest tmp load_state
+  CODEX_HOME_BINDING_CREATED=0
+  fm_procevent_source_id_valid "$source_id" || return 1
+  dest=$(codex_home_binding_path "$spelling") || return 1
+  reg=$(fm_procevent_registry_dir "$STATE")
+  (umask 077; mkdir -p "$reg") || return 1
+  [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    codex_home_binding_load "$spelling"
+    load_state=$?
+    [ "$load_state" -eq 0 ] || return 1
+    if [ "$CODEX_HOME_BOUND_SOURCE_ID" = "$source_id" ]; then
+      return 0
+    fi
+    if [ -e "$reg/$CODEX_HOME_BOUND_SOURCE_ID.source" ] \
+      || [ -L "$reg/$CODEX_HOME_BOUND_SOURCE_ID.source" ]; then
+      return 1
+    fi
+  fi
+  tmp=$(umask 077; mktemp "$reg/.quota-codex-home-binding.XXXXXX") || return 1
+  if {
+    printf 'schema=fm-procevent-quota-codex-home-binding.v1\n'
+    printf 'spelling=%s\n' "$spelling"
+    printf 'source_id=%s\n' "$source_id"
+  } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$dest"; then
+    CODEX_HOME_BINDING_FILE=$dest
+    CODEX_HOME_BINDING_CREATED=1
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
+codex_home_binding_remove() {  # <original-spelling> <canonical-source-id>
+  local spelling=$1 source_id=$2 load_state
+  codex_home_binding_load "$spelling"
+  load_state=$?
+  [ "$load_state" -ne 1 ] || return 0
+  [ "$load_state" -eq 0 ] || return 1
+  [ "$CODEX_HOME_BOUND_SOURCE_ID" = "$source_id" ] || return 1
+  rm -f -- "$CODEX_HOME_BINDING_FILE"
+  [ ! -e "$CODEX_HOME_BINDING_FILE" ] && [ ! -L "$CODEX_HOME_BINDING_FILE" ]
+}
+
 # resolve_codex_home
 # Binds the Codex account axis after resolve_provider: expands --codex-home,
 # requires --provider codex, and derives the per-account source id. Existence
@@ -130,6 +219,22 @@ resolve_codex_home() {
   CODEX_HOME_RESOLVED=$FM_CODEX_HOME_PATH
   CANONICAL_SOURCE_ID="$SOURCE_ID_BASE-codex-$(codex_home_slug "$CODEX_HOME_RESOLVED")"
   fm_procevent_source_id_valid "$CANONICAL_SOURCE_ID" || die "source id is not path-safe: $CANONICAL_SOURCE_ID"
+}
+
+resolve_codex_home_binding() {
+  local load_state
+  CODEX_HOME_BINDING_FOUND=0
+  [ -n "$CODEX_HOME_ARG" ] || return 0
+  codex_home_binding_load "$CODEX_HOME_ARG"
+  load_state=$?
+  case "$load_state" in
+    0)
+      CANONICAL_SOURCE_ID=$CODEX_HOME_BOUND_SOURCE_ID
+      CODEX_HOME_BINDING_FOUND=1
+      ;;
+    1) ;;
+    *) die "--codex-home binding is unsafe or malformed" ;;
+  esac
 }
 
 positive_number() {
@@ -265,6 +370,7 @@ parse_scope_args() {
   done
   resolve_provider "$provider"
   resolve_codex_home
+  resolve_codex_home_binding
 }
 
 cmd_source_id() {
@@ -294,8 +400,18 @@ cmd_arm() {
   local timeout
   timeout=$(perl -e 'print int($ARGV[0] * 0.8 + 0.5)' "$interval") || timeout=30
   [ "$timeout" -ge 5 ] || timeout=5
-  "$SCRIPT_DIR/fm-procevent.sh" register quota "$CANONICAL_SOURCE_ID" \
-    -- "$SCRIPT_DIR/fm-procevent-quota.sh" poll --interval "$interval" --threshold "$threshold" --provider "$PROVIDER" ${account[@]+"${account[@]}"} --timeout "$timeout" || exit 1
+  if [ -n "$CODEX_HOME_RESOLVED" ]; then
+    codex_home_binding_publish "$CODEX_HOME_ARG" "$CANONICAL_SOURCE_ID" \
+      || die "cannot durably bind the Codex home spelling to its quota source"
+  fi
+  if ! "$SCRIPT_DIR/fm-procevent.sh" register quota "$CANONICAL_SOURCE_ID" \
+    -- "$SCRIPT_DIR/fm-procevent-quota.sh" poll --interval "$interval" --threshold "$threshold" --provider "$PROVIDER" ${account[@]+"${account[@]}"} --timeout "$timeout"; then
+    if [ "$CODEX_HOME_BINDING_CREATED" -eq 1 ] \
+      && ! codex_home_binding_remove "$CODEX_HOME_ARG" "$CANONICAL_SOURCE_ID"; then
+      die "quota registration failed and its new Codex home binding could not be cleaned"
+    fi
+    exit 1
+  fi
   printf 'armed: %s\n' "$CANONICAL_SOURCE_ID"
   printf 'provider: %s\n' "${PROVIDER:-(aggregate)}"
   [ -z "$CODEX_HOME_RESOLVED" ] || printf 'codex_home: %s\n' "$CODEX_HOME_RESOLVED"
@@ -373,7 +489,11 @@ cmd_terminal() {
 
 cmd_retire() {
   parse_scope_args "$@"
-  "$SCRIPT_DIR/fm-procevent.sh" retire "$CANONICAL_SOURCE_ID"
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$CANONICAL_SOURCE_ID" || return 1
+  if [ "$CODEX_HOME_BINDING_FOUND" -eq 1 ] \
+    && ! codex_home_binding_remove "$CODEX_HOME_ARG" "$CANONICAL_SOURCE_ID"; then
+    die "source retired but its Codex home binding could not be cleaned"
+  fi
 }
 
 case "${1-}" in

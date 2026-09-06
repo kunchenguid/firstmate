@@ -282,6 +282,30 @@ alias_source_id=$("$BIN/fm-procevent-quota.sh" source-id --provider codex --code
   || fail "a symlink alias for one account produced a duplicate source id: $alias_source_id"
 ok "codex-home watch canonicalizes aliases to one account identity"
 
+ALIAS_ARM_HOME="$LAB/alias-arm-home"
+mkdir -p "$ALIAS_ARM_HOME" && mkdir -m 700 "$ALIAS_ARM_HOME/state"
+out=$(FM_HOME="$ALIAS_ARM_HOME" FM_PROCEVENT_CLAIM_ROOT="$LAB/alias-claims" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" arm --interval 30 --threshold 15 --provider codex --codex-home "$acct_alias") \
+  || fail "arm through a valid account alias refused: $out"
+printf '%s\n' "$out" | grep -qx "armed: $source_id" \
+  || fail "alias arm did not register the physical source identity: $out"
+alias_reg="$ALIAS_ARM_HOME/state/procevent/$source_id.source"
+[ -f "$alias_reg" ] || fail "alias arm did not publish the canonical registration"
+alias_binding=$(find "$ALIAS_ARM_HOME/state/procevent" -maxdepth 1 -type f \
+  -name '.quota-codex-home-*.binding' -print)
+[ -n "$alias_binding" ] && [ "$(printf '%s\n' "$alias_binding" | wc -l | tr -d ' ')" = 1 ] \
+  || fail "alias arm did not publish exactly one private spelling binding: $alias_binding"
+rm -f -- "$acct_alias"
+[ "$(FM_HOME="$ALIAS_ARM_HOME" "$BIN/fm-procevent-quota.sh" source-id --provider codex --codex-home "$acct_alias")" = "$source_id" ] \
+  || fail "the durable alias binding did not preserve source identity after alias removal"
+out=$(FM_HOME="$ALIAS_ARM_HOME" FM_PROCEVENT_CLAIM_ROOT="$LAB/alias-claims" \
+  "$BIN/fm-procevent-quota.sh" retire --provider codex --codex-home "$acct_alias")
+[ "$out" = "retired: $source_id" ] || fail "retire through a removed alias targeted the wrong source: $out"
+[ ! -e "$alias_reg" ] || fail "retire through a removed alias left the canonical registration behind"
+[ ! -e "$alias_binding" ] && [ ! -L "$alias_binding" ] \
+  || fail "retire through a removed alias left its durable binding behind"
+ok "codex-home retire uses and cleans the durable alias binding after alias removal"
+
 rm -f "$COUNT" "$ARGV_LOG"
 out=$(QUOTA_AXI_PER_HOME=1 QUOTA_AXI_ARGV_LOG="$ARGV_LOG" QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
   "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
