@@ -99,6 +99,77 @@ test_predicate_source_needs_supervision() {
   pass "fm_supervision_unhealthy: source-only home needs supervision"
 }
 
+# Register a custom check the way an operator does, through the real
+# bin/fm-check-register.sh, so these cases bind to the shipped registration
+# artifacts rather than to a hand-written imitation of them.
+register_custom_check() {
+  local state=$1 id=$2
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/$id.check.sh"
+  chmod 700 "$state/$id.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+    || fail "fm-check-register.sh could not register $id"
+}
+
+test_predicate_registered_check_needs_supervision() {
+  local state="$TMP_ROOT/pred-check/state"
+  mkdir -p "$state"
+  register_custom_check "$state" issue-comments
+  fm_supervision_needed "$state" 300 || fail "a registered custom check did not register as supervision need"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a registered custom check must not count as an in-flight task"
+  [ "$FM_SUP_CHECKS" -eq 1 ] || fail "expected one registered custom check, got $FM_SUP_CHECKS"
+  fm_supervision_unhealthy "$state" 300 || fail "a registered custom check with no beacon must be unhealthy"
+  pass "fm_supervision_needed: a registered custom check needs supervision with no task in flight"
+}
+
+test_predicate_registered_check_survives_rebinding_drift() {
+  local state="$TMP_ROOT/pred-check-drift/state"
+  mkdir -p "$state"
+  register_custom_check "$state" issue-comments
+  printf '#!/usr/bin/env bash\necho drifted\n' > "$state/issue-comments.check.sh"
+  fm_supervision_needed "$state" 300 \
+    || fail "an edited registered check must keep supervision on so the sweep can report the rejection"
+  [ "$FM_SUP_CHECKS" -eq 1 ] || fail "expected the edited check to stay counted, got $FM_SUP_CHECKS"
+  pass "fm_supervision_needed: a registered check whose bytes drifted still needs supervision"
+}
+
+test_predicate_unregistered_check_needs_nothing() {
+  local state="$TMP_ROOT/pred-check-unregistered/state"
+  mkdir -p "$state"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/rogue.check.sh"
+  chmod 700 "$state/rogue.check.sh"
+  if fm_supervision_needed "$state" 300; then
+    fail "a check with no trust binding must not arm supervision"
+  fi
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "an unregistered check must not be counted, got $FM_SUP_CHECKS"
+  pass "fm_supervision_needed: false for a check.sh with no registration binding"
+}
+
+test_predicate_task_pr_poll_needs_nothing_after_teardown() {
+  local state="$TMP_ROOT/pred-pr-poll/state"
+  mkdir -p "$state"
+  : > "$state/task1.meta"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/task1.check.sh"
+  chmod 700 "$state/task1.check.sh"
+  : > "$state/task1.pr-poll"
+  fm_supervision_needed "$state" 300 || fail "the in-flight task itself must need supervision"
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "a task PR poll must not count as a registered custom check"
+  # What teardown leaves behind: the task, its poll, and its check are all gone.
+  rm -f "$state/task1.meta" "$state/task1.check.sh" "$state/task1.pr-poll"
+  if fm_supervision_needed "$state" 300; then
+    fail "a torn-down task must leave nothing keeping the home armed"
+  fi
+  pass "fm_supervision_needed: a task PR poll never arms the home on its own"
+}
+
+test_predicate_relay_shim_is_not_a_custom_check() {
+  local state="$TMP_ROOT/pred-relay-not-custom/state"
+  mkdir -p "$state"
+  : > "$state/x-watch.check.sh"
+  fm_supervision_needed "$state" 300 || fail "the relay poll must still need supervision"
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "the relay shim keeps its own trust path and must not be counted as a custom check"
+  pass "fm_supervision_status: the relay shim is not counted as a registered custom check"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -1908,6 +1979,11 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
+test_predicate_registered_check_needs_supervision
+test_predicate_registered_check_survives_rebinding_drift
+test_predicate_unregistered_check_needs_nothing
+test_predicate_task_pr_poll_needs_nothing_after_teardown
+test_predicate_relay_shim_is_not_a_custom_check
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
