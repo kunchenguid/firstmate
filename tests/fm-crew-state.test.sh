@@ -1479,6 +1479,30 @@ test_secondmate_open_block_survives_unrelated_append() {
   pass "a busy secondmate keeps its open blocker until that exact key closes"
 }
 
+test_newest_open_decision_supplies_the_reported_detail() {
+  reset_fakes
+  local d out gen
+  d=$(new_case newest-open-decision)
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" "harness=claude"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" mate)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" mate busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  printf 'blocked [key=a]: staging is down\nneeds-decision [key=b]: pick a rollout order\n' > "$d/state/mate.status"
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: parked" "the newer open decision is the reported state"
+  assert_contains "$out" "pick a rollout order" "the newer open decision supplies the detail"
+  printf 'blocked [key=c]: the deploy host went away\n' >> "$d/state/mate.status"
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: blocked" "a newer blocker takes the report back"
+  assert_contains "$out" "the deploy host went away" "the newest blocker supplies the detail"
+  printf 'resolved [key=c]: host restored\n' >> "$d/state/mate.status"
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: parked" "closing the newest decision falls back to the next open one"
+  assert_contains "$out" "pick a rollout order" "the still-open older decision is not lost"
+  pass "the most recently opened decision supplies the reported state and detail"
+}
+
 test_single_owner_terminal_declaration_supersedes_stale_decision() {
   reset_fakes
   local d kind opener terminal out key expected
@@ -2365,6 +2389,7 @@ test_socket_refusal_over_terminal_run_reports_blocked
 test_ordinary_blocked_over_live_run_keeps_plain_superseded
 test_genuine_daemon_down_reports_blocked
 test_secondmate_open_block_survives_unrelated_append
+test_newest_open_decision_supplies_the_reported_detail
 test_single_owner_terminal_declaration_supersedes_stale_decision
 test_latest_status_preserves_legacy_completions
 test_latest_status_subshell_work_does_not_grow_with_history

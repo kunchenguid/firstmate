@@ -556,26 +556,20 @@ status_open_decisions() {  # <status-file> [<kind>]
 }
 
 # Resolve the log's current declaration at one boundary for crew-state consumers.
-# An open blocker wins over unrelated events, then an open needs-decision wins;
-# within each kind the fold's most recently opened record supplies the detail.
+# Any decision the fold still holds open wins over unrelated events, and the
+# fold's most recently opened record supplies it; the latest recognized event
+# stands when nothing is open.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
-  local last open key verb note blocked='' decision=''
-  last=$(last_status_line "$1")
+  local open key verb note current=''
   open=$(status_open_decisions "$1" "$2")
   while IFS=$'\t' read -r key verb note; do
-    case "$verb" in
-      blocked) blocked="blocked [key=$key]: $note" ;;
-      needs-decision) decision="needs-decision [key=$key]: $note" ;;
-    esac
+    case "$verb" in ?*) current="$verb [key=$key]: $note" ;; esac
   done <<EOF
 $open
 EOF
-  if [ -n "$blocked$decision" ]; then
-    printf '%s\n' "${blocked:-$decision}"
-  else
-    printf '%s\n' "$last"
-  fi
+  [ -n "$current" ] || current=$(last_status_line "$1")
+  printf '%s\n' "$current"
 }
 
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
