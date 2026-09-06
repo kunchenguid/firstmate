@@ -175,13 +175,18 @@ _fm_pending_reply_archive_locked() {  # <state-dir> <corr_id>
   mv -f "$hot" "$archive_dir/$corr" 2>/dev/null || return 1
 }
 
+fm_pending_reply_require_wake_lib() {
+  command -v fm_lock_acquire_wait >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+}
+
 fm_pending_reply_archive() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 lock rc=0
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_pending_reply_require_wake_lib || return 1
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_archive_locked "$state" "$corr" || rc=$?
   fm_lock_release "$lock"
@@ -447,7 +452,7 @@ fm_pending_reply_confirm_delivery() {  # <state-dir> <corr_id>
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_pending_reply_require_wake_lib || return 1
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_confirm_delivery_locked "$@" || rc=$?
   fm_lock_release "$lock"
@@ -528,7 +533,7 @@ fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_pending_reply_require_wake_lib || return 1
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_reconcile_delivery_locked "$@" || rc=$?
   fm_lock_release "$lock"
@@ -557,7 +562,7 @@ fm_pending_reply_reset_known_undelivered() {  # <state-dir> <corr_id>
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_pending_reply_require_wake_lib || return 1
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_reset_known_undelivered_locked "$@" || rc=$?
   fm_lock_release "$lock"
@@ -687,8 +692,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_pending_reply_require_wake_lib || return 1
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_try_resolve_locked "$@" || rc=$?
   fm_lock_release "$lock"
@@ -697,7 +701,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
 
 _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
-  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now
+  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now archive_rc
   local unconfirmed=0
   rec=$(fm_pending_reply_locate "$state" "$corr") || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -709,7 +713,12 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
     _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
     if [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
       || [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ]; then
-      _fm_pending_reply_archive_locked "$state" "$corr" || return 1
+      if ! _fm_pending_reply_archive_locked "$state" "$corr"; then
+        if [ -n "$(fm_pending_reply_get "$rec" escalated_epoch)" ]; then
+          fm_pending_reply_set "$rec" escalation_closed_epoch "" || true
+        fi
+        return 1
+      fi
     fi
     return 0
   fi
@@ -749,7 +758,12 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
   if [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
     || [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ]; then
-    _fm_pending_reply_archive_locked "$state" "$corr" || return 1
+    archive_rc=0
+    _fm_pending_reply_archive_locked "$state" "$corr" || archive_rc=$?
+    if [ "$archive_rc" -ne 0 ]; then
+      fm_pending_reply_set "$rec" phase "$phase" || true
+      return 2
+    fi
   fi
   return 0
 }
@@ -1206,8 +1220,7 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_pending_reply_require_wake_lib || return 1
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_close_escalation_locked "$@" || rc=$?
   fm_lock_release "$lock"
@@ -1272,8 +1285,7 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_pending_reply_require_wake_lib || return 1
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_maybe_escalate_locked "$@" || rc=$?
   fm_lock_release "$lock"
@@ -1316,9 +1328,10 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
     fi
   fi
   # Resolve wins if a late report arrived between completion and this call.
-  if _fm_pending_reply_try_resolve_locked "$state" "$corr"; then
-    return 0
-  fi
+  local resolve_rc=0
+  _fm_pending_reply_try_resolve_locked "$state" "$corr" || resolve_rc=$?
+  [ "$resolve_rc" -eq 0 ] && return 0
+  [ "$resolve_rc" -ne 2 ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   [ "$phase" != resolved ] || return 1
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
@@ -1524,9 +1537,12 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task observation_timeout observation_grace found i
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
+  STATE=$state
+  fm_pending_reply_require_wake_lib || return 1
   for rec in "$dir"/*; do
     # The archive subdirectory holds settled records and is deliberately not
     # scanned: it is read lazily by correlation id (fm_pending_reply_locate).

@@ -433,7 +433,7 @@ test_status_is_paused_classifier() {
 # (surface it) - so the watcher's stale path gets both for one bounded call.
 # crew_is_paused delegates to it exactly as crew_is_provably_working does.
 test_crew_absorb_class_classifier() {
-  local dir fakebin
+  local dir fakebin started elapsed
   dir=$(make_case absorb-class); fakebin="$dir/fakebin"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE
@@ -451,8 +451,20 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
+  cat > "$fakebin/fm-crew-state-hung.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 5
+printf 'state: working · source: pane · too late\n'
+SH
+  chmod +x "$fakebin/fm-crew-state-hung.sh"
+  started=$SECONDS
+  [ "$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state-hung.sh" \
+    FM_CREW_STATE_TIMEOUT=1 crew_absorb_class a)" = none ] \
+    || fail "timed-out crew state was treated as absorbable"
+  elapsed=$((SECONDS - started))
+  [ "$elapsed" -lt 4 ] || fail "crew-state classification exceeded its deadline"
   unset FM_FAKE_CREW_STATE
-  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+  pass "crew_absorb_class: working/paused/none with bounded crew-state reads"
 }
 
 # The wedge detector's third liveness input: writes inside the crew's own recorded

@@ -1768,10 +1768,12 @@ test_resolution_reports_archive_failure() {
   unset -f _fm_pending_reply_archive_locked
   eval "$original_archive"
   [ "$first_rc" -ne 0 ] || fail "resolution reported success after archival failed"
-  [ -f "$hot" ] || fail "failed archival lost the resolved record"
-  fm_pending_reply_try_resolve "$state" "$corr" || fail "resolution retry should archive"
+  [ -f "$hot" ] || fail "failed archival lost the pending record"
+  [ "$(fm_pending_reply_get "$hot" phase)" != resolved ] \
+    || fail "failed archival left a terminal record in the hot set"
+  fm_pending_reply_tick "$state" || fail "watcher retry should succeed"
   [ -f "$(fm_pending_reply_archive_dir "$state")/$corr" ] \
-    || fail "resolution retry did not archive"
+    || fail "watcher retry did not archive"
   pass "successful resolution guarantees resolve-time archival"
 }
 
@@ -1791,13 +1793,13 @@ test_archive_failure_does_not_reopen_resolved_reply() {
   unset -f _fm_pending_reply_archive_locked
   eval "$original_archive"
   [ "$escalation_rc" -ne 0 ] || fail "archive failure was hidden by escalation"
-  [ "$(fm_pending_reply_get "$hot" phase)" = resolved ] \
-    || fail "archive failure reopened the resolved reply"
+  [ "$(fm_pending_reply_get "$hot" phase)" = recovery_failed ] \
+    || fail "archive failure changed the retryable recovery phase"
   ! grep -Fq "$(fm_pending_reply_escalation_key "$corr")" "$state/hibit.status" \
     || fail "archive failure emitted a false escalation for the resolved reply"
-  fm_pending_reply_try_resolve "$state" "$corr" || fail "resolved retry should archive"
+  fm_pending_reply_tick "$state" || fail "watcher retry should archive"
   [ -f "$(fm_pending_reply_archive_dir "$state")/$corr" ] \
-    || fail "resolved retry did not archive after the transient failure"
+    || fail "watcher retry did not archive after the transient failure"
   pass "archive failure cannot reopen a resolved reply"
 }
 
