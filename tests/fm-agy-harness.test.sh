@@ -512,6 +512,41 @@ test_store_directory_writable_by_the_primary_group_is_refused() {
 # plain `mkdir -p` under the umask-002 default would leave 0775 here and refuse
 # on its own work. Creation is pinned to 0755 instead, and a fresh home must
 # still register.
+# The store is followed through a CHAIN, not just one link, and every directory
+# the resolution passes through can repoint what comes after it. Checking only
+# the settings directory and the final target's directory leaves a middle hop in
+# a directory others can write, which is the same confused deputy as a first hop
+# there. Both directions are asserted in one case, so the refusal is pinned to
+# the permission rather than to the chain.
+test_store_symlink_chain_through_a_loose_directory_is_refused() {
+  local rec out store dir loose victim before
+  rec=$(make_case store-chain-loose-hop)
+  read_case "$rec"
+  store=$(store_path "$AGY_HOME")
+  dir=$(dirname "$store")
+  mkdir -p "$dir"
+  loose="$CASE_DIR/hop"
+  mkdir -p "$loose"
+  victim="$CASE_DIR/unrelated.json"
+  printf '%s\n' '{"unrelated":true}' > "$victim"
+  before=$(cat "$victim")
+  ln -s "$victim" "$loose/link.json"
+  ln -s "$loose/link.json" "$store"
+  chgrp "$(id -g)" "$loose"
+  chmod g+w,o-w "$loose"
+  out=$(run_trust "$AGY_HOME" "$WT" "$PROJ")
+  expect_code 1 $? "a chain hop others can write must be refused: $out"
+  assert_contains "$out" "writable by other users" "the refusal did not name the directory permission"
+  [ "$(cat "$victim")" = "$before" ] || \
+    fail "an unrelated file this user owns was overwritten through the store symlink chain"
+  # Same chain, tight hop: the length of the chain was never the objection.
+  chmod go-w "$loose"
+  out=$(run_trust "$AGY_HOME" "$WT" "$PROJ")
+  expect_code 0 $? "a chain through directories only this user can write must be accepted: $out"
+  assert_trusted "$victim" "$WT" "the trust did not land at the end of the chain"
+  pass "fm-agy-trust.sh: refuses a store symlink chain through a directory others can write"
+}
+
 test_created_store_directory_is_not_group_writable() {
   local rec out dir mode
   rec=$(make_case created-dir-mode)
@@ -1233,6 +1268,7 @@ test_symlinked_store_to_a_foreign_owned_target_is_refused
 test_symlinked_store_to_an_owned_target_is_accepted
 test_store_directory_writable_by_others_is_refused
 test_store_directory_writable_by_the_primary_group_is_refused
+test_store_symlink_chain_through_a_loose_directory_is_refused
 test_created_store_directory_is_not_group_writable
 test_corrupt_store_fails_closed
 test_non_array_trusted_workspaces_fails_closed

@@ -106,11 +106,6 @@ real_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
 # resolved one.
 logical_dir() { (cd -- "$1" 2>/dev/null && pwd); }
 
-# The fully resolved path of an existing file, or empty. Resolution runs in node
-# because it must follow a symlink chain to its final target, and node is already
-# this script's JSON writer.
-real_file() { node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$1" 2>/dev/null; }
-
 # The resolved common dir of a git worktree, or empty. --git-common-dir can be
 # relative, so it is resolved from inside the worktree rather than joined here.
 common_dir_of() {
@@ -216,51 +211,82 @@ command -v node >/dev/null 2>&1 || refuse "node is required to record workspace 
 # removing the symlink support a dotfile manager or synced folder legitimately
 # needs. Reported by Greptile on kunchenguid/firstmate#3858.
 #
-# Write for GROUP or for OTHER is refused, with no carve-out for the caller's own
-# primary group. An earlier version of this guard made exactly that carve-out - a
-# private user group has no members but its owner, so refusing it looked like
-# failing ordinary homes closed for no gain - and the carve-out WAS the hole:
-# where the primary group is itself shared, as macOS `staff` is, every other
-# member of it could still plant the link.
-#
-# The bits cannot distinguish a shared group from a private one, and membership
-# cannot be enumerated portably or completely: `getent` does not exist on macOS,
-# a group's primary members are not listed in its group entry on any platform,
-# and a directory service is free not to enumerate at all. An unanswerable
-# question is not guessed at here - mode 0022 is the whole test, and the refusal
-# names the chmod that fixes it. That costs a one-time `chmod g-w` on a settings
-# directory some other tool created group-writable, which is the price of a guard
-# that cannot be wrong in the unsafe direction.
-#
-# node, not stat: `stat -c` is GNU-only and `stat -f` is BSD-only, and node is
-# already required below as this script's JSON writer.
-dir_writable_by_others() {  # <dir>
-  node -e '
-    const fs = require("node:fs");
-    process.exit((fs.statSync(process.argv[1]).mode & 0o022) !== 0 ? 0 : 1);
-  ' "$1" 2>/dev/null
-}
-
-refuse_loose_dir() {  # <dir> <label>
-  ! dir_writable_by_others "$1" || refuse \
-    "$2 '$1' is writable by other users, so the settings path it holds cannot be trusted; remove write access for others with: chmod go-w '$1'"
-}
-
-refuse_loose_dir "$CONFIG_DIR_REAL" "agy settings directory"
-
 STORE="$CONFIG_DIR_REAL/settings.json"
+
 # A dotfile manager or a synced folder legitimately symlinks this store, so the
 # link is followed to its final target and every check below judges that target.
 # Ownership is the property that matters: another user's file is refused however
 # it is reached. Writing to the resolved path is what keeps the link itself in
 # place, since staging beside the link and renaming would replace it with a
 # regular file and break that layout.
-if [ -L "$STORE" ]; then
-  STORE_REAL=$(real_file "$STORE") || true
-  [ -n "$STORE_REAL" ] || refuse "'$STORE' is a symlink whose target cannot be resolved"
-  STORE=$STORE_REAL
-  refuse_loose_dir "$(dirname "$STORE")" "the directory holding the resolved agy settings store"
-fi
+#
+# Following that link is only safe while no other account can write ANY directory
+# the resolution passes through. Whoever can create or replace an entry in one of
+# them repoints the store at an unrelated file THIS user owns, and every check on
+# the resolved store still passes, because the file that would be rewritten is
+# owned by the very user this runs as - so ownership cannot catch it. The whole
+# walk is judged rather than its two ends: a chain whose middle hop sits in a
+# directory others can write is the same confused deputy as one whose first hop
+# does. Reported by Greptile on kunchenguid/firstmate#3858.
+#
+# Write for GROUP or for OTHER is refused, with no carve-out for the caller's own
+# primary group. An earlier version of this guard made exactly that carve-out - a
+# private user group has no members but its owner, so refusing it looked like
+# failing ordinary homes closed for no gain - and the carve-out WAS the hole:
+# where the primary group is itself shared, as macOS `staff` is, every other
+# member of it could still plant the link. The bits cannot distinguish a shared
+# group from a private one, and membership cannot be enumerated portably or
+# completely: `getent` does not exist on macOS, a group's primary members are not
+# listed in its group entry on any platform, and a directory service is free not
+# to enumerate at all. An unanswerable question is not guessed at here - mode
+# 0022 is the whole test, and the refusal names the chmod that fixes it. That
+# costs a one-time `chmod g-w` on a directory some other tool created
+# group-writable, which is the price of a guard that cannot be wrong in the
+# unsafe direction.
+#
+# Ancestors ABOVE the settings directory are deliberately not walked. An account
+# that can write $HOME owns this user's login long before it reaches agy, and
+# refusing on a 0775 home would fail the umask-002 default closed over an exposure
+# this script cannot be the control for.
+#
+# node, not stat: `stat -c` is GNU-only and `stat -f` is BSD-only, and node is
+# already required below as this script's JSON writer.
+STORE_VERDICT=$(node -e '
+  const fs = require("node:fs");
+  const path = require("node:path");
+  let p = process.argv[1];
+  let followed = 0;
+  for (;;) {
+    // The REAL directory the current name lives in, so a symlinked parent is
+    // judged where it actually resolves rather than where it is spelled.
+    let dir;
+    try { dir = fs.realpathSync(path.dirname(p)); } catch (err) { break; }
+    if ((fs.statSync(dir).mode & 0o022) !== 0) {
+      process.stdout.write("loose:" + dir);
+      process.exit(0);
+    }
+    p = path.join(dir, path.basename(p));
+    let st;
+    try { st = fs.lstatSync(p); } catch (err) { st = null; }
+    if (st === null) break;
+    if (!st.isSymbolicLink()) { process.stdout.write("store:" + p); process.exit(0); }
+    // A chain long enough to be a loop is a store this cannot resolve, and node
+    // would only report ELOOP further down anyway.
+    if (++followed > 40) break;
+    const target = fs.readlinkSync(p);
+    p = path.isAbsolute(target) ? target : path.join(dir, target);
+  }
+  // Nothing there yet: a store this run creates itself, unless a link pointed at
+  // it, which is the dangling store the caller must fix rather than have rewritten.
+  process.stdout.write(followed > 0 ? "dangling:" : "store:" + p);
+' "$STORE" 2>/dev/null) || STORE_VERDICT=
+
+case $STORE_VERDICT in
+  store:*) STORE=${STORE_VERDICT#store:} ;;
+  loose:*) refuse "'${STORE_VERDICT#loose:}' is writable by other users, so the agy settings store reached through it cannot be trusted; remove write access for others with: chmod go-w '${STORE_VERDICT#loose:}'" ;;
+  dangling:) refuse "'$STORE' is a symlink whose target cannot be resolved" ;;
+  *) refuse "the agy settings store at '$STORE' could not be resolved" ;;
+esac
 if [ -e "$STORE" ]; then
   [ -f "$STORE" ] || refuse "'$STORE' is not a regular file"
   [ -O "$STORE" ] || refuse "'$STORE' is not owned by this user"
