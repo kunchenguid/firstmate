@@ -934,6 +934,59 @@ test_tasks_config_follows_a_relocated_data_directory() {
   pass "bootstrap materializes .tasks.toml at a relocated data directory's parent"
 }
 
+# An override that reaches its data directory through a symlink must resolve to
+# the same address the backlog consumers use: fm_backlog_data_absolute
+# canonicalizes with cd/pwd -P (bin/fm-backlog-transition-lib.sh), so a final
+# symlink component moves the addressing root to the target's parent. Deriving
+# the location from the raw path would publish .tasks.toml beside the symlink,
+# where fm_backlog_root and tasks-axi never read it, leaving the home on
+# tasks-axi's built-in fallback defaults (losing archive addressing and
+# done_keep), and readdressing to the symlink's name would point the archive at
+# a directory that does not exist.
+test_tasks_config_follows_a_symlinked_override() {
+  local case_dir fixture root home fakebin data out config
+  case_dir="$TMP_ROOT/tasks-config-symlinked"
+  fixture=$(make_routine_bootstrap_fixture "$case_dir")
+  root=${fixture%%|*}
+  fixture=${fixture#*|}
+  home=${fixture%%|*}
+  fakebin=${fixture#*|}
+  data="$case_dir/backlog-store"
+  mkdir -p "$data" "$case_dir/relocated"
+  ln -s "$data" "$case_dir/relocated/data-link"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_DATA_OVERRIDE="$case_dir/relocated/data-link" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "TASKS_CONFIG" \
+    "materializing a symlinked home's .tasks.toml should stay silent"
+  [ ! -e "$home/.tasks.toml" ] \
+    || fail "bootstrap put the symlinked home's .tasks.toml at FM_HOME"
+  [ ! -e "$case_dir/relocated/.tasks.toml" ] \
+    || fail "bootstrap published .tasks.toml beside the symlink instead of at the canonical root"
+  config="$case_dir/.tasks.toml"
+  [ -f "$config" ] || fail "bootstrap did not materialize .tasks.toml at the canonical root"
+  assert_contains "$(cat "$config")" 'path = "backlog-store/backlog.md"' \
+    "generated .tasks.toml must address the canonical data directory, not the symlink name"
+  assert_contains "$(cat "$config")" 'archive = "backlog-store/done-archive.md"' \
+    "generated .tasks.toml must archive inside the canonical data directory"
+
+  if command -v tasks-axi >/dev/null 2>&1; then
+    local i
+    printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$data/backlog.md"
+    for i in 1 2 3 4 5 6 7 8 9 10 11; do
+      (cd "$case_dir" && tasks-axi add "fm-sym-$i" "row $i" --file "$data/backlog.md") >/dev/null
+      (cd "$case_dir" && tasks-axi start "fm-sym-$i" --file "$data/backlog.md") >/dev/null
+      (cd "$case_dir" && tasks-axi "done" "fm-sym-$i" --file "$data/backlog.md") >/dev/null
+    done
+    [ -f "$data/done-archive.md" ] \
+      || fail "tasks-axi did not read the generated .tasks.toml and archived outside the configured data directory"
+    [ ! -e "$case_dir/data" ] \
+      || fail "tasks-axi sent the archive to a sibling data directory"
+  fi
+  pass "bootstrap resolves a symlinked override to the canonical addressing root"
+}
+
 # A data directory relocated under a name other than "data" must keep its
 # archive beside its backlog: tasks-axi resolves the generated .tasks.toml's
 # data-relative path values against the addressing root, so the template's
@@ -1360,6 +1413,9 @@ test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_tasks_config_materializes_from_the_tracked_example
 test_tasks_config_follows_a_relocated_data_directory
+
+test_tasks_config_follows_a_symlinked_override
+
 test_tasks_config_readdresses_a_renamed_data_directory
 test_tasks_config_leaves_an_existing_home_copy_untouched
 test_tasks_config_never_clobbers_a_concurrent_home_copy

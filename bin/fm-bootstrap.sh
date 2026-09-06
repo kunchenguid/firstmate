@@ -1342,7 +1342,16 @@ tasks_config_setup() {
   # sitting unread at FM_HOME. The example's paths assume the data directory is
   # named data under the root, so a relocation under another name readdresses
   # them to the configured directory and the archive stays beside the backlog.
+  # The root is derived from the canonical data directory (the same cd/pwd -P
+  # resolution fm_backlog_data_absolute applies for every backlog consumer), so
+  # an override reaching its data through a symlink publishes where tasks-axi
+  # actually resolves the config, not beside the raw path.
   local check=$DATA root rel_data
+  if ! check=$(CDPATH='' cd -- "$check" 2>/dev/null && pwd -P); then
+    # An unresolvable data directory still gets the raw-path fallback so the
+    # degradation below (and its actionable report) stays reachable.
+    check=$DATA
+  fi
   while [ "$check" != / ] && [ "${check%/}" != "$check" ]; do check=${check%/}; done
   case "$check" in
     */*) root=${check%/*} rel_data=${check##*/} ;;
