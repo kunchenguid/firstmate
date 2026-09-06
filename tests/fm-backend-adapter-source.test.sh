@@ -97,6 +97,28 @@ test_backend_source_missing_adapter_refuses() {
   pass "fm_backend_source: a missing or unreadable adapter refuses without aborting the caller"
 }
 
+test_backend_source_nested_failure_refuses() {
+  local fixture out rc
+  fixture=$TMP_ROOT/nested-source-failure
+  mkdir -p "$fixture/bin/backends"
+  cp "$ROOT/bin/fm-backend.sh" "$fixture/bin/fm-backend.sh"
+  cp "$ROOT"/bin/backends/*.sh "$fixture/bin/backends/"
+  printf '%s\n' '. "$FM_BACKEND_LIB_DIR/missing-nested-library.sh"' ':' \
+    > "$fixture/bin/backends/herdr.sh"
+
+  set +e
+  out=$(backend_source_refusal_probe "$fixture" herdr)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "nested source failure probe failed before exposing the caller state"
+  assert_contains "$out" "REFUSED" \
+    "a nested source failure was overwritten by a later successful adapter command"
+  assert_contains "$out" "REACHED_CALLER" \
+    "a nested source failure killed the caller before its refusal branch"
+  rm -rf "$fixture"
+  pass "fm_backend_source: nested source failure refuses even after later adapter commands"
+}
+
 # The suite is only meaningful on the interpreter where a failed `.` aborts, so
 # record which bash actually ran it. Not an assertion: bash 5 lanes legitimately
 # run this file too, they just cannot reproduce the abort.
@@ -105,4 +127,5 @@ test_report_probe_interpreter() {
 }
 
 test_backend_source_missing_adapter_refuses
+test_backend_source_nested_failure_refuses
 test_report_probe_interpreter
