@@ -33,10 +33,8 @@ FM_TEST_LIB_SOURCED=1
 # suite's fixtures were written against.
 umask 022
 
-# Fixture Git processes must not inherit host signing, hooks, or other global
-# and system preferences. This affects only the sourcing test and its children;
-# config tests can still set local config, use -c, or supply their own env after
-# sourcing. Never write the developer's config or disable real project signing.
+# Fixture Git isolation for every suite that reaches this library; the helper's
+# header owns the invariant and the layers it deliberately leaves in force.
 # shellcheck source=tests/git-config-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
 
