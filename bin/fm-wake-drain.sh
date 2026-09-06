@@ -392,9 +392,51 @@ EOF
 # fm-classify-lib.sh's "incremental (cursor-backed) open-decisions fold").
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
+#
+# Pure: compose one OPEN DECISIONS row, appending the task's latest progress
+# event when one is known and its verb differs from this row's own verb, so
+# progress that arrives while a decision is still open reads as progress, not
+# as an answer. An empty <latest-verb> means no later event is known, so the
+# row is unchanged.
+_fm_open_decision_row_text() {  # <task> <key> <verb> <note> <latest-verb> <latest-note>
+  local task=$1 key=$2 verb=$3 note=$4 latest_verb=$5 latest_note=$6 line
+  line="$task"
+  [ "$key" = default ] || line="$line [key=$key]"
+  line="$line $verb: $note"
+  if [ -n "$latest_verb" ] && [ "$latest_verb" != "$verb" ]; then
+    line="$line · latest: $latest_verb: $latest_note"
+  fi
+  printf '%s' "$line"
+}
+
+# Look up <task>'s captured presentation endpoint/identity from <snapshot> (the
+# same "task<TAB>endpoint<TAB>ident" rows the outcome backstop reads above).
+# Sets FM_OPEN_DECISION_SNAPSHOT_ENDPOINT/_IDENT; returns 1 when the task has no
+# row (an empty snapshot, or its status file dropped out of the fleet scan
+# between the snapshot and this read), leaving the caller's latest-event lookup
+# skipped rather than guessed.
+FM_OPEN_DECISION_SNAPSHOT_ENDPOINT=
+FM_OPEN_DECISION_SNAPSHOT_IDENT=
+_fm_open_decision_snapshot_row() {  # <snapshot> <task>
+  local snapshot=$1 want=$2 task endpoint ident
+  FM_OPEN_DECISION_SNAPSHOT_ENDPOINT=
+  FM_OPEN_DECISION_SNAPSHOT_IDENT=
+  [ -n "$snapshot" ] || return 1
+  while IFS=$'\t' read -r task endpoint ident; do
+    [ "$task" = "$want" ] || continue
+    FM_OPEN_DECISION_SNAPSHOT_ENDPOINT=$endpoint
+    FM_OPEN_DECISION_SNAPSHOT_IDENT=$ident
+    return 0
+  done <<EOF
+$snapshot
+EOF
+  return 1
+}
+
 print_open_decisions_section() {
   local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes
+  local latest_task='' latest_verb='' latest_note='' event_verb
 
   if [ -n "$snapshot" ]; then
     open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
@@ -405,9 +447,26 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
-    line="$task"
-    [ "$key" = default ] || line="$line [key=$key]"
-    line="$line $verb: $note"
+    # scan_open_decisions_{snapshot,incremental} print a task's open rows
+    # consecutively, so the latest-event lookup below runs at most once per
+    # task and its result is reused across that task's grouped rows.
+    if [ "$task" != "$latest_task" ]; then
+      latest_task=$task
+      latest_verb=
+      latest_note=
+      if _fm_open_decision_snapshot_row "$snapshot" "$task" \
+        && status_snapshot_latest_event "$STATE/$task.status" \
+             "$FM_OPEN_DECISION_SNAPSHOT_ENDPOINT" "$FM_OPEN_DECISION_SNAPSHOT_IDENT"; then
+        event_verb=$(status_line_verb "$FM_STATUS_SNAPSHOT_EVENT_LINE")
+        case "$event_verb" in
+          working|done|failed)
+            latest_verb=$event_verb
+            latest_note=$(status_line_note "$FM_STATUS_SNAPSHOT_EVENT_LINE")
+            ;;
+        esac
+      fi
+    fi
+    line=$(_fm_open_decision_row_text "$task" "$key" "$verb" "$note" "$latest_verb" "$latest_note")
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.

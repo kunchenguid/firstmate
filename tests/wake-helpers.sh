@@ -42,6 +42,31 @@ REC
 chmod +x "$_fm_wedge_rec_dir/rec"
 export FM_WEDGE_ALARM_EXEC="$_fm_wedge_rec_dir/rec"
 
+# The origin/main head this repository's wake-drain latest-progress work
+# branched from (see fm-wake-drain-open-decisions.test.sh's own base/head
+# comparisons). Pinned so a test can build a working copy of the exact
+# fm-wake-drain.sh this PR changed, to diff behavior against.
+BASE_WAKE_DRAIN_SHA=0388c9f5e688083fbbefbef66a83de980552f668
+
+# base_wake_drain_bin <dest-dir>: build a bin/ directory at <dest-dir> that
+# runs the BASE_WAKE_DRAIN_SHA copy of fm-wake-drain.sh against every other
+# bin/*.sh file exactly as currently checked out (symlinked, so unrelated
+# fixes are never frozen to the old sha). Echoes the base drain's path.
+base_wake_drain_bin() {  # <dest-dir>
+  local dest=$1 f name
+  mkdir -p "$dest"
+  for f in "$ROOT"/bin/*.sh; do
+    name=$(basename "$f")
+    if [ "$name" = fm-wake-drain.sh ]; then
+      git -C "$ROOT" show "$BASE_WAKE_DRAIN_SHA:bin/$name" > "$dest/$name" || return 1
+      chmod +x "$dest/$name"
+    else
+      ln -sf "$f" "$dest/$name"
+    fi
+  done
+  printf '%s/fm-wake-drain.sh\n' "$dest"
+}
+
 # append_wake <state> <kind> <key> <payload>: append a wake record to the durable
 # queue in a subshell scoped to <state>, using the production wake library.
 append_wake() {
