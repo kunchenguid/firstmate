@@ -887,6 +887,17 @@ More prose after the marker.'
   assert_grep ">> '$home/state/bootstrap-ship-b1.status'" "$brief" \
     "ship brief's bootstrap acknowledgement did not point at this task's own status file"
 
+  # The declared contract must precede the branch-creation step, so a worker
+  # reading the brief in order sees the mandatory read before its first
+  # repository-changing action (Greptile review on PR #3877).
+  local contract_line branch_line
+  contract_line=$(grep -n "^# Project bootstrap contract$" "$brief" | head -1 | cut -d: -f1)
+  branch_line=$(grep -n "First action: create your branch" "$brief" | head -1 | cut -d: -f1)
+  [ -n "$contract_line" ] && [ -n "$branch_line" ] \
+    || fail "ship brief missing the contract section or the branch-creation step"
+  [ "$contract_line" -lt "$branch_line" ] \
+    || fail "ship brief presents the bootstrap contract (line $contract_line) after branch creation (line $branch_line)"
+
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" bootstrap-scout-b2 incident-proj --scout >/dev/null 2>&1
   brief="$home/data/bootstrap-scout-b2/brief.md"
   assert_present "$brief" "scout brief was not scaffolded"
@@ -895,6 +906,25 @@ More prose after the marker.'
   assert_grep 'Read fresh `error_logs` first.' "$brief" \
     "scout brief did not carry the declared read-order line verbatim"
   pass "fm-brief.sh: a project's declared bootstrap contract reaches both ship and scout briefs"
+}
+
+test_secondmate_scaffold_ignores_unresolvable_projects_override() {
+  local home status
+  home="$TMP_ROOT/bootstrap-secondmate-override-home"
+  mkdir -p "$home/data"
+
+  # A secondmate charter never looks up a project's bootstrap contract, so an
+  # inherited FM_PROJECTS_OVERRIDE that cannot be resolved must not block it
+  # (Greptile review on PR #3877: PROJECTS used to be validated unconditionally
+  # for every scaffold kind, including one that never reads it).
+  FM_HOME="$home" FM_PROJECTS_OVERRIDE=does-not-exist-relative-dir \
+    FM_SECONDMATE_CHARTER='ops domain' \
+    "$ROOT/bin/fm-brief.sh" bootstrap-secondmate-override --secondmate --no-projects >/dev/null 2>&1
+  status=$?
+  expect_code 0 "$status" "a secondmate scaffold must not fail over an unresolvable FM_PROJECTS_OVERRIDE it never uses"
+  assert_present "$home/data/bootstrap-secondmate-override/brief.md" \
+    "secondmate charter was not scaffolded despite an unresolvable FM_PROJECTS_OVERRIDE"
+  pass "fm-brief.sh: a secondmate scaffold ignores an unresolvable FM_PROJECTS_OVERRIDE it never uses"
 }
 
 test_bootstrap_contract_fails_closed_on_unterminated_block() {
@@ -1004,6 +1034,7 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_bootstrap_contract_absent_by_default
 test_bootstrap_contract_injected_into_ship_and_scout
+test_secondmate_scaffold_ignores_unresolvable_projects_override
 test_bootstrap_contract_fails_closed_on_unterminated_block
 test_bootstrap_contract_fails_closed_on_empty_block
 test_scout_and_secondmate_scaffold

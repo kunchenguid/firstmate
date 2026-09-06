@@ -122,11 +122,6 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
-if [ -n "${FM_PROJECTS_OVERRIDE:-}" ]; then
-  PROJECTS=$(resolve_directory_input FM_PROJECTS_OVERRIDE "$FM_PROJECTS_OVERRIDE") || exit 1
-else
-  PROJECTS="$FM_HOME/projects"
-fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -322,6 +317,16 @@ fi
 
 REPO=${POS[1]}
 
+# PROJECTS is resolved only here, never above alongside DATA/STATE: a
+# secondmate charter (already scaffolded and returned above) never reads it,
+# so validating it unconditionally for every invocation would fail a
+# secondmate scaffold over a directory it never uses.
+if [ -n "${FM_PROJECTS_OVERRIDE:-}" ]; then
+  PROJECTS=$(resolve_directory_input FM_PROJECTS_OVERRIDE "$FM_PROJECTS_OVERRIDE") || exit 1
+else
+  PROJECTS="$FM_HOME/projects"
+fi
+
 # Fail closed rather than silently scaffolding a brief that omits a project's
 # declared bootstrap contract (bin/fm-bootstrap-contract-lib.sh owns discovery,
 # the marker format, and this failure mode). BOOTSTRAP_SECTION is empty when
@@ -467,9 +472,9 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
-If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.$BOOTSTRAP_SECTION
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2$BOOTSTRAP_SECTION
+1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
 # Rules
 $RULE1
