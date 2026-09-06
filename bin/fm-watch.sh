@@ -1236,84 +1236,187 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+pr_refresh_state_write() {  # <path> <prepared|dispatched|resolved> <head> <attempt> <record|->
+  local path=$1 status=$2 head=$3 attempt=$4 record=$5 tmp
+  tmp=$(mktemp "$STATE/.pr-refresh-state.XXXXXX") || return 1
+  if printf '%s\t%s\t%s\t%s\n' "$status" "$head" "$attempt" "$record" > "$tmp" \
+    && chmod 0600 "$tmp" && mv "$tmp" "$path"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+pr_refresh_state_read() {  # <path>; sets PR_REFRESH_*
+  local path=$1 extra tab
+  tab=$(printf '\t')
+  IFS="$tab" read -r PR_REFRESH_STATUS PR_REFRESH_HEAD PR_REFRESH_ATTEMPT PR_REFRESH_RECORD extra < "$path" \
+    || return 1
+  case "$PR_REFRESH_STATUS" in prepared|dispatched|resolved) ;; *) return 1 ;; esac
+  case "${#PR_REFRESH_HEAD}" in 40|64) ;; *) return 1 ;; esac
+  case "$PR_REFRESH_HEAD" in *[!0-9a-f]*) return 1 ;; esac
+  case "$PR_REFRESH_ATTEMPT" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ -z "$extra" ] || return 1
+  case "$PR_REFRESH_STATUS:$PR_REFRESH_RECORD" in
+    prepared:-) ;;
+    prepared:*|dispatched:-|resolved:-) return 1 ;;
+    *) fm_task_inbox_seq_of "$PR_REFRESH_RECORD" >/dev/null || return 1 ;;
+  esac
+}
+
+pr_refresh_record_state() {  # <task-id> <record>; prints pending|resolved|missing
+  local id=$1 record=$2 dir
+  dir="$STATE/$id.inbox"
+  if [ -f "$dir/handled/$record" ]; then
+    printf resolved
+  elif [ -f "$dir/$record" ]; then
+    printf pending
+  # The acknowledgement move may land between the two reads.
+  elif [ -f "$dir/handled/$record" ]; then
+    printf resolved
+  else
+    printf missing
+  fi
+}
+
 pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
-  local id=$1 url=$2 condition=$3 head=$4 state_line state mode spawn_gen message
-  local marker="$STATE/$id.pr-refresh-dispatched" delivery_id known=0
-  local escalated="$STATE/$id.pr-refresh-escalated" stale_secs age
-  # Captured before the state check so a mid-check replacement can't hand its own generation to the "done" verdict it never earned.
-  spawn_gen=$(fm_meta_get "$STATE/$id.meta" spawn_gen)
+  local id=$1 url=$2 condition=$3 head=$4 state_line state mode spawn_gen poll_spawn_gen message
+  local marker="$STATE/$id.pr-refresh-state" meta="$STATE/$id.meta" attempt record record_path record_state
+  spawn_gen=$(fm_meta_get "$meta" spawn_gen)
+  poll_spawn_gen=$(fm_meta_get "$meta" pr_poll_spawn_gen)
+  if [ -z "$spawn_gen" ] || [ "$spawn_gen" != "$poll_spawn_gen" ]; then
+    printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=worker-generation-changed\n' \
+      "$url" "$head" "$condition"
+    return 1
+  fi
+  mode=$(fm_meta_get "$meta" mode)
   state_line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || state_line=
   state=${state_line#state: }
   state=${state%% *}
   case "$state" in
     working)
+      if [ -f "$marker" ] && pr_refresh_state_read "$marker" \
+        && [ "$PR_REFRESH_STATUS" = dispatched ] && [ "$PR_REFRESH_HEAD" = "$head" ] \
+        && [ "$(pr_refresh_record_state "$id" "$PR_REFRESH_RECORD")" = resolved ]; then
+        pr_refresh_state_write "$marker" resolved "$head" "$PR_REFRESH_ATTEMPT" "$PR_REFRESH_RECORD" || {
+          printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-failed\n' \
+            "$url" "$head" "$condition"
+          return 1
+        }
+      fi
       printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=active-work\n' \
         "$url" "$head" "$condition"
       return 2
       ;;
-    done)
-      # A done verdict paired with a spawn_gen that moved since our first read belongs to an incoming replacement, not the incarnation that earned it.
-      if [ "$(fm_meta_get "$STATE/$id.meta" spawn_gen)" != "$spawn_gen" ]; then
-        printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=active-work\n' \
-          "$url" "$head" "$condition"
-        return 2
-      fi
-      ;;
+    done) ;;
     failed|blocked|paused|parked|unknown) ;;
     *) state=unknown ;;
   esac
   if [ "$state" != "done" ]; then
-    rm -f "$marker" "$escalated"
     printf 'branch-refresh-refused pr=%s head=%s condition=%s task-state=%s\n' \
       "$url" "$head" "$condition" "$state"
     return 1
   fi
 
-  mode=$(fm_meta_get "$STATE/$id.meta" mode)
   case "$mode" in no-mistakes|direct-PR) ;; *)
     printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=unsupported-mode\n' \
       "$url" "$head" "$condition"
     return 1
   esac
   case "$condition" in behind|conflict) ;; *) return 1 ;; esac
-  if [ "$mode" = no-mistakes ]; then
-    message="FIRSTMATE_OP: v1 branch-currency: Your open pull request $url is not current with its base (behind or in conflict) at head $head. Re-run this brief's no-mistakes delivery contract with its exact serialized captain intent. Before any edit or branch movement, inspect no-mistakes axi status and do not act while an active run owns the branch. Let the pipeline's rebase step bring the branch current and re-establish every check on the resulting head. If rebase conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
+  if [ -f "$marker" ]; then
+    if ! pr_refresh_state_read "$marker"; then
+      printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-invalid\n' \
+        "$url" "$head" "$condition"
+      return 1
+    fi
+    if [ "$PR_REFRESH_HEAD" = "$head" ] && [ "$PR_REFRESH_STATUS" = dispatched ]; then
+      record_state=$(pr_refresh_record_state "$id" "$PR_REFRESH_RECORD")
+      case "$record_state" in
+        pending)
+          printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-pending\n' \
+            "$url" "$head" "$condition"
+          return 2
+          ;;
+        resolved)
+          if ! pr_refresh_state_write "$marker" resolved "$head" "$PR_REFRESH_ATTEMPT" "$PR_REFRESH_RECORD"; then
+            printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-failed\n' \
+              "$url" "$head" "$condition"
+            return 1
+          fi
+          printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-resolved\n' \
+            "$url" "$head" "$condition"
+          return 2
+          ;;
+        *)
+          printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-missing\n' \
+            "$url" "$head" "$condition"
+          return 1
+          ;;
+      esac
+    fi
+    if [ "$PR_REFRESH_HEAD" = "$head" ] && [ "$PR_REFRESH_STATUS" = prepared ]; then
+      attempt=$PR_REFRESH_ATTEMPT
+    elif [ "$PR_REFRESH_HEAD" = "$head" ] && [ "$PR_REFRESH_STATUS" = resolved ]; then
+      attempt=$((PR_REFRESH_ATTEMPT + 1))
+    else
+      attempt=1
+    fi
   else
-    message="FIRSTMATE_OP: v1 branch-currency: Your open pull request $url is not current with its base (behind or in conflict) at head $head. Refresh it through this brief's direct-PR delivery path. Before any edit or branch movement, confirm no active validation run owns the branch. Fetch and merge the pull request's base without force, run the project checks on the resulting head, push normally, and wait for current-head checks. If the merge conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
+    attempt=1
+  fi
+  if [ ! -f "$marker" ] || [ "$PR_REFRESH_STATUS" != prepared ] \
+    || [ "$PR_REFRESH_HEAD" != "$head" ]; then
+    if ! pr_refresh_state_write "$marker" prepared "$head" "$attempt" -; then
+      printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-failed\n' \
+        "$url" "$head" "$condition"
+      return 1
+    fi
+  fi
+  if [ "$mode" = no-mistakes ]; then
+    message="FIRSTMATE_OP: v1 branch-currency attempt $attempt: Your open pull request $url is not current with its base (behind or in conflict) at head $head. Re-run this brief's no-mistakes delivery contract with its exact serialized captain intent. Before any edit or branch movement, inspect no-mistakes axi status and do not act while an active run owns the branch. Let the pipeline's rebase step bring the branch current and re-establish every check on the resulting head. If rebase conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
+  else
+    message="FIRSTMATE_OP: v1 branch-currency attempt $attempt: Your open pull request $url is not current with its base (behind or in conflict) at head $head. Refresh it through this brief's direct-PR delivery path. Before any edit or branch movement, confirm no active validation run owns the branch. Fetch and merge the pull request's base without force, run the project checks on the resulting head, push normally, and wait for current-head checks. If the merge conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
   fi
 
-  # Identity is the head alone (a same-head condition relabel is the same
-  # queued work); fm-send's durable fire-and-forget dedup is authoritative,
-  # so the marker is only a wake-noise hint, never load-bearing for delivery.
-  delivery_id=$(printf '%s' "$head" | cut -c1-16)
-  if [ "$(cat "$marker" 2>/dev/null)" = "$head" ]; then
-    known=1
-  else
-    rm -f "$escalated"
-  fi
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_EXPECTED_SPAWN_GEN="$spawn_gen" \
-    "$FM_PR_REFRESH_SEND_BIN" "$id" --fire-and-forget "$delivery_id" "$message" >/dev/null 2>&1; then
-    rm -f "$marker" "$escalated"
+  # A prepared attempt retries with the same body; a resolved attempt increments
+  # the body identity so all-history transport dedup cannot swallow new work.
+  if ! record_path=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    FM_SEND_EXPECTED_SPAWN_GEN="$spawn_gen" FM_SEND_IDEMPOTENT=1 FM_SEND_PRINT_INBOX_RECORD=1 \
+    "$FM_PR_REFRESH_SEND_BIN" "$id" "$message" 2>/dev/null); then
     printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=worker-dispatch-failed\n' \
       "$url" "$head" "$condition"
     return 1
   fi
-  if [ "$known" -eq 1 ]; then
-    # Fire-and-forget skips the inbox's own re-ring/escalation ladder, so an
-    # unconfirmed doorbell (dead pane, missing endpoint) must escalate here.
-    stale_secs=${FM_PR_REFRESH_STALE_SECS:-300}
-    age=$(age_of "$marker")
-    if [ "$age" -ge "$stale_secs" ] && [ "$(cat "$escalated" 2>/dev/null)" != "$head" ]; then
-      printf '%s' "$head" > "$escalated"
-      printf 'branch-refresh-stale pr=%s head=%s condition=%s reason=unacknowledged-after-%ss\n' \
-        "$url" "$head" "$condition" "$stale_secs"
+  case "$record_path" in
+    "$STATE/$id.inbox/"*.msg|"$STATE/$id.inbox/handled/"*.msg) record=${record_path##*/} ;;
+    *)
+      printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=worker-dispatch-receipt-invalid\n' \
+        "$url" "$head" "$condition"
       return 1
-    fi
-    printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-pending\n' \
+      ;;
+  esac
+  fm_task_inbox_seq_of "$record" >/dev/null || {
+    printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=worker-dispatch-receipt-invalid\n' \
+      "$url" "$head" "$condition"
+    return 1
+  }
+  record_state=$(pr_refresh_record_state "$id" "$record")
+  case "$record_state" in pending) record_state=dispatched ;; resolved) ;; *)
+    printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-missing\n' \
+      "$url" "$head" "$condition"
+    return 1
+  esac
+  if ! pr_refresh_state_write "$marker" "$record_state" "$head" "$attempt" "$record"; then
+    printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-failed\n' \
+      "$url" "$head" "$condition"
+    return 1
+  fi
+  if [ "$record_state" = resolved ]; then
+    printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-resolved\n' \
       "$url" "$head" "$condition"
     return 2
   fi
-  printf '%s' "$head" > "$marker"
   printf 'branch-refresh-dispatched pr=%s head=%s condition=%s\n' "$url" "$head" "$condition"
 }
 

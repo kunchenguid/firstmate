@@ -199,7 +199,8 @@ write_task_meta() {
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "spawn_gen=1"
 }
 
 write_poll_meta() {
@@ -502,6 +503,8 @@ test_valid_recording_and_merge_derivation() {
   grep -qxF 'pr=https://github.com/my-org/repo_name.with-dots/pull/37' "$dir/home/state/task-a.meta" \
     || fail "canonical pr metadata was not exact"
   grep -qxF "pr_head=$expected" "$dir/home/state/task-a.meta" || fail "PR head metadata was not exact"
+  grep -qxF 'pr_poll_spawn_gen=1' "$dir/home/state/task-a.meta" \
+    || fail "PR poll did not bind the worker generation that armed it"
   cmp -s "$POLL" "$dir/home/state/task-a.check.sh" || fail "published check was not byte-for-byte static"
   [ "$(file_mode "$dir/home/state/task-a.check.sh")" = 600 ] || fail "published check mode was not 0600"
   [ "$(file_mode "$dir/home/state/task-a.pr-poll")" = 600 ] || fail "published sidecar mode was not 0600"
@@ -797,22 +800,32 @@ printf 'state: done \302\267 source: run-step \302\267 checks green: PR ready fo
 SH
   cat > "$dir/fakebin/fm-refresh-send.sh" <<'SH'
 #!/usr/bin/env bash
-delivery_id=
-prev=
-for arg in "$@"; do
-  [ "$prev" != --fire-and-forget ] || delivery_id=$arg
-  prev=$arg
+[ "${FM_SEND_IDEMPOTENT:-0}" = 1 ] || exit 1
+[ "${FM_SEND_PRINT_INBOX_RECORD:-0}" = 1 ] || exit 1
+case " $* " in *" --fire-and-forget "*) exit 1 ;; esac
+task=$1
+shift
+body=$*
+dir="$FM_STATE_OVERRIDE/$task.inbox"
+mkdir -p "$dir/handled"
+record=
+count=0
+for candidate in "$dir"/*.msg "$dir/handled"/*.msg; do
+  [ -e "$candidate" ] || continue
+  count=$((count + 1))
+  [ "$(sed -n '4,$p' "$candidate")" = "$body" ] || continue
+  record=$candidate
+  break
 done
-ids_log="$FM_TEST_REFRESH_SEND_LOG.ids"
-if [ -n "$delivery_id" ] && [ -f "$ids_log" ] && grep -qxF "$delivery_id" "$ids_log"; then
-  exit 0
+if [ -z "$record" ]; then
+  record=$(printf '%s/%03d.msg' "$dir" "$((count + 1))")
+  printf 'schema=fm-task-inbox.v1\nat=fixture\n--\n%s' "$body" > "$record"
+  printf '%s\n' "$body" >> "$FM_TEST_REFRESH_SEND_LOG"
 fi
-[ -z "$delivery_id" ] || printf '%s\n' "$delivery_id" >> "$ids_log"
-printf '%s\n' "$*" >> "$FM_TEST_REFRESH_SEND_LOG"
+printf '%s\n' "$record"
 SH
   chmod +x "$dir/fakebin/fm-crew-state.sh" "$dir/fakebin/fm-refresh-send.sh"
   : > "$dir/refresh-send.log"
-  rm -f "$dir/refresh-send.log.ids"
   set +e
   FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=DIRTY FM_TEST_GH_MERGEABLE=CONFLICTING \
     FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
@@ -850,6 +863,24 @@ SH
   assert_grep 'branch-refresh-deferred pr=https://github.com/o/r/pull/2 head=0123456789abcdef0123456789abcdef01234567 condition=conflict reason=dispatch-pending' \
     "$state/.watch-triage.log" "repeated dispatch for an unchanged head was not deferred"
 
+  # A crash after enqueue leaves the prepared attempt; its retry converges on
+  # the existing record instead of creating a duplicate.
+  printf 'prepared\t0123456789abcdef0123456789abcdef01234567\t1\t-\n' \
+    > "$state/task-a.pr-refresh-state"
+  ack_watcher_cycle "$state" || fail "branch-currency restart acknowledgement failed"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=DIRTY FM_TEST_GH_MERGEABLE=CONFLICTING \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/restart.out" 2> "$dir/restart.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "restart branch-currency watcher failed: $(cat "$dir/restart.err")"
+  [ "$(wc -l < "$dir/refresh-send.log" | tr -d ' ')" -eq 1 ] \
+    || fail "a restart after enqueue duplicated the per-head refresh instruction"
+
   # GitHub relabeling the same unchanged head from conflict to behind must not
   # queue a second copy of the already-dispatched refresh instruction.
   ack_watcher_cycle "$state" || fail "branch-currency relabel acknowledgement failed"
@@ -868,8 +899,9 @@ SH
   assert_grep 'branch-refresh-deferred pr=https://github.com/o/r/pull/2 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=dispatch-pending' \
     "$state/.watch-triage.log" "a same-head condition relabel was not deferred"
 
-  # A worker that transits working and back to done at the same still-stale
-  # head must not have its dispatch identity erased along the way.
+  # Acknowledgement resolves the dispatched attempt. Active work still defers,
+  # then an idle worker receives a new attempt if the same head remains stale.
+  mv "$state/task-a.inbox/001.msg" "$state/task-a.inbox/handled/"
   ack_watcher_cycle "$state" || fail "branch-currency working-transit acknowledgement failed"
   cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
@@ -886,6 +918,8 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "working-transit branch-currency watcher failed: $(cat "$dir/dispatch4.err")"
+  assert_grep $'resolved\t0123456789abcdef0123456789abcdef01234567\t1\t001.msg' \
+    "$state/task-a.pr-refresh-state" "handled branch refresh was not recorded as resolved"
 
   cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
@@ -903,96 +937,28 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "post-working branch-currency watcher failed: $(cat "$dir/dispatch5.err")"
-  [ "$(wc -l < "$dir/refresh-send.log" | tr -d ' ')" -eq 1 ] \
-    || fail "a working-then-done transit at an unchanged head queued a duplicate refresh instruction"
-  assert_grep 'branch-refresh-deferred pr=https://github.com/o/r/pull/2 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=dispatch-pending' \
-    "$state/.watch-triage.log" "a working-then-done transit at an unchanged head was not deferred"
-  pass "branch currency reactivates finished work, names conflicts, and refuses active validation"
-}
+  [ "$(wc -l < "$dir/refresh-send.log" | tr -d ' ')" -eq 2 ] \
+    || fail "an idle worker was not reactivated after resolving stale-head work"
+  assert_grep 'branch-currency attempt 2:' "$dir/refresh-send.log" \
+    "the second stale-head dispatch reused the handled attempt identity"
 
-test_branch_currency_stale_dispatch_escalates() {
-  local dir state rc marker back
-
-  dir=$(make_case branch-currency-stale-escalate)
-  state="$dir/home/state"
-  write_task_meta "$dir"
-  run_check_entry "$dir" task-a https://github.com/o/r/pull/3 >/dev/null \
-    || fail "could not arm stale branch-currency fixture"
-  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
-#!/usr/bin/env bash
-printf 'state: done \302\267 source: run-step \302\267 checks green: PR ready for review\n'
-SH
-  cat > "$dir/fakebin/fm-refresh-send.sh" <<'SH'
-#!/usr/bin/env bash
-delivery_id=
-prev=
-for arg in "$@"; do
-  [ "$prev" != --fire-and-forget ] || delivery_id=$arg
-  prev=$arg
-done
-ids_log="$FM_TEST_REFRESH_SEND_LOG.ids"
-if [ -n "$delivery_id" ] && [ -f "$ids_log" ] && grep -qxF "$delivery_id" "$ids_log"; then
-  exit 0
-fi
-[ -z "$delivery_id" ] || printf '%s\n' "$delivery_id" >> "$ids_log"
-printf '%s\n' "$*" >> "$FM_TEST_REFRESH_SEND_LOG"
-SH
-  chmod +x "$dir/fakebin/fm-crew-state.sh" "$dir/fakebin/fm-refresh-send.sh"
-  : > "$dir/refresh-send.log"
-  rm -f "$dir/refresh-send.log.ids"
-
-  set +e
-  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND \
-    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
-    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
-    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
-    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/stale1.out" 2> "$dir/stale1.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "stale-dispatch watcher failed: $(cat "$dir/stale1.err")"
-  assert_grep 'branch-refresh-dispatched pr=https://github.com/o/r/pull/3 head=0123456789abcdef0123456789abcdef01234567 condition=behind' \
-    "$dir/stale1.out" "fresh branch-currency dispatch was not woken"
-
-  marker="$state/task-a.pr-refresh-dispatched"
-  [ -f "$marker" ] || fail "branch-refresh-dispatched left no dedup marker"
-  back=$(( $(date +%s) - 1000 ))
-  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$marker"
-  else touch -m -d "@$back" "$marker"; fi
-
-  # Fire-and-forget carries no re-ring/escalation of its own, so a worker
-  # whose pane never types the doorbell back would otherwise leave this task
-  # "done" and behind forever with nothing louder than a triage-log line.
-  ack_watcher_cycle "$state" || fail "stale branch-currency acknowledgement failed"
-  set +e
-  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND FM_PR_REFRESH_STALE_SECS=300 \
-    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
-    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
-    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
-    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/stale2.out" 2> "$dir/stale2.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "stale branch-currency escalation watcher failed: $(cat "$dir/stale2.err")"
-  assert_grep 'branch-refresh-stale pr=https://github.com/o/r/pull/3 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=unacknowledged-after-300s' \
-    "$dir/stale2.out" "an unacknowledged fire-and-forget dispatch never escalated to the captain"
-  [ "$(wc -l < "$dir/refresh-send.log" | tr -d ' ')" -eq 1 ] \
-    || fail "the stale escalation resent a duplicate refresh instruction"
-
-  # Escalating again for the same still-stale head would just be noise; the
-  # next cycle goes back to a quiet deferral until something changes.
-  ack_watcher_cycle "$state" || fail "post-escalation acknowledgement failed"
+  ack_watcher_cycle "$state" || fail "new-head branch-currency acknowledgement failed"
   add_stop_custom_check "$dir"
   set +e
-  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND FM_PR_REFRESH_STALE_SECS=300 \
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND \
+    FM_TEST_GH_HEAD=89abcdef0123456789abcdef0123456789abcdef \
     FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
     FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
     FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
-    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/stale3.out" 2> "$dir/stale3.err"
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/new-head.out" 2> "$dir/new-head.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "post-escalation branch-currency watcher failed: $(cat "$dir/stale3.err")"
-  assert_grep 'branch-refresh-deferred pr=https://github.com/o/r/pull/3 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=dispatch-pending' \
-    "$state/.watch-triage.log" "a repeat cycle after escalation was not quietly deferred"
-  pass "an unacknowledged fire-and-forget branch-refresh escalates once instead of deferring forever"
+  [ "$rc" -eq 0 ] || fail "new-head branch-currency watcher failed: $(cat "$dir/new-head.err")"
+  [ "$(wc -l < "$dir/refresh-send.log" | tr -d ' ')" -eq 3 ] \
+    || fail "a new stale head did not receive its own refresh dispatch"
+  assert_grep 'branch-refresh-dispatched pr=https://github.com/o/r/pull/2 head=89abcdef0123456789abcdef0123456789abcdef condition=behind' \
+    "$dir/new-head.out" "a changed stale head did not act again"
+  pass "branch currency deduplicates pending work and reactivates resolved or changed heads"
 }
 
 test_branch_currency_generation_race_defers() {
@@ -1001,18 +967,21 @@ test_branch_currency_generation_race_defers() {
   dir=$(make_case branch-currency-generation-race)
   state="$dir/home/state"
   write_task_meta "$dir"
-  printf 'spawn_gen=1\n' >> "$state/task-a.meta"
   run_check_entry "$dir" task-a https://github.com/o/r/pull/5 >/dev/null \
     || fail "could not arm generation-race branch-currency fixture"
 
-  # Simulate a replacement bumping spawn_gen before its own state flips away from "done".
+  # A replacement that lands during the state read is rejected again under
+  # fm-send's delivery lock.
   cat > "$dir/fakebin/fm-crew-state.sh" <<SH
 #!/usr/bin/env bash
-printf 'spawn_gen=2\n' >> "$state/\$1.meta"
+sed 's/^spawn_gen=.*/spawn_gen=2/' "$state/\$1.meta" > "$state/\$1.meta.next"
+mv "$state/\$1.meta.next" "$state/\$1.meta"
 printf 'state: done \\302\\267 source: run-step \\302\\267 checks green: PR ready for review\n'
 SH
   cat > "$dir/fakebin/fm-refresh-send.sh" <<'SH'
 #!/usr/bin/env bash
+current=$(awk -F= '$1 == "spawn_gen" { print $2; exit }' "$FM_STATE_OVERRIDE/$1.meta")
+[ "$current" = "$FM_SEND_EXPECTED_SPAWN_GEN" ] || exit 1
 printf '%s\n' "$*" >> "$FM_TEST_REFRESH_SEND_LOG"
 SH
   chmod +x "$dir/fakebin/fm-crew-state.sh" "$dir/fakebin/fm-refresh-send.sh"
@@ -1028,10 +997,42 @@ SH
   set -e
   [ "$rc" -eq 0 ] || fail "generation-race watcher failed: $(cat "$dir/race.err")"
   [ ! -s "$dir/refresh-send.log" ] \
-    || fail "a done verdict paired with a spawn_gen that moved reached an actively launching replacement"
-  assert_grep 'branch-refresh-deferred pr=https://github.com/o/r/pull/5 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=active-work' \
-    "$state/.watch-triage.log" "a spawn_gen bumped between reads did not defer as active work"
-  pass "a spawn_gen that moves between reads defers rather than pairing a done verdict with a replacement's generation"
+    || fail "a captured done verdict reached an actively launching replacement"
+  assert_grep 'branch-refresh-refused pr=https://github.com/o/r/pull/5 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=worker-dispatch-failed' \
+    "$dir/race.out" "delivery did not refuse a replacement generation"
+
+  # A replacement already published before the poll fires cannot inherit the
+  # prior generation's done verdict.
+  dir=$(make_case branch-currency-replaced-worker)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/6 >/dev/null \
+    || fail "could not arm replaced-worker branch-currency fixture"
+  sed 's/^spawn_gen=.*/spawn_gen=2/' "$state/task-a.meta" > "$state/task-a.meta.next"
+  mv "$state/task-a.meta.next" "$state/task-a.meta"
+  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: done \302\267 source: run-step \302\267 checks green: stale prior run\n'
+SH
+  cat > "$dir/fakebin/fm-refresh-send.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_REFRESH_SEND_LOG"
+SH
+  chmod +x "$dir/fakebin/fm-crew-state.sh" "$dir/fakebin/fm-refresh-send.sh"
+  : > "$dir/refresh-send.log"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/replaced.out" 2> "$dir/replaced.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "replaced-worker watcher failed: $(cat "$dir/replaced.err")"
+  [ ! -s "$dir/refresh-send.log" ] || fail "a replacement inherited the prior worker's done verdict"
+  assert_grep 'branch-refresh-refused pr=https://github.com/o/r/pull/6 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=worker-generation-changed' \
+    "$dir/replaced.out" "a replaced worker was not refused before state dispatch"
+  pass "poll generation and delivery generation refuse replacement races"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -1484,6 +1485,8 @@ test_teardown_removes_poll_artifacts() {
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
+  printf 'prepared\t0123456789abcdef0123456789abcdef01234567\t1\t-\n' \
+    > "$dir/home/state/task-a.pr-refresh-state"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1498,6 +1501,7 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
+  [ ! -e "$dir/home/state/task-a.pr-refresh-state" ] || fail "teardown left branch-refresh state"
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
@@ -2420,7 +2424,6 @@ test_gitlab_merged_poll_retires() {
 }
 
 test_branch_currency_dispatch_and_active_refusal
-test_branch_currency_stale_dispatch_escalates
 test_branch_currency_generation_race_defers
 test_parser_matrix
 test_gitlab_merge_watch
