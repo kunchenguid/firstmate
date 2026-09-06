@@ -1330,7 +1330,7 @@ command_reconcile_requests() {
     if [ -z "$show" ]; then
       printf 'refused: %s (absent)\n' "$id"
       skipped=$((skipped + 1))
-    elif [ "$(show_field "$show" state)" = done ]; then
+    elif [ "$(show_field "$show" state)" = "done" ]; then
       printf 'refused: %s (already closed)\n' "$id"
       skipped=$((skipped + 1))
     elif [ "$(show_field_value "$show" hold_kind)" != captain ]; then
