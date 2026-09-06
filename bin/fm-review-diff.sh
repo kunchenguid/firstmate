@@ -12,7 +12,11 @@
 # same way.
 # Pooled project clones do not keep their local branches current, so this helper
 # compares remote-backed projects against origin/<target> after fetching that
-# branch, and projects with no remote against the local branch.
+# branch. A project with no remote, and a target the remote cannot resolve - the
+# normal shape for a task stacked on a local branch its own Rule 1 forbids
+# pushing - compare against the local refs/heads/<target> instead, which is the
+# same ref bin/fm-merge-local.sh verifies and bin/fm-teardown.sh measures the
+# local-only path against. Only a target that resolves NEITHER way is refused.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -152,17 +156,21 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
+BASE="$TARGET"
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<target> stale on some Git versions and only refresh FETCH_HEAD.
-  # A target the remote does not carry is refused rather than quietly downgraded
-  # to a possibly stale local ref: a review against the wrong base is the failure
-  # this whole resolution exists to prevent.
-  git -C "$WT" fetch origin "+refs/heads/$TARGET:refs/remotes/origin/$TARGET" --quiet \
-    || { echo "error: cannot fetch $TARGET from origin for $PROJ ($TARGET_DESC); the review has no authoritative base" >&2; exit 1; }
-  BASE="origin/$TARGET"
-else
-  BASE="$TARGET"
+  if git -C "$WT" fetch origin "+refs/heads/$TARGET:refs/remotes/origin/$TARGET" --quiet 2>/dev/null; then
+    BASE="origin/$TARGET"
+  else
+    # A remote that does not carry the target is the normal shape for a task
+    # stacked on a local branch its own Rule 1 forbids pushing, so refs/heads/
+    # <target> is the authority there - the same ref bin/fm-merge-local.sh
+    # verifies and bin/fm-teardown.sh measures the local-only path against. The
+    # base is still never guessed: the guard below refuses when neither the
+    # remote nor the local ref resolves.
+    echo "warning: could not fetch $TARGET from origin; reviewing against the local $TARGET, which may lag the remote" >&2
+  fi
 fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT ($TARGET_DESC)" >&2; exit 1; }

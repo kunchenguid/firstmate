@@ -15,7 +15,8 @@
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
 #   (f) base= recorded -> diff against that branch, not the repo default branch
-#   (g) base= recorded but unresolvable -> refuse, naming the branch and its source
+#   (g) base= recorded but never pushed -> diff against its local ref with a warning
+#   (h) base= recorded and resolving nowhere -> refuse, naming the branch and its source
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -205,13 +206,46 @@ test_recorded_base_is_the_review_base() {
   pass "fm-review-diff reviews against the recorded delivery target branch"
 }
 
-# An unresolvable base is refused rather than quietly downgraded to a possibly
-# stale local ref: a review against the wrong base is the failure this resolution
-# exists to prevent, and the refusal must say which branch it could not resolve.
+# A local-only task stacks on a branch its own Rule 1 forbids pushing, so the
+# remote cannot carry it and the local ref is the authority - the same ref
+# bin/fm-merge-local.sh lands from. Refusing here would leave the operator unable
+# to review a branch fm-merge-local.sh will happily merge.
+test_unpushed_recorded_base_uses_the_local_ref() {
+  local case_dir out err
+  case_dir=$(make_case local-base)
+
+  git -C "$case_dir/wt" checkout -q -b feat/local-stack
+  printf 'local-stack-only\n' > "$case_dir/wt/stack.txt"
+  git -C "$case_dir/wt" add stack.txt
+  git -C "$case_dir/wt" commit -qm "commit only the unpushed local stack carries"
+  git -C "$case_dir/wt" checkout -q -B fm/task-x1 feat/local-stack
+  printf 'task-change\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "the task's own change"
+
+  write_task_meta "$case_dir" "mode=local-only" "base=feat/local-stack"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  err=$(cat "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: feat/local-stack' \
+    "local-base: an unpushed delivery target branch must review against its local ref"
+  assert_contains "$out" '+task-change' \
+    "local-base: the task's own change must be in the diff"
+  assert_not_contains "$out" 'local-stack-only' \
+    "local-base: commits the local stack already carries must not read as the task's work"
+  assert_contains "$err" 'could not fetch feat/local-stack from origin' \
+    "local-base: the local-ref fallback must say the remote copy was unavailable"
+  pass "fm-review-diff reviews an unpushed delivery target branch against its local ref"
+}
+
+# A base that resolves NEITHER on the remote NOR locally is refused rather than
+# reviewed against a guessed branch: a review against the wrong base is the
+# failure this resolution exists to prevent.
 test_unresolvable_recorded_base_is_refused() {
   local case_dir status err
   case_dir=$(make_case missing-base)
-  write_task_meta "$case_dir" "base=feat/never-pushed"
+  write_task_meta "$case_dir" "base=feat/never-existed"
 
   set +e
   run_review_diff "$case_dir" task-x1 >/dev/null 2> "$case_dir/stderr"
@@ -220,11 +254,11 @@ test_unresolvable_recorded_base_is_refused() {
   err=$(cat "$case_dir/stderr")
 
   expect_code 1 "$status" "missing-base: an unresolvable delivery target branch must refuse"
-  assert_contains "$err" 'cannot fetch feat/never-pushed from origin' \
+  assert_contains "$err" 'base feat/never-existed does not exist' \
     "missing-base: the refusal must name the branch it could not resolve"
   assert_contains "$err" "this task's recorded delivery target branch" \
     "missing-base: the refusal must say where the measured branch came from"
-  pass "fm-review-diff refuses when the recorded delivery target branch cannot be resolved"
+  pass "fm-review-diff refuses when the recorded delivery target branch resolves nowhere"
 }
 
 test_pr_meta_uses_pr_head_not_stale_local
@@ -233,4 +267,5 @@ test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_recorded_base_is_the_review_base
+test_unpushed_recorded_base_uses_the_local_ref
 test_unresolvable_recorded_base_is_refused
