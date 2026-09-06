@@ -76,7 +76,7 @@
 # private as data/<id>/report.md, and a rule that stopped at two components
 # would refuse the shallow leak while passing the deeper one.
 #
-# MEASURED COUNTS, all against origin/main's 16,485 merged message lines, and
+# MEASURED COUNTS, all against origin/main's 16,547 merged message lines, and
 # current as of this rule set. These are the figures the rules were selected on;
 # any change to a rule must restate them:
 #   captain-address-opening      222   every leaked line carries a commit prefix
@@ -94,7 +94,7 @@
 # and the work-document total are identical before and after them. They close a
 # reachable shape rather than widening what the rules already refuse. The counts
 # above are higher than the ones the rules were first selected on only because
-# merged history itself grew from 14,965 lines to 16,485; the address total was
+# merged history itself grew from 14,965 lines to 16,547; the address total was
 # 222 under the previous expression too.
 #
 # WHICH DOCUMENT FAMILIES ARE COVERED. Exactly two: data/<id>/<file> and
@@ -266,23 +266,24 @@ FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}https?://[^[:space:]?#]*/ses
 # while the tail accepts further slashes so a deeper private path cannot slip
 # past a bound nobody chose. Spelling the boundaries out avoids GNU-only \b.
 #
-# The leading class excludes "/" on purpose, and the Lavish rule below does not.
-# "data" is an ordinary directory name that occurs inside legitimate paths such
-# as tests/data/fixtures/x.txt, so a preceding slash must disqualify the match;
-# ".lavish" is a distinctive dot-prefixed directory whose parent path is
-# irrelevant, so a preceding slash is allowed there. Both leading classes
-# exclude "." so a longer dotted name cannot be split into a false match.
+# The relative alternative's leading class excludes "/" on purpose, and the
+# Lavish rule below does not. "data" is an ordinary directory name that occurs
+# inside legitimate paths such as tests/data/fixtures/x.txt, so a preceding
+# slash must disqualify that relative match. ".lavish" is a distinctive
+# dot-prefixed directory whose parent path is irrelevant, so a preceding slash
+# is allowed there. Both relative leading classes exclude "." so a longer
+# dotted name cannot be split into a false match.
 #
 # That slash exclusion is also what let a ROOT-QUALIFIED path through, because
 # the leak this guard is for is usually pasted absolute: the same private report
 # written as /Users/<user>/<home>/data/<id>/report.md has a slash before "data"
 # and so escaped the rule that refuses its relative spelling. The second
 # alternative admits exactly that shape - an absolute or "~"-rooted path, of any
-# depth, ending in the same data/<id>/<file> tail - while still requiring a
-# non-word character before the leading slash, which is what keeps the relative
-# tests/data/fixtures/x.txt passing: the slash before "data" there follows a
-# letter. It matches no additional line in merged history.
-FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}((^|[^[:alnum:]_/.-])|(^|[^[:alnum:]_])~?(/[[:alnum:]_.-]+)*/)data/[[:alnum:]_.-]+/[[:alnum:]_./-]+${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
+# depth, ending in the same data/<id>/<file> tail. Its leading delimiter excludes
+# both ":" and "/" so the match cannot begin inside a URL scheme, while each
+# ancestor component accepts spaces because a real home directory can contain
+# them. It matches no additional line in merged history.
+FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}((^|[^[:alnum:]_/.-])|(^|[^[:alnum:]_:/])~?(/[[:alnum:]_.-][[:alnum:]_. -]*)*/)data/[[:alnum:]_.-]+/[[:alnum:]_./-]+${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
 
 # The local Lavish review artifact, which is the other private work-document
 # shape this repo produces. Keyed on the dot-prefixed directory path so the 59

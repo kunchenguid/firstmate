@@ -231,7 +231,7 @@ test_passes_ordinary_uses_of_the_word_session() {
     'fix(bin): bind the session lock to the home rather than the process' \
     'feat(pi): start a fresh supervision branch for every main session' \
     'docs: explain how session start drains the wake queue' \
-    'refs https://github.com/kunchenguid/firstmate/pull/3600' \
+    'docs: see https://github.com/kunchenguid/firstmate/pull/3837' \
     'fix(bin): rename create_session_id to match its record' \
     'Discussion: https://example.invalid/internal-session' \
     'Regression: https://example.invalid/internal-session' \
@@ -307,9 +307,18 @@ test_refuses_an_em_or_en_dash_address() {
 test_refuses_a_root_qualified_work_document_path() {
   local out rc=0
 
+  # The prior root-qualified expression constrained ancestor characters instead
+  # of distinguishing a local path from a URL, so this literal spaced path
+  # exited 0 before the matcher correction.
+  out=$(fm_voice_text 'docs: retire /Users/A Person/firstmate/data/alpha/report.md') || rc=$?
+  expect_code 1 "$rc" "a spaced root-qualified private work-document path was not refused"
+  assert_contains "$out" "private-task-work-document" \
+    "spaced root-qualified work-document path named the wrong rule"
+
   # The leak arrives pasted absolute far more often than relative, and the
   # slash that makes it absolute is exactly what the relative rule's leading
   # boundary excluded.
+  rc=0
   out=$(fm_voice_text 'docs: retire /Users/someone/firstmate/data/alpha/report.md after completion') || rc=$?
   expect_code 1 "$rc" "a root-qualified private work-document path was not refused"
   assert_contains "$out" "private-task-work-document" \
@@ -360,7 +369,11 @@ test_refuses_a_private_review_artifact() {
 test_passes_nonprivate_paths_and_work_document_words() {
   local out rc message
 
+  # The prior root-qualified alternative could begin at the first slash in each
+  # URL below, so both exited 1 before the scheme-safe delimiter correction.
   for message in \
+    'docs: point at https://example.com/data/api/schema.json for the schema' \
+    'docs: see https://github.com/kunchenguid/firstmate/blob/main/data/alpha/report.md' \
     'docs: update data/backlog.md' \
     'docs: update data/projects.md' \
     'docs: update data/learnings.md' \
