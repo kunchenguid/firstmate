@@ -1006,6 +1006,52 @@ test_no_run_busy_pane() {
   pass "no run + a busy semantic record reads working, attributed to its source"
 }
 
+# A turn parked at Claude's tool-permission dialog is still an open turn, so the
+# busy contract keeps answering busy. It is not work, though, and the supervisor
+# line is where that distinction has to appear: bin/fm-classify-lib.sh absorbs a
+# quiet pane only while this line says working, so a gate reported as working is
+# a gate nobody looks at until the wedge threshold.
+test_no_run_approval_gate_reads_parked() {
+  reset_fakes
+  local d; d=$(new_case approval-gate)
+  make_repo_on_branch "$d/wt" fm/feat-gate
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gate.meta" "window=fm:fm-feat-gate" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-gate)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-gate busy --gen "$gen" \
+    --source claude-hook --event permission-prompt
+  local out; out=$(run_crew_state "$d" feat-gate)
+  assert_contains "$out" "state: parked" "an approval gate reads parked, not working"
+  assert_not_contains "$out" "state: working" "an approval gate must not read working"
+  assert_contains "$out" "waiting on approval" "the parked line names the gate"
+  pass "a busy record standing at the approval gate reads parked"
+}
+
+# The resume half: the gate is one event on the ordinary record, so any later
+# lifecycle event returns the crew to plain working without a second mechanism.
+test_no_run_approval_gate_cleared_reads_working() {
+  reset_fakes
+  local d; d=$(new_case approval-cleared)
+  make_repo_on_branch "$d/wt" fm/feat-gate2
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gate2.meta" "window=fm:fm-feat-gate2" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-gate2)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-gate2 busy --gen "$gen" \
+    --source claude-hook --event permission-prompt
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-gate2 busy --gen "$gen" \
+    --source claude-hook --event approval-answered
+  local out; out=$(run_crew_state "$d" feat-gate2)
+  assert_contains "$out" "state: working" "a cleared gate returns to working"
+  assert_not_contains "$out" "waiting on approval" "a cleared gate stops naming the gate"
+  pass "a later lifecycle event clears the approval gate back to working"
+}
+
 # A converted adapter must NOT read working from rendered footer text: the
 # redesign removed that dependency, so a pane painting "esc to interrupt" with
 # no semantic record is unknown, never working and never silently idle.
@@ -2074,6 +2120,8 @@ test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_no_run_approval_gate_reads_parked
+test_no_run_approval_gate_cleared_reads_working
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture

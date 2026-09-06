@@ -163,6 +163,8 @@ Codex and standalone Kimi classify unknown behind explicit probes until a semant
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
+A busy record can additionally carry the approval-gate event (`fm_busy_approval_wait` in `bin/fm-busy-lib.sh`): the turn is open but parked at a harness dialog only an operator can answer, so `bin/fm-crew-state.sh` reports it as `parked` rather than `working`, the watcher and daemon stop counting that pane as busy so it surfaces through the ordinary stale path instead of aging to the wedge threshold, and steering doorbells keep waiting so no keystroke lands in the dialog.
+Claude is the adapter that publishes this gate today, through the `Notification`, `PostToolUse`, and `PostToolUseFailure` hooks owned by `bin/fm-claude-approval-hook.sh`.
 Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 

@@ -264,6 +264,67 @@ test_claude_hooks_semantic_lifecycle() {
   pass "claude hooks open on UserPromptSubmit and close on Stop, StopFailure, and SessionEnd"
 }
 
+# Claude's real Notification payloads, captured live on Claude Code 2.1.261.
+CLAUDE_NOTIFY_PERMISSION='{"session_id":"s1","hook_event_name":"Notification","message":"Claude needs your permission","notification_type":"permission_prompt"}'
+CLAUDE_NOTIFY_IDLE='{"session_id":"s1","hook_event_name":"Notification","message":"Claude is waiting for your input","notification_type":"idle_prompt"}'
+CLAUDE_POST_TOOL_USE='{"session_id":"s1","hook_event_name":"PostToolUse","tool_name":"Bash"}'
+CLAUDE_POST_TOOL_USE_FAILURE='{"session_id":"s1","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_use_id":"toolu_01","error":"Exit code 128","is_interrupt":false}'
+
+feed_claude_hook() {  # <settings.json> <hook-event> <payload>
+  local cmd
+  cmd=$(jq -r ".hooks[\"$2\"][0].hooks[0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  printf '%s' "$3" | sh -c "$cmd"
+}
+
+# A turn that stops at Claude's tool-permission dialog fires no closing hook, so
+# without this pair the task keeps classifying busy and supervision reads a
+# worker that needs one keystroke as ordinary work. The spawn must therefore wire
+# both halves of the gate, and the wiring is what this drives: the commands the
+# spawn actually wrote, fed the payloads Claude actually emits.
+test_claude_approval_gate_wiring() {
+  local rec id=busy-cl-3 out state settings
+  rec=$(make_spawn_case claude-approval claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$WT_DIR/.claude/settings.local.json"
+  for ev in Notification PostToolUse PostToolUseFailure; do
+    jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
+  done
+
+  feed_claude_hook "$settings" Notification "$CLAUDE_NOTIFY_IDLE" \
+    || fail "the idle notification must not break the hook"
+  fm_busy_approval_wait "$state" "$id" claude \
+    && fail "an idle-prompt notification must not open the approval gate"
+
+  feed_claude_hook "$settings" Notification "$CLAUDE_NOTIFY_PERMISSION" \
+    || fail "the permission notification hook command failed"
+  fm_busy_approval_wait "$state" "$id" claude \
+    || fail "the permission notification must open the approval gate"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy claude-hook" ] \
+    || fail "the gate must leave the turn busy: it is open, just parked, got '$out'"
+
+  feed_claude_hook "$settings" PostToolUse "$CLAUDE_POST_TOOL_USE" \
+    || fail "the PostToolUse hook command failed"
+  fm_busy_approval_wait "$state" "$id" claude \
+    && fail "a tool that ran proves the gate was answered"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy claude-hook" ] || fail "clearing the gate must not end the turn, got '$out'"
+
+  feed_claude_hook "$settings" Notification "$CLAUDE_NOTIFY_PERMISSION"
+  fm_busy_approval_wait "$state" "$id" claude || fail "the gate did not reopen"
+  feed_claude_hook "$settings" PostToolUseFailure "$CLAUDE_POST_TOOL_USE_FAILURE" \
+    || fail "the PostToolUseFailure hook command failed"
+  fm_busy_approval_wait "$state" "$id" claude \
+    && fail "an approved tool that then failed still proves the gate was answered"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy claude-hook" ] || fail "a failed tool must not end the turn either, got '$out'"
+  pass "the spawn wires Claude's permission notification to the approval gate and closes it on a tool that ran, success or failure"
+}
+
 test_claude_hooks_stale_incarnation_harmless() {
   local rec id=busy-cl-2 out state settings
   rec=$(make_spawn_case claude-stale claude "$id")
@@ -420,6 +481,7 @@ test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
+test_claude_approval_gate_wiring
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless

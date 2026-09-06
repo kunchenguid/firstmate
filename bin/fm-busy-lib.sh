@@ -30,7 +30,8 @@
 # never classify another adapter):
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
-#   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
+#   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd),
+#                    plus the approval-gate pair below
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
@@ -44,6 +45,24 @@
 #   endpoint-gone, herdr-native, grok-regex, rovo-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target
+#
+# APPROVAL GATE (fm_busy_approval_wait): a turn can stop at a harness dialog
+# that only an operator can answer - Claude's tool-permission prompt is the
+# observed case - and such a turn is still open, so it correctly classifies
+# busy. It is nevertheless making no progress, and supervision that reads it as
+# ordinary work absorbs its quiet pane until the wedge threshold. The gate is
+# therefore recorded as a distinguished EVENT on the ordinary busy record rather
+# than as a fourth state: state and source keep their exact meanings, and one
+# extra predicate exposes the flavour to the readers that decide what busy
+# buys: bin/fm-crew-state.sh, where the supervisor-facing state is chosen
+# (parked, not working), and the absorb gates in bin/fm-watch.sh and
+# bin/fm-supervise-daemon.sh, which stop counting a gated turn as busy so its
+# quiet pane takes the stale path and surfaces promptly instead of waiting out
+# the wedge threshold. bin/fm-claude-approval-hook.sh is
+# Claude's adapter for both halves; the gate opens on the harness's own
+# structured permission notification and closes on the next tool that actually
+# ran, or on any ordinary lifecycle event, since every one of them proves the
+# turn moved past the dialog.
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
@@ -91,6 +110,11 @@
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
 
 FM_BUSY_LIB_VERSION=v1
+
+# The one event token that marks a busy record as parked at an operator-only
+# approval gate, declared once so the adapter that writes it and the predicate
+# that reads it cannot drift.
+FM_BUSY_APPROVAL_EVENT=permission-prompt
 
 # Standalone-Kimi verification gate. Empty means no installed Kimi version
 # has passed live verification, so every standalone Kimi task classifies
@@ -1012,6 +1036,25 @@ fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
     return 0
   fi
   fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" "$tail40"
+}
+
+# fm_busy_approval_wait: 0 iff <id>'s record is a valid, gen-matching, harness-
+# trusted busy record standing at the approval gate. Every other outcome - a
+# missing, malformed, stale, or untrusted record, an idle or unknown state, or
+# any other event - returns 1, so the gate is claimed only on positive evidence
+# and a task whose record cannot be trusted is never reported as waiting on an
+# operator. The harness trust check is the same one classification uses, so one
+# adapter's writer can no more open another adapter's gate than it can classify
+# it.
+fm_busy_approval_wait() {  # <state-dir> <id> <harness>
+  local state=$1 id=$2 harness=$3 out r_state r_source r_event
+  out=$(fm_busy_record_read "$state" "$id") || return 1
+  r_state=${out%% *}; out=${out#* }
+  r_source=${out%% *}; out=${out#* }
+  r_event=${out%% *}
+  [ "$r_state" = busy ] || return 1
+  [ "$r_event" = "$FM_BUSY_APPROVAL_EVENT" ] || return 1
+  fm_busy_source_trusted "$harness" "$r_source"
 }
 
 # fm_busy_is_busy: boolean view for callers that only gate on provable

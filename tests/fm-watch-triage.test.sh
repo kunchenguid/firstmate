@@ -2737,6 +2737,63 @@ test_busy_pane_below_turn_age_bound_is_absorbed() {
   pass "a busy worker below the turn-age bound remains working with no escalation"
 }
 
+# A Claude turn parked at its tool-permission dialog is still an open turn, so
+# its busy record keeps classifying busy - and before the approval gate reached
+# this predicate, the watcher read that as work and sat in the busy branch until
+# BUSY_TURN_MAX_SECS. A gated turn makes no progress, so it must take the stale
+# path on the first stable hash, where fm-crew-state's parked line is not
+# absorbable and the pane surfaces; the resume half (a tool that ran) returns it
+# to ordinary busy absorption.
+test_busy_pane_at_approval_gate_surfaces_promptly() {
+  local dir state fakebin out capture_file window key pane_hash sig gen pid
+  dir=$(make_case busy-approval-gate); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-gate"
+  printf 'Allow Bash(git switch)? (y/n)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/busy-gate.meta"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" busy-gate)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" busy-gate busy --gen "$gen" \
+    --source claude-hook --event permission-prompt
+  printf 'working: setup complete\n' > "$state/busy-gate.status"
+  sig=$(seen_sig "$state/busy-gate.status"); printf '%s' "$sig" > "$state/.seen-busy-gate_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Allow Bash(git switch)? (y/n)")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  touch "$state/busy-gate.turn-ended"
+  prime_turnend_seen "$state/busy-gate.turn-ended"
+
+  # Phase A: the gate is open. The turn-age and wedge bounds are far away, so
+  # the only route to a wake is the stale path this fix opens.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: parked · source: pane · waiting on approval: the harness is holding at a permission prompt only an operator can answer' \
+    FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a busy pane parked at the approval gate was absorbed as working: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the approval gate did not surface as a stale wake: $(cat "$out")"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the approval gate started a wedge timer instead of surfacing"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the approval-gate stop"
+
+  # Phase B: a tool ran, so the gate was answered. The same busy record is now
+  # ordinary work again and the same stable pane is absorbed with no wake.
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" busy-gate busy --gen "$gen" \
+    --source claude-hook --event approval-answered
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (claude-hook)' \
+    FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "an answered approval gate still surfaced as stale: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an answered approval gate printed a wake reason: $(cat "$out")"
+  reap "$pid"
+  pass "a worker parked at Claude's permission prompt surfaces on the first stable hash and is absorbed again once the gate is answered"
+}
+
 test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case busy-stable-hash-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4160,6 +4217,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
+test_busy_pane_at_approval_gate_surfaces_promptly
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age

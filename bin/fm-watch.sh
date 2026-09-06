@@ -254,20 +254,25 @@ hash_pane() {
 # the semantic busy-state contract (bin/fm-busy-lib.sh). Only an exact busy
 # verdict returns 0: idle, unknown, and dead all return 1, so a converted
 # adapter whose semantic state is missing, malformed, stale, or unverified is
-# treated as not-provably-working and surfaces rather than being absorbed.
+# treated as not-provably-working and surfaces rather than being absorbed. A
+# busy turn parked at an operator-only approval gate (fm_busy_approval_wait) is
+# an open turn making no progress, so it too returns 1 and takes the stale path,
+# where fm-crew-state's parked line surfaces it instead of absorbing it.
 # <tail40> is the same bounded capture already read for hashing and is
 # consumed only by the Grok-scoped fallback inside the contract.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 task meta verdict
+  local w=$1 tail40=$2 task meta harness verdict
   task=$(window_to_task "$w" "$STATE")
   meta="$STATE/$task.meta"
+  harness=$(window_harness "$w")
   if [ -n "$task" ] && [ -f "$meta" ]; then
     verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
   else
-    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
+    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$harness" \
       "${task:-unknown}" "$STATE" "$tail40")
   fi
-  [ "${verdict%% *}" = busy ]
+  [ "${verdict%% *}" = busy ] || return 1
+  ! fm_busy_approval_wait "$STATE" "${task:-unknown}" "$harness"
 }
 
 window_kind() {
@@ -328,7 +333,9 @@ window_key() {  # <window>
 # Quiet when healthy: an absent, empty, or handled inbox costs one directory
 # glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
 # policy owner) reports a due action, a busy pane just waits - the record is
-# durable and the worker will reach a turn boundary - an idle pane gets one
+# durable and the worker will reach a turn boundary - and so does a turn parked
+# at an operator-only approval gate, since a doorbell typed into that dialog
+# would answer it; an idle pane gets one
 # delivery attempt, and a spent attempt budget surfaces as an ordinary stale
 # wake for stuck-crewmate-recovery. If the attempt's ladder write fails while
 # its record remains unhandled, that unwritable state surfaces through the same
@@ -352,7 +359,7 @@ inbox_steer_check() {  # <window> <task>
       ;;
   esac
   tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
-  if window_is_busy "$w" "$tail40"; then
+  if window_is_busy "$w" "$tail40" || fm_busy_approval_wait "$STATE" "$task" "$(window_harness "$w")"; then
     return 0
   fi
   case "$verb" in
