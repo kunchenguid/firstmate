@@ -310,12 +310,14 @@ Ctrl+c:cancel')
 # 2026-09-06); legacy_tail is the older recorded Ctrl+c:cancel token, which
 # that session never observed. quoted_tail is an idle pane whose finished turn
 # quoted the token in prose: the signature matches the measured footer row, so
-# only the row classifies busy. This file sources bin/fm-busy-lib.sh without
+# only the row classifies busy. approve_tail carries the --always-approve
+# segment every real grok worker is launched with, whose footer position the
+# record never captured, so nothing may be required between the measured keys. This file sources bin/fm-busy-lib.sh without
 # its canonical owner bin/fm-composer-lib.sh, so the plain calls exercise the
 # defensive literal duplicate; the final arm sources the owner and must agree
 # with it.
 test_grok_regex_active_turn_busy() {
-  local state out busy_tail idle_tail legacy_tail quoted_tail
+  local state out busy_tail idle_tail legacy_tail quoted_tail approve_tail
   state=$(new_state_dir grok-active-turn)
   busy_tail='    ⠧ Run sleep 30 and wait for completion… 9.8s                                                                      11s ⇣36.2k [↓][stop]
   Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+x:shortcuts'
@@ -323,6 +325,7 @@ test_grok_regex_active_turn_busy() {
   idle_tail='  Shift+Tab:mode  │  Ctrl+x:shortcuts'
   quoted_tail='The measured busy footer is `Esc:cancel`, not `esc interrupt`.
   Shift+Tab:mode  │  Ctrl+x:shortcuts'
+  approve_tail='  Shift+Tab:mode  ·  always-approve  │  Esc:cancel  │  Ctrl+x:shortcuts'
 
   out=$(fm_busy_classify tmux w1 grok t1 "$state" "$busy_tail")
   [ "$out" = "busy grok-regex" ] \
@@ -336,6 +339,9 @@ test_grok_regex_active_turn_busy() {
   out=$(fm_busy_classify tmux w1 grok t1 "$state" "$quoted_tail")
   [ "$out" = "idle grok-regex" ] \
     || fail "a finished turn quoting Esc:cancel must classify idle, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" "$approve_tail")
+  [ "$out" = "busy grok-regex" ] \
+    || fail "a footer segment between the measured keys must stay busy, got '$out'"
 
   out=$(. "$ROOT/bin/fm-composer-lib.sh"
     fm_busy_classify tmux w1 grok t1 "$state" "$busy_tail")

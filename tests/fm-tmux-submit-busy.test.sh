@@ -331,7 +331,7 @@ test_claude_busy_signature_uses_real_capture_shapes() {
 
 # Grok's delivery signature after the 2026-09-06 live measurement
 # (docs/verification/grok-queued-enter.md, grok 1.0.13): the active-turn footer
-# row renders `Esc:cancel` one separator after `Shift+Tab:mode`, and it stays
+# row carries `Shift+Tab:mode` and then `Esc:cancel`, and it stays
 # per-harness. The harness-less union must NOT match it, because
 # fm_tmux_submit_core reads the pane with no harness and would convert a
 # proven-pending grok composer to `empty` (reported delivered). The legacy
@@ -363,6 +363,11 @@ test_grok_busy_signature_uses_measured_footer() {
   # Live grok 1.0.13 idle footer.
   printf '  Shift+Tab:mode  │  Ctrl+x:shortcuts\n' > "$composer"
   pane_busy idle grok && fail "Grok's measured idle footer must not be busy"
+
+  # Production panes launch with --always-approve, whose footer segment was
+  # never captured in position, so an intervening segment must stay busy.
+  printf '  Shift+Tab:mode  ·  always-approve  │  Esc:cancel  │  Ctrl+x:shortcuts\n' > "$composer"
+  pane_busy approve grok || fail "an intervening footer segment must stay busy for Grok"
 
   # An idle pane whose finished turn quoted the token is still idle: the
   # signature matches the footer row, not the bare token.
