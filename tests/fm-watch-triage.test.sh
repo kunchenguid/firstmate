@@ -2583,6 +2583,46 @@ test_failed_wake_append_does_not_arm_the_captain_hold_throttle() {
   pass "a wake that never reached the durable queue arms no re-surface throttle"
 }
 
+# The task id is not the captain call. A task can be answered with `--release`
+# and held again as a genuinely different call with NO status append, and binding
+# the throttle to the status-log signature alone let the second call inherit the
+# first one's silence and absorbed its first sight. That is the one alarm this
+# bound must never swallow: a delivery announced twice is noise, but a decision
+# waiting on the captain that is never surfaced is invisible.
+# Measured at base c499f84 this fixture alarms on every sighting, so the
+# suppression was introduced by the bound itself rather than pre-existing.
+test_reheld_captain_call_starts_its_own_resurface_window() {
+  local dir state out capture wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (re-held captain call)"; return 0; }
+  dir=$(make_hold_home reheld-call 'done: PR https://example.invalid/pull/1 checks green' hold) \
+    || fail "could not build a captain-held backlog fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of the first captain call did not surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first call's surface"
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 1 \
+    || fail "the first call's churn was not absorbed"
+  [ "$(hold_stale_wakes "$state")" -eq 0 ] \
+    || fail "the first call's churn re-alarmed inside its own window"
+
+  # Answer and release, then re-hold: a second, distinct captain call on the same
+  # task id, with no status append, so the status signature cannot tell them apart.
+  printf 'go ahead\n' > "$dir/decision.txt"
+  run_hold "$dir" answer held-merge --decision-file "$dir/decision.txt" --release \
+    || fail "could not record the captain's answer"
+  run_hold "$dir" hold held-merge --reason 'awaiting the captain a second time' \
+    || fail "could not re-hold the task as a second captain call"
+
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 3s' \
+    || fail "the second captain call inherited the first call's silence"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] \
+    || fail "the second captain call produced $wakes first wakes instead of one"
+  pass "a released-then-re-held task is a distinct captain call whose first sight still alarms"
+}
+
 
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -4404,6 +4444,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
+test_reheld_captain_call_starts_its_own_resurface_window
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
