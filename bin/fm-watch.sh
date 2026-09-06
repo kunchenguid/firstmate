@@ -991,6 +991,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
         printf '%s' "$declared" > "$STATE/.stale-$key"
         wake "stale: $win"
       fi
+      triage_log "absorbed stale (away-mode declared wait already handed off): $win"
       return 0
     fi
     handle_paused_stale "$win" "$task" "$h"
