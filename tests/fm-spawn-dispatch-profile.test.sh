@@ -384,6 +384,45 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+test_raw_claude_launch_enforces_verifiable_rc_off() {
+  local rec id out status launch args info
+  id=profile-raw-claude-z15b
+  rec=$(make_spawn_case profile-raw-claude claude "$id")
+  read_case_record "$rec"
+  args="$CASE_DIR/claude-args.json"
+  info="$CASE_DIR/process-info.json"
+  cat > "$FAKEBIN_DIR/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '2.1.263 (Claude Code)'
+else
+  printf '%s\0' "$@" | jq -Rs 'split("\u0000")[:-1]' > "$FM_RAW_CLAUDE_ARGS"
+fi
+SH
+  cat > "$FAKEBIN_DIR/herdr" <<'SH'
+#!/usr/bin/env bash
+cat "$FM_RAW_CLAUDE_INFO"
+SH
+  chmod +x "$FAKEBIN_DIR/claude" "$FAKEBIN_DIR/herdr"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --dangerously-skip-permissions")
+  status=$?
+  expect_code 0 "$status" "raw Claude launch should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  FM_RAW_CLAUDE_ARGS="$args" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" \
+    || fail "raw Claude launch command could not execute"
+  jq -e '.[0] == "--settings" and (.[1] | fromjson | .disableRemoteControl == true) and .[2:] == ["--dangerously-skip-permissions"]' "$args" >/dev/null \
+    || fail "raw Claude launch did not enforce RC-off while preserving arguments"
+  jq -n --slurpfile argv "$args" \
+    '{result:{process_info:{pane_id:"w1:p2",foreground_processes:[{pid:42,argv:(["claude"] + $argv[0])}]}}}' > "$info"
+  FM_RAW_CLAUDE_INFO="$info" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-claude-rc-off.sh" verify named w1:p2 >/dev/null \
+    || fail "raw Claude launch did not produce verifiable RC-off process state"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  pass "raw Claude spawns enforce RC-off and remain verifiable"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -1104,6 +1143,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_claude_launch_enforces_verifiable_rc_off
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
