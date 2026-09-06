@@ -209,7 +209,6 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
-#     __RCOFF__     quoted path to the Claude RC-off launch helper
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
@@ -1338,8 +1337,7 @@ launch_template() {
     # alone disables the feature; keep both so a managed override of one still
     # leaves the other in force. Both are per-launch, scoped to this invocation only,
     # and never touch the captain's global ~/.claude/settings.json.
-    # fm-claude-rc-off.sh owns per-launch Remote Control enforcement.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 __RCOFF__ launch --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1470,44 +1468,6 @@ launch_template() {
   esac
 }
 
-raw_launch_mentions_claude() {
-  local scan=$1 word
-  local -a words=()
-  scan=${scan//$'\n'/ }
-  scan=${scan//|/ }
-  scan=${scan//;/ }
-  scan=${scan//&/ }
-  scan=${scan//\(/ }
-  scan=${scan//\)/ }
-  read -r -a words <<< "$scan"
-  for word in "${words[@]}"; do
-    word=${word//\"/}
-    word=${word//\'/}
-    [ "${word##*/}" = claude ] && return 0
-  done
-  return 1
-}
-
-raw_claude_launch_is_safe() {
-  local scan=$1 word
-  local -a words=()
-  scan=${scan//$'\n'/ }
-  scan=${scan//|/ }
-  scan=${scan//;/ }
-  scan=${scan//&/ }
-  scan=${scan//\(/ }
-  scan=${scan//\)/ }
-  read -r -a words <<< "$scan"
-  for word in "${words[@]}"; do
-    word=${word//\"/}
-    word=${word//\'/}
-    case "$word" in
-      --remote-control|--remote-control=*|--rc|--rc=*|remote-control|--settings|--settings=*|CLAUDE_CONFIG_DIR=*) return 1 ;;
-    esac
-  done
-  return 0
-}
-
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     RAW_LAUNCH=1
@@ -1516,19 +1476,6 @@ case "$ARG3" in
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
-    if raw_launch_mentions_claude "$LAUNCH"; then
-      case "$HARNESS" in
-        claude|env) HARNESS=claude ;;
-        *)
-          echo "error: raw command contains a Claude invocation that cannot be safely classified; use the managed Claude harness template" >&2
-          exit 1
-          ;;
-      esac
-      if ! raw_claude_launch_is_safe "$LAUNCH"; then
-        echo "error: raw Claude commands cannot override RC policy, Claude settings, or CLAUDE_CONFIG_DIR; use the managed Claude harness template" >&2
-        exit 1
-      fi
-    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1557,6 +1504,13 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+if [ "$RAW_LAUNCH" -eq 1 ] || [ "$HARNESS" = claude ]; then
+  "$FM_ROOT/bin/fm-claude-rc-off.sh" verify-policy >/dev/null || {
+    echo "error: Claude managed RC-off policy is not verified; refusing launch. Run '$FM_ROOT/bin/fm-claude-rc-off.sh install-policy' with system privileges." >&2
+    exit 1
+  }
+fi
 
 # muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
@@ -3010,11 +2964,6 @@ fi
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
-RAW_CLAUDE_CONFIG_DIR=
-if [ "$HARNESS" = claude ] && [ "$RAW_LAUNCH" -eq 1 ]; then
-  CLAUDE_CONFIG_SOURCE=${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}
-  RAW_CLAUDE_CONFIG_DIR=$("$FM_ROOT/bin/fm-claude-rc-off.sh" config "$CLAUDE_CONFIG_SOURCE" "$TASK_TMP") || exit 1
-fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -3111,7 +3060,7 @@ if [ "$KIND" != secondmate ]; then
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"disableRemoteControl":true,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
@@ -3552,7 +3501,6 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
-LAUNCH=${LAUNCH//__RCOFF__/"$(shell_quote "$FM_ROOT/bin/fm-claude-rc-off.sh")"}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
@@ -3596,10 +3544,6 @@ fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
-if [ -n "$RAW_CLAUDE_CONFIG_DIR" ]; then
-  LAUNCH="export CLAUDE_CONFIG_DIR=$(shell_quote "$RAW_CLAUDE_CONFIG_DIR"); $LAUNCH"
-fi
-
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" status=0 acquired=0
   # Fresh publication still owns the lock. Relaunch deliberately uses a short

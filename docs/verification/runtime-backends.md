@@ -8,34 +8,40 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 ## Claude Remote Control enforcement
 
-Verified on 2026-09-06 with Claude Code 2.1.263 on Linux through named Herdr lab sessions.
-The command was run from a pre-registered trusted worktree with `CLAUDE_CONFIG_DIR` selecting the target Claude Max account.
+Claude RC-off is enforced by Claude's machine-managed `disableRemoteControl=true` setting, whose precedence is above command-line, project, local-project, and user settings.
+Install the idempotent policy once per host before spawning Claude.
+
+```sh
+sudo bin/fm-claude-rc-off.sh install-policy
+```
+
+Linux installs `/etc/claude-code/managed-settings.d/50-firstmate-remote-control.json`.
+macOS installs `/Library/Application Support/ClaudeCode/managed-settings.d/50-firstmate-remote-control.json`.
+The helper requires the production file to be regular, root-owned, and not writable by group or others.
+`fm-spawn.sh` verifies it before every known Claude launch and every raw shell launch, and refuses before creating task state when verification fails.
+Raw commands are covered without rewriting because they may invoke Claude through an explicit path, environment prefix, `exec`, fallback, or later shell operation.
+
+The opt-in drift guard deliberately requests `--remote-control` while passing `--settings '{"disableRemoteControl":false}'`, then observes that both Remote Control commands remain unavailable after a completed turn.
+Run it only after the system policy is installed and from a pre-registered trusted worktree with `CLAUDE_CONFIG_DIR` selecting the target account.
 
 ```sh
 FM_CLAUDE_RC_OFF_LIVE_E2E=1 tests/fm-claude-rc-off-live-e2e.test.sh
 ```
 
-Exact stable result lines:
+Its success line is:
 
 ```text
-ok - 2.1.263 (Claude Code): real baseline RC connection observed and unprotected policy rejected
-ok - 2.1.263 (Claude Code): RC-on flag blocked, both RC commands unavailable, RC-off policy retained after a model turn
+ok - 2.1.263 (Claude Code): managed policy beat CLI and settings overrides and retained RC-off after a model turn
 ```
 
-The baseline's `/remote-control` dialog offered `Disconnect this session` and displayed a connected session URL.
-The protected launch explicitly requested `--remote-control`, but its `/remote-control` command returned `Unknown command: /remote-control`.
-After a completed tool-free model turn, `/rc` returned `Unknown command: /rc`.
-Herdr's `pane process-info` independently exposed the foreground Claude process's inline `disableRemoteControl=true` launch setting before and after the turn.
-The verifier accepted that protected process and rejected the baseline, regardless of its rendered terminal history.
 Successful guard exit includes lab teardown and the default-session fleet-state tripwire.
 
-[`fm-claude-rc-off.sh`](../../bin/fm-claude-rc-off.sh) owns the launch and verification interface.
-The verification reports the live process's launch policy; it is not an independent measurement of network connections and does not retrofit an existing process.
-The enforcement mechanism is Claude's documented [`disableRemoteControl` setting](https://code.claude.com/docs/en/settings), supported from 2.1.128.
+[`fm-claude-rc-off.sh`](../../bin/fm-claude-rc-off.sh) owns managed policy installation and verification.
+The enforcement mechanism is Claude's documented [`disableRemoteControl` setting](https://code.claude.com/docs/en/settings) at [managed-settings precedence](https://code.claude.com/docs/en/settings#settings-precedence).
 The portable regression is [`fm-claude-rc-off.test.sh`](../../tests/fm-claude-rc-off.test.sh), and the opt-in guard above must be rerun after Claude or Herdr upgrades before refreshing this evidence.
-The common Claude launch template applies to workers and secondmates across tmux, Herdr, Zellij, Orca, and cmux; the change does not alter their transport interfaces.
+The common preflight applies to workers and secondmates across tmux, Herdr, Zellij, Orca, and cmux; the change does not alter their transport interfaces.
 Other harnesses are not applicable because this is a Claude-specific setting and their launch templates do not call the helper.
-Only Herdr received live verification in this record; portable spawn regressions cover the common launch construction and Orca routing.
+Raw non-Claude commands also require the preflight because their arbitrary shell bodies cannot be proven never to invoke Claude.
 
 ## tmux
 

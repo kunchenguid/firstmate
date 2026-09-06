@@ -2,7 +2,7 @@
 # Opt-in real Claude/Herdr guard for the RC-off launch policy.
 # Run from an already trusted worktree with the target CLAUDE_CONFIG_DIR.
 # This creates only a named lab session and verifies the default-session tripwire on exit.
-# It deliberately connects one lab baseline to RC and spends one tool-free model turn.
+# It deliberately tries to override the managed policy and spends one tool-free model turn.
 # Other harnesses are not applicable because disableRemoteControl is a Claude setting.
 set -euo pipefail
 if [ "${FM_CLAUDE_RC_OFF_LIVE_E2E:-0}" != 1 ]; then
@@ -14,6 +14,7 @@ for tool in claude herdr jq; do
   command -v "$tool" >/dev/null || { echo "not ok - required installed harness/tool absent: $tool" >&2; exit 1; }
 done
 VERSION=$(claude --version)
+"$ROOT/bin/fm-claude-rc-off.sh" verify-policy
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name claude-rc-off)
 cleanup() {
@@ -46,30 +47,19 @@ submit() {
 }
 shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
-BASE=$(run workspace create --cwd "$ROOT" --label rc-baseline | jq -er '.result.root_pane.pane_id')
-# Unset the inherited child marker to exercise an ordinary interactive Claude session.
 PREFIX="env -u CLAUDE_CODE_CHILD_SESSION CLAUDE_CONFIG_DIR=$(shell_quote "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")"
-COMMON="--tools '' --strict-mcp-config --mcp-config '{\"mcpServers\":{}}' --settings '{\"disableAllHooks\":true}'"
-run pane run "$BASE" "$PREFIX claude --remote-control $COMMON"
-wait_for "$BASE" '❯' baseline-start.txt
-submit "$BASE" /remote-control
-wait_for "$BASE" 'Disconnect this session' baseline-on.txt
-if "$ROOT/bin/fm-claude-rc-off.sh" verify "$HERDR_LAB_SESSION" "$BASE" > "$EVIDENCE/baseline-verify.txt" 2>&1; then
-  fail 'unprotected baseline was accepted'
-fi
-echo "ok - $VERSION: real baseline RC connection observed and unprotected policy rejected"
-run pane close "$BASE"
+COMMON="--tools '' --strict-mcp-config --mcp-config '{\"mcpServers\":{}}' --settings '{\"disableAllHooks\":true,\"disableRemoteControl\":false}'"
 
 OFF=$(run workspace create --cwd "$ROOT" --label rc-enforced | jq -er '.result.root_pane.pane_id')
-run pane run "$OFF" "$PREFIX $(shell_quote "$ROOT/bin/fm-claude-rc-off.sh") launch --remote-control $COMMON"
+run pane run "$OFF" "$PREFIX claude --remote-control $COMMON"
 wait_for "$OFF" '❯' enforced-start.txt
-"$ROOT/bin/fm-claude-rc-off.sh" verify "$HERDR_LAB_SESSION" "$OFF" | tee "$EVIDENCE/enforced-verify.txt"
+"$ROOT/bin/fm-claude-rc-off.sh" verify-policy | tee "$EVIDENCE/enforced-verify.txt"
 submit "$OFF" /remote-control
 wait_for "$OFF" 'Unknown command: /remote-control' enforced-off.txt
 submit "$OFF" 'Reply with exactly RC_OFF_GUARD_OK and do not use any tools.'
 wait_for "$OFF" '● RC_OFF_GUARD_OK' completed-turn.txt
 submit "$OFF" /rc
 wait_for "$OFF" 'Unknown command: /rc' still-off.txt
-"$ROOT/bin/fm-claude-rc-off.sh" verify "$HERDR_LAB_SESSION" "$OFF" | tee "$EVIDENCE/still-off-verify.txt"
+"$ROOT/bin/fm-claude-rc-off.sh" verify-policy | tee "$EVIDENCE/still-off-verify.txt"
 run pane process-info --pane "$OFF" > "$EVIDENCE/guard-process.json"
-echo "ok - $VERSION: RC-on flag blocked, both RC commands unavailable, RC-off policy retained after a model turn"
+echo "ok - $VERSION: managed policy beat CLI and settings overrides and retained RC-off after a model turn"

@@ -1,138 +1,69 @@
 #!/usr/bin/env bash
-# Launch Claude with Remote Control disabled, or verify that policy in a Herdr pane.
-# Usage: fm-claude-rc-off.sh launch [Claude arguments...]
-#        fm-claude-rc-off.sh config <source-config-dir> <runtime-dir>
-#        fm-claude-rc-off.sh verify <session> <pane>
-# Launch merges caller --settings JSON or files and forces disableRemoteControl=true.
-# It requires Claude Code >= 2.1.128, the vendor's documented support floor.
-# Settings are passed inline so the account's global settings remain unchanged.
-# Verify reads the live foreground process arguments and environment, never terminal history.
-# It requires exactly one Claude process with inline enforcement or an enforced runtime config.
-# Success verifies the launch policy, not an independent network-connection measurement.
-# An existing unprotected session must be relaunched through launch; verify never types keys.
-# Lab sessions are routed through fm-herdr-lab.sh, including read-only verification.
-# The live drift guard is tests/fm-claude-rc-off-live-e2e.test.sh.
+# Install or verify Firstmate's machine-managed Claude Remote Control policy.
+# Usage: fm-claude-rc-off.sh install-policy
+#        fm-claude-rc-off.sh verify-policy
+# Claude's managed settings outrank command-line, project, and user settings.
+# Production policy is root-owned and must not be group- or world-writable.
+# Tests may redirect the managed directory only under FM_SPAWN_NO_GUARD=1.
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-
 die() { printf 'fm-claude-rc-off: %s\n' "$*" >&2; exit 1; }
-usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,7p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
-check_version() {
-  local version major minor patch
-  version=$(claude --version) || die 'cannot read Claude version'
-  [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)[[:space:]]+\(Claude\ Code\)$ ]] || die "unrecognized Claude version: $version"
-  major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
-  (( major > 2 || (major == 2 && (minor > 1 || (minor == 1 && patch >= 128))) )) || die "Claude $version lacks the required disableRemoteControl setting"
-}
-
-launch() {
-  local settings='{}' value parsed
-  local -a args=()
-  check_version
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --settings)
-        [ "$#" -ge 2 ] || die '--settings requires a value'
-        value=$2
-        shift 2
-        ;;
-      --settings=*) value=${1#*=}; shift ;;
-      --) args+=("$@"); break ;;
-      *) args+=("$1"); shift; continue ;;
-    esac
-    if [[ "$value" =~ ^[[:space:]]*\{ ]]; then
-      parsed=$(printf '%s' "$value" | jq -ce 'select(type == "object")') || die 'invalid settings JSON'
-    else
-      parsed=$(jq -ce 'select(type == "object")' -- "$value") || die "cannot read settings object: $value"
-    fi
-    settings=$(jq -cn --argjson previous "$settings" --argjson next "$parsed" '$previous * $next')
-  done
-  settings=$(printf '%s' "$settings" | jq -c '.disableRemoteControl = true')
-  exec claude --settings "$settings" "${args[@]}"
-}
-
-config() {
-  [ "$#" -eq 2 ] || die 'config requires a source config directory and runtime directory'
-  local source=$1 runtime=$2 target item name settings
-  case "$source" in /*) ;; *) die 'source config directory must be absolute' ;; esac
-  case "$runtime" in /*) ;; *) die 'runtime directory must be absolute' ;; esac
-  [ ! -e "$source" ] || [ -d "$source" ] || die "source config is not a directory: $source"
-  mkdir -p "$runtime"
-  target=$(mktemp -d "$runtime/claude-config.XXXXXX")
-  chmod 700 "$target"
-  if [ -d "$source" ]; then
-    shopt -s dotglob nullglob
-    for item in "$source"/*; do
-      name=${item##*/}
-      [ "$name" = settings.json ] || ln -s "$item" "$target/$name"
-    done
-    shopt -u dotglob nullglob
+managed_dir() {
+  if [ -n "${FM_TEST_CLAUDE_MANAGED_SETTINGS_DIR:-}" ]; then
+    [ "${FM_SPAWN_NO_GUARD:-0}" = 1 ] || die 'test managed-settings override requires FM_SPAWN_NO_GUARD=1'
+    case "$FM_TEST_CLAUDE_MANAGED_SETTINGS_DIR" in /*) ;; *) die 'test managed-settings directory must be absolute' ;; esac
+    printf '%s\n' "$FM_TEST_CLAUDE_MANAGED_SETTINGS_DIR"
+    return
   fi
-  settings='{}'
-  if [ -f "$source/settings.json" ]; then
-    settings=$(jq -ce 'select(type == "object")' -- "$source/settings.json") \
-      || die "cannot read settings object: $source/settings.json"
-  fi
-  printf '%s\n' "$settings" | jq -c '.disableRemoteControl = true' > "$target/settings.json"
-  chmod 600 "$target/settings.json"
-  printf '%s\n' "$target"
-}
-
-verify() {
-  [ "$#" -eq 2 ] || die 'verify requires an explicit session and pane'
-  local session=$1 pane=$2 info process pid config_dir settings_count verified=0
-  [ -n "$session" ] && [ -n "$pane" ] || die 'session and pane must not be empty'
-  case "$session" in
-    fm-lab-*) info=$("$ROOT/bin/fm-herdr-lab.sh" run "$session" pane process-info --pane "$pane") ;;
-    *) info=$(herdr pane process-info --pane "$pane" --session "$session") ;;
+  case "$(uname -s)" in
+    Linux) printf '%s\n' /etc/claude-code/managed-settings.d ;;
+    Darwin) printf '%s\n' '/Library/Application Support/ClaudeCode/managed-settings.d' ;;
+    *) die "unsupported platform: $(uname -s)" ;;
   esac
-  process=$(printf '%s' "$info" | jq -cer --arg pane "$pane" '
-    .result.process_info | select(.pane_id == $pane)
-    | [.foreground_processes[]? | select(.argv | type == "array")
-       | select(.argv[0] | type == "string")
-       | select((.argv[0] | split("/") | last) == "claude")]
-    | select(length == 1) | .[0]
-    | select(.pid | type == "number" and . > 0)
-  ') || die "RC-off policy NOT verified for $session/$pane; relaunch Claude through this helper"
-  pid=$(printf '%s' "$process" | jq -er '.pid')
-  settings_count=$(printf '%s' "$process" | jq '
-    .argv as $all
-    | ($all | index("--")) as $end
-    | ($all[:($end // ($all | length))])
-    | [.[] | select(. == "--settings" or startswith("--settings="))]
-    | length
-  ')
-  if printf '%s' "$process" | jq -e '
-    .argv as $all
-    | ($all | index("--")) as $end
-    | ($all[:($end // ($all | length))]) as $args
-    | [$args | to_entries[] | select(.value == "--settings" or (.value | startswith("--settings=")))
-       | if .value == "--settings" then $args[.key + 1] else .value[11:] end]
-    | select(length == 1) | .[0] | fromjson
-    | select(type == "object" and .disableRemoteControl == true)
-  ' >/dev/null 2>&1; then
-    verified=1
-  elif [ "$settings_count" -gt 0 ]; then
-    verified=0
-  elif [ -r "/proc/$pid/environ" ]; then
-    config_dir=$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | tail -n 1)
-  else
-    config_dir=$(ps eww -p "$pid" -o command= 2>/dev/null | tr ' ' '\n' | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | tail -n 1)
+}
+
+policy_path() {
+  printf '%s/50-firstmate-remote-control.json\n' "$(managed_dir)"
+}
+
+verify_policy() {
+  local target uid mode
+  target=$(policy_path)
+  [ -f "$target" ] && [ ! -L "$target" ] || die "managed RC-off policy missing or unsafe: $target; run this helper's install-policy command with system privileges"
+  jq -e 'type == "object" and .disableRemoteControl == true' "$target" >/dev/null 2>&1 \
+    || die "managed RC-off policy is invalid: $target"
+  if [ -z "${FM_TEST_CLAUDE_MANAGED_SETTINGS_DIR:-}" ]; then
+    case "$(uname -s)" in
+      Linux) read -r uid mode < <(stat -c '%u %a' "$target") ;;
+      Darwin) read -r uid mode < <(stat -f '%u %Lp' "$target") ;;
+      *) die "unsupported platform: $(uname -s)" ;;
+    esac
+    [ "$uid" = 0 ] || die "managed RC-off policy is not root-owned: $target"
+    (( (8#$mode & 8#022) == 0 )) || die "managed RC-off policy is group- or world-writable: $target"
   fi
-  if [ "$verified" -eq 0 ] && [ "$settings_count" -eq 0 ] && [ -n "${config_dir:-}" ] && [ -f "$config_dir/settings.json" ] \
-     && jq -e '.disableRemoteControl == true' "$config_dir/settings.json" >/dev/null 2>&1; then
-    verified=1
-  fi
-  [ "$verified" -eq 1 ] || die "RC-off policy NOT verified for $session/$pane; relaunch Claude through this helper"
-  printf 'RC-off launch policy verified: session=%s pane=%s pid=%s disableRemoteControl=true\n' "$session" "$pane" "$pid"
+  printf 'Claude managed RC-off policy verified: %s\n' "$target"
+}
+
+install_policy() {
+  local dir target tmp
+  dir=$(managed_dir)
+  target=$(policy_path)
+  mkdir -p "$dir"
+  tmp=$(mktemp "$dir/.50-firstmate-remote-control.XXXXXX")
+  trap 'rm -f "$tmp"' RETURN
+  printf '%s\n' '{"disableRemoteControl":true}' > "$tmp"
+  chmod 644 "$tmp"
+  mv -f "$tmp" "$target"
+  trap - RETURN
+  verify_policy
+  printf 'Claude managed RC-off policy installed: %s\n' "$target"
 }
 
 case "${1:-}" in
-  launch) shift; launch "$@" ;;
-  config) shift; config "$@" ;;
-  verify) shift; verify "$@" ;;
+  install-policy) [ "$#" -eq 1 ] || die 'install-policy takes no arguments'; install_policy ;;
+  verify-policy) [ "$#" -eq 1 ] || die 'verify-policy takes no arguments'; verify_policy ;;
   --help|-h|help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

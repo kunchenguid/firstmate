@@ -273,7 +273,7 @@ make_spawn_fakebin() {
 # CLAUDE_CONFIG_DIR, ...) are inherited. Does not add --mode/--yolo; ship tests
 # that need a delivery contract pass those flags themselves.
 fm_test_run_spawn() {
-  local home=$1 pane=$2 fakebin=$3
+  local home=$1 pane=$2 fakebin=$3 managed_settings_dir
   shift 3
   # A claude spawn pre-registers workspace trust in the launching user's own
   # store (bin/fm-claude-trust.sh), so every spawn here runs against a throwaway
@@ -287,10 +287,17 @@ fm_test_run_spawn() {
   # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
   local spawn_home=$home/user-home
   mkdir -p "$spawn_home"
+  managed_settings_dir=${FM_TEST_CLAUDE_MANAGED_SETTINGS_DIR:-$home/managed-settings.d}
+  if [ "${FM_TEST_CLAUDE_MANAGED_POLICY_MODE:-installed}" = installed ] \
+     && [ ! -f "$managed_settings_dir/50-firstmate-remote-control.json" ]; then
+    FM_SPAWN_NO_GUARD=1 FM_TEST_CLAUDE_MANAGED_SETTINGS_DIR="$managed_settings_dir" \
+      bash "$ROOT/bin/fm-claude-rc-off.sh" install-policy >/dev/null
+  fi
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_TEST_CLAUDE_MANAGED_SETTINGS_DIR="$managed_settings_dir" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$@" 2>&1
