@@ -357,19 +357,10 @@ log_claims_pipeline_unreachable() {  # <line>
 }
 
 # Rows of the `active_steps[N]{...}:` table in the captured run output
-# ($RUN_OUT), which the pipeline emits only while a step is actually running or
-# fixing. Column order is deliberately not assumed: the header's own indentation
-# bounds the block, and callers below read the table as text.
+# ($RUN_OUT). A thin wrapper over the one owner in bin/fm-nm-run-lib.sh, which
+# the wedge detector's step-progress probe reads through as well.
 nm_active_steps_rows() {
-  printf '%s\n' "$RUN_OUT" | awk '
-    /^[[:space:]]*active_steps\[[0-9]+\]\{/ { hdr = index($0, "active_steps"); inblock = 1; next }
-    inblock {
-      if ($0 ~ /^[[:space:]]*$/) { inblock = 0; next }
-      match($0, /[^ \t]/)
-      if (RSTART <= hdr) { inblock = 0; next }
-      print
-    }
-  '
+  fm_nm_active_steps_rows "$RUN_OUT"
 }
 
 # Rows of the `steps[N]{step,status,findings,duration_ms}:` table in the

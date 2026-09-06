@@ -101,6 +101,7 @@ exit 1
 SH
   chmod +x "$fakebin/tmux"
   make_fake_crew_state "$fakebin" >/dev/null
+  make_fake_no_mistakes "$fakebin" >/dev/null
   printf '%s\n' "$dir"
 }
 
@@ -127,6 +128,56 @@ exit 0
 SH
   chmod +x "$fakebin/fm-crew-state.sh"
   printf '%s\n' "$fakebin/fm-crew-state.sh"
+}
+
+# Install a hermetic fake no-mistakes into <fakebin> and echo its path. The
+# watcher's step-progress probe (crew_run_step_advanced) shells out to the real
+# CLI, so without this stand-in a case would reach whatever no-mistakes the
+# runner happens to have installed and talk to a live daemon.
+# The default answer is NO run at all - both verbs print nothing and exit 1 -
+# because that is the state the overwhelming majority of cases describe, and it
+# leaves the escalation schedule of every pre-existing test exactly as it was.
+# A case that needs an active step points FM_FAKE_NM_STATUS at a TOON fixture
+# file and, optionally, FM_FAKE_NM_LOG at a file standing in for the current
+# step's log; the stub then answers `axi status` and `axi logs` from those,
+# with the `axi logs` answer asserting the probe's real CLI signature against
+# the fixture (--step always; --run exactly when the fixture names a run id).
+make_fake_no_mistakes() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = axi ] && [ "${2:-}" = status ] && [ -n "${FM_FAKE_NM_STATUS:-}" ]; then
+  cat "$FM_FAKE_NM_STATUS"
+  exit 0
+fi
+if [ "${1:-}" = axi ] && [ "${2:-}" = logs ] && [ -n "${FM_FAKE_NM_LOG:-}" ]; then
+  shift 2
+  run='' step=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --run) run=${2:-}; shift 2 ;;
+      --step) step=${2:-}; shift 2 ;;
+      --full) shift ;;
+      *) exit 1 ;;
+    esac
+  done
+  [ -n "${FM_FAKE_NM_STATUS:-}" ] || exit 1
+  expect_run=$(sed -n 's/^[[:space:]]*id:[[:space:]]*//p' "$FM_FAKE_NM_STATUS" | head -1 | tr -d '"')
+  expect_step=$(sed -n '/active_steps\[/{n;s/^[[:space:]]*//;s/,.*//;p;}' "$FM_FAKE_NM_STATUS" | head -1)
+  [ -n "$step" ] && [ "$step" = "$expect_step" ] || exit 1
+  if [ -n "$expect_run" ]; then
+    [ "$run" = "$expect_run" ] || exit 1
+  else
+    [ -z "$run" ] || exit 1
+  fi
+  cat "$FM_FAKE_NM_LOG" 2>/dev/null
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fakebin/no-mistakes"
+  printf '%s\n' "$fakebin/no-mistakes"
 }
 
 # Prime <file>'s .seen-* marker to its CURRENT signature through the production
