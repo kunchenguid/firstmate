@@ -109,6 +109,12 @@
 # recorded family-level coupling still expands to the whole family.
 set -eu
 
+# Deterministic fixture permissions: a caller's group-writable umask (e.g. 0002)
+# would leak into every fixture directory the suite creates and trip the
+# product's own private-directory contracts (e.g. the procevent state root)
+# with failures that say nothing about the code under test.
+umask 022
+
 now_ms() {
   if command -v python3 >/dev/null 2>&1; then
     python3 -c 'import time; print(int(time.time() * 1000))'

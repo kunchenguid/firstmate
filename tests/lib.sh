@@ -26,6 +26,13 @@ if [ -n "${FM_TEST_LIB_SOURCED:-}" ]; then
 fi
 FM_TEST_LIB_SOURCED=1
 
+# Deterministic fixture permissions: a caller's group-writable umask (e.g. 0002)
+# would leak into every fixture directory created below and trip the product's
+# own private-directory contracts (e.g. the procevent state root) with failures
+# that say nothing about the code under test. bin/fm-test-run.sh sets the same
+# umask for runner-driven execution; this covers direct script invocation.
+umask 022
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every

@@ -13,7 +13,11 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
-mkdir -p "$STATE"
+# The state root is created private regardless of the caller's umask: the
+# procevent contract (fm-procevent-lib.sh) refuses a group- or other-writable
+# state root, so a wake-library consumer must never be the one to create it
+# open.
+(umask 077; mkdir -p "$STATE")
 
 # Most wake-library consumers need only queue and lock primitives, including
 # deliberately minimal recovery fixtures and remote installations.

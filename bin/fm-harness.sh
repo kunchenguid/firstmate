@@ -115,13 +115,15 @@ detect_own() {
       # It does NOT reach the currently installed CLI, which is a node bundle
       # (~/.local/bin/gemini -> @google/gemini-cli/bundle/gemini.js): modern
       # Node on Linux reports `comm` as MainThread rather than node (measured
-      # on Node v24.20.0), so neither this arm nor the node interpreter arm
-      # below matches a live gemini process. GEMINI_CLI above is therefore
-      # load-bearing for gemini rather than a fast path, which is why gemini
-      # is not offered as a primary or secondmate harness. Do NOT add
-      # MainThread to the interpreter arm to close this: that would make the
-      # args of EVERY node process searchable and let an unrelated node
-      # command carrying a harness name in its arguments claim an identity.
+      # on Node v24.20.0; v26 names it node-MainThread), so neither this arm
+      # nor the node interpreter arm below matches a live gemini process.
+      # GEMINI_CLI above is therefore load-bearing for gemini rather than a
+      # fast path, which is why gemini is not offered as a primary or
+      # secondmate harness. Do NOT add a thread-name comm to the interpreter
+      # arm to close this: that would make the args of EVERY node process
+      # searchable and let an unrelated node command carrying a harness name
+      # in its arguments claim an identity, so the arm matches interpreter
+      # names exactly and never a *node* glob.
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
@@ -136,8 +138,10 @@ detect_own() {
       muse|muse-bin-*) echo muse; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
-      node*|python*)
-        # Bare interpreter: match the harness name in its script path.
+      node|node-[0-9]*|node[0-9]*|python*)
+        # Bare interpreter: match the harness name in its script path. The
+        # exact-name match keeps a thread-name comm (MainThread,
+        # node-MainThread) from making every node process's args searchable.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
         if fm_gemini_args_are_gemini "$args"; then
           echo gemini

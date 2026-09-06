@@ -978,6 +978,10 @@ test_pi_extension_injects_once_per_logical_agent_run() {
   mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  # Node 26 emits a MODULE_TYPELESS_PACKAGE_JSON warning when it imports the
+  # copied .ts extension, which the no-noise contract below would read as
+  # output. Pin the module type so the warning class stays out of the way.
+  printf '{"type":"module"}\n' > "$repo/.pi/extensions/package.json"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1044,6 +1048,8 @@ test_pi_extension_retries_after_followup_delivery_failure() {
   mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  # Same MODULE_TYPELESS_PACKAGE_JSON pin as the logical-run fixture above.
+  printf '{"type":"module"}\n' > "$repo/.pi/extensions/package.json"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
