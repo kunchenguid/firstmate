@@ -101,6 +101,7 @@ test_fm_lock_recognizes_grok_holder() {
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
+  *"lstart="*) exec /bin/ps "$@" ;;
   *"comm="*) printf '%s\n' '/usr/local/bin/grok'; exit 0 ;;
   *"args="*) printf '%s\n' 'grok'; exit 0 ;;
 esac

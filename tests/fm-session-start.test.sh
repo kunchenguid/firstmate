@@ -226,6 +226,9 @@ for argument in "$@"; do
   previous=$argument
 done
 case "$*" in
+  # Process identity is a real property of a real pid: only the harness NAMING
+  # is faked here, so let the identity query through to the real ps.
+  *"lstart="*) exec /bin/ps "$@" ;;
   *"comm="*)
     if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
       || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then

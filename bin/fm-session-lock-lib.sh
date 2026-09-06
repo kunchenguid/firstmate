@@ -251,22 +251,24 @@ fm_session_lock_record_owner() {  # <state> <pid>
 #   free        no lock file at all
 #   malformed   the lock is not a regular file, or carries no numeric pid
 #   dead        that pid is gone, or is no longer a verified harness
-#   unrecorded  this home holds no owner record naming that live pid
+#   unconfirmed nothing here can confirm or disprove that live pid: no record
+#               names it, or an identity that would compare cannot be read
 #   reused      an unrelated process now occupies that pid
 #   live        a verified live owner
 # and FM_LOCK_OWNER_PID/COMMAND to the detail a refusal or reclaim needs.
 #
-# Only a genuine identity MISMATCH demotes an owner. An identity that cannot be
-# read at all leaves a recorded, live, harness-named owner holding the lock, so
-# an unreadable process table can never hand a live session's home to a second
-# one.
+# Only a genuine identity MISMATCH demotes an owner, and only a comparison that
+# actually happened can confirm one. An identity that cannot be read is neither:
+# it leaves the live, harness-named owner holding the lock, reported as
+# unconfirmed rather than as a match nobody made.
 #
-# unrecorded is missing evidence, NOT evidence of absence: no record at all is
+# unconfirmed is missing evidence, NOT evidence of absence: no record at all is
 # what a still-running session that acquired its lock before owner records
-# existed looks like, and a record about some other pid says nothing at all
-# about the process in the lock file today. Only dead and reused prove the pid
-# in the lock is not a live session here, and fm_session_lock_reclaimable below
-# is the one place that judgement is made.
+# existed looks like, a record about some other pid says nothing about the
+# process in the lock file today, and an unreadable identity says nothing
+# either. Only dead and reused prove the pid in the lock is not a live session
+# here, and fm_session_lock_reclaimable below is the one place that judgement is
+# made.
 FM_LOCK_OWNER_STATUS=free
 FM_LOCK_OWNER_PID=
 FM_LOCK_OWNER_COMMAND=
@@ -301,12 +303,16 @@ fm_session_lock_live_owner() {  # <state>
     done < "$owner"
   fi
   if [ "$rec_pid" != "$lock_pid" ]; then
-    FM_LOCK_OWNER_STATUS=unrecorded
+    FM_LOCK_OWNER_STATUS=unconfirmed
     return 1
   fi
   _fm_session_lock_require_identity
   live_identity=$(fm_pid_identity "$lock_pid" 2>/dev/null | tr -d '\n' || true)
-  if [ -n "$rec_identity" ] && [ -n "$live_identity" ] && [ "$rec_identity" != "$live_identity" ]; then
+  if [ -z "$rec_identity" ] || [ -z "$live_identity" ]; then
+    FM_LOCK_OWNER_STATUS=unconfirmed
+    return 1
+  fi
+  if [ "$rec_identity" != "$live_identity" ]; then
     FM_LOCK_OWNER_STATUS=reused
     return 1
   fi
@@ -320,8 +326,8 @@ fm_session_lock_live_owner() {  # <state>
 #
 #   free/malformed  the lock names no pid at all, so no session holds it
 #   dead            that pid is gone, or is not a verified harness process
-#   reused          a record for that EXACT pid proves a different process
-#                   occupies it now
+#   reused          a record for that EXACT pid, compared against the process
+#                   there now, proves a different process occupies it
 #
 # A pid that is alive and carries a verified harness name is never by itself
 # such evidence - that is precisely how an unrelated ChatGPT-app codex daemon
@@ -331,7 +337,7 @@ fm_session_lock_live_owner() {  # <state>
 fm_session_lock_reclaimable() {  # <state>
   fm_session_lock_live_owner "$1" && return 1
   case "$FM_LOCK_OWNER_STATUS" in
-    unrecorded) return 1 ;;
+    unconfirmed) return 1 ;;
   esac
   return 0
 }

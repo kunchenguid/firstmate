@@ -447,7 +447,7 @@ stop_fixture_processes() {
 # missing evidence, not evidence that the process is unrelated, so it is held
 # rather than evicted - the alternative puts two live sessions in one home.
 test_legacy_bare_pid_lock_is_held_not_reclaimed() {
-  local dir fakebin foreign session out status
+  local dir fakebin foreign session out reported status
   dir="$TMP_ROOT/legacy-bare-pid"
   fakebin=$(fm_fakebin "$dir")
   mkdir -p "$dir/state" "$dir/noproc"
@@ -459,19 +459,32 @@ test_legacy_bare_pid_lock_is_held_not_reclaimed() {
   status=0
   out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
     PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  # The status subcommand answers the same question and must be as actionable,
+  # so read it while the holder is still the live process the refusal named.
+  reported=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
   stop_fixture_processes
 
   expect_code 1 "$status" "an unrecorded live lock owner was taken over anyway: $out"
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$foreign" ] \
     || fail "a second session took a lock it could not disprove: $(cat "$dir/state/.lock")"
   assert_absent "$dir/state/.lock-owner" "a refused session recorded itself as the owner"
-  assert_contains "$out" "no ownership record" \
-    "the refusal did not say what was actually missing"
   assert_contains "$out" "ChatGPT.app" \
     "the refusal did not name the real process an operator has to go find"
+  assert_contains "$out" "cannot prove is dead" \
+    "the refusal did not say why firstmate declines to take the home"
+  assert_contains "$out" "quit that process" "the refusal did not offer the first way out"
+  assert_contains "$out" "$dir/state/.lock" \
+    "the refusal did not name the exact lock file to remove"
   assert_not_contains "$out" "reclaimed" "an untouched lock was reported as reclaimed"
   assert_not_contains "$out" "not a firstmate session" \
     "the refusal asserted something it cannot know about a live process"
+
+  assert_contains "$reported" "ChatGPT.app" "status did not name the process holding the home"
+  assert_contains "$reported" "cannot prove is dead" \
+    "status did not say why firstmate declines to take the home"
+  assert_contains "$reported" "quit that process" "status did not offer the first way out"
+  assert_contains "$reported" "$dir/state/.lock" "status did not name the exact lock file to remove"
   pass "session-lock: a legacy bare-pid lock on a live harness is held, not reclaimed"
 }
 
@@ -527,13 +540,16 @@ test_acquire_still_succeeds_when_identity_cannot_be_read() {
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$session" ] \
     || fail "the lock was not published: $(cat "$dir/state/.lock")"
 
-  # The record it could write still holds the home: the session that owns it
-  # keeps it, and a second session is refused rather than handed the home.
+  # The record it could write still holds the home, but no comparison was ever
+  # made against it, so the report says unconfirmed rather than claiming a match.
   out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
     PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
   stop_fixture_processes
-  assert_contains "$out" "lock: held by live harness pid $session" \
-    "an owner recorded without a readable identity lost its own home: $out"
+  assert_contains "$out" "lock: unconfirmed" \
+    "a record no identity comparison ever touched was reported as confirmed: $out"
+  assert_contains "$out" "$session" "the report did not name the pid holding the home"
+  assert_not_contains "$out" "held by live harness pid" \
+    "the report claimed a confirmation nobody made"
   pass "session-lock: an unreadable process identity still acquires and holds the home"
 }
 
@@ -562,7 +578,7 @@ test_owner_record_for_a_different_pid_is_not_evidence() {
   expect_code 1 "$status" "a record about another pid was treated as proof about this one: $out"
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$foreign" ] \
     || fail "a live session was evicted on evidence about a different pid: $(cat "$dir/state/.lock")"
-  assert_contains "$out" "no ownership record naming it" \
+  assert_contains "$out" "cannot confirm is a firstmate session here" \
     "the refusal did not say why the holder could not be confirmed"
   assert_contains "$out" "ChatGPT.app" \
     "the refusal did not name the process an operator has to go find"
@@ -571,7 +587,8 @@ test_owner_record_for_a_different_pid_is_not_evidence() {
 }
 
 # The record names this exact pid, but no identity comparison is possible, so
-# nothing disproves the process holding the lock and it keeps the home.
+# nothing disproves the process holding the lock and it keeps the home - and
+# nothing confirms it either, so the refusal must not claim a verified owner.
 test_unreadable_recorded_identity_is_not_reclaimable() {
   local dir fakebin foreign session out status
   dir="$TMP_ROOT/blind-record"
@@ -591,6 +608,12 @@ test_unreadable_recorded_identity_is_not_reclaimable() {
   expect_code 1 "$status" "an owner that could not be compared was evicted anyway: $out"
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$foreign" ] \
     || fail "a live owner lost its home to an impossible comparison"
+  assert_contains "$out" "cannot confirm is a firstmate session here" \
+    "an owner nothing was compared against was reported as a confirmed live session"
+  assert_contains "$out" "ChatGPT.app" "the refusal did not name the process holding the home"
+  assert_contains "$out" "$dir/state/.lock" "the refusal did not name the lock file to remove"
+  assert_not_contains "$out" "another live firstmate session" \
+    "the refusal claimed a confirmation nobody made"
   assert_not_contains "$out" "reclaimed" "an untouched lock was reported as reclaimed"
   pass "session-lock: an owner whose recorded identity cannot be compared keeps the home"
 }
