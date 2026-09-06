@@ -283,6 +283,11 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
   exit "$FM_LEASE_REFUSE_EXIT"
 fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
+TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
+  echo "error: could not resolve the task-set lock for $STATE" >&2
+  exit 1
+}
+TASK_SET_LOCK_HELD=0
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
@@ -321,10 +326,19 @@ teardown_release_locks() {
     fm_lock_release "$CONTROL_LOCK" || true
     CONTROL_LOCK_HELD=0
   fi
+  if [ "$TASK_SET_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$TASK_SET_LOCK" || true
+    TASK_SET_LOCK_HELD=0
+  fi
   fm_lease_guard_release || true
   return "$status"
 }
 trap teardown_release_locks EXIT
+fm_lock_try_acquire "$TASK_SET_LOCK" || {
+  echo "error: this home's task set is locked by another operation; nothing was changed" >&2
+  exit 1
+}
+TASK_SET_LOCK_HELD=1
 fm_lock_try_acquire "$CONTROL_LOCK" || {
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
   exit 1

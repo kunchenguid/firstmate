@@ -137,6 +137,48 @@ test_control_lock_contention_refuses_before_mutation() {
   pass "fm-teardown: a concurrent lifecycle action refuses before mutation"
 }
 
+test_task_set_lock_contention_refuses_before_mutation() {
+  local dir id=publishing-task lock ready holder i=0 rc
+  dir=$(make_case task-set-lock)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  lock="$dir/home/state/.task-set.lock"
+  ready="$dir/task-set-lock-ready"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    trap 'fm_lock_release "$lock"' EXIT
+    : > "$ready"
+    sleep 30
+  ) &
+  holder=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "could not stage an in-progress task publication"
+  }
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown raced an in-progress task publication"
+  assert_present "$dir/home/state/$id.meta" "task-set contention removed task metadata"
+  assert_present "$dir/worktree/sentinel" "task-set contention changed the worktree"
+  assert_present "$lock" "task-set contention removed the publisher's lock"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "task-set contention reached the runtime: $(cat "$dir/runtime.log")"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "fm-teardown: an in-progress task publication refuses before mutation"
+}
+
 test_metadata_lock_serializes_destructive_cleanup() {
   local dir id=metadata-locked-task lock ready release holder teardown_pid i=0 rc
   dir=$(make_case metadata-lock)
@@ -511,6 +553,7 @@ SH
 
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
+test_task_set_lock_contention_refuses_before_mutation
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
 test_tmux_empty_target_refuses_without_invocation
