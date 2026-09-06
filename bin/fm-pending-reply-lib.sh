@@ -144,20 +144,19 @@ fm_pending_reply_path() {  # <state-dir> <corr_id>
   printf '%s/%s' "$(fm_pending_reply_dir "$1")" "$2"
 }
 
-# The record for <corr_id> wherever it currently lives: hot first, then the
-# archive. Correlation reuse and the wrong-home detector go through here so an
-# archived record is still findable by id, which is what lets the tick's working
-# set shrink to open records only.
+# The record for <corr_id> wherever it currently lives. Correlation reuse and
+# the wrong-home detector go through here so an archived record is still findable
+# by id, which is what lets the tick's working set shrink to open records only.
 fm_pending_reply_locate() {  # <state-dir> <corr_id>
   local hot archived
   hot=$(fm_pending_reply_path "$1" "$2")
-  if [ -f "$hot" ]; then
-    printf '%s' "$hot"
-    return 0
-  fi
   archived="$(fm_pending_reply_archive_dir "$1")/$2"
   if [ -f "$archived" ]; then
     printf '%s' "$archived"
+    return 0
+  fi
+  if [ -f "$hot" ]; then
+    printf '%s' "$hot"
     return 0
   fi
   return 1
@@ -173,6 +172,45 @@ _fm_pending_reply_archive_locked() {  # <state-dir> <corr_id>
   archive_dir=$(fm_pending_reply_archive_dir "$state")
   mkdir -p "$archive_dir" 2>/dev/null || return 1
   mv -f "$hot" "$archive_dir/$corr" 2>/dev/null || return 1
+}
+
+_fm_pending_reply_publish_stage_locked() {  # <staging-path> <archive-path>
+  mv -f "$1" "$2" 2>/dev/null
+}
+
+_fm_pending_reply_unlink_hot_locked() {  # <hot-path>
+  rm -f "$1" 2>/dev/null
+}
+
+_fm_pending_reply_publish_resolved_locked() {  # <state-dir> <corr_id> <resolved-via> <resolved-epoch>
+  local state=$1 corr=$2 via=$3 now=$4 hot archive_dir archive stage
+  hot=$(fm_pending_reply_path "$state" "$corr")
+  archive_dir=$(fm_pending_reply_archive_dir "$state")
+  archive="$archive_dir/$corr"
+  if [ -f "$archive" ]; then
+    [ "$(fm_pending_reply_get "$archive" phase)" = resolved ] || return 1
+    _fm_pending_reply_unlink_hot_locked "$hot" || return 2
+    return 0
+  fi
+  [ -f "$hot" ] || return 1
+  mkdir -p "$archive_dir" 2>/dev/null || return 2
+  stage="$archive_dir/.$corr.resolving"
+  rm -f "$stage" 2>/dev/null || return 2
+  cp "$hot" "$stage" 2>/dev/null || return 2
+  fm_pending_reply_set "$stage" resolved_epoch "$now" || { rm -f "$stage"; return 2; }
+  fm_pending_reply_set "$stage" resolved_via "$via" || { rm -f "$stage"; return 2; }
+  fm_pending_reply_set "$stage" phase resolved || { rm -f "$stage"; return 2; }
+  _fm_pending_reply_close_escalation_locked "$state" "$corr" "$stage" || true
+  if [ -n "$(fm_pending_reply_get "$stage" escalated_epoch)" ] \
+    && [ -z "$(fm_pending_reply_get "$stage" escalation_closed_epoch)" ]; then
+    rm -f "$stage"
+    return 2
+  fi
+  if ! _fm_pending_reply_publish_stage_locked "$stage" "$archive"; then
+    rm -f "$stage"
+    return 2
+  fi
+  _fm_pending_reply_unlink_hot_locked "$hot" || return 2
 }
 
 fm_pending_reply_require_wake_lib() {
@@ -689,8 +727,15 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
 
 _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
-  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now archive_rc
+  local rec hot archive phase delivered marker delivery_entry delivery_state status_file signature previous line via now
   local unconfirmed=0
+  hot=$(fm_pending_reply_path "$state" "$corr")
+  archive="$(fm_pending_reply_archive_dir "$state")/$corr"
+  if [ -f "$hot" ] && [ -f "$archive" ]; then
+    [ "$(fm_pending_reply_get "$archive" phase)" = resolved ] || return 1
+    _fm_pending_reply_unlink_hot_locked "$hot" || return 2
+    return 0
+  fi
   rec=$(fm_pending_reply_locate "$state" "$corr") || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   if [ "$rec" != "$(fm_pending_reply_path "$state" "$corr")" ]; then
@@ -738,22 +783,7 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
     fm_pending_reply_mark_delivered "$state" "$corr" "$now" || return 1
     rm -f "$marker" 2>/dev/null || true
   fi
-  fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
-  fm_pending_reply_set "$rec" resolved_via "$via" || return 1
-  fm_pending_reply_set "$rec" phase resolved || return 1
-  # The record is resolved either way; a failed close stays retryable from the
-  # watcher tick rather than turning a settled request back into a failure.
-  _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
-  if [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
-    || [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ]; then
-    archive_rc=0
-    _fm_pending_reply_archive_locked "$state" "$corr" || archive_rc=$?
-    if [ "$archive_rc" -ne 0 ]; then
-      fm_pending_reply_set "$rec" phase "$phase" || true
-      return 2
-    fi
-  fi
-  return 0
+  _fm_pending_reply_publish_resolved_locked "$state" "$corr" "$via" "$now"
 }
 
 # Observe backend busy/idle evidence for the active turn without reading chat.
@@ -1212,10 +1242,10 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   return "$rc"
 }
 
-_fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 rec escalated closed parent_status escalation key note
+_fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id> [record-path]
+  local state=$1 corr=$2 rec=${3:-} escalated closed parent_status escalation key note
   local open_line open_key open_note now close_line close_rc _task _via
-  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -n "$rec" ] || rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
   escalated=$(fm_pending_reply_get "$rec" escalated_epoch)
