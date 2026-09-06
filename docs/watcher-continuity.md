@@ -101,9 +101,9 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
-The beacon records PHASE progress, not elapsed time: the watch loop beats at every phase boundary of a poll rather than once per iteration, so its age is the age of the current phase.
+The beacon records watcher-owned progress, not merely elapsed time: the watch loop beats at poll phase boundaries, between units of long record and window scans, and while explicitly bounded waits remain within their enforced deadline.
 That is what makes an aged beacon meaningful at all - before it, one poll iteration that had grown past the grace made a perfectly healthy watcher read as dead.
-Bounded check captures beat from the watcher while waiting and enforce the same deadline in the parent, while other phases beat only when they complete so an unbounded stall still lets the beacon age.
+Bounded check captures enforce their deadline in the watcher, while unbounded work cannot refresh the beacon without reaching another progress boundary, so a stall still lets the beacon age.
 
 An aged beacon on a LIVE, identity-matched holder is a suspected stall and nothing stronger.
 Identity proves which process holds the lock, never that the process is stuck, so no caller may signal, stop or replace that holder: `bin/fm-watch.sh` leaves through a typed busy-holder status, and `bin/fm-watch-arm.sh` waits for up to half the effective stale grace and attaches when it beats again.
