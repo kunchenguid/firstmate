@@ -45,6 +45,20 @@ charted_next_count() {  # <render-json>
   printf '%s' "$1" | jq -r '.stats[] | select(.label == "charted next") | .n'
 }
 
+# Build the board from a complete <payload-json> and replay [clicks-json]
+# (an array the harness feeds to filter chips / the clear button) against
+# the rendered page before returning what it produced.
+render_payload() {  # <home> <payload-json> [clicks-json]
+  local home=$1 payload=$2 clicks=${3:-[]} data="$1/payload.json"
+  printf '%s' "$payload" > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$BOARD" build "$data" >/dev/null || fail "the board did not build"
+  node "$HARNESS" "$home/.lavish/bearings-board.html" "$clicks" \
+    || fail "the built board could not be rendered"
+}
+
 test_a_warning_row_reads_as_a_repair_not_as_queued_work() {
   local home out
   home=$(make_home warning-badge)
@@ -128,8 +142,398 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   pass "an omitted kind renders exactly as queued work always did"
 }
 
+# A payload sized to match the real complaint: many Captain's Call cards
+# spread across a few repos and card types, plus matching Underway/Landed/
+# Charted rows, so the filter menu's counts and narrowing can be checked
+# against the real template rather than a toy fixture.
+multi_repo_payload() {
+  jq -n '
+    def call_item($i;$repo;$type):
+      {key:("call-"+$repo+"-"+$type+"-"+($i|tostring)),
+       type:$type, repo:$repo, title:("Card "+$repo+" "+$type+" "+($i|tostring)),
+       options:[{value:"yes",label:"Yes"},{value:"no",label:"No"}]}
+      + (if $type == "merge" then {risk:"low"} else {} end);
+    {
+      schema:"fm-bearings-board.v1", home:"filter-home", generated:"2026-08-26T00:00Z",
+      prs_live:false,
+      captains_call:
+        ([range(0;6) | call_item(.; "jt2627s"; "decision")])
+        + ([range(0;2) | call_item(.; "jt2627s"; "merge")])
+        + ([range(0;1) | call_item(.; "jt2627s"; "credential")])
+        + ([range(0;3) | call_item(.; "interactp"; "decision")])
+        + [{key:"call-norepo-1", type:"decision", repo:null, title:"No-repo card",
+            options:[{value:"yes",label:"Yes"}]}],
+      underway:
+        [{id:"uw-jt-1", repo:"jt2627s", state:"working", doing:"Doing jt work", kind:"ship"},
+         {id:"uw-ip-1", repo:"interactp", state:"working", doing:"Doing ip work", kind:"ship"}],
+      landed:
+        [{id:"ld-jt-1", repo:"jt2627s", what:"Landed jt work", owner:"main"}],
+      charted:
+        [{id:"ch-jt-1", repo:"jt2627s", title:"Charted jt work", reason:"", dispatchable:true},
+         {id:"ch-ip-1", repo:"interactp", title:"Charted ip work", reason:"", dispatchable:true}],
+      charted_more:0, charted_warning_more:0
+    }'
+}
+
+stack_total() {  # <render-json> - the "Y" in the deck's "card X of Y" text
+  printf '%s' "$1" | jq -r '.deck.stackText | capture("of (?<y>[0-9]+)").y'
+}
+
+test_filter_menu_shows_counted_repo_and_type_choices() {
+  local home payload out
+  home=$(make_home filter-counts)
+  payload=$(multi_repo_payload)
+  out=$(render_payload "$home" "$payload")
+  printf '%s' "$out" | jq -e '
+    (.filterbar.chips | map(select(.group == "repo" and .key == "jt2627s")) | .[0].count) == 9
+      and (.filterbar.chips | map(select(.group == "repo" and .key == "interactp")) | .[0].count) == 3
+      and (.filterbar.chips | map(select(.group == "repo" and .key == "no repo")) | .[0].count) == 1
+      and (.filterbar.chips | map(select(.group == "type" and .key == "decision")) | .[0].count) == 10
+      and (.filterbar.chips | map(select(.group == "type" and .key == "merge")) | .[0].count) == 2
+      and (.filterbar.chips | map(select(.group == "type" and .key == "credential")) | .[0].count) == 1
+      and (.filterbar.clearHidden == true)
+  ' >/dev/null || fail "filter chip counts were wrong: $out"
+  [ "$(stack_total "$out")" = 13 ] || fail "unfiltered stack should cover all 13 cards: $out"
+  pass "the filter menu shows every project/type choice with its real count"
+}
+
+test_project_filter_narrows_the_stack_and_the_other_sections() {
+  local home payload out
+  home=$(make_home filter-narrow)
+  payload=$(multi_repo_payload)
+  out=$(render_payload "$home" "$payload" '[{"selector":".bb-chip","match":{"group":"repo","key":"jt2627s"}}]')
+  [ "$(stack_total "$out")" = 9 ] \
+    || fail "picking a project must narrow the stack counter to that project's cards: $out"
+  printf '%s' "$out" | jq -e '
+    (.filterbar.chips | map(select(.group == "repo" and .key == "jt2627s")) | .[0].active) == true
+      and (.filterbar.clearHidden == false)
+      and (.sections.underway.rows | map(select(.repo == "jt2627s"))[0].hidden) == false
+      and (.sections.underway.rows | map(select(.repo == "interactp"))[0].hidden) == true
+      and (.sections.landed.rows[0].repo == "jt2627s" and .sections.landed.rows[0].hidden == false)
+      and (.sections.charted.rows | map(select(.repo == "jt2627s"))[0].hidden) == false
+      and (.sections.charted.rows | map(select(.repo == "interactp"))[0].hidden) == true
+  ' >/dev/null || fail "the project filter did not narrow Underway/Landed/Charted the same way: $out"
+  pass "picking a project narrows the Captain's Call stack and the other three sections together"
+}
+
+test_type_filter_narrows_only_the_stack_not_the_other_sections() {
+  local home payload out
+  home=$(make_home filter-type-only)
+  payload=$(multi_repo_payload)
+  out=$(render_payload "$home" "$payload" '[
+    {"selector":".bb-chip","match":{"group":"repo","key":"jt2627s"}},
+    {"selector":".bb-chip","match":{"group":"type","key":"merge"}}
+  ]')
+  [ "$(stack_total "$out")" = 2 ] \
+    || fail "combining project + type filters did not intersect correctly: $out"
+  printf '%s' "$out" | jq -e '
+    (.sections.underway.rows | map(select(.repo == "jt2627s"))[0].hidden) == false
+  ' >/dev/null || fail "a type filter must not touch Underway rows, which have no card type: $out"
+  pass "type and project filters combine on the stack while Underway stays project-only"
+}
+
+test_clear_filters_restores_everything() {
+  local home payload out
+  home=$(make_home filter-clear)
+  payload=$(multi_repo_payload)
+  out=$(render_payload "$home" "$payload" '[
+    {"selector":".bb-chip","match":{"group":"repo","key":"interactp"}},
+    {"selector":".bb-filter__clear"}
+  ]')
+  [ "$(stack_total "$out")" = 13 ] \
+    || fail "the clear-filters control did not restore the full stack: $out"
+  printf '%s' "$out" | jq -e '
+    (.filterbar.clearHidden == true)
+      and ([.filterbar.chips[] | select(.active)] | length) == 0
+      and (.sections.underway.rows | map(select(.repo == "jt2627s"))[0].hidden) == false
+  ' >/dev/null || fail "the clear-filters control left stale filter state behind: $out"
+  pass "the clear-filters control is an obvious, working way back to everything"
+}
+
+test_a_filter_combination_with_no_matches_stays_graceful() {
+  local home payload out
+  home=$(make_home filter-empty)
+  payload=$(multi_repo_payload)
+  out=$(render_payload "$home" "$payload" '[
+    {"selector":".bb-chip","match":{"group":"repo","key":"interactp"}},
+    {"selector":".bb-chip","match":{"group":"type","key":"credential"}}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.deck.empty | length) == 1
+      and (.deck.empty[0] | test("No Captain.s Call cards match"))
+      and (.error == "")
+      and (.sections.underway.rows | map(select(.repo == "interactp"))[0].hidden) == false
+  ' >/dev/null || fail "an empty filter result must show a plain empty state, not break the board: $out"
+  pass "a filter combination with no matches degrades to a plain empty state"
+}
+
+test_hiding_a_picked_charted_row_clears_its_selection() {
+  local home payload out
+  home=$(make_home filter-clears-pick)
+  payload=$(multi_repo_payload)
+  # Tick the jt2627s charted item's dispatch checkbox directly (bypassing its
+  # own click handler, same as a captain's real click would leave it), then
+  # filter the project away and confirm the now-invisible pick is cleared
+  # rather than silently riding along to a dispatch order.
+  out=$(render_payload "$home" "$payload" '[
+    {"selector":".bb-pick","container":"bb-charted","match":{"value":"ch-jt-1"},"set":{"checked":true}},
+    {"selector":".bb-chip","match":{"group":"repo","key":"interactp"}}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.charted[0].hidden == true and .charted[0].checked == false)
+      and (.charted[1].hidden == false)
+      and (.dispatch.disabled == true)
+      and (.dispatch.count | test("pick queued work"))
+  ' >/dev/null || fail "a filtered-out charted pick must be cleared, not silently dispatched: $out"
+  pass "filtering away a picked charted row clears its selection instead of dispatching it invisibly"
+}
+
+# --- the answer a captain queues -------------------------------------------
+#
+# Writing your own answer is the LAST OPTION in the same radio group, not a box
+# hanging below the list. A captain who picks an option and then changes his
+# mind can pick "in my own words" to clear it, and an answer is one thing: the
+# typed words, or the option - never an option with a note stapled to it.
+
+call_payload() {  # <call-items-json>
+  jq -n --argjson calls "$1" '{
+    schema:"fm-bearings-board.v1", home:"answer-home", generated:"2026-09-04T00:00Z",
+    prs_live:false, captains_call:$calls, underway:[], landed:[], charted:[]}'
+}
+
+one_question_card() {
+  printf '%s' '[{
+    "key":"base-branch","type":"decision","repo":"firstmate",
+    "title":"Which base branch should this land on?",
+    "about":"The branch targets main; the other phases landed on develop.",
+    "options":[{"value":"develop","label":"Rebase onto develop"},
+               {"value":"main","label":"Keep targeting main"}],
+    "allow_freeform":true
+  }]'
+}
+
+test_a_typed_answer_queues_on_its_own_with_no_option_selected() {
+  local home out
+  home=$(make_home bare-note)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","selector":".bb-freeform","set":{"value":"neither - hold it until the study lands"}},
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.queued | length) == 1
+      and (.queued[0].options.data.question == "base-branch")
+      and (.queued[0].options.data.answer == "neither - hold it until the study lands")
+      and (.queued[0].prompt | test("neither - hold it until the study lands"))
+      and (.deck.cards[0].queued == true)
+  ' >/dev/null || fail "a typed answer with no option selected did not queue as the whole answer: $out"
+  pass "a typed answer queues on its own with no option selected"
+}
+
+test_a_picked_option_queues_alone() {
+  local home out
+  home=$(make_home option-alone)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","selector":"input","match":{"value":"develop"},"click":true},
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.queued | length) == 1
+      and (.queued[0].options.data.answer == "develop")
+  ' >/dev/null || fail "a picked option did not queue as the whole answer: $out"
+  pass "a picked option queues alone"
+}
+
+test_choosing_own_words_clears_the_option_the_captain_changed_his_mind_about() {
+  local home out
+  home=$(make_home change-of-mind)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","selector":"input","match":{"value":"develop"},"click":true},
+    {"card":"base-branch","selector":"input","match":{"value":"__own words__"},"click":true},
+    {"card":"base-branch","selector":".bb-freeform","set":{"value":"neither - hold it until the study lands"},"fire":"input"},
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.queued | length) == 1
+      and (.queued[0].options.data.answer == "neither - hold it until the study lands")
+  ' >/dev/null || fail "the option the captain changed his mind about rode along with his words: $out"
+  pass "choosing own words clears the option the captain changed his mind about"
+}
+
+test_picking_an_option_clears_words_typed_before_it() {
+  local home out
+  home=$(make_home stale-words)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","selector":".bb-freeform","set":{"value":"actually, hold it"},"fire":"input"},
+    {"card":"base-branch","selector":"input","match":{"value":"develop"},"click":true},
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.queued | length) == 1
+      and (.queued[0].options.data.answer == "develop")
+  ' >/dev/null || fail "a stale typed sentence rode along with a picked option: $out"
+  pass "picking an option clears words typed before it"
+}
+
+test_own_words_with_nothing_typed_refuses_instead_of_queueing_an_empty_answer() {
+  local home out
+  home=$(make_home own-words-empty)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","selector":"input","match":{"value":"__own words__"},"click":true},
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.queued | length) == 0
+      and (.deck.cards[0].queued == false)
+      and (.deck.cards[0].limit | test("Type your answer, then queue it"))
+  ' >/dev/null || fail "own words with nothing typed queued an empty answer, or said nothing: $out"
+  pass "own words with nothing typed refuses instead of queueing an empty answer"
+}
+
+test_a_changed_answer_replaces_the_earlier_one() {
+  local home out
+  home=$(make_home re-answer)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","selector":"input","match":{"value":"develop"},"click":true},
+    {"card":"base-branch","submit":true},
+    {"card":"base-branch","selector":"input","match":{"value":"main"},"click":true},
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    ([.queued[] | select(.options.queueKey == "base-branch")] | length) == 2
+      and (.queued[-1].options.data.answer == "main")
+  ' >/dev/null || fail "a changed answer did not carry the card key so the later one wins: $out"
+  pass "a changed answer replaces the earlier one"
+}
+
+test_queueing_nothing_at_all_says_so_instead_of_going_quiet() {
+  local home out
+  home=$(make_home empty-answer)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")" '[
+    {"card":"base-branch","submit":true}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.queued | length) == 0
+      and (.deck.cards[0].queued == false)
+      and (.deck.cards[0].limit | test("Type your answer"))
+  ' >/dev/null || fail "an empty submit queued something, or said nothing at all: $out"
+  pass "queueing nothing at all reports what is missing instead of going quiet"
+}
+
+test_the_dealt_card_owns_the_caret_so_typing_lands_in_its_answer_box() {
+  local home out
+  home=$(make_home caret)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")")
+  printf '%s' "$out" | jq -e '.deck.focused | test("bb-freeform")' >/dev/null     || fail "the dealt card did not take the caret into its own answer box: $out"
+  pass "the dealt card owns the caret so typing lands in its answer box"
+}
+
+# --- badly composed cards are marked, never withheld ------------------------
+#
+# A question the captain never sees cannot be answered, so no fault in a card
+# may keep it off the board. The board says what is wrong on the card's face
+# and deals it anyway.
+
+test_a_card_asking_several_questions_is_flagged_and_still_dealt() {
+  local home out
+  home=$(make_home bundle-title)
+  out=$(render_payload "$home" "$(call_payload '[{
+    "key":"four-things","type":"decision","repo":"interact",
+    "title":"What do we charge on? Is a member a person? Is onboarding in the price?",
+    "about":"Three product questions carried on one task.",
+    "options":[{"value":"walk","label":"Walk me through all of them"},
+               {"value":"rec","label":"Take my recommendation on all of them"}]
+  }]')")
+  printf '%s' "$out" | jq -e '
+    (.deck.cards | length) == 1
+      and (.deck.cards[0].flags | map(.kind) | index("bundle") != null)
+      and (.deck.cards[0].flags[0].text | test("one question per card"))
+  ' >/dev/null || fail "a multi-question card was not flagged, or was withheld: $out"
+  pass "a card asking several questions is flagged as a bundle and still dealt"
+}
+
+test_options_that_answer_the_card_rather_than_the_question_are_flagged() {
+  local home out
+  home=$(make_home bundle-options)
+  out=$(render_payload "$home" "$(call_payload '[{
+    "key":"four-things","type":"decision","repo":"interact",
+    "title":"Four things about the product I need you to settle",
+    "about":"Pricing, membership, fundraising and onboarding.",
+    "options":[{"value":"walk","label":"Walk me through all four"},
+               {"value":"rec","label":"Take my recommendation on all four"}]
+  }]')")
+  printf '%s' "$out" | jq -e '
+    (.deck.cards | length) == 1
+      and (.deck.cards[0].flags | map(.kind) | index("bundle") != null)
+  ' >/dev/null || fail "options about how to work the card were not flagged as a bundle: $out"
+  pass "options that answer how to work the card rather than the question are flagged"
+}
+
+test_one_question_with_real_options_is_not_flagged() {
+  local home out
+  home=$(make_home no-false-bundle)
+  out=$(render_payload "$home" "$(call_payload "$(one_question_card)")")
+  printf '%s' "$out" | jq -e '(.deck.cards[0].flags | length) == 0' >/dev/null     || fail "an ordinary single-question card was flagged: $out"
+  pass "one question with real options carries no flag"
+}
+
+test_a_thin_card_carries_what_is_missing_and_is_still_dealt() {
+  local home out
+  home=$(make_home thin-card)
+  out=$(render_payload "$home" "$(call_payload '[{
+    "key":"uncitable","type":"decision","repo":"jt2627s",
+    "title":"Two figures in an approved stage cannot be traced. Keep or cut?",
+    "about":"They are used in the study but no source we can find supports them.",
+    "missing":"the two figures are not named yet - firstmate is tracing them",
+    "options":[{"value":"keep","label":"Keep them"},{"value":"cut","label":"Cut them"}]
+  }]')")
+  printf '%s' "$out" | jq -e '
+    (.deck.cards | length) == 1
+      and (.deck.cards[0].flags | map(.kind) | index("incomplete") != null)
+      and (.deck.cards[0].flags | map(.text) | any(test("not named yet")))
+  ' >/dev/null || fail "a thin card lost its missing note, or was withheld: $out"
+  pass "a thin card carries what is missing and is still dealt"
+}
+
+test_every_card_reaches_the_board_however_badly_composed() {
+  local home out
+  home=$(make_home never-withheld)
+  out=$(render_payload "$home" "$(call_payload '[
+    {"key":"a","type":"decision","repo":"one","title":"Plain question?","about":"named specifics",
+     "options":[{"value":"y","label":"Yes"}]},
+    {"key":"b","type":"decision","repo":"one","title":"Two? Questions?","about":"",
+     "options":[{"value":"walk","label":"Walk me through all of them"}]},
+    {"key":"c","type":"decision","repo":"two","title":"Thin one","about":"a stage",
+     "missing":"nothing is named yet","options":[{"value":"y","label":"Yes"}]}
+  ]')")
+  printf '%s' "$out" | jq -e '
+    (.deck.cards | length) == 3
+      and (.stats[0].n == 3)
+      and (.error == "")
+  ' >/dev/null || fail "the board dropped a card instead of dealing it flagged: $out"
+  pass "every card reaches the board however badly composed"
+}
+
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
+test_filter_menu_shows_counted_repo_and_type_choices
+test_project_filter_narrows_the_stack_and_the_other_sections
+test_type_filter_narrows_only_the_stack_not_the_other_sections
+test_clear_filters_restores_everything
+test_a_filter_combination_with_no_matches_stays_graceful
+test_hiding_a_picked_charted_row_clears_its_selection
+test_a_typed_answer_queues_on_its_own_with_no_option_selected
+test_a_picked_option_queues_alone
+test_choosing_own_words_clears_the_option_the_captain_changed_his_mind_about
+test_picking_an_option_clears_words_typed_before_it
+test_own_words_with_nothing_typed_refuses_instead_of_queueing_an_empty_answer
+test_a_changed_answer_replaces_the_earlier_one
+test_queueing_nothing_at_all_says_so_instead_of_going_quiet
+test_the_dealt_card_owns_the_caret_so_typing_lands_in_its_answer_box
+test_a_card_asking_several_questions_is_flagged_and_still_dealt
+test_options_that_answer_the_card_rather_than_the_question_are_flagged
+test_one_question_with_real_options_is_not_flagged
+test_a_thin_card_carries_what_is_missing_and_is_still_dealt
+test_every_card_reaches_the_board_however_badly_composed

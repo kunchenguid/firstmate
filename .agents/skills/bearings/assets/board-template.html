@@ -151,6 +151,38 @@ a { color: inherit; text-decoration: none; }
 .bb-stat--call .bb-stat__num { color: var(--rust-600); }
 .bb-stat__label { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
 
+/* ---- filter bar (project / card type) ---- */
+.bb-filterbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+  padding: 12px 16px; background: var(--surface-card-warm);
+  border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+}
+.bb-filterbar[hidden] { display: none; }
+.bb-filter__group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.bb-filter__label {
+  font-family: var(--font-mono); font-size: var(--fs-2xs); font-weight: 800;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint);
+  margin-right: 2px; white-space: nowrap;
+}
+.bb-chip {
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+  font-family: var(--font-sans); font-weight: 700; font-size: var(--fs-xs);
+  padding: 5px 10px 4px; background: var(--surface-card);
+  border: 1.5px solid var(--border-default); border-radius: var(--radius-pill);
+  color: var(--text-body); transition: border-color 120ms, background 120ms, color 120ms;
+}
+.bb-chip:hover { border-color: var(--ink-300); }
+.bb-chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.bb-chip.is-active { border-color: var(--rust-500); background: var(--rust-050); color: var(--rust-700); }
+.bb-chip__count { font-family: var(--font-mono); color: var(--text-faint); }
+.bb-chip.is-active .bb-chip__count { color: var(--rust-500); }
+.bb-filter__clear {
+  margin-left: auto; font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 700;
+  color: var(--ocean-600); background: none; border: none; cursor: pointer; padding: 4px 6px;
+}
+.bb-filter__clear:hover { text-decoration: underline; }
+.bb-filter__clear[hidden] { display: none; }
+
 .bb-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .bb-section__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .bb-cols { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 22px; }
@@ -227,11 +259,25 @@ a { color: inherit; text-decoration: none; }
   border-radius: var(--radius-xs); padding: 5px 9px 4px;
 }
 .is-queued .bb-queued { display: inline-flex; }
+/* A card the composer left in poor shape is still dealt; the flag says so on
+   the card's face rather than keeping the question off the board. */
+.bb-flag {
+  display: flex; align-items: baseline; gap: 8px;
+  background: var(--status-warn-soft); border: 1px solid var(--gold-500);
+  border-radius: var(--radius-sm); padding: 7px 10px;
+}
+.bb-flag__k { flex: none; font-family: var(--font-mono); font-size: var(--fs-2xs); font-weight: 800;
+  text-transform: uppercase; letter-spacing: 0.07em; color: var(--status-warn); }
+.bb-flag__v { font-size: var(--fs-xs); line-height: 1.4; color: var(--text-body); }
 .bb-limit { display: none; font-size: var(--fs-xs); font-weight: 700; color: var(--status-danger); }
 .bb-limit.is-visible { display: inline; }
-.bb-freeform { width: 100%; font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--text-strong);
+/* The write-my-own box is the body of the last option, not a field below the
+   list, so choosing it deselects any other pick the way any radio does. */
+.bb-freeform { width: 100%; margin-top: 6px; font-family: var(--font-sans); font-size: var(--fs-sm);
+  color: var(--text-strong);
   background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
 .bb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
+.bb-freeform:disabled { background: var(--paper-100); color: var(--text-faint); cursor: not-allowed; }
 
 /* ---- compact rows (Underway / Landed / Charted) ---- */
 .bb-rows { display: flex; flex-direction: column; }
@@ -295,6 +341,8 @@ a { color: inherit; text-decoration: none; }
 <main class="bb-main">
 
   <div class="bb-stats" id="bb-stats"></div>
+
+  <div class="bb-filterbar" id="bb-filterbar" hidden></div>
 
   <div class="bb-cols">
   <section class="bb-section">
@@ -442,6 +490,10 @@ __FM_BEARINGS_BOARD_DATA__
   var chartedMoreQueued = data.charted_more || 0;
   var chartedMoreWarnings = data.charted_warning_more || 0;
   function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
+  /* Sentinel value for the write-my-own radio. It carries a space, which the
+     payload contract forbids in an option value, so it can never collide with
+     a real option. */
+  var OWN_WORDS = "__own words__";
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
   document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
@@ -464,6 +516,120 @@ __FM_BEARINGS_BOARD_DATA__
   document.getElementById("bb-call-sub").textContent =
     callTotal ? callTotal + " item" + (callTotal === 1 ? "" : "s") + " wait on you, captain" : "nothing needs you, captain";
 
+  /* ---- project / type filter bar ----
+     Counts are drawn from Captain's Call, since that pile - not the other
+     three sections - is what becomes unusable at scale. A repo that only
+     shows up in Underway/Landed/Charted still gets a chip (count 0) so the
+     project filter can narrow those sections too. */
+  var REPO_NONE_LABEL = "no repo";
+  function repoKey(repo) { return repo || REPO_NONE_LABEL; }
+  var repoCounts = {};
+  var typeCounts = {};
+  data.captains_call.forEach(function (item) {
+    var rk = repoKey(item.repo);
+    repoCounts[rk] = (repoCounts[rk] || 0) + 1;
+    typeCounts[item.type] = (typeCounts[item.type] || 0) + 1;
+  });
+  [data.underway, data.landed, data.charted].forEach(function (list) {
+    list.forEach(function (item) {
+      var rk = repoKey(item.repo);
+      if (!(rk in repoCounts)) repoCounts[rk] = 0;
+    });
+  });
+  var repoOrder = Object.keys(repoCounts).sort(function (a, b) {
+    if (a === REPO_NONE_LABEL) return 1;
+    if (b === REPO_NONE_LABEL) return -1;
+    return repoCounts[b] - repoCounts[a] || a.localeCompare(b);
+  });
+  var TYPE_LABELS = { decision: "decision", merge: "merge", credential: "credential" };
+  var typeOrder = ["decision", "merge", "credential"].filter(function (t) { return typeCounts[t]; });
+
+  var activeRepos = new Set();
+  var activeTypes = new Set();
+  var filterBar = document.getElementById("bb-filterbar");
+  var clearBtn = el("button", "bb-filter__clear", "Show everything");
+  clearBtn.type = "button";
+  clearBtn.hidden = true;
+
+  function refreshClearVisibility() {
+    clearBtn.hidden = activeRepos.size === 0 && activeTypes.size === 0;
+  }
+  function makeChip(group, key, label, count) {
+    var chip = el("button", "bb-chip");
+    chip.type = "button";
+    chip.dataset.group = group;
+    chip.dataset.key = key;
+    chip.appendChild(el("span", null, label));
+    chip.appendChild(el("span", "bb-chip__count", "(" + count + ")"));
+    chip.addEventListener("click", function () {
+      var set = group === "repo" ? activeRepos : activeTypes;
+      if (set.has(key)) { set.delete(key); } else { set.add(key); }
+      chip.classList.toggle("is-active", set.has(key));
+      refreshClearVisibility();
+      applyFilters();
+    });
+    return chip;
+  }
+  var hasFilterGroups = repoOrder.length > 1 || typeOrder.length > 1;
+  if (repoOrder.length > 1) {
+    var repoGroup = el("div", "bb-filter__group");
+    repoGroup.appendChild(el("span", "bb-filter__label", "project"));
+    repoOrder.forEach(function (rk) { repoGroup.appendChild(makeChip("repo", rk, rk, repoCounts[rk])); });
+    filterBar.appendChild(repoGroup);
+  }
+  if (typeOrder.length > 1) {
+    var typeGroup = el("div", "bb-filter__group");
+    typeGroup.appendChild(el("span", "bb-filter__label", "type"));
+    typeOrder.forEach(function (t) { typeGroup.appendChild(makeChip("type", t, TYPE_LABELS[t], typeCounts[t])); });
+    filterBar.appendChild(typeGroup);
+  }
+  clearBtn.addEventListener("click", function () {
+    activeRepos.clear();
+    activeTypes.clear();
+    Array.prototype.forEach.call(filterBar.querySelectorAll(".bb-chip.is-active"), function (c) {
+      c.classList.remove("is-active");
+    });
+    refreshClearVisibility();
+    applyFilters();
+  });
+  filterBar.appendChild(clearBtn);
+  filterBar.hidden = !hasFilterGroups;
+
+  /* section registry filled in below as each section's rows are built;
+     applyFilters() (defined once every section exists) re-derives what is
+     visible from activeRepos/activeTypes without ever rebuilding the DOM. */
+  var sectionFilterables = [];
+  function registerSectionFilterable(container, rows, label) {
+    sectionFilterables.push({ container: container, rows: rows, label: label, filteredEmptyNode: null });
+  }
+  function refreshSectionFilterable(entry) {
+    var visibleCount = 0;
+    var pickCleared = false;
+    entry.rows.forEach(function (row) {
+      var ok = activeRepos.size === 0 || activeRepos.has(row.dataset.repo);
+      row.hidden = !ok;
+      if (ok) {
+        visibleCount++;
+        return;
+      }
+      /* a filtered-out row must never keep an invisible dispatch pick: the
+         captain would otherwise queue work from a project he can no longer
+         see on the screen. Only Charted rows ever carry a .bb-pick, so this
+         is a no-op for Underway/Landed. */
+      var hiddenPick = row.querySelectorAll(".bb-pick:checked")[0];
+      if (hiddenPick) {
+        hiddenPick.checked = false;
+        pickCleared = true;
+      }
+    });
+    if (entry.filteredEmptyNode) { entry.filteredEmptyNode.remove(); entry.filteredEmptyNode = null; }
+    if (entry.rows.length && visibleCount === 0) {
+      entry.filteredEmptyNode = el("div", "bb-empty", "No " + entry.label + " match this project.");
+      entry.container.appendChild(entry.filteredEmptyNode);
+    }
+    if (pickCleared) refreshBar();
+  }
+
   /* Captain's Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
   function ctxRow(k, v, rec) {
@@ -473,8 +639,35 @@ __FM_BEARINGS_BOARD_DATA__
     return row;
   }
 
+  /* Marks, never gates. Every question the composer hands the board reaches the
+     captain; a card in poor shape reaches him carrying a plain statement of
+     what is wrong with it. A question he never sees is the one outcome the
+     board must never produce, so nothing below removes, hides or defers a
+     card - it only writes on it. */
+  var BUNDLE_OPTION =
+    /walk me through|one by one|one at a time|take my recommendation|all (?:of them|of these|three|four|five|six)\b|go through (?:them|these)/i;
+  function bundleFault(it) {
+    if ((String(it.title).match(/\?/g) || []).length > 1) {
+      return "this card asks more than one question - split it, one question per card";
+    }
+    var meta = (it.options || []).some(function (o) { return BUNDLE_OPTION.test(String(o.label)); });
+    if (meta) {
+      return "these options answer how to work through the card rather than the question itself" +
+        " - split it, one question per card";
+    }
+    return "";
+  }
+  function flag(kind, text) {
+    var f = el("div", "bb-flag");
+    f.appendChild(el("span", "bb-flag__k", kind));
+    f.appendChild(el("span", "bb-flag__v", text));
+    return f;
+  }
+
   data.captains_call.forEach(function (item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
+    card.dataset.repo = repoKey(item.repo);
+    card.dataset.type = item.type;
     var pad = el("div", "bb-decision__pad");
 
     var top = el("div", "bb-decision__top");
@@ -488,6 +681,16 @@ __FM_BEARINGS_BOARD_DATA__
     pad.appendChild(top);
 
     pad.appendChild(el("h3", "bb-decision__title", item.title));
+
+    var bundle = bundleFault(item);
+    if (bundle) pad.appendChild(flag("bundle", bundle));
+    /* `missing` is the composer's own admission that it published a thin card.
+       It is shown as given and never checked, because a card whose gaps are
+       named still asks its question, and one whose gaps are not named still
+       has to be asked. */
+    if (typeof item.missing === "string" && item.missing.trim()) {
+      pad.appendChild(flag("incomplete", item.missing.trim()));
+    }
 
     if (item.type === "merge") {
       if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
@@ -523,11 +726,34 @@ __FM_BEARINGS_BOARD_DATA__
     });
     form.appendChild(opts);
 
+    /* "Answer in my own words" is the last radio in the SAME group: picking it
+       clears whatever was picked before, and picking a listed option clears and
+       disables this box, so a stale sentence can never ride along with a choice
+       the captain did not mean. */
+    var ownRadio = null, ff = null;
     if (item.allow_freeform) {
-      var ff = document.createElement("input");
+      var ownLab = el("label", "bb-opt");
+      ownRadio = document.createElement("input");
+      ownRadio.type = "radio"; ownRadio.name = "answer"; ownRadio.value = OWN_WORDS;
+      ownLab.appendChild(ownRadio);
+      var ownBody = el("span", "bb-opt__body");
+      ownBody.appendChild(el("span", "bb-opt__label", "Answer in my own words"));
+      ff = document.createElement("input");
       ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
-      ff.placeholder = item.freeform_hint || "or answer in your own words…";
-      form.appendChild(ff);
+      ff.placeholder = item.freeform_hint || "type your answer…";
+      ownBody.appendChild(ff);
+      ownLab.appendChild(ownBody);
+      opts.appendChild(ownLab);
+
+      /* typing is itself the choice, so a bare typed answer needs no extra click */
+      ff.addEventListener("input", function () { ownRadio.checked = true; });
+      form.addEventListener("change", function (ev) {
+        if (ev.target.name !== "answer") return;
+        var own = ownRadio.checked;
+        ff.disabled = !own;
+        if (!own) { ff.value = ""; return; }
+        try { ff.focus({ preventScroll: true }); } catch (e) { ff.focus(); }
+      });
     }
 
     var foot = el("div", "bb-decision__foot");
@@ -548,9 +774,21 @@ __FM_BEARINGS_BOARD_DATA__
       var fd = new FormData(form);
       var value = fd.get("answer");
       var note = (fd.get("note") || "").trim();
-      /* picked option, optionally annotated; a bare note is itself the answer */
-      var answer = value ? (note ? value + " - " + note : value) : note;
-      if (!answer) return;
+      /* An answer is one thing: the typed words, or the picked option - never a
+         value with a note stapled to it. */
+      var answer = (value === OWN_WORDS || !value) ? note : value;
+      if (!answer) {
+        /* Never fail silently here: an unexplained dead button is what makes a
+           captain believe the box needs an option ticked before it will take
+           his words. Say what is missing instead. */
+        answerLimit.textContent = value === OWN_WORDS
+          ? "Type your answer, then queue it."
+          : item.allow_freeform
+            ? "Type your answer, or pick an option, then queue it."
+            : "Pick an option, then queue it.";
+        answerLimit.classList.add("is-visible");
+        return;
+      }
       if (utf8ByteLength(answer) > 512) {
         answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
         answerLimit.classList.add("is-visible");
@@ -564,12 +802,14 @@ __FM_BEARINGS_BOARD_DATA__
         window.lavish.queuePrompt(
           "Captain's Call answer - " + item.title + ": " + answer,
           { tag: "choice", text: item.title + " -> " + answer, element: form,
-            data: ctxData }
+            /* keyed on the card, so changing an answer replaces it rather than
+               queueing a second, contradictory one */
+            queueKey: item.key, data: ctxData }
         );
       }
       card.classList.add("is-queued");
       /* deal the next card once this one is answered */
-      setTimeout(function () { showCard(active < cards.length - 1 ? active + 1 : active); }, 450);
+      setTimeout(function () { showCard(active < visibleCards.length - 1 ? active + 1 : active); }, 450);
     });
 
     pad.appendChild(form);
@@ -577,40 +817,81 @@ __FM_BEARINGS_BOARD_DATA__
     deck.appendChild(card);
   });
 
-  /* stack navigation: one card at a time, dealt off the pile */
-  var cards = Array.prototype.slice.call(deck.children);
+  /* stack navigation: one card at a time, dealt off the pile.
+     allCards never changes after this point; visibleCards is re-derived by
+     refreshDeck() whenever a filter chip toggles, and active always indexes
+     into visibleCards so the counter reads "card N of the filtered pile". */
+  var allCards = Array.prototype.slice.call(deck.children);
+  var visibleCards = allCards.slice();
   var active = 0;
+  var deckEmptyNode = null;
   var stackCount = document.getElementById("bb-stack-count");
   var stackPrev = document.getElementById("bb-stack-prev");
   var stackNext = document.getElementById("bb-stack-next");
   var stackNav = stackCount.parentNode;
   function showCard(i) {
-    active = Math.max(0, Math.min(cards.length - 1, i));
-    cards.forEach(function (c, j) { c.hidden = j !== active; });
+    active = Math.max(0, Math.min(visibleCards.length - 1, i));
+    allCards.forEach(function (c) { c.hidden = true; });
+    visibleCards.forEach(function (c, j) { c.hidden = j !== active; });
     var answered = deck.querySelectorAll(".is-queued").length;
-    stackCount.textContent = "card " + (active + 1) + " of " + cards.length +
+    stackCount.textContent = "card " + (active + 1) + " of " + visibleCards.length +
       (answered ? " · " + answered + " answered" : "");
     stackPrev.disabled = active === 0;
-    stackNext.disabled = active === cards.length - 1;
+    stackNext.disabled = active === visibleCards.length - 1;
     /* the pile thins as the deal approaches the bottom */
-    deck.classList.toggle("bb-call--penult", active === cards.length - 2);
-    deck.classList.toggle("bb-call--last", active === cards.length - 1);
+    deck.classList.toggle("bb-call--penult", active === visibleCards.length - 2);
+    deck.classList.toggle("bb-call--last", active === visibleCards.length - 1);
+    /* Put the caret in the dealt card's own answer box. The board is embedded
+       in a review tool whose annotation popup also takes typing, and words
+       typed there are a comment on the card, not an answer to it. Owning the
+       caret keeps the captain's words in the field that answers the question. */
+    var dealt = visibleCards[active];
+    var noteBox = dealt && dealt.querySelectorAll(".bb-freeform")[0];
+    if (noteBox && typeof noteBox.focus === "function") {
+      try { noteBox.focus({ preventScroll: true }); } catch (e) { noteBox.focus(); }
+    }
   }
-  if (cards.length) {
+  function cardVisible(card) {
+    var repoOk = activeRepos.size === 0 || activeRepos.has(card.dataset.repo);
+    var typeOk = activeTypes.size === 0 || activeTypes.has(card.dataset.type);
+    return repoOk && typeOk;
+  }
+  function refreshDeck() {
+    visibleCards = allCards.filter(cardVisible);
+    deck.classList.remove("bb-call--empty", "bb-call--penult", "bb-call--last");
+    if (deckEmptyNode) { deckEmptyNode.remove(); deckEmptyNode = null; }
+    if (!visibleCards.length) {
+      deck.classList.add("bb-call--empty");
+      deckEmptyNode = el("div", "bb-empty", allCards.length
+        ? "No Captain's Call cards match these filters."
+        : "Nothing needs your action right now.");
+      deck.appendChild(deckEmptyNode);
+      stackNav.hidden = true;
+      stackCount.textContent = allCards.length ? "card 0 of " + allCards.length : "-";
+      return;
+    }
+    stackNav.hidden = false;
+    showCard(0);
+  }
+  if (allCards.length) {
     stackPrev.addEventListener("click", function () { showCard(active - 1); });
     stackNext.addEventListener("click", function () { showCard(active + 1); });
-    showCard(0);
-  } else {
-    deck.classList.add("bb-call--empty");
-    deck.appendChild(el("div", "bb-empty", "Nothing needs your action right now."));
-    stackNav.hidden = true;
+  }
+
+  /* Every filter chip and the clear-all button funnel through here so the
+     deck and the three project-scoped sections always agree. */
+  function applyFilters() {
+    refreshDeck();
+    sectionFilterables.forEach(refreshSectionFilterable);
   }
 
   /* Underway */
   var uw = document.getElementById("bb-underway");
   if (!data.underway.length) uw.appendChild(el("div", "bb-empty", "Nothing is underway."));
+  var uwRows = [];
   data.underway.forEach(function (t) {
     var row = el("div", "bb-row");
+    row.dataset.repo = repoKey(t.repo);
     row.appendChild(badge(t.state === "working" ? "online" : "info", t.state));
     var main = el("div", "bb-row__main");
     main.appendChild(el("div", "bb-row__title", t.doing));
@@ -619,13 +900,17 @@ __FM_BEARINGS_BOARD_DATA__
     main.appendChild(el("div", "bb-row__sub", t.kind + " · " + (t.repo || t.id)));
     row.appendChild(main);
     uw.appendChild(row);
+    uwRows.push(row);
   });
+  registerSectionFilterable(uw, uwRows, "underway tasks");
 
   /* Landed */
   var ld = document.getElementById("bb-landed");
   if (!data.landed.length) ld.appendChild(el("div", "bb-empty", "No recent completions are in the current baseline."));
+  var ldRows = [];
   data.landed.forEach(function (t) {
     var row = el("div", "bb-row");
+    row.dataset.repo = repoKey(t.repo);
     var chk = el("span", "bb-row__check");
     chk.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
     row.appendChild(chk);
@@ -639,7 +924,9 @@ __FM_BEARINGS_BOARD_DATA__
       row.appendChild(a);
     }
     ld.appendChild(row);
+    ldRows.push(row);
   });
+  registerSectionFilterable(ld, ldRows, "landed items");
 
   /* Charted Next + dispatch picker */
   var ch = document.getElementById("bb-charted");
@@ -660,8 +947,11 @@ __FM_BEARINGS_BOARD_DATA__
   if (!chartedQueued(data.charted).length && !chartedMoreQueued) {
     ch.appendChild(el("div", "bb-empty", "Nothing is queued."));
   }
+  var chRows = [];
   data.charted.forEach(function (t) {
     var row = el("div", "bb-row");
+    row.dataset.repo = repoKey(t.repo);
+    chRows.push(row);
     if (t.dispatchable && !isWarning(t)) {
       anyPickable = true;
       var pick = document.createElement("input");
@@ -699,6 +989,7 @@ __FM_BEARINGS_BOARD_DATA__
   if (chartedMoreWarnings) {
     ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreWarnings + " more repair warning" + (chartedMoreWarnings === 1 ? "" : "s") + " - ask firstmate for the full chart"));
   }
+  registerSectionFilterable(ch, chRows, "charted work");
 
   if (anyPickable) {
     bar.hidden = false;
@@ -722,6 +1013,10 @@ __FM_BEARINGS_BOARD_DATA__
       bar.classList.add("is-queued");
     });
   }
+
+  /* initial render: with no filter chips active this reproduces the
+     unfiltered layout exactly, so it doubles as the empty-fleet path too */
+  applyFilters();
   } catch (e) {
     renderBoardError("The board data could not be rendered");
   }

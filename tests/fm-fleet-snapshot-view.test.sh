@@ -1045,8 +1045,63 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_large_held_backlog_survives_argv_limit() {
+  local home out record_count reason valid
+  home=$(make_home large-backlog)
+  {
+    printf '## In flight\n\n'
+    printf '## Queued\n'
+    # A real backlog reason can carry a long, wrapped explanation as
+    # indented body lines under the row; pad enough of these across enough
+    # held items that the assembled backlog JSON is many megabytes, well
+    # past a single command-line argument's kernel limit (MAX_ARG_STRLEN,
+    # 128KB on Linux) when naively embedded in a jq invocation.
+    local pad
+    pad=$(printf 'x%.0s' $(seq 1 2000))
+    for i in $(seq 1 140); do
+      printf -- '- [ ] held-%03d - Held task %d (repo: alpha) (kind: ship) (hold: captain review pending) (hold-kind: captain)\n' "$i" "$i"
+      printf '  %s\n' "$pad" "$pad" "$pad" "$pad" "$pad"
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must not fail on a backlog large enough to exceed the argv limit"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "snapshot output must be valid JSON for a large held backlog: ${out:0:200}"
+  record_count=$(printf '%s' "$out" | jq '.backlog.records | length')
+  [ "$record_count" = 140 ] || fail "expected 140 backlog records, got $record_count"
+  valid=$(printf '%s' "$out" | jq -r '.main_inventory.valid')
+  reason=$(printf '%s' "$out" | jq -r '.main_inventory.reason // "null"')
+  [ "$valid" = true ] && [ "$reason" = null ] \
+    || fail "large held backlog should still be a valid main inventory: valid=$valid reason=$reason"
+  pass "fleet snapshot handles a backlog large enough to exceed the kernel argv limit"
+}
+
+test_snapshot_leaves_no_args_tempdir_behind() {
+  local home tmpdir leftover
+  home=$(make_home args-tempdir-leak)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] leftover-check - A held item (repo: alpha) (kind: ship) (hold: captain review) (hold-kind: captain)
+
+## Done
+EOF
+  tmpdir="$TMP_ROOT/args-tempdir-scratch"
+  mkdir -p "$tmpdir"
+  TMPDIR="$tmpdir" FM_HOME="$home" "$SNAPSHOT" --json >/dev/null \
+    || fail "snapshot run failed while checking for a leaked temp directory"
+  leftover=$(find "$tmpdir" -maxdepth 1 -name 'fm-fleet-snapshot-args.*')
+  [ -z "$leftover" ] \
+    || fail "the backlog/tasks temp directory survived the snapshot run: $leftover"
+  pass "the snapshot's private argv-workaround temp directory is cleaned up on exit"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_large_held_backlog_survives_argv_limit
+test_snapshot_leaves_no_args_tempdir_behind
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
