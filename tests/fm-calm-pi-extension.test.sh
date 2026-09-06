@@ -1357,7 +1357,7 @@ for (const reason of ["startup", "new", "resume", "fork", "reload"]) {
 await calmCommand.handler("", commandContext);
 
 const readWrapper = tools.find((tool) => tool.name === "read");
-const originalRead = createReadToolDefinition(process.cwd());
+const originalRead = stockCreateReadToolDefinition(process.cwd());
 const executeContext = { cwd: process.cwd() };
 const [originalResult, wrappedResult] = await Promise.all([
   originalRead.execute("original-read", { path: "sample.txt" }, undefined, undefined, executeContext),
