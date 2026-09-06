@@ -1635,7 +1635,6 @@ case "$HARNESS" in
       echo "error: omp worker posture overlay missing at $OMP_WORKER_CFG; a worker launched without it can park on the captain's own approval or plan-mode settings" >&2
       exit 1
     }
-    omp_model_validate "$OMP_BIN" "$MODEL" || exit 1
     ;;
 esac
 
@@ -1659,6 +1658,9 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+if [ "$HARNESS" = omp ]; then
+  omp_model_validate "$OMP_BIN" "$MODEL" || exit 1
 fi
 
 secondmate_registry_value() {
