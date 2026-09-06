@@ -10,10 +10,17 @@
 # to carry a verified harness command name or to have inherited a recycled pid.
 # bin/fm-session-lock-lib.sh owns that record's format and verification.
 #
-# A lock whose owner cannot be verified is never trusted and never fatal: it is
-# reclaimed with a note naming the process that had been holding the home, so a
-# legacy bare-pid lock written before owner records existed upgrades on the next
-# acquire instead of stranding the operator.
+# A lock DISPROVED by that record - this home recorded a different pid, or the
+# process now at the recorded pid is not the one the record pinned - is never
+# fatal: it is reclaimed with a note naming the process that had been holding
+# the home.
+#
+# A lock this home simply holds no record for is a different thing entirely, and
+# is never reclaimed. That is what a session which acquired its lock before
+# owner records existed looks like while it is still genuinely running, and
+# evicting it would put two sessions in one home. It is refused with the process
+# named, so the operator can see whether it is their own session (which repairs
+# its own record the next time it touches the lock) or something to quit.
 #
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
@@ -56,8 +63,10 @@ if [ "${1:-}" = "status" ]; then
     dead) echo "lock: stale (pid $FM_LOCK_OWNER_PID dead or not a harness)" ;;
     reused)
       echo "lock: stale (pid $FM_LOCK_OWNER_PID was recycled and now belongs to an unrelated process$(owner_detail)); the next session start reclaims it" ;;
+    unrecorded)
+      echo "lock: unrecorded (pid $FM_LOCK_OWNER_PID$(owner_detail) is a live harness process, but this home holds no ownership record for it); it is held, not reclaimed" ;;
     *)
-      echo "lock: unverified (pid $FM_LOCK_OWNER_PID$(owner_detail) is a live harness process, but no session in this home recorded it as the owner); the next session start reclaims it" ;;
+      echo "lock: unverified (pid $FM_LOCK_OWNER_PID$(owner_detail) is a live harness process, but this home recorded a different pid as the owner); the next session start reclaims it" ;;
   esac
   exit 0
 fi
@@ -89,6 +98,26 @@ refuse_live_owner() {
   exit 1
 }
 
+# An owner this home cannot vouch for is still not evidence that it is not a
+# session. Say what is actually known, name the process so the operator can
+# decide, and never take the home from it.
+refuse_unrecorded_owner() {
+  echo "error: the session lock names live harness pid $FM_LOCK_OWNER_PID$(owner_detail), and this home holds no ownership record for it, so it cannot be taken over safely: if that is a firstmate session it keeps the home and repairs its own record, and if it is not, quit it or remove $LOCK; operate read-only until resolved" >&2
+  exit 1
+}
+
+# True when the lock is held by something this session must not take over: a
+# verified live owner, or a live owner this home cannot vouch for either way.
+owner_blocks_takeover() {
+  fm_session_lock_live_owner "$STATE" && return 0
+  [ "$FM_LOCK_OWNER_STATUS" = unrecorded ]
+}
+
+refuse_blocking_owner() {
+  [ "$FM_LOCK_OWNER_STATUS" = unrecorded ] && refuse_unrecorded_owner
+  refuse_live_owner
+}
+
 # Why this lock is being taken over, when it was held by something that failed
 # verification. Reported after the claim so the operator can connect a home that
 # had gone read-only to the process that was actually responsible.
@@ -96,7 +125,7 @@ RECLAIMED_FROM=''
 note_reclaim() {
   case "$FM_LOCK_OWNER_STATUS" in
     unverified)
-      RECLAIMED_FROM="note: reclaimed the session lock from pid $FM_LOCK_OWNER_PID$(owner_detail): no session in this home ever recorded that pid as its owner, so it is not a firstmate session here." ;;
+      RECLAIMED_FROM="note: reclaimed the session lock from pid $FM_LOCK_OWNER_PID$(owner_detail): this home's ownership record names a different pid, so that process did not take this lock." ;;
     reused)
       RECLAIMED_FROM="note: reclaimed the session lock from pid $FM_LOCK_OWNER_PID$(owner_detail): that pid was recycled and now belongs to an unrelated process." ;;
     *) RECLAIMED_FROM='' ;;
@@ -113,8 +142,8 @@ if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
       echo "lock acquired: harness pid $me"
       exit 0
     fi
-  elif fm_session_lock_live_owner "$STATE"; then
-    refuse_live_owner
+  elif owner_blocks_takeover; then
+    refuse_blocking_owner
   fi
 fi
 
@@ -138,8 +167,8 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     exit 1
   }
   if [ "$old" != "$me" ]; then
-    if fm_session_lock_live_owner "$STATE"; then
-      refuse_live_owner
+    if owner_blocks_takeover; then
+      refuse_blocking_owner
     fi
     note_reclaim
   fi

@@ -388,6 +388,12 @@ while [ "\$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
+# FM_TEST_IDENTITY_BLIND names a pid whose identity cannot be read at all - a
+# permission-denied /proc entry, a process exiting inside the race, a ps that
+# answers nothing.
+case "\$fields" in
+  *lstart*) [ "\${FM_TEST_IDENTITY_BLIND:-}" != "\$pid" ] || exit 0 ;;
+esac
 foreign_path='/Applications/ChatGPT.app/Contents/Resources/codex'
 case "\$pid" in
   $foreign)
@@ -436,12 +442,13 @@ stop_fixture_processes() {
   OWNER_FIXTURE_PIDS=""
 }
 
-# The reported lockout: an unrelated harness-named daemon took a whole home
-# read-only because the lock record was a bare pid and nothing tied that pid to a
-# firstmate session in this home.
-test_unrelated_harness_named_process_never_holds_the_home() {
+# A bare pid with no owner record beside it is what a session that acquired its
+# lock before owner records existed looks like while it is still running. That is
+# missing evidence, not evidence that the process is unrelated, so it is held
+# rather than evicted - the alternative puts two live sessions in one home.
+test_legacy_bare_pid_lock_is_held_not_reclaimed() {
   local dir fakebin foreign session out status
-  dir="$TMP_ROOT/foreign-daemon"
+  dir="$TMP_ROOT/legacy-bare-pid"
   fakebin=$(fm_fakebin "$dir")
   mkdir -p "$dir/state" "$dir/noproc"
   start_fixture_process foreign
@@ -454,15 +461,76 @@ test_unrelated_harness_named_process_never_holds_the_home() {
     PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
   stop_fixture_processes
 
-  expect_code 0 "$status" \
-    "an unrelated ChatGPT-app codex daemon still took this home read-only: $out"
-  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$session" ] \
-    || fail "the lock was not reclaimed for this session: $(cat "$dir/state/.lock")"
-  assert_contains "$out" "$foreign" \
-    "the reclaim said nothing about which process had been holding the home"
+  expect_code 1 "$status" "an unrecorded live lock owner was taken over anyway: $out"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$foreign" ] \
+    || fail "a second session took a lock it could not disprove: $(cat "$dir/state/.lock")"
+  assert_absent "$dir/state/.lock-owner" "a refused session recorded itself as the owner"
+  assert_contains "$out" "no ownership record" \
+    "the refusal did not say what was actually missing"
   assert_contains "$out" "ChatGPT.app" \
-    "the reclaim did not name the real process an operator has to go find"
-  pass "session-lock: an unrelated harness-named process never holds this home's lock"
+    "the refusal did not name the real process an operator has to go find"
+  assert_not_contains "$out" "reclaimed" "an untouched lock was reported as reclaimed"
+  assert_not_contains "$out" "not a firstmate session" \
+    "the refusal asserted something it cannot know about a live process"
+  assert_not_contains "$out" "holding this home since" \
+    "an unverified record's timestamp was attributed to the process at that pid"
+  pass "session-lock: a legacy bare-pid lock on a live harness is held, not reclaimed"
+}
+
+# The other half of the same rule: the session that WROTE that legacy lock must
+# not be stranded by it, so its own next touch repairs the missing record in
+# place instead of needing a fresh acquire cycle.
+test_original_holder_repairs_its_own_missing_owner_record() {
+  local dir fakebin foreign session out status
+  dir="$TMP_ROOT/legacy-self-heal"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/noproc"
+  start_fixture_process foreign
+  start_fixture_process session
+  write_owner_record_ps "$fakebin" "$foreign" "$session"
+  printf '%s\n' "$session" > "$dir/state/.lock"
+
+  status=0
+  out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 0 "$status" "the legacy lock's own holder was stranded by it: $out"
+  assert_contains "$out" "lock acquired: harness pid $session" \
+    "the original holder did not keep its own lock"
+
+  out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  stop_fixture_processes
+  assert_contains "$out" "lock: held by live harness pid $session" \
+    "the repaired record did not verify: $out"
+  assert_contains "$out" "holding this home since" \
+    "a proven live owner lost the acquisition time it can honestly report"
+  pass "session-lock: the original holder repairs its own missing owner record in place"
+}
+
+# An owner record that pins only a pid could never later prove a mismatch, so it
+# would reproduce the original lockout after a reboot recycles that pid. Acquire
+# fails closed instead of writing one.
+test_acquire_fails_closed_when_identity_cannot_be_read() {
+  local dir fakebin foreign session out status
+  dir="$TMP_ROOT/identity-blind"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/noproc"
+  start_fixture_process foreign
+  start_fixture_process session
+  write_owner_record_ps "$fakebin" "$foreign" "$session"
+
+  status=0
+  out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    FM_TEST_IDENTITY_BLIND="$session" PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  stop_fixture_processes
+
+  expect_code 1 "$status" "an unpinnable owner record was accepted: $out"
+  assert_contains "$out" "cannot record session-lock ownership" \
+    "the refusal did not name the ownership record as the reason"
+  assert_absent "$dir/state/.lock-owner" "a pid-only owner record was written anyway"
+  assert_absent "$dir/state/.lock" "the lock was published without a verifiable owner"
+  pass "session-lock: an owner record that cannot pin a process fails the acquire closed"
 }
 
 test_owner_record_still_refuses_a_genuine_second_session() {
@@ -515,10 +583,16 @@ test_recycled_pid_never_inherits_the_previous_owners_lock() {
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$session" ] \
     || fail "the lock was not reclaimed from the recycled pid: $(cat "$dir/state/.lock")"
   assert_contains "$out" "$foreign" "the reclaim did not name the recycled pid"
+  assert_contains "$out" "ChatGPT.app" \
+    "the reclaim did not name the real process an operator has to go find"
+  assert_not_contains "$out" "holding this home since" \
+    "the dead owner's acquisition time was attributed to the process that took its pid"
   pass "session-lock: a recycled pid does not inherit the previous owner's lock"
 }
 
-test_unrelated_harness_named_process_never_holds_the_home
+test_legacy_bare_pid_lock_is_held_not_reclaimed
+test_original_holder_repairs_its_own_missing_owner_record
+test_acquire_fails_closed_when_identity_cannot_be_read
 test_owner_record_still_refuses_a_genuine_second_session
 test_recycled_pid_never_inherits_the_previous_owners_lock
 
@@ -532,11 +606,23 @@ start_unrelated_harness_process() {  # <output-variable>
   printf -v "$1" '%s' "$!"
 }
 
+# state/.lock-owner is this code's own persisted record, so a fixture may age it
+# deliberately: the pid still matches, but the record no longer pins the process
+# now at it - exactly what a reboot's pid reuse leaves behind.
+age_recorded_identity() {  # <state>
+  local state=$1
+  sed 's/^identity=.*/identity=aged-fixture-identity/' "$state/.lock-owner" \
+    > "$state/.lock-owner.aged"
+  mv -f "$state/.lock-owner.aged" "$state/.lock-owner"
+}
+
 test_e2e_unrelated_harness_process_does_not_freeze_supervision() {
   local dir foreign
   dir="$TMP_ROOT/e2e-unrelated-holder"
   make_primary_home "$dir"
   start_unrelated_harness_process foreign
+  fm_record_session_lock_owner "$dir/state" "$foreign"
+  age_recorded_identity "$dir/state"
   FM_FIXTURE_LOCK_PID="$foreign" run_fixture_tree "$dir" "$NAMED_CLAUDE"
   stop_fixture_processes
 
@@ -546,6 +632,25 @@ test_e2e_unrelated_harness_process_does_not_freeze_supervision() {
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$(tr -d '[:space:]' < "$dir/state/session-pid")" ] \
     || fail "the hook did not reclaim the home from the unrelated process"
   pass "session-lock e2e: an unrelated harness-named lock holder does not freeze supervision"
+}
+
+test_e2e_legacy_bare_pid_lock_keeps_a_competing_hook_inert() {
+  local dir foreign
+  dir="$TMP_ROOT/e2e-legacy-holder"
+  make_primary_home "$dir"
+  start_unrelated_harness_process foreign
+  # No owner record at all: a session that took this lock before owner records
+  # existed looks exactly like this while it is still running.
+  FM_FIXTURE_LOCK_PID="$foreign" run_fixture_tree "$dir" "$NAMED_CLAUDE"
+  stop_fixture_processes
+
+  expect_code 0 "$(hook_rc "$dir")" \
+    "a competing hook did not stand down for a live owner it could not disprove"
+  assert_absent "$dir/state/arm-ran" \
+    "a competing session armed supervision over a live unrecorded owner"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$foreign" ] \
+    || fail "a competing session took a lock it could not disprove"
+  pass "session-lock e2e: a legacy bare-pid lock keeps a competing session's hook inert"
 }
 
 test_e2e_verified_live_owner_still_keeps_a_competing_hook_inert() {
@@ -567,4 +672,5 @@ test_e2e_verified_live_owner_still_keeps_a_competing_hook_inert() {
 }
 
 test_e2e_unrelated_harness_process_does_not_freeze_supervision
+test_e2e_legacy_bare_pid_lock_keeps_a_competing_hook_inert
 test_e2e_verified_live_owner_still_keeps_a_competing_hook_inert

@@ -12,11 +12,12 @@
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
 #   - Identity: only when THIS session's harness ancestor holds state/.lock.
 #     When an existing numeric owner fails the shared verified-owner predicate -
-#     gone, no longer a harness, recorded by no session in this home, or a
-#     recycled pid - the hook delegates guarded recovery to bin/fm-lock.sh and
-#     then re-verifies ownership. A verified live owner, missing lock, malformed
-#     lock, or unresolved ancestry remains inert, so a competing session never
-#     arms or rewakes.
+#     gone, no longer a harness, recorded here under a different pid, or a
+#     recycled pid - the hook delegates guarded recovery to bin/fm-lock.sh, which
+#     alone decides whether that owner may be taken over, and then re-verifies
+#     ownership. A verified live owner, a live owner this home holds no record
+#     for, a missing lock, a malformed lock, or unresolved ancestry all remain
+#     inert, so a competing session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -114,9 +115,10 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its numeric harness pid in .lock,
-# and that pid may since have been recycled or may never have belonged to a
-# session in this home at all. The shared owner predicate recognizes exactly
-# those unowned cases; a verified live owner still keeps this hook inert.
+# and that pid may since have been recycled. The shared owner predicate
+# recognizes exactly those disproved cases; a verified live owner keeps this hook
+# inert here, and a live owner this home cannot vouch for either way is refused
+# by the acquire below rather than evicted.
 # Defer the mutating claim until after the unchanged AFK and need gates, so an
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.

@@ -563,7 +563,14 @@ test_kimi_session_lock_identity() {
   mkdir -p "$home/state"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
+pid=
+previous=
+for argument in "$@"; do
+  [ "$previous" = -p ] && pid=$argument
+  previous=$argument
+done
 case "$*" in
+  *"lstart="*) exec /bin/ps -p "$pid" -o lstart= -o command= ;;
   *"comm="*) printf '%s\n' '/opt/kimi/bin/kimi'; exit 0 ;;
   *"args="*) printf '%s\n' 'kimi'; exit 0 ;;
 esac

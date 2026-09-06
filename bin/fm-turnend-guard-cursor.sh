@@ -249,10 +249,12 @@ current_session_still_ours() {
   fm_session_lock_owned_by_self "$STATE"
 }
 
-# Only the lock-owning session may arm or wake. A numeric owner no session in
-# this home can vouch for - dead, no longer a harness, never recorded here, or a
+# Only the lock-owning session may arm or wake. A numeric owner this home can
+# disprove - dead, no longer a harness, recorded here under a different pid, or a
 # recycled pid - is the one recoverable case, delegated to bin/fm-lock.sh so
-# acquisition keeps its single owner. A verified live owner stays untouched.
+# acquisition keeps its single owner. A verified live owner stays untouched, and
+# so does a live owner this home holds no record for: the delegated acquire
+# refuses it and this hook stands down.
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$LOCK_PID" in ''|*[!0-9]*) exit 0 ;; esac
