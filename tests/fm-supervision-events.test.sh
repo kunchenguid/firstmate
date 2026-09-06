@@ -49,9 +49,14 @@ mkrec() {  # <pane_id> <status>
 (
   routing_log="$TMP/backend-routing"
   : > "$routing_log"
+  # These test doubles are invoked indirectly by the watcher routing wrappers.
+  # shellcheck disable=SC2329
   fm_backend_capture() { printf 'direct\n' >> "$routing_log"; printf direct; }
+  # shellcheck disable=SC2329
   fm_backend_capture_bounded() { printf 'bounded\n' >> "$routing_log"; printf bounded; }
+  # shellcheck disable=SC2329
   fm_backend_agent_alive() { printf 'direct\n' >> "$routing_log"; printf alive; }
+  # shellcheck disable=SC2329
   fm_backend_agent_alive_bounded() { printf 'bounded\n' >> "$routing_log"; printf alive; }
   [ "$(watcher_backend_capture tmux session:window 40)" = direct ] \
     || fail "tmux capture did not stay on the direct watcher path"

@@ -1140,6 +1140,7 @@ test_bounded_backend_reads_use_requested_deadline() {
   dir="$TMP_ROOT/capture-timeout"
   log="$dir/timeout"
   mkdir -p "$dir"
+  # shellcheck disable=SC2329 # Test double invoked indirectly by the bounded backend wrappers.
   fm_run_function_timed() {
     printf '%s\n' "$1" > "$FM_TIMEOUT_LOG"
     return 124
@@ -1179,6 +1180,7 @@ test_bounded_backend_reads_use_requested_deadline() {
   unset -f fm_run_function_timed
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$ROOT/bin/fm-timeout-lib.sh"
+  # shellcheck disable=SC2329 # Passed by name to fm_run_function_timed.
   fm_test_hung_backend_read() { sleep 5; }
   status=0
   started=$SECONDS

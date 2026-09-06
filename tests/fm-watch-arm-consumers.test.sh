@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-arm-consumers)
@@ -131,7 +132,7 @@ if (process.env.FM_SCENARIO.startsWith("restoration")) {
 JS
 
 run_scenario() {
-  local consumer=$1 scenario=$2 runner plugin scenario_home log release killed
+  local consumer=$1 scenario=$2 runner scenario_home log release killed
   scenario_home="$home/$consumer-$scenario"
   log="$TMP_ROOT/$consumer-$scenario.log"
   release="$TMP_ROOT/$consumer-$scenario.release"

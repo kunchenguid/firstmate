@@ -1036,6 +1036,7 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit" alpha kimi
   fm_backend_busy_state() { printf 'unknown'; }
   fm_backend_capture() { printf '%s' "$FM_PENDING_KIMI_CAPTURE"; }
+  # shellcheck disable=SC2329 # Test double invoked indirectly by pending-reply observation.
   fm_backend_capture_bounded() { shift; fm_backend_capture "$@"; }
   export FM_PENDING_KIMI_CAPTURE=' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
 
@@ -1797,6 +1798,7 @@ test_archive_failure_does_not_reopen_resolved_reply() {
   fm_pending_reply_set "$hot" phase recovery_failed
   printf 'done [corr=%s]: late but resolved\n' "$corr" > "$state/hibit.status"
   original_publish=$(declare -f _fm_pending_reply_publish_stage_locked)
+  # shellcheck disable=SC2329 # Test double invoked indirectly by escalation's resolve path.
   _fm_pending_reply_publish_stage_locked() { return 1; }
   fm_pending_reply_maybe_escalate "$state" "$corr" || escalation_rc=$?
   unset -f _fm_pending_reply_publish_stage_locked
