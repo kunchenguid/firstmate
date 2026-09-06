@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# fm-pipeline.sh - the single writer for shadow pipeline probe events.
+# fm-pipeline.sh - the single writer for pipeline records and shadow probe events.
 #
-# The probe command reads declared `paused:` waits, asks fm-crew-state.sh for
-# current state, and appends one schema=fm-pipeline.v2 event per wait.
+# The owner derives lifecycle steps from local machine artifacts and appends one
+# schema=fm-pipeline.v2 event per declared wait.
 # Usage:
+#   fm-pipeline.sh reconcile <task-id>
+#   fm-pipeline.sh retire <task-id>
+#   fm-pipeline.sh board-json
+#   fm-pipeline.sh steps <kind>
 #   fm-pipeline.sh probe [--task <id>]
-#   fm-pipeline.sh append <validated-event-line>
 #   fm-pipeline.sh arm
 #   fm-pipeline.sh disarm
 #
@@ -21,6 +24,30 @@ LOG="${FM_PIPELINE_LOG:-$STATE/pipeline-events.log}"
 CREW_STATE_BIN="${FM_PIPELINE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 
 CHECK_ID='pipeline-probe'
+PIPELINE_SCHEMA='fm-pipeline.v3'
+PIPELINE_REPAIR='repair: confirm the task is gone and run fm-pipeline.sh retire <id>, or move the file aside by hand'
+
+# Results populated by pipeline_record_load for its callers.
+PIPELINE_RECORD_STATE=
+PIPELINE_RECORD_REASON=
+PIPELINE_RECORD_KIND=
+PIPELINE_RECORD_GEN=
+PIPELINE_RECORD_STEP=
+PIPELINE_RECORD_REV=0
+PIPELINE_RECORD_TS=
+PIPELINE_RECORD_HEAD=
+PIPELINE_RECORD_EVIDENCE=
+PIPELINE_RECORD_ATTEMPT=-
+PIPELINE_RECORD_LINE=
+PIPELINE_RECORD_HAS_LINE=0
+PIPELINE_META_FILE=
+PIPELINE_META_KIND=
+PIPELINE_META_GEN=
+PIPELINE_META_ATTEMPT=
+PIPELINE_META_PR_HEAD=
+PIPELINE_META_SCALAR_READY=0
+PIPELINE_META_IDENTITY_READY=0
+PIPELINE_META_PR_OK=0
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
@@ -34,6 +61,11 @@ usage() {
   sed -n '2,20p' "$0" | sed 's/^# //' >&2
 }
 
+command=${1:-}
+case "$command" in
+  arm|disarm|--help|-h|'') ;;
+  *) [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable" ;;
+esac
 [ ! -L "$STATE" ] || die "state directory is unavailable"
 
 # shellcheck source=bin/fm-pr-lib.sh
@@ -233,8 +265,59 @@ pipeline_disarm() {
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$REGISTER_BIN" retire "$CHECK_ID"
 }
 
-meta_value() {  # <meta-file> <key>
-  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+pipeline_meta_cache_load() {  # <meta-file> [force]
+  local meta=$1 force=${2:-0} kind='' gen='' attempt='' pr_head='' line scalars
+  if [ "$force" -ne 1 ] && [ "$PIPELINE_META_FILE" = "$meta" ] \
+    && [ "$PIPELINE_META_SCALAR_READY" -eq 1 ]; then
+    return 0
+  fi
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  scalars=$(awk '
+    index($0, "kind=") == 1 { kind=substr($0, 6) }
+    index($0, "spawn_gen=") == 1 { gen=substr($0, 11) }
+    index($0, "attempt=") == 1 { attempt=substr($0, 9) }
+    index($0, "pr_head=") == 1 { pr_head=substr($0, 9) }
+    END {
+      printf "kind=%s\ngen=%s\nattempt=%s\npr_head=%s\n", kind, gen, attempt, pr_head
+    }
+  ' "$meta" 2>/dev/null) || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      kind=*) kind=${line#kind=} ;;
+      gen=*) gen=${line#gen=} ;;
+      attempt=*) attempt=${line#attempt=} ;;
+      pr_head=*) pr_head=${line#pr_head=} ;;
+    esac
+  done <<EOF
+$scalars
+EOF
+  case "$kind:$gen:$attempt:$pr_head" in
+    *[[:space:]=]*) return 2 ;;
+  esac
+  PIPELINE_META_FILE=$meta
+  PIPELINE_META_KIND=$kind
+  PIPELINE_META_GEN=$gen
+  PIPELINE_META_ATTEMPT=$attempt
+  PIPELINE_META_PR_HEAD=$pr_head
+  PIPELINE_META_SCALAR_READY=1
+  PIPELINE_META_IDENTITY_READY=0
+  PIPELINE_META_PR_OK=0
+}
+
+pipeline_meta_identity_load() {  # <meta-file>
+  local meta=$1
+  if [ "$PIPELINE_META_FILE" = "$meta" ] && [ "$PIPELINE_META_IDENTITY_READY" -eq 1 ]; then
+    [ "$PIPELINE_META_PR_OK" -eq 1 ]
+    return
+  fi
+  pipeline_meta_cache_load "$meta" || return 1
+  PIPELINE_META_IDENTITY_READY=1
+  if fm_pr_metadata_identity_parse "$meta"; then
+    PIPELINE_META_PR_OK=1
+    return 0
+  fi
+  PIPELINE_META_PR_OK=0
+  return 1
 }
 
 pipeline_status_key() {  # <line> -> tagged key identity
@@ -293,9 +376,30 @@ $activities
 EOF
 }
 
+pipeline_seen_prepare() {  # <task-id>
+  local id=$1 pipeline="$STATE/$1.pipeline" seen="$STATE/$1.pipeline-seen" first
+  pipeline_state_file_valid "$seen" || return 1
+  [ -e "$pipeline" ] || [ -L "$pipeline" ] || return 0
+  pipeline_state_file_valid "$pipeline" || return 1
+  first=$(awk 'NR == 1 { print; exit }' "$pipeline" 2>/dev/null || true)
+  case "$first" in
+    "schema=$PIPELINE_SCHEMA "*) return 0 ;;
+    "schema=$PIPELINE_SCHEMA task="*) return 0 ;;
+    *)
+      if [ -e "$seen" ] || [ -L "$seen" ]; then
+        return 2
+      fi
+      mv -- "$pipeline" "$seen" || return 1
+      printf 'fm-pipeline.sh: migrated legacy observation cache %s to %s\n' \
+        "$pipeline" "$seen" >&2
+      ;;
+  esac
+}
+
 observation_elapsed_since() {  # <task-id> <wait> <step> <generation> <evidence> <now>
-  local id=$1 wait=$2 step=$3 gen=$4 evidence=$5 now=$6 pipeline="$STATE/$1.pipeline"
+  local id=$1 wait=$2 step=$3 gen=$4 evidence=$5 now=$6 pipeline="$STATE/$1.pipeline-seen"
   local observed
+  pipeline_seen_prepare "$id" || return 1
   pipeline_state_file_valid "$pipeline" || return 1
   observed=$(awk -v wait="$wait" -v step="$step" -v gen="$gen" -v evidence="$evidence" '
     $1 == "wait=" wait && $2 == "step=" step && $3 == "gen=" gen && $4 == "evidence=" evidence {
@@ -360,8 +464,8 @@ event_valid() {  # <event-line>
       exit(ok ? 0 : 1)
     }
   ' || {
-    if printf '%s\n' "$line" | awk '{print $10}' | grep -q '^evidence=-$' &&
-      printf '%s\n' "$line" | grep -q 'action=would-heal'; then
+    if printf '%s\n' "$line" | rg -q '(^| )evidence=-( |$)' &&
+      printf '%s\n' "$line" | rg -q '(^| )action=would-heal( |$)'; then
       printf 'fm-pipeline.sh: would-heal with evidence=- is inadmissible\n' >&2
     else
       printf 'fm-pipeline.sh: malformed shadow event\n' >&2
@@ -400,14 +504,675 @@ append_event() {
 }
 
 append_event_locked() {
-  local line=$1
+  local line=$1 last
   event_valid "$line" || return 1
   pipeline_state_file_valid "$LOG" || return 1
+  if [ -s "$LOG" ]; then
+    last=$(set -o pipefail; tail -c 1 "$LOG" | od -An -tx1 | tr -d '[:space:]') || return 1
+    if [ "$last" != 0a ]; then
+      printf 'fm-pipeline.sh: malformed shadow event: %s:partial-tail\n' "$LOG" >&2
+      printf '\n' >> "$LOG" || return 1
+    fi
+  fi
   printf '%s\n' "$line" >> "$LOG"
 }
 
-probe_task() {  # <id>
-  local id=$1 status_file meta
+pipeline_step_known() {
+  case "$1" in
+    dispatched|pr-registered|merged) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+pipeline_kind_steps() {  # <kind> -> nodes<TAB>edges
+  case "$1" in
+    ship|ship-nm|ship-direct|ship-local)
+      printf '%s\t%s\n' \
+        'dispatched ingress working validating pr-registered checks merge-wait merged' \
+        'dispatched>ingress ingress>working working>validating validating>pr-registered pr-registered>checks checks>merge-wait merge-wait>merged'
+      ;;
+    scout|scout-reader|scout-writer)
+      printf '%s\t%s\n' \
+        'dispatched ingress working report-exists gate done' \
+        'dispatched>ingress ingress>working working>report-exists report-exists>gate gate>done'
+      ;;
+    secondmate)
+      printf '%s\t%s\n' \
+        'session-live inbox-current queue-current reporting' \
+        'session-live>inbox-current inbox-current>queue-current queue-current>reporting'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+pipeline_steps_json() {  # <kind>
+  local nodes edges node_json edge_json node edge
+  pipeline_kind_steps "$1" >/dev/null || return 1
+  IFS=$'\t' read -r nodes edges <<EOF
+$(pipeline_kind_steps "$1")
+EOF
+  node_json='[]'
+  for node in $nodes; do
+    node_json=$(jq -nc --argjson values "$node_json" --arg value "$node" '$values + [$value]') || return 1
+  done
+  edge_json='[]'
+  for edge in $edges; do
+    node=${edge%%>*}
+    edge=${edge#*>}
+    edge_json=$(jq -nc --argjson values "$edge_json" --arg from "$node" --arg to "$edge" \
+      '$values + [{from:$from,to:$to}]') || return 1
+  done
+  jq -nc --argjson nodes "$node_json" --argjson edges "$edge_json" \
+    '{nodes:$nodes,edges:$edges}'
+}
+
+pipeline_record_reset() {
+  PIPELINE_RECORD_STATE=
+  PIPELINE_RECORD_REASON=
+  PIPELINE_RECORD_KIND=
+  PIPELINE_RECORD_GEN=
+  PIPELINE_RECORD_STEP=
+  PIPELINE_RECORD_REV=0
+  PIPELINE_RECORD_TS=
+  PIPELINE_RECORD_HEAD=
+  PIPELINE_RECORD_EVIDENCE=
+  PIPELINE_RECORD_ATTEMPT=-
+  PIPELINE_RECORD_LINE=
+  PIPELINE_RECORD_HAS_LINE=0
+}
+
+pipeline_record_refuse() {  # <reason> [<line>]
+  PIPELINE_RECORD_STATE=refused:$1
+  PIPELINE_RECORD_REASON=$1
+  PIPELINE_RECORD_LINE=${2:-}
+  PIPELINE_RECORD_HAS_LINE=0
+  return 1
+}
+
+pipeline_record_header_valid() {  # <file> <id> <kind> <gen>
+  local file=$1 id=$2 kind=$3 gen=$4 line schema task header_kind header_gen
+  line=$(awk 'NR == 1 { print; exit }' "$file" 2>/dev/null || true)
+  [ "$(printf '%s\n' "$line" | awk '{print NF}')" -eq 4 ] || return 1
+  IFS=' ' read -r schema task header_kind header_gen <<EOF
+$line
+EOF
+  [ "$schema" = "schema=$PIPELINE_SCHEMA" ] || return 1
+  [ "$task" = "task=$id" ] || return 1
+  [ "$header_kind" = "kind=$kind" ] || return 1
+  [ "$header_gen" = "gen=$gen" ] || return 2
+}
+
+pipeline_record_line_load() {  # <line> <file> <number> <expected-gen>
+  local line=$1 file=$2 number=$3 expected_gen=$4 rev ts step evidence gen head attempt
+  local field1 field2 field3 field4 field5 field6 field7
+  [ "$(printf '%s\n' "$line" | awk '{print NF}')" -eq 7 ] || return 1
+  IFS=' ' read -r field1 field2 field3 field4 field5 field6 field7 <<EOF
+$line
+EOF
+  rev=${field1#rev=}; ts=${field2#ts=}; step=${field3#step=}; evidence=${field4#evidence=}
+  gen=${field5#gen=}; head=${field6#head=}; attempt=${field7#attempt=}
+  [ "$field1" = "rev=$rev" ] && [ "$field2" = "ts=$ts" ] && [ "$field3" = "step=$step" ] \
+    && [ "$field4" = "evidence=$evidence" ] && [ "$field5" = "gen=$gen" ] \
+    && [ "$field6" = "head=$head" ] && [ "$field7" = "attempt=$attempt" ] || return 1
+  case "$rev" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$rev" -gt 0 ] 2>/dev/null || return 1
+  case "$ts" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+    *) return 1 ;;
+  esac
+  pipeline_step_known "$step" || return 1
+  case "$evidence" in ''|*[[:space:]]*|*:*:*) return 1 ;; esac
+  [ -n "$gen" ] && [ "$gen" = "$expected_gen" ] || return 1
+  case "$head" in
+    unknown) ;;
+    *) fm_pr_head_valid "$head" || return 1 ;;
+  esac
+  case "$attempt" in ''|*[[:space:]=]*) return 1 ;; esac
+  PIPELINE_RECORD_LINE=$line
+  PIPELINE_RECORD_REV=$rev
+  PIPELINE_RECORD_TS=$ts
+  PIPELINE_RECORD_STEP=$step
+  PIPELINE_RECORD_GEN=$gen
+  PIPELINE_RECORD_HEAD=$head
+  PIPELINE_RECORD_EVIDENCE=$evidence
+  PIPELINE_RECORD_ATTEMPT=$attempt
+  PIPELINE_RECORD_HAS_LINE=1
+}
+
+pipeline_predicate_dispatched() {  # <meta>
+  local meta=$1
+  pipeline_meta_cache_load "$meta" || return 1
+  [ -n "$PIPELINE_META_GEN" ]
+}
+
+pipeline_predicate_pr_registered() {  # <meta>
+  pipeline_meta_identity_load "$1"
+}
+
+pipeline_predicate_merged() {  # <id> <meta>
+  local id=$1 meta=$2
+  pipeline_meta_identity_load "$meta" || return 1
+  fm_pr_poll_merge_already_notified "$STATE" "$id" "$FM_PR_META_PROVIDER" \
+    "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER"
+}
+
+pipeline_kind_has_step() {  # <kind> <step>
+  local nodes edges
+  IFS=$'\t' read -r nodes edges <<EOF
+$(pipeline_kind_steps "$1" 2>/dev/null)
+EOF
+  case " $nodes " in
+    *" $2 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+pipeline_step_proven() {  # <id> <meta> <kind> <step> <head>
+  local id=$1 meta=$2 kind=$3 step=$4
+  pipeline_kind_has_step "$kind" "$step" || return 1
+  case "$step" in
+    dispatched) pipeline_predicate_dispatched "$meta" ;;
+    pr-registered)
+      pipeline_predicate_pr_registered "$meta"
+      ;;
+    merged)
+      pipeline_predicate_merged "$id" "$meta"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+pipeline_record_prepare() {  # <id> <meta-kind> <meta-gen> [migrate]
+  local id=$1 kind=$2 gen=$3 migrate=${4:-1} pipeline="$STATE/$1.pipeline" seen="$STATE/$1.pipeline-seen" first
+  pipeline_state_file_valid "$pipeline" || return 3
+  pipeline_state_file_valid "$seen" || return 3
+  [ -e "$pipeline" ] || [ -L "$pipeline" ] || return 0
+  first=$(awk 'NR == 1 { print; exit }' "$pipeline" 2>/dev/null || true)
+  case "$first" in
+    "schema=$PIPELINE_SCHEMA task=$id kind=$kind gen=$gen") return 0 ;;
+    "schema=$PIPELINE_SCHEMA "*) return 0 ;;
+    *)
+      [ "$migrate" = 1 ] || return 4
+      if [ -e "$seen" ] || [ -L "$seen" ]; then
+        return 2
+      fi
+      mv -- "$pipeline" "$seen" || return 3
+      printf 'fm-pipeline.sh: migrated legacy observation cache %s to %s\n' \
+        "$pipeline" "$seen" >&2
+      ;;
+  esac
+}
+
+pipeline_record_load() {  # <id> <meta-file> <kind> <gen> [migrate] [cached]
+  local id=$1 meta=$2 kind=$3 gen=$4 migrate=${5:-1} cached=${6:-0}
+  local pipeline="$STATE/$1.pipeline" line number=0 prev_rev=0 expected_rev cache_rc
+  pipeline_record_reset
+  PIPELINE_RECORD_KIND=$kind
+  PIPELINE_RECORD_GEN=$gen
+  [ -f "$meta" ] && [ ! -L "$meta" ] || {
+    PIPELINE_RECORD_STATE=refused:absent-meta-not-cleaned
+    PIPELINE_RECORD_REASON=absent-meta-not-cleaned
+    return 1
+  }
+  if [ "$cached" -ne 1 ]; then
+    cache_rc=0
+    pipeline_meta_cache_load "$meta" || cache_rc=$?
+    case "$cache_rc" in
+      0) ;;
+      2)
+        PIPELINE_RECORD_STATE=refused:malformed-meta-artifact
+        PIPELINE_RECORD_REASON=malformed-meta-artifact
+        return 1
+        ;;
+      *)
+        PIPELINE_RECORD_STATE=refused:absent-meta-not-cleaned
+        PIPELINE_RECORD_REASON=absent-meta-not-cleaned
+        return 1
+        ;;
+    esac
+  fi
+  pipeline_record_prepare "$id" "$kind" "$gen" "$migrate"
+  case "$?" in
+    2) pipeline_record_refuse migration-collision; return 1 ;;
+    3) pipeline_record_refuse unsafe-record-path; return 1 ;;
+    4) pipeline_record_refuse legacy-cache "$pipeline:1"; return 1 ;;
+  esac
+  [ -e "$pipeline" ] || [ -L "$pipeline" ] || {
+    PIPELINE_RECORD_STATE=uninitialized
+    return 0
+  }
+  [ -f "$pipeline" ] && [ ! -L "$pipeline" ] || {
+    pipeline_record_refuse malformed-record-line "$pipeline:1"
+    return 1
+  }
+  pipeline_record_header_valid "$pipeline" "$id" "$kind" "$gen"
+  case "$?" in
+    1) pipeline_record_refuse malformed-record-line "$pipeline:1"; return 1 ;;
+    2) pipeline_record_refuse foreign-gen "$pipeline:1"; return 1 ;;
+  esac
+  # shellcheck disable=SC2094
+  while IFS= read -r line || [ -n "$line" ]; do
+    number=$((number + 1))
+    [ "$number" -gt 1 ] || continue
+    # shellcheck disable=SC2094
+    if ! pipeline_record_line_load "$line" "$pipeline" "$number" "$gen"; then
+      pipeline_record_refuse malformed-record-line "$pipeline:$number"
+      return 1
+    fi
+    expected_rev=$((prev_rev + 1))
+    [ "$PIPELINE_RECORD_REV" -eq "$expected_rev" ] 2>/dev/null || {
+      pipeline_record_refuse malformed-record-line "$pipeline:$number"
+      return 1
+    }
+    prev_rev=$PIPELINE_RECORD_REV
+    if ! pipeline_step_proven "$id" "$meta" "$kind" "$PIPELINE_RECORD_STEP" "$PIPELINE_RECORD_HEAD"; then
+      pipeline_record_refuse unproven-step "$pipeline:$number"
+      return 1
+    fi
+  done < "$pipeline"
+  PIPELINE_RECORD_STATE=ok
+  return 0
+}
+
+pipeline_record_append() {  # <id> <kind> <gen> <step> <evidence> <head> <attempt>
+  local id=$1 kind=$2 gen=$3 step=$4 evidence=$5 head=$6 attempt=$7
+  local pipeline="$STATE/$id.pipeline" tmp ts rev device
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  rev=$((PIPELINE_RECORD_REV + 1))
+  pipeline_state_file_valid "$pipeline" || return 1
+  device=$(fm_pr_file_device "$STATE") || return 1
+  tmp=$(umask 077; mktemp "$STATE/.fm-pipeline-record.XXXXXX") || return 1
+  if [ "$PIPELINE_RECORD_HAS_LINE" -eq 0 ]; then
+    printf 'schema=%s task=%s kind=%s gen=%s\n' "$PIPELINE_SCHEMA" "$id" "$kind" "$gen" > "$tmp" || {
+      rm -f -- "$tmp"; return 1;
+    }
+  else
+    cat "$pipeline" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  fi
+  printf 'rev=%s ts=%s step=%s evidence=%s gen=%s head=%s attempt=%s\n' \
+    "$rev" "$ts" "$step" "$evidence" "$gen" "$head" "$attempt" >> "$tmp" || {
+    rm -f -- "$tmp"; return 1;
+  }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  fm_pr_private_file_valid "$tmp" 600 "$device" || { rm -f -- "$tmp"; return 1; }
+  fm_pr_regular_destination_on_device_or_absent "$pipeline" "$device" || {
+    rm -f -- "$tmp"; return 1;
+  }
+  mv -f -- "$tmp" "$pipeline" || { rm -f -- "$tmp"; return 1; }
+  PIPELINE_RECORD_STATE=ok
+  PIPELINE_RECORD_KIND=$kind
+  PIPELINE_RECORD_GEN=$gen
+  PIPELINE_RECORD_STEP=$step
+  PIPELINE_RECORD_REV=$rev
+  PIPELINE_RECORD_TS=$ts
+  PIPELINE_RECORD_HEAD=$head
+  PIPELINE_RECORD_EVIDENCE=$evidence
+  PIPELINE_RECORD_ATTEMPT=$attempt
+  PIPELINE_RECORD_HAS_LINE=1
+}
+
+pipeline_derived_step() {  # <id> <meta> <kind> -> step<TAB>evidence<TAB>head
+  local id=$1 meta=$2 kind=$3 pr_head=${PIPELINE_META_PR_HEAD:-unknown}
+  [ -n "$pr_head" ] || pr_head=unknown
+  if pipeline_predicate_merged "$id" "$meta" && pipeline_kind_has_step "$kind" merged; then
+    printf 'merged\tpr-poll:state/%s.pr-poll-merge-notified\t%s\n' "$id" "$pr_head"
+    return 0
+  fi
+  if pipeline_predicate_pr_registered "$meta" && pipeline_kind_has_step "$kind" pr-registered; then
+    pr_head=${PIPELINE_META_PR_HEAD:-unknown}
+    [ -n "$pr_head" ] || pr_head=unknown
+    printf 'pr-registered\tmeta:state/%s.meta\t%s\n' "$id" "$pr_head"
+    return 0
+  fi
+  if pipeline_predicate_dispatched "$meta" && pipeline_kind_has_step "$kind" dispatched; then
+    printf 'dispatched\tmeta:state/%s.meta\tunknown\n' "$id"
+    return 0
+  fi
+  return 1
+}
+
+pipeline_reconcile_test_signal() {  # test-only competing-client handshake
+  local ready=${FM_PIPELINE_TEST_RECONCILE_BEFORE_LOCK_READY:-}
+  [ -z "$ready" ] || printf '%s\n' ready > "$ready"
+}
+
+pipeline_reconcile_test_gate() {  # <phase>, test-only interleaving seam
+  local phase=$1 gate=${FM_PIPELINE_TEST_RECONCILE_GATE:-}
+  [ -n "$gate" ] || return 0
+  [ "${FM_PIPELINE_TEST_RECONCILE_GATE_PHASE:-after-load}" = "$phase" ] || return 0
+  printf '%s\n' ready > "$gate.ready" || return 1
+  while [ -e "$gate" ]; do
+    sleep 0.01
+  done
+}
+
+pipeline_reconcile_unlock() {
+  fm_lock_release "$PIPELINE_LOCK_DIR" || true
+  trap - EXIT
+}
+
+pipeline_reconcile_refuse_locked() {  # <reason> [<line>] [<repair>]
+  local reason=$1 line=${2:-} repair=${3:-1}
+  pipeline_reconcile_unlock
+  printf 'refused:%s %s\n' "$reason" "$line" >&2
+  [ "$repair" -eq 1 ] && printf '%s\n' "$PIPELINE_REPAIR" >&2
+  return 1
+}
+
+pipeline_reconcile() {  # <id> [quiet]
+  local id=$1 quiet=${2:-} meta kind gen attempt derived step evidence head
+  local initial_kind initial_gen cache_rc
+  fm_task_id_path_safe "$id" || { printf 'refused:invalid-task-id\n' >&2; return 1; }
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || {
+    printf 'refused:state-directory-unavailable\n' >&2
+    return 1
+  }
+  meta="$STATE/$id.meta"
+  pipeline_state_file_valid "$meta" || {
+    printf 'refused:unsafe-meta-path\n' >&2
+    return 1
+  }
+  pipeline_reconcile_test_signal
+  lock_log
+  cache_rc=0
+  pipeline_meta_cache_load "$meta" || cache_rc=$?
+  case "$cache_rc" in
+    0) ;;
+    2)
+      pipeline_reconcile_refuse_locked malformed-meta-artifact '' 0
+      return 1
+      ;;
+    *)
+      pipeline_reconcile_refuse_locked absent-meta-not-cleaned '' 0
+      return 1
+      ;;
+  esac
+  kind=$PIPELINE_META_KIND
+  gen=$PIPELINE_META_GEN
+  [ -n "$kind" ] && [ -n "$gen" ] || {
+    pipeline_reconcile_refuse_locked missing-meta-artifact '' 0
+    return 1
+  }
+  case "$kind:$gen" in
+    *[[:space:]=]*)
+      pipeline_reconcile_refuse_locked malformed-meta-artifact '' 0
+      return 1
+      ;;
+  esac
+  pipeline_kind_steps "$kind" >/dev/null || {
+    pipeline_reconcile_refuse_locked unknown-pipeline-kind '' 0
+    return 1
+  }
+  initial_kind=$kind
+  initial_gen=$gen
+  pipeline_reconcile_test_gate after-load
+  cache_rc=0
+  pipeline_meta_cache_load "$meta" 1 || cache_rc=$?
+  case "$cache_rc" in
+    0) ;;
+    2)
+      pipeline_reconcile_refuse_locked malformed-meta-artifact '' 0
+      return 1
+      ;;
+    *)
+      pipeline_reconcile_refuse_locked absent-meta-not-cleaned '' 0
+      return 1
+      ;;
+  esac
+  kind=$PIPELINE_META_KIND
+  gen=$PIPELINE_META_GEN
+  [ "$kind" = "$initial_kind" ] || {
+    pipeline_reconcile_refuse_locked foreign-kind ''
+    return 1
+  }
+  [ "$gen" = "$initial_gen" ] || {
+    pipeline_reconcile_refuse_locked foreign-gen ''
+    return 1
+  }
+  pipeline_record_load "$id" "$meta" "$kind" "$gen" 1 1
+  if [ "$PIPELINE_RECORD_STATE" != uninitialized ] && [ "$PIPELINE_RECORD_STATE" != ok ]; then
+    pipeline_reconcile_refuse_locked "$PIPELINE_RECORD_REASON" "${PIPELINE_RECORD_LINE:-}"
+    return 1
+  fi
+  derived=$(pipeline_derived_step "$id" "$meta" "$kind") || {
+    pipeline_reconcile_refuse_locked no-proven-artifact '' 0
+    return 1
+  }
+  IFS=$'\t' read -r step evidence head <<EOF
+$derived
+EOF
+  if [ "$PIPELINE_RECORD_HAS_LINE" -eq 1 ] && [ "$PIPELINE_RECORD_STEP" = "$step" ]; then
+    pipeline_reconcile_unlock
+    [ "$quiet" = probe ] || printf 'unchanged: %s step=%s rev=%s\n' "$id" "$step" "$PIPELINE_RECORD_REV"
+    return 0
+  fi
+  attempt=${PIPELINE_META_ATTEMPT:--}
+  case "$attempt" in
+    *[[:space:]=]*)
+      pipeline_reconcile_refuse_locked malformed-meta-artifact '' 0
+      return 1
+      ;;
+  esac
+  pipeline_record_append "$id" "$kind" "$gen" "$step" "$evidence" "$head" "$attempt" || {
+    pipeline_reconcile_refuse_locked record-write '' 0
+    return 1
+  }
+  pipeline_reconcile_unlock
+  [ "$quiet" = probe ] || printf 'reconciled: %s step=%s rev=%s\n' "$id" "$step" "$PIPELINE_RECORD_REV"
+}
+
+pipeline_retire() {  # <id>
+  local id=$1 meta pipeline="$STATE/$1.pipeline" seen="$STATE/$1.pipeline-seen" path
+  fm_task_id_path_safe "$id" || { printf 'refused:invalid-task-id\n' >&2; return 1; }
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || { printf 'refused:unsafe-record-path\n' >&2; return 1; }
+  meta="$STATE/$id.meta"
+  [ ! -e "$meta" ] && [ ! -L "$meta" ] || {
+    printf 'refused:live-meta\n' >&2
+    return 1
+  }
+  for path in "$pipeline" "$seen"; do
+    pipeline_state_file_valid "$path" || {
+      printf 'refused:unsafe-record-path\n' >&2
+      return 1
+    }
+  done
+  lock_log
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    fm_lock_release "$PIPELINE_LOCK_DIR" || true
+    trap - EXIT
+    printf 'refused:live-meta\n' >&2
+    return 1
+  fi
+  rm -f -- "$pipeline" "$seen" || {
+    fm_lock_release "$PIPELINE_LOCK_DIR" || true
+    trap - EXIT
+    printf 'refused:record-retire\n' >&2
+    return 1
+  }
+  fm_lock_release "$PIPELINE_LOCK_DIR"
+  trap - EXIT
+  printf 'retired: %s\n' "$id"
+}
+
+pipeline_board_waits_json() {  # <task-id> <generation>
+  local id=$1 gen=$2 key row ts probe evidence wait tmp keys_json
+  tmp=$(umask 077; mktemp "$STATE/.fm-board-waits.XXXXXX") || return 1
+  : > "$tmp"
+  if [ -f "$LOG" ] && [ ! -L "$LOG" ]; then
+    keys_json=$(awk -v task="task=$id" -v generation="gen=$gen" \
+      '$2 == task && $11 == generation && NF == 14 { print $13 }' "$LOG" 2>/dev/null | sort -u)
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      row=$(awk -v task="task=$id" -v generation="gen=$gen" -v wait="$key" \
+        '$2 == task && $11 == generation && $13 == wait && NF == 14 { line=$0 } END { print line }' "$LOG" 2>/dev/null)
+      [ -n "$row" ] || continue
+          local field1 field6 field10 field13
+      IFS=' ' read -r field1 _ _ _ _ field6 _ _ _ field10 _ _ field13 _ <<EOF
+$row
+EOF
+      ts=${field1#ts=}; probe=${field6#probe=}; evidence=${field10#evidence=}; wait=${field13#wait=}
+      jq -nc --arg key "$wait" --arg target - --arg verdict "$probe" \
+        --arg evidence "$evidence" --arg ts "$ts" \
+        '{key:$key,target:$target,verdict:$verdict,evidence:$evidence,ts:$ts}' >> "$tmp" || {
+        rm -f -- "$tmp"; return 1;
+      }
+    done <<EOF
+$keys_json
+EOF
+  fi
+  jq -sc . "$tmp"
+  local rc=$?
+  rm -f -- "$tmp"
+  return "$rc"
+}
+
+pipeline_board_probe_json() {  # <task-id> <generation>
+  local id=$1 gen=$2 row ts probe evidence
+  if [ -f "$LOG" ] && [ ! -L "$LOG" ]; then
+    row=$(awk -v task="task=$id" -v generation="gen=$gen" \
+      '$2 == task && $11 == generation && NF == 14 { line=$0 } END { print line }' "$LOG" 2>/dev/null)
+  fi
+  if [ -n "${row:-}" ]; then
+    local field1 field6 field10
+    IFS=' ' read -r field1 _ _ _ _ field6 _ _ _ field10 _ _ _ _ <<EOF
+$row
+EOF
+    ts=${field1#ts=}; probe=${field6#probe=}; evidence=${field10#evidence=}
+    jq -nc --arg verdict "$probe" --arg ts "$ts" --arg evidence "$evidence" \
+      '{verdict:$verdict,ts:$ts,evidence:$evidence}'
+  else
+    printf 'null\n'
+  fi
+}
+
+pipeline_board_record_header() {  # <file> -> task<TAB>kind<TAB>gen
+  local file=$1 line schema task kind gen
+  line=$(awk 'NR == 1 { print; exit }' "$file" 2>/dev/null || true)
+  [ "$(printf '%s\n' "$line" | awk '{print NF}')" -eq 4 ] || return 1
+  IFS=' ' read -r schema task kind gen <<EOF
+$line
+EOF
+  [ "$schema" = "schema=$PIPELINE_SCHEMA" ] || return 1
+  printf '%s\t%s\t%s\n' "${task#task=}" "${kind#kind=}" "${gen#gen=}"
+}
+
+pipeline_board_task_json() {  # <id> <output-file>
+  local id=$1 output=$2 meta="$STATE/$1.meta" kind gen steps waits probe record_state initialized
+  local record header header_kind header_gen cache_rc
+  record="$STATE/$id.pipeline"
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    cache_rc=0
+    pipeline_meta_cache_load "$meta" || cache_rc=$?
+    if [ "$cache_rc" -eq 0 ]; then
+      kind=${PIPELINE_META_KIND:-unknown}
+      gen=${PIPELINE_META_GEN:-unknown}
+    else
+      kind=unknown
+      gen=unknown
+    fi
+    if [ "$kind" = unknown ] || [ "$gen" = unknown ]; then
+      pipeline_record_reset
+      PIPELINE_RECORD_STATE=refused:malformed-meta-artifact
+      PIPELINE_RECORD_REASON=malformed-meta-artifact
+      record_state=$PIPELINE_RECORD_STATE
+    elif ! pipeline_kind_steps "$kind" >/dev/null 2>&1; then
+      pipeline_record_reset
+      PIPELINE_RECORD_STATE=refused:unknown-pipeline-kind
+      PIPELINE_RECORD_REASON=unknown-pipeline-kind
+      record_state=$PIPELINE_RECORD_STATE
+    elif pipeline_record_load "$id" "$meta" "$kind" "$gen" 0 1; then
+      record_state=${PIPELINE_RECORD_STATE:-uninitialized}
+    else
+      record_state=${PIPELINE_RECORD_STATE:-refused:record}
+    fi
+  else
+    header=$(pipeline_board_record_header "$record" 2>/dev/null || true)
+    [ -n "$header" ] || return 0
+    IFS=$'\t' read -r id header_kind header_gen <<EOF
+$header
+EOF
+    kind=$header_kind
+    gen=$header_gen
+    pipeline_record_reset
+    PIPELINE_RECORD_STATE=refused:absent-meta-not-cleaned
+    PIPELINE_RECORD_REASON=absent-meta-not-cleaned
+    record_state=$PIPELINE_RECORD_STATE
+  fi
+  if ! steps=$(pipeline_steps_json "$kind" 2>/dev/null); then
+    steps='{"nodes":[],"edges":[]}'
+    [ "$record_state" = uninitialized ] && record_state=refused:unknown-pipeline-kind
+  fi
+  waits=$(pipeline_board_waits_json "$id" "$gen") || return 1
+  probe=$(pipeline_board_probe_json "$id" "$gen") || return 1
+  initialized=false
+  if [ "$record_state" = ok ] && [ "$PIPELINE_RECORD_HAS_LINE" -eq 1 ]; then
+    initialized=true
+  fi
+  if [ "$initialized" = true ]; then
+    jq -nc --arg id "$id" --arg kind "$kind" --arg gen "$gen" --argjson steps "$steps" \
+      --arg step "$PIPELINE_RECORD_STEP" --argjson step_rev "$PIPELINE_RECORD_REV" \
+      --arg step_ts "$PIPELINE_RECORD_TS" --arg step_evidence "$PIPELINE_RECORD_EVIDENCE" \
+      --argjson waits "$waits" --argjson probe "$probe" --argjson initialized true \
+      --argjson step_proven true --arg record_state "$record_state" \
+      '{id:$id,kind:$kind,gen:$gen,steps:$steps,step:$step,step_rev:$step_rev,step_ts:$step_ts,step_evidence:$step_evidence,crew_state:{verb:"unavailable",source:"-",ts:"-"},waits:$waits,probe_last:$probe,initialized:$initialized,step_proven:$step_proven,record_state:$record_state}' >> "$output"
+  else
+    jq -nc --arg id "$id" --arg kind "$kind" --arg gen "$gen" --argjson steps "$steps" \
+      --argjson waits "$waits" --argjson probe "$probe" --argjson initialized false \
+      --argjson step_proven false --arg record_state "$record_state" \
+      '{id:$id,kind:$kind,gen:$gen,steps:$steps,step:null,step_rev:null,step_ts:null,step_evidence:null,crew_state:{verb:"unavailable",source:"-",ts:"-"},waits:$waits,probe_last:$probe,initialized:$initialized,step_proven:$step_proven,record_state:$record_state}' >> "$output"
+  fi
+}
+
+pipeline_board_json() {
+  local inventory tasks_file task_file file id first generated_epoch check_interval
+  local tmp rc
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || die 'state directory is unavailable'
+  inventory=$(umask 077; mktemp "$STATE/.fm-board-inventory.XXXXXX") || return 1
+  tasks_file=$(umask 077; mktemp "$STATE/.fm-board-tasks.XXXXXX") || { rm -f -- "$inventory"; return 1; }
+  task_file=$(umask 077; mktemp "$STATE/.fm-board-task-json.XXXXXX") || {
+    rm -f -- "$inventory" "$tasks_file"; return 1;
+  }
+  : > "$inventory"; : > "$task_file"
+  for file in "$STATE"/*.meta; do
+    pipeline_state_file_valid "$file" || continue
+    id=${file##*/}; id=${id%.meta}
+    fm_task_id_path_safe "$id" && printf '%s\n' "$id" >> "$inventory"
+  done
+  for file in "$STATE"/*.pipeline; do
+    pipeline_state_file_valid "$file" || continue
+    first=$(pipeline_board_record_header "$file" 2>/dev/null || true)
+    [ -n "$first" ] || continue
+    id=${first%%$'\t'*}
+    fm_task_id_path_safe "$id" && printf '%s\n' "$id" >> "$inventory"
+  done
+  sort -u "$inventory" > "$tasks_file"
+  # shellcheck disable=SC2094
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    pipeline_board_task_json "$id" "$task_file" || {
+      rm -f -- "$inventory" "$tasks_file" "$task_file"
+      return 1
+    }
+  done < "$tasks_file"
+  tasks=$(jq -sc . "$task_file") || {
+    rm -f -- "$inventory" "$tasks_file" "$task_file"
+    return 1
+  }
+  generated_epoch=$(date +%s)
+  check_interval=${FM_CHECK_INTERVAL:-${CHECK_INTERVAL:-300}}
+  case "$check_interval" in ''|*[!0-9]*) check_interval=300 ;; esac
+  jq -nc --argjson generated_epoch "$generated_epoch" --argjson check_interval "$check_interval" \
+    --argjson tasks "$tasks" \
+    '{schema:"fm-pipeline-board.v1",generated_epoch:$generated_epoch,check_interval:$check_interval,tasks:$tasks}'
+  rc=$?
+  rm -f -- "$inventory" "$tasks_file" "$task_file"
+  return "$rc"
+}
+
+probe_task() {  # <id> [quiet]
+  local id=$1 quiet=${2:-} status_file meta
   local pauses line_no key line current current_state now ts since kind step gen attempt wait rule action probe evidence
   fm_task_id_path_safe "$id" || die "invalid task id: $id"
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
@@ -415,6 +1180,14 @@ probe_task() {  # <id>
   meta="$STATE/$id.meta"
   pipeline_state_file_valid "$status_file" || die "status file is unavailable: $id"
   pipeline_state_file_valid "$meta" || die "meta file is unavailable: $id"
+  pipeline_record_reset
+  if [ -f "$meta" ]; then
+    if [ "$quiet" = quiet ]; then
+      pipeline_reconcile "$id" probe >/dev/null 2>/dev/null || return 1
+    else
+      pipeline_reconcile "$id" probe >/dev/null || return 1
+    fi
+  fi
   [ -f "$status_file" ] || return 0
   pauses=$(active_paused "$status_file")
   [ -n "$pauses" ] || return 0
@@ -424,16 +1197,14 @@ probe_task() {  # <id>
   current_state=${current_state%% · *}
   now=$(date +%s)
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  kind=-
-  step=-
-  gen=-
-  attempt=-
-  if [ -f "$meta" ]; then
-    kind=$(meta_value "$meta" kind); [ -n "$kind" ] || kind=-
-    step=$(meta_value "$meta" step); [ -n "$step" ] || step=-
-    gen=$(meta_value "$meta" spawn_gen); [ -n "$gen" ] || gen=-
-    attempt=$(meta_value "$meta" attempt); [ -n "$attempt" ] || attempt=-
-  fi
+  kind=${PIPELINE_RECORD_KIND:--}
+  step=${PIPELINE_RECORD_STEP:--}
+  gen=${PIPELINE_RECORD_GEN:--}
+  attempt=${PIPELINE_RECORD_ATTEMPT:--}
+  [ -n "$kind" ] || kind=-
+  [ -n "$step" ] || step=-
+  [ -n "$gen" ] || gen=-
+  [ -n "$attempt" ] || attempt=-
   lock_log
   while IFS=$'\t' read -r line_no key line; do
     wait=$(wait_identity "$key")
@@ -474,18 +1245,47 @@ EOF
 probe_all() {
   local file id
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
+  for file in "$STATE"/*.meta; do
+    pipeline_state_file_valid "$file" || continue
+    id=${file##*/}
+    id=${id%.meta}
+    fm_task_id_path_safe "$id" || continue
+    [ -f "$STATE/$id.status" ] || probe_task "$id" quiet || true
+  done
   for file in "$STATE"/*.status; do
     pipeline_state_file_valid "$file" || continue
     id=${file##*/}
     id=${id%.status}
     fm_task_id_path_safe "$id" || continue
-    probe_task "$id"
+    probe_task "$id" quiet || true
   done
 }
 
-command=${1:-}
+if [ "${FM_PIPELINE_SOURCE_ONLY:-0}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
 shift || true
 case "$command" in
+  reconcile)
+    [ "$#" -eq 1 ] || die 'reconcile requires a task id'
+    pipeline_reconcile "$1"
+    ;;
+  retire)
+    [ "$#" -eq 1 ] || die 'retire requires a task id'
+    pipeline_retire "$1"
+    ;;
+  board-json)
+    [ "$#" -eq 0 ] || die 'board-json takes no arguments'
+    pipeline_board_json
+    ;;
+  steps)
+    [ "$#" -eq 1 ] || die 'steps requires a kind'
+    pipeline_kind_steps "$1" >/dev/null || die "unknown pipeline kind: $1"
+    IFS=$'\t' read -r nodes edges <<EOF
+$(pipeline_kind_steps "$1")
+EOF
+    printf 'kind=%s\nnodes=%s\nedges=%s\n' "$1" "$nodes" "$edges"
+    ;;
   probe)
     task=
     while [ "$#" -gt 0 ]; do
@@ -498,6 +1298,7 @@ case "$command" in
     if [ -n "$task" ]; then probe_task "$task"; else probe_all; fi
     ;;
   append)
+    [ "${FM_PIPELINE_ALLOW_APPEND:-0}" = 1 ] || die 'append is an internal test-only operation'
     [ "$#" -eq 1 ] || die 'append requires one event line'
     append_event "$1"
     ;;
