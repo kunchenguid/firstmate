@@ -1,7 +1,6 @@
 # tmux runtime backend
 
 tmux is Firstmate's default runtime backend and the fully supported baseline for secondmate homes.
-CI requires tmux for the real away-mode injection end-to-end tests, but Herdr now carries the larger backend-specific test suite and its own dedicated required CI lane; see [`docs/herdr-backend.md`](herdr-backend.md) for that evidence.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
 ## Setup
