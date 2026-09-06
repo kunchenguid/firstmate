@@ -447,7 +447,7 @@ expect_code() {
   [ "$actual" = "$expected" ] || fail "$label: expected exit $expected, got $actual"
 }
 
-# assert_grep <pattern> <file> <msg>: fixed-string grep must match in <file>.: fixed-string grep must match in <file>.
+# assert_grep <pattern> <file> <msg>: fixed-string grep must match in <file>.
 # `--` guards patterns that begin with '-' (e.g. backlog/registry lines).
 assert_grep() {
   grep -F -- "$1" "$2" >/dev/null || fail "$3"

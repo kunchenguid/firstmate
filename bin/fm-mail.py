@@ -113,12 +113,13 @@ def cmd_read():
         for i in ids[-READ_LIMIT:]:
             uid = i.decode() if isinstance(i, bytes) else str(i)
             typ, msg = m.uid('fetch', i, '(BODY.PEEK[])')
-            if typ != 'OK' or not msg or not msg[0]:
+            if typ != 'OK' or not msg or not msg[0] or not msg[0][1]:
                 print('---')
                 print('Uid:', uid)
                 print('From:', '(unfetchable)')
                 print('Date:', '')
                 print('Subj:', 'unfetchable body - see fm-mail read')
+                print('Body:', '(body unavailable)')
                 continue
             mi = email.message_from_bytes(msg[0][1])
             print('---')
@@ -127,11 +128,14 @@ def cmd_read():
             print('Subj:', dec(mi.get('Subject')))
             preview = body_preview(mi)
             if preview:
-                first = preview.splitlines()[0] if preview else preview
+                first = preview.splitlines()[0]
                 print('Body:', (first[:MAX_PREVIEW] if first else ''))
             else:
-                print('Body: (body unavailable)')
-        m.logout()
+                print('Body:', '(body unavailable)')
+        try:
+            m.logout()
+        except Exception:
+            pass
         return 0
     except Exception as e:
         print('fm-mail read error:', e)
