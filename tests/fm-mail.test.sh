@@ -732,6 +732,45 @@ SH
   pass "fm-mail: a failed retry clear fails the poll instead of duplicating the recovery wake"
 }
 
+test_poll_fails_closed_when_stale_retry_clear_fails() {
+  # After a successful non-degraded wake, a stale retry entry must be cleared
+  # fail-closed: swallowing that failure would leave the uid eligible for a
+  # duplicate recovery wake on the next poll.
+  local fakebin out rc=0
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  mkdir -p "$HOME_DIR/bin"
+  [ -e "$HOME_DIR/bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$HOME_DIR/bin/fm-wake-lib.sh"
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t90009\n'
+printf '77\t2026-09-05T00:00:00Z\tfrom@x\tHello\tok\n'
+SH
+  chmod +x "$fakebin/python3"
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+  printf '77\n' > "$HOME_DIR/state/.mail-retry"
+  chmod 0000 "$HOME_DIR/state/.mail-retry"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll must fail when a stale retry cannot be cleared after wake"
+  assert_contains "$out" "could not clear stale retry for 77" "failure names the stale-retry cleanup"
+  assert_contains "$out" "woke for 77" "the wake already landed before the cleanup failure"
+  chmod 0600 "$HOME_DIR/state/.mail-retry"
+  assert_grep "77" "$HOME_DIR/state/.mail-retry" "the stale retry entry remains for the next poll to clear"
+  pass "fm-mail: a failed stale-retry clear fails the poll instead of silently leaving a duplicate-wake entry"
+}
+
+test_assert_equals_rejects_mismatch() {
+  # Guard against a silent false pass: assert_equals must be defined and must
+  # abort on a mismatch (the retry-scan cursor test depends on it).
+  if ( assert_equals "11" "10" "deliberate mismatch" ) >/dev/null 2>&1; then
+    fail "assert_equals must fail when expected and actual differ"
+  fi
+  assert_equals "11" "11" "matching values must pass"
+  pass "tests/lib: assert_equals fails on mismatch so cursor assertions cannot false-pass"
+}
+
 test_poll_fails_closed_when_retry_unwritable() {
   local fakebin homedir_bin out rc=0
   fakebin=$(fm_fakebin "$TMP_ROOT")
@@ -1464,6 +1503,8 @@ test_poll_cap_one_never_suppresses_new_mail
 test_poll_cap_one_alternates_new_and_retry
 test_poll_fails_closed_when_retry_unwritable
 test_poll_fails_closed_when_retry_clear_fails
+test_poll_fails_closed_when_stale_retry_clear_fails
+test_assert_equals_rejects_mismatch
 test_poll_fails_closed_when_poll_list_fails
 test_poll_restores_retry_when_recovered_wake_cannot_append
 test_poll_fetch_raise_does_not_abort_the_scan

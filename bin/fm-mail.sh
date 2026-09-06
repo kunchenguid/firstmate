@@ -519,8 +519,13 @@ mail_poll() {
         if [ "$status" != degraded ]; then
           # Newly surfaced (ok) or recovered (retry) mail carries real
           # metadata: no retry record may remain, and a stale entry left by a
-          # rolled-back earlier wake is cleaned here.
-          mail_retry_remove "$uid" || true
+          # rolled-back earlier wake is cleaned here. Fail closed so a stale
+          # entry cannot silently remain eligible for a duplicate wake.
+          if ! mail_retry_remove "$uid"; then
+            echo "fm-mail: could not clear stale retry for $uid; retried on next poll" >&2
+            fm_lock_release "$STATE_DIR/.mail-seen.lock"
+            return 1
+          fi
         fi
       else
         if [ "$status" = retry ] && [ "$wake_rc" -ne 2 ]; then
