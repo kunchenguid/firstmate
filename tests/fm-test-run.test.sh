@@ -1339,6 +1339,51 @@ test_coverage_is_locale_independent() {
   pass "coverage guard uses identical collation across caller locales"
 }
 
+test_portable_backend_isolation() {
+  local tmp tool jobs
+  tmp=$(fm_test_tmproot fm-runner-backend-isolation)
+  mkdir -p "$tmp/bin" "$tmp/repo/bin" "$tmp/repo/tests"
+  cp "$RUNNER" "$tmp/repo/bin/fm-test-run.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$tmp/repo/bin/"
+  for tool in tmux herdr; do
+    cat > "$tmp/bin/$tool" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_BACKEND_CONTACTS"
+SH
+    chmod +x "$tmp/bin/$tool"
+  done
+  cat > "$tmp/repo/tests/fm-procevent.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ -z "${FM_BACKEND:-}${HERDR_ENV:-}${HERDR_PANE_ID:-}${HERDR_SOCKET_PATH:-}${HERDR_SESSION:-}${TMUX:-}" ]
+rc=0
+herdr status >/dev/null 2>&1 || rc=$?
+[ "$rc" = 97 ]
+rc=0
+tmux list-sessions >/dev/null 2>&1 || rc=$?
+[ "$rc" = 97 ]
+tmux -L fm-isolation-private list-sessions
+mkdir -p "$TMPDIR/own-fake"
+printf '%s\n' '#!/usr/bin/env bash' 'echo own-fake' > "$TMPDIR/own-fake/herdr"
+chmod +x "$TMPDIR/own-fake/herdr"
+[ "$(PATH="$TMPDIR/own-fake:$PATH" herdr status)" = own-fake ]
+SH
+  cp "$tmp/repo/tests/fm-procevent.test.sh" "$tmp/repo/tests/fm-quota-choose.test.sh"
+  for jobs in 1 2; do
+    : > "$tmp/contacts"
+    (cd "$tmp/repo" && FM_BACKEND=herdr HERDR_ENV=1 HERDR_PANE_ID=live HERDR_SOCKET_PATH=/live.sock \
+      HERDR_SESSION=default TMUX=live FM_TEST_BACKEND_CONTACTS="$tmp/contacts" \
+      PATH="$tmp/bin:$PATH" bin/fm-test-run.sh --jobs "$jobs" \
+      tests/fm-procevent.test.sh tests/fm-quota-choose.test.sh) > "$tmp/output" 2>&1 \
+      || fail "portable backend isolation failed with jobs=$jobs: $(cat "$tmp/output")"
+    [ "$(wc -l < "$tmp/contacts" | tr -d ' ')" = 2 ] || fail 'unintended backend contact'
+    [ "$(grep -c '^-L fm-isolation-private list-sessions$' "$tmp/contacts")" = 2 ] \
+      || fail 'portable test reached an unscoped backend'
+  done
+  pass "portable serial and concurrent tests reject ambient live backends but allow mocks and private tmux"
+}
+
+
 test_aggregate_json() {
   local tmp a b
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggjson.XXXXXX")
@@ -1393,6 +1438,7 @@ test_script_list_uses_bounded_automatic_concurrency
 test_family_proofs_run_in_separate_concurrent_phases
 test_empty_selection_emits_summary
 test_timing_markers_and_json
+test_portable_backend_isolation
 test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_fail_on_gate_skip_token

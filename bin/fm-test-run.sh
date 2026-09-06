@@ -2090,10 +2090,49 @@ record_script_result() {
 # positive, a script that outruns it is terminated and reported as exit 124: a
 # hung script must become a bounded failure rather than an unbounded suite,
 # because an unbounded suite is what silently outruns its caller's budget.
-run_script_bounded() {  # <script> <out> <stream> <id>
+run_script_bounded() (  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
   local rc
-  : "$id"
+  trap - EXIT HUP INT TERM
+  local family work real_tmux
+  family=$(family_for_basename "$(basename "$script")")
+  work="$RUN_TMP/backend-$id"
+  mkdir -p "$work/tmp"
+  chmod 0700 "$work" "$work/tmp"
+  export TMPDIR="$work/tmp" TMP="$work/tmp"
+  unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
+    FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND \
+    HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
+    HERDR_TAB_ID HERDR_WORKSPACE_ID TMUX TMUX_PANE 2>/dev/null || true
+  umask 022
+  case "$family" in
+    real-herdr-gated|live-harness-optin) ;;
+    *)
+      mkdir -p "$work/backend-guard"
+      printf '%s\n' '#!/usr/bin/env bash' \
+        'echo "test isolation: provide a fake Herdr backend for portable tests" >&2' \
+        'exit 97' > "$work/backend-guard/herdr"
+      real_tmux=$(command -v tmux || true)
+      if [ -n "$real_tmux" ]; then
+        printf '#!/usr/bin/env bash\nreal_tmux=%q\n' "$real_tmux" > "$work/backend-guard/tmux"
+        cat >> "$work/backend-guard/tmux" <<'SH'
+case "${1:-}" in
+  -V) exec "$real_tmux" "$@" ;;
+  -L|-S)
+    if [ -n "${2:-}" ] && [ "$2" != default ]; then
+  exec "$real_tmux" "$@"
+    fi
+    ;;
+esac
+echo 'test isolation: provide fake tmux or an explicit private socket' >&2
+exit 97
+SH
+        chmod +x "$work/backend-guard/tmux"
+      fi
+      chmod +x "$work/backend-guard/herdr"
+      export PATH="$work/backend-guard:$PATH"
+      ;;
+  esac
   set +e
   if [ "$stream" -eq 1 ]; then
     if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
@@ -2119,7 +2158,7 @@ run_script_bounded() {  # <script> <out> <stream> <id>
     [ "$stream" -eq 1 ] && tail -1 "$out"
   fi
   return "$rc"
-}
+)
 
 run_one_serial() {
   local script=$1
@@ -2241,10 +2280,6 @@ else
     (
       trap - EXIT HUP INT TERM
       set +e
-      export TMPDIR="$work/tmp"
-      export TMP="$work/tmp"
-      unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
-        FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
       set +e
