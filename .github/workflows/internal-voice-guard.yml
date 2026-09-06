@@ -1,0 +1,73 @@
+name: Voice guard
+run-name: "PR #${{ github.event.pull_request.number }} text - ${{ github.event.action }}"
+
+# The commit-message half of this refusal is prevention: bin/fm-lint.sh runs it
+# before the first push, so matching text never leaves the machine.
+# This pull request check is only a backstop, and the "Internal-voice refusal
+# before the first push" section of docs/architecture.md owns why.
+#
+# It matters because of how a squash merge composes public history: the title
+# becomes the merge commit's subject and the description can become its body,
+# so internal voice in either lands on the default branch under the repository
+# owner's name exactly like a leaked commit message would.
+#
+# "edited" is in the trigger list on purpose: a description rewritten after the
+# checks first passed is the one vector the pre-push refusal cannot see.
+#
+# SCANNER SELECTION. The separate base-branch checkout prevents this job from
+# executing a scanner the pull request rewrote. It does not make the job a trust
+# boundary because this workflow file still travels with the pull request; the
+# "Internal-voice refusal before the first push" section of docs/architecture.md
+# owns the complete scope and trust limit.
+#
+# BOOTSTRAP GAP. While bin/fm-prepush-voice-guard.sh is absent from the base
+# branch, this check does not scan anything, including on the pull request that
+# introduces the scanner. It reports that skip as a warning annotation and job
+# summary line as a courtesy notice that the scan did not run, and it does NOT
+# fall back to the pull request's copy. The condition ends as soon as the file is
+# on the base branch.
+# The residual that follows: if the scanner were ever deleted from the default
+# branch, this check would skip again until it is restored.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: voice-guard-${{ github.event.pull_request.number }}-${{ github.event.action == 'edited' && github.run_id || 'head-change' }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: PR text must be free of internal voice
+    runs-on: ubuntu-latest
+    steps:
+      # The base BRANCH, not base.sha, so the newest trusted rules apply rather
+      # than whatever the pull request happened to branch from. Neither value is
+      # pull-request-controllable.
+      - name: Check out the trusted scanner from the base branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          path: trusted-scanner
+      # The title and body are attacker-controlled text, so they reach the
+      # check through the environment and stdin, never through run: string
+      # interpolation.
+      - name: Refuse internal voice in the pull request title and description
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          guard=trusted-scanner/bin/fm-prepush-voice-guard.sh
+          if [ ! -f "$guard" ]; then
+            reason='bin/fm-prepush-voice-guard.sh is not on the base branch, so this pull request'"'"'s title and description were NOT scanned. This check becomes effective once the scanner is on the base branch.'
+            printf '::warning title=Voice guard did not scan this pull request::%s\n' "$reason"
+            printf 'Voice guard: NOT APPLIED. %s\n' "$reason"
+            printf 'Voice guard: **NOT APPLIED**. %s\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | bash "$guard" --text -

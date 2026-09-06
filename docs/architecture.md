@@ -221,6 +221,47 @@ Independently, `fm-spawn.sh`, `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh
 A normal primary checkout or crewmate worktree has neither signal and remains unaffected.
 The helper's header owns the exact signal detection, relocated-home limitation, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.
 
+## Internal-voice refusal before the first push
+
+The same identity that the authority boundary above contains also leaks in the other direction, as text rather than as capability.
+An agent working inside this repo reads `AGENTS.md`'s "address the user as captain" rule as an ordinary repo file and applies it to commit messages, which it treats as responses; the messages that leaked came from the gate's own review, test, and document agents, so no crewmate brief could have prevented them.
+`bin/fm-prepush-voice-guard.sh` is deterministic commit-message prevention, paired with the scoping sentence at that instruction in `AGENTS.md`.
+This check catches the accident in which a pipeline agent writes internal voice into a commit message or pull request description without meaning to, the same failure that put two such messages permanently into public history under the repository owner's name.
+It is not a trust boundary.
+It does not stop an author who deliberately disables it, because the lint entry point, the scanner, and the workflow file all travel with the branch being judged.
+Enforcement that binds a determined author has to live somewhere the branch cannot edit, which is the separate upstream item already filed as `nm-pr-body-scan-before-api`.
+Reading this check as a security control exceeds its stated scope.
+
+It runs before the first push rather than before merge, because on a repository firstmate does not own a maintainer can merge at any moment.
+The enforcement point is `bin/fm-lint.sh`'s default path: `.no-mistakes.yaml` pins `commands.lint` to that script and the gate runs lint after its review, test, and document steps, so it is the last firstmate-owned code to see every commit the branch would contribute, including the ones the gate's own agents wrote.
+It stops with an unknown-range error when neither `origin/main` nor local `main` resolves, which is why the CI lint job checks out full history.
+On a branch that has not been pushed, a matching commit message is therefore refused before it leaves the machine.
+
+The set the guard scans by default is every commit reachable from `HEAD` but not from the default-branch ref, preferring `origin/main` and falling back to local `main` only when it does not resolve, so an ahead local branch cannot shrink the set.
+That set is deliberately broader than "commits that have never been pushed": a commit already on a feature remote or already visible in an open pull request stays in it until the default branch carries it.
+The conservative choice is what keeps the refusal standing while the leak is still in what a maintainer would merge, and the cost is that clearing such a refusal means rewriting already-pushed history rather than adding a commit on top.
+
+The pull request title and description half is only a backstop, and this section owns that limit.
+`.github/workflows/internal-voice-guard.yml` receives them on open, edit, synchronize, and reopen after GitHub has already stored and exposed the text.
+A failed check reports a leak that is already public and cannot undo that disclosure.
+Preventing that earlier requires scanning the locally generated title and description before the API call in the no-mistakes repository, which is outside this change's scope.
+
+That workflow runs the base branch's copy of the scanner, checked out separately, and never the pull request's own.
+A `pull_request` checkout is the pull request's own code, so running the scanner from it would let a pull request rewrite the scanner to succeed and ship a leaking title and body, approving itself with a green check.
+While `bin/fm-prepush-voice-guard.sh` is absent from the base branch the check does not scan at all, including on the pull request that introduces the scanner.
+It reports that skip as a warning annotation and a job summary line rather than passing silently, and it does not fall back to the pull request's copy, because that fallback is the same vulnerability with extra steps.
+The condition ends as soon as the file is on the base branch, and the residual that follows is that deleting the scanner from the default branch would make this check skip again until it is restored.
+
+The refusal also covers a pointer to the working session that produced a change, as a trailer or as a bare link, because that is internal material leaving the machine in the same artifact at the same moment.
+It matches the fleet's literal pointer format rather than the word `session`, so ordinary technical uses still pass.
+The same guard refuses relative or machine-root-qualified `data/<id>/<file>` paths and `.lavish/<file>` paths at any depth, while flat data files, nested `tests/data/` fixture paths, and the bare words `report`, `brief`, and `Lavish` remain outside that coverage.
+Those two families are the whole of that coverage: `state/`, `config/`, `projects/`, `.no-mistakes/`, and `.env` paths all have legitimate merged mentions and are deliberately left out, with their counts recorded in the script's header.
+
+The script's header owns the rule set, current merged-history evidence, admitted path roots and delimiters, and the rules that were rejected.
+The short version is that the admissible signal is the syntactic position of an address or a pointer rather than any vocabulary: this repo's own subject matter is the fleet, so `captain hold`, `captain intent`, the `/ahoy` skill, and `shipshape` are legitimate and must keep shipping.
+Its name is deliberately outside the `bin/fm-voice-*` audio relay family, which is unrelated.
+`tests/fm-prepush-voice-guard.test.sh` pins both directions against the real merged history the rules were selected on.
+
 ## Two task shapes
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
