@@ -1893,11 +1893,15 @@ test_stale_terminal_status_dead_agent_not_absorbed_on_cobranch_run() {
   window="test:fm-closed"
   printf 'idle bare shell after agent exit' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/closed.meta"
-  printf 'window=test:fm-sibling\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/sibling.meta"
   printf 'done: implementation complete, ready to validate\n' > "$state/closed.status"
-  printf 'working: validating through no-mistakes\n' > "$state/sibling.status"
   sig=$(seen_sig "$state/closed.status"); printf '%s' "$sig" > "$state/.seen-closed_status"
-  sig=$(seen_sig "$state/sibling.status"); printf '%s' "$sig" > "$state/.seen-sibling_status"
+  # The co-branch sibling is deliberately NOT given a record of its own. Its only
+  # role in this scenario is to own the run that gets credited to the closed crew
+  # by branch, and the canned FM_FAKE_CREW_STATE verdict below already IS that
+  # misattributed `working`. A second recorded window would join the stale loop,
+  # accumulate its own stale counts against a shared pane hash (the fake tmux
+  # capture ignores its target), and race the assertions below by wedge-escalating
+  # for a reason unrelated to the crew under test.
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle bare shell after agent exit")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -2698,6 +2702,62 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   [ ! -e "$state/.stale-since-$key" ] || fail "wedge timer remained after authoritative working escalation"
   unset FM_FAKE_CREW_STATE
   pass "a paused status overridden by authoritative working preserves its wedge timer and escalates"
+}
+
+# --- the reported symptom itself, at loop level: paused + DEAD agent ---------
+# The case above is the same shape with a LIVE (well, unknown-liveness) agent and
+# is what the reported failure actually looked like from the outside: on a shared
+# feature branch bin/fm-crew-state.sh credited a co-branch sibling's pipeline to a
+# crew that had already been exited, `state/.watch-triage.log` recorded its empty
+# pane absorbed as "non-terminal stale (provably working)" on every poll, and the
+# wedge timer escalated it as a possible wedge every FM_STALE_ESCALATE_SECS,
+# indefinitely, until teardown. tests/fm-watch-pause-precedence.test.sh case (b)
+# pins the classifier verdict for that shape; this drives the whole watcher loop
+# for it, so the absorb-and-escalate loop the captain saw cannot come back
+# unnoticed. The canned crew-state verdict below IS the misattributed `working`;
+# the dead verdict comes from the real tmux probe over the fake tmux, whose
+# current command is a bare shell rather than the recorded harness.
+test_paused_dead_agent_absorbed_on_pause_cadence_not_wedge_escalated() {
+  local dir state fakebin out capture_file window key pane_hash sig pid round
+  dir=$(make_case paused-dead-cobranch); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-paused-dead"
+  printf 'idle bare shell after agent exit\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/paused-dead.meta"
+  printf 'paused: waiting on the captain to merge\n' > "$state/paused-dead.status"
+  sig=$(seen_sig "$state/paused-dead.status"); printf '%s' "$sig" > "$state/.seen-paused-dead_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle bare shell after agent exit")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # The escalation threshold sits at its floor, so a pane absorbed as provably
+  # working would grow a wedge timer and escalate within a poll or two. A dead
+  # agent's own declared wait is taken instead, so it is absorbed on the bounded
+  # pause cadence: no wedge timer, no wake, no output.
+  round=1
+  while [ "$round" -le 3 ]; do
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_poll_cycle "$state" "$pid"; then
+      reap "$pid"; fail "dead crew's declared wait woke on round $round instead of absorbing: $(cat "$out")"
+    fi
+    reap "$pid"
+    [ ! -s "$out" ] || fail "dead crew's declared wait printed a wake on round $round: $(cat "$out")"
+    grep -F "possible wedge" "$out" >/dev/null && fail "dead crew's declared wait wedge-escalated on round $round: $(cat "$out")"
+    [ ! -e "$state/.stale-since-$key" ] || fail "dead crew's declared wait started a wedge timer on round $round"
+    [ ! -e "$state/.wedge-escalations-$key" ] || fail "dead crew's declared wait accumulated wedge escalations on round $round"
+    round=$((round + 1))
+  done
+  [ ! -s "$state/.wake-queue" ] || fail "dead crew's declared wait queued a wake: $(cat "$state/.wake-queue")"
+  unset FM_FAKE_CREW_STATE
+  pass "the reported symptom: a dead crew's declared wait is absorbed on the pause cadence, never wedge-escalated off a co-branch run"
 }
 
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
@@ -4282,6 +4342,7 @@ test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
+test_paused_dead_agent_absorbed_on_pause_cadence_not_wedge_escalated
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence

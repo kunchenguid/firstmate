@@ -2394,6 +2394,80 @@ EOF
   pass "a bound crew with a stale own run is never credited its sibling's current ledger row"
 }
 
+# A run TOON named by id that is PARKED at a gate, as `axi status --run <id>`
+# answers for a run that is still very much alive.
+run_parked_id() {  # <branch> <run-id> <head>
+  cat <<EOF
+run:
+  id: "$2"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "$3"
+  pr: ""
+  findings[1]{id,severity,file,line,action,description}:
+    r1,error,b.go,,ask-user,changes product behavior
+gate: review
+EOF
+}
+
+# The head-UNCHANGED variant of a stale binding, and the one the head rule
+# cannot catch. Crew T binds run A; A ends at head H; T starts run B at the SAME
+# head H and never re-binds. `axi status` answers B, T refetches A by id, and A
+# passes every gate - same branch, its own id, and a head equal to the
+# worktree's - so before the decline T was reported `state: failed - run
+# cancelled` while it was actively validating B, and teardown would then remove
+# its worktree without aborting B. Declining a TERMINAL binding whose branch is
+# still current returns T to the unbound path, where B - which no other task
+# binds - is credited to it, so T reads its real current state.
+test_stale_terminal_binding_at_the_same_head_falls_back_to_the_current_run() {
+  reset_fakes
+  local d out head
+  d=$(make_shared_branch_case stale-same-head fm/shared-samehead)
+  arm_shared_head "$d"
+  head=$(git -C "$d/wt-owner" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes" "harness=claude" "nm_run=01STALESAMEHEAD0000000001"
+  # The restarted run is the crew's OWN and nobody binds it - exactly the shape
+  # a missed re-bind leaves behind.
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-samehead 01RESTARTEDRUN000000000001)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_terminal_id fm/shared-samehead 01STALESAMEHEAD0000000001 "$head" cancelled)"
+  out=$(run_crew_state "$d" owner)
+  assert_not_contains "$out" "state: failed" \
+    "a stale terminal binding at the same head must not report a validating crew as failed"
+  assert_not_contains "$out" "run cancelled" \
+    "the stale binding's terminal TOON must not be parsed as authoritative"
+  assert_contains "$out" "state: working" "the crew reads the run it is actually validating"
+  assert_contains "$out" "source: run-step" "and reads it from the run step"
+  pass "a stale terminal binding at an unchanged head falls back to the crew's real current run"
+}
+
+# The decline is scoped to TERMINAL bindings only. A bound run that is still
+# alive keeps precedence over whatever the repo happens to be reporting, so a
+# crew parked at its own gate is never given up for a sibling's running row.
+test_active_binding_keeps_precedence_over_the_repos_current_run() {
+  reset_fakes
+  local d out head
+  d=$(make_shared_branch_case active-binding fm/shared-active)
+  arm_shared_head "$d"
+  head=$(git -C "$d/wt-owner" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/owner.meta" "window=fm:fm-owner" "worktree=$d/wt-owner" \
+    "kind=ship" "mode=no-mistakes" "harness=claude" "nm_run=01ACTIVEOWNRUN00000000001"
+  fm_write_meta "$d/state/other.meta" "window=fm:fm-other" "worktree=$d/wt-other" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running_id fm/shared-active 01SIBLINGACTIVE000000000001)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_parked_id fm/shared-active 01ACTIVEOWNRUN00000000001 "$head")"
+  out=$(run_crew_state "$d" owner)
+  assert_contains "$out" "state: parked" \
+    "an active binding must keep precedence over the repo's current run"
+  assert_contains "$out" "source: run-step" "and is read from its own run step"
+  assert_not_contains "$out" "validating (running)" \
+    "the sibling's running row must not be substituted for the crew's own parked run"
+  pass "an active binding keeps precedence over the repo's current run"
+}
+
 # The other way a bound crew reached the ledger on its binding alone: its own
 # run, fetched by id, is on ANOTHER branch (started elsewhere before the
 # worktree moved onto the shared branch). The ledger's same-head row on this
@@ -2623,6 +2697,8 @@ test_same_project_bound_sibling_withholds_coarse_credit
 test_other_project_bound_sibling_is_ignored_by_the_coarse_gate
 test_detached_bound_sibling_owns_its_run_by_id_but_no_longer_holds_the_branch
 test_bound_crew_with_a_stale_own_run_is_not_credited_a_siblings_current_row
+test_stale_terminal_binding_at_the_same_head_falls_back_to_the_current_run
+test_active_binding_keeps_precedence_over_the_repos_current_run
 test_bound_crew_whose_own_run_is_on_another_branch_takes_no_ledger_credit
 test_unbound_cobranch_crews_keep_coarse_credit_with_no_binding_on_the_branch
 test_unbound_crew_never_takes_coarse_credit_for_a_same_branch_run_bound_elsewhere

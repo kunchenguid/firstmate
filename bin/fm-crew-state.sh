@@ -71,6 +71,15 @@
 #          bound sibling whose worktree has since detached, moved to another
 #          branch, or been torn down no longer withholds the ledger's credit on
 #          this branch (it still owns the run it bound on the id route).
+#          A binding is DECLINED, and the crew falls through to the unbound
+#          path, when the bound run has reached a terminal outcome while the
+#          repo's current run is a different id on this same branch: that is a
+#          crew which restarted validation and did not re-bind, and pinning it
+#          to its own finished row would report `failed` for a crew that is
+#          actively validating and let teardown remove its worktree without
+#          aborting the live run. Declining degrades a stale binding to the
+#          branch guess rather than to a confident wrong answer, so a missed
+#          re-bind is self-healing. An ACTIVE bound run always keeps precedence.
 #        - the DELIVERY-MODE gate: a direct-PR or local-only crew never drives a
 #          pipeline, so it is never credited a run at all.
 #      bin/fm-watch.sh's pause_state_class independently declines this proof for
@@ -572,7 +581,27 @@ if [ "$KIND" = ship ] && [ "$RUN_ELIGIBLE" = 1 ] && [ -n "$CREW_BRANCH" ] \
     # applies to it. Nested inside `[ -n "$RUN_OUT" ]` for the same reason as
     # the ledger fallback: an empty primary answer means the CLI itself did not
     # respond, and a second bounded call would only double the wait.
+    CURRENT_RUN_OUT=$RUN_OUT
+    CURRENT_RUN_BRANCH=$(strip_quotes "$(nm_field branch)")
     RUN_OUT=$(nm_run axi status --run "$NM_BOUND_RUN")
+    # A STALE binding must not pin the crew to a finished run. A crew that
+    # restarts validation at the same head and does not re-bind would otherwise
+    # be reported from its own terminal row - `state: failed - run cancelled` -
+    # while it is actively validating the run the repo is currently reporting,
+    # and teardown would then remove its worktree without aborting that live
+    # run. So when the bound run has reached a terminal outcome and the repo's
+    # current run is a DIFFERENT id on this same branch, the binding is declined
+    # and the crew falls through to the unbound path, which is exactly the
+    # branch guess this whole contract exists to improve on: a wrong or lost
+    # binding degrades to the old behaviour rather than to a confident wrong
+    # answer, which is what makes a missed re-bind self-healing. A bound run
+    # that is still ACTIVE keeps precedence, so a genuinely running own run is
+    # never given up for a sibling's.
+    if [ -n "$RUN_OUT" ] && [ "$CURRENT_RUN_BRANCH" = "$CREW_BRANCH" ] \
+      && ! fm_nm_run_is_active "$RUN_OUT"; then
+      NM_BOUND_RUN=''
+      RUN_OUT=$CURRENT_RUN_OUT
+    fi
   fi
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")

@@ -1640,8 +1640,8 @@ task_bound_run() {
 # recorded worktree currently holds (one local git ref read per bound record,
 # never a CLI call) while this task binds none, is left completely alone and
 # the owner is named.
-task_owns_run() {  # <worktree> <run-id> <branch>
-  local wt=$1 run_id=$2 branch=$3 own owner project
+task_owns_run() {  # <run-id> <branch>
+  local run_id=$1 branch=$2 own owner project
   own=$(task_bound_run)
   if ! fm_nm_run_owned_by_task "$STATE" "$ID" "$own" "$run_id"; then
     if owner=$(fm_nm_run_bound_by_other_task "$STATE" "$ID" "$run_id"); then
@@ -1702,7 +1702,7 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
     awaiting_approval|fix_review) ;;
     *) [ -n "$awaiting" ] || [ "$has_gate" = 1 ] || return 1 ;;
   esac
-  task_owns_run "$wt" "$run_id" "$branch" || return 1
+  task_owns_run "$run_id" "$branch" || return 1
   TASK_RUN_ID=$run_id
   return 0
 }

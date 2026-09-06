@@ -193,9 +193,12 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # only through interactive pane menus (no done: status) is never swallowed. An
 # ACTIONABLE wake (a captain-relevant signal, a no-verb signal without either
 # eligible proof, any check, a stale pane whose crew is not provably working, a
-# stale pane whose agent the backend confidently reports dead regardless of any
-# run credited to it by branch, a provably-working stale past the threshold, or
-# anything unknown) is written to the durable queue and exits. That wakes the
+# TERMINAL-status stale pane whose agent the backend confidently reports dead,
+# regardless of any run credited to it by branch, a provably-working stale past
+# the threshold, or anything unknown) is written to the durable queue and exits.
+# That dead-agent entry is the terminal-status branch alone: under a declared
+# wait a confidently dead agent is classified paused instead and ABSORBED on the
+# bounded pause cadence, so it belongs to the absorbed list rather than here. That wakes the
 # LLM through the background-task completion. The same classifier
 # (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
@@ -982,8 +985,10 @@ crew_agent_alive() {  # <window> <kind>
 # still inherits a co-branch crew's active run and reads `working` forever: the
 # stale path then absorbs its empty pane as provably working on every poll while
 # the wedge timer escalates it as a possible wedge every STALE_ESCALATE_SECS,
-# indefinitely. A dead agent cannot be running that pipeline, so its own
-# declaration is the better evidence. The order is reversed ONLY for a dead agent:
+# indefinitely. A dead agent cannot ANSWER that pipeline's gates or act on its
+# result - the run itself is a background daemon run and may well still be
+# executing, whoever owns it - so the crew's own declaration is the better
+# evidence about the crew. The order is reversed ONLY for a dead agent:
 # a live or ambiguous agent still consults the working class first, so a crew that
 # declared a wait and then genuinely started a run is never silenced. The
 # stale path's terminal-line branch applies the same dead-agent precedence
@@ -1972,9 +1977,11 @@ EOF
           # feature branch a closed crew's `done:` leftover would otherwise
           # inherit a co-branch sibling's active run, be absorbed as provably
           # working, and then wedge-escalate every STALE_ESCALATE_SECS until
-          # torn down. A dead agent cannot be running that pipeline, so its
-          # pane is surfaced once as the genuinely terminal stale it is, with
-          # no wedge timer; a live or ambiguous agent keeps the override.
+          # torn down. A dead agent cannot ANSWER that pipeline's gates or act
+          # on its result - the run is a background daemon run and may still be
+          # executing, whoever owns it - so the pane is surfaced once as the
+          # genuinely terminal stale it is, with no wedge timer; a live or
+          # ambiguous agent keeps the override.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if [ "$(crew_agent_alive "$w" "$kind")" != dead ] \
               && crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then

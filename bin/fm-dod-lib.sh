@@ -203,7 +203,14 @@ fm_dod_block() {  # <mode> <task-id> <firstmate-root> <firstmate-home>
   # its project worktree with neither set - the same reason every other path a
   # brief hands a worker is absolute. A secondmate home's root and home differ,
   # so both are named rather than inferred.
-  bind_cmd="FM_HOME=$home $root/bin/fm-run-bind.sh $id <run-id>"
+  # Both paths are shell-quoted, as bin/fm-brief.sh and bin/fm-promote.sh already
+  # quote the absolute paths they render: this string is a command the worker
+  # copies and runs, so a home or root under a path containing a space would
+  # otherwise word-split, the binding would never land, and attribution would
+  # silently fall back to the branch guess this whole contract exists to replace.
+  # `printf %q` leaves an ordinary path unchanged, so briefs on normal paths are
+  # byte-identical.
+  bind_cmd="FM_HOME=$(printf '%q' "$home") $(printf '%q' "$root/bin/fm-run-bind.sh") $id <run-id>"
   case "$mode" in
     direct-PR)
       cat <<EOF

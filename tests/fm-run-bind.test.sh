@@ -2,9 +2,14 @@
 # tests/fm-run-bind.test.sh - bin/fm-run-bind.sh, which records `nm_run=<run-id>`
 # in a task's record so bin/fm-crew-state.sh can tell concurrent crews on ONE
 # branch apart. The run id is the only unambiguous identifier no-mistakes
-# exposes, and only the crew that started a run knows which id is its own, so a
-# lost or wrong binding silently returns attribution to the branch guess this
-# command exists to replace.
+# exposes, and only the crew that started a run knows which id is its own.
+# A lost or STALE binding degrades to the branch guess this command exists to
+# improve on, rather than to a confident wrong answer: bin/fm-crew-state.sh
+# declines a bound run that has reached a terminal outcome while the repo is
+# currently running a different id on the same branch, and falls through to the
+# unbound path (its header owns that rule). So a missed re-bind is self-healing,
+# and re-binding on every run start - which case (b) pins - is what keeps the
+# crew on the sharper answer.
 #
 #   (a) a first bind records the key and leaves every other key intact
 #   (b) re-binding REPLACES the value rather than accumulating, so a restarted
