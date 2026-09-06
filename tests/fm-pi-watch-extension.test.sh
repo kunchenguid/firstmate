@@ -2598,6 +2598,172 @@ EOF
   pass "an acked replay for a torn-down task is dropped and its handoff record cleared"
 }
 
+# The same incident shape with a signal reason: the extension's own signal
+# routing parses <task>.status keys, so the gate must apply the torn-down
+# rule to them too. An unrelated queued row keeps the global empty-queue
+# rule out of the way, so only the signal rule can produce this drop.
+test_pi_replayed_signal_wake_of_torn_down_task_is_dropped() {
+  local repo home plugin stop out status handoff
+  repo="$TMP_ROOT/pi-replay-signal-drop-root"
+  home="$TMP_ROOT/pi-replay-signal-drop-home"
+  stop="$TMP_ROOT/pi-replay-signal-drop.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_replay_gate_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=signal-fixture\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.watcher-down`, "acked:handling:130247.1788720192.pbH0L2\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tstale\tother:win\tstale: other:win\n");
+const handoff = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+mkdirSync(handoff.slice(0, handoff.lastIndexOf("/")), { recursive: true });
+writeFileSync(handoff, `${JSON.stringify({
+  version: 2,
+  pending: [{
+    version: 1,
+    token: "130247-1788720192-2",
+    message: "signal: gone.status gone.turn-ended",
+    predecessorArmPid: "",
+  }],
+})}\n`);
+
+const handlers = new Map();
+const prompts = [];
+let tool = null;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+  events: { on() {}, emit() {} },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await new Promise((resolve) => setTimeout(resolve, 300));
+if (prompts.some((message) => message.includes("signal: gone.status"))) {
+  throw new Error(`a signal replay for a torn-down task was re-presented: ${prompts.join(" | ")}`);
+}
+if (existsSync(handoff)) throw new Error("the dropped signal replay kept its persisted handoff record");
+if (!tool) throw new Error("Pi watch tool was not registered");
+const redundant = await tool.execute("post-drop-arm", {}, undefined, undefined, {});
+if (!redundant.details?.ok || !String(redundant.details.message).includes("unchanged")) {
+  throw new Error(`dropping the signal replay disturbed arm ownership: ${JSON.stringify(redundant.details)}`);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a signal replay whose task is gone must be dropped, never re-presented"
+  [ -z "$out" ] || fail "Pi replay-signal-drop test printed output: $out"
+  pass "a signal replay for a torn-down task is dropped and its handoff record cleared"
+}
+
+# A gate drop whose handoff cleanup fails must not re-select the record: the
+# record is marked delivered before finishing, so the bounded cleanup pass
+# owns the retry and the gate is consulted exactly once per dropped record.
+test_pi_gate_drop_survives_handoff_cleanup_failure_without_spinning() {
+  local repo home plugin stop gate_log out status handoff
+  repo="$TMP_ROOT/pi-replay-spin-root"
+  home="$TMP_ROOT/pi-replay-spin-home"
+  stop="$TMP_ROOT/pi-replay-spin.stop"
+  gate_log="$TMP_ROOT/pi-replay-spin.gate.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_replay_gate_fixture "$repo"
+  mv "$repo/bin/fm-watch-replay-gate.sh" "$repo/bin/fm-watch-replay-gate-real.sh"
+  cat > "$repo/bin/fm-watch-replay-gate.sh" <<SH
+#!/usr/bin/env bash
+printf 'x\n' >> "$gate_log"
+exec bash "$repo/bin/fm-watch-replay-gate-real.sh" "\$@"
+SH
+  chmod +x "$repo/bin/fm-watch-replay-gate.sh"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=spin-fixture\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  mkdir -p "$home/state/extensions/pi-primary-watch"
+  handoff="$home/state/extensions/pi-primary-watch/session-replacement-actionable.json"
+  cat > "$handoff" <<'JSON'
+{"version":2,"pending":[{"version":1,"token":"130247-1788720192-1","message":"stale: default:wMA:p2","predecessorArmPid":""},{"version":1,"token":"130247-1788720192-2","message":"stale: default:wMA:p2","predecessorArmPid":""}]}
+JSON
+  # An unwritable handoff directory makes clearing a dropped record's entry
+  # fail the same way a corrupted or unwritable handoff file fails in
+  # production, while loading and parsing the seeded records still works.
+  chmod 555 "$home/state/extensions/pi-primary-watch"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_STOP_FILE="$stop" FM_GATE_LOG="$gate_log" timeout 60 node --input-type=module 2>&1 <<'EOF'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.watcher-down`, "acked:handling:130247.1788720192.pbH0L2\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "");
+const handoff = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+
+const handlers = new Map();
+const prompts = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+  events: { on() {}, emit() {} },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await new Promise((resolve) => setTimeout(resolve, 700));
+const gateCalls = () => readFileSync(process.env.FM_GATE_LOG, "utf8").split("\n").filter((row) => row !== "").length;
+if (gateCalls() !== 2) {
+  throw new Error(`the gate must answer exactly once per dropped record, saw ${gateCalls()} calls`);
+}
+if (prompts.some((message) => message.includes("FIRSTMATE WATCHER WAKE: stale: default:wMA:p2"))) {
+  throw new Error(`a dropped replay was re-presented: ${prompts.join(" | ")}`);
+}
+// Cleanup is now possible again; the bounded retry timer must retire both
+// dropped records without consulting the gate a third time.
+chmodSync(`${process.env.FM_HOME}/state/extensions/pi-primary-watch`, 0o755);
+for (let i = 0; i < 100 && existsSync(handoff); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+if (existsSync(handoff)) throw new Error("the dropped records were never retired after cleanup became possible");
+if (gateCalls() !== 2) {
+  throw new Error(`cleanup retries re-consulted the gate: ${gateCalls()} calls`);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  chmod -R u+w "$home" 2>/dev/null
+  expect_code 0 "$status" "a failed handoff cleanup after a gate drop must stay bounded (no re-gating spin)"
+  [ -z "$out" ] || fail "Pi replay-spin test printed output: $out"
+  pass "a gate drop with a failing handoff cleanup marks the record delivered and stays bounded"
+}
+
 # A replayed record whose referenced wake is still unhandled delivers exactly
 # once; Pi's acceptance then retires the record, so a further replacement is
 # silent. Redelivery is bounded at one presentation per acceptance.
@@ -4214,6 +4380,8 @@ test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_streaming_followup_is_never_redelivered_after_replacement
 test_pi_replayed_acked_wake_of_torn_down_task_is_dropped
+test_pi_replayed_signal_wake_of_torn_down_task_is_dropped
+test_pi_gate_drop_survives_handoff_cleanup_failure_without_spinning
 test_pi_replayed_unhandled_wake_delivers_once_then_stops
 test_pi_streaming_time_delivery_keeps_the_successor_chain
 test_pi_successor_failure_during_delivery_is_retried_after_delivery

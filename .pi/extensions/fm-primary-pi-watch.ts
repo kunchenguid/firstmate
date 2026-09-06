@@ -811,6 +811,7 @@ export default function (pi: ExtensionAPI) {
           // armed.
           if (pending.replayed && replayGateDrops(pending.message)) {
             settleClaim("delivered");
+            pending.delivered = true;
             try {
               finishPendingActionable(owner, pending);
             } catch (error) {

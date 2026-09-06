@@ -88,6 +88,60 @@ test_gate_drops_stale_replay_when_its_row_was_acked() {
   pass "a stale replay whose own row was acknowledged is dropped"
 }
 
+test_gate_drops_signal_replay_when_every_referenced_task_is_gone() {
+  local home out
+  home=$(new_home signal-gone)
+  # An unrelated queued row keeps the global empty-queue rule out of the way,
+  # and the referenced task's own signal row lingers unacknowledged, but its
+  # meta is gone: the watcher can never re-detect that endpoint.
+  printf '1\t1\tstale\tother:win\tstale: other:win\n' > "$home/state/.wake-queue"
+  printf '2\t2\tsignal\tgone.status\tsignal: gone.status\n' >> "$home/state/.wake-queue"
+  out=$(verdict "$home/state" "signal: gone.status")
+  [ "$out" = "drop signal-task-gone" ] || fail "expected the torn-down-signal drop, got: $out"
+  pass "a signal replay for a torn-down task is dropped even with its row lingering"
+}
+
+test_gate_drops_signal_replay_when_its_rows_were_acked() {
+  local home out
+  home=$(new_home signal-acked)
+  write_meta "$home/state" task-a default:wMA:p2
+  # The task still exists but neither referenced row survives in the queue;
+  # an unrelated row keeps the queue non-empty past the global rule.
+  printf '1\t1\tstale\tother:win\tstale: other:win\n' > "$home/state/.wake-queue"
+  out=$(verdict "$home/state" "signal: task-a.status task-a.turn-ended")
+  [ "$out" = "drop referenced-wake-acked" ] || fail "expected the acked-row drop, got: $out"
+  pass "a signal replay whose every row was acknowledged is dropped"
+}
+
+test_gate_delivers_signal_batch_with_a_live_unacknowledged_key() {
+  local home out
+  home=$(new_home signal-mixed)
+  write_meta "$home/state" task-a default:wMA:p2
+  printf '1\t1\tsignal\ttask-a.status\tsignal: gone.status task-a.status\n' > "$home/state/.wake-queue"
+  out=$(verdict "$home/state" "signal: gone.status task-a.status")
+  [ "$out" = "deliver" ] || fail "a batch with a live unacked key must deliver, got: $out"
+  pass "a signal batch with any live unacknowledged key delivers"
+}
+
+test_gate_maps_turn_ended_signal_keys_to_their_task() {
+  local home out
+  home=$(new_home signal-turnended)
+  write_meta "$home/state" task-b default:wMA:p9
+  printf '1\t1\tsignal\ttask-b.turn-ended\tsignal: task-b.turn-ended\n' > "$home/state/.wake-queue"
+  out=$(verdict "$home/state" "signal: task-b.turn-ended")
+  [ "$out" = "deliver" ] || fail "a queued turn-ended row must deliver, got: $out"
+  pass "turn-ended keys resolve to their task and its unacknowledged row"
+}
+
+test_gate_delivers_signal_replay_with_unparseable_keys() {
+  local home out
+  home=$(new_home signal-unparseable)
+  printf '1\t1\tstale\tother:win\tstale: other:win\n' > "$home/state/.wake-queue"
+  out=$(verdict "$home/state" "signal: some-text-without-a-status-suffix")
+  [ "$out" = "deliver" ] || fail "an unparseable signal replay must deliver, got: $out"
+  pass "a signal replay whose keys do not parse as status paths delivers"
+}
+
 test_gate_decorated_stale_reason_parses_its_window() {
   local home out
   home=$(new_home decorated-stale)
@@ -173,6 +227,11 @@ test_gate_delivers_when_a_recovery_episode_is_still_outstanding
 test_gate_delivers_when_the_stale_row_is_still_queued
 test_gate_drops_stale_replay_when_no_meta_records_the_window
 test_gate_drops_stale_replay_when_its_row_was_acked
+test_gate_drops_signal_replay_when_every_referenced_task_is_gone
+test_gate_drops_signal_replay_when_its_rows_were_acked
+test_gate_delivers_signal_batch_with_a_live_unacknowledged_key
+test_gate_maps_turn_ended_signal_keys_to_their_task
+test_gate_delivers_signal_replay_with_unparseable_keys
 test_gate_decorated_stale_reason_parses_its_window
 test_gate_delivers_non_stale_reasons_on_a_non_empty_queue
 test_gate_drops_any_replay_when_the_queue_is_empty_even_unparsed
