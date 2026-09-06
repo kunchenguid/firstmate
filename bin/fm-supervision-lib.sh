@@ -671,13 +671,65 @@ fm_lane_floor_live() {  # <state-dir>
   printf '%s\n' "$live"
 }
 
+# Title+body text for backlog items that name a Change but are not actually
+# dispatchable right now: held --kind captain, or held --kind
+# external/parked/future whose named event has not fired, or blocked by a
+# still-open item. tasks-axi's own `held` field already reads a hold whose
+# --until has passed as queued rather than held, and its own `blocked` field
+# already reads a blocker that is done as not blocking, so a plain held=yes /
+# blocked=yes check here is exactly the still-actionable-by-firstmate-only
+# test fm_dispatchable_work's backlog half already applies - filing and
+# holding a decision for the captain is itself what removes the Change from
+# enumeration, and this reads that same record rather than re-deciding it.
+# blocked_by is deliberately not requested: it can hold a quoted
+# comma-separated id list, which would break the right-anchored trailing-field
+# strip below, and the boolean `blocked` field is all this needs.
+fm_lane_floor_held_text() {  # <data-dir>
+  local data=$1 backlog="$1/backlog.md" list_out row rest hold_kind blocked held
+  [ -f "$backlog" ] && command -v tasks-axi >/dev/null 2>&1 || return 0
+  list_out=$(tasks-axi list --fields body,hold_kind,blocked,held --file "$backlog" 2>/dev/null) || return 0
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    held=${row##*,}
+    rest=${row%,*}
+    blocked=${rest##*,}
+    rest=${rest%,*}
+    hold_kind=${rest##*,}
+    rest=${rest%,*}
+    if [ "$blocked" = yes ]; then
+      printf '%s\n' "$rest"
+      continue
+    fi
+    case "$held:$hold_kind" in
+      yes:captain | yes:external | yes:parked | yes:future) printf '%s\n' "$rest" ;;
+    esac
+  done < <(printf '%s\n' "$list_out" | awk '
+    /^tasks\[/ { rows = 1; next }
+    /^[^[:space:]]/ { rows = 0 }
+    rows && /^[[:space:]]/ { sub(/^[[:space:]]+/, ""); print }')
+}
+
+# Does <held-text> name Change <name> as a whole slug token, bare or as an
+# openspec/changes/<name>/ path segment, never as a mere substring of a longer
+# sibling name? A plain substring test would read a hold that names
+# carry-assistant-runtime-deferrals as also naming carry-assistant-runtime.
+fm_lane_floor_change_named() {  # <held-text> <change>
+  local text=$1 change=$2 escaped
+  [ -n "$text" ] && [ -n "$change" ] || return 1
+  # shellcheck disable=SC2016  # the sed script is a literal ERE char class, not shell expansion
+  escaped=$(printf '%s' "$change" | sed 's/[.[\*^$()+?{|\\]/\\&/g')
+  printf '%s' "$text" \
+    | grep -qE "(^|[^A-Za-z0-9_-])${escaped}([^A-Za-z0-9_-]|\$)|openspec/changes/${escaped}/"
+}
+
 # Every openspec Change in one project clone that still carries unticked task
-# boxes and is not already named by a live task's brief. Prints
+# boxes and is not already named by a live task's brief or by a backlog item
+# firstmate filed and held for the captain or an unmet external event. Prints
 # "<change>\t<open-box-count>" lines, or nothing. openspec/changes/archive/ is
 # the landed history and is excluded; the glob's own depth already skips it, and
 # the explicit case below keeps that true if a tasks.md is ever added there.
-fm_lane_floor_project_changes() {  # <project-root> <live-brief-text>
-  local root=$1 brief_text=$2 tasks change open_boxes
+fm_lane_floor_project_changes() {  # <project-root> <live-brief-text> [held-text]
+  local root=$1 brief_text=$2 held_text=${3:-} tasks change open_boxes
   [ -n "$root" ] && [ -d "$root/openspec/changes" ] || return 0
   for tasks in "$root"/openspec/changes/*/tasks.md; do
     [ -f "$tasks" ] || continue
@@ -691,6 +743,7 @@ fm_lane_floor_project_changes() {  # <project-root> <live-brief-text>
     # one unfilled lane, while under-excluding one dispatches a second worker
     # onto work already under way.
     case "$brief_text" in *"$change"*) continue ;; esac
+    fm_lane_floor_change_named "$held_text" "$change" && continue
     printf '%s\t%s\n' "$change" "$open_boxes"
   done
 }
@@ -708,7 +761,11 @@ fm_lane_floor_project_changes() {  # <project-root> <live-brief-text>
 #                                    firstmate's own call to make
 #   openspec <project>:<change>:<n>  an openspec Change under a registered
 #                                    project clone with n unticked task boxes
-#                                    that no live task's brief names
+#                                    that no live task's brief names, and that
+#                                    no backlog item held for the captain or an
+#                                    unmet external event, or blocked by a
+#                                    still-open item, names in its title or
+#                                    body (fm_lane_floor_held_text)
 # A captain-kind hold is excluded because it is a question the captain owns.
 # An external, parked, or future hold is excluded too, but only while still
 # actually held: tasks-axi's own ready listing already reads a hold whose
@@ -717,7 +774,7 @@ fm_lane_floor_project_changes() {  # <project-root> <live-brief-text>
 # event has not yet fired - there is nothing here for firstmate to act on.
 fm_dispatchable_work() {  # <state-dir> [data-dir] [root]
   local state=$1 data=${2:-} root=${3:-$FM_IDLE_SELF_ROOT}
-  local backlog ready_out row id hold_kind
+  local backlog ready_out row id hold_kind held_text
   local meta brief brief_text='' name project_root change open_boxes
 
   [ -n "$data" ] || data=$(dirname -- "$state")/data
@@ -759,6 +816,8 @@ fm_dispatchable_work() {  # <state-dir> [data-dir] [root]
     brief_text="$brief_text"$'\n'"$(cat "$brief" 2>/dev/null)"
   done
 
+  held_text=$(fm_lane_floor_held_text "$data")
+
   # Registered project clones only: data/projects.md is the one registry, and
   # fm_idle_project_root above is the one resolver from a project name to its
   # recorded repository path.
@@ -769,7 +828,7 @@ fm_dispatchable_work() {  # <state-dir> [data-dir] [root]
     while IFS="$(printf '\t')" read -r change open_boxes; do
       [ -n "$change" ] || continue
       printf 'openspec %s:%s:%s\n' "$name" "$change" "$open_boxes"
-    done < <(fm_lane_floor_project_changes "$project_root" "$brief_text")
+    done < <(fm_lane_floor_project_changes "$project_root" "$brief_text" "$held_text")
   done < <(awk '$1 == "-" && $2 != "" && /repository: / { print $2 }' "$data/projects.md" 2>/dev/null)
   return 0
 }

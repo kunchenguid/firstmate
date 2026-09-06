@@ -41,7 +41,7 @@ Work the list until live lanes reach the floor, or until the memory bound below 
 5. **Spawn, then re-read the count.** After each spawn the live count rises by one; stop as soon as it reaches the floor.
 
 Nothing here changes merge authority, delivery mode, or the captain-decision boundary.
-A Change that turns out to need a captain call is filed and held `--kind captain` like any other, which removes it from the enumeration by its own record rather than by being skipped silently.
+A Change that turns out to need a captain call is filed and held `--kind captain` like any other, which removes it from the enumeration by its own record rather than by being skipped silently: the enumerator excludes an openspec Change whenever the Change's directory name or `tasks.md` path is named in the title or body of a backlog item that is held `captain`, held `external`/`parked`/`future` with its named event still unmet, or blocked by a still-open item, so the filed item's own wording is what keeps the Change out, not a side channel.
 
 ## The memory bound
 

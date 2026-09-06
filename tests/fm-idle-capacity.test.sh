@@ -842,6 +842,27 @@ make_change() {  # <home> <project> <change> <open-boxes>
     || register_project "$home" "$project" "$home/projects/$project"
 }
 
+# A held backlog item whose title names Change <change>, for the lane floor's
+# held-record match. Reuses add_kind_hold's kind/until shape.
+add_change_hold() {  # <home> <id> <change> <kind> [--until <date>]
+  local home=$1 id=$2 change=$3 kind=$4; shift 4
+  tasks-axi add "$id" "carries the $change Change" --kind ship \
+    --file "$home/data/backlog.md" >/dev/null
+  tasks-axi hold "$id" --reason "waiting on a named event" --kind "$kind" "$@" \
+    --file "$home/data/backlog.md" >/dev/null
+}
+
+# A backlog item whose title names Change <change>, blocked by a fresh
+# still-open blocker item, for the lane floor's blocked-record match.
+add_change_blocked() {  # <home> <id> <change> <blocker-id>
+  local home=$1 id=$2 change=$3 blocker=$4
+  tasks-axi add "$blocker" "blocker for $id" --kind ship \
+    --file "$home/data/backlog.md" >/dev/null
+  tasks-axi add "$id" "carries the $change Change" --kind ship \
+    --file "$home/data/backlog.md" >/dev/null
+  tasks-axi block "$id" --by "$blocker" --file "$home/data/backlog.md" >/dev/null
+}
+
 lane_floor_report() {  # <home>
   local home=$1
   PATH="$home/fakebin:$PATH" bash -c '
@@ -959,6 +980,86 @@ test_lane_floor_excludes_a_change_a_live_brief_names() {
     *"proj:alpha"*) fail "a Change named by a live worker's instructions is not idle capacity: $out" ;;
   esac
   pass "lane floor: a Change a live worker's instructions name is excluded, an unclaimed sibling is not"
+}
+
+# A Change firstmate has already filed and held for the captain is not idle
+# capacity either - the held record itself is what removes it, per the
+# lane-floor skill's own contract.
+test_lane_floor_excludes_a_change_a_captain_held_item_names() {
+  local home out
+  home=$(make_home lane-floor-captain-held 3)
+  make_change "$home" proj alpha 2
+  make_change "$home" proj beta 1
+  add_change_hold "$home" alpha-held alpha captain
+  : > "$home/state/live-1.meta"
+  out=$(lane_floor_report "$home")
+  case "$out" in
+    *"openspec proj:beta:1"*) ;;
+    *) fail "an unclaimed sibling Change must still be listed, got: $out" ;;
+  esac
+  case "$out" in
+    *"proj:alpha"*) fail "a Change a captain-held item names must never be counted as idle capacity: $out" ;;
+  esac
+  pass "lane floor: a Change named by a captain-held item is excluded, an unclaimed sibling is not"
+}
+
+# An external hold whose named event has already fired reads as queued, not
+# held (fm_lane_floor_held_text relies on tasks-axi's own `held` field for
+# this), so the Change it names is dispatchable again like any other.
+test_lane_floor_counts_a_change_a_past_dated_hold_names() {
+  local home out
+  home=$(make_home lane-floor-past-hold 3)
+  make_change "$home" proj alpha 1
+  add_change_hold "$home" alpha-past alpha external --until 2000-01-01
+  : > "$home/state/live-1.meta"
+  out=$(lane_floor_report "$home")
+  case "$out" in
+    *"openspec proj:alpha:1"*) ;;
+    *) fail "a Change named only by a past-dated hold must still be counted, got: $out" ;;
+  esac
+  pass "lane floor: a Change named only by a past-dated external hold is still counted"
+}
+
+# A Change named by an item blocked on a still-open dependency is exactly as
+# unactionable to firstmate as one held for the captain.
+test_lane_floor_excludes_a_change_a_blocked_item_names() {
+  local home out
+  home=$(make_home lane-floor-blocked 3)
+  make_change "$home" proj alpha 2
+  make_change "$home" proj beta 1
+  add_change_blocked "$home" alpha-blocked alpha alpha-blocker
+  : > "$home/state/live-1.meta"
+  out=$(lane_floor_report "$home")
+  case "$out" in
+    *"openspec proj:beta:1"*) ;;
+    *) fail "an unclaimed sibling Change must still be listed, got: $out" ;;
+  esac
+  case "$out" in
+    *"proj:alpha"*) fail "a Change a blocked item names must never be counted as idle capacity: $out" ;;
+  esac
+  pass "lane floor: a Change named by a blocked item is excluded, an unclaimed sibling is not"
+}
+
+# A Change name that is a strict prefix of a sibling Change's name must never
+# be mismatched by the held-record match: the match is a whole slug token,
+# never a substring.
+test_lane_floor_does_not_mismatch_a_change_name_prefix() {
+  local home out
+  home=$(make_home lane-floor-prefix 3)
+  make_change "$home" proj carry-assistant-runtime 1
+  make_change "$home" proj carry-assistant-runtime-deferrals 1
+  add_change_hold "$home" deferrals-held carry-assistant-runtime-deferrals captain
+  : > "$home/state/live-1.meta"
+  out=$(lane_floor_report "$home")
+  case "$out" in
+    *"openspec proj:carry-assistant-runtime:1"*) ;;
+    *) fail "a Change whose name is only a prefix of the held one must still be listed, got: $out" ;;
+  esac
+  case "$out" in
+    *"proj:carry-assistant-runtime-deferrals"*) \
+      fail "the exact Change the held item names must never be counted: $out" ;;
+  esac
+  pass "lane floor: a held Change name is matched as a whole token, never as a prefix of a sibling"
 }
 
 test_lane_floor_excludes_archived_changes() {
@@ -1290,6 +1391,10 @@ test_lane_floor_excludes_unmet_event_holds
 test_lane_floor_silent_at_the_floor
 test_lane_floor_malformed_value_falls_back_to_default
 test_lane_floor_excludes_a_change_a_live_brief_names
+test_lane_floor_excludes_a_change_a_captain_held_item_names
+test_lane_floor_counts_a_change_a_past_dated_hold_names
+test_lane_floor_excludes_a_change_a_blocked_item_names
+test_lane_floor_does_not_mismatch_a_change_name_prefix
 test_lane_floor_excludes_archived_changes
 test_lane_floor_does_not_count_a_paused_lane
 test_lane_floor_fails_soft_without_tasks_axi
