@@ -108,6 +108,8 @@ cleanup_json_files() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-stdlib.sh
+. "$SCRIPT_DIR/fm-stdlib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -280,10 +282,6 @@ path_present_json() {  # <contract-path> [<observed-path>]
   [ -e "$observed" ] && present=1
   jq -n --arg path "$path" --argjson present "$(bool_json "$present")" \
     '{path:$path,present:$present}'
-}
-
-meta_value() {  # <meta-file> <key>
-  fm_meta_get "$1" "$2"
 }
 
 last_nonempty_line() {  # <file>

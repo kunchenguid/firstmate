@@ -86,10 +86,10 @@
 #                                 (tests); receives task_id and full message as args
 #   FM_PENDING_REPLY_NOW          optional fixed epoch for deterministic tests
 
-# shellcheck source=bin/fm-marker-lib.sh
+# shellcheck source=bin/fm-operational-input.sh
 _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PENDING_REPLY_LIB_DIR="."
-# shellcheck source=bin/fm-marker-lib.sh
-. "$_FM_PENDING_REPLY_LIB_DIR/fm-marker-lib.sh"
+# shellcheck source=bin/fm-operational-input.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-operational-input.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-tmux-lib.sh
@@ -1523,18 +1523,3 @@ fm_pending_reply_tick() {  # <state-dir>
   return 0
 }
 
-# True when any open (non-resolved) pending reply exists for a task.
-fm_pending_reply_task_has_open() {  # <state-dir> <task_id>
-  local state=$1 task_id=$2 dir rec phase tid
-  dir=$(fm_pending_reply_dir "$state")
-  [ -d "$dir" ] || return 1
-  for rec in "$dir"/*; do
-    [ -f "$rec" ] || continue
-    tid=$(fm_pending_reply_get "$rec" task_id)
-    [ "$tid" = "$task_id" ] || continue
-    phase=$(fm_pending_reply_get "$rec" phase)
-    [ "$phase" != resolved ] || continue
-    return 0
-  done
-  return 1
-}

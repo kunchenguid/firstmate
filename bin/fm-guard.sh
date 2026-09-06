@@ -138,7 +138,7 @@ fm_guard_clear_stale_banner() {
 # only: detached HEAD (linked worktrees, secondmate homes) never trips this.
 tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" || true)
 if [ -n "$tangle_branch" ]; then
-  tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
+  tangle_default=$(default_branch "$FM_ROOT" 2>/dev/null || echo main)
   trule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$trule"

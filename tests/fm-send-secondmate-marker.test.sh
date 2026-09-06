@@ -4,7 +4,7 @@
 # A secondmate is itself a firstmate, so a request relayed to it lands in its own
 # chat - which the main firstmate never reads (the only channel back is the terse
 # status file). fm-send therefore prepends a from-firstmate marker
-# (bin/fm-marker-lib.sh) when, and only when, the resolved target is a task
+# (bin/fm-operational-input.sh) when, and only when, the resolved target is a task
 # selector whose meta records kind=secondmate, so the secondmate can recognize
 # the request and route its reply via the status path. The marker now travels
 # inside the durable inbox record's body (the payload is never typed; only the
@@ -22,7 +22,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
-. "$ROOT/bin/fm-marker-lib.sh"
+. "$ROOT/bin/fm-operational-input.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
 

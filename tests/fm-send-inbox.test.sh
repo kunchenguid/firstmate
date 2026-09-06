@@ -30,7 +30,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
-. "$ROOT/bin/fm-marker-lib.sh"
+. "$ROOT/bin/fm-operational-input.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
 

@@ -1441,7 +1441,7 @@ detect_local_config() {
   # primary only; detached-HEAD worktrees and secondmate homes never trip it.
   tangle_branch=$(fm_primary_tangle_branch "$FM_ROOT" 2>/dev/null || true)
   if [ -n "$tangle_branch" ]; then
-    tangle_default=$(fm_default_branch "$FM_ROOT" 2>/dev/null || echo main)
+    tangle_default=$(default_branch "$FM_ROOT" 2>/dev/null || echo main)
     if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ] && [ "${FM_BOOTSTRAP_LOCKED:-0}" != 1 ]; then
       echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - read-only session must leave restore work to the session holding the fleet lock"
     else

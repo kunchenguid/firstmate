@@ -42,21 +42,10 @@ first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
-default_branch() {
-  local dir=$1 ref branch
-  ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
-}
+_FM_STDLIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-stdlib.sh
+. "$_FM_STDLIB_DIR/fm-stdlib.sh"
+unset _FM_STDLIB_DIR
 
 # Resolve the PRIMARY checkout's current default-branch commit - the local-HEAD
 # sync target every secondmate follows. Reads the default branch *ref* rather than

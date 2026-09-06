@@ -17,22 +17,16 @@
 # that contract.
 set -eu
 
+_FM_STDLIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-stdlib.sh
+. "$_FM_STDLIB_DIR/fm-stdlib.sh"
+unset _FM_STDLIB_DIR
+
 FM_HOME=${FM_HOME:?FM_HOME is required}
 MAX_BYTES=${FM_REMOTE_DELTA_MAX_BYTES:-65536}
 POLL_SECONDS=${FM_REMOTE_DELTA_POLL_SECONDS:-0.2}
 
-die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
-
-sha256_file() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    die "no SHA-256 tool is available"
-  fi
-}
 
 copy_prefix() { # <file> <bytes> <destination>
   if [ "$2" -eq 0 ]; then

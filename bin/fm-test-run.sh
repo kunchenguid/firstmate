@@ -109,18 +109,11 @@
 # recorded family-level coupling still expands to the whole family.
 set -eu
 
-now_ms() {
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import time; print(int(time.time() * 1000))'
-  else
-    echo $(($(date +%s) * 1000))
-  fi
-}
-
 RUN_STARTED_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-RUN_STARTED_MS=$(now_ms)
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/fm-stdlib.sh
+. "$ROOT/bin/fm-stdlib.sh"
+RUN_STARTED_MS=$(now_ms)
 cd "$ROOT" || exit 1
 
 MODE=
@@ -172,11 +165,7 @@ PORTABLE_SERIAL_DEFAULT_WEIGHT_MS=27000
 PORTABLE_SERIAL_MAX_UNHINTED_PERCENT=15
 
 usage() {
-  awk '
-    NR == 1 { next }
-    /^#/ { sub(/^# ?/, ""); print; next }
-    { exit }
-  ' "$0" >&2
+  usage_render_header "$0" >&2
 }
 
 die() {
@@ -1348,8 +1337,8 @@ families_for_changed_path() {
     bin/fm-lint.sh|bin/fm-lint-workflows.sh|bin/fm-install-shellcheck.sh|\
     bin/fm-install-actionlint.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
-    bin/fm-captain-hold.sh|bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
-    bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
+    bin/fm-captain-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
+    bin/fm-tmux-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
     bin/fm-vendor-auth-probe.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)

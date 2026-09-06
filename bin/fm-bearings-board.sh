@@ -46,6 +46,8 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-stdlib.sh
+. "$SCRIPT_DIR/fm-stdlib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 
@@ -54,11 +56,7 @@ PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
 BOARD_SCHEMA=fm-bearings-board.v1
 
 usage() {
-  awk '
-    NR == 1 { next }
-    /^#/ { sub(/^# ?/, ""); print; next }
-    { exit }
-  ' "$0"
+  usage_render_header "$0"
 }
 
 fail() {

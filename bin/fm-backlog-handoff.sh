@@ -65,6 +65,8 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-stdlib.sh
+. "$SCRIPT_DIR/fm-stdlib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -99,10 +101,6 @@ release_remote_locks() {
 trap release_remote_locks EXIT
 trap 'exit 1' HUP INT TERM
 
-sha256_file() {
-  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi
-}
-
 RESUME_PENDING=0
 if [ "${1:-}" = --resume-pending ]; then
   [ "$#" -eq 1 ] || { echo "usage: fm-backlog-handoff.sh --resume-pending" >&2; exit 1; }
@@ -122,17 +120,6 @@ secondmate_home() {
   home=$(secondmate_registry_field "$REG" "$id" home || true)
   [ -n "$home" ] || { echo "error: secondmate $id has no home in $REG" >&2; return 1; }
   printf '%s\n' "$home"
-}
-
-path_is_ancestor_of() {
-  local ancestor=$1 path=$2
-  [ -n "$ancestor" ] || return 1
-  [ -n "$path" ] || return 1
-  [ "$ancestor" != "$path" ] || return 1
-  case "$path" in
-    "$ancestor"/*) return 0 ;;
-  esac
-  return 1
 }
 
 resolved_existing_dir() {
@@ -415,21 +402,6 @@ receiver_wake_promote_prepared() { # <secondmate-id> <batch-id>
     *) return 1 ;;
   esac
   receiver_wake_state_write "$id" "pending:$corr"
-}
-
-receiver_wake_discard_pending() { # <secondmate-id>
-  local id=$1 marker="$STATE/.backlog-handoff-$1.wake-pending" value corr
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  value=$(cat "$marker" 2>/dev/null || true)
-  case "$value" in
-    pending:*)
-      corr=${value#pending:}
-      fm_pending_reply_discard_undelivered "$STATE" "$corr" || return 1
-      ;;
-    pending) ;;
-    *) return 1 ;;
-  esac
-  rm -f -- "$marker"
 }
 
 receiver_wake_clear_confirmed() { # <secondmate-id>

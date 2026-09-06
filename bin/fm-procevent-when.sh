@@ -75,6 +75,8 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-stdlib.sh
+. "$SCRIPT_DIR/fm-stdlib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -91,7 +93,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 WHEN_DIR="$STATE/when"
 OUTPUT_TAIL_BYTES=${FM_WHEN_OUTPUT_TAIL_BYTES:-8192}
 
-die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,72p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 spec_file()  { printf '%s/%s.spec\n' "$WHEN_DIR" "$1"; }

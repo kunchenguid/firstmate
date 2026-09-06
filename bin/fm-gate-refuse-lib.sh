@@ -32,7 +32,7 @@
 # crew worktree - has NEITHER signal and is COMPLETELY unaffected: the function
 # returns 0 and the lifecycle proceeds exactly as before.
 #
-# This mirrors the unspoofable-marker precedent in bin/fm-marker-lib.sh: a signal
+# This mirrors the unspoofable-marker precedent in bin/fm-operational-input.sh: a signal
 # the agent cannot forge, keyed on at a chokepoint, keeping the pattern familiar
 # to firstmate maintainers. It layers ABOVE no-mistakes' separately-shipping
 # HEAD-continuity guard, which remains the adversarial/residual backstop.
