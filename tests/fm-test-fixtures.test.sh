@@ -6,6 +6,12 @@
 # output, exit status, and files they create - never on fixtures.sh source
 # text. Migrated spawn suites cover fm_test_run_spawn through the real
 # fm-spawn.sh; this file pins the stubs those suites now share.
+#
+# It is also the fixture Git-config isolation regression, with host signing
+# armed on a scratch config file: it drives every entry point that must reach
+# tests/git-config-helpers.sh - the shared helpers, bin/fm-test-run.sh's
+# per-suite wrapper, and the standalone scripts runnable without a live vendor.
+# That helper's header owns the contract and the layers it leaves in force.
 set -u
 
 # shellcheck source=tests/fixtures.sh
