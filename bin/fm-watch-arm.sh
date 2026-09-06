@@ -628,6 +628,14 @@ done
 
 trap - HUP TERM INT
 print_watch_output "$child_out"
+if fm_pid_alive "$child"; then
+  cycle_log_append 1 none confirmation-timeout-live "preserved:$child"
+  rm -f "$child_out" 2>/dev/null || true
+  child_out=
+  echo "watcher: UNCONFIRMED - live watcher pid=$child has no fresh beacon"
+  child=
+  exit 1
+fi
 cleanup_child
 wait "$child" 2>/dev/null
 rc=$?

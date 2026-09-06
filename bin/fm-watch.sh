@@ -368,6 +368,15 @@ watcher_backend_agent_alive() {  # <backend> <target>
   fi
 }
 
+watcher_backend_agent_state() {  # <backend> <target>
+  if [ "$1" = herdr ]; then
+    fm_backend_source "$1" || { printf 'unreadable'; return 0; }
+    fm_run_function_timed "$WATCHER_EXTERNAL_TIMEOUT" fm_backend_agent_state "$@"
+  else
+    fm_backend_agent_state "$@"
+  fi
+}
+
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
@@ -435,7 +444,7 @@ inbox_steer_check() {  # <window> <task>
       ;;
   esac
   backend=$(window_backend "$w")
-  agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
+  agent_state=$(watcher_backend_agent_state "$backend" "$w" 2>/dev/null || true)
   case "$agent_state" in
     dead|missing)
       inbox_steer_escalate_unavailable "$w" "$task" "$rec"

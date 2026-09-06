@@ -700,8 +700,11 @@ FM_RECOVERY_MARKER_ACTIVE_LOCK=
 
 _fm_recovery_marker_lock_acquire() {
   local lock=$1
-  fm_lock_acquire_wait "$lock" || return 1
   FM_RECOVERY_MARKER_ACTIVE_LOCK=$lock
+  if ! fm_lock_acquire_wait "$lock"; then
+    [ "${FM_RECOVERY_MARKER_ACTIVE_LOCK:-}" != "$lock" ] || FM_RECOVERY_MARKER_ACTIVE_LOCK=
+    return 1
+  fi
 }
 
 _fm_recovery_marker_lock_release() {

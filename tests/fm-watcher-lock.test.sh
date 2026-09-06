@@ -770,6 +770,51 @@ test_arm_starts_and_self_heals() {
   pass "arm starts cleanly and resurfaces recovery after a dead-pid lock"
 }
 
+test_arm_confirmation_timeout_preserves_live_unconfirmed_child() {
+  local dir state armout armpid watcher_pid status i
+  dir=$(make_case arm-confirmation-preserve)
+  state="$dir/state"
+  armout="$dir/arm.out"
+  mkdir -p "$dir/bin"
+  cp "$WATCH_ARM" "$dir/bin/fm-watch-arm.sh"
+  cp "$LIB" "$dir/bin/fm-wake-lib.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+. "$(dirname "$0")/fm-wake-lib.sh"
+trap 'printf "TERM\n" >> "$FM_TEST_SIGNALS"' TERM
+mkdir "$FM_STATE_OVERRIDE/.watch.lock"
+printf '%s\n' "${BASHPID:-$$}" > "$FM_STATE_OVERRIDE/.watch.lock/pid"
+printf '%s\n' "$FM_HOME" > "$FM_STATE_OVERRIDE/.watch.lock/fm-home"
+printf '%s\n' "$0" > "$FM_STATE_OVERRIDE/.watch.lock/watcher-path"
+fm_pid_identity "${BASHPID:-$$}" > "$FM_STATE_OVERRIDE/.watch.lock/pid-identity"
+printf '%s\n' "${BASHPID:-$$}" > "$FM_TEST_WATCHER_PID"
+while :; do sleep 1; done
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+  : > "$dir/signals"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_TEST_SIGNALS="$dir/signals" \
+    FM_TEST_WATCHER_PID="$dir/watcher.pid" FM_ARM_CONFIRM_TIMEOUT=1 \
+    "$dir/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
+  armpid=$!
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm did not return after confirmation timeout"
+  [ "$status" -ne 0 ] || fail "arm claimed success for an unconfirmed live watcher"
+  watcher_pid=$(cat "$dir/watcher.pid" 2>/dev/null || true)
+  is_live_non_zombie "$watcher_pid" || fail "confirmation timeout terminated the live watcher"
+  [ ! -s "$dir/signals" ] || fail "confirmation timeout signalled the live watcher"
+  grep -F "watcher: UNCONFIRMED - live watcher pid=$watcher_pid has no fresh beacon" "$armout" >/dev/null \
+    || fail "arm did not report the preserved unconfirmed watcher: $(cat "$armout")"
+  ! grep -qF 'watcher: started' "$armout" || fail "arm claimed the unconfirmed watcher started successfully"
+  kill -KILL "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 20 ] && is_live_non_zombie "$watcher_pid"; do sleep 0.1; i=$((i + 1)); done
+  pass "arm reports and preserves a live watcher that misses confirmation"
+}
+
 test_arm_hup_cleans_child_and_temp_output() {
   local dir state fakebin armout i armpid lock_pid status
   dir=$(make_case arm-hup-cleanup)
@@ -1442,6 +1487,34 @@ test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
   pass "/proc process identity detects pid reuse"
 }
 
+test_recovery_marker_interrupt_during_acquire_exits_promptly() {
+  local dir state pid status
+  dir=$(make_case recovery-marker-acquire-interrupt)
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock="$2"
+    cleanup() {
+      _fm_recovery_marker_lock_acquire "$lock"
+      _fm_recovery_marker_lock_release "$lock"
+    }
+    fm_lock_acquire_wait() {
+      fm_lock_try_acquire "$1" || return 1
+      kill -TERM "${BASHPID:-$$}"
+      sleep 30
+    }
+    trap cleanup EXIT
+    trap "fm_recovery_marker_interrupt_release; exit 143" TERM
+    _fm_recovery_marker_lock_acquire "$lock"
+  ' _ "$LIB" "$state/.watcher-down.lock" &
+  pid=$!
+  wait_for_exit "$pid" 50
+  status=$?
+  [ "$status" -eq 143 ] || fail "recovery-marker acquire interruption wedged or returned $status"
+  [ ! -e "$state/.watcher-down.lock" ] || fail "interrupted recovery-marker acquire retained its lock"
+  pass "recovery-marker interruption closes the acquire-to-tracking window"
+}
+
 test_stale_watch_reclaim_publishes_before_clear() {
   local dir state lockdir rc token
   dir=$(make_case stale-watch-publish-before-clear)
@@ -1515,6 +1588,7 @@ test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
+test_recovery_marker_interrupt_during_acquire_exits_promptly
 test_stale_watch_reclaim_publishes_before_clear
 test_live_missing_beacon_lock_is_actionable
 test_unidentified_live_lock_holder_still_fails_loudly
@@ -1535,6 +1609,7 @@ test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
+test_arm_confirmation_timeout_preserves_live_unconfirmed_child
 test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down

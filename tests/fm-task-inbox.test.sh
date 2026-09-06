@@ -493,6 +493,28 @@ idle_capture() {  # <dir>
   printf '%s\n' "$1/idle.capture"
 }
 
+test_watcher_bounds_herdr_agent_state_for_due_inbox() {
+  local dir state rec started elapsed
+  dir=$(setup_watch_case bounded-herdr-agent-state)
+  state="$dir/state"
+  printf 'backend=herdr\nwindow=session:pane\nkind=ship\nharness=grok\n' > "$state/t1.meta"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  started=$SECONDS
+  FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=2 bash -c '
+    . "$1"
+    fm_backend_herdr_agent_state() { sleep 30; printf alive; }
+    watcher_backend_capture() { printf "idle pane\n"; }
+    window_is_busy() { return 0; }
+    inbox_steer_check session:pane t1
+    beat
+  ' _ "$WATCH"
+  elapsed=$((SECONDS - started))
+  [ "$elapsed" -lt 5 ] || fail "a hanging Herdr agent-state read blocked inbox supervision for ${elapsed}s"
+  [ -e "$state/.last-watcher-beat" ] || fail "the watcher did not beat after the bounded Herdr agent-state read"
+  pass "watcher bounds Herdr inbox agent-state reads before its next beat"
+}
+
 test_watcher_rerings_idle_pane_quietly() {
   local dir state out log pid rec
   dir=$(setup_watch_case rering)
@@ -704,6 +726,7 @@ test_writer_retries_after_a_vanished_lock_collision
 test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy
+test_watcher_bounds_herdr_agent_state_for_due_inbox
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
