@@ -19,6 +19,13 @@
 # home with a backlog but no compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
+# An exit with status zero before this invocation confirms task-record removal
+# is an aborted teardown:
+# the EXIT guard returns failure and reports it on the original stderr, even if
+# the triggering call discarded stderr, without continuing cleanup.
+# Local and remote completion record that removal while holding the meta lock,
+# so replacement metadata published afterward does not cause a false abort.
+# tests/fm-gotmp.test.sh covers this guard and adapter-load failure retention.
 # The close - and only the close - is replaced by `tasks-axi reopen` with the
 # deliverable recorded while the backlog item is still an open captain call
 # (bin/fm-captain-hold.sh `open` owns that predicate), because the policy holds
@@ -75,7 +82,11 @@
 # is the approved discard path that prevalidates child removal targets, locks each
 # descendant home's task set before enumeration, and holds those locks through
 # child cleanup. Contention refuses the complete forced teardown before child
-# mutation. Local and remote retirement serialize their destructive phase with
+# mutation. Required child adapters are loaded recursively before child cleanup;
+# unavailable adapters or fatal source exits preserve parent and child metadata,
+# work, and scratch. After successful loading, endpoint kills keep their existing
+# best-effort behavior and Herdr's exact-pane disappearance requirement.
+# Local and remote retirement serialize their destructive phase with
 # that mate's backlog-handoff lock under the registry lock. Pending handoff wake
 # state is retired with the home, and local removal failure restores that state
 # before preserving the route for retry. Teardown then discards child work, kills
@@ -262,6 +273,7 @@ CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
+TEARDOWN_RECORD_REMOVED=0
 DESCENDANT_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
@@ -297,8 +309,15 @@ teardown_release_locks() {
     CONTROL_LOCK_HELD=0
   fi
   fm_lease_guard_release || true
+  # A fatal source error can leave $? at 0 on Bash 3.2, just like an explicit
+  # exit 0. Descriptor 3 survives best-effort callers redirecting their stderr.
+  if [ "$status" -eq 0 ] && [ "$TEARDOWN_RECORD_REMOVED" != 1 ]; then
+    echo "error: teardown of $ID aborted before its task record was removed; every durable record is retained" >&3
+    exit 1
+  fi
   return "$status"
 }
+exec 3>&2
 trap teardown_release_locks EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" || {
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
@@ -778,6 +797,7 @@ remote_secondmate_teardown() {
   mv -f -- "$tmp" "$SECONDMATE_REG"
   status_retire_presentation_task "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
+  TEARDOWN_RECORD_REMOVED=1
   rm -f -- "$STATE/$ID.turn-ended"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
@@ -2580,7 +2600,7 @@ $session	$lock_path"
   return 1
 }
 
-preflight_firstmate_home_herdr_children() {  # <home>
+preflight_firstmate_home_backend_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_backend child_target child_kind child_home child_wt
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
@@ -2592,6 +2612,9 @@ preflight_firstmate_home_herdr_children() {  # <home>
     child_target=$FM_BACKEND_VALIDATED_TARGET
     if [ "$child_backend" = herdr ]; then
       teardown_herdr_preflight_target "$child_target" "$child_id" || return 1
+    elif ! fm_backend_source "$child_backend"; then
+      echo "REFUSED: $child_backend adapter is unavailable for child $child_id; forced teardown changed nothing" >&2
+      return 1
     fi
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
@@ -2599,7 +2622,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
       child_wt=$(meta_value "$child_meta" worktree)
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      preflight_firstmate_home_herdr_children "$child_home" || return 1
+      preflight_firstmate_home_backend_children "$child_home" || return 1
     fi
   done
 }
@@ -2732,7 +2755,7 @@ if [ "$KIND" = secondmate ]; then
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi
-    preflight_firstmate_home_herdr_children "$HOME_PATH" || exit 1
+    preflight_firstmate_home_backend_children "$HOME_PATH" || exit 1
   fi
 fi
 
@@ -3135,6 +3158,7 @@ else
     exit 1
   fi
 fi
+TEARDOWN_RECORD_REMOVED=1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
