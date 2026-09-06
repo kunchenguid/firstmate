@@ -224,6 +224,23 @@ SH
 
 # --- spawn-world ------------------------------------------------------------
 
+# fm_test_claude_spawn_default <fixture-root>
+# Supply an isolated managed default and a supported fake Claude for spawn fixtures.
+fm_test_claude_spawn_default() {
+  local root=$1 fakebin="$1/claude-policy-bin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '2.1.263 (Claude Code)'
+fi
+SH
+  chmod +x "$fakebin/claude"
+  export FM_TEST_CLAUDE_MANAGED_SETTINGS_DIR="$root/managed-settings.d"
+  FM_SPAWN_NO_GUARD=1 bash "$ROOT/bin/fm-claude-rc-off.sh" install-policy >/dev/null
+  export PATH="$fakebin:$PATH"
+}
+
 # fm_test_spawn_home <home> [harness]
 # Minimal firstmate home layout plus watcher-liveness beat. Optional harness
 # pin is written to config/crew-harness.

@@ -56,6 +56,22 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+# fm_test_hide_command <bash-env-file> <command>
+# Mask command discovery even when the host supplies the tool in a system PATH.
+# Callers declare local BASH_ENV to scope the exported mask to their test case.
+fm_test_hide_command() {
+  local file=$1 tool=$2
+  cat > "$file" <<SH
+command() {
+  if [ "\${1:-}" = -v ] && [ "\${2:-}" = "$tool" ]; then
+    return 1
+  fi
+  builtin command "\$@"
+}
+SH
+  export BASH_ENV="$file"
+}
+
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal

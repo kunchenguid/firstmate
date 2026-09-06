@@ -2,6 +2,9 @@
 # Behavioral tests for bin/fm-procevent-quota.sh.
 set -u
 
+# Fixture permissions do not inherit the operator's group-writable umask.
+umask 022
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 BIN="$FM_ROOT/bin"

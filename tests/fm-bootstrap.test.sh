@@ -895,6 +895,8 @@ test_network_phase_partitions_the_run() {
   # Break the two diagnostics that stand for the two halves: a local tool floor
   # and the network GitHub-auth probe.
   rm -f "$fakebin/node"
+  local BASH_ENV
+  fm_test_hide_command "$fakebin/no-node.bash" node
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 1
