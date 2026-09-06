@@ -23,7 +23,7 @@
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
-#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
+#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance> [--captured-from <source-id>]   (keyed answers on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
 #   fm-captain-hold.sh binding <source-id>
@@ -854,6 +854,19 @@ read_binding() {  # <source-id>
   printf '%s\n' "$origin"
 }
 
+# Pure admission decision for a captured source's binding: admit or skip.
+# <binding-origin> is empty for an absent binding (never the failure case;
+# read_binding already fails loudly on an unreadable or wrong-schema record).
+captured_admission() {  # <binding-origin|empty> <given-origin>
+  local binding_origin=$1 given_origin=$2
+  if [ -n "$binding_origin" ] \
+    && { [ "$binding_origin" = "$BINDING_ANY" ] || [ "$binding_origin" = "$given_origin" ]; }; then
+    printf 'admit\n'
+  else
+    printf 'skip\n'
+  fi
+}
+
 command_bind() {
   local source=${1:-} origin=${2:-} dest tmp
   [ "$#" -ge 1 ] && [ "$#" -le 2 ] || { usage >&2; exit 2; }
@@ -914,11 +927,12 @@ sanitize_field() {  # <text>
 }
 
 command_answers() {
-  local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
+  local origin='' source='' captured_from='' captured_from_set=0 binding_origin row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
   local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
+      --captured-from) shift; captured_from=${1:-}; captured_from_set=1 ;;
       --any-origin) origin=$BINDING_ANY ;;
       --*) usage >&2; exit 2 ;;
       *)
@@ -934,6 +948,24 @@ command_answers() {
   [ -n "$source" ] || fail "--source provenance is required so the durable decision records where the answer came from"
   source=$(sanitize_field "$source")
   require_tasks_axi
+  if [ "$captured_from_set" = 1 ]; then
+    validate_source_id "$captured_from"
+    binding_origin=$(read_binding "$captured_from") || exit 1
+    if [ "$(captured_admission "$binding_origin" "$origin")" != admit ]; then
+      while IFS= read -r row; do
+        key=${row%%"$tab"*}
+        [ -n "${key:-}" ] || continue
+        case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
+        [ "${#key}" -le 128 ] || continue
+        printf 'skipped: %s (captured source %s is not bound for this origin)\n' \
+          "$key" "$captured_from"
+        skipped=$((skipped + 1))
+      done
+      printf 'answers: closed=%s skipped=%s\n' "$closed" "$skipped"
+      [ "$skipped" -eq 0 ]
+      return
+    fi
+  fi
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-keyed-decision.XXXXXX") || fail "cannot stage the captain decision"
   err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-keyed-decision-err.XXXXXX") \
     || { rm -f -- "$tmp"; fail "cannot stage the captain decision diagnostics"; }

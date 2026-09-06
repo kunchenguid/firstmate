@@ -1738,6 +1738,98 @@ assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
 assert_contains "$out" "ANNOTATIONS: (none)" "an empty board close invented annotations"
 pass "read distinguishes a feedback capture from an ended-with-nothing close"
 
+# --- V4a: the intake verifies a captured source's binding itself -----------
+# feed_keyed_answers (fm-captain-hold.sh:351-361) reads a source's binding
+# once, then hands the captured answers to the intake. Nothing stops the
+# binding from changing between that read and the intake's own decision - the
+# caller-to-intake race. Made deterministic with a sibling-script copy of
+# bin/ whose fm-captain-hold.sh answers the caller's `binding <id>` truthfully
+# and then removes the real binding before returning, so the intake (called
+# moments later, through this same wrapper) runs against a binding that has
+# already changed. No sleep, no timing: the mutation happens inside the very
+# call the caller made.
+HRACE="$TMP_ROOT/race-home"
+mkdir -p "$HRACE/data" "$HRACE/state" "$HRACE/config" "$HRACE/adapter-root/bin"
+cp "$ROOT/.tasks.toml" "$HRACE/.tasks.toml"
+cat > "$HRACE/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+FM_HOME="$HRACE" "$ROOT/bin/fm-captain-hold.sh" hold race-call \
+  --title "Race call" --reason "captain choice pending" --repo sample >/dev/null \
+  || fail "could not create the race fixture's captain call"
+FM_HOME="$HRACE" "$ROOT/bin/fm-captain-hold.sh" bind race-src origin-real >/dev/null \
+  || fail "could not bind the race fixture's source"
+
+RACE_BIN="$TMP_ROOT/race-bin"
+mkdir -p "$RACE_BIN"
+for RACE_SRC_FILE in "$ROOT"/bin/*; do
+  RACE_BASE=$(basename "$RACE_SRC_FILE")
+  [ "$RACE_BASE" = fm-captain-hold.sh ] && continue
+  ln -s "$RACE_SRC_FILE" "$RACE_BIN/$RACE_BASE"
+done
+cat > "$RACE_BIN/fm-captain-hold.sh" <<WRAP
+#!/usr/bin/env bash
+# Race fixture: delegates to the real script for every subcommand except
+# \`binding\`, where it answers truthfully and then unbinds the real record
+# before returning, so the caller's stale origin outlives the binding it
+# read and the intake's own read (through this wrapper too) sees a binding
+# that has already changed underneath it.
+REAL="$ROOT/bin/fm-captain-hold.sh"
+if [ "\${1:-}" = binding ]; then
+  out=\$("\$REAL" "\$@")
+  rc=\$?
+  printf '%s\n' "\$out"
+  "\$REAL" unbind "\${2:-}" >/dev/null 2>&1
+  exit "\$rc"
+fi
+exec "\$REAL" "\$@"
+WRAP
+chmod +x "$RACE_BIN/fm-captain-hold.sh"
+
+cat > "$HRACE/adapter-root/bin/fm-procevent-racechan.sh" <<'SH'
+#!/usr/bin/env bash
+# Fixture channel: one keyed answer for the race fixture's captain call.
+case "${1-}" in
+  answers) printf 'race-call\tship it\t\n' ;;
+esac
+exit 2
+SH
+chmod +x "$HRACE/adapter-root/bin/fm-procevent-racechan.sh"
+
+RACE_RESULT="$HRACE/race-result.txt"
+printf 'race payload\n' > "$RACE_RESULT"
+
+FM_HOME="$HRACE" FM_ROOT_OVERRIDE="$HRACE/adapter-root" FM_PROCEVENT_CLAIM_ROOT="$HRACE/procevent-claims" \
+  "$RACE_BIN/fm-procevent.sh" register racechan race-src -- cat "$RACE_RESULT" >/dev/null \
+  || fail "could not register the race fixture channel"
+FM_HOME="$HRACE" FM_ROOT_OVERRIDE="$HRACE/adapter-root" FM_PROCEVENT_CLAIM_ROOT="$HRACE/procevent-claims" \
+  "$RACE_BIN/fm-procevent.sh" start race-src >/dev/null 2>&1
+
+race_show=$(cd "$HRACE" && tasks-axi show race-call --full)
+assert_contains "$race_show" "state: queued" \
+  "the caller-to-intake binding race closed a call whose binding changed after the caller's check"
+assert_contains "$race_show" "held: yes" \
+  "the caller-to-intake binding race released a call it should have left held"
+
+# The accepted outcome for a skipped captured answer (bin/fm-procevent.sh:345-350):
+# the capture stays byte-identical and still announced, and the wake is
+# retained (no handled acknowledgement), exactly as an unbound source's
+# capture already does.
+RACE_CAPTURED="$HRACE/state/procevent-inbox/race-src.1.result"
+assert_present "$RACE_CAPTURED" "the race fixture's captured result disappeared"
+cmp -s "$RACE_RESULT" "$RACE_CAPTURED" \
+  || fail "the race fixture's captured result changed: $(diff "$RACE_RESULT" "$RACE_CAPTURED" 2>&1)"
+assert_absent "$HRACE/state/procevent-inbox/race-src.1.handled" \
+  "the race fixture's capture was acknowledged despite the skipped answer"
+assert_contains "$(wake_payloads "$HRACE")" "procevent racechan race-src 1" \
+  "the race fixture's capture was not announced"
+
+pass "the intake's own binding read survives the caller-to-intake race, leaves the call held, and the capture stays intact and announced"
+
 # The runner's silence seam is generic and closed by default: an adapter with no
 # `silent` command must keep announcing, so adding the seam changed nothing for
 # every adapter that has no notion of a no-op.

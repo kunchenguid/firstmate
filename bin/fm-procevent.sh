@@ -356,7 +356,7 @@ feed_keyed_answers() {  # <adapter> <source-id> <result-file>
   [ -n "$origin" ] || return 1
   seq=$(fm_procevent_result_sequence "$result") || return 1
   "$script" answers "$result" 2>/dev/null \
-    | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
+    | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" --captured-from "$id" \
         --source "the captured result $id sequence $seq" >/dev/null 2>&1
 }
 

@@ -95,6 +95,50 @@ run_resolve_entry_unit() {  # <home> <origin> <entry>
   ' _ "$ROOT" "$home/state" "$home/data" "$origin" "$entry"
 }
 
+# Direct unit test on the pure admission decision the keyed-answer intake's
+# --captured-from gate runs: (binding-origin|absent, given-origin) -> admit
+# or skip. Extracted the same way run_resolve_entry_unit is: the function
+# (and the BINDING_ANY constant it compares against) evaluated in an isolated
+# subshell process, never through the CLI dispatch this file's other tests use.
+run_captured_admission_unit() {  # <binding-origin> <given-origin>
+  local binding_origin=$1 given_origin=$2
+  bash -c '
+    set -eu
+    FM_ROOT=$1; binding_origin=$2; given_origin=$3
+    eval "$(sed -n "/^BINDING_ANY=/p; /^captured_admission() {/,/^}/p" "$FM_ROOT/bin/fm-captain-hold.sh")"
+    captured_admission "$binding_origin" "$given_origin"
+  ' _ "$ROOT" "$binding_origin" "$given_origin"
+}
+
+# The task's stored body, decoded from `show --full` exactly the way the
+# owner itself decodes it (show_field_value), so a test-side parsing
+# shortcut can never diverge from what the CLI actually reads back.
+run_show_body_unit() {  # <show-output>
+  local show_output=$1
+  bash -c '
+    set -eu
+    FM_ROOT=$1; output=$2
+    eval "$(sed -n "/^show_field() {/,/^}/p; /^decode_shown_value() {/,/^}/p; /^show_field_value() {/,/^}/p" "$FM_ROOT/bin/fm-captain-hold.sh")"
+    show_field_value "$output" body
+  ' _ "$ROOT" "$show_output"
+}
+
+# The raw (still TOON-escaped, not JSON-decoded) stored body field. Command
+# substitution strips trailing newlines from both a decoded actual value and
+# a decoded expected value alike, so a decoded-only equality cannot see a
+# trailing-newline drift the owner never produces but the contract still
+# names: a raw escaped value carries that drift as literal trailing "\n"
+# text, which command substitution never touches.
+run_show_body_raw_unit() {  # <show-output>
+  local show_output=$1
+  bash -c '
+    set -eu
+    FM_ROOT=$1; output=$2
+    eval "$(sed -n "/^show_field() {/,/^}/p" "$FM_ROOT/bin/fm-captain-hold.sh")"
+    show_field "$output" body
+  ' _ "$ROOT" "$show_output"
+}
+
 # The retired command surface, kept for one release as a shim; in-flight
 # pre-collapse work still drives the lifecycle through these spellings.
 run_shim() {  # <home> <command args...>
@@ -2150,6 +2194,163 @@ SH
   pass "cleanup refuses a ship row when its captain hold cannot be read"
 }
 
+# Table test on the pure decision: absent binding, a mismatched concrete
+# origin, an exact match, the any-origin marker, and the any-origin marker
+# against an empty given origin (the --any-origin caller shape) all resolve
+# to the one right verdict with no task, backlog, or filesystem state at all.
+test_captured_admission_decision_table() {
+  local case_row expected binding_origin given_origin actual
+  for case_row in \
+    'skip||origin-a' \
+    'skip|origin-a|origin-b' \
+    'admit|origin-a|origin-a' \
+    'admit|(any)|origin-a' \
+    'admit|(any)|' \
+  ; do
+    IFS='|' read -r expected binding_origin given_origin <<<"$case_row"
+    actual=$(run_captured_admission_unit "$binding_origin" "$given_origin")
+    [ "$actual" = "$expected" ] \
+      || fail "captured_admission(binding=$binding_origin given=$given_origin) = $actual, want $expected"
+  done
+  pass "the pure captured-source admission decision matches its table for absent, mismatched, exact, and any-origin bindings"
+}
+
+# The head-contract cases (a)-(f) from V4a.md: a captured source bound to
+# another origin, an unbound source, a source bound to the given origin, a
+# source bound any-origin, a wrong-schema binding record, and the direct
+# owner path with no --captured-from at all. Real captain-held tasks and the
+# real intake, no fixture wrapper: the race itself is proven separately
+# against the real caller in the procevent suite.
+test_captured_from_gates_the_keyed_intake() {
+  local home out show rc expected_decision_body expected_decision_body_raw
+  local expected_decision_body_digest actual_decision_body actual_decision_body_raw
+  home=$(make_home captured-from-gate)
+  run_captain "$home" hold call-a --title "Call A" --reason "captain choice pending" --repo sample >/dev/null
+  run_captain "$home" hold call-b --title "Call B" --reason "captain choice pending" --repo sample >/dev/null
+  run_captain "$home" hold call-c --title "Call C" --reason "captain choice pending" --repo sample >/dev/null
+  run_captain "$home" hold call-d --title "Call D" --reason "captain choice pending" --repo sample >/dev/null
+  run_captain "$home" hold call-e --title "Call E" --reason "captain choice pending" --repo sample >/dev/null
+  run_captain "$home" hold call-f --title "Call F" --reason "captain choice pending" --repo sample >/dev/null
+
+  # (a) bound to a different concrete origin than the one given: skipped, held.
+  # A skipped key still reports the ordinary nonzero skip status (the same
+  # discipline every other skip in this intake follows); the captured caller
+  # (feed_keyed_answers) consumes that status to gate its own "answers-fed"
+  # line, but capture publication and acknowledgement continue regardless
+  # (best-effort continuation, not an ignored status).
+  run_captain "$home" bind src-a origin-x >/dev/null
+  set +e
+  out=$(printf 'call-a\tyes\t\n' \
+    | run_captain "$home" answers origin-y --captured-from src-a --source "gate fixture a" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a captured skip reported success: $out"
+  assert_contains "$out" "skipped: call-a (captured source src-a is not bound for this origin)" \
+    "a captured source bound to a different origin closed the call"
+  show=$(tasks_in "$home" show call-a --full)
+  assert_contains "$show" "state: queued" "case (a) closed a call it should have skipped"
+  assert_contains "$show" "held: yes" "case (a) released a call it should have left held"
+
+  # (b) no binding at all: skipped, held.
+  set +e
+  out=$(printf 'call-b\tyes\t\n' \
+    | run_captain "$home" answers origin-y --captured-from src-b --source "gate fixture b" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a captured skip reported success: $out"
+  assert_contains "$out" "skipped: call-b (captured source src-b is not bound for this origin)" \
+    "an unbound captured source closed the call"
+  show=$(tasks_in "$home" show call-b --full)
+  assert_contains "$show" "state: queued" "case (b) closed a call it should have skipped"
+  assert_contains "$show" "held: yes" "case (b) released a call it should have left held"
+
+  # (g) --captured-from present with an EMPTY value must not alias the flag
+  # being absent: an explicit empty source id is refused before any close, the
+  # same as an invalid one, never silently treated as the direct owner path.
+  run_captain "$home" hold call-g --title "Call G" --reason "captain choice pending" --repo sample >/dev/null
+  set +e
+  out=$(printf 'call-g\tyes\t\n' \
+    | run_captain "$home" answers origin-y --captured-from "" --source "gate fixture g" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an empty --captured-from value closed a call: $out"
+  assert_contains "$out" "source-id must be a non-empty privacy-safe slug" \
+    "an empty --captured-from value was not refused as an invalid source id"
+  assert_not_contains "$out" "closed: call-g" "an empty --captured-from value aliased the direct owner path"
+  show=$(tasks_in "$home" show call-g --full)
+  assert_contains "$show" "state: queued" "an empty --captured-from value closed a call anyway"
+  assert_contains "$show" "held: yes" "an empty --captured-from value released a call anyway"
+
+  # (c) bound to the given origin exactly: closes as today.
+  run_captain "$home" bind src-c origin-y >/dev/null
+  out=$(printf 'call-c\tyes\t\n' \
+    | run_captain "$home" answers origin-y --captured-from src-c --source "gate fixture c") \
+    || fail "a matching-origin captured answer did not close: $out"
+  assert_contains "$out" "closed: call-c" "case (c) did not close a matching-origin captured answer"
+
+  # (d) bound any-origin: closes regardless of the given origin.
+  run_captain "$home" bind src-d >/dev/null
+  out=$(printf 'call-d\tyes\t\n' \
+    | run_captain "$home" answers origin-z --captured-from src-d --source "gate fixture d") \
+    || fail "an any-origin captured answer did not close: $out"
+  assert_contains "$out" "closed: call-d" "case (d) did not close an any-origin captured answer"
+
+  # (e) a wrong-schema binding record: fails loudly naming the path, closes nothing.
+  mkdir -p "$home/state/decision-bindings"
+  printf 'schema=bogus\norigin=origin-y\n' > "$home/state/decision-bindings/src-e.origin"
+  set +e
+  out=$(printf 'call-e\tyes\t\n' \
+    | run_captain "$home" answers origin-y --captured-from src-e --source "gate fixture e" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a wrong-schema binding record did not fail loudly"
+  assert_contains "$out" "decision binding has an incompatible schema" \
+    "the schema failure did not name the corrupt binding record"
+  assert_contains "$out" "$home/state/decision-bindings/src-e.origin" \
+    "the schema failure did not name the corrupt binding record's actual path"
+  show=$(tasks_in "$home" show call-e --full)
+  assert_contains "$show" "state: queued" "a wrong-schema binding closed a call anyway"
+  assert_contains "$show" "held: yes" "a wrong-schema binding released a call anyway"
+
+  # (f) no --captured-from: the direct owner path, unchanged. Driven exactly
+  # as bin/fm-send.sh:626-627 does (--source only, no legacy-origin argument).
+  # Asserted by exact equality against a fixed literal captured once from the
+  # real base owner (ae39804d) for this exact input, never derived by calling
+  # back into the same functions under test (that would let a shared bug in
+  # both sides cancel out) and never a substring (a substring match cannot
+  # tell a stored answer from one with the same prefix and different or
+  # extra trailing content). The literal's own SHA-256 is asserted too, so a
+  # reviewer can cross-check it independently without re-running the base.
+  # Two equalities, not one: the decoded body (show_field_value) passes
+  # through a command substitution on both the actual and the fixed-literal
+  # side, and command substitution strips trailing newlines identically on
+  # both, so a stored value with extra trailing newline bytes would still
+  # match there. The raw, still-escaped field (show_field, before JSON
+  # decoding) carries a trailing-newline drift as literal trailing "\n" text
+  # instead, which command substitution never touches, so it is asserted too.
+  out=$(printf 'call-f\tyes\t\n' | run_captain "$home" answers --source "gate fixture f") \
+    || fail "the direct owner path regressed: $out"
+  assert_contains "$out" "closed: call-f" "case (f) did not close without --captured-from"
+  expected_decision_body=$'Resolution recorded by fm-captain-hold.\nDecision digest: d5230c6fecfe812c6bed59b36503ae2c891a4883b12a7c9dca93d53d7a97cc1c\nResolution mode: answered\n\nCaptain decision:\nCaptain answered this call through gate fixture f.\nTask: call-f\nAnswer: yes'
+  expected_decision_body_raw='"Resolution recorded by fm-captain-hold.\nDecision digest: d5230c6fecfe812c6bed59b36503ae2c891a4883b12a7c9dca93d53d7a97cc1c\nResolution mode: answered\n\nCaptain decision:\nCaptain answered this call through gate fixture f.\nTask: call-f\nAnswer: yes"'
+  if command -v shasum >/dev/null 2>&1; then
+    expected_decision_body_digest=$(printf '%s' "$expected_decision_body" | shasum -a 256 | awk '{print $1}')
+  else
+    expected_decision_body_digest=$(printf '%s' "$expected_decision_body" | sha256sum | awk '{print $1}')
+  fi
+  [ "$expected_decision_body_digest" = 58d2868237a0e881b8528e42709d68424cd6b09422e7b2c6f02e59c86f353ca6 ] \
+    || fail "the fixed base-owner literal in this test no longer matches its own recorded SHA-256"
+  show=$(tasks_in "$home" show call-f --full)
+  actual_decision_body=$(run_show_body_unit "$show")
+  [ "$actual_decision_body" = "$expected_decision_body" ] \
+    || fail "the direct owner path's decision record is not byte-identical to the base owner's: got $(printf '%q' "$actual_decision_body"), want $(printf '%q' "$expected_decision_body")"
+  actual_decision_body_raw=$(run_show_body_raw_unit "$show")
+  [ "$actual_decision_body_raw" = "$expected_decision_body_raw" ] \
+    || fail "the direct owner path's raw stored field is not byte-identical to the base owner's: got $(printf '%q' "$actual_decision_body_raw"), want $(printf '%q' "$expected_decision_body_raw")"
+
+  pass "the captured-from admission gate skips a mismatched, absent, or explicitly empty binding while leaving the call held, admits a matching or any-origin one, fails loudly on a corrupt record, and leaves the direct owner path unchanged"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
@@ -2178,3 +2379,5 @@ test_teardown_never_closes_a_captain_held_task
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
+test_captured_admission_decision_table
+test_captured_from_gates_the_keyed_intake
