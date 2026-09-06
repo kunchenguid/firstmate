@@ -1237,7 +1237,7 @@ backlog_record_reconcile() {
       fm_lock_release "$control_lock"
       continue
     fi
-    if fm_backlog_close_marker_replay "$STATE" "$marker" "$DATA"; then
+    if fm_backlog_close_marker_replay "$STATE" "$marker" "$DATA" "$CONFIG"; then
       case "$FM_BACKLOG_CLOSE_REPLAY_RESULT" in
         closed)
           echo "BOOTSTRAP_INFO: closed the backlog item for $label that an interrupted cleanup left open"

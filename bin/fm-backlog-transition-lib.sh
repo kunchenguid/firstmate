@@ -46,7 +46,11 @@
 # The writer and replay share one complete-record validator, and teardown stages
 # that record before destructive cleanup, so it never publishes or acts on a close
 # replay would reject. The validator pins the data path to this home's configured
-# root before any recovery mutation, then re-runs exactly that close.
+# root before any recovery mutation, then re-runs exactly that close. It is
+# passed this home's config directory so a recorded `--pr` link on a plain-http
+# Gitea/Forgejo instance is accepted only when that instance base URL is
+# allow-listed in config/gitea-instances (fm-pr-lib.sh owns the parse and the
+# allow-list read).
 # `tasks-axi done` on an already-closed task backfills links
 # without moving the close date, so replay is idempotent. Spawn needs no marker:
 # it publishes the meta first, so a crash
@@ -72,6 +76,19 @@ FM_BACKLOG_ROW_HOLD_KIND=
 # retained_incomplete | answered | stale | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_CLOSE_REPLAY_RESULT=
+
+_FM_BACKLOG_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The recorded-close validator reuses fm-pr-lib.sh's canonical PR/MR URL parser
+# and Gitea instance allow-list rather than hand-rolling a second copy of
+# either (AGENTS.md one-owner rule). Every direct caller of the close-marker
+# helpers already sources fm-pr-lib.sh, but bin/fm-bootstrap.sh's replay path
+# does not, so load it lazily here when it is missing.
+fm_backlog_pr_lib_helpers() {
+  command -v fm_pr_url_parse >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-pr-lib.sh
+  . "$_FM_BACKLOG_TRANSITION_LIB_DIR/fm-pr-lib.sh"
+}
 
 # Emit each byte of a value as a decimal number, locale-independently.
 # Deliberately perl rather than od: the spawn and teardown lifecycle runs under a
@@ -329,6 +346,19 @@ fm_backlog_start() {  # <data-dir> <id>
 fm_backlog_done() {  # <data-dir> <id> [flag...]
   local data=$1 id=$2
   shift 2
+  # The backlog backend's structured `--pr` link must end in `/pull/<n>`; a
+  # Gitea/Forgejo PR URL ends in `/pulls/<n>` and the backend rejects it. Record
+  # a Gitea link as a completion note instead - the same shape fm_backlog_retain
+  # already uses for a captain-held row - while GitHub and GitLab keep the
+  # structured link. This is the single apply point for both a direct close and
+  # a crash replay, and the recorded close marker still carries the canonical
+  # `--pr <url>`; the provider is read from fm-pr-lib.sh's parser, not re-derived
+  # here.
+  if [ "${1-}" = --pr ] && [ "$#" -eq 2 ] \
+     && fm_backlog_pr_lib_helpers && fm_pr_url_parse "$2" \
+     && [ "$FM_PR_PROVIDER" = gitea ]; then
+    set -- --note "PR $2"
+  fi
   fm_backlog_mutate "$data" "done" "$id" "$@"
 }
 
@@ -617,8 +647,8 @@ fm_backlog_close_marker_path() {  # <state-dir> <id>
   printf '%s/%s.backlog-close\n' "$1" "$2"
 }
 
-fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <expected-id> <state-dir>
-  local marker=$1 authorized_data data_resolved expected_id=$3 state=$4
+fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <expected-id> <state-dir> <config-dir>
+  local marker=$1 authorized_data data_resolved expected_id=$3 state=$4 config_dir=$5
   local id='' data='' marker_spawn_gen='' cleanup_incomplete=0 mode=close line raw_bytes arg_value
   local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
   local percent_tail percent_valid
@@ -719,14 +749,29 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
         --note) [ "${args[1]}" = "local%20main" ] ;;
         --pr)
           arg_value=${args[1]}
+          # A plain-http origin is accepted only for a Gitea/Forgejo pull
+          # request whose instance base URL is allow-listed in
+          # config/gitea-instances; fm-pr-lib.sh owns both that URL parse and
+          # the allow-list read. An https URL keeps the pre-existing generic
+          # acceptance (GitHub, GitLab, and https Gitea alike).
           [ "${#arg_value}" -le 2048 ] \
-            && case "$arg_value" in https://*) true ;; *) false ;; esac \
+            && case "$arg_value" in
+              https://*) true ;;
+              http://*)
+                fm_backlog_pr_lib_helpers \
+                  && fm_pr_url_parse "$arg_value" \
+                  && [ "$FM_PR_PROVIDER" = gitea ] \
+                  && fm_pr_gitea_instance_resolve "$config_dir" "$FM_PR_HOST"
+                ;;
+              *) false ;;
+            esac \
             && case "$arg_value" in
               *[[:space:]]*|*[!A-Za-z0-9:/?\&=._#%+~@-]*) false ;;
               *) true ;;
             esac \
             && {
-              url_tail=${arg_value#https://}
+              url_tail=${arg_value#http://}
+              url_tail=${url_tail#https://}
               url_authority=${url_tail%%/*}
               url_path=${url_tail#*/}
               url_host=$url_authority
@@ -792,8 +837,8 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
 # A leading `--retain` flag records the captain-held transition (`mode=retain`)
 # instead of a close; the remaining flags are the same completion links either
 # transition records.
-fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> <state-dir> <cleanup-incomplete: 0|1> [--retain] [flag...]
-  local tmp=$1 id=$2 data spawn_gen=$4 state=$5 cleanup_incomplete=$6 arg previous_arg=''
+fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> <state-dir> <config-dir> <cleanup-incomplete: 0|1> [--retain] [flag...]
+  local tmp=$1 id=$2 data spawn_gen=$4 state=$5 config_dir=$6 cleanup_incomplete=$7 arg previous_arg=''
   local mode=close serialized_args=()
   data=$(fm_backlog_data_absolute "$3") || {
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $3"
@@ -808,7 +853,7 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     0|1) ;;
     *) FM_BACKLOG_TRANSITION_ERROR="invalid pending-close cleanup state"; return 1 ;;
   esac
-  shift 6
+  shift 7
   if [ "${1:-}" = --retain ]; then
     mode=retain
     shift
@@ -831,27 +876,27 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
       printf 'arg=%s\n' "$arg"
     done
   } > "$tmp" || { rm -f "$tmp"; return 1; }
-  fm_backlog_close_marker_validate "$tmp" "$data" "$id" "$state" \
+  fm_backlog_close_marker_validate "$tmp" "$data" "$id" "$state" "$config_dir" \
     || { rm -f "$tmp"; return 1; }
 }
 
 # Record the exact close a teardown is about to perform.
-fm_backlog_close_marker_write() {  # <state-dir> <id> <data-dir> <spawn-gen> [flag...]
-  local state=$1 id=$2 data=$3 spawn_gen=$4 marker tmp
+fm_backlog_close_marker_write() {  # <state-dir> <id> <data-dir> <spawn-gen> <config-dir> [flag...]
+  local state=$1 id=$2 data=$3 spawn_gen=$4 config_dir=$5 marker tmp
   fm_backlog_directory_present "$state" "state directory" || return 1
-  shift 4
+  shift 5
   marker=$(fm_backlog_close_marker_path "$state" "$id") || return 1
   tmp="$state/.$id.backlog-close.${BASHPID:-$$}"
-  fm_backlog_close_marker_stage "$tmp" "$id" "$data" "$spawn_gen" "$state" 0 "$@" || return 1
+  fm_backlog_close_marker_stage "$tmp" "$id" "$data" "$spawn_gen" "$state" "$config_dir" 0 "$@" || return 1
   fm_backlog_atomic_transition publish "$tmp" "$marker" "pending-close record" "$state" \
     || { rm -f "$tmp"; return 1; }
 }
 
-fm_backlog_close_marker_mark_cleanup_incomplete() {  # <state-dir> <marker-path> <id> <data-dir> <spawn-gen> [flag...]
-  local state=$1 marker=$2 id=$3 data=$4 spawn_gen=$5 tmp
-  shift 5
+fm_backlog_close_marker_mark_cleanup_incomplete() {  # <state-dir> <marker-path> <id> <data-dir> <spawn-gen> <config-dir> [flag...]
+  local state=$1 marker=$2 id=$3 data=$4 spawn_gen=$5 config_dir=$6 tmp
+  shift 6
   tmp="$state/.$id.backlog-close.${BASHPID:-$$}"
-  fm_backlog_close_marker_stage "$tmp" "$id" "$data" "$spawn_gen" "$state" 1 "$@" || return 1
+  fm_backlog_close_marker_stage "$tmp" "$id" "$data" "$spawn_gen" "$state" "$config_dir" 1 "$@" || return 1
   fm_backlog_atomic_transition publish "$tmp" "$marker" "pending-close record" "$state" \
     || { rm -f "$tmp"; return 1; }
 }
@@ -870,8 +915,8 @@ fm_backlog_close_marker_clear() {  # <state-dir> <id>
 # retained), the marker is stale, or an answer already closed a retained row,
 # and 1 when marker validation or recovery fails. Validation completes before
 # any meta or backlog mutation.
-fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data-dir>
-  local state=$1 marker=$2 marker_name expected_id
+fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data-dir> <config-dir>
+  local state=$1 marker=$2 config_dir=$4 marker_name expected_id
   local id data marker_spawn_gen meta meta_spawn_gen row_state cleanup_incomplete mode
   local args=() mode_flags=()
   FM_BACKLOG_CLOSE_REPLAY_RESULT=noop
@@ -882,7 +927,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
     *.backlog-close) expected_id=${marker_name%.backlog-close} ;;
     *) FM_BACKLOG_TRANSITION_ERROR="invalid pending-close record name $marker"; return 1 ;;
   esac
-  fm_backlog_close_marker_validate "$marker" "$3" "$expected_id" "$state" || return 1
+  fm_backlog_close_marker_validate "$marker" "$3" "$expected_id" "$state" "$config_dir" || return 1
   id=$FM_BACKLOG_CLOSE_VALIDATED_ID
   data=$FM_BACKLOG_CLOSE_VALIDATED_DATA
   marker_spawn_gen=$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN
@@ -907,7 +952,8 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       return 0
     fi
     fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \
-      "$marker_spawn_gen" "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" \
+      "$marker_spawn_gen" "$config_dir" "${mode_flags[@]+"${mode_flags[@]}"}" \
+      "${args[@]+"${args[@]}"}" \
       || return 1
     cleanup_incomplete=1
     fm_backlog_atomic_transition remove "$meta" "the interrupted task record" "$state" \

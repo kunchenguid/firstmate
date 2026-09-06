@@ -1908,6 +1908,52 @@ test_recovery_rejects_malformed_pr_urls() {
   pass "recovery rejects malformed PR URL values"
 }
 
+# A self-hosted Gitea/Forgejo instance can be plain http on a non-standard
+# port. The recorded close is staged (its --pr link accepted because the
+# instance is allow-listed) and then applied, landing the PR link as a
+# completion note on the Done row - the backlog backend rejects a structured
+# --pr link that does not end in /pull/<n>.
+test_recovery_replays_a_close_with_an_allow_listed_http_gitea_pr() {
+  local case_dir id out
+  id=atomic-heal-gitea-http-b12
+  case_dir=$(make_home heal-gitea-http)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  printf '%s\n' 'http://alps:3222' > "$(home_of "$case_dir")/config/gitea-instances"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-gitea\narg=--pr\narg=http://alps:3222/babbarc/server-ops/pulls/1\n' \
+    "$id" "$(home_of "$case_dir")/data" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "recovery refused an allow-listed plain-http Gitea PR at teardown: $out"
+  assert_grep 'http://alps:3222/babbarc/server-ops/pulls/1' "$(backlog_of "$case_dir")" \
+    "the replayed close dropped the plain-http Gitea completion link"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed plain-http Gitea close left its record behind"
+  pass "recovery replays a close whose PR URL is an allow-listed plain-http Gitea instance"
+}
+
+# The plain-http acceptance is gated: a plain-http PR URL whose host is not an
+# allow-listed Gitea instance is still rejected, exactly like any other
+# non-https origin.
+test_recovery_rejects_an_http_pr_for_a_non_allow_listed_host() {
+  local case_dir id marker out
+  id=atomic-marker-http-unlisted-b12
+  case_dir=$(make_home marker-http-unlisted)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-http-unlisted\narg=--pr\narg=http://elsewhere:3222/owner/repo/pulls/1\n' \
+    "$id" "$(home_of "$case_dir")/data" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  assert_present "$marker" "close marker with a non-allow-listed plain-http PR host was consumed"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "a non-allow-listed plain-http PR URL changed the backlog row: $out"
+  pass "recovery rejects a plain-http PR URL whose host is not an allow-listed Gitea instance"
+}
+
 test_failed_close_replay_is_not_started_as_live_work() {
   local case_dir id marker out
   id=atomic-pending-close-not-started-b12
@@ -2438,6 +2484,8 @@ test_recovery_rejects_an_unterminated_unknown_field
 test_recovery_rejects_lexical_data_traversal
 test_recovery_rejects_raw_control_bytes
 test_recovery_rejects_malformed_pr_urls
+test_recovery_replays_a_close_with_an_allow_listed_http_gitea_pr
+test_recovery_rejects_an_http_pr_for_a_non_allow_listed_host
 test_failed_close_replay_is_not_started_as_live_work
 test_recovery_rejects_invalid_close_arguments
 test_recovery_rejects_a_symlinked_close_marker
