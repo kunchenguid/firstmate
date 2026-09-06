@@ -1951,10 +1951,11 @@ test_teardown_never_closes_a_captain_held_task() {
 }
 
 test_retained_row_artifacts_survive_captain_answers() {
-  local home retained_id precedence_id rejected_id rejected_local_id approved_id released_id local_id
+  local home retained_id precedence_id rejected_id rejected_local_id report_question_id
+  local approved_id released_id local_id
   local repo wt
   local local_repo local_wt
-  local precedence_pr rejected_pr approved_pr json show
+  local precedence_pr rejected_pr approved_pr released_pr json show
   home=$(make_home retained-row-artifacts)
   retained_id=sample-retained-report
   mkdir -p "$home/data/$retained_id"
@@ -2031,6 +2032,23 @@ test_retained_row_artifacts_survive_captain_answers() {
   assert_contains "$show" "hold_kind: captain" \
     "the rejected local merge lost its non-release evidence"
 
+  report_question_id=sample-report-path-question
+  tasks_in "$home" add "$report_question_id" \
+    "Decide whether data/$report_question_id/report.md should be published" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the report-path question fixture"
+  run_captain "$home" hold "$report_question_id" \
+    --reason "captain report publication decision pending" >/dev/null \
+    || fail "could not hold the report-path question"
+  printf 'Do not publish this report.\n' > "$home/report-question-answer.txt"
+  run_captain "$home" answer "$report_question_id" \
+    --decision-file "$home/report-question-answer.txt" >/dev/null \
+    || fail "could not record the report-path answer"
+  show=$(tasks_in "$home" show "$report_question_id" --full) \
+    || fail "the report-path question disappeared"
+  assert_contains "$show" "state: done" "the report-path answer did not close its call"
+  assert_contains "$show" "hold_kind: captain" \
+    "the report-path question lost its non-release evidence"
+
   approved_id=sample-approved-merge
   approved_pr="https://github.com/sample/sample/pull/23"
   repo="$home/projects/sample-approved"
@@ -2088,9 +2106,11 @@ test_retained_row_artifacts_survive_captain_answers() {
     || fail "released local cleanup failed: $(cat "$home/local-teardown.err")"
 
   released_id=sample-released-report
+  released_pr=https://github.com/sample/sample/pull/24
   mkdir -p "$home/data/$released_id"
-  tasks_in "$home" add "$released_id" "Investigate released report evidence" --kind scout \
-    --repo sample --start >/dev/null || fail "could not create the released report fixture"
+  tasks_in "$home" add "$released_id" "Investigate $released_pr report evidence" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the released report fixture"
   write_origin_meta "$home" "$released_id"
   printf 'done: report complete\n' > "$home/state/$released_id.status"
   printf '# Released report\n' > "$home/data/$released_id/report.md"
@@ -2112,6 +2132,7 @@ test_retained_row_artifacts_survive_captain_answers() {
     --arg precedence_id "$precedence_id" \
     --arg precedence "data/$precedence_id/report.md" \
     --arg rejected_id "$rejected_id" --arg rejected_local_id "$rejected_local_id" \
+    --arg report_question_id "$report_question_id" \
     --arg approved_id "$approved_id" --arg local_id "$local_id" \
     --arg approved_pr "$approved_pr" --arg released_id "$released_id" \
     --arg released "data/$released_id/report.md" '
@@ -2119,6 +2140,7 @@ test_retained_row_artifacts_survive_captain_answers() {
         and (.landed | any(.id == $precedence_id and .artifact == $precedence))
         and (.landed | any(.id == $rejected_id) | not)
         and (.landed | any(.id == $rejected_local_id) | not)
+        and (.landed | any(.id == $report_question_id) | not)
         and (.landed | any(.id == $approved_id and .artifact == $approved_pr))
         and (.landed | any(.id == $local_id))
         and (.landed | any(.id == $released_id and .artifact == $released))
