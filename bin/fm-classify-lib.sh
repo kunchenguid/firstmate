@@ -1922,18 +1922,26 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
 #      wedged forever. fm_nm_step_progress_probe resolves the current step first.
 #
 # 0 (defer the escalation) when there is positive evidence the run advanced since
-# the recorded sample, or when a step IS executing but the sample is younger than
-# the window, so no flat reading yet means anything. 1 (escalate on the caller's
-# unchanged schedule) for every other outcome, including no run, no active step, a
-# failed or bounded-out probe, and - the case the alarm exists for - a mature
-# window over which nothing moved at all.
+# the recorded sample, when a step IS executing but the sample is younger than the
+# window, so no flat reading yet means anything, or when a step IS executing but
+# this is the window's first usable measurement: a baseline, never a verdict. That
+# last case is real, not theoretical - the seed probe can find no active step (a
+# run parked at a gate or between steps), the timer then matures, and the first
+# valid measurement arrives exactly at the escalation moment; recording it with an
+# escalation would hand a healthy advancing run precisely the false wedge this
+# probe exists to suppress. 1 (escalate on the caller's unchanged schedule) for
+# every other outcome, including no run, no active step, a failed or bounded-out
+# probe, and - the case the alarm exists for - a mature window over which nothing
+# moved at all.
 #
-# The deferral for a young sample is self-limiting rather than open-ended, and that
-# is load-bearing: an immature window deliberately does NOT rewrite the sample, so
-# its age only grows and maturity always arrives. Total added delay before a real
-# stall escalates is therefore bounded by FM_NM_PROGRESS_WINDOW_SECS no matter how
-# a home has tuned its escalation threshold. Rewriting the sample there would build
-# exactly the thing this repo keeps removing: a check that cannot fail.
+# Both deferrals are self-limiting rather than open-ended, and that is
+# load-bearing: an immature window deliberately does NOT rewrite the sample, so
+# its age only grows and maturity always arrives, and a baseline sample is written
+# once, at the moment it is taken, so its age grows the same way. Total added
+# delay before a real stall escalates is therefore bounded by
+# FM_NM_PROGRESS_WINDOW_SECS no matter how a home has tuned its escalation
+# threshold. Rewriting the sample there would build exactly the thing this repo
+# keeps removing: a check that cannot fail.
 #
 # Prints a short evidence label for the caller's wake reason on a deferral.
 # NOT a pure read: two bounded no-mistakes calls per invocation, so callers must
@@ -1949,11 +1957,15 @@ FM_NM_PROGRESS_WINDOW_SECS=${FM_NM_PROGRESS_WINDOW_SECS:-180}
 # Wall-clock bound on each of the probe's two no-mistakes calls. The probe runs
 # synchronously inside the poll that was about to escalate, so an unresponsive
 # pipeline daemon must cost the escalation the bound and nothing more: a timed-out
-# call yields no record, which reads as no evidence like every other negative.
+# call yields no record, which reads as no evidence like every other negative. A
+# value that is not a positive integer is not a bound at all (`timeout 0` runs its
+# command to completion and the perl fallback's `alarm 0` cancels the deadline),
+# so the default applies instead; the check lives at the point of use so an
+# in-process override gets it too.
 FM_NM_PROGRESS_TIMEOUT=${FM_NM_PROGRESS_TIMEOUT:-10}
 
 crew_run_step_advanced() {  # <id> <state> <sample-file>
-  local id=$1 state=$2 sample=$3 wt kind now current prior
+  local id=$1 state=$2 sample=$3 wt kind now current prior timeout_secs
   local prior_epoch prior_body current_body
   [ -n "$id" ] && [ -n "$sample" ] || return 1
   # A kind=secondmate task records a provisioned firstmate home, not a code tree
@@ -1963,7 +1975,9 @@ crew_run_step_advanced() {  # <id> <state> <sample-file>
   wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
 
-  current=$(fm_nm_step_progress_probe "$wt" "$FM_NM_PROGRESS_TIMEOUT" 2>/dev/null || true)
+  timeout_secs=$FM_NM_PROGRESS_TIMEOUT
+  case "$timeout_secs" in ''|*[!0-9]*|0) timeout_secs=10 ;; esac
+  current=$(fm_nm_step_progress_probe "$wt" "$timeout_secs" 2>/dev/null || true)
   if [ -z "$current" ]; then
     # No run, no executing step, or an unusable probe: nothing here may defer, and
     # a stale sample must not outlive the run it described.
@@ -1977,9 +1991,16 @@ crew_run_step_advanced() {  # <id> <state> <sample-file>
   current_body=$current
   case "$prior_epoch" in
     ''|*[!0-9]*)
-      # First measurement of this idle window: a baseline, never a verdict.
+      # First usable measurement of this idle window: a baseline, never a verdict.
+      # A step IS executing, so this is liveness evidence - only nothing to compare
+      # it against yet, because the seed probe found no active step (a run between
+      # steps) and the timer matured before the first valid measurement arrived.
+      # Defer on the recorded baseline; the next threshold moment either sees it
+      # move or ages it past the window, so the verdict is delayed, not suppressed.
       printf '%s\t%s\n' "$now" "$current_body" > "$sample"
-      return 1
+      printf 'its validation run is on step %s with no baseline to compare against yet' \
+        "$(printf '%s' "$current_body" | cut -f2)"
+      return 0
       ;;
   esac
   if [ "$prior_body" != "$current_body" ]; then

@@ -575,7 +575,7 @@ age_progress_sample() {  # <sample-file> <seconds-ago>
 }
 
 test_crew_run_step_advanced_classifier() {
-  local dir state fakebin sample toon steplog wt saved_path young_sample
+  local dir state fakebin sample toon steplog wt saved_path young_sample progress
   dir=$(make_case classify-step-progress); state="$dir/state"; fakebin="$dir/fakebin"
   sample="$state/.pipeline-sample-probe"; toon="$dir/status.toon"; steplog="$dir/step.log"
   wt="$dir/wt"
@@ -595,10 +595,20 @@ test_crew_run_step_advanced_classifier() {
   nm_status_fixture "$toon" fixing review 44121
   printf 'aaaa' > "$steplog"
 
-  # First measurement of a window is a baseline, not a verdict.
-  ! crew_run_step_advanced probe "$state" "$sample" >/dev/null \
-    || fail "the first measurement of an idle window was reported as progress"
+  # First measurement of a window is a baseline, never a verdict. This is also the
+  # late-seed shape: the timer was seeded while the run had no active step (no run
+  # at all, parked at a gate, between steps), so the first valid measurement
+  # arrives exactly at the escalation moment. A step IS executing, so recording
+  # that measurement with a wedge alarm would hand a healthy advancing run the
+  # false wedge this probe exists to suppress - it must defer on the baseline it
+  # records and name the step in the evidence label.
+  progress=$(crew_run_step_advanced probe "$state" "$sample") \
+    || fail "the first measurement of an idle window escalated instead of deferring on its recorded baseline"
   [ -s "$sample" ] || fail "the first measurement recorded no baseline to compare against"
+  case "$progress" in
+    'its validation run is on step review with no baseline to compare against yet') ;;
+    *) fail "the baseline deferral gave the caller no usable evidence label: $progress" ;;
+  esac
 
   # Identical measurement, but the window is younger than FM_NM_PROGRESS_WINDOW_SECS:
   # a flat reading over a short sample means nothing, so it must not escalate - and
@@ -720,6 +730,78 @@ test_step_progress_window_is_configurable_and_bounded() {
   unset FM_FAKE_NM_STATUS FM_FAKE_NM_LOG
   export PATH="$saved_path"
   pass "FM_NM_PROGRESS_WINDOW_SECS really governs how long a flat reading must hold before it counts as a stall"
+}
+
+# FM_NM_PROGRESS_TIMEOUT=0 must not disable the bound: `timeout 0` runs its
+# command to completion and the perl fallback's `alarm 0` cancels the deadline,
+# so a zero knob handed to the probe unchanged would let one unresponsive
+# no-mistakes call pin the watcher poll that was about to escalate instead of
+# costing it the bound and reading as no progress evidence. The documented
+# contract is the default for a value that is not a positive integer, so a
+# hanging stub must cost the probe ten seconds and nothing more - and a valid
+# smaller value must still govern, proving the knob itself is alive rather than
+# quietly replaced by the fallback.
+test_progress_timeout_enforces_a_positive_integer_bound() {
+  local dir state fakebin sample wt saved_path saved start bg rc elapsed
+  dir=$(make_case classify-progress-timeout); state="$dir/state"; fakebin="$dir/fakebin"
+  sample="$state/.pipeline-sample-hang"; wt="$dir/wt"
+  make_task_worktree "$wt" fm/probe
+  printf 'window=test:fm-hang\nkind=ship\nworktree=%s\n' "$wt" > "$state/hang.meta"
+  # An unresponsive pipeline daemon: the stub accepts the call and never answers.
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+sleep 120
+SH
+  chmod +x "$fakebin/no-mistakes"
+  saved_path=$PATH
+  export PATH="$fakebin:$PATH"
+  saved=$FM_NM_PROGRESS_TIMEOUT
+
+  # Run the probe as a job so a broken bound surfaces as a failed bounded wait
+  # instead of hanging the whole suite.
+  start=$(date +%s)
+  FM_NM_PROGRESS_TIMEOUT=0 crew_run_step_advanced hang "$state" "$sample" >/dev/null 2>&1 &
+  bg=$!
+  while [ "$(( $(date +%s) - start ))" -lt 55 ] \
+    && kill -0 "$bg" 2>/dev/null; do sleep 1; done
+  if kill -0 "$bg" 2>/dev/null; then
+    kill "$bg" 2>/dev/null
+    wait "$bg" 2>/dev/null
+    FM_NM_PROGRESS_TIMEOUT=$saved
+    export PATH="$saved_path"
+    fail "FM_NM_PROGRESS_TIMEOUT=0 left an unresponsive no-mistakes call unbounded"
+  fi
+  wait "$bg"; rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  [ "$rc" -ne 0 ] \
+    || fail "an unresponsive no-mistakes call under FM_NM_PROGRESS_TIMEOUT=0 was reported as progress evidence"
+  [ "$elapsed" -lt 55 ] \
+    || fail "FM_NM_PROGRESS_TIMEOUT=0 cost the probe $elapsed seconds instead of the default bound"
+
+  # A valid value still reaches the bound: one second, not the ten-second default.
+  start=$(date +%s)
+  FM_NM_PROGRESS_TIMEOUT=1 crew_run_step_advanced hang "$state" "$sample" >/dev/null 2>&1 &
+  bg=$!
+  while [ "$(( $(date +%s) - start ))" -lt 55 ] \
+    && kill -0 "$bg" 2>/dev/null; do sleep 1; done
+  kill -0 "$bg" 2>/dev/null && {
+    kill "$bg" 2>/dev/null
+    wait "$bg" 2>/dev/null
+    FM_NM_PROGRESS_TIMEOUT=$saved
+    export PATH="$saved_path"
+    fail "FM_NM_PROGRESS_TIMEOUT=1 left an unresponsive no-mistakes call unbounded"
+  }
+  wait "$bg"; rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  [ "$rc" -ne 0 ] \
+    || fail "an unresponsive no-mistakes call under FM_NM_PROGRESS_TIMEOUT=1 was reported as progress evidence"
+  [ "$elapsed" -lt 10 ] \
+    || fail "FM_NM_PROGRESS_TIMEOUT=1 cost the probe $elapsed seconds instead of the one second it asked for"
+
+  FM_NM_PROGRESS_TIMEOUT=$saved
+  unset FM_FAKE_NM_STATUS FM_FAKE_NM_LOG
+  export PATH="$saved_path"
+  pass "FM_NM_PROGRESS_TIMEOUT enforces a positive-integer bound: 0 falls back to the default and a valid smaller value still governs"
 }
 
 # FM_WORKTREE_WRITE_PRUNE is a skip list, so clearing it skips nothing and is the
@@ -4512,6 +4594,7 @@ test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain
 test_crew_run_step_advanced_classifier
 test_step_progress_window_is_configurable_and_bounded
+test_progress_timeout_enforces_a_positive_integer_bound
 test_wedge_escalation_deferred_while_the_validation_run_advances
 test_run_progress_deferral_resurfaces_on_the_bounded_cadence
 test_triage_log_size_cap_accepts_spaced_wc_counts
