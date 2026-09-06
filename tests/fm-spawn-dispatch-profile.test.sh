@@ -33,6 +33,11 @@ SH
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+shift
+exec "$@"
+SH
   cat > "$fakebin/cursor-agent" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --list-models ]; then
@@ -41,7 +46,7 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/cursor-agent"
+  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -1061,9 +1066,17 @@ SH
     prompt="$CASE_DIR/prompt"
     FM_ROLE_PROMPT="$prompt" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" || fail "could not consume $kind launch command"
     # The final prompt delivered to the harness is the generated interface.
-    # An authored role heading must not suppress the current worker contract.
+    # An authored role heading must neither suppress nor duplicate the current
+    # worker contract; the launch section is its single, superseding owner.
     assert_grep 'follow this brief instead of that supervisor contract' "$prompt" "$kind command did not deliver the role correction"
     assert_grep 'brief for' "$prompt" "$kind command lost the task"
+    [ "$(grep -c '^# Current worker role contract$' "$prompt")" -eq 1 ] ||
+      fail "$brief_kind $kind duplicated the delivered worker contract"
+    if [ "$brief_kind" = heading ]; then
+      assert_grep 'This section supersedes every earlier brief instruction about your role' "$prompt" \
+        "$kind command left the authored role section without a precedence rule"
+      assert_grep 'Follow the project instructions' "$prompt" "$kind command dropped the authored role section"
+    fi
     cmp -s "$CASE_DIR/brief-before" "$HOME_DIR/data/$id/brief.md" || fail "spawn rewrote the authored brief"
     if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
       printf '# evidence begin: %s %s worker\n%s\n' "$brief_kind" "$kind" "$out"

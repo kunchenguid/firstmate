@@ -22,12 +22,16 @@
 # restating the rule.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
-# fm_brief_worker_role owns the ship/scout role scope, emitted by fm-brief.sh
-# and supplied to legacy worker briefs by fm-spawn.sh, never to secondmates.
+# fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
+# emitter, supplying it to every ship/scout launch brief and never to a
+# secondmate charter. Like fm_brief_intent_overlay it is a distinctly titled
+# launch section that states its own precedence, so a brief that authors its own
+# role wording is superseded rather than duplicated.
 
 fm_brief_worker_role() {
   cat <<'EOF'
-# Worker role
+# Current worker role contract
+This section supersedes every earlier brief instruction about your role and identity.
 When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is the primary/secondmate supervisor's contract: follow this brief instead of that supervisor contract.
 For that Firstmate task, do the assigned work yourself and report to firstmate; do not adopt the supervisor identity, delegate the task, run fleet supervision, or address the captain.
 This exception preserves this brief's safety and authority boundaries and applicable contributor guidance, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.

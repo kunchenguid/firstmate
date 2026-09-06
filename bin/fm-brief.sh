@@ -64,8 +64,9 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and defers self-governance recognition and insertion to
 # fm-ensure-agents-md.sh's contract.
-# Ship/scout role scope comes from fm_brief_worker_role in fm-dod-lib.sh;
-# its Firstmate-only exception does not change other projects' instructions.
+# Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
+# fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
+# second owner of a contract that must stay current across relaunches.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -309,7 +310,6 @@ exit 0
 fi
 
 REPO=${POS[1]}
-WORKER_ROLE=$(fm_brief_worker_role)
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -356,8 +356,6 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
-
-$WORKER_ROLE
 
 $TASK_SECTION
 
@@ -433,8 +431,6 @@ DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
-
-$WORKER_ROLE
 
 $TASK_SECTION
 

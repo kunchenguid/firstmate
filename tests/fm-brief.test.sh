@@ -856,18 +856,16 @@ test_worker_role_scope() {
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$kind" arbitrary-project-name --mode "$kind" >/dev/null || fail "$kind scaffold failed"
     fi
     brief="$home/data/$kind/brief.md"
-    assert_grep '# Worker role' "$brief" "$kind omitted the worker role contract"
-    assert_grep 'When this task works on Firstmate itself' "$brief" "$kind did not scope the exception to Firstmate"
-    assert_grep 'follow this brief instead of that supervisor contract' "$brief" "$kind did not neutralize the supervisor role"
-    assert_grep 'Other projects retain their own instructions unchanged' "$brief" "$kind displaced unrelated project guidance"
+    assert_no_grep '# Current worker role contract' "$brief" "$kind scaffolded a second owner of the role scope fm-spawn.sh delivers"
   done
   FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
     "$ROOT/bin/fm-brief.sh" supervisor --secondmate --no-projects >/dev/null || fail "secondmate scaffold failed"
   brief="$home/data/supervisor/brief.md"
-  assert_no_grep '# Worker role' "$brief" "secondmate received the worker exception"
+  assert_no_grep '# Current worker role contract' "$brief" "secondmate received the worker exception"
+  assert_no_grep 'do not adopt the supervisor identity' "$brief" "secondmate received the worker exception"
   assert_grep "The local \`AGENTS.md\` is your job description" "$brief" "secondmate lost its supervisor contract"
   assert_grep 'That file is your parent channel' "$brief" "secondmate lost its parent channel"
-  pass "fm-brief: worker role scope preserves secondmate and other-project instructions"
+  pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
 test_worker_role_scope
