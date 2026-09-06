@@ -817,6 +817,118 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# A project declares its bootstrap contract by adding one
+# `<!-- firstmate:bootstrap-contract ... -->` block to its own committed
+# AGENTS.md, discovered from `<FM_HOME>/projects/<repo>/AGENTS.md`
+# (bin/fm-bootstrap-contract-lib.sh). Absent that block, a brief must render
+# exactly as it did before this contract existed.
+write_project_agents_md() {
+  local home=$1 project=$2 body=$3
+  mkdir -p "$home/projects/$project"
+  printf '%s\n' "$body" > "$home/projects/$project/AGENTS.md"
+}
+
+test_bootstrap_contract_absent_by_default() {
+  local home brief
+  home="$TMP_ROOT/bootstrap-absent-home"
+  mkdir -p "$home/data"
+
+  # No project directory at all: today's ordinary case for an unregistered
+  # or not-yet-cloned repo name.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" bootstrap-absent-a1 unregistered-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/bootstrap-absent-a1/brief.md"
+  assert_present "$brief" "brief was not scaffolded for an unregistered project"
+  assert_no_grep "# Project bootstrap contract" "$brief" \
+    "an unregistered project injected a bootstrap contract section"
+
+  # A cloned project with a plain AGENTS.md that carries no marker.
+  write_project_agents_md "$home" plain-proj "# Plain project
+No bootstrap marker here."
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" bootstrap-absent-a2 plain-proj --scout >/dev/null 2>&1
+  brief="$home/data/bootstrap-absent-a2/brief.md"
+  assert_present "$brief" "brief was not scaffolded for a plain AGENTS.md project"
+  assert_no_grep "# Project bootstrap contract" "$brief" \
+    "a project with no marker injected a bootstrap contract section"
+  pass "fm-brief.sh: a project declaring no bootstrap contract renders unchanged"
+}
+
+test_bootstrap_contract_injected_into_ship_and_scout() {
+  local home brief agents
+  home="$TMP_ROOT/bootstrap-injected-home"
+  mkdir -p "$home/data"
+  # shellcheck disable=SC2016  # single quotes are deliberate: this fixture's backticks must stay literal
+  write_project_agents_md "$home" incident-proj '# Incident project
+
+Read `START_HERE.md` for the full continuity read order.
+
+<!-- firstmate:bootstrap-contract
+- Read fresh `error_logs` first.
+- Treat missing branch evidence as a product defect; inspect code or ask the user only after.
+-->
+
+More prose after the marker.'
+  agents="$home/projects/incident-proj/AGENTS.md"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" bootstrap-ship-b1 incident-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/bootstrap-ship-b1/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  assert_grep "# Project bootstrap contract" "$brief" "ship brief missing the injected bootstrap contract section"
+  assert_grep "$agents declares a mandatory bootstrap contract" "$brief" \
+    "ship brief did not name the declaring AGENTS.md"
+  # shellcheck disable=SC2016  # backticked doc-name text must stay literal
+  assert_grep 'Read fresh `error_logs` first.' "$brief" \
+    "ship brief did not carry the declared read-order line verbatim"
+  assert_grep "Treat missing branch evidence as a product defect" "$brief" \
+    "ship brief did not carry the declared incident rule verbatim"
+  assert_no_grep "More prose after the marker." "$brief" \
+    "ship brief leaked AGENTS.md prose outside the declared marker block"
+  assert_grep "working: bootstrapped, read {documents}" "$brief" \
+    "ship brief did not require the worker to state which documents it read"
+  assert_grep ">> '$home/state/bootstrap-ship-b1.status'" "$brief" \
+    "ship brief's bootstrap acknowledgement did not point at this task's own status file"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" bootstrap-scout-b2 incident-proj --scout >/dev/null 2>&1
+  brief="$home/data/bootstrap-scout-b2/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_grep "# Project bootstrap contract" "$brief" "scout brief missing the injected bootstrap contract section"
+  # shellcheck disable=SC2016  # backticked doc-name text must stay literal
+  assert_grep 'Read fresh `error_logs` first.' "$brief" \
+    "scout brief did not carry the declared read-order line verbatim"
+  pass "fm-brief.sh: a project's declared bootstrap contract reaches both ship and scout briefs"
+}
+
+test_bootstrap_contract_fails_closed_on_unterminated_block() {
+  local home agents out status
+  home="$TMP_ROOT/bootstrap-unterminated-home"
+  mkdir -p "$home/data"
+  write_project_agents_md "$home" broken-proj '<!-- firstmate:bootstrap-contract
+- Read X first.'
+  agents="$home/projects/broken-proj/AGENTS.md"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" bootstrap-broken-c1 broken-proj --mode direct-PR 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "an unterminated bootstrap-contract block should refuse to scaffold"
+  assert_contains "$out" "$agents" "refusal did not name the malformed AGENTS.md"
+  assert_contains "$out" "no closing" "refusal did not explain the missing closing marker"
+  assert_absent "$home/data/bootstrap-broken-c1/brief.md" "refused scaffold still wrote a brief"
+  pass "fm-brief.sh: an unterminated bootstrap-contract block fails closed rather than omitting it"
+}
+
+test_bootstrap_contract_fails_closed_on_empty_block() {
+  local home agents out status
+  home="$TMP_ROOT/bootstrap-empty-home"
+  mkdir -p "$home/data"
+  write_project_agents_md "$home" empty-proj '<!-- firstmate:bootstrap-contract
+-->'
+  agents="$home/projects/empty-proj/AGENTS.md"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" bootstrap-empty-c2 empty-proj --scout 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "an empty bootstrap-contract block should refuse to scaffold"
+  assert_contains "$out" "$agents" "refusal did not name the malformed AGENTS.md"
+  assert_contains "$out" "empty" "refusal did not explain the empty declared block"
+  assert_absent "$home/data/bootstrap-empty-c2/brief.md" "refused scaffold still wrote a brief"
+  pass "fm-brief.sh: an empty bootstrap-contract block fails closed rather than omitting it"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -890,4 +1002,8 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_bootstrap_contract_absent_by_default
+test_bootstrap_contract_injected_into_ship_and_scout
+test_bootstrap_contract_fails_closed_on_unterminated_block
+test_bootstrap_contract_fails_closed_on_empty_block
 test_scout_and_secondmate_scaffold
