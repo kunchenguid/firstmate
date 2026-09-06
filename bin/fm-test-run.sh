@@ -1374,7 +1374,7 @@ families_for_changed_path() {
         printf '%s\n' "__unmapped__:$path"
       fi
       ;;
-    README.md|LICENSE|assets/*|docs/*|.gitignore)
+    README.md|VISION.md|GROK_BOT.md|LICENSE|assets/*|docs/*|.gitignore)
       ;;
     *)
       families_for_test_reference "$path" \
