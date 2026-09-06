@@ -1013,7 +1013,7 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
-# The two records of one legitimate wait, and why a stale alarm must read both.
+# The two records of one ordinary crew wait, and why its stale alarm reads both.
 #
 # status_is_paused_or_captain_held reads the status LINE a worker wrote, which is
 # the only record when the worker itself is waiting. It is not the only record
@@ -1031,7 +1031,10 @@ pause_state_class() {  # <window> <task>
 #
 # The read costs one subprocess and runs only where the watcher is about to
 # alarm, so at most once per distinct stale hash per window, beside the crew-state
-# read the same paths already pay.
+# read the same paths already pay. The secondmate stale gate deliberately runs
+# before this bound and admits only status-declared waits: a backlog-only hold
+# whose mate still says `working:` or `done:` does not reach this read. Reaching
+# it would put backlog reads into windows deliberately skipped on ordinary polls.
 STALE_WAIT_DECLARATION=
 
 task_captain_call_open() {  # <task>
@@ -1075,6 +1078,9 @@ stale_wait_record() {  # <window-key>
   printf '%s' "$STALE_WAIT_DECLARATION" > "$STATE/.paused-resurfaced-$1"
 }
 
+# Bound a due stale alarm for an ordinary crew task held for the captain.
+# Backlog-only secondmate holds are outside this guard because the earlier gate
+# preserves their no-backlog-read hot path.
 captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
@@ -1099,9 +1105,9 @@ captain_call_stale_bound() {  # <window-key> <task>
 # and the throttle is read BEFORE anything is queued and advanced only by a wake
 # that really fires - a throttle written by the wake it should have prevented, or
 # read after that wake was already appended, bounds nothing.
-# Both records of a wait bound it (see task_captain_call_open above): the status
-# line the worker declared, and the backlog hold firstmate recorded once the
-# captain took the work in hand.
+# Both records of an ordinary crew wait bound it (see task_captain_call_open
+# above): the status line the worker declared, and the backlog hold firstmate
+# recorded once the captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1
   key=$(window_key "$win")
@@ -1959,12 +1965,12 @@ EOF
       clear_pause_tracking "$key"
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
-    # the pane-stale path ONLY to serve a declared wait's bounded re-surface -
-    # the same declarations pause_state_class reconciles below, which is why this
-    # gate reads the shared predicate rather than the pause verb alone. Narrowing
-    # it to `paused` would leave a mate's captain hold rotting invisibly: the
-    # clear above already spares its pause tracking, but nothing would ever
-    # re-surface it.
+    # the pane-stale path ONLY to serve a status-declared wait's bounded
+    # re-surface. This gate reads the shared predicate rather than the pause verb
+    # alone so it includes a declared `captain-held` status. A hold recorded only
+    # in the backlog while the mate still says `working:` or `done:` is outside
+    # this guard: reaching it would require backlog reads for windows this gate
+    # deliberately skips, putting that read on the ordinary poll hot path.
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
@@ -2024,13 +2030,12 @@ EOF
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             elif captain_call_stale_bound "$key" "$task"; then
               # The line is captain-relevant and stays so, but the backlog says
-              # the captain already holds this work: further sights of the SAME
-              # status-log state have nothing to add, and the pane keeps churning
-              # a new hash into this branch for as long as they are deciding. Only
-              # that repetition is bounded - the first sight already alarmed and
-              # the window's end alarms once more - and the bookkeeping matches the
-              # alarm it replaces, so a stable hash stays as inert here as it
-              # already was after a first terminal alarm.
+              # the captain already holds this work: further NEW pane hashes with
+              # the same status-log state have nothing to add while they are
+              # deciding. Only that new-hash repetition is bounded - the first
+              # sight already alarmed, a new hash inside the window is absorbed,
+              # and a new hash after it alarms again. A stable hash stays as inert
+              # here as it already was after a first terminal alarm.
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
