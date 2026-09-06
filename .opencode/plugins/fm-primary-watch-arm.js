@@ -20,8 +20,10 @@ let retryTimer = null;
 let retryFailures = 0;
 let launchInFlight = null;
 let restorationInFlight = null;
+let deferredClose = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
+let armBusyWaiting = new WeakSet();
 let armRecovery = new WeakMap();
 
 function positiveInteger(name, fallback) {
@@ -164,7 +166,7 @@ function classifyArmClose(stdout, stderr, code, signal) {
   };
 }
 
-function observeArmOutput(stdout, stderr, settleReadiness) {
+function observeArmOutput(stdout, stderr, settleReadiness, armChild) {
   const combined = `${stdout}\n${stderr}`;
   if (combined.split(/\r?\n/).some((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line))) {
     setArmStatus("wake");
@@ -177,6 +179,7 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
     return;
   }
   if (combined.split(/\r?\n/).includes("FM_WATCH_ARM_STATE=busy-holder-waiting")) {
+    armBusyWaiting.add(armChild);
     setArmStatus("busy-holder");
     settleReadiness("busy-holder-waiting");
     return;
@@ -386,12 +389,12 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
   armChild.stdout.on("data", (chunk) => {
     stdout += chunk.toString();
     observeRecovery();
-    observeArmOutput(stdout, stderr, settleReadiness);
+    observeArmOutput(stdout, stderr, settleReadiness, armChild);
   });
   armChild.stderr.on("data", (chunk) => {
     stderr += chunk.toString();
     observeRecovery();
-    observeArmOutput(stdout, stderr, settleReadiness);
+    observeArmOutput(stdout, stderr, settleReadiness, armChild);
   });
   armChild.on("close", (code, signal) => {
     if (settled) return;
@@ -405,6 +408,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       if (restorationInFlight) return;
       retryFailures = 0;
       setArmStatus("wake");
+      deferredClose = null;
       const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
       restorationInFlight = restoration;
       void restoration.then(async (result) => {
@@ -413,6 +417,11 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
           await deliverActionableWake(paths, client, sessionID, message, result.recovery);
         } finally {
           if (restorationInFlight === restoration) restorationInFlight = null;
+          const deferred = deferredClose;
+          deferredClose = null;
+          if (deferred && !child && !retryTimer) {
+            void scheduleRetry(paths, sessionID, client, deferred.message, deferred.predecessorArmPid);
+          }
         }
       }).catch((error) => {
         if (restorationInFlight === restoration) restorationInFlight = null;
@@ -432,6 +441,9 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     }
     if (restorationInFlight) {
       setArmStatus("failed");
+      if (armBusyWaiting.has(armChild)) {
+        deferredClose = { message: classification.message, predecessorArmPid: predecessor };
+      }
       return;
     }
     void scheduleRetry(paths, sessionID, client, classification.message, predecessor);
@@ -442,17 +454,16 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     settleReadiness("failed");
+    const message = `watcher: FAILED - OpenCode arm child failed: ${error.message}`;
+    const predecessor = String(armChild.pid ?? "");
     if (restorationInFlight) {
       setArmStatus("failed");
+      if (armBusyWaiting.has(armChild)) {
+        deferredClose = { message, predecessorArmPid: predecessor };
+      }
       return;
     }
-    void scheduleRetry(
-      paths,
-      sessionID,
-      client,
-      `watcher: FAILED - OpenCode arm child failed: ${error.message}`,
-      String(armChild.pid ?? ""),
-    );
+    void scheduleRetry(paths, sessionID, client, message, predecessor);
   });
   return armChild;
 }
