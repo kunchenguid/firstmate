@@ -217,10 +217,11 @@ Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the sha
 Typed-plane text is typed once; only Enter is retried.
 
 On an idle or done native baseline, submit confirmation first waits for `working` or `blocked` across a bounded polling window.
-If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer is delivery, and proven pending text retries Enter.
+Once an Enter has been sent and native state reads `working`, an earlier Enter is proven landed and delivery confirms immediately without pressing another Enter.
+If native status never reads busy, the shared composer verdict is the next positive signal: a cleared composer is delivery, and proven pending text retries Enter.
+Native status reading unknown throughout on an idle baseline is not a hard failure (a kimi pane before its first submitted message has no herdr-registered agent); the composer read below disambiguates, and a fully unreadable screen stops retrying and reports unknown.
 After the retry budget, `fm_composer_queued_enter_verdict` treats proven pending text plus a generating busy signal as a queued delivered Enter, and keeps an idle pending composer as a genuine swallow.
 On an already active or unreadable baseline, the adapter falls back to conservative composer clearance, with a pre-Enter rendered-footer transition when that baseline is unavailable.
-A fully unreadable target stops retrying and reports unknown.
 blocked is not treated as a queued-Enter busy signal, so a Cursor pane that reports blocked in every state does not receive that conversion.
 
 Some harnesses never present a legibly idle native baseline at all, so the composer fallback is their only path.
@@ -270,6 +271,8 @@ This prevents closing the workspace's last tab before a replacement exists.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
+Herdr's `agent_status` is ambiguous in both directions for a self-exited agent - kimi at rest reports done or idle, and a self-exited kimi retains its record as done or idle - so the probe also reports `dead` for a registered agent whose pane foreground is provably back to a bare shell, letting exit and relaunch confirm a stop that already happened.
+Every doubt - a transient-empty raw re-read, unreadable process-info, more than one foreground process, a non-shell foreground, or a foreground whose argv0 names another program - keeps reporting `alive` or `unreadable`, never `dead`.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
 
 The session-start sweep uses this probe.

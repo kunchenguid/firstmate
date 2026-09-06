@@ -389,6 +389,117 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
 }
 
+test_matrix_kimi_status_footer_below_box() {
+  # Real kimi 0.40.1 (captured live 2026.09.03 over backend=herdr): the status
+  # footer renders as free-text DIRECTLY BELOW the composer box - one row
+  # ("K2.7 Coding thinking <cwd> <hint>") at narrow widths, with a right-aligned
+  # "context: N% (used/total)" meter row beneath it at wider widths. The
+  # below-box staleness walk must step over these furniture rows exactly as it
+  # steps over blanks, or the visibly-empty composer reads unknown and the
+  # spawn delivery gate false-fails. The FM_COMPOSER_KIMI_FOOTER=1 prefix on
+  # every read mirrors bin/fm-spawn.sh's kimi gate, the production caller that
+  # positively identified the pane as kimi; an unidentified read refuses these
+  # same screens (pinned in
+  # test_matrix_kimi_footer_requires_positive_kimi_identification below). The
+  # divergence pins prove any OTHER free-text row below the box still
+  # invalidates it, with and without the override knob.
+  local box typed hint meter wide transcript meter_prose out
+  box=$'╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯'
+  typed=$'╭────────────────────────╮\n│ > deploy the fix       │\n╰────────────────────────╯'
+  hint=$'K2.7 Coding thinking  /repo    shift-tab to Plan mode to review the approach'
+  meter=$'                                                                            context: 0% (0/256k)'
+  wide=$'K2.7 Coding thinking  /repo'
+  transcript=$'the user asked about the parser yesterday'
+  meter_prose=$'the meter says context: 50% (128/256k) now'
+  FM_COMPOSER_KIMI_FOOTER=1 assert_screen "kimi idle, hint footer below the box" empty "$CAPS_STYLED" "$box"$'\n'"$hint"
+  FM_COMPOSER_KIMI_FOOTER=1 assert_screen "kimi idle, hint footer, plain capture" empty "$CAPS_PLAIN" "$box"$'\n'"$hint"
+  FM_COMPOSER_KIMI_FOOTER=1 assert_screen "kimi idle, two-row footer with context meter" empty "$CAPS_STYLED" "$box"$'\n'"$wide"$'\n'"$meter"
+  FM_COMPOSER_KIMI_FOOTER=1 assert_screen "kimi typed, hint footer below the box" pending "$CAPS_STYLED" "$typed"$'\n'"$hint"
+  FM_COMPOSER_KIMI_FOOTER=1 assert_screen "kimi typed, two-row footer" pending "$CAPS_STYLED" "$typed"$'\n'"$wide"$'\n'"$meter"
+  # Divergence: an ordinary transcript row directly below the box is NOT
+  # furniture; the candidate must still be refused as stale.
+  FM_COMPOSER_KIMI_FOOTER=1 assert_screen "kimi box above transcript text stays stale" unknown "$CAPS_STYLED" "$box"$'\n'"$transcript"
+  # Divergence: a transcript row merely EMBEDDING meter-shaped prose mid-row
+  # is not the right-aligned furniture row either; it must still refuse.
+  FM_COMPOSER_KIMI_FOOTER=1 assert_screen "kimi box above mid-row meter prose stays stale" unknown "$CAPS_STYLED" "$box"$'\n'"$meter_prose"
+  # Divergence: with the footer pattern overridden away, the real footer no
+  # longer qualifies either - the pass above came from the furniture match,
+  # not from a weakened staleness check.
+  out=$(FM_COMPOSER_KIMI_FOOTER=1 FM_COMPOSER_KIMI_FOOTER_RE='^NEVER-MATCHES$' fm_composer_classify_screen "$CAPS_STYLED" "$box"$'\n'"$hint")
+  [ "$out" = unknown ] \
+    || fail "kimi footer override must restore refusal, got '$out'"
+  pass "matrix: kimi's below-box status footer is stepped over as furniture and nothing else is"
+}
+
+test_matrix_kimi_permission_badged_footer() {
+  # Real kimi 0.40.1 --auto (captured live 2026.09.03 on a fleet-spawned pane):
+  # the footer row renders the permission mode as a LEFT BADGE ahead of the
+  # model token - "Never Ask  K2.7 Coding thinking  <cwd>  <hint>". The badge
+  # vocabulary (from the kimi binary's own strings): "Never Ask" (--auto),
+  # "Ask When Needed" (--yolo), "Always Ask" (manual). Without the badge in
+  # the furniture pattern, every --auto spawn's visibly-empty composer reads
+  # unknown and both the readiness and the delivery gate false-fail. As in
+  # the test above, FM_COMPOSER_KIMI_FOOTER=1 mirrors the production
+  # kimi-identified caller. The divergence pins below prove badge-like prose
+  # without the model token is still ordinary transcript and refuses the box.
+  local box typed never_ask ask_needed always_ask prose out
+  box=$'╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯'
+  typed=$'╭────────────────────────╮\n│ > deploy the fix       │\n╰────────────────────────╯'
+  never_ask=$'Never Ask  K2.7 Coding thinking  /repo    shift-tab to Plan mode'
+  ask_needed=$'Ask When Needed  K2.7 Coding thinking  /repo'
+  always_ask=$'Always Ask  K2.7 Coding thinking  /repo'
+  prose=$'Never Ask me about the parser again'
+  FM_COMPOSER_KIMI_FOOTER=1 assert_screen "kimi --auto badged footer below the box" empty "$CAPS_STYLED" "$box"$'\n'"$never_ask"
+  FM_COMPOSER_KIMI_FOOTER=1 assert_screen "kimi --yolo badged footer below the box" empty "$CAPS_STYLED" "$box"$'\n'"$ask_needed"
+  FM_COMPOSER_KIMI_FOOTER=1 assert_screen "kimi manual badged footer below the box" empty "$CAPS_STYLED" "$box"$'\n'"$always_ask"
+  FM_COMPOSER_KIMI_FOOTER=1 assert_screen "kimi typed, badged footer below the box" pending "$CAPS_STYLED" "$typed"$'\n'"$never_ask"
+  # Divergence: badge-shaped prose without the "<model> Coding" furniture
+  # token is transcript and still invalidates the box above it.
+  FM_COMPOSER_KIMI_FOOTER=1 assert_screen "kimi badge-shaped prose below box stays stale" unknown "$CAPS_STYLED" "$box"$'\n'"$prose"
+  # Divergence: with the footer pattern overridden away, the badged footer no
+  # longer qualifies either.
+  out=$(FM_COMPOSER_KIMI_FOOTER=1 FM_COMPOSER_KIMI_FOOTER_RE='^NEVER-MATCHES$' fm_composer_classify_screen "$CAPS_STYLED" "$box"$'\n'"$never_ask")
+  [ "$out" = unknown ] \
+    || fail "kimi badged footer override must restore refusal, got '$out'"
+  pass "matrix: kimi's permission-badged footer is stepped over as furniture and badge-shaped prose is not"
+}
+
+test_matrix_kimi_footer_requires_positive_kimi_identification() {
+  # STRICT DEFAULT PIN (review fix on PR 3716): the kimi footer furniture
+  # tolerance is identification-scoped. Without a caller's positive kimi
+  # identification (FM_COMPOSER_KIMI_FOOTER unset - the default every foreign
+  # harness, steer guard, and injection guard reads under), the exact footer
+  # rows a kimi-identified pane steps over MUST refuse the box above them: a
+  # matching below-box row on an unidentified or foreign pane is ordinary
+  # transcript and the candidate stays stale. This is what keeps one vendor's
+  # rendered footer from binding fleet-wide delivery truth (VISION.md:
+  # contracts bind to semantics a vendor exposes, never to the pixels of
+  # today's UI) - and when a future kimi footer out-drifts the pattern, the
+  # unidentified default fails LOUD here instead of quietly confirming.
+  local box hint meter never_ask claude_box out
+  box=$'╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯'
+  hint=$'K2.7 Coding thinking  /repo    shift-tab to Plan mode to review the approach'
+  meter=$'                                                                            context: 0% (0/256k)'
+  never_ask=$'Never Ask  K2.7 Coding thinking  /repo'
+  claude_box=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯'
+  unset FM_COMPOSER_KIMI_FOOTER
+  assert_screen "unidentified pane: hint footer below box stays stale" unknown "$CAPS_STYLED" "$box"$'\n'"$hint"
+  assert_screen "unidentified pane: badged footer below box stays stale" unknown "$CAPS_STYLED" "$box"$'\n'"$never_ask"
+  assert_screen "unidentified pane: two-row footer below box stays stale" unknown "$CAPS_STYLED" "$box"$'\n'"$hint"$'\n'"$meter"
+  # The foreign-harness case the scoping exists for: another boxed harness
+  # whose transcript happens to emit a kimi-footer-shaped row directly below
+  # a (stale) box. Unidentified, it must still refuse - never discard the
+  # row as furniture.
+  assert_screen "unidentified pane: footer-shaped row below a foreign box stays stale" unknown "$CAPS_STYLED" "$claude_box"$'\n'"$never_ask"
+  # Sanity: the same read under positive identification flips to empty,
+  # proving the strict verdicts above came from the absent identification
+  # and not from any change to the pattern or the walk.
+  out=$(FM_COMPOSER_KIMI_FOOTER=1 fm_composer_classify_screen "$CAPS_STYLED" "$box"$'\n'"$never_ask")
+  [ "$out" = empty ] \
+    || fail "the same badged footer read under positive kimi identification must be empty, got '$out'"
+  pass "matrix: the kimi footer tolerance applies only to a positively identified kimi pane"
+}
+
 test_matrix_claude_inside_zellij_ansi_dump() {
   # Real claude captured through `zellij action dump-screen --ansi`
   # (capability established by the audit): `ESC[m` `❯` U+00A0.
@@ -621,6 +732,9 @@ test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
+test_matrix_kimi_status_footer_below_box
+test_matrix_kimi_permission_badged_footer
+test_matrix_kimi_footer_requires_positive_kimi_identification
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies

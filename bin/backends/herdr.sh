@@ -1928,18 +1928,92 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   esac
 }
 
+# fm_backend_herdr_bare_shell_agent_exited: true (0) only when the pane holds a
+# RETAINED herdr agent record AND herdr's own process-info shows the foreground
+# reduced to exactly one recognized shell. Verified 2026.09.03 against real
+# kimi 0.40.1 panes: herdr's agent_status is AMBIGUOUS for kimi in both
+# directions - a live kimi at rest reports done on one registration path and
+# idle on another while its foreground still holds the kimi/kimi-code process
+# (or its unshare wrapper chain), and a self-exited kimi (Bye! rendered, agent
+# gone) RETAINS its record as done on the first path and as idle on the
+# second. The status field therefore cannot discriminate rest from exit; "the
+# agent TUI is not in the pane's foreground" is the structural proof that the
+# agent process has exited, and every harness firstmate dispatches is a TUI
+# agent. The launch window is owned upstream, not here: pane_agent_state
+# maps agent_not_found to no-agent and fm_backend_herdr_agent_state maps that
+# to dead without ever calling this proof, so a pane herdr holds no record
+# for never reaches these checks. Within the live branch, requiring the raw
+# re-read to be non-empty is the transient-failure guard: pane_agent_state
+# already saw a legible status, and only this second read decides exit, so an
+# empty read (server hiccup, record vanished mid-check) must refuse rather
+# than trust a stale first read.
+# Deliberately looser than fm_backend_herdr_pane_idle_shell_pid, and for
+# different questions: this proof reads ONLY herdr's process-info (pane pids
+# live in herdr's namespace and are invisible to a host ps, verified 2026.09.03)
+# and does not require foreground_pgid == shell_pid (a wrapped pane shell fails
+# that equality while genuinely exited, also verified). Any doubt - no
+# retained record, unreadable process-info, more than one foreground process,
+# a non-shell foreground, or a foreground whose argv0 names a different
+# program - refuses (1), and the caller keeps reporting the agent alive, which
+# is the recovery-grade default for every lifecycle path that consumes
+# fm_backend_herdr_agent_state.
+fm_backend_herdr_bare_shell_agent_exited() {  # <session> <pane-id>
+  local session=$1 pane=$2 raw info count name argv0
+  raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane")
+  [ -n "$raw" ] || return 1
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$pane" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+  ' >/dev/null 2>&1 || return 1
+  count=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) || return 1
+  [ "$count" -eq 1 ] || return 1
+  name=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_processes[0].name | select(type == "string" and length > 0)' 2>/dev/null) || return 1
+  name=${name##*/}
+  case "$name" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
+  argv0=$(printf '%s' "$info" | jq -r '
+    .result.process_info.foreground_processes[0] as $process
+    | ($process.argv0 // $process.argv[0] // "")
+    | if type == "string" then . else "" end
+  ' 2>/dev/null) || return 1
+  if [ -n "$argv0" ]; then
+    argv0=${argv0#-}
+    argv0=${argv0##*/}
+    case "$argv0" in
+      ''|sh|bash|zsh|dash|ksh|fish) ;;
+      *) return 1 ;;
+    esac
+  fi
+  return 0
+}
+
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
-# a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
-# unexpected or failed API read is `unreadable`.
+# a confirmed agent-less pane is `dead`, a registered agent is `alive` - except
+# that herdr's agent_status is ambiguous for self-backgrounding agents like
+# kimi in BOTH directions (done or idle at rest, done or idle retained after
+# exit, verified 2026.09.03 on two registration paths), so an agent whose pane
+# foreground is provably back to a bare shell reports `dead` regardless of the
+# retained status, letting fm-control exit/relaunch and fm-spawn --relaunch
+# confirm a stop that already happened (2026-09-03: without this, a relaunch
+# after an exited kimi agent timed out its dead-wait with exit=unconfirmed
+# every time). Every genuinely unprovable state still reports `alive` or
+# `unreadable`, never `dead`.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
   case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
     dead) printf 'missing' ;;
     no-agent) printf 'dead' ;;
-    live) printf 'alive' ;;
+    live)
+      if fm_backend_herdr_bare_shell_agent_exited "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"; then
+        printf 'dead'
+      else
+        printf 'alive'
+      fi ;;
     *) printf 'unreadable' ;;
   esac
 }
@@ -2738,6 +2812,10 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 #     the composer fallback. A cleared composer is delivery; a proven-pending
 #     composer on an idle pane is a swallow; extra Enter on an already-empty
 #     composer is a no-op, not a duplicate delivery of <text>.
+#   - Native reads unknown throughout on an idle baseline (a kimi pane before
+#     its first submitted message has no herdr-registered agent): not a hard
+#     failure - the composer read below disambiguates, and only a genuinely
+#     unreadable screen reports unknown to the caller.
 # Fallback path, for a harness whose native agent-state is never legibly idle
 # (measured live: herdr reports a cursor pane `blocked` in every state - idle,
 # mid-turn, and after - so the idle-baseline path above is structurally
@@ -2804,6 +2882,19 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target")
   fi
   while :; do
+    # An already-running turn proves an earlier Enter landed: confirm delivery
+    # immediately instead of pressing another Enter into an agent that is
+    # working on this text. This matters most for a patient retry budget
+    # (kimi's first message can swallow several Enters while its input loop
+    # initializes): the moment native state flips to working, the retry loop
+    # must stop sending keys. Every harness that registers a working agent
+    # mid-loop is covered; cursor's always-blocked native state never reads
+    # working, so its queued-Enter path is untouched.
+    if [ "$enter_sent" -eq 1 ] && [ "$raw_status" != working ] \
+      && [ "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = working ]; then
+      printf 'empty'
+      return 0
+    fi
     if fm_backend_herdr_send_key "$target" Enter; then
       enter_sent=1
     elif [ "$enter_sent" -eq 0 ]; then
@@ -2820,10 +2911,15 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
       case "$verdict" in
         busy) printf 'empty'; return 0 ;;
-        unknown) printf 'unknown'; return 0 ;;
       esac
-      # Native stayed idle. Composer empty is positive delivery (a landed
-      # Claude turn that never flipped agent_status). Proven pending retries.
+      # Native never read busy. That includes "unknown", which is NOT a hard
+      # read failure here: a pre-first-message kimi pane has no herdr-registered
+      # agent, so its baseline was sampled legibly idle yet every poll reports
+      # unknown. Fall through to the composer read, which still reports
+      # unknown only when the screen itself is genuinely unreadable. A
+      # swallowed Enter then earns its retry below instead of aborting the
+      # whole delivery as unconfirmed (2026-09-03 kimi spawn-gate false
+      # failure).
       verdict=$(fm_backend_herdr_composer_state "$target")
       case "$verdict" in
         empty) printf 'empty'; return 0 ;;
@@ -3023,10 +3119,13 @@ fm_backend_herdr_busy_state() {  # <target>
 #             "busy" across the whole window. This is readable but
 #             inconclusive: native state can remain idle for a landed turn,
 #             so the caller falls through to composer confirmation.
-#   unknown - EVERY poll in the window failed to read the target at all (a
-#             hard I/O failure - pane gone, socket error - not a timing
-#             race). The caller must not keep retrying Enter against a target
-#             it cannot even read.
+#   unknown - no poll observed a legible status: either EVERY poll failed to
+#             read the target at all (pane gone, socket error) or herdr held
+#             no agent record for the pane in any poll (verified 2026.09.03:
+#             a pre-first-message kimi pane reads unknown although the pane is
+#             perfectly healthy). This function does not distinguish the two;
+#             the caller disambiguates with a composer read, which reports
+#             unknown only for a genuinely unreadable screen.
 #
 # <polls> spread across <budget-seconds> (rather than one check at the end)
 # lets the fast path catch a native transition that lands partway through the

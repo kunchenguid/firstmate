@@ -3613,12 +3613,29 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
+  # Every composer classification below - the readiness wait, the backend
+  # submit core's composer re-verification (it reads in this same process),
+  # and the delivery poll - concerns THIS pane, whose harness this process
+  # launched and positively knows is kimi. Enable the shared classifier's
+  # kimi footer furniture tolerance (the permission-badged model row and
+  # context meter kimi draws directly below the composer box) for exactly
+  # these reads; every other caller and harness keeps the strict
+  # blank-only below-box walk (bin/fm-composer-lib.sh).
+  FM_COMPOSER_KIMI_FOOTER=1
+  export FM_COMPOSER_KIMI_FOOTER
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
-  KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
+  # Patient by verified measurement (2026-09-03): a fresh kimi pane can swallow
+  # every Enter for many seconds while its input loop initializes, and the
+  # paste is buffered all the while, so the retry loop must outlast that
+  # window. Each retry re-verifies native state and the composer before the
+  # next Enter, and stops the instant either proves delivery; retries matter
+  # only while the text sits unsubmitted, so a generous count cannot duplicate
+  # a delivered message.
+  KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-20}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
   if ! KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \

@@ -35,16 +35,26 @@ make_spawn_fakebin() {
 set -u
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
 state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
+# Miniature of the verified live kimi 0.40.1 --auto layout (capture owned by
+# tests/fm-composer-lib.test.sh): the transcript/banner area, the bordered
+# composer box, then the permission-badged model row and the right-aligned
+# context meter DIRECTLY BELOW the box. On the cursor-less backends (herdr -
+# where the 2026-09-03 spawn-gate defect fired) those below-box rows are what
+# fm-spawn.sh's kimi gate enables the shared classifier's kimi footer
+# furniture tolerance for (FM_COMPOSER_KIMI_FOOTER); on tmux the cursor sits
+# inside the box and the cursor-anchored read classifies only the box rows,
+# so this fixture also pins that the tmux path stays correct with the real
+# footer present.
 fake_screen() {
   case "$state" in
     ready)
-      printf 'Welcome to Kimi Code!\ncontext: 0%% (0/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
+      printf 'Welcome to Kimi Code!\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K2.7 Coding thinking  /repo    shift-tab to Plan mode\n                                        context: 0%% (0/256k)\n'
       ;;
     pointer-typed)
-      printf 'context: 0%% (0/256k)\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
+      printf '╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\nNever Ask  K2.7 Coding thinking  /repo    shift-tab to Plan mode\n                                        context: 0%% (0/256k)\n'
       ;;
     delivered)
-      printf '✨ Read the brief at %s and follow it exactly.\ncontext: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n' "$FM_FAKE_BRIEF_REAL"
+      printf '✨ Read the brief at %s and follow it exactly.\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K2.7 Coding thinking  /repo    shift-tab to Plan mode\n                                        context: 1%% (2k/256k)\n' "$FM_FAKE_BRIEF_REAL"
       ;;
     *)
       printf 'shell starting\n$ \n'
@@ -53,8 +63,8 @@ fake_screen() {
 }
 fake_cursor_y() {
   case "$state" in
-    pointer-typed) printf '3\n' ;;
-    ready|delivered) printf '3\n' ;;
+    pointer-typed) printf '1\n' ;;
+    ready|delivered) printf '2\n' ;;
     *) printf '1\n' ;;
   esac
 }
