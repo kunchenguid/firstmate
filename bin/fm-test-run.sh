@@ -1536,6 +1536,12 @@ families_for_changed_path() {
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
+    skills/*/SKILL.md)
+      # The public, installer-facing skill tree. No test names these files by
+      # path, so without a curated case they fall through to the reference scan
+      # and fail closed as unmapped.
+      printf '%s\n' pure-contract-unit
+      ;;
     .github/workflows/ci.yml|.no-mistakes.yaml)
       printf '%s\n' pure-contract-unit
       printf '%s\n' real-herdr-gated
