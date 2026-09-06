@@ -74,7 +74,11 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. A run lookup that was
+#      KILLED before answering is not such a case: it produced no information, so
+#      nothing can supersede the log and the verb mapping is skipped entirely in
+#      favour of unknown plus the timeout reason (see NM_LOOKUP_TIMED_OUT). A busy
+#      pane still outranks that, being positive evidence about right now.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -257,8 +261,42 @@ crew_busy_verdict() {  # <target>
 
 trim() { fm_nm_trim "$@"; }
 strip_quotes() { fm_nm_strip_quotes "$@"; }
+# The fail-open form, for a call whose timeout costs no information: the ci-log
+# read below only ever refines an ALREADY attributed run, so losing it leaves the
+# conservative working verdict standing. Deliberately not nm_run_timed - do not
+# unify the two, or a lost log read would start reporting the run itself unknown.
 nm_run() {  # <args...>
   fm_nm_run "$WT" "$NM_TIMEOUT" "$@"
+}
+# Exit status the bounded wrappers report when a call was KILLED before it
+# answered: `timeout`/`gtimeout` use 124, and fm-nm-run-lib.sh's perl fallback
+# (the path taken wherever neither of those is installed, including stock macOS)
+# exits 124 deliberately to match them.
+NM_RC_TIMEOUT=124
+# 1 once any run lookup was killed before answering. An unanswered lookup and an
+# answered "this crew has no run" both leave the output empty, yet they mean
+# opposite things: the second is information the fallback path can act on, the
+# first is an absence of any information about whether a run exists at all.
+NM_LOOKUP_TIMED_OUT=0
+# Like nm_run, but a killed call yields NOTHING: no output, and its own exit
+# status instead of a swallowed one. Discarding the output is the load-bearing
+# half. A call killed mid-flight can still have written bytes on its way out -
+# `axi status` emitting a whole run record and then wedging is the obvious shape -
+# and those bytes are not a trustworthy answer: nothing proves the record was
+# complete rather than truncated at a field boundary that changes its meaning.
+# Left in place they would flow straight into attribution and publish a terminal
+# run-step state, bypassing the unknown-on-timeout guard below. Emptying the
+# output here keeps that rule in ONE place, so no attribution site has to
+# remember it. Callers read the status rather than having this set the flag
+# directly, because every call site is a command substitution - a subshell, whose
+# variable assignments would be discarded.
+nm_run_timed() {  # <args...>
+  local out rc
+  out=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" "$@")
+  rc=$?
+  [ "$rc" = "$NM_RC_TIMEOUT" ] && return "$NM_RC_TIMEOUT"
+  printf '%s' "$out"
+  return 0
 }
 
 # Scalar value of a TOON key in the captured run output ($RUN_OUT).
@@ -533,8 +571,12 @@ nm_ci_checks_state() {
 # active fix round whose head object the task copy never fetched used to be
 # rejected here, letting the older failed row answer as current), so both
 # attribution routes share one rule.
+# The list call stays on the bounded-and-checked wrapper, not the plain one, so
+# a list killed before it answered is reported as unknown rather than as "this
+# branch has no run"; an unchecked call cannot tell an empty ledger from a
+# timed-out one (tests/fm-crew-state.test.sh, coarse lookup timeout).
 nm_runs_list() {
-  nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT"
+  nm_run_timed runs --limit "$FM_CREW_STATE_RUNS_LIMIT"
 }
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
@@ -562,7 +604,9 @@ COARSE_STATUS=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  RUN_OUT=$(nm_run axi status)
+  if ! RUN_OUT=$(nm_run_timed axi status); then
+    NM_LOOKUP_TIMED_OUT=1
+  fi
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     # Head equality, or the pipeline-owned-active exemption: while the
@@ -579,7 +623,11 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
       # itself did not respond, so retrying it immediately with a second
       # bounded call would just double the wait for no better answer.
-      COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+      if ! runs_list=$(nm_runs_list); then
+        NM_LOOKUP_TIMED_OUT=1
+        runs_list=""
+      fi
+      COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$runs_list")
       if [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         # A branch-matching answer the strict rule rejected is this branch's
@@ -814,6 +862,25 @@ if [ "$KIND" != secondmate ]; then
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
+fi
+
+# A run lookup killed before it answered leaves the run-step dimension DARK, so
+# there is nothing for the append-only log to be reconciled against and its last
+# line is only an old event. Publishing that event as the current state is how a
+# live run gets reported `failed` (or a crew still applying findings gets reported
+# `done`), and a confident terminal verdict is exactly the evidence that would
+# justify restarting or tearing down healthy work. No information reports unknown
+# instead, and names the timeout so a reader knows to re-read rather than act.
+# The event itself is still relayed, labelled as the unreconciled event it is, so
+# no evidence is hidden - it is simply no longer asserted as the current state.
+# Narrow by construction: only a ship crew on a branch reaches the lookup at all,
+# a busy crew already reported working from its own semantic record just above,
+# and every lookup that ANSWERED - including one answering "no run for this
+# crew" - still falls through to the verb mapping below unchanged.
+if [ "$NM_LOOKUP_TIMED_OUT" = 1 ]; then
+  timeout_detail="run lookup timed out after ${NM_TIMEOUT}s: no run state available"
+  [ -n "$LOG_VERB" ] && timeout_detail="$timeout_detail${SEP}unreconciled last event: $LOG_VERB"
+  emit unknown none "$timeout_detail"
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real
