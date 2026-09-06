@@ -1239,6 +1239,8 @@ run_check_capture() {
 pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
   local id=$1 url=$2 condition=$3 head=$4 state_line state mode spawn_gen message
   local marker="$STATE/$id.pr-refresh-dispatched" delivery_id known=0
+  # Captured before the state check so a mid-check replacement can't hand its own generation to the "done" verdict it never earned.
+  spawn_gen=$(fm_meta_get "$STATE/$id.meta" spawn_gen)
   state_line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || state_line=
   state=${state_line#state: }
   state=${state%% *}
@@ -1266,7 +1268,6 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
     return 1
   esac
   case "$condition" in behind|conflict) ;; *) return 1 ;; esac
-  spawn_gen=$(fm_meta_get "$STATE/$id.meta" spawn_gen)
   if [ "$mode" = no-mistakes ]; then
     message="FIRSTMATE_OP: v1 branch-currency: Your open pull request $url is not current with its base (behind or in conflict) at head $head. Re-run this brief's no-mistakes delivery contract with its exact serialized captain intent. Before any edit or branch movement, inspect no-mistakes axi status and do not act while an active run owns the branch. Let the pipeline's rebase step bring the branch current and re-establish every check on the resulting head. If rebase conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
   else
