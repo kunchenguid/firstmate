@@ -1094,6 +1094,12 @@ stale_wait_record() {  # <window-key>
   printf '%s' "$STALE_WAIT_DECLARATION" > "$STATE/.paused-resurfaced-$1"
 }
 
+stale_wait_timer_record() {  # <window-key> <timer-file>
+  local marker="$STATE/.paused-resurfaced-$1" timer=$2 since
+  since=$(stat_mtime "$marker") || since=$(date +%s)
+  printf '%s\n' "$since" > "$timer"
+}
+
 # Decide one stale sighting against the captain call the backlog may hold for it.
 # Sets STALE_WAIT_DECLARATION to the scope this sighting is bound to, and leaves
 # it EMPTY when no open call bounds it, so the caller alarms exactly as before.
@@ -2047,14 +2053,18 @@ EOF
               # deciding. Only that repetition is bounded - the first sight
               # already alarmed and the window's end alarms once more.
               printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
+              stale_wait_timer_record "$key" "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"
               printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
+              if [ -n "$STALE_WAIT_DECLARATION" ]; then
+                stale_wait_timer_record "$key" "$ssf"
+              else
+                rm -f "$ssf"
+              fi
               clear_write_tracking "$key"
               stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
               stale_record=$(status_span_first_actionable_record "$stale_status" 0)
@@ -2066,8 +2076,8 @@ EOF
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then
-            # This exact hash was already overridden as provably-working (a
-            # wedge timer is running for it) - keep treating it that way
+            # This exact hash already has a local alarm deadline - keep treating
+            # it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
             #
@@ -2082,20 +2092,26 @@ EOF
             STALE_WAIT_DECLARATION=
             terminal_since=$(cat "$ssf" 2>/dev/null || true)
             terminal_due=1
+            terminal_bound=$STALE_ESCALATE_SECS
+            [ -e "$STATE/.paused-resurfaced-$key" ] && terminal_bound=$PAUSE_RESURFACE_SECS
             case "$terminal_since" in
-              ''|*[!0-9]*) terminal_due=0 ;;
-              *) [ "$(( $(date +%s) - terminal_since ))" -ge "$STALE_ESCALATE_SECS" ] || terminal_due=0 ;;
+              ''|*[!0-9]*)
+                wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+                terminal_due=0
+                ;;
+              *) [ "$(( $(date +%s) - terminal_since ))" -ge "$terminal_bound" ] || terminal_due=0 ;;
             esac
             if [ "$terminal_due" -eq 1 ] && captain_call_stale_bound "$key" "$task"; then
+              stale_wait_timer_record "$key" "$ssf"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             elif [ "$terminal_due" -eq 1 ] && [ -n "$STALE_WAIT_DECLARATION" ]; then
               # Held, and its window elapsed: one bounded re-surface, and the idle
               # timer restarts so the wedge path resumes cleanly once answered.
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"
-              date +%s > "$ssf"
+              stale_wait_timer_record "$key" "$ssf"
               wake "stale: $w"
-            else
+            elif [ "$terminal_due" -eq 1 ]; then
               wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
             fi
           fi
