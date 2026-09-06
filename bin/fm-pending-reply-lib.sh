@@ -861,13 +861,12 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
 }
 
 fm_pending_reply_backend_observation_bounded() {  # <seconds> <backend> <target> [expected-label] [harness]
-  local timeout=$1
+  local timeout=$1 backend=$2
   shift
-  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
-  fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
-    FM_HOME="${FM_HOME:-}" bash -c \
-    '. "$1"; shift; fm_pending_reply_backend_observation "$@"' _ \
-    "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-lib.sh" "$@"
+  # Load the selected adapter once in the watcher. The timed child inherits the
+  # definitions instead of re-sourcing this complete library for every record.
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  fm_run_function_timed "$timeout" fm_pending_reply_backend_observation "$@"
 }
 
 fm_pending_reply_busy_state_from_observation() {  # <record-path> <observation>
@@ -1048,11 +1047,7 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
 fm_pending_reply_send_recovery_bounded() {  # <seconds> <state-dir> <corr_id>
   local timeout=$1
   shift
-  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
-  fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
-    FM_HOME="${FM_HOME:-}" bash -c \
-    '. "$1"; fm_pending_reply_send_recovery "$2" "$3"' _ \
-    "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-lib.sh" "$1" "$2"
+  fm_run_function_timed "$timeout" fm_pending_reply_send_recovery "$@"
 }
 
 fm_pending_reply_pid_identity() {  # <pid>
