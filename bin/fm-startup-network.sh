@@ -107,6 +107,14 @@
 # aggregate deadline covering both the inactive-outcome scan and network sweeps.
 # Hitting the bound is reported as an actionable NETWORK_CHECKS: line, never as
 # silence. bin/fm-timeout-lib.sh remains the single owner of bounded execution.
+#
+# The worker also ends its run when this home's state directory is gone. It
+# outlives the command that launched it by design, so the home can be removed
+# underneath it - a retired home, a torn-down fixture - and every lock it still
+# needs then lives in a directory nothing will recreate. Waiting there is
+# unbounded, so a vanished home ends the run instead: there is nowhere left to
+# publish a report or queue a wake, and the work is idempotent detection the
+# next session re-derives in full.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -172,6 +180,28 @@ delivery_budget() {
   local budget=${FM_SESSION_START_TIMEOUT:-120}
   case "$budget" in ''|*[!0-9]*|0) budget=120 ;; esac
   printf '%s' "$budget"
+}
+
+# Every lock this worker waits for lives inside the home's state directory, so
+# every wait for one is also a wait on that directory still existing. A lock
+# whose parent is gone can never be created and no holder can ever release it,
+# while fm_lock_acquire_wait waits for a holder that will never appear - which
+# turns a removed home into a detached process polling for as long as the
+# machine stays up.
+#
+# So this waits on the same 0.1s cadence but re-tests the home on every tick.
+# Ordinary contention is exactly as patient as fm_lock_acquire_wait, because a
+# lock that is merely held keeps the loop going; only a home that has actually
+# vanished ends it, and it ends as a refusal the caller acts on rather than as a
+# hang. Callers MUST check the return value - continuing would mean acting on a
+# lock this never took.
+home_lock_acquire() {  # <lockdir> - 1 once this home's state directory is gone
+  local lockdir=$1
+  while [ -d "$STATE" ]; do
+    fm_lock_try_acquire "$lockdir" && return 0
+    sleep 0.1
+  done
+  return 1
 }
 
 # Is a `running` record a stage that is genuinely still in flight? Two
@@ -334,7 +364,7 @@ await_delivery() {  # <generation> <state>
   limit=$(( $(delivery_budget) * 10 ))
   while [ "$waited" -lt "$limit" ]; do
     claim_live=0
-    fm_lock_acquire_wait "$PUBLISH_LOCK"
+    home_lock_acquire "$PUBLISH_LOCK" || return 0
     if [ "$(status_get generation)" != "$generation" ]; then
       fm_lock_release "$PUBLISH_LOCK"
       return 0
@@ -369,7 +399,7 @@ EOF
     sleep 0.1
     waited=$((waited + 1))
   done
-  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  home_lock_acquire "$PUBLISH_LOCK" || return 0
   if [ "$(status_get generation)" != "$generation" ] || [ -f "$DELIVERED_FILE" ]; then
     fm_lock_release "$PUBLISH_LOCK"
     return 0
@@ -384,7 +414,7 @@ EOF
 
 publish() {  # <generation> <state> <phases> <locked> <started> <rc> <output-file> <timing-file>
   local generation=$1 state=$2 phases=$3 locked=$4 started=$5 rc=$6 out=$7 timings=${8:-} report_published=1
-  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  home_lock_acquire "$PUBLISH_LOCK" || return 0
   if [ "$(status_get generation)" != "$generation" ]; then
     fm_lock_release "$PUBLISH_LOCK"
     return 0
@@ -426,7 +456,7 @@ cmd_run() {  # <locked> <lock-pid> <generation>
   budget=$(stage_budget)
   phases=probe
   if [ -n "$generation" ]; then
-    fm_lock_acquire_wait "$PUBLISH_LOCK"
+    home_lock_acquire "$PUBLISH_LOCK" || return 1
     if [ "$(status_get generation)" = "$generation" ] && [ "$(status_get pid)" = "$$" ]; then
       internal=1
       started=$(status_get started)
@@ -449,7 +479,7 @@ cmd_run() {  # <locked> <lock-pid> <generation>
 
   if [ "$internal" -eq 0 ]; then
     generation="$(now).$$.manual"
-    fm_lock_acquire_wait "$PUBLISH_LOCK"
+    home_lock_acquire "$PUBLISH_LOCK" || return 1
     if [ "$(status_get state)" = running ] && worker_alive; then
       fm_lock_release "$PUBLISH_LOCK"
       return 1
@@ -477,7 +507,14 @@ EOF
   stage_started=$(fm_timing_now_ms)
   rc=0
   if [ "$sweep_locked" -eq 1 ]; then
-    fm_lock_acquire_wait "$STATE/.lock.acquire"
+    if ! home_lock_acquire "$STATE/.lock.acquire"; then
+      # The home vanished while this run waited for the sweep lease. There is
+      # nothing left to sweep for or publish into, so the only thing still worth
+      # doing is dropping the scratch files this run had already opened.
+      rm -f "$out" 2>/dev/null || true
+      [ -z "$timings" ] || rm -f "$timings" 2>/dev/null || true
+      return 1
+    fi
     lease_held=1
     if ! lock_unchanged "$lock_pid"; then
       sweep_locked=0

@@ -863,6 +863,23 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# "Cannot create a lock here" is an operator-actionable fault that used to be
+# spelled as an unbounded recursion, so it is reported rather than merely
+# refused. Once per path per process: fm_lock_acquire_wait reaches it ten times
+# a second and this class of fault persists.
+FM_LOCK_UNCREATABLE_WARNED=
+fm_lock_warn_uncreatable() {
+  local lockdir=$1 newline
+  newline='
+'
+  case "$FM_LOCK_UNCREATABLE_WARNED" in
+    *"$newline$lockdir$newline"*) return 0 ;;
+  esac
+  FM_LOCK_UNCREATABLE_WARNED="$FM_LOCK_UNCREATABLE_WARNED$newline$lockdir$newline"
+  printf 'fm_lock_try_acquire: cannot create %s and no holder to displace; check that its directory exists and is writable\n' \
+    "$lockdir" >&2
+}
+
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
@@ -897,6 +914,46 @@ fm_lock_try_acquire() {
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$pid"; then
     FM_LOCK_HELD_PID=$pid
+    return 1
+  fi
+
+  # Gate the recursion below, which is the one place this library calls itself.
+  #
+  # It exists ONLY to displace an abandoned holder, so it is sound exactly while
+  # there is one at this level or the next. Each level is entered because the
+  # level above exists on disk, so the walk is self-terminating and
+  # self-cleaning: it stops at the first level it can create, then unwinds
+  # reclaiming every level under it. A fully abandoned chain of any length is
+  # legitimate recovery and must stay UNBOUNDED - capping the depth turns slow,
+  # noisy recovery into a permanent refusal that fm_lock_acquire_wait spins on
+  # forever.
+  #
+  # The runaway is the case with nothing to displace at either level: reaching
+  # here with both the lock path and its steal companion ABSENT means
+  # fm_lock_try_create failed for a reason a deeper steal cannot fix - the
+  # state directory removed or moved out from under a running watcher, an
+  # unwritable or full filesystem - and every deeper level fails identically
+  # while the name grows by ".steal", past the filesystem's name limit and on
+  # without bound. So the guard is progress, not depth, and it is applied by
+  # ATTEMPTING progress: the same absence is also the benign race where the
+  # holder released between the create above and this point, and there the
+  # lock is simply free. Retry the create; a lock that reappears is freshly
+  # held by someone whose liveness this frame never evaluated, so report
+  # contention and let the caller come back rather than steal on stale
+  # evidence. When the lock path is absent but its steal companion still
+  # exists, there is something to displace one level down - a crash between a
+  # reclaim's fm_lock_remove_path and its paired fm_lock_try_create can leave
+  # exactly that - so fall through to the steal recursion instead of refusing.
+  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    && [ ! -e "$lockdir.steal" ] && [ ! -L "$lockdir.steal" ]; then
+    if fm_lock_try_create "$lockdir"; then
+      return 0
+    fi
+    if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+      fm_lock_warn_uncreatable "$lockdir"
+    fi
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_OWNER_DIR=
     return 1
   fi
 
