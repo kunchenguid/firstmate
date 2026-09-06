@@ -437,8 +437,10 @@ teardown_task() {  # <id> <home>
 finish_concurrent_teardown() {  # <id> <status> <stdout> <stderr>
   local id=$1 status=$2 out=$3 err=$4
   [ "$status" -ne 0 ] || return 0
-  grep -F "session presentation lock is contended" "$err" >/dev/null 2>&1 \
-    || fail "projected teardown $id failed unexpectedly: $(cat "$err")"
+  if ! grep -F "session presentation lock is contended" "$err" >/dev/null 2>&1 \
+     && ! grep -F "another Treehouse slot allocation or return is in progress" "$err" >/dev/null 2>&1; then
+    fail "projected teardown $id failed unexpectedly: $(cat "$err")"
+  fi
   teardown_task "$id" "$HOME_DIR" > "$out" 2> "$err" \
     || fail "projected teardown $id retry failed after presentation cleanup completed: $(cat "$err")"
 }

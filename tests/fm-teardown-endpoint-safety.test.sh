@@ -415,6 +415,29 @@ SH
   pass "fm-teardown: exact tmux cleanup preserves invalid and prefix-matched neighbors while removing only the recorded target"
 }
 
+test_bare_relative_origin_shares_project_lock_with_clone() {
+  local dir second_project primary_lock clone_lock
+  dir=$(make_case bare-relative-origin-lock)
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm lock-fixture
+  git -C "$dir/project" remote add origin project
+  second_project="$dir/second-project"
+  git clone -q "$dir/project" "$second_project"
+
+  primary_lock=$(FM_HOME="$dir/home" bash -c \
+    '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$dir/project") \
+    || fail "could not resolve the primary project's bare-origin lock"
+  clone_lock=$(FM_HOME="$dir/home" bash -c \
+    '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$second_project") \
+    || fail "could not resolve the clone project's absolute-origin lock"
+  [ "$primary_lock" = "$clone_lock" ] \
+    || fail "bare and absolute forms of the same local origin resolved different project locks"
+
+  pass "Treehouse locking gives a bare local origin and its absolute clone one project identity"
+}
+
 test_reused_pool_slot_refuses_before_touching_the_other_task() {
   local dir id=stale-task other=live-task worker rc
 
@@ -606,6 +629,7 @@ test_supported_backend_endpoint_records_validate
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup
+test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down

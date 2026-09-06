@@ -1093,8 +1093,10 @@ fm_firstmate_root_home() {
   home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
   while [ -e "$home/.fm-secondmate-parent" ] || [ -L "$home/.fm-secondmate-parent" ]; do
     marker="$home/.fm-secondmate-parent"
-    command -v fm_secondmate_parent_record_parse >/dev/null 2>&1 \
-      || . "$FM_WAKE_LIB_DIR/fm-secondmate-parent-lib.sh"
+    if ! command -v fm_secondmate_parent_record_parse >/dev/null 2>&1; then
+      # shellcheck source=bin/fm-secondmate-parent-lib.sh
+      . "$FM_WAKE_LIB_DIR/fm-secondmate-parent-lib.sh"
+    fi
     fm_secondmate_parent_record_parse "$marker" || return 1
     [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 1
     parent=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || return 1
@@ -1116,6 +1118,8 @@ fm_treehouse_project_lock_path() {  # <project-dir>
     case "$origin" in
       /*) [ ! -d "$origin" ] || origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 1 ;;
       ./*|../*) [ ! -d "$project/$origin" ] || origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 1 ;;
+      *://*|*:* ) ;;
+      *) [ ! -d "$(dirname "$project")/$origin" ] || origin=$(CDPATH='' cd -- "$(dirname "$project")/$origin" 2>/dev/null && pwd -P) || return 1 ;;
     esac
     identity=$origin
   else
