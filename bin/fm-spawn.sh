@@ -2303,8 +2303,7 @@ rovo_spawn_fail() {  # <detail>
 # (teardown, the watcher) will ever learn this endpoint exists to close it:
 # without this, the already-launched --yolo rovo process keeps running as an
 # orphaned autonomous agent outside task control. Mirrors fm-teardown.sh's own
-# generic non-orca kill call; orca's worktree+terminal are owned by the
-# separate ORCA_ABORT_CLEANUP trap path and are out of scope here.
+# generic endpoint-kill call at task retirement.
 rovo_endpoint_cleanup() {
   [ "$BACKEND" = orca ] && return 0
   local tab_id=
