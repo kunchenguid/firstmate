@@ -117,6 +117,11 @@ case "${1:-}" in
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
       fi
+      if [ "$payload" = Escape ] && [ -n "${FM_FAKE_INTERRUPT_DISAPPEARS:-}" ]; then
+        # The seat closes itself on the interrupt: the recorded window vanishes
+        # from the session inventory, so the endpoint is authoritatively absent.
+        printf '%s\n' 'other-window' > "$D/windows"
+      fi
       if [ "$payload" = Escape ] && [ -n "${FM_FAKE_MUSE_LOG:-}" ]; then
         if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ]; then
           : > "$D/muse-ack-pending"
@@ -161,6 +166,8 @@ if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ] \
   printf 'zsh' > "$FM_FAKE_DIR/command"
   printf '%s\n' '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"cancelled","reason":null}}}' >> "$FM_FAKE_MUSE_LOG"
 fi
+case "${1:-}" in *[!0-9.]*|'') exit 0 ;; esac
+/bin/sleep "$1"
 exit 0
 SH
   chmod +x "$fb/sleep"
@@ -216,6 +223,7 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_INTERRUPT_DISAPPEARS="${FM_FAKE_INTERRUPT_DISAPPEARS:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -796,6 +804,26 @@ test_exit_accepts_agent_stopped_by_busy_interrupt() {
   pass "fm-control exit: an interrupt-stopped agent satisfies the gone-state postcondition"
 }
 
+test_exit_accepts_endpoint_that_disappears_after_busy_interrupt() {
+  local dir out rc gen
+  dir=$(new_case interrupt-vanishes)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(FM_FAKE_INTERRUPT_DISAPPEARS=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit should accept an endpoint that disappears after the interrupt"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=claude" \
+    "an authoritatively absent endpoint after interrupt is a positive stop"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "exit should deliver the busy agent's interrupt sequence"
+  [ -z "$(literals "$dir")" ] \
+    || fail "exit should not type a command after the endpoint already vanished"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] && [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "exit should retire busy wiring for an endpoint that vanished"
+  pass "fm-control exit: a post-interrupt missing endpoint is a stopped exit, never a failure"
+}
+
 test_agent_that_does_not_stop_reports_unconfirmed_never_failed() {
   local dir out rc gen
   dir=$(new_case stubborn)
@@ -950,6 +978,7 @@ test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
+test_exit_accepts_endpoint_that_disappears_after_busy_interrupt
 test_agent_that_does_not_stop_reports_unconfirmed_never_failed
 test_exit_reports_late_stop_as_success
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed

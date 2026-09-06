@@ -482,13 +482,12 @@ do_exit() {
       cancel=$(deliver_interrupt) || return $?
       state=$(agent_state)
       case "$state" in
-        dead)
+        dead|missing)
           retire_busy_incarnation
           printf 'stopped'
           return 0
           ;;
         alive) interrupt_result="delivered verified=agent-alive cancel=$cancel" ;;
-        missing) die "task $ID's recorded endpoint disappeared after interrupt delivery, so exit cannot prove whether the agent stopped" ;;
         *) die "task $ID's endpoint reads '$state' after interrupt delivery rather than a positively classified state; exit cannot prove whether the agent stopped" ;;
       esac
       ;;
