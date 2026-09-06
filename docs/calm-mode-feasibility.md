@@ -147,6 +147,29 @@ An adjacent two-notification run retained the same two-row neighboring-assistant
 Calm off, an absent Calm preference, and an absent Calm extension retained ordinary rows.
 The current exact marker and the narrow bare-U+2063 `Supervisor escalate (` compatibility shape hid under Calm, while quoted markers, ASCII `FIRSTMATE_OP:` without U+2063, ordinary text before the current marker, unrelated text after U+2063, and image-bearing input remained visible.
 
+## Pending-notification presentation
+
+The pending area is separate from `addMessageToChat`, so Calm's transcript adapter cannot collapse queued follow-ups.
+Pi 0.85.1's documented extension UI, Markdown transformers, and message renderers expose no pending-preview filter.
+`InteractiveMode.updatePendingMessagesDisplay` builds a spacer, one `TruncatedText` per steering and follow-up string, and an edit-all hint in `pendingMessagesContainer`.
+Its `getAllQueuedMessages` snapshot omits images, and `AgentSession._queueSteer` and `_queueFollowUp` emit `queue_update` before adding full content to the agent queue.
+Filtering that snapshot's strings alone would therefore hide image-bearing user input with matching text.
+
+`.pi/extensions/fm-pending-notifications.ts` owns the independent lifecycle, and `.pi/extensions/lib/fm-pending-notification-layout.ts` owns the capability-probed component adapter.
+It decorates only stock row render methods after native pending layout or extension UI binding, validates each component's identity against the exact queue snapshot, and uses the existing canonical operational parser.
+Full `Agent.steeringQueue.messages` and `followUpQueue.messages` are inspected only during rendering, after synchronous queue publication has completed.
+Unknown metadata or ambiguous matches retain the original component rendering.
+The stock container, including pending bash components, remains intact; its normal layout computes zero height for hidden rows and their otherwise orphaned spacer and hint.
+No input, provider, queue mutation, acknowledgement, or delivery method is intercepted.
+The global patch is idempotent across extension reloads, generation-owned activation prevents stale shutdown from disabling its replacement, and shutdown restores stock row rendering.
+These exported classes and private metadata fields are capability dependencies, not a numeric version guarantee.
+The operator contract and conservative visibility limits live in [calm.md](calm.md#pending-notifications).
+
+The installed-package and deterministic native TUI regression is `tests/fm-calm-pi-extension.test.sh --pending-notifications`.
+It compares stock and adapted pending geometry, retains one genuine queued message among forty internal notifications, checks exact ordered consumption and session/provider/export data, and exercises resize, reload, and Pi's actual dequeue key.
+Component checks additionally cover Calm on/off, image-bearing and duplicate-text ambiguity, steering previews, ordinary near misses, pending bash rows, repeated activation, and unavailable metadata or presentation seams.
+Current dated evidence is recorded in [runtime-backends.md](verification/runtime-backends.md#pi-pending-notification-presentation).
+
 ## Calm working presentation
 
 Calm replaces Pi's stock working row with a small animated boat while Calm is on and one logical agent run is active.

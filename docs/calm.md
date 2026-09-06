@@ -25,11 +25,21 @@ Outside Pi's same-name built-in override collision described below, Calm changes
 Calm's built-in wrappers preserve Pi's execution behavior, and input delivery, ordering, model context, session storage, diagnostics, and `/export` and `/share` operation remain unchanged.
 Every hidden Firstmate input remains available to the model and in serialized session data and exported artifacts.
 Legacy operational custom messages remain in session data and Pi's sidebar tree, although the main HTML transcript may omit them.
-Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved.
+Toggling Calm off restores ordinary transcript rendering, and `Ctrl+O` expansion state is preserved.
 
 Pi's supported presentation API does not expose a global transcript filter.
 Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and other arbitrary custom-tool or extension rows remain visible.
 These are supported-API boundaries rather than hidden-content failures.
+
+## Pending notifications
+
+Firstmate hides verified internal notification previews above Pi's editor independently of `/calm`.
+Genuine queued messages remain visible, and an internal-only queue occupies no rows or empty spacing.
+The normal edit-all-queued-messages shortcut still restores every queued message, including hidden notifications.
+Delivery, queue order, user roles, model context, session records, and exports remain unchanged.
+Image-bearing messages and ambiguous previews stay visible; this includes identical text shared by an internal notification and an image-bearing input, and compaction-only previews without full pending-message metadata.
+If Pi changes the required presentation or metadata seam, Firstmate logs a diagnostic and leaves the affected rows visible.
+The implementation and compatibility evidence are in [calm-mode-feasibility.md](calm-mode-feasibility.md#pending-notification-presentation).
 
 ## Pi compatibility
 
