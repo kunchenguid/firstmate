@@ -221,9 +221,12 @@ test_supported_backend_endpoint_records_validate() {
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Zellij endpoint refused"
 
   id=orca-task
+  # Orca records the composite "<uuid>::<absolute worktree path>" id that
+  # `orca worktree create --json` actually emits, not a bare token.
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
-    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=worktree-9"
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::/orca/workspaces/fm/fm-$id"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Orca endpoint refused"
   [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] || fail "Orca validation did not select its terminal"
 
@@ -241,6 +244,63 @@ test_supported_backend_endpoint_records_validate() {
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
   pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
+}
+
+test_orca_worktree_id_shape_is_validated_without_relaxing_other_backends() {
+  local dir id=orca-shape value rc
+
+  dir=$(make_case orca-shape)
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  for value in \
+    "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3" \
+    "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::orca/workspaces/fm/wt" \
+    "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::" \
+    "/orca/workspaces/fm/wt::/orca/workspaces/fm/wt" \
+    "::/orca/workspaces/fm/wt" \
+    "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::/orca/workspaces/fm/wt/" \
+    "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::/" \
+    "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::/orca/workspaces//fm/wt" \
+    "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::/orca/workspaces/fm/../escape"; do
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+      "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+      "orca_worktree_id=$value"
+    set +e
+    fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" >/dev/null 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "malformed Orca worktree id accepted: '$value'"
+  done
+
+  # Orca's id format is undocumented and real worktree paths carry spaces and
+  # non-ASCII characters, so only the composite structure is required.
+  for value in \
+    "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::/Users/Example User/orca/workspaces/fm/wt" \
+    "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::/orca/workspaces/équipe/wt" \
+    "wt_20260902_01::/orca/workspaces/fm/wt"; do
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+      "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+      "orca_worktree_id=$value"
+    fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+      || fail "well-formed Orca worktree id refused: '$value'"
+  done
+
+  if fm_backend_orca_worktree_id_valid ""; then
+    fail "Orca worktree id validation accepted an empty value"
+  fi
+
+  # The composite shape is accepted for Orca only; the shared atom validator that
+  # guards tmux, Herdr, Zellij, and cmux endpoint atoms still rejects ':' and '/'.
+  for value in "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::/orca/workspaces/fm/wt" "lab:w1" "/tmp/lab"; do
+    if fm_backend_endpoint_atom_valid "$value"; then
+      fail "shared endpoint atom validation was widened to accept '$value'"
+    fi
+  done
+  fm_backend_endpoint_atom_valid "lab-1" || fail "shared endpoint atom validation rejected a plain token"
+
+  pass "cleanup identity: Orca worktree ids are shape-validated while other backends' endpoint atoms stay strict"
 }
 
 test_tmux_empty_target_refuses_without_invocation() {
@@ -369,6 +429,7 @@ test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
+test_orca_worktree_id_shape_is_validated_without_relaxing_other_backends
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup

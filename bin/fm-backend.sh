@@ -388,6 +388,37 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+# Orca is the one backend whose recorded worktree id is not a bare atom:
+# `orca worktree create --json` emits "<opaque id>::<absolute worktree path>", so
+# it always carries ':' and '/'. Validate that composite shape structurally here
+# rather than widening fm_backend_endpoint_atom_valid, whose narrow allowlist is
+# the injection guard for every other backend's endpoint atoms. Only the
+# structure is pinned: an id half that is non-empty and slash-free, and an
+# absolute path with no empty, trailing, or '..' segment. Orca's id format is
+# undocumented and worktree paths legitimately contain spaces and non-ASCII
+# characters, and the recorded value only ever reaches `orca` as a single quoted
+# argv element, so a character allowlist here would refuse real worktrees
+# without guarding anything.
+fm_backend_orca_worktree_id_valid() {  # <value>
+  local value=$1 worktree_id path
+  case "$value" in
+    *::*) ;;
+    *) return 1 ;;
+  esac
+  worktree_id=${value%%::*}
+  path=${value#*::}
+  case "$worktree_id" in
+    ''|*/*) return 1 ;;
+  esac
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$path" in
+    */|*//*|*/../*|*/..) return 1 ;;
+  esac
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -508,7 +539,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       if [ "$window" != "fm-$id" ] \
         || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
+        || ! fm_backend_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
