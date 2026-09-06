@@ -19,6 +19,7 @@ ok - quiet checkpoint exits 124 with a clean checkpoint line and no live lock
 ok - checkpoint passes through a real watcher wake and leaves the queue for drain
 ok - checkpoint preserves watcher environment for registered custom checks
 ok - checkpoint rejects an existing watcher singleton as unowned
+ok - codex instructions route failed checkpoint waits to ownership inspection, not the quiet-deadline rule
 ```
 
 ## tmux

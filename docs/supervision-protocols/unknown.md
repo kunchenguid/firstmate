@@ -7,7 +7,7 @@ Ordinary wake: drain, handle all emitted wakes, reconcile open decisions and unr
 Before that acknowledgement, interruption leaves the work durable for idempotent re-handling.
 Use `bin/fm-watch-arm.sh` only when the harness has a tracked background mechanism that survives the tool call and notifies the model on process exit.
 Use `bin/fm-watch-checkpoint.sh` as a bounded foreground wait when that wake mechanism is not verified; its help owns the deadline and exit-status contract.
-After a quiet checkpoint, drain queued wakes and process newly visible user input before continuing.
+After a quiet `checkpoint: no actionable wake` deadline, drain queued wakes and process newly visible user input before continuing; any other `checkpoint: FAILED` or already-running line is a failed wait, not a quiet deadline.
 Never use shell `&` for watcher supervision.
 Failure or missing cycle only: drain queued wakes, inspect the failure and current watcher ownership, then restore the same verified wait shape.
 
