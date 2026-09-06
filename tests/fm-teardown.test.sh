@@ -276,8 +276,10 @@ SH
 }
 
 # Squash-merged history whose pipeline rebased the branch onto a newer main that
-# edited the same shared file. Per-commit patch ids against the rebased head
-# differ, and merge-tree against main conflicts, which is the false-refusal case.
+# edited the same shared file. A local copy left behind by that rebase holds
+# different content for the shared file, so its per-commit patch ids against the
+# PR head differ and merge-tree against main conflicts; teardown refuses it on
+# purpose rather than reading a shared path as proof the local content landed.
 # local_mode: rebased | stale | rebased-plus-unlanded
 # Echoes: <pr_head>
 setup_squash_rebased_history() {
@@ -949,9 +951,9 @@ test_squash_merged_same_file_different_content_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-same-path-diverged)
   write_meta "$case_dir" no-mistakes ship
-  # Reviewer's exact sequence: pipeline rebase produced a different blob for
-  # shared.txt than the stale local still holds, then squash-merged. Same path
-  # is not proof the local content landed.
+  # The pipeline rebase produced a different blob for shared.txt than the stale
+  # local still holds, then squash-merged. Same path is not proof the local
+  # content landed.
   pr_head=$(setup_squash_rebased_history "$case_dir" stale)
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
