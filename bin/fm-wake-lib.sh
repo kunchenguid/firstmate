@@ -105,9 +105,9 @@ fm_path_age() {
 }
 
 # fm_watcher_lock_unheld <state>
-# True when the watcher lock or its symlinked owner directory is absent, or when
-# the existing lock records no pid at all. Any non-empty pid remains held here;
-# its syntax, liveness, ownership metadata, and identity are health concerns.
+# True when the watcher lock publication is absent, or when its published owner
+# pid record is absent or empty. Any non-empty pid remains held here; its
+# syntax, liveness, ownership metadata, and identity are health concerns.
 fm_watcher_lock_unheld() {
   local state=$1 lockdir pid
   lockdir="$state/.watch.lock"
@@ -433,6 +433,25 @@ fm_lock_points_to_owner() {
   [ "$actual" = "$ownerdir" ]
 }
 
+fm_lock_uses_legacy_directory() {
+  case "$_FM_UNAME" in
+    MSYS_NT-*|MINGW*_NT-*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_lock_publication_matches() {  # <lockdir> <owner-path-or-legacy-token>
+  local lockdir=$1 owner=$2 pid
+  case "$owner" in
+    legacy:*)
+      pid=${owner#legacy:}
+      [ -d "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
+      [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$pid" ]
+      ;;
+    *) fm_lock_points_to_owner "$lockdir" "$owner" ;;
+  esac
+}
+
 fm_lock_discard_owner() {
   local ownerdir=$1
   [ -n "$ownerdir" ] || return 0
@@ -448,11 +467,56 @@ fm_lock_remove_stray_owner_link() {
   fi
 }
 
+#
+# Only nested directories that prove they were generated owner artifacts are
+# eligible for stale Windows migration cleanup. Anything empty, malformed, or
+# carrying unknown content must make the reclaim refuse and preserve evidence.
+fm_lock_generated_owner_dir_is_removable() {
+  local ownerdir=$1 pid
+  [ -d "$ownerdir" ] && [ ! -L "$ownerdir" ] || return 1
+  [ -f "$ownerdir/pid" ] && [ ! -L "$ownerdir/pid" ] || return 1
+  pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  (
+    shopt -s dotglob nullglob
+    local entry base
+    for entry in "$ownerdir"/*; do
+      base=${entry##*/}
+      case "$base" in
+        pid|fm-home|pid-identity|role|watcher-path)
+          [ -f "$entry" ] && [ ! -L "$entry" ] || exit 1
+          ;;
+        *)
+          exit 1
+          ;;
+      esac
+    done
+  )
+}
+
+fm_lock_remove_generated_owner_dirs() {
+  local lockdir=$1 base nested
+  base=$(basename "$lockdir")
+  # Migration cleanup must be all-or-nothing: if any nested artifact is
+  # malformed or foreign, preserve every nested entry as evidence.
+  for nested in "$lockdir/$base.owner."*; do
+    [ -e "$nested" ] || continue
+    fm_lock_generated_owner_dir_is_removable "$nested" || return 1
+  done
+  for nested in "$lockdir/$base.owner."*; do
+    [ -e "$nested" ] || continue
+    fm_lock_clean_known_files "$nested"
+    rmdir "$nested" 2>/dev/null || return 1
+  done
+}
+
 fm_lock_claim_blocked_by_steal() {
   local lockdir=$1 allowed_steal_owner=${2:-} steal
   steal="$lockdir.steal"
   [ -e "$steal" ] || [ -L "$steal" ] || return 1
-  if [ -n "$allowed_steal_owner" ] && fm_lock_points_to_owner "$steal" "$allowed_steal_owner"; then
+  if [ -n "$allowed_steal_owner" ] && fm_lock_publication_matches "$steal" "$allowed_steal_owner"; then
     return 1
   fi
   return 0
@@ -484,9 +548,30 @@ fm_lock_claim() {
   return 0
 }
 
+fm_lock_try_create_legacy() {
+  local lockdir=$1 allowed_steal_owner=${2:-} mypid
+  FM_LOCK_OWNER_DIR=
+  mkdir "$lockdir" 2>/dev/null || return 1
+  if ! fm_lock_prepare_owner "$lockdir"; then
+    fm_lock_discard_owner "$lockdir"
+    return 1
+  fi
+  if fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
+    fm_lock_discard_owner "$lockdir"
+    return 1
+  fi
+  mypid=${BASHPID:-$$}
+  FM_LOCK_OWNER_DIR="legacy:$mypid"
+  return 0
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
+  if fm_lock_uses_legacy_directory; then
+    fm_lock_try_create_legacy "$lockdir" "$allowed_steal_owner"
+    return $?
+  fi
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
@@ -519,6 +604,7 @@ fm_lock_remove_path() {
     [ -n "$ownerdir" ] && fm_lock_discard_owner "$ownerdir"
     return 0
   fi
+  fm_lock_remove_generated_owner_dirs "$lockdir" || return 1
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null
 }
@@ -921,7 +1007,7 @@ fm_lock_try_acquire() {
     FM_LOCK_OWNER_DIR=
     return 1
   fi
-  if ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
+  if ! fm_lock_publication_matches "$steal" "$steal_owner"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
@@ -1074,8 +1160,7 @@ fm_lock_release() {
   fi
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 0
-  fm_lock_clean_known_files "$lockdir"
-  rmdir "$lockdir" 2>/dev/null || true
+  fm_lock_remove_path "$lockdir" || true
 }
 
 fm_meta_lock_path() {

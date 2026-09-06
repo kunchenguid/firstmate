@@ -34,6 +34,37 @@ drain_and_ack() {  # <state>
     --recovery-generation "$generation"
 }
 
+wait_for_file_text() {
+  local file=$1 expected=$2 i=0
+  while [ "$i" -lt 100 ]; do
+    grep -F "$expected" "$file" >/dev/null 2>&1 && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+host_lacks_real_symlink_support() {
+  case "$(uname 2>/dev/null || echo unknown)" in
+    MSYS*|MINGW*) return 0 ;;
+  esac
+  return 1
+}
+
+stale_fixture_pid() {
+  printf '%s\n' 2147483647
+}
+
+assert_fixture_pid_not_live() {
+  local state=$1 pid=$2
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_pid_alive "$2"; then
+      exit 1
+    fi
+  ' _ "$LIB" "$pid" || fail "fixture stale pid is unexpectedly live"
+}
+
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 live i
   dir=$(make_case singleton)
@@ -391,6 +422,10 @@ test_lock_late_claim_loses_after_recreate() {
 
 test_lock_paused_mid_acquire_claim_fails_during_steal() {
   local dir state lockdir out pid
+  if host_lacks_real_symlink_support; then
+    pass "paused symlink claimant race skipped on MSYS host"
+    return
+  fi
   dir=$(make_case lock-paused-claim-steal)
   state="$dir/state"
   lockdir="$state/.contend.lock"
@@ -416,6 +451,478 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pid=${out#*pid=}; pid=${pid%% *}
   [ -n "$pid" ] || fail "stealer claim did not record a pid: $out"
   pass "paused mid-acquire claimant backs off to active stealer"
+}
+
+make_fake_msys_lock_bin() {
+  local fakebin=$1
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'MINGW64_NT-10.0'
+SH
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+printf 'used\n' > "${FM_TEST_LN_USED:?}"
+exit 97
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ln"
+}
+
+make_fake_uname_lock_bin() {
+  local fakebin=$1 uname_value=$2
+  cat > "$fakebin/uname" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '$uname_value'
+SH
+  chmod +x "$fakebin/uname"
+}
+
+make_fake_cygwin_lock_bin() {
+  local fakebin=$1
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'CYGWIN_NT-10.0'
+SH
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+printf 'used\n' > "${FM_TEST_LN_USED:?}"
+exec "${REAL_LN:?}" "$@"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ln"
+}
+
+test_msys_lock_single_winner_under_concurrency() {
+  local dir state fakebin lockdir marker ready release ln_used i pids pid wins rc
+  dir=$(make_case msys-lock-concurrency)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  marker="$dir/wins"
+  ready="$dir/ready"
+  release="$dir/release"
+  ln_used="$dir/ln-used"
+  make_fake_msys_lock_bin "$fakebin"
+  : > "$marker"
+  pids=
+  i=1
+  while [ "$i" -le 40 ]; do
+    PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      if fm_lock_try_acquire "$2"; then
+        printf "%s\n" "${BASHPID:-$$}" >> "$3"
+        printf "ready\n" > "$4"
+        while [ ! -e "$5" ]; do
+          sleep 0.1
+        done
+        fm_lock_release "$2"
+      fi
+    ' _ "$LIB" "$lockdir" "$marker" "$ready" "$release" &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  wait_for_file_text "$ready" "ready" || {
+    for pid in $pids; do
+      kill "$pid" 2>/dev/null || true
+    done
+    for pid in $pids; do
+      wait "$pid" 2>/dev/null || true
+    done
+    fail "MSYS lock winner never acquired the lock"
+  }
+  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  [ "$wins" -eq 1 ] || {
+    : > "$release"
+    for pid in $pids; do
+      wait "$pid" 2>/dev/null || true
+    done
+    fail "expected exactly one MSYS lock winner under concurrency, got $wins"
+  }
+  [ -d "$lockdir" ] && [ ! -L "$lockdir" ] || {
+    : > "$release"
+    for pid in $pids; do
+      wait "$pid" 2>/dev/null || true
+    done
+    fail "MSYS winner did not publish a directory lock"
+  }
+  if compgen -G "$state/.contend.lock.owner.*" >/dev/null; then
+    : > "$release"
+    for pid in $pids; do
+      wait "$pid" 2>/dev/null || true
+    done
+    fail "MSYS losing contenders left owner directories behind"
+  fi
+  [ ! -e "$ln_used" ] || {
+    : > "$release"
+    for pid in $pids; do
+      wait "$pid" 2>/dev/null || true
+    done
+    fail "MSYS lock acquisition still invoked ln -s"
+  }
+  : > "$release"
+  rc=0
+  for pid in $pids; do
+    wait "$pid" || rc=$?
+  done
+  [ "$rc" -eq 0 ] || fail "MSYS concurrent lock worker failed (rc=$rc)"
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || fail "MSYS winner did not release the directory lock"
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 20
+    [ -d "$2" ] && [ ! -L "$2" ] || exit 21
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 22
+  ' _ "$LIB" "$lockdir" || fail "MSYS directory lock was not reacquirable after release"
+  [ ! -e "$ln_used" ] || fail "MSYS reacquire invoked ln -s"
+  pass "MSYS lock concurrency uses one clean directory winner"
+}
+
+test_msys_lock_steals_abandoned_directory_lock() {
+  local dir state fakebin lockdir ln_used rc stalepid
+  dir=$(make_case msys-lock-stale-recovery)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  ln_used="$dir/ln-used"
+  make_fake_msys_lock_bin "$fakebin"
+  stalepid=$(stale_fixture_pid)
+  assert_fixture_pid_not_live "$state" "$stalepid"
+  mkdir "$lockdir"
+  printf '%s\n' "$stalepid" > "$lockdir/pid"
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 20
+    [ -d "$2" ] && [ ! -L "$2" ] || exit 21
+    [ "${FM_LOCK_RECOVERED_PID:-}" = "$3" ] || exit 22
+    current=$(cat "$2/pid" 2>/dev/null || true)
+    [ -n "$current" ] || exit 23
+    [ "$current" = "${BASHPID:-$$}" ] || exit 24
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 25
+  ' _ "$LIB" "$lockdir" "$stalepid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "MSYS stale directory lock was not recovered safely (rc=$rc)"
+  [ ! -e "$ln_used" ] || fail "MSYS stale recovery invoked ln -s"
+  pass "MSYS abandoned directory locks are reclaimed cleanly"
+}
+
+test_msys_lock_live_steal_mutex_is_not_reclaimed() {
+  local dir state fakebin lockdir holder_file ln_used dead holder out i lockpid stealpid
+  dir=$(make_case msys-lock-live-stealer)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  holder_file="$dir/holder"
+  ln_used="$dir/ln-used"
+  dead=$(stale_fixture_pid)
+  make_fake_msys_lock_bin "$fakebin"
+  assert_fixture_pid_not_live "$state" "$dead"
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2.steal" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    sleep 2
+    fm_lock_release "$2.steal"
+  ' _ "$LIB" "$lockdir" "$holder_file" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$holder_file" ] || fail "MSYS live steal mutex holder did not start"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s lockpid=%s stealpid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "$(cat "$2/pid" 2>/dev/null || true)" "$(cat "$2.steal/pid" 2>/dev/null || true)"
+  ' _ "$LIB" "$lockdir")
+  wait "$holder" || fail "MSYS live steal mutex holder failed"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "MSYS stale lock was stolen while a live steal mutex was held: $out" ;;
+  esac
+  lockpid=${out#*lockpid=}; lockpid=${lockpid%% *}
+  stealpid=${out#*stealpid=}; stealpid=${stealpid%% *}
+  [ "$lockpid" = "$dead" ] || fail "MSYS primary lock changed while live steal mutex was held: $out"
+  [ "$stealpid" = "$(cat "$holder_file")" ] || fail "MSYS live steal mutex owner changed: $out"
+  [ ! -e "$ln_used" ] || fail "MSYS live steal mutex check invoked ln -s"
+  pass "MSYS live steal mutex is not reclaimed"
+}
+
+test_msys_stale_corrupted_lock_recovers_generated_owner_dir() {
+  local dir state fakebin lockdir nested ln_used rc stalepid
+  dir=$(make_case msys-lock-corrupted-recovery)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  nested="$lockdir/.contend.lock.owner.stale123"
+  ln_used="$dir/ln-used"
+  make_fake_msys_lock_bin "$fakebin"
+  stalepid=$(stale_fixture_pid)
+  assert_fixture_pid_not_live "$state" "$stalepid"
+  mkdir -p "$nested"
+  printf '%s\n' "$stalepid" > "$lockdir/pid"
+  printf '%s\n' "$stalepid" > "$nested/pid"
+  printf '%s\n' "$state" > "$nested/fm-home"
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 10
+    [ -d "$2" ] && [ ! -L "$2" ] || exit 11
+    [ ! -e "$3" ] || exit 12
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 13
+  ' _ "$LIB" "$lockdir" "$nested" || rc=$?
+  [ "$rc" -eq 0 ] || fail "corrupted MSYS stale lock did not recover cleanly (rc=$rc)"
+  [ ! -e "$ln_used" ] || fail "MSYS corrupted-lock recovery invoked ln -s"
+  pass "MSYS stale lock recovery removes generated nested owner dirs"
+}
+
+test_msys_stale_corrupted_lock_refuses_empty_nested_owner_dir() {
+  local dir state fakebin lockdir nested ln_used rc stalepid
+  dir=$(make_case msys-lock-corrupted-empty-refusal)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  nested="$lockdir/.contend.lock.owner.stale123"
+  ln_used="$dir/ln-used"
+  make_fake_msys_lock_bin "$fakebin"
+  stalepid=$(stale_fixture_pid)
+  assert_fixture_pid_not_live "$state" "$stalepid"
+  mkdir -p "$nested"
+  printf '%s\n' "$stalepid" > "$lockdir/pid"
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" && exit 10
+    [ -d "$2" ] || exit 11
+    [ -d "$3" ] || exit 12
+    [ ! -e "$3/pid" ] || exit 13
+  ' _ "$LIB" "$lockdir" "$nested" || rc=$?
+  [ "$rc" -eq 0 ] || fail "MSYS stale lock with empty nested owner dir was not refused safely (rc=$rc)"
+  [ ! -e "$ln_used" ] || fail "MSYS empty nested-owner refusal invoked ln -s"
+  pass "MSYS stale lock recovery refuses empty nested owner dirs"
+}
+
+test_msys_stale_corrupted_lock_refuses_unknown_nested_content() {
+  local dir state fakebin lockdir nested ln_used rc stalepid
+  dir=$(make_case msys-lock-corrupted-refusal)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  nested="$lockdir/.contend.lock.owner.stale123"
+  ln_used="$dir/ln-used"
+  make_fake_msys_lock_bin "$fakebin"
+  stalepid=$(stale_fixture_pid)
+  assert_fixture_pid_not_live "$state" "$stalepid"
+  mkdir -p "$nested"
+  printf '%s\n' "$stalepid" > "$lockdir/pid"
+  printf '%s\n' "$stalepid" > "$nested/pid"
+  printf '%s\n' "$state" > "$nested/fm-home"
+  printf 'keep\n' > "$nested/foreign.txt"
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" && exit 10
+    [ -d "$2" ] || exit 11
+    [ -d "$3" ] || exit 12
+    [ "$(cat "$2/pid" 2>/dev/null || true)" = "$4" ] || exit 13
+    [ "$(cat "$3/pid" 2>/dev/null || true)" = "$4" ] || exit 14
+    [ "$(cat "$3/fm-home" 2>/dev/null || true)" = "$5" ] || exit 15
+    [ -f "$3/foreign.txt" ] || exit 16
+  ' _ "$LIB" "$lockdir" "$nested" "$stalepid" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "MSYS stale lock with foreign nested content was not refused safely (rc=$rc)"
+  [ ! -e "$ln_used" ] || fail "MSYS foreign-content refusal invoked ln -s"
+  pass "MSYS stale lock recovery refuses foreign nested content without deleting evidence"
+}
+
+test_msys_stale_corrupted_lock_refuses_partial_nested_cleanup() {
+  local dir state fakebin lockdir nested_ok nested_bad ln_used rc stalepid
+  dir=$(make_case msys-lock-corrupted-partial-refusal)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  nested_ok="$lockdir/.contend.lock.owner.generated111"
+  nested_bad="$lockdir/.contend.lock.owner.generated222"
+  ln_used="$dir/ln-used"
+  make_fake_msys_lock_bin "$fakebin"
+  stalepid=$(stale_fixture_pid)
+  assert_fixture_pid_not_live "$state" "$stalepid"
+  mkdir -p "$nested_ok" "$nested_bad"
+  printf '%s\n' "$stalepid" > "$lockdir/pid"
+  printf '%s\n' "$stalepid" > "$nested_ok/pid"
+  printf '%s\n' "$state" > "$nested_ok/fm-home"
+  printf '%s\n' "$stalepid" > "$nested_bad/pid"
+  printf 'keep\n' > "$nested_bad/foreign.txt"
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" && exit 10
+    [ -d "$2" ] || exit 11
+    [ -d "$3" ] || exit 12
+    [ "$(cat "$3/pid" 2>/dev/null || true)" = "$5" ] || exit 13
+    [ "$(cat "$3/fm-home" 2>/dev/null || true)" = "$6" ] || exit 14
+    [ -d "$4" ] || exit 15
+    [ "$(cat "$4/pid" 2>/dev/null || true)" = "$5" ] || exit 16
+    [ -f "$4/foreign.txt" ] || exit 17
+  ' _ "$LIB" "$lockdir" "$nested_ok" "$nested_bad" "$stalepid" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "MSYS stale lock partially deleted earlier nested evidence before refusal (rc=$rc)"
+  [ ! -e "$ln_used" ] || fail "MSYS partial-refusal path invoked ln -s"
+  pass "MSYS stale lock refusal preserves all nested evidence when later content is foreign"
+}
+
+test_non_windows_mingw_name_keeps_symlink_publication() {
+  local dir state fakebin lockdir ln_used real_ln rc
+  if host_lacks_real_symlink_support; then
+    pass "generic mingw-name symlink publication skipped on MSYS host"
+    return
+  fi
+  dir=$(make_case mingw-name-symlink-publication)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  ln_used="$dir/ln-used"
+  real_ln=$(command -v ln)
+  make_fake_uname_lock_bin "$fakebin" MINGW64
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+printf 'used\n' > "${FM_TEST_LN_USED:?}"
+exec "${REAL_LN:?}" "$@"
+SH
+  chmod +x "$fakebin/ln"
+  rc=0
+  PATH="$fakebin:$PATH" REAL_LN="$real_ln" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 10
+    [ -L "$2" ] || exit 11
+    [ -e "$3" ] || exit 12
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 13
+  ' _ "$LIB" "$lockdir" "$ln_used" || rc=$?
+  [ "$rc" -eq 0 ] || fail "generic MINGW name incorrectly switched to legacy directory publication (rc=$rc)"
+  pass "only Windows MSYS/MINGW uname spellings switch lock publication"
+}
+
+test_cygwin_lock_keeps_symlink_publication() {
+  local dir state fakebin lockdir ln_used real_ln rc
+  if host_lacks_real_symlink_support; then
+    pass "Cygwin symlink publication skipped on MSYS host"
+    return
+  fi
+  dir=$(make_case cygwin-lock-publication)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  ln_used="$dir/ln-used"
+  real_ln=$(command -v ln)
+  make_fake_cygwin_lock_bin "$fakebin"
+  rc=0
+  PATH="$fakebin:$PATH" REAL_LN="$real_ln" FM_TEST_LN_USED="$ln_used" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 10
+    [ -L "$2" ] || exit 11
+    [ -e "$3" ] || exit 12
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 13
+  ' _ "$LIB" "$lockdir" "$ln_used" || rc=$?
+  [ "$rc" -eq 0 ] || fail "Cygwin lock publication did not stay symlink-based (rc=$rc)"
+  pass "Cygwin keeps symlink-based lock publication"
+}
+
+test_symlink_lock_contention_cleans_stray_owner_link() {
+  local dir state fakebin lockdir entered ready release real_ln contender holder rc
+  if host_lacks_real_symlink_support; then
+    pass "Symlink contention skipped on MSYS host"
+    return
+  fi
+  dir=$(make_case symlink-lock-contention)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  lockdir="$state/.contend.lock"
+  entered="$dir/ln-entered"
+  ready="$dir/holder.ready"
+  release="$dir/holder.release"
+  real_ln=$(command -v ln)
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'Linux'
+SH
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -s ] && [ "$#" -eq 3 ] && [ "$3" = "${TARGET_LOCK:-}" ] && [ ! -e "${LN_RACED_ONCE:-}" ]; then
+  printf 'entered\n' > "$LN_ENTERED" || exit 1
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "${HOLDER_READY:-}" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "${HOLDER_READY:-}" ] || exit 1
+  : > "$LN_RACED_ONCE" || exit 1
+fi
+exec "$REAL_LN" "$@"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ln"
+
+  rc=0
+  PATH="$fakebin:$PATH" TARGET_LOCK="$lockdir" LN_ENTERED="$entered" HOLDER_READY="$ready" \
+    LN_RACED_ONCE="$dir/ln-raced.once" REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" && exit 10
+    owner=$(fm_lock_link_owner "$2") || exit 11
+    [ -L "$2" ] || exit 12
+    [ -e "$3" ] || exit 13
+    if compgen -G "$owner/.contend.lock.owner.*" >/dev/null; then
+      exit 14
+    fi
+  ' _ "$LIB" "$lockdir" "$dir/ln-raced.once" &
+  contender=$!
+  wait_for_file_text "$entered" "entered" || {
+    kill "$contender" 2>/dev/null || true
+    wait "$contender" 2>/dev/null || true
+    fail "symlink contender never reached the publication race"
+  }
+
+  PATH="$fakebin:$PATH" REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 20
+    [ -L "$2" ] || exit 21
+    printf "ready\n" > "$3"
+    while [ ! -e "$4" ]; do
+      sleep 0.1
+    done
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 22
+  ' _ "$LIB" "$lockdir" "$ready" "$release" &
+  holder=$!
+  wait_for_file_text "$ready" "ready" || {
+    kill "$contender" 2>/dev/null || true
+    kill "$holder" 2>/dev/null || true
+    wait "$contender" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "symlink holder never acquired the lock"
+  }
+
+  wait "$contender" || rc=$?
+  [ "$rc" -eq 0 ] || {
+    : > "$release"
+    wait "$holder" 2>/dev/null || true
+    fail "symlink contention left a nested owner link behind (rc=$rc)"
+  }
+  [ -e "$dir/ln-raced.once" ] || {
+    : > "$release"
+    wait "$holder" 2>/dev/null || true
+    fail "symlink contention stub never exercised the nested owner race"
+  }
+
+  : > "$release"
+  wait "$holder" || fail "symlink holder did not release cleanly after contention"
+  PATH="$fakebin:$PATH" REAL_LN="$real_ln" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 30
+    fm_lock_release "$2"
+    [ ! -e "$2" ] && [ ! -L "$2" ] || exit 31
+  ' _ "$LIB" "$lockdir" || fail "symlink lock was not reacquirable after stray-link cleanup"
+  pass "symlink contention cleans nested owner links"
 }
 
 test_watch_restart_rejects_reused_pid() {
@@ -1118,6 +1625,16 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_msys_lock_single_winner_under_concurrency
+test_msys_lock_steals_abandoned_directory_lock
+test_msys_lock_live_steal_mutex_is_not_reclaimed
+test_msys_stale_corrupted_lock_recovers_generated_owner_dir
+test_msys_stale_corrupted_lock_refuses_empty_nested_owner_dir
+test_msys_stale_corrupted_lock_refuses_unknown_nested_content
+test_msys_stale_corrupted_lock_refuses_partial_nested_cleanup
+test_non_windows_mingw_name_keeps_symlink_publication
+test_cygwin_lock_keeps_symlink_publication
+test_symlink_lock_contention_cleans_stray_owner_link
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
