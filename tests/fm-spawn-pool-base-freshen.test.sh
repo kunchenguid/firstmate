@@ -59,6 +59,75 @@ run_spawn() {
     "$id" "$PROJECT_DIR" "$@"
 }
 
+test_linked_spawning_home_rejects_primary_before_refresh() {
+  local rec id out status returned primary spawning before_reflog
+  for returned in primary primary-alias spawning scout; do
+    id="pool-linked-${returned}-r12"
+    rec=$(make_case "linked-$returned" "$id")
+    read_case_record "$rec"
+    primary=$PROJECT_DIR
+    spawning="$CASE_DIR/secondmate"
+    git -C "$primary" worktree add --quiet --detach "$spawning" HEAD
+    PROJECT_DIR=$spawning
+    case "$returned" in
+      primary) POOL_DIR=$primary ;;
+      primary-alias)
+        ln -s "$primary" "$CASE_DIR/primary-alias"
+        POOL_DIR="$CASE_DIR/primary-alias"
+        ;;
+      spawning) POOL_DIR=$spawning ;;
+    esac
+    before_reflog=$(git -C "$primary" reflog)
+    # The assertion concerns identity, not how long an unchanged cwd is polled.
+    fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+    out=$(run_spawn "$id" --scout)
+    status=$?
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# evidence begin: linked-home spawn, returned=%s\n' "$returned"
+      printf '$ bin/fm-spawn.sh %s %s --scout\n%s\nexit=%s\n' "$id" "$PROJECT_DIR" "$out" "$status"
+      printf 'primary HEAD before=%s after=%s\n' "$INITIAL_SHA" "$(git -C "$primary" rev-parse HEAD)"
+      printf 'primary reflog before:\n%s\nprimary reflog after:\n%s\n' "$before_reflog" "$(git -C "$primary" reflog)"
+      if [ -e "$primary/.git/FETCH_HEAD" ]; then
+        printf 'FETCH_HEAD:\n'; cat "$primary/.git/FETCH_HEAD"
+      else
+        printf 'FETCH_HEAD absent\n'
+      fi
+      if [ -e "$HOME_DIR/state/$id.meta" ]; then
+        printf 'saved task metadata:\n'; cat "$HOME_DIR/state/$id.meta"
+        printf 'worker HEAD=%s origin/main=%s\n' "$(git -C "$POOL_DIR" rev-parse HEAD)" "$(git -C "$POOL_DIR" rev-parse origin/main)"
+      else
+        printf 'task metadata absent\n'
+      fi
+      printf '# evidence end\n'
+    fi
+    if [ "$returned" = scout ]; then
+      expect_code 0 "$status" "a genuine scout copy from a linked home should launch"$'\n'"$out"
+      assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+        "spawn did not record the genuine scout copy"
+      [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+        || fail "spawn did not refresh the genuine scout copy"
+    else
+      [ "$status" -ne 0 ] || fail "linked spawning home accepted $returned as a disposable copy"
+      # None of these is an isolated copy, so the worktree poll never adopts one
+      # and the wait runs out instead: the spawning directory fails the poll's
+      # own project comparison, and the repository primary (named directly or
+      # through a symlink) fails the isolation screen the poll shares with the
+      # guard. The refusal names the last path the pane reported.
+      assert_contains "$out" "did not enter an isolated worktree" \
+        "spawn did not explain its isolation refusal"
+      assert_contains "$out" "last seen" "refusal did not name the path the pane reported"
+      [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+      [ ! -e "$primary/.git/FETCH_HEAD" ] || fail "refused spawn fetched before proving isolation"
+    fi
+    [ "$(git -C "$primary" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+      || fail "spawn reset the repository primary from a linked home"
+    [ "$(git -C "$primary" reflog)" = "$before_reflog" ] \
+      || fail "spawn touched the primary reflog from a linked home"
+    pass "linked spawning home: $returned preserves the primary before any refresh"
+  done
+}
+
 test_stale_pool_base_refreshes_before_branching() {
   local rec id out status current branch_head
   id='pool-current-base-r1'
@@ -423,6 +492,7 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
 
+test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch

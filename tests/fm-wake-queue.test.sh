@@ -1248,6 +1248,33 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
+test_subshell_lock_ownership_without_bashpid() {
+  local dir state rc
+  dir=$(make_case subshell-lock-ownership)
+  state="$dir/state"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    unset BASHPID
+    . "$1"
+    lock="$2/.fixture.lock"
+    fm_lock_acquire_wait "$lock" || exit 10
+    ( fm_lock_release "$lock" )
+    [ "$(cat "$lock/pid")" = "$$" ] || exit 11
+    ( fm_lock_try_acquire "$lock" && exit 12; exit 0 ) || exit 12
+    fm_lock_release "$lock"
+    (
+      fm_lock_acquire_wait "$lock" || exit 13
+      [ "$(cat "$lock/pid")" != "$$" ] || exit 14
+      fm_lock_try_acquire "$lock" || exit 15
+      fm_lock_set_role "$lock" terminal-check || exit 16
+      fm_lock_release "$lock"
+      [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 17
+    ) || exit $?
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "subshell lock ownership without BASHPID failed (rc=$rc)"
+  pass "without BASHPID a subshell cannot release or reclaim its parent lock and owns its own hold"
+}
+
 # A bounded waiter acquires in a helper process, but the caller must own the
 # lock once contention clears so it can safely hold and release the critical
 # section itself.
@@ -1542,6 +1569,7 @@ test_historical_annotation_skips_announced_status() {
 }
 
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure

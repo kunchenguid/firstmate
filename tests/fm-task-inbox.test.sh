@@ -23,6 +23,9 @@
 #      pane, stays silent on a healthy/empty inbox, surfaces unwritable ladder
 #      bookkeeping only while its record remains unhandled, and emits exactly
 #      one stale wake once the ring budget is spent.
+#   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
+#      shell, the ring skips an agent the backend classifies dead, and the
+#      watcher surfaces such a record exactly once instead of re-ringing.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -50,7 +53,10 @@ inbox_lib() {  # <state> <function> [args...]
 
 # A fake tmux for the watcher cases: capture-pane replays FM_FAKE_TMUX_CAPTURE,
 # display-message yields a numeric cursor row, and every literal send-keys is
-# logged to FM_SEND_LOG so a doorbell ring is observable.
+# logged to FM_SEND_LOG so a doorbell ring is observable. With
+# FM_FAKE_TMUX_AGENT set, the inventory lists window fm-t1 and its
+# #{pane_current_command} answers with that value, so `zsh` makes
+# fm_backend_tmux_agent_state read the pane as a dead bare shell.
 make_watch_stubs() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -76,7 +82,13 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_current_command*) [ -z "${FM_FAKE_TMUX_AGENT:-}" ] || { printf '%s\n' "$FM_FAKE_TMUX_AGENT"; exit 0; } ;;
+        *pane_tty*) [ -z "${FM_FAKE_TMUX_AGENT:-}" ] || { printf '\n'; exit 0; } ;;
+      esac
+    done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE" ]; then
@@ -85,7 +97,7 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] || printf 'fm-t1\n'; exit 0 ;;
 esac
 exit 0
 SH
@@ -150,14 +162,121 @@ test_write_is_durable_and_exact() {
   doorbell2=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec2")
   [ "$doorbell" = "$doorbell2" ] \
     || fail "every record in one inbox should ring the same drain-all doorbell"
-  assert_contains "$doorbell" "$state/t1.inbox/*.msg" "doorbell should name all unhandled records"
+  assert_contains "$doorbell" "'$state/t1.inbox'/*.msg" "doorbell should quote and name all unhandled records"
   assert_contains "$doorbell" "numeric order" "doorbell should require ordered processing"
-  assert_contains "$doorbell" "$state/t1.inbox/handled/" "doorbell should name the handled dir"
+  assert_contains "$doorbell" "'$state/t1.inbox'/handled/" "doorbell should quote and name the handled dir"
   assert_contains "$doorbell" "Firstmate instruction waiting" "doorbell should be self-describing"
   case "$doorbell" in
     *$'\n'*) fail "the doorbell must be a single line" ;;
   esac
   pass "inbox: a steer is written durably and round-trips byte-exact with a self-describing doorbell"
+}
+
+# The doorbell may land in a pane whose agent has exited, where it is a shell
+# command line. Execute the real line in real shells and assert it is inert:
+# exit 0, no output, and nothing in the inbox touched.
+test_doorbell_is_a_shell_noop() {
+  local state rec doorbell sh out before after marker
+  state="$TMP_ROOT/noop/x; touch marker; #'s space/state"
+  marker="$state/marker"
+  mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  case "$doorbell" in
+    ': '*) ;;
+    *) fail "the doorbell must start with the shell no-op prefix, got: $doorbell" ;;
+  esac
+  assert_contains "$doorbell" "'\\''s space/state/t1.inbox'" \
+    "the doorbell should escape an embedded single quote in its quoted path"
+  before=$(ls -R "$state/t1.inbox")
+  for sh in sh bash zsh; do
+    command -v "$sh" >/dev/null 2>&1 || continue
+    out=$(cd "$state" && "$sh" -c "$doorbell" 2>&1) \
+      || fail "$sh executed the hostile-path doorbell with a non-zero status: $out"
+    [ -z "$out" ] || fail "$sh produced output while executing the hostile-path doorbell: $out"
+    [ ! -e "$marker" ] || fail "$sh executed shell syntax embedded in the inbox path"
+  done
+  # An interactive-style zsh with the line fed on stdin, the closest portable
+  # stand-in for a dead pane's login shell reading typed keystrokes.
+  if command -v zsh >/dev/null 2>&1; then
+    out=$(cd "$state" && printf '%s\n' "$doorbell" | zsh -s 2>&1) \
+      || fail "zsh reading the hostile-path doorbell from stdin failed: $out"
+    [ -z "$out" ] || fail "zsh printed while reading the hostile-path doorbell: $out"
+    [ ! -e "$marker" ] || fail "zsh executed shell syntax from the stdin doorbell"
+  fi
+  after=$(ls -R "$state/t1.inbox")
+  [ "$before" = "$after" ] || fail "executing the doorbell changed the inbox:"$'\n'"$after"
+  [ -f "$rec" ] || fail "executing the doorbell removed the unhandled record"
+  pass "inbox: a hostile-path doorbell executes as a no-op in bare shells"
+}
+
+test_doorbell_rejects_terminal_controls() {
+  local dir state rec doorbell control label log marker rc
+  dir="$TMP_ROOT/control-path"
+  marker="$dir/marker"
+  mkdir -p "$dir"
+  make_watch_stubs "$dir" >/dev/null
+  for label in etx esc; do
+    case "$label" in
+      etx) control=$'\003' ;;
+      esc) control=$'\033' ;;
+    esac
+    state="$dir/${control}touch marker; # $label/state"
+    mkdir -p "$state"
+    rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+    doorbell=
+    rc=0
+    doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec") || rc=$?
+    [ "$rc" -ne 0 ] || fail "a $label path should make doorbell construction fail"
+    [ -z "$doorbell" ] || fail "a rejected $label path emitted doorbell bytes"
+    log="$dir/$label.send.log"; : > "$log"
+    rc=0
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+    [ "$rc" = 2 ] || fail "a rejected $label path should return send-failed status 2, got $rc"
+    [ ! -s "$log" ] || fail "a $label path reached send-keys:"$'\n'"$(cat "$log")"
+    [ ! -e "$marker" ] || fail "a $label path executed its crafted command"
+    [ -f "$rec" ] || fail "rejecting a $label path removed the durable record"
+  done
+  pass "inbox: terminal-control paths are rejected without typing"
+}
+
+# fm_task_inbox_ring against a backend whose agent classifies dead or missing:
+# nothing is typed and the distinct return code lets callers route to recovery.
+# An unreadable endpoint still rings, so a blind classifier never starves a
+# live worker.
+test_ring_skips_dead_agent() {
+  local dir state rec log rc
+  dir="$TMP_ROOT/ring-dead"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  log="$dir/send.log"; : > "$log"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=zsh \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 3 ] || fail "a dead agent should return 3 from the ring, got $rc"
+  [ ! -s "$log" ] || fail "a dead pane was typed into:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "skipping the ring must leave the durable record in place"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_MISSING=1 \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 3 ] || fail "a missing endpoint should return 3 from the ring, got $rc"
+  [ ! -s "$log" ] || fail "a missing endpoint was typed into:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "skipping a missing endpoint must leave the durable record in place"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "a live agent should still be rung, got $rc"
+  grep -qF 'Firstmate instruction waiting' "$log" || fail "a live agent did not receive the doorbell"
+  : > "$log"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "an endpoint the classifier cannot see should still be rung, got $rc"
+  grep -qF 'Firstmate instruction waiting' "$log" || fail "an unclassifiable endpoint did not receive the doorbell"
+  pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -391,7 +510,7 @@ test_watcher_rerings_idle_pane_quietly() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "Firstmate instruction waiting: list $state/t1.inbox/*.msg" "$log" \
+  grep -qF "Firstmate instruction waiting: list '$state/t1.inbox'/*.msg" "$log" \
     || { kill "$pid" 2>/dev/null; fail "the watcher never re-rang the doorbell:"$'\n'"$(cat "$log")"; }
   kill -0 "$pid" 2>/dev/null \
     || fail "a healthy re-ring must not wake firstmate (watcher exited):"$'\n'"$(cat "$out")"
@@ -522,7 +641,61 @@ test_watcher_escalates_once_after_budget() {
   pass "watcher: a spent ring budget emits exactly one ordinary stale wake for recovery"
 }
 
+test_watcher_dead_pane_escalates_once_without_ringing() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case dead-pane)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_FAKE_TMUX_AGENT=zsh FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "the watcher never surfaced a dead pane's unhandled instruction"; }
+  [ ! -s "$log" ] || fail "a dead pane was typed into:"$'\n'"$(cat "$log")"
+  [ "$(grep -cF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null || true)" = 1 ] \
+    || fail "a dead pane should surface exactly one stale wake:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -qF "agent has exited" "$state/.wake-queue" \
+    || fail "the stale wake should say the agent has exited:"$'\n'"$(cat "$state/.wake-queue")"
+  grep -qF "$rec" "$state/.wake-queue" || fail "the stale wake should name the record path"
+  [ -f "$rec" ] || fail "the durable record must survive for recovery"
+  [ "$(cat "$state/t1.inbox/.escalated")" = "${rec##*/}" ] \
+    || fail "the escalation marker should suppress further surfacing of this record"
+  [ ! -e "$state/t1.inbox/.ring-state" ] || fail "a dead pane must not enter the re-ring ladder"
+  # The ladder is capped: nothing further is due for this record, so no later
+  # poll rings the dead pane or queues a second wake.
+  [ "$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)" = quiet ] \
+    || fail "a dead pane already surfaced must be quiet on later polls"
+  pass "watcher: a positively dead pane is never typed into and surfaces exactly one stale wake"
+}
+
+test_watcher_dead_pane_ignores_stale_busy_state() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case dead-pane-busy)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  printf 'some output\nBUSYTOKEN active\n' > "$dir/busy.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/busy.capture" \
+    FM_FAKE_TMUX_AGENT=zsh FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  wait_watcher_gone "$pid" \
+    || { kill "$pid" 2>/dev/null; fail "stale busy state hid a dead pane's unhandled instruction"; }
+  [ ! -s "$log" ] || fail "a busy-marked dead pane was typed into:"$'\n'"$(cat "$log")"
+  [ "$(grep -cF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null || true)" = 1 ] \
+    || fail "a busy-marked dead pane should surface exactly once:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  [ -f "$rec" ] || fail "the durable record must survive stale busy-state recovery"
+  [ "$(cat "$state/t1.inbox/.escalated")" = "${rec##*/}" ] \
+    || fail "stale busy-state recovery should suppress repeated surfacing"
+  pass "watcher: dead-pane recovery overrides stale busy state"
+}
+
 test_write_is_durable_and_exact
+test_doorbell_is_a_shell_noop
+test_doorbell_rejects_terminal_controls
+test_ring_skips_dead_agent
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
@@ -537,3 +710,5 @@ test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
+test_watcher_dead_pane_escalates_once_without_ringing
+test_watcher_dead_pane_ignores_stale_busy_state

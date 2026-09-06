@@ -15,6 +15,32 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-pi-branch-extension)
 EXT="$ROOT/.pi/extensions/fm-branch-supervision.ts"
 export NODE_NO_WARNINGS=1
+# The Pi release whose stock renderer stopped supplying an implicit reset at
+# multiline boundaries, which is the contract this file's renderer cases
+# compare against.
+PI_STOCK_RENDER_FLOOR=0.84.4
+
+# Semantic-version floor for a version string this file already holds (Pi's
+# package.json field). bin/fm-bootstrap.sh's tool_version_at_least is the same
+# rule for a tool it invokes itself; this is the string-shaped form, kept here
+# rather than in tests/lib.sh because this is its only consumer and every test
+# sources that library. It is deliberately as strict: a version that is not
+# exactly one major.minor.patch triple never satisfies a floor it was not
+# checked against.
+pi_version_at_least() {  # <version> <min-version>
+  local version=$1 min=$2 parts major minor patch extra
+  local min_major min_minor min_patch min_extra
+  parts=$(printf '%s\n' "$version" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
+  IFS=' ' read -r major minor patch extra <<< "$parts"
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
+  IFS='.' read -r min_major min_minor min_patch min_extra <<< "$min"
+  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$min_extra" ] || return 1
+  [ "$major" -gt "$min_major" ] && return 0
+  [ "$major" -eq "$min_major" ] || return 1
+  [ "$minor" -gt "$min_minor" ] && return 0
+  [ "$minor" -eq "$min_minor" ] || return 1
+  [ "$patch" -ge "$min_patch" ]
+}
 
 # Keep JavaScript heredocs outside command substitutions. Stock macOS Bash
 # 3.2 reparses quotes and template literals inside that combination.
@@ -28,6 +54,7 @@ install_pi_branch_extension_fixture() {
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
@@ -547,10 +574,14 @@ const pi = {
     return mainThinkingLevel;
   },
 };
-function fire(event, payload, ctx) {
+// Pi's own extension runner awaits every handler in turn
+// (dist/core/extensions/runner.js emit), so this driver does too: a handler
+// that awaits a subprocess must be allowed to finish before the driver
+// asserts on what it did.
+async function fire(event, payload, ctx) {
   const eventCtx = ctx;
   if (eventCtx?.sessionManager) activeMainSession = eventCtx.sessionManager;
-  for (const handler of piHandlers.get(event) ?? []) handler(payload, eventCtx);
+  for (const handler of piHandlers.get(event) ?? []) await handler(payload, eventCtx);
 }
 function makeOffer(message, projects = [approvedProject], heartbeat = false, eligible = projects.length > 0 || heartbeat) {
   const offer = {
@@ -612,7 +643,7 @@ const { pi, fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages,
 import { readFileSync, writeFileSync } from "node:fs";
 
 writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
-fire("session_start", {}, defaultSessionCtx);
+await fire("session_start", {}, defaultSessionCtx);
 
 // 1. An accepted wake reaches the branch session, never main. Keep the
 // scripted turn open until its durable report below, matching a real Pi prompt
@@ -680,12 +711,12 @@ if (sentToMain.length !== 1) throw new Error("routine report did not merge exact
 if (sentToMain[0].message.customType !== "fm-branch-merge") throw new Error("merge note has the wrong custom type");
 if (sentToMain[0].options.triggerTurn) throw new Error("routine idle merge must not trigger a turn");
 if (sentToMain[0].options.deliverAs) throw new Error("routine idle merge must append immediately");
-fire("agent_start", {});
+await fire("agent_start", {});
 await report.execute("call-2", { task: "task-9", verdict: "routine", summary: "still healthy" }, undefined, undefined, {});
 if (sentToMain[1].options.deliverAs !== "nextTurn" || sentToMain[1].options.triggerTurn) {
   throw new Error(`routine busy merge must defer to nextTurn without a turn: ${JSON.stringify(sentToMain[1].options)}`);
 }
-fire("agent_end", {});
+await fire("agent_end", {});
 await report.execute("call-3", { task: "task-9", verdict: "captain", summary: "PR https://example.com/pr/9 checks green, ready for review" }, undefined, undefined, {});
 // A captain outcome opens exactly ONE sequence-keyed processing turn: a
 // hidden, typed request that names the sequence and carries the exact stored
@@ -987,17 +1018,17 @@ const operational = spawnSync(
   { encoding: "utf8", input: "operational watcher injection" },
 );
 if (operational.status !== 0) throw new Error(`could not create operational input: ${operational.stderr}`);
-fire("before_agent_start", { prompt: operational.stdout }, mainCtx);
+await fire("before_agent_start", { prompt: operational.stdout }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: operational.stdout } });
 const unsolicitedPrompt = "Please keep responses concise while monitoring the fleet.";
-fire("before_agent_start", { prompt: unsolicitedPrompt }, mainCtx);
+await fire("before_agent_start", { prompt: unsolicitedPrompt }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
-fire("agent_start", {}, mainCtx);
-fire("agent_end", {}, mainCtx);
+await fire("agent_start", {}, mainCtx);
+await fire("agent_end", {}, mainCtx);
 const legacyOperational = "⁣FIRSTMATE_OP: give me a fresh system-resource report.";
-fire("before_agent_start", { prompt: legacyOperational }, mainCtx);
+await fire("before_agent_start", { prompt: legacyOperational }, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: legacyOperational } });
-fire("agent_start", {}, mainCtx);
+await fire("agent_start", {}, mainCtx);
 const unsolicited = dispatch("signal: healthy resource result");
 if (!unsolicited.accepted) throw new Error("branch did not accept the unsolicited result");
 await settle(() => fleetOperations.length === 2, "unsolicited result acknowledgement");
@@ -1023,10 +1054,10 @@ for (let index = 0; index < requestedPrompts.length; index += 1) {
   if (index < longRequests.length && content.length <= 4000) {
     throw new Error(`request fixture ${index} did not exceed the mirror bound`);
   }
-  fire("before_agent_start", { prompt: content }, mainCtx);
+  await fire("before_agent_start", { prompt: content }, mainCtx);
   // Pi persists this only after every before_agent_start handler has returned.
   entries.push({ type: "message", message: { role: "user", content } });
-  fire("agent_start", {}, mainCtx);
+  await fire("agent_start", {}, mainCtx);
   const requested = dispatch("signal: healthy resource result");
   if (!requested.accepted) throw new Error(`branch did not accept requested result ${index}`);
   await settle(() => fleetOperations.length === 4 + (index * 2), `requested result ${index} acknowledgement`);
@@ -1061,7 +1092,7 @@ if (sentToMain.length !== 1 + processingRequests.length) {
 if (processingRequests.length !== 1 || processingRequests[0].options.triggerTurn !== true) {
   throw new Error(`captain results re-sent while the first keyed request was pending: ${JSON.stringify(processingRequests)}`);
 }
-fire("agent_settled", {}, mainCtx);
+await fire("agent_settled", {}, mainCtx);
 processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
 if (processingRequests.length !== 2 || processingRequests[1].options.triggerTurn !== true) {
   throw new Error(`the widened captain sequence set did not open one keyed turn at the run boundary: ${JSON.stringify(processingRequests)}`);
@@ -1123,15 +1154,15 @@ mainEntries.push({
   customType: "fm-branch-visible-outcome",
   data: { version: 1, seq: seq1, task: "email-intake", verdict: "captain", summary: summary1, silent: false },
 });
-fire("session_start", {}, defaultSessionCtx);
+await fire("session_start", {}, defaultSessionCtx);
 if (outcomeScript(["unread"]) !== "") throw new Error("reload did not advance the cursor after finding the persisted entry");
 
 const summary2 = "Second completed request stayed exact while main was streaming.";
 const seq2 = Number(outcomeScript(["append", "--task", "task-busy", "--verdict", "captain", "--summary", summary2]));
-fire("agent_start", {});
-fire("session_shutdown", {});
-fire("session_start", {}, defaultSessionCtx);
-fire("agent_end", {});
+await fire("agent_start", {});
+await fire("session_shutdown", {});
+await fire("session_start", {}, defaultSessionCtx);
+await fire("agent_end", {});
 const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
 if (visible.length !== 2 || visible[0].data.seq !== seq1 || visible[1].data.seq !== seq2) {
   throw new Error(`reload recovery was not sequence-keyed and exactly once: ${JSON.stringify(visible)}`);
@@ -1149,8 +1180,8 @@ if (!recovered.includes(`[seq ${seq1}] email-intake: ${summary1}`) || !recovered
 }
 
 // A second reload sees the cursor and must stay idempotent.
-fire("session_shutdown", {});
-fire("session_start", {}, defaultSessionCtx);
+await fire("session_shutdown", {});
+await fire("session_start", {}, defaultSessionCtx);
 if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").length !== 2) {
   throw new Error("a second reload duplicated a visible captain outcome");
 }
@@ -1170,8 +1201,8 @@ mainEntries.push({
   customType: "fm-branch-visible-outcome",
   data: { version: 1, seq: seq3, task: "task-conflict", verdict: "captain", summary: "different summary", silent: false },
 });
-fire("session_shutdown", {});
-fire("session_start", {}, defaultSessionCtx);
+await fire("session_shutdown", {});
+await fire("session_start", {}, defaultSessionCtx);
 if (!outcomeScript(["unread"]).includes('"seq":3')) {
   throw new Error("conflicting sequence content advanced the cursor instead of failing closed");
 }
@@ -1201,7 +1232,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
 const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
-const runOf = (fn) => { fire("agent_start", {}); fn?.(); fire("agent_end", {}); fire("agent_settled", {}); };
+const runOf = async (fn) => { await fire("agent_start", {}); await fn?.(); await fire("agent_end", {}); await fire("agent_settled", {}); };
 
 // A home upgraded with outcomes that were delivered before the processed
 // marker existed treats them as processed once, at the first reconciliation:
@@ -1209,7 +1240,7 @@ const runOf = (fn) => { fire("agent_start", {}); fn?.(); fire("agent_end", {}); 
 const legacy = Number(outcomeScript(["append", "--task", "legacy", "--verdict", "captain", "--summary", "delivered before processing existed"]));
 outcomeScript(["mark-read", "--through", String(legacy)]);
 mainEntries.push({ type: "custom", customType: "fm-branch-visible-outcome", data: { version: 1, seq: legacy, task: "legacy", verdict: "captain", summary: "delivered before processing existed", silent: false } });
-fire("session_start", {}, defaultSessionCtx);
+await fire("session_start", {}, defaultSessionCtx);
 if (requests().length !== 0) throw new Error(`the upgrade migration re-presented already-delivered history: ${JSON.stringify(sentToMain)}`);
 if (readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() !== String(legacy)) {
   throw new Error("the processed marker was not initialized at the read cursor on first reconciliation");
@@ -1231,7 +1262,7 @@ finishRoutinePrompt();
 await routineOffer.settlement;
 globalThis.__fmOnBranchPrompt = undefined;
 const routineSeq = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
-runOf();
+await runOf();
 if (requests().length !== 0) throw new Error("a routine outcome opened a processing turn");
 
 // An actionable (captain) outcome: exactly one keyed request while main is idle.
@@ -1250,7 +1281,7 @@ if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error
 // Case A (timeline report 2026-08-31): the turn returns an EMPTY assistant
 // message. The processed marker must not move, and the same sequence is
 // presented again at the run boundary.
-runOf(() => mainEntries.push({ type: "message", message: { role: "assistant", content: [] } }));
+await runOf(() => mainEntries.push({ type: "message", message: { role: "assistant", content: [] } }));
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("an empty answer advanced the processed marker");
 if (requests().length !== 2) throw new Error(`an empty answer did not re-present the outcome: ${requests().length} requests`);
 if (requests()[1].options.triggerTurn !== true) throw new Error("the first re-presentation must open its own turn");
@@ -1259,23 +1290,23 @@ if (!requests()[1].message.content.includes(`[seq ${seq}] task-d: ${decision}`))
 // Case B: the turn repeats an unrelated prior answer. Same result: the marker
 // holds, and the request is presented again - now riding the captain's next
 // prompt because the triggered budget for this sequence set is spent.
-runOf(() => mainEntries.push({ type: "message", message: { role: "assistant", content: "The retry safe-stopped; diagnosis is underway." } }));
+await runOf(() => mainEntries.push({ type: "message", message: { role: "assistant", content: "The retry safe-stopped; diagnosis is underway." } }));
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("an unrelated answer advanced the processed marker");
 if (requests().length !== 3) throw new Error(`an unrelated answer did not re-present the outcome: ${requests().length} requests`);
 if (requests()[2].options.deliverAs !== "nextTurn" || requests()[2].options.triggerTurn) {
   throw new Error(`after the triggered budget the request must ride the next prompt: ${JSON.stringify(requests()[2].options)}`);
 }
 // A quiet settle with the copy still queued does not queue a duplicate.
-fire("agent_settled", {});
+await fire("agent_settled", {});
 if (requests().length !== 3) throw new Error("a duplicate next-turn copy was queued");
 // The captain's next prompt consumes that copy; settling unacknowledged queues one more.
-runOf(() => mainEntries.push({ type: "message", message: { role: "assistant", content: "Captain, shipshape." } }));
+await runOf(() => mainEntries.push({ type: "message", message: { role: "assistant", content: "Captain, shipshape." } }));
 if (requests().length !== 4 || requests()[3].options.deliverAs !== "nextTurn") throw new Error("the outcome stopped being re-presented on later prompts");
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a paraphrase advanced the processed marker");
 
 // A session replacement re-presents with a fresh triggered budget.
-fire("session_shutdown", {});
-fire("session_start", {}, defaultSessionCtx);
+await fire("session_shutdown", {});
+await fire("session_start", {}, defaultSessionCtx);
 if (requests().length !== 5 || requests()[4].options.triggerTurn !== true) throw new Error("session start did not re-present the unprocessed outcome with its own turn");
 if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq).length !== 1) {
   throw new Error("re-presentation duplicated the visible entry");
@@ -1296,7 +1327,7 @@ const ack = await processed.execute("ack", { through: seq }, undefined, undefine
 if (ack.isError) throw new Error(`acknowledgement failed: ${JSON.stringify(ack)}`);
 if (unprocessedSeqs().length !== 0) throw new Error("the acknowledgement did not close the sequence");
 const before = requests().length;
-runOf();
+await runOf();
 if (requests().length !== before) throw new Error("an acknowledged outcome was presented again");
 
 // Two newer captain outcomes in a row: the second does not overlap a request
@@ -1335,14 +1366,14 @@ if (!unlisted.isError || !unlisted.content.some((item) => item.type === "text" &
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seqE, seqF])) {
   throw new Error(`an unlisted acknowledgement closed outcomes: ${unprocessedSeqs()}`);
 }
-runOf();
+await runOf();
 if (requests().length !== beforePair + 2) throw new Error("the widened sequence was not presented at the run boundary");
 const latest = requests().at(-1).message.content;
 if (!latest.includes(`[seq ${seqE}] branch-driver:`) || !latest.includes(`[seq ${seqF}] task-f:`) || !latest.includes(`through=${seqF}`)) {
   throw new Error(`the widened request did not cover every unprocessed sequence with the highest key: ${latest}`);
 }
 const beforePairRepeat = requests().length;
-runOf();
+await runOf();
 if (requests().length !== beforePairRepeat + 1 || requests().at(-1).options.triggerTurn !== true) {
   throw new Error("the second presentation of the widened sequence set did not open its own turn");
 }
@@ -1350,7 +1381,7 @@ const partial = await processed.execute("ack-partial", { through: seqE }, undefi
 if (partial.isError) throw new Error(`partial acknowledgement failed: ${JSON.stringify(partial)}`);
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seqF])) throw new Error(`a partial acknowledgement did not keep the newer sequence open: ${unprocessedSeqs()}`);
 const beforeF = requests().length;
-runOf();
+await runOf();
 if (
   requests().length !== beforeF + 1 ||
   requests().at(-1).options.triggerTurn !== true ||
@@ -1436,7 +1467,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 if (existsSync(`${home}/config/pi-supervision-branch`)) {
   throw new Error("test fixture unexpectedly wrote a grant file");
 }
-fire("session_start", {}, defaultSessionCtx);
+await fire("session_start", {}, defaultSessionCtx);
 if (!dispatch("signal: default-on task wake").accepted) {
   throw new Error("a task-scoped wake was refused with no grant file present");
 }
@@ -1580,7 +1611,7 @@ await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, 
 const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
 import { appendFileSync, readFileSync } from "node:fs";
 
-fire("session_start", {});
+await fire("session_start", {});
 let releasePrompt;
 globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
 const offer = dispatch("heartbeat", [], true, true);
@@ -1638,7 +1669,7 @@ import { pathToFileURL } from "node:url";
 // A second live task the wake does not name, plus the memory of a task whose
 // records are already gone.
 writeFileSync(`${home}/state/other-task.meta`, `project=${approvedProject}\nwindow=default:wX:p1\n`);
-fire("session_start", {}, defaultSessionCtx);
+await fire("session_start", {}, defaultSessionCtx);
 
 let finish;
 globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finish = resolve; });
@@ -1724,7 +1755,7 @@ await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, 
 const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 
-fire("session_start", {});
+await fire("session_start", {});
 let releasePrompt;
 globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
 const offer = dispatch("signal: task-local wake");
@@ -1767,6 +1798,71 @@ EOF
   pass "pre-drain eligibility re-check excludes a newly main-owned row without deferring eligible work"
 }
 
+# A needs-decision signal wakes main independently, but it must not veto an
+# already accepted routine delivery at the branch's pre-drain recheck. The
+# grant serializes the actors: branch owns only the routine row, while the
+# decision row remains main-owned. If the prompted branch then fails, rejecting
+# the settlement releases the grant so watcher fallback can replay both rows.
+test_branch_predrain_needs_decision_keeps_routine_row_branch_eligible() {
+  local repo home out status
+  repo="$TMP_ROOT/predrain-needs-decision-root"
+  home="$TMP_ROOT/predrain-needs-decision-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { bus, fire, home, makeOffer, realRoot }; })()`);
+const { bus, fire, home, makeOffer, realRoot } = globalThis.__t;
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+
+fire("session_start", {});
+writeFileSync(
+  `${home}/state/.wake-queue`,
+  "1\t1\tsignal\tbranch-driver.status\tsignal: routine progress\n" +
+    "2\t2\tsignal\tdecision-task.status\tneeds-decision: decision-task.status\n",
+);
+let releasePrompt;
+globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
+const offer = makeOffer("signal: branch-driver.status");
+bus.emit("fm-branch-supervision:dispatch", offer);
+if (!offer.accepted) throw new Error("branch refused the routine offer before its mixed-queue recheck");
+for (let i = 0; i < 250 && !globalThis.__fmPromptStarted; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!globalThis.__fmPromptStarted) {
+  throw new Error("a co-present needs-decision row vetoed the accepted routine branch prompt");
+}
+const snapshot = readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim().split("\n");
+if (!snapshot.includes("1") || snapshot.includes("2")) {
+  throw new Error(`mixed queue granted the wrong rows to branch: ${snapshot}`);
+}
+releasePrompt();
+const failure = await offer.settlement.then(() => null, (error) => error);
+if (!(failure instanceof Error) || !failure.message.includes("produced no durable outcome")) {
+  throw new Error(`accepted wake settled without delivery instead of rejecting to fallback: ${String(failure)}`);
+}
+if (existsSync(`${home}/state/.branch-eligible-rows`)) {
+  throw new Error("failed branch prompt retained its routine-row grant");
+}
+const drain = spawnSync("bash", [`${realRoot}/bin/fm-wake-drain.sh`], {
+  encoding: "utf8",
+  env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`, FM_ROOT_OVERRIDE: realRoot },
+});
+if (drain.status !== 0) throw new Error(`main fallback drain failed: ${drain.stderr}`);
+if (!drain.stdout.includes("\t1\tsignal\tbranch-driver.status\t") ||
+    !drain.stdout.includes("\t2\tsignal\tdecision-task.status\t")) {
+  throw new Error(`fallback did not receive the released mixed queue: ${drain.stdout}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a mixed needs-decision recheck must keep routine branch delivery live: $out"
+  pass "a co-present needs-decision row neither vetoes nor falsely settles routine branch delivery"
+}
+
 test_settled_branch_prompt_releases_unacknowledged_grant() {
   local repo home out status
   repo="$TMP_ROOT/settled-grant-root"
@@ -1781,7 +1877,7 @@ const { dispatch, fire, home, realRoot, mainUserMessages } = globalThis.__t;
 const { spawnSync } = await import("node:child_process");
 const { existsSync } = await import("node:fs");
 
-fire("session_start", {});
+await fire("session_start", {});
 const offer = dispatch("signal: unacknowledged branch wake");
 if (!offer.accepted) throw new Error("eligible wake was not accepted");
 for (let i = 0; i < 250 && (globalThis.__fmPrompts ?? []).length === 0; i += 1) {
@@ -1834,7 +1930,7 @@ import { existsSync } from "node:fs";
 let now = 1_000_000;
 Date.now = () => now;
 const entries = [];
-fire("session_start", {}, {
+await fire("session_start", {}, {
   sessionManager: {
     getSessionFile: () => `${home}/main.jsonl`,
     getEntries: () => entries,
@@ -1973,6 +2069,9 @@ now += 5 * 60 * 1000;
 const recoveryProbe = dispatch("signal: recovery probe after extended cooldown");
 if (!recoveryProbe.accepted) throw new Error("the branch did not re-probe after the extended cooldown elapsed");
 await settle(() => attempt === 6 && sentToMain.some((sent) => sent.message.content.includes("cooldown probe recovered the branch")), "successful recovery probe");
+// The recovery note is emitted when the wake SETTLES, which is after the
+// report note the condition above waits for.
+await recoveryProbe.settlement;
 if (mainUserMessages.length !== 0) throw new Error("a successful recovery probe also fell back to main");
 const recoveryNotes = sentToMain.filter((sent) => sent.message.content.includes("Supervision branch recovered after a successful cooldown probe"));
 if (recoveryNotes.length !== 1 || recoveryNotes[0].message.content.includes("\n")) {
@@ -2020,9 +2119,9 @@ const mainSession = {
   getSessionFile: () => `${home}/main.jsonl`,
   getEntries: () => entries,
 };
-fire("session_start", {}, { sessionManager: mainSession });
+await fire("session_start", {}, { sessionManager: mainSession });
 entries.push({ type: "message", message: { role: "user", content: "context waiting for the branch mirror" } });
-fire("turn_end", {}, { sessionManager: mainSession });
+await fire("turn_end", {}, { sessionManager: mainSession });
 
 let releaseMirror;
 globalThis.__fmMirrorGate = new Promise((resolve) => { releaseMirror = resolve; });
@@ -2053,7 +2152,7 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
 const stale = dispatch("signal: provider error during model selection");
 if (!stale.accepted) throw new Error("in-flight wake was not accepted");
 await settle(() => globalThis.__fmMirrorStarted === true, "pending branch mirror");
-fire("model_select", { model: { provider: "anthropic", id: "replacement-model" } });
+await fire("model_select", { model: { provider: "anthropic", id: "replacement-model" } });
 releaseMirror();
 const staleFailure = await stale.settlement.then(() => null, (error) => error);
 if (!(staleFailure instanceof Error) ||
@@ -2097,7 +2196,7 @@ await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, 
 const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
 import { writeFileSync } from "node:fs";
 
-fire("session_start", {});
+await fire("session_start", {});
 const offer = dispatch("signal: interrupted main claim");
 if (!offer.accepted) throw new Error("eligible wake was not accepted before the ownership recheck");
 writeFileSync(`${home}/state/.main-eligible-rows`, "1\n");
@@ -2135,7 +2234,7 @@ await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, 
 const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
 import { writeFileSync } from "node:fs";
 
-fire("session_start", {});
+await fire("session_start", {});
 let releaseFirst;
 globalThis.__fmPromptGate = new Promise((resolve) => {
   releaseFirst = resolve;
@@ -2208,7 +2307,7 @@ const ctx = {
 // Dialog collected at main's turn_end, delivered into the branch BEFORE the
 // next wake, tagged and filtered: no tool traffic, no operational injections,
 // no merge notes, long messages capped.
-fire("turn_end", {}, ctx);
+await fire("turn_end", {}, ctx);
 dispatch("signal: after mirror");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
 const session = globalThis.__fmSessions[0];
@@ -2234,7 +2333,7 @@ if (mirrored.some((m) => m.content.includes("operational injection") || m.conten
 
 // The durable cursor advances: a second turn_end mirrors only NEW dialog.
 entries.push({ type: "message", message: { role: "user", content: "actually, task-7 may merge when green" } });
-fire("turn_end", {}, ctx);
+await fire("turn_end", {}, ctx);
 await settle(() => session.ops.filter((op) => op.kind === "custom").length === 4, "incremental mirror");
 const latest = session.ops[session.ops.length - 1];
 if (latest.message.content !== "[captain] actually, task-7 may merge when green") {
@@ -2253,7 +2352,7 @@ const ctx2 = {
     getEntries: () => [{ type: "message", message: { role: "user", content: "fresh session standing order" } }],
   },
 };
-fire("turn_end", {}, ctx2);
+await fire("turn_end", {}, ctx2);
 await settle(() => session.ops.filter((op) => op.kind === "custom").length === 5, "replacement-session mirror");
 const fresh = session.ops[session.ops.length - 1];
 if (fresh.message.content !== "[captain] fresh session standing order") {
@@ -2289,8 +2388,8 @@ const ctx = makeCtx({
 });
 const mirrorsOf = (session) => session.ops.filter((op) => op.kind === "custom").map((op) => op.message.content);
 
-fire("session_start", {}, ctx);
-fire("turn_end", {}, ctx);
+await fire("session_start", {}, ctx);
+await fire("turn_end", {}, ctx);
 dispatch("signal: first session");
 await settle(() => (globalThis.__fmSessions ?? []).length === 1, "first branch build");
 const first = globalThis.__fmSessions[0];
@@ -2306,9 +2405,9 @@ if (cursor.file !== `${home}/main-1.jsonl` || cursor.index !== entries.length) {
 // current main session's start and that conversation receives the whole
 // session's dialog, not only what arrived after the cursor.
 entries.push({ type: "message", message: { role: "user", content: "and hold task-9 too" } });
-fire("session_shutdown", {});
-fire("session_start", {}, ctx);
-fire("turn_end", {}, ctx);
+await fire("session_shutdown", {});
+await fire("session_start", {}, ctx);
+await fire("turn_end", {}, ctx);
 dispatch("signal: second session");
 await settle(() => (globalThis.__fmSessions ?? []).length === 2, "second branch build");
 const second = globalThis.__fmSessions[1];
@@ -2320,7 +2419,7 @@ if (JSON.stringify(mirrorsOf(second)) !== JSON.stringify(expected)) {
 
 // Inside that session the cursor keeps working: later dialog mirrors once.
 entries.push({ type: "message", message: { role: "user", content: "task-9 may merge when green" } });
-fire("turn_end", {}, ctx);
+await fire("turn_end", {}, ctx);
 await settle(() => mirrorsOf(second).length === 3, "incremental mirror after the re-anchor");
 if (mirrorsOf(second)[2] !== "[captain] task-9 may merge when green") {
   throw new Error(`the incremental mirror re-sent dialog or lost the new line: ${JSON.stringify(mirrorsOf(second))}`);
@@ -2354,7 +2453,7 @@ const pointerFile = `${home}/state/.branch-session`;
 const readPointer = () => readFileSync(pointerFile, "utf8").trim();
 
 // 1. The first wake of a session opens the branch conversation and records it.
-fire("session_start", {}, makeCtx());
+await fire("session_start", {}, makeCtx());
 dispatch("signal: first session probe");
 await settle(() => (globalThis.__fmSessions ?? []).length === 1, "first branch build");
 const first = globalThis.__fmSessions[0].options.sessionManager;
@@ -2365,7 +2464,7 @@ if (readPointer() !== first.getSessionFile()) {
 
 // 2. WITHIN one main session the conversation persists: a model or effort
 // change drops the live branch and the next wake continues the same file.
-fire("thinking_level_select", { level: "high", previousLevel: "medium" });
+await fire("thinking_level_select", { level: "high", previousLevel: "medium" });
 await settle(() => globalThis.__fmSessions[0].disposed, "live branch release inside the session");
 dispatch("signal: same session probe");
 await settle(() => (globalThis.__fmSessions ?? []).length === 2, "same-session rebuild");
@@ -2377,8 +2476,8 @@ if (!continued.opened || continued.getSessionFile() !== first.getSessionFile()) 
 // 3. A main session start - /new here, and identically /resume, /fork, or a
 // reload - starts a NEW branch conversation. The recorded pointer is not
 // reopened, and it follows the new conversation instead.
-fire("session_shutdown", {});
-fire("session_start", {}, makeCtx());
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
 dispatch("signal: new session probe");
 await settle(() => (globalThis.__fmSessions ?? []).length === 3, "post-session-start branch build");
 const replacement = globalThis.__fmSessions[2].options.sessionManager;
@@ -2416,7 +2515,7 @@ if (readFileSync(`${home}/state/.branch-session`, "utf8").trim() !== prior) {
   throw new Error("the restart did not start from the previous process's recorded pointer");
 }
 
-fire("session_start", {}, makeCtx());
+await fire("session_start", {}, makeCtx());
 dispatch("signal: restart probe");
 await settle(() => (globalThis.__fmSessions ?? []).length === 1, "restart branch build");
 const restarted = globalThis.__fmSessions[0].options.sessionManager;
@@ -2452,7 +2551,7 @@ registryModels.push({ provider: "anthropic", id: "main-model" }, { provider: "op
 // 1. No pin and main's model not known yet: the build falls back to the
 // pre-feature path of passing no override rather than refusing to build, so
 // a wake is never lost over model choice.
-fire("session_start", {});
+await fire("session_start", {});
 dispatch("signal: main model unknown");
 await settle(() => (globalThis.__fmSessions ?? []).length === 1, "unknown-main-model branch build");
 if ("model" in globalThis.__fmSessions[0].options) {
@@ -2461,8 +2560,8 @@ if ("model" in globalThis.__fmSessions[0].options) {
 
 // 2. No pin, main's model known: the branch follows MAIN's own model,
 // applied explicitly.
-fire("session_shutdown", {});
-fire("session_start", {}, makeCtx());
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
 dispatch("signal: unpinned probe");
 await settle(() => (globalThis.__fmSessions ?? []).length === 2, "unpinned branch build");
 const unpinned = globalThis.__fmSessions[1].options.model;
@@ -2473,8 +2572,8 @@ if (!unpinned || unpinned.provider !== "anthropic" || unpinned.id !== "main-mode
 // 3. Pin present: the very next build carries exactly that model, resolved
 // out of Pi's own catalog.
 writeFileSync(`${home}/config/supervision-branch-model`, "openai/cheap-1\n");
-fire("session_shutdown", {});
-fire("session_start", {}, makeCtx());
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
 dispatch("signal: pinned probe");
 await settle(() => (globalThis.__fmSessions ?? []).length === 3, "pinned branch build");
 const pinned = globalThis.__fmSessions[2].options.model;
@@ -2485,8 +2584,8 @@ if (!pinned || pinned.provider !== "openai" || pinned.id !== "cheap-1") {
 // 4. The session-replacement path (/new, /resume, /fork, reload all replace
 // the session in-process) builds a NEW branch conversation and still applies
 // the pin.
-fire("session_shutdown", {});
-fire("session_start", {}, makeCtx());
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
 dispatch("signal: replacement probe");
 await settle(() => (globalThis.__fmSessions ?? []).length === 4, "replacement branch build");
 const replaced = globalThis.__fmSessions[3].options.model;
@@ -2502,8 +2601,8 @@ if (manager.opened) throw new Error("a session replacement continued the previou
 // because that conversation still records the pinned model, so only an
 // explicit override keeps "follow main" honest.
 rmSync(`${home}/config/supervision-branch-model`);
-fire("session_shutdown", {});
-fire("session_start", {}, makeCtx());
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
 dispatch("signal: unpinned again");
 await settle(() => (globalThis.__fmSessions ?? []).length === 5, "post-clear branch build");
 const cleared = globalThis.__fmSessions[4];
@@ -2539,13 +2638,13 @@ registryModels.push(
   { provider: "anthropic", id: "replacement-model" },
   { provider: "openai", id: "cheap-1" },
 );
-fire("session_start", {}, makeCtx());
+await fire("session_start", {}, makeCtx());
 dispatch("signal: before main model change");
 await settle(() => (globalThis.__fmSessions ?? []).length === 1, "initial unpinned branch build");
 const original = globalThis.__fmSessions[0];
 if (original.options.model?.id !== "main-model") throw new Error("the unpinned branch did not start on main's model");
 
-fire("model_select", { model: { provider: "anthropic", id: "replacement-model" } });
+await fire("model_select", { model: { provider: "anthropic", id: "replacement-model" } });
 await settle(() => original.disposed, "live unpinned branch release");
 dispatch("signal: after main model change");
 await settle(() => (globalThis.__fmSessions ?? []).length === 2, "replacement unpinned branch build");
@@ -2555,15 +2654,15 @@ if (following.options.model?.id !== "replacement-model") {
 }
 
 writeFileSync(`${home}/config/supervision-branch-model`, "openai/cheap-1\n");
-fire("session_shutdown", {});
-fire("session_start", {}, makeCtx());
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
 dispatch("signal: establish pinned branch");
 await settle(() => (globalThis.__fmSessions ?? []).length === 3, "pinned branch build");
 const pinned = globalThis.__fmSessions[2];
 if (pinned.options.model?.id !== "cheap-1") throw new Error("the pinned branch did not use its pin");
 const promptsBefore = pinned.ops.filter((op) => op.kind === "prompt").length;
 
-fire("model_select", { model: { provider: "anthropic", id: "replacement-model" } });
+await fire("model_select", { model: { provider: "anthropic", id: "replacement-model" } });
 dispatch("signal: pinned after main model change");
 await settle(() => pinned.ops.filter((op) => op.kind === "prompt").length === promptsBefore + 1, "pinned branch wake");
 if (pinned.disposed || globalThis.__fmSessions.length !== 3) {
@@ -2601,7 +2700,7 @@ registryModels.push(
 const command = commands.get("supervision-model");
 if (!command) throw new Error("the supervision-model command was not registered");
 
-fire("session_start", {}, makeCtx());
+await fire("session_start", {}, makeCtx());
 dispatch("signal: before the pick");
 await settle(() => (globalThis.__fmSessions ?? []).length === 1, "pre-pick branch build");
 const firstSession = globalThis.__fmSessions[0];
@@ -2750,16 +2849,16 @@ registryModels.push(
 );
 const effortPin = `${home}/config/supervision-branch-effort`;
 const modelPin = `${home}/config/supervision-branch-model`;
-function rebuild(reason, expected) {
-  fire("session_shutdown", {});
-  fire("session_start", {}, makeCtx());
+async function rebuild(reason, expected) {
+  await fire("session_shutdown", {});
+  await fire("session_start", {}, makeCtx());
   dispatch(`signal: ${reason}`);
   return settle(() => (globalThis.__fmSessions ?? []).length === expected, `${reason} branch build`);
 }
 
 // 1. No effort pin: the branch applies MAIN's own current effort explicitly,
 // so a reopened conversation cannot restore the level it last ran under.
-fire("session_start", {}, makeCtx());
+await fire("session_start", {}, makeCtx());
 dispatch("signal: unpinned effort");
 await settle(() => (globalThis.__fmSessions ?? []).length === 1, "unpinned-effort branch build");
 if (globalThis.__fmSessions[0].options.thinkingLevel !== "medium") {
@@ -2871,7 +2970,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 registryModels.push({ provider: "anthropic", id: "main-model", reasoning: true });
 const effortPin = `${home}/config/supervision-branch-effort`;
 
-fire("session_start", {}, makeCtx());
+await fire("session_start", {}, makeCtx());
 dispatch("signal: before main effort change");
 await settle(() => (globalThis.__fmSessions ?? []).length === 1, "initial branch build");
 const original = globalThis.__fmSessions[0];
@@ -2881,7 +2980,7 @@ if (original.options.thinkingLevel !== "medium") throw new Error("the unpinned b
 // reopens the same conversation at main's new effort without waiting for a
 // session replacement.
 setMainThinkingLevel("high");
-fire("thinking_level_select", { level: "high", previousLevel: "medium" });
+await fire("thinking_level_select", { level: "high", previousLevel: "medium" });
 await settle(() => original.disposed, "live branch release after main's effort change");
 dispatch("signal: after main effort change");
 await settle(() => (globalThis.__fmSessions ?? []).length === 2, "post-change branch build");
@@ -2896,15 +2995,15 @@ if (!following.options.sessionManager.opened) {
 // A pinned branch is authoritative: main's effort changes leave both the live
 // branch and the stored pin alone.
 writeFileSync(effortPin, "minimal\n");
-fire("session_shutdown", {});
-fire("session_start", {}, makeCtx());
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
 dispatch("signal: pinned effort");
 await settle(() => (globalThis.__fmSessions ?? []).length === 3, "pinned effort branch build");
 const pinned = globalThis.__fmSessions[2];
 if (pinned.options.thinkingLevel !== "minimal") throw new Error("the pinned branch did not use its effort pin");
 
 setMainThinkingLevel("high");
-fire("thinking_level_select", { level: "high", previousLevel: "minimal" });
+await fire("thinking_level_select", { level: "high", previousLevel: "minimal" });
 dispatch("signal: pinned after main effort change");
 await new Promise((resolve) => setTimeout(resolve, 50));
 if (pinned.disposed) throw new Error("a main effort change replaced the effort-pinned branch");
@@ -2942,7 +3041,7 @@ registryModels.push({ provider: "dynamic", id: "extension-only", branchAvailable
 
 const command = commands.get("supervision-model");
 if (!command) throw new Error("the supervision-model command was not registered");
-fire("session_start", {}, makeCtx());
+await fire("session_start", {}, makeCtx());
 
 // The captain types a search query and confirms the one row it leaves.
 globalThis.__fmPickerLists = [];
@@ -3071,7 +3170,7 @@ registryModels.push(
 const command = commands.get("supervision-model");
 const effortPin = `${home}/config/supervision-branch-effort`;
 const modelPin = `${home}/config/supervision-branch-model`;
-fire("session_start", {}, makeCtx());
+await fire("session_start", {}, makeCtx());
 
 // One command, two steps in order: the model picker, then an effort picker
 // built from Pi's own supported levels for the model just chosen.
@@ -3231,7 +3330,7 @@ registryModels.push(
 // A pin the isolated branch runtime cannot hand back is never a silent
 // downgrade onto main's model, even when main's session knows that model.
 writeFileSync(`${home}/config/supervision-branch-model`, "dynamic/extension-only\n");
-fire("session_start", {}, makeCtx());
+await fire("session_start", {}, makeCtx());
 const unusableOffer = dispatch("signal: unusable pin probe");
 if (!unusableOffer.accepted) throw new Error("unusable-pin wake was not initially accepted");
 const unusableFailure = await unusableOffer.settlement.then(
@@ -3251,8 +3350,8 @@ if ((globalThis.__fmSessions ?? []).length !== 0) throw new Error("an unusable p
 // An unparseable file is simply no pin, so supervision keeps working and the
 // branch follows main's own model.
 writeFileSync(`${home}/config/supervision-branch-model`, "not-a-model-reference\n");
-fire("session_shutdown", {});
-fire("session_start", {}, makeCtx());
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
 dispatch("signal: unparseable pin probe");
 await settle(() => (globalThis.__fmSessions ?? []).length === 1, "unparseable-pin branch build");
 const unparseable = globalThis.__fmSessions[0].options.model;
@@ -3295,12 +3394,14 @@ import { existsSync, writeFileSync } from "node:fs";
 
 writeFileSync(`${home}/state/.lease-task-old`, `branch\t${process.pid}\t123\n`);
 
-fire("session_start", {});
+await fire("session_start", {});
 if (!existsSync(`${home}/state/.lease-task-old`)) throw new Error("failed activation incorrectly committed lease cleanup");
 const offer = dispatch("signal: retry activation");
 if (!offer.accepted) throw new Error("later boundary did not retry failed activation");
-if (existsSync(`${home}/state/.lease-task-old`)) throw new Error("replacement activation did not clean the prior branch lease");
+// Activation runs as the accepted wake's first settlement step, so its lease
+// cleanup is observable once that wake has reached the branch.
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "post-retry wake prompt");
+if (existsSync(`${home}/state/.lease-task-old`)) throw new Error("replacement activation did not clean the prior branch lease");
 process.exit(0);
 EOF
   status=$?
@@ -3324,7 +3425,7 @@ import { existsSync, writeFileSync } from "node:fs";
 
 const summary = "Recovered the stored captain result after cold startup.";
 const seq = Number(outcomeScript(["append", "--task", "cold-result", "--verdict", "captain", "--summary", summary]));
-fire("session_start", {}, defaultSessionCtx);
+await fire("session_start", {}, defaultSessionCtx);
 if (mainEntries.some((entry) => entry.customType === "fm-branch-visible-outcome")) {
   throw new Error("captain outcome was delivered before lock ownership");
 }
@@ -3333,7 +3434,7 @@ if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
   throw new Error("branch wrote its marker before owning the lock");
 }
 writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
-fire("turn_end", {}, defaultSessionCtx);
+await fire("turn_end", {}, defaultSessionCtx);
 const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
 if (visible.length !== 1 || visible[0].data.seq !== seq || visible[0].data.summary !== summary) {
   throw new Error(`post-lock turn_end did not recover the exact captain outcome: ${JSON.stringify(visible)}`);
@@ -3376,7 +3477,7 @@ const queuedFailure = queuedOffer.settlement.then(
   (error) => error,
 );
 const entries = [{ type: "message", message: { role: "user", content: "queued mirror must stay undelivered" } }];
-fire("turn_end", {}, {
+await fire("turn_end", {}, {
   sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => entries },
 });
 unlinkSync(`${home}/state/.lock`);
@@ -3420,14 +3521,14 @@ const oldBash = oldSession.options.customTools.find((tool) => tool.name === "bas
 let releaseMirror;
 globalThis.__fmMirrorGate = new Promise((resolve) => { releaseMirror = resolve; });
 const oldEntries = [{ type: "message", message: { role: "user", content: "old generation mirror" } }];
-fire("turn_end", {}, {
+await fire("turn_end", {}, {
   sessionManager: { getSessionFile: () => `${home}/old-main.jsonl`, getEntries: () => oldEntries },
 });
 await settle(() => globalThis.__fmMirrorStarted === true, "blocked old mirror delivery");
-fire("session_shutdown", {});
-fire("session_start", {});
+await fire("session_shutdown", {});
+await fire("session_start", {});
 const newEntries = [{ type: "message", message: { role: "user", content: "new generation mirror" } }];
-fire("turn_end", {}, {
+await fire("turn_end", {}, {
   sessionManager: { getSessionFile: () => `${home}/new-main.jsonl`, getEntries: () => newEntries },
 });
 
@@ -3533,8 +3634,8 @@ const entries = [
 const ctx = {
   sessionManager: { getSessionFile: () => `${home}/main-1.jsonl`, getEntries: () => entries },
 };
-fire("turn_end", {}, ctx);
-fire("session_shutdown", {});
+await fire("turn_end", {}, ctx);
+await fire("session_shutdown", {});
 
 // Replacement instance: fresh import simulates Pi rebinding the extension.
 const replacementHandlers = new Map();
@@ -3607,12 +3708,23 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   home="$TMP_ROOT/dispatch-classify-home"
   mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
   LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" GRANT="$ROOT/bin/fm-wake-grant.sh" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
-import { readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import fs, { readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+
+const originalReadFileSync = fs.readFileSync;
+let countedStatusPath = "";
+let countedStatusReads = 0;
+fs.readFileSync = function(path, ...args) {
+  if (String(path) === countedStatusPath) countedStatusReads += 1;
+  return originalReadFileSync.call(this, path, ...args);
+};
+syncBuiltinESMExports();
 
 const { activateEligibleRowsOwner, scopeForUnreadWake, writeEligibleRowsSnapshot, releaseEligibleRowsSnapshot, BRANCH_ELIGIBLE_ROWS_FILE } =
   await import(pathToFileURL(process.env.LIB).href);
@@ -3635,6 +3747,157 @@ for (const row of mainOnlyRows) {
   }
   if (scope.corrupted) throw new Error(`an ordinary main-only row must not read as corrupted: ${row}`);
 }
+
+// A needs-decision signal row is a main-only class too, marked by payload
+// rather than kind (docs/pi-supervision-branch.md "Autonomy"): it is excluded
+// from eligibleSeqs and named in needsDecisionKeys. A later stale row under the
+// task's window alias remains individually claimable, while task-identity
+// precedence keeps its complete wake on main until the decision row is read.
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\tsignal\ttask-a.status\tneeds-decision: task-a.status",
+    "1\t2\tstale\tfm-window\tstale: later routine reminder",
+  ].join("\n"),
+);
+const needsDecisionMixed = scopeForUnreadWake(state, false);
+if (!needsDecisionMixed.eligible) {
+  throw new Error(`an unread needs-decision row must not erase a later stale row: ${JSON.stringify(needsDecisionMixed)}`);
+}
+if (needsDecisionMixed.eligibleSeqs.join(",") !== "2") {
+  throw new Error(`a needs-decision row must be excluded from eligibleSeqs: ${JSON.stringify(needsDecisionMixed)}`);
+}
+if (needsDecisionMixed.needsDecisionKeys.join(",") !== "task-a.status") {
+  throw new Error(`needsDecisionKeys must name the excluded row: ${JSON.stringify(needsDecisionMixed)}`);
+}
+if (needsDecisionMixed.taskByWakeKey["task-a.status"] !== "task-a" ||
+  needsDecisionMixed.taskByWakeKey["fm-window"] !== "task-a") {
+  throw new Error(`status and stale aliases did not resolve to one task: ${JSON.stringify(needsDecisionMixed)}`);
+}
+if (needsDecisionMixed.corrupted) {
+  throw new Error(`a needs-decision row must not read as corrupted: ${JSON.stringify(needsDecisionMixed)}`);
+}
+
+// A queue holding only a needs-decision row is ordinary main-only absence,
+// exactly like a queue holding only a check row.
+writeFileSync(`${state}/.wake-queue`, "1\t1\tsignal\ttask-a.status\tneeds-decision: task-a.status");
+const needsDecisionOnly = scopeForUnreadWake(state, false);
+if (needsDecisionOnly.eligible || needsDecisionOnly.eligibleSeqs.length !== 0 || needsDecisionOnly.corrupted) {
+  throw new Error(`a needs-decision-only queue must be ordinary main-only absence: ${JSON.stringify(needsDecisionOnly)}`);
+}
+
+// A captain-held task's bounded stale recheck is itself a decision wake. It is
+// excluded while an unrelated routine row remains independently branch-owned.
+writeFileSync(`${state}/task-a.status`, "captain-held [key=route]: awaiting the captain\n \t \n");
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\tstale\tfm-window\tstale: fm-window (awaiting the captain)",
+    "1\t2\tsignal\ttask-a.status\tsignal: routine follow-up",
+  ].join("\n"),
+);
+const captainHeldMixed = scopeForUnreadWake(state, false);
+if (!captainHeldMixed.eligible || captainHeldMixed.eligibleSeqs.join(",") !== "2") {
+  throw new Error(`a captain-held stale row was offered to the branch: ${JSON.stringify(captainHeldMixed)}`);
+}
+if (captainHeldMixed.needsDecisionKeys.join(",") !== "fm-window") {
+  throw new Error(`the captain-held stale key was not marked main-owned: ${JSON.stringify(captainHeldMixed)}`);
+}
+
+writeFileSync(`${state}/task-a.status`, "captain-held [key=route]: awaiting a second captain reminder\n \n");
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\tstale\tfm-window\tstale: fm-window (first reminder)",
+    "1\t2\tstale\tfm-window\tstale: fm-window (second reminder)",
+    "1\t3\tsignal\ttask-a.status\tsignal: routine follow-up",
+  ].join("\n"),
+);
+countedStatusPath = `${state}/task-a.status`;
+countedStatusReads = 0;
+const repeatedCaptainHeld = scopeForUnreadWake(state, false);
+if (countedStatusReads !== 1) {
+  throw new Error(`one status was read ${countedStatusReads} times for repeated stale rows`);
+}
+if (!repeatedCaptainHeld.eligible || repeatedCaptainHeld.eligibleSeqs.join(",") !== "3" ||
+  repeatedCaptainHeld.needsDecisionKeys.join(",") !== "fm-window,fm-window") {
+  throw new Error(`repeated stale reminders changed classification: ${JSON.stringify(repeatedCaptainHeld)}`);
+}
+const repeatedCaptainHeldNextScan = scopeForUnreadWake(state, false);
+if (countedStatusReads !== 1 || repeatedCaptainHeldNextScan.needsDecisionKeys.join(",") !== "fm-window,fm-window") {
+  throw new Error(`an unchanged status was not reused across scans: reads=${countedStatusReads} scope=${JSON.stringify(repeatedCaptainHeldNextScan)}`);
+}
+writeFileSync(`${state}/task-a.status`, "captain-held [key=route]: awaiting the captain\nworking: resumed after answer\n");
+const changedCaptainHeld = scopeForUnreadWake(state, false);
+if (countedStatusReads !== 2 || changedCaptainHeld.eligibleSeqs.join(",") !== "1,2,3" ||
+  changedCaptainHeld.needsDecisionKeys.length !== 0) {
+  throw new Error(`a changed status did not invalidate its cached decision: reads=${countedStatusReads} scope=${JSON.stringify(changedCaptainHeld)}`);
+}
+countedStatusPath = "";
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\tstale\tfm-window\tstale: fm-window (awaiting the captain)",
+    "1\t2\tsignal\ttask-a.status\tsignal: routine follow-up",
+  ].join("\n"),
+);
+
+// A later unrelated status does not mask a still-open durable decision. The
+// stale row remains main-owned while the routine signal stays branch-owned.
+writeFileSync(
+  `${state}/task-a.status`,
+  "needs-decision [key=cleanup]: choose destructive cleanup\nworking: routine follow-up\n",
+);
+const openDecisionMixed = scopeForUnreadWake(state, false);
+if (!openDecisionMixed.eligible || openDecisionMixed.eligibleSeqs.join(",") !== "2") {
+  throw new Error(`an open-decision stale row was offered to the branch: ${JSON.stringify(openDecisionMixed)}`);
+}
+if (openDecisionMixed.needsDecisionKeys.join(",") !== "fm-window") {
+  throw new Error(`the open-decision stale key was not marked main-owned: ${JSON.stringify(openDecisionMixed)}`);
+}
+
+process.env.FM_CLASSIFY_RESOLVE_VERB = "answered";
+writeFileSync(
+  `${state}/task-a.status`,
+  "needs-decision [key=cleanup]: choose destructive cleanup\nanswered [key=cleanup]: remove generated files\n",
+);
+const customResolved = scopeForUnreadWake(state, false);
+if (!customResolved.eligible || customResolved.eligibleSeqs.slice().sort().join(",") !== "1,2" ||
+  customResolved.needsDecisionKeys.length !== 0) {
+  throw new Error(`a custom resolution verb left the stale decision open: ${JSON.stringify(customResolved)}`);
+}
+
+process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB = "awaiting-captain";
+writeFileSync(`${state}/task-a.status`, "awaiting-captain [key=cleanup]: awaiting the captain\n");
+const customHeld = scopeForUnreadWake(state, false);
+if (!customHeld.eligible || customHeld.eligibleSeqs.join(",") !== "2" ||
+  customHeld.needsDecisionKeys.join(",") !== "fm-window") {
+  throw new Error(`a custom captain-held verb was offered to the branch: ${JSON.stringify(customHeld)}`);
+}
+delete process.env.FM_CLASSIFY_RESOLVE_VERB;
+delete process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB;
+
+process.env.FM_CLASSIFY_RESERVED_KEY_PREFIXES = "secret-";
+writeFileSync(
+  `${state}/task-a.status`,
+  "needs-decision [key=pending-reply-x]: choose destructive cleanup\nworking: routine follow-up\n",
+);
+const customReservedPrefixes = scopeForUnreadWake(state, false);
+if (!customReservedPrefixes.eligible || customReservedPrefixes.eligibleSeqs.join(",") !== "2" ||
+  customReservedPrefixes.needsDecisionKeys.join(",") !== "fm-window") {
+  throw new Error(`configured reserved prefixes lost an open stale decision: ${JSON.stringify(customReservedPrefixes)}`);
+}
+delete process.env.FM_CLASSIFY_RESERVED_KEY_PREFIXES;
+
+writeFileSync(`${state}/symlink-target.status`, "needs-decision: external choice\n");
+unlinkSync(`${state}/task-a.status`);
+symlinkSync(`${state}/symlink-target.status`, `${state}/task-a.status`);
+const symlinkedStatus = scopeForUnreadWake(state, false);
+if (!symlinkedStatus.corrupted || symlinkedStatus.eligible || symlinkedStatus.needsDecisionKeys.length !== 0) {
+  throw new Error(`a symlinked status file influenced stale routing: ${JSON.stringify(symlinkedStatus)}`);
+}
+unlinkSync(`${state}/task-a.status`);
+writeFileSync(`${state}/task-a.status`, "working: routine work\n");
 
 writeFileSync(
   `${state}/.wake-queue`,
@@ -3667,10 +3930,10 @@ if (!mixed.projects.includes(project)) {
   throw new Error(`eligible project context lost: ${JSON.stringify(mixed.projects)}`);
 }
 
-if (!activateEligibleRowsOwner(state, process.env.GRANT, process.pid, "fixture")) {
+if (!(await activateEligibleRowsOwner(state, process.env.GRANT, process.pid, "fixture"))) {
   throw new Error("branch owner activation failed");
 }
-if (writeEligibleRowsSnapshot(state, mixed.eligibleSeqs, process.env.GRANT, "fixture") !== "published") {
+if ((await writeEligibleRowsSnapshot(state, mixed.eligibleSeqs, process.env.GRANT, "fixture")) !== "published") {
   throw new Error("snapshot write reported failure");
 }
 const snapshot = readFileSync(`${state}/${BRANCH_ELIGIBLE_ROWS_FILE}`, "utf8").trim().split("\n");
@@ -3678,12 +3941,12 @@ if (snapshot.join(",") !== "2,3") throw new Error(`snapshot did not name exactly
 
 // An empty eligible set is refused rather than clearing the snapshot to
 // nothing - a caller must never overwrite a live snapshot with an empty one.
-if (writeEligibleRowsSnapshot(state, [], process.env.GRANT, "fixture") !== "error") {
+if ((await writeEligibleRowsSnapshot(state, [], process.env.GRANT, "fixture")) !== "error") {
   throw new Error("an empty eligible set must not be written");
 }
-if (!releaseEligibleRowsSnapshot(state, process.env.GRANT, "fixture")) throw new Error("snapshot release failed");
+if (!(await releaseEligibleRowsSnapshot(state, process.env.GRANT, "fixture"))) throw new Error("snapshot release failed");
 writeFileSync(`${state}/.main-eligible-rows`, "2\n");
-if (writeEligibleRowsSnapshot(state, ["2"], process.env.GRANT, "fixture") !== "main-owned") {
+if ((await writeEligibleRowsSnapshot(state, ["2"], process.env.GRANT, "fixture")) !== "main-owned") {
   throw new Error("a row already claimed by main was not reported as main-owned");
 }
 
@@ -3848,16 +4111,32 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
     echo "skip: node not found for Pi outcomes rendering test"
     return
   fi
-  local package_dir fixture out status
+  local package_dir package_version fixture out status
   package_dir=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
   if [ ! -f "$package_dir/package.json" ]; then
     echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return
+  fi
+  # This case compares the extension's own renderers against Pi's stock
+  # rendering, so its verdict is only meaningful against the vendor contract
+  # those renderers target: since Pi 0.84.4 the stock renderer no longer
+  # supplies an implicit reset at multiline boundaries, and the extension
+  # emits that reset itself. An older installed Pi still supplies it, so the
+  # two legitimately differ there and a comparison would report a defect that
+  # is really a version skew. Name the version and skip rather than degrade
+  # quietly; a package whose version cannot be read at all is still a failure.
+  package_version=$(node -p 'require(process.argv[1]).version || ""' "$package_dir/package.json" 2>/dev/null || printf '')
+  [ -n "$package_version" ] \
+    || fail "installed @earendil-works/pi-coding-agent has no readable version at $package_dir"
+  if ! pi_version_at_least "$package_version" "$PI_STOCK_RENDER_FLOOR"; then
+    echo "skip: installed Pi $package_version predates the stock renderer contract $PI_STOCK_RENDER_FLOOR this case compares against"
     return
   fi
   fixture="$TMP_ROOT/stock-render-consumers"
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$fixture/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/fm-operational-input.ts"
@@ -3982,6 +4261,480 @@ JS
   pass "fm_branch_outcomes hides through ToolExecutionComponent while Calm-off and HTML export stay stock"
 }
 
+# The delivery path runs on Pi's single JS thread, so a delivery that blocks
+# it is a delivery the captain sees as a frozen TUI. These three cover what
+# moving that work off the thread must not cost: responsiveness during a
+# delivery, and the ordering, exactly-once, and cancellation guarantees that
+# the single thread used to provide for free.
+test_delivery_keeps_the_event_loop_live_and_ordered() {
+  local repo home out status
+  repo="$TMP_ROOT/delivery-responsiveness-root"
+  home="$TMP_ROOT/delivery-responsiveness-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx } = globalThis.__t;
+
+await fire("session_start", {}, defaultSessionCtx);
+let finishWakePrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishWakePrompt = resolve; });
+const offer = dispatch("signal: branch-driver working");
+if (!offer.accepted) throw new Error("branch did not accept the wake offer");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+
+// A repeating timer is the event loop's own liveness: it cannot tick while
+// the single JS thread is blocked, which is exactly what the TUI's repaint
+// and key echo cannot do either. Ticks observed WHILE one outcome is being
+// delivered are therefore the responsiveness this delivery preserves.
+function loopProbe(intervalMs) {
+  let ticks = 0;
+  let worstGapMs = 0;
+  let last = process.hrtime.bigint();
+  const timer = setInterval(() => {
+    const now = process.hrtime.bigint();
+    const gap = Number(now - last) / 1e6;
+    if (gap > worstGapMs) worstGapMs = gap;
+    last = now;
+    ticks += 1;
+  }, intervalMs);
+  return {
+    reset() { ticks = 0; worstGapMs = 0; last = process.hrtime.bigint(); },
+    stop() { clearInterval(timer); },
+    get ticks() { return ticks; },
+    get worstGapMs() { return worstGapMs; },
+  };
+}
+
+const probe = loopProbe(5);
+await new Promise((resolve) => setTimeout(resolve, 40));
+probe.reset();
+const idleStart = process.hrtime.bigint();
+await new Promise((resolve) => setTimeout(resolve, 120));
+const idleWallMs = Number(process.hrtime.bigint() - idleStart) / 1e6;
+const idleWorstGapMs = probe.worstGapMs;
+
+async function timedDelivery(callId, params) {
+  probe.reset();
+  const started = process.hrtime.bigint();
+  const result = await report.execute(callId, params, undefined, undefined, {});
+  const wallMs = Number(process.hrtime.bigint() - started) / 1e6;
+  return { result, wallMs, ticks: probe.ticks, worstGapMs: probe.worstGapMs };
+}
+
+const routine = await timedDelivery("live-routine", { task: "branch-driver", verdict: "routine", summary: "routine outcome during a live loop" });
+if (routine.result.isError) throw new Error(`routine delivery failed: ${JSON.stringify(routine.result)}`);
+const captain = await timedDelivery("live-captain", { task: "branch-driver", verdict: "captain", summary: "captain outcome during a live loop" });
+if (captain.result.isError) throw new Error(`captain delivery failed: ${JSON.stringify(captain.result)}`);
+probe.stop();
+
+// Two independent signals, so neither a fast machine nor a slow one can make
+// this vacuous. First: the loop must actually run during the delivery. A
+// delivery built on synchronous subprocesses ticks zero times no matter how
+// fast the host is, because nothing else can run at all.
+for (const [label, measured] of [["routine", routine], ["captain", captain]]) {
+  if (measured.ticks < 4) {
+    throw new Error(`${label} delivery blocked the event loop: ${measured.ticks} ticks in ${measured.wallMs.toFixed(1)} ms`);
+  }
+  // Second: the longest single stall must be a MINORITY of the delivery it
+  // happens inside. Stated as a fraction rather than a millisecond budget on
+  // purpose - a loaded machine that descheduled this process would inflate an
+  // absolute budget into a false failure, while it inflates the delivery's own
+  // wall time too, so the fraction stays meaningful. A delivery built on
+  // synchronous subprocesses sits near 1.0 here whatever the load.
+  const stallBudgetMs = Math.max(measured.wallMs * 0.5, idleWorstGapMs * 4);
+  if (measured.worstGapMs > stallBudgetMs) {
+    throw new Error(
+      `${label} delivery stalled the event loop for ${measured.worstGapMs.toFixed(1)} ms of its own ${measured.wallMs.toFixed(1)} ms (budget ${stallBudgetMs.toFixed(1)} ms, idle jitter ${idleWorstGapMs.toFixed(1)} ms over ${idleWallMs.toFixed(0)} ms)`,
+    );
+  }
+}
+
+// Interleaving: six outcomes reported without waiting for each other must
+// still reach the store and main in sequence order, each exactly once. The
+// captain rows also prove the visible entries land in the same order.
+const many = await Promise.all(
+  Array.from({ length: 6 }, (_, index) => report.execute(
+    `interleaved-${index}`,
+    {
+      task: "branch-driver",
+      verdict: index % 2 === 0 ? "routine" : "captain",
+      summary: `interleaved outcome ${index}`,
+    },
+    undefined,
+    undefined,
+    {},
+  )),
+);
+finishWakePrompt();
+await offer.settlement;
+for (const [index, result] of many.entries()) {
+  if (result.isError) throw new Error(`interleaved delivery ${index} failed: ${JSON.stringify(result)}`);
+}
+
+const stored = outcomeScript(["list", "--recent", "50"]).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+const interleaved = stored.filter((row) => row.summary.startsWith("interleaved outcome "));
+if (interleaved.length !== 6) {
+  throw new Error(`interleaved deliveries did not store exactly six rows: ${JSON.stringify(interleaved.map((row) => row.summary))}`);
+}
+const seqs = interleaved.map((row) => row.seq);
+if (seqs.slice().sort((a, b) => a - b).join(",") !== seqs.join(",")) {
+  throw new Error(`stored sequences are not monotonic: ${seqs}`);
+}
+if (new Set(seqs).size !== seqs.length) throw new Error(`a sequence was reused: ${seqs}`);
+
+const deliveredRoutine = sentToMain
+  .filter((sent) => sent.message.customType === "fm-branch-merge" && sent.message.content.includes("interleaved outcome "))
+  .map((sent) => sent.message.content);
+const routineSummaries = interleaved.filter((row) => row.verdict === "routine").map((row) => `⛵ branch-driver: ${row.summary}`);
+if (deliveredRoutine.join("|") !== routineSummaries.join("|")) {
+  throw new Error(`routine notes lost, duplicated, or reordered: ${JSON.stringify(deliveredRoutine)} vs ${JSON.stringify(routineSummaries)}`);
+}
+const deliveredCaptain = mainEntries
+  .filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.summary.startsWith("interleaved outcome "))
+  .map((entry) => entry.data.seq);
+const captainSeqs = interleaved.filter((row) => row.verdict === "captain").map((row) => row.seq);
+if (deliveredCaptain.join(",") !== captainSeqs.join(",")) {
+  throw new Error(`captain entries lost, duplicated, or reordered: ${deliveredCaptain} vs ${captainSeqs}`);
+}
+// Everything delivered is recorded as read, so a later reconciliation cannot
+// deliver any of it a second time.
+if (outcomeScript(["unread"]) !== "") throw new Error("delivered outcomes were left unread");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "delivery must keep the event loop live and stay ordered: $out"
+  pass "outcome delivery keeps the event loop running and interleaved reports stay ordered and exactly once"
+}
+
+test_session_replacement_during_delivery_neither_loses_nor_duplicates() {
+  local repo home fakebin out status real_ps
+  repo="$TMP_ROOT/delivery-replacement-root"
+  home="$TMP_ROOT/delivery-replacement-home"
+  fakebin="$home/fakebin"
+  real_ps=$(command -v ps)
+  mkdir -p "$home/state" "$home/config" "$fakebin"
+  install_pi_branch_extension_fixture "$repo"
+  cat > "$fakebin/ps" <<'SH'
+#!/bin/sh
+if [ -f "$FM_TEST_PS_ARM" ]; then
+  rm -f "$FM_TEST_PS_ARM"
+  : > "$FM_TEST_PS_ENTERED"
+  while [ ! -f "$FM_TEST_PS_RELEASE" ]; do sleep 0.01; done
+fi
+exec "$FM_TEST_REAL_PS" "$@"
+SH
+  chmod +x "$fakebin/ps"
+  PATH="$fakebin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_REAL_PS="$real_ps" FM_TEST_PS_ARM="$home/state/ps-arm" \
+    FM_TEST_PS_ENTERED="$home/state/ps-entered" FM_TEST_PS_RELEASE="$home/state/ps-release" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, home }; })()`);
+const { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, home } = globalThis.__t;
+import { existsSync, writeFileSync } from "node:fs";
+
+const firstEntries = [];
+const firstCtx = {
+  sessionManager: { getSessionFile: () => `${home}/first.jsonl`, getEntries: () => firstEntries },
+};
+const secondEntries = [];
+const secondCtx = {
+  sessionManager: { getSessionFile: () => `${home}/second.jsonl`, getEntries: () => secondEntries },
+};
+
+// Use the live parent as lock owner so each ownership check must traverse at
+// least one real ps subprocess; a self-owned lock would return before the
+// asynchronous boundary this regression needs to hold open.
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+await fire("session_start", {}, firstCtx);
+let finishWakePrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishWakePrompt = resolve; });
+const offer = dispatch("signal: branch-driver working");
+if (!offer.accepted) throw new Error("branch did not accept the wake offer");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+const toolGeneration = 1;
+
+// A delivery that is still in flight when the captain replaces the session
+// (/new, /resume, /fork, reload) must stop acting into the replaced session.
+writeFileSync(process.env.FM_TEST_PS_ARM, "");
+const inFlight = report.execute(
+  "replaced-mid-delivery",
+  { task: "branch-driver", verdict: "captain", summary: "reported as the session was replaced" },
+  undefined,
+  undefined,
+  {},
+);
+await settle(() => existsSync(process.env.FM_TEST_PS_ENTERED), "in-flight ownership subprocess");
+await fire("session_shutdown", {});
+const replacementStart = fire("session_start", {}, secondCtx);
+writeFileSync(process.env.FM_TEST_PS_RELEASE, "");
+await replacementStart;
+const replaced = await inFlight;
+if (!replaced.isError) {
+  throw new Error(`a report from the replaced session was accepted: ${JSON.stringify(replaced)}`);
+}
+
+// Nothing was delivered into either session's transcript by that refused
+// report, and nothing was stored for it either: the refusal happened before
+// the durable append, so there is no orphan row.
+const storedAfter = outcomeScript(["list", "--recent", "50"]).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+if (storedAfter.some((row) => row.summary === "reported as the session was replaced")) {
+  throw new Error("a report refused for a replaced session still reached the durable store");
+}
+if (firstEntries.length !== 0 || secondEntries.length !== 0 || sentToMain.length !== 0) {
+  throw new Error("a report refused for a replaced session still delivered something visible");
+}
+finishWakePrompt();
+await offer.settlement.then(() => null, () => null);
+
+// A row that WAS stored but not yet delivered when the session was replaced
+// is not lost: the new session's own reconciliation delivers it exactly once,
+// into the new transcript, and advances the cursor past it.
+const orphanSeq = Number(outcomeScript(["append", "--task", "branch-driver", "--verdict", "captain", "--summary", "stored before the replacement"]));
+await fire("session_shutdown", {});
+const thirdEntries = [];
+await fire("session_start", {}, {
+  sessionManager: { getSessionFile: () => `${home}/third.jsonl`, getEntries: () => thirdEntries },
+});
+const recovered = thirdEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
+if (recovered.length !== 1 || recovered[0].data.seq !== orphanSeq) {
+  throw new Error(`the replacement session did not deliver the stored row exactly once: ${JSON.stringify(recovered)}`);
+}
+if (outcomeScript(["unread"]) !== "") throw new Error("the replacement session did not advance the read cursor");
+
+// Reconciling again delivers nothing further: the cursor, not the transcript,
+// is what stops a second delivery.
+await fire("turn_end", {}, {
+  sessionManager: { getSessionFile: () => `${home}/third.jsonl`, getEntries: () => thirdEntries },
+});
+if (thirdEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").length !== 1) {
+  throw new Error("a later reconciliation delivered the same captain outcome twice");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a session replaced mid-delivery must neither lose nor duplicate an outcome: $out"
+  pass "a session replaced mid-delivery cancels cleanly and the stored outcome still arrives exactly once"
+}
+
+test_store_failure_during_delivery_neither_loses_nor_duplicates() {
+  local repo home fakebin out status real_bash
+  repo="$TMP_ROOT/delivery-store-failure-root"
+  home="$TMP_ROOT/delivery-store-failure-home"
+  fakebin="$home/fakebin"
+  real_bash=$(command -v bash)
+  mkdir -p "$home/state" "$home/config" "$fakebin"
+  install_pi_branch_extension_fixture "$repo"
+  # Fails exactly the store subcommand the arming file names, once, so the
+  # delivery meets a real failing script rather than a stubbed return value.
+  # The driver arms it through that file because the extension snapshots its
+  # child environment when it loads.
+  cat > "$fakebin/bash" <<'SH'
+#!/bin/sh
+armed=$(cat "$FM_TEST_FAIL_ARM" 2>/dev/null || printf '')
+if [ -n "$armed" ] && [ "$1" = "$FM_TEST_OUTCOME_SCRIPT" ] && [ "$2" = "$armed" ]; then
+  : > "$FM_TEST_FAIL_ARM"
+  echo "injected store failure" >&2
+  exit 9
+fi
+exec "$FM_TEST_REAL_BASH" "$@"
+SH
+  chmod +x "$fakebin/bash"
+  PATH="$fakebin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_REAL_BASH="$real_bash" FM_TEST_OUTCOME_SCRIPT="$ROOT/bin/fm-branch-outcome.sh" \
+    FM_TEST_FAIL_ARM="$home/state/store-fail-arm" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx } = globalThis.__t;
+import { writeFileSync } from "node:fs";
+
+const failArm = process.env.FM_TEST_FAIL_ARM;
+const armStoreFailure = (subcommand) => writeFileSync(failArm, subcommand);
+await fire("session_start", {}, defaultSessionCtx);
+let finishWakePrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishWakePrompt = resolve; });
+const offer = dispatch("signal: branch-driver working");
+if (!offer.accepted) throw new Error("branch did not accept the wake offer");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+
+// 1. The durable append fails: the failure surfaces to the branch, and
+// nothing is delivered, because nothing was ever stored.
+armStoreFailure("append");
+const appendFailed = await report.execute("append-fails", { task: "branch-driver", verdict: "routine", summary: "append must fail" }, undefined, undefined, {});
+if (!appendFailed.isError || !appendFailed.content[0].text.includes("outcome store append failed")) {
+  throw new Error(`a failed append did not surface as an error: ${JSON.stringify(appendFailed)}`);
+}
+if (sentToMain.length !== 0 || mainEntries.length !== 0) throw new Error("a failed append still delivered something visible");
+if (outcomeScript(["list", "--recent", "50"]) !== "") throw new Error("a failed append still left a stored row");
+
+// 2. The cursor advance fails AFTER the row is durable and delivered. The
+// branch is told, the row stays in the store exactly once, and the next
+// reconciliation completes the delivery rather than losing it.
+armStoreFailure("mark-read");
+const markFailed = await report.execute("mark-read-fails", { task: "branch-driver", verdict: "captain", summary: "cursor advance must fail" }, undefined, undefined, {});
+if (!markFailed.isError || !markFailed.content[0].text.includes("visible delivery or cursor advancement failed")) {
+  throw new Error(`a failed cursor advance did not surface as an error: ${JSON.stringify(markFailed)}`);
+}
+const afterFailure = outcomeScript(["list", "--recent", "50"]).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+if (afterFailure.length !== 1 || afterFailure[0].summary !== "cursor advance must fail") {
+  throw new Error(`the durable row was lost or duplicated by the failed cursor advance: ${JSON.stringify(afterFailure)}`);
+}
+const failedSeq = afterFailure[0].seq;
+if (outcomeScript(["unread"]) === "") throw new Error("a failed cursor advance still marked the row read");
+
+// 3. Recovery: the same row is delivered exactly once and the cursor now
+// advances, so nothing is lost and nothing is doubled.
+armStoreFailure("");
+await fire("turn_end", {}, defaultSessionCtx);
+const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === failedSeq);
+if (visible.length !== 1) {
+  throw new Error(`the recovered captain outcome is not present exactly once: ${JSON.stringify(visible)}`);
+}
+if (outcomeScript(["unread"]) !== "") throw new Error("recovery did not advance the read cursor");
+await fire("turn_end", {}, defaultSessionCtx);
+if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === failedSeq).length !== 1) {
+  throw new Error("a later reconciliation delivered the recovered outcome a second time");
+}
+finishWakePrompt();
+await offer.settlement.then(() => null, () => null);
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a store failure during delivery must neither lose nor duplicate an outcome: $out"
+  pass "a failing store script surfaces to the branch and its outcome is neither lost nor delivered twice"
+}
+
+# The failure boundary the async conversion had to leave exactly as it found
+# it: a routine note is delivered and then its cursor write fails. Routine
+# notes carry no sequence key, so the next reconciliation delivers the same
+# note again - a KNOWN PRE-EXISTING limitation of the routine delivery
+# representation, tracked as fm-pi-routine-delivery-idempotency-followup-r1,
+# not something moving the work off Pi's render thread introduced. This pins
+# the exact shape (one re-delivery, never more, nothing lost) so a future
+# change cannot quietly worsen it, and pins the captain row's sequence-keyed
+# deduplication that makes the two paths differ.
+test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication() {
+  local repo home fakebin out status real_bash
+  repo="$TMP_ROOT/mark-read-failure-shape-root"
+  home="$TMP_ROOT/mark-read-failure-shape-home"
+  fakebin="$home/fakebin"
+  real_bash=$(command -v bash)
+  mkdir -p "$home/state" "$home/config" "$fakebin"
+  install_pi_branch_extension_fixture "$repo"
+  cat > "$fakebin/bash" <<'SH'
+#!/bin/sh
+armed=$(cat "$FM_TEST_FAIL_ARM" 2>/dev/null || printf '')
+if [ -n "$armed" ] && [ "$1" = "$FM_TEST_OUTCOME_SCRIPT" ] && [ "$2" = "$armed" ]; then
+  : > "$FM_TEST_FAIL_ARM"
+  echo "injected store failure" >&2
+  exit 9
+fi
+exec "$FM_TEST_REAL_BASH" "$@"
+SH
+  chmod +x "$fakebin/bash"
+  PATH="$fakebin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_REAL_BASH="$real_bash" FM_TEST_OUTCOME_SCRIPT="$ROOT/bin/fm-branch-outcome.sh" \
+    FM_TEST_FAIL_ARM="$home/state/store-fail-arm" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx } = globalThis.__t;
+import { writeFileSync } from "node:fs";
+
+const failArm = process.env.FM_TEST_FAIL_ARM;
+const armStoreFailure = (subcommand) => writeFileSync(failArm, subcommand);
+const storedRows = () => outcomeScript(["list", "--recent", "50"]).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+const routineCopies = (summary) => sentToMain.filter(
+  (sent) => sent.message.customType === "fm-branch-merge" && sent.message.content.includes(summary),
+).length;
+const captainCopies = (seq) => mainEntries.filter(
+  (entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq,
+).length;
+
+await fire("session_start", {}, defaultSessionCtx);
+let finishWakePrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishWakePrompt = resolve; });
+const offer = dispatch("signal: branch-driver working");
+if (!offer.accepted) throw new Error("branch did not accept the wake offer");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+
+// A routine note is delivered, then its cursor write fails.
+const routineSummary = "routine note whose cursor write fails";
+armStoreFailure("mark-read");
+const routineFailed = await report.execute("routine-mark-read-fails", { task: "branch-driver", verdict: "routine", summary: routineSummary }, undefined, undefined, {});
+if (!routineFailed.isError || !routineFailed.content[0].text.includes("visible delivery or cursor advancement failed")) {
+  throw new Error(`a failed routine cursor advance did not surface as an error: ${JSON.stringify(routineFailed)}`);
+}
+if (routineCopies(routineSummary) !== 1) {
+  throw new Error(`the routine note was not delivered exactly once before the cursor failure: ${routineCopies(routineSummary)}`);
+}
+let stored = storedRows();
+if (stored.length !== 1) throw new Error(`the failed cursor write changed the store: ${JSON.stringify(stored)}`);
+if (outcomeScript(["unread"]) === "") throw new Error("a failed cursor write still marked the routine row read");
+
+// The next reconciliation re-delivers it, because a routine note has no
+// sequence-keyed record to recognize. That second copy is the pre-existing
+// limitation; what must hold is that it is exactly one more, and that the
+// store and cursor recover.
+armStoreFailure("");
+await fire("turn_end", {}, defaultSessionCtx);
+if (routineCopies(routineSummary) !== 2) {
+  throw new Error(`recovery did not re-deliver the routine note exactly once: ${routineCopies(routineSummary)}`);
+}
+if (outcomeScript(["unread"]) !== "") throw new Error("recovery did not advance the cursor past the routine row");
+stored = storedRows();
+if (stored.length !== 1) throw new Error(`recovery changed the stored routine row: ${JSON.stringify(stored)}`);
+
+// Once the cursor is past it, no further reconciliation delivers it again:
+// the duplication window is the failed write, not an unbounded repeat.
+await fire("turn_end", {}, defaultSessionCtx);
+if (routineCopies(routineSummary) !== 2) {
+  throw new Error(`the routine note kept being re-delivered after the cursor advanced: ${routineCopies(routineSummary)}`);
+}
+
+// The same failure on a captain row does NOT duplicate: its visible entry is
+// keyed by store sequence, so the re-run recognizes its own earlier write.
+const captainSummary = "captain outcome whose cursor write fails";
+armStoreFailure("mark-read");
+const captainFailed = await report.execute("captain-mark-read-fails", { task: "branch-driver", verdict: "captain", summary: captainSummary }, undefined, undefined, {});
+if (!captainFailed.isError) throw new Error(`a failed captain cursor advance did not surface as an error: ${JSON.stringify(captainFailed)}`);
+const captainSeq = storedRows().find((row) => row.summary === captainSummary).seq;
+if (captainCopies(captainSeq) !== 1) throw new Error(`the captain entry was not written exactly once: ${captainCopies(captainSeq)}`);
+armStoreFailure("");
+await fire("turn_end", {}, defaultSessionCtx);
+if (captainCopies(captainSeq) !== 1) {
+  throw new Error(`recovery duplicated the captain entry: ${captainCopies(captainSeq)}`);
+}
+if (outcomeScript(["unread"]) !== "") throw new Error("recovery did not advance the cursor past the captain row");
+if (storedRows().length !== 2) throw new Error(`the store lost or duplicated a row across both failures: ${JSON.stringify(storedRows())}`);
+
+// The durable cursor, not this session, is what closes both windows: a new
+// main session reconciles and re-delivers neither of them.
+finishWakePrompt();
+await offer.settlement.then(() => null, () => null);
+await fire("session_start", {}, defaultSessionCtx);
+if (routineCopies(routineSummary) !== 2 || captainCopies(captainSeq) !== 1) {
+  throw new Error(`a new session re-delivered an already-read outcome: routine=${routineCopies(routineSummary)} captain=${captainCopies(captainSeq)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a failed cursor write must keep the routine re-delivery shape and the captain deduplication: $out"
+  pass "a failed cursor write re-delivers a routine note exactly once more while a captain outcome stays deduplicated"
+}
+
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
@@ -3994,6 +4747,7 @@ test_branch_default_on_heartbeat_afk_and_fallback
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_report_refuses_a_task_the_wake_did_not_name
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
+test_branch_predrain_needs_decision_keeps_routine_row_branch_eligible
 test_settled_branch_prompt_releases_unacknowledged_grant
 test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown
 test_selection_change_does_not_corrupt_inflight_provider_state
@@ -4017,3 +4771,7 @@ test_queued_actions_recheck_lock_ownership
 test_stale_generation_boundaries_are_side_effect_free
 test_secondary_session_stays_inert
 test_rebind_remirrors_undelivered_dialog_from_durable_cursor
+test_delivery_keeps_the_event_loop_live_and_ordered
+test_session_replacement_during_delivery_neither_loses_nor_duplicates
+test_store_failure_during_delivery_neither_loses_nor_duplicates
+test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication

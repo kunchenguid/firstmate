@@ -54,14 +54,26 @@
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
-#      agree, and are reported as parked.
+#      agree, and are reported as parked. A `blocked:` line that reports a
+#      refused or missing daemon socket remains blocked even if an attributed
+#      run record is stale or terminal. Other daemon, timeout, or unreachability
+#      claims are superseded BECAUSE THE RUN IS ALIVE when the run is
+#      running/fixing with recent reported activity: a killed or timed-out drive
+#      call is not daemon death, so that claim is answered by steering the crew
+#      to reattach, not by escalating.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log.
+#      than trusting a stale status log. On tmux and herdr, which own a
+#      recovery-grade classifier, only its positive death evidence reads as gone
+#      (the endpoint is authoritatively absent, or its pane holds no agent); an
+#      endpoint that merely failed to answer reports unknown · none as
+#      unreachable, and an alive endpoint whose scrollback read failed is still
+#      classified by step 4. Backends with no classifier keep reading a failed
+#      capture as gone. The fallback's own comment owns the per-verdict rules.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -309,6 +321,61 @@ log_reports_ci_ready() {
   esac
 }
 
+# 0 when a status-log line reports positive daemon socket failure rather than a
+# client-side timeout or generic unreachability.
+log_reports_daemon_socket_down() {  # <line>
+  local line
+  line=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$line" in
+    *daemon*|*no-mistakes*) ;;
+    *) return 1 ;;
+  esac
+  case "$line" in
+    *"connection refused"*|*"connections refused"*|*"socket refused connection"*|*"socket refuses connection"*|*"socket refusing connection"*|*"socket missing"*|*"socket is missing"*|*"missing socket"*) return 0 ;;
+  esac
+  return 1
+}
+
+# 0 when a status-log line blames the pipeline's transport rather than the work.
+# None of these claims alone is evidence the daemon died: a drive call is only
+# waiting for a read while the fix round runs in the background.
+log_claims_pipeline_unreachable() {  # <line>
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    *daemon*|*timeout*|*"timed out"*|*unreachab*) return 0 ;;
+  esac
+  return 1
+}
+
+# Rows of the `active_steps[N]{...}:` table in the captured run output
+# ($RUN_OUT), which the pipeline emits only while a step is actually running or
+# fixing. Column order is deliberately not assumed: the header's own indentation
+# bounds the block, and callers below read the table as text.
+nm_active_steps_rows() {
+  printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*active_steps\[[0-9]+\]\{/ { hdr = index($0, "active_steps"); inblock = 1; next }
+    inblock {
+      if ($0 ~ /^[[:space:]]*$/) { inblock = 0; next }
+      match($0, /[^ \t]/)
+      if (RSTART <= hdr) { inblock = 0; next }
+      print
+    }
+  '
+}
+
+# 0 when the pipeline itself reports RECENT activity on an actively running or
+# fixing step. The client prefixes a step's `last_activity` with `quiet` once no
+# step log or native-agent lifecycle event has arrived for longer than its
+# configured quiet warning, so its own recency verdict is the signal here rather
+# than a second threshold invented in firstmate. Positive evidence is required:
+# an absent table is not recency, so a run record that merely still says
+# `running` while nothing executes it never reads as alive.
+nm_run_activity_is_recent() {
+  local rows
+  rows=$(nm_active_steps_rows)
+  [ -n "$rows" ] || return 1
+  ! printf '%s\n' "$rows" | grep -q 'quiet'
+}
+
 nm_ci_step_status() {
   local row rest
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
@@ -542,11 +609,29 @@ if [ "$HAVE_RUN" = 1 ]; then
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
+  #
+  # A refused or missing daemon socket is positive daemon-down evidence and
+  # outranks any attributed run record, including a terminal one left behind
+  # after the daemon stopped. Other blocked claims caused by a timed-out drive
+  # call are contradicted only when the run reports recent
+  # activity; the answer is then to steer the crew to reattach without touching
+  # the shared daemon.
   case "$LOG_VERB" in
     needs-decision|blocked)
+      if [ "$LOG_VERB" = blocked ] \
+        && log_reports_daemon_socket_down "$LOG_LINE"; then
+        emit blocked status-log "$(status_line_note "$LOG_LINE")${SEP}daemon socket down despite attributed run record"
+      fi
       if [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
-          RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
+          if [ "$LOG_VERB" = blocked ] \
+            && log_claims_pipeline_unreachable "$LOG_LINE" \
+            && { [ "$RUN_STATUS" = running ] || [ "$RUN_STATUS" = fixing ]; } \
+            && nm_run_activity_is_recent; then
+            RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded: run alive, not a daemon failure (steer reattach)"
+          else
+            RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
+          fi
         else
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded (run $RUN_STATE)"
         fi
@@ -560,10 +645,58 @@ fi
 # --- fallback: no run attributed to this crew ------------------------------
 # The run-step path above already handled any crew with a run, regardless of pane
 # liveness, so a finished-but-pane-closed crew never reaches here. Down here there
-# is no run to consult, so a dead/unreadable target means the crew is gone: report
-# unknown rather than trusting a possibly-stale status log as the current state.
+# is no run to consult, so only positive evidence that the target is gone may
+# read as death - a backend that failed to answer is unknown, never death, for
+# both classifier-backed backends (tmux and herdr) - and every death-class
+# verdict reports unknown rather than trusting a possibly-stale status log as
+# the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
-pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+if ! pane_readable "$BACKEND_TARGET"; then
+  # A failed probe is not itself evidence the pane is gone: the herdr CLI can
+  # error or stall under load, and tmux can fail to be executed at all (a
+  # trimmed PATH) or answer non-definitively, while the pane is alive - a busy
+  # box would otherwise score dozens of live claims dead. Both backends own a
+  # recovery-grade classifier (fm_backend_agent_state), which separates the
+  # outcomes:
+  #   missing - the endpoint is authoritatively absent: herdr's pane get
+  #             answered pane_not_found; tmux's successful window inventory
+  #             omitted the exact recorded window, or tmux gave one of its
+  #             definitive no-session/no-server/no-socket responses (which
+  #             fm_backend_tmux_agent_state owns as death, since fm-bootstrap
+  #             and fm-session-start depend on it to license a respawn after a
+  #             genuine server death - a socket-connection failure is NOT
+  #             covered by the unknown-never-death rule above).
+  #   dead    - the endpoint exists but confidently has no agent (herdr's agent
+  #             get answered agent_not_found; tmux's readable foreground process
+  #             group is nothing but shells), still positive death evidence.
+  #   alive   - the endpoint and its agent answered and only the heavy
+  #             scrollback read failed, so the live state is classified by the
+  #             normal flow below instead of being discarded.
+  #   anything else - the cheap probes themselves failed to answer or
+  #             contradicted themselves, which is unknown, never death.
+  # Backends with no classifier (orca, zellij, and cmux all report unverified)
+  # keep their historical capture-failure-means-gone reading.
+  case "$TASK_BACKEND" in
+    tmux|herdr) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
+    *) AGENT_STATE=none ;;
+  esac
+  case "$TASK_BACKEND:$AGENT_STATE" in
+    tmux:alive|herdr:alive)
+      ;;
+    tmux:missing|herdr:missing)
+      emit unknown none "backend target gone: $BACKEND_TARGET"
+      ;;
+    tmux:dead|herdr:dead)
+      emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
+      ;;
+    tmux:*|herdr:*)
+      emit unknown none "backend unreachable ($TASK_BACKEND endpoint state: $AGENT_STATE)"
+      ;;
+    *)
+      emit unknown none "backend target gone: $BACKEND_TARGET"
+      ;;
+  esac
+fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.

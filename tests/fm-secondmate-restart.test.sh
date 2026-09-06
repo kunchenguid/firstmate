@@ -68,10 +68,10 @@ case "${1:-}" in
           if [ -e "$D/remote-relaunch-start" ] && [ ! -e "$D/remote-relaunch-end" ]; then
             : > "$D/local-relaunch-during-remote"
           fi
-          printf 'zsh' > "$D/command"
+          printf 'zsh' > "$D/command.$target"
           ;;
-        *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
-        'Firstmate instruction waiting: list '*)
+        *'encode launch-brief'*) cat "$D/becomes" > "$D/command.$target" ;;
+        ': Firstmate instruction waiting: list '*)
           printf 'doorbell\n' >> "$D/rings"
           if [ -x "$D/on-doorbell" ]; then
             "$D/on-doorbell" "$payload"
@@ -95,12 +95,18 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
+    target=
+    prev=
     for a in "$@"; do
+      if [ "$prev" = -t ]; then target=$a; fi
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
-        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_command*)
+          if [ -f "$D/command.$target" ]; then cat "$D/command.$target"; else cat "$D/command"; fi
+          printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
+      prev=$a
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '> \n'; exit 0 ;;
@@ -159,7 +165,7 @@ add_local_mate() {
     echo "home=$smhome"
     [ -z "$backend" ] || echo "backend=$backend"
   } > "$home/state/$id.meta"
-  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s\n' "fm-$id" >> "$dir/fake/windows"
   printf '%s' "$smhome" > "$dir/fake/cwd"
 }
 
@@ -284,7 +290,7 @@ test_persist_precedes_restart() {
   assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" "the summary should report the reload"
   # The pane transcript orders the two phases: the instruction doorbell first,
   # the harness exit command only after it.
-  doorbell_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  doorbell_line=$(grep -n '^: Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
   exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
   [ -n "$doorbell_line" ] || fail "the persist request never reached the mate"
   [ -n "$exit_line" ] || fail "the mate was never stopped, so it was not restarted"
@@ -308,6 +314,43 @@ test_arrived_answer_precedes_deadline_check() {
   expect_code 0 "$rc" "an answer delivered with the request must beat the deadline check"$'\n'"$out"
   assert_contains "$out" "restarted: sm1" "the arrived persist answer was ignored at the deadline"
   pass "T2b an arrived persist answer is resolved before timeout"
+}
+
+# --- T2c: an answer arriving between resolution and timeout wins -------------
+test_answer_between_resolution_and_timeout_wins() {
+  local dir out rc
+  dir=$(new_case answer-at-timeout-decision)
+  add_local_mate "$dir" sm1
+
+  # Delay the modelled answer until the first resolution attempt has completed
+  # its unsuccessful status scan. The real pending-reply machinery publishes
+  # that scan signature with mv; this wrapper appends the correlated answer only
+  # after that publication, reproducing the boundary race deterministically.
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+/bin/mv "$@" || exit $?
+target=${!#}
+case "$target" in
+  "${FM_FAKE_DIR%/fake}"/home/state/pending-replies/*)
+    if [ ! -e "$FM_FAKE_DIR/answer-after-scan" ] \
+      && grep -q '^parent_status_scan_signature=.' "$target"; then
+      : > "$FM_FAKE_DIR/answer-after-scan"
+      corr=${target##*/}
+      status=$(sed -n 's/^parent_status=//p' "$target")
+      printf 'done [corr=%s]: open records written down\n' "$corr" >> "$status"
+    fi
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/mv"
+
+  out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" sm1); rc=$?
+
+  expect_code 0 "$rc" "an answer already on disk at the timeout decision must release the gate"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1" "the reply that raced the timeout was ignored"
+  assert_not_contains "$out" "nudged: sm1" "a confirmed mate must not take the timeout fallback"
+  pass "T2c a reply between the preliminary scan and timeout decision wins"
 }
 
 # --- T3: a runtime that cannot prove a restart never gets one ----------------
@@ -553,7 +596,7 @@ test_persist_waits_are_polled_together() {
 
   expect_code 3 "$rc" "the unanswered mate should fall back after the confirmed mate restarts"$'\n'"$out"
   exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
-  nudge_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | tail -1 | cut -d: -f1)
+  nudge_line=$(grep -n '^: Firstmate instruction waiting: ' "$dir/fake/literal" | tail -1 | cut -d: -f1)
   [ -n "$exit_line" ] && [ -n "$nudge_line" ] && [ "$exit_line" -lt "$nudge_line" ] \
     || fail "the first mate's timeout held the confirmed second mate behind it: $out"
   pass "T10 pending persist answers are polled as one fleet"
@@ -712,7 +755,7 @@ test_already_current_mate_restarts_end_to_end() {
   assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" \
     "the pass must report the reload it performed"
   # Persist strictly before replace, read off the pane transcript.
-  doorbell_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  doorbell_line=$(grep -n '^: Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
   exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
   [ -n "$doorbell_line" ] || fail "the persist request never reached the already-current mate"
   [ -n "$exit_line" ] || fail "the already-current mate was never stopped, so it was not restarted"
@@ -764,6 +807,7 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
+test_answer_between_resolution_and_timeout_wins
 test_unprovable_runtime_falls_back
 test_unknown_mate_is_accounted_for
 test_refused_restart_falls_back_without_claiming_a_reload
