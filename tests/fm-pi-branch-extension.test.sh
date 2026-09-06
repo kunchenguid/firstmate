@@ -106,6 +106,7 @@ export class ModelRuntime {
   constructor() {
     this.models = (globalThis.__fmBranchStaticModels?.() ?? []).map((model) => ({ ...model }));
     this.authenticated = new Set(this.models.filter((model) => model.storedAuth !== false).map((model) => model.provider));
+    this.registeredProviderConfigs = new Map();
   }
   static async create() {
     const queuedError = globalThis.__fmModelRuntimeErrors?.shift();
@@ -115,6 +116,14 @@ export class ModelRuntime {
     (globalThis.__fmModelRuntimes ??= []).push(runtime);
     return runtime;
   }
+  registerProvider(providerId, config) {
+    this.registeredProviderConfigs.set(providerId, config);
+    for (const model of config.models ?? []) {
+      this.models.push({ ...model, provider: providerId });
+    }
+    if (config.oauth || config.apiKey) this.authenticated.add(providerId);
+  }
+  async refresh() {}
   getModel(provider, id) {
     return this.models.find((model) => model.provider === provider && model.id === id);
   }
@@ -446,6 +455,8 @@ const modelRegistry = {
   getAvailable: () => registryModels.filter((model) => model.mainAvailable !== false).slice(),
   find: (provider, id) => registryModels.find((model) => model.provider === provider && model.id === id),
   hasConfiguredAuth: (model) => model.mainAvailable !== false,
+  getRegisteredProviderConfig: (providerId) => globalThis.__fmExtensionProviderConfigs?.get(providerId),
+  getRegisteredProviderIds: () => [...(globalThis.__fmExtensionProviderConfigs?.keys() ?? [])],
 };
 function makeCtx(extra) {
   return {
@@ -4735,6 +4746,92 @@ EOF
   pass "a failed cursor write re-delivers a routine note exactly once more while a captain outcome stays deduplicated"
 }
 
+test_extension_registered_provider_resolves_in_the_branch() {
+  local repo home out status
+  repo="$TMP_ROOT/extprov-root"
+  home="$TMP_ROOT/extprov-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, registryModels, uiSelections, uiPrompts, notices, commands, home }; })()`);
+const { fire, dispatch, settle, makeCtx, registryModels, uiSelections, uiPrompts, notices, commands, home } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+// An extension-registered provider exists only in main's registry, never in
+// the isolated branch runtime's static catalog. Registering its config on
+// main's registry is what makes it resolvable for the branch.
+registryModels.push(
+  { provider: "anthropic", id: "main-model" },
+  // Available in main's registry but absent from the branch runtime's static
+  // catalog, exactly like a provider an extension registered at runtime.
+  { provider: "devin", id: "swe-1-7", branchAvailable: false },
+);
+globalThis.__fmExtensionProviderConfigs = new Map([
+  [
+    "devin",
+    {
+      name: "Devin (Cognition)",
+      api: "devin-cloud",
+      baseUrl: "https://server.codeium.com",
+      models: [{ id: "swe-1-7", name: "SWE 1.7", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 8192 }],
+      oauth: { name: "Devin (Cognition / Windsurf)", login: async () => ({}), refreshToken: async (c) => c, getApiKey: (c) => c.access },
+      streamSimple: () => {},
+    },
+  ],
+]);
+
+await fire("session_start", {}, makeCtx());
+
+// The picker must offer the extension-registered model: it is available in
+// main's registry and resolvable in the branch runtime once its registration
+// is copied across.
+const command = commands.get("supervision-model");
+if (!command) throw new Error("the supervision-model command was not registered");
+uiSelections.push("devin/swe-1-7");
+await command.handler("", makeCtx());
+const offered = uiPrompts[0];
+if (!offered.options.includes("devin/swe-1-7")) {
+  throw new Error(`the picker must offer an extension-registered provider the branch can run: ${JSON.stringify(offered.options)}`);
+}
+if (readFileSync(`${home}/config/supervision-branch-model`, "utf8") !== "devin/swe-1-7\n") {
+  throw new Error("the extension-registered pick was not persisted");
+}
+dispatch("signal: extension provider pin");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "pinned extension-provider branch build");
+const pinned = globalThis.__fmSessions[0].options.model;
+if (!pinned || pinned.provider !== "devin" || pinned.id !== "swe-1-7") {
+  throw new Error(`the extension-registered pin did not bind the branch: ${JSON.stringify(pinned)}`);
+}
+
+// Without the registration, the same pin is unavailable and the branch
+// refuses to build rather than silently downgrading.
+globalThis.__fmExtensionProviderConfigs = new Map();
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
+const unregisteredOffer = dispatch("signal: unregistered provider pin");
+if (!unregisteredOffer.accepted) throw new Error("unregistered-pin wake was not initially accepted");
+const unregisteredFailure = await unregisteredOffer.settlement.then(
+  () => null,
+  (error) => error,
+);
+if (
+  !(unregisteredFailure instanceof Error) ||
+  !unregisteredFailure.message.includes("devin/swe-1-7") ||
+  !unregisteredFailure.message.includes("supervision model pin")
+) {
+  throw new Error(`the unregistered pin did not reject with its own name: ${String(unregisteredFailure)}`);
+}
+if ((globalThis.__fmSessions ?? []).length !== 1) throw new Error("an unregistered pin must not build a second branch session");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "an extension-registered provider must resolve in the isolated branch runtime: $out"
+  pass "an extension-registered provider resolves in the isolated branch runtime"
+}
+
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
@@ -4763,6 +4860,7 @@ test_supervision_model_picker_is_bounded_searchable_and_branch_only
 test_branch_model_picker_keeps_follow_main_first_under_ranking
 test_branch_effort_pin_applies_and_absent_pin_follows_main
 test_unpinned_branch_follows_main_effort_changes_live
+test_extension_registered_provider_resolves_in_the_branch
 test_supervision_model_command_picks_effort_after_the_model
 test_unusable_model_pin_falls_back_to_main
 test_replacement_activation_cleans_leases_and_retries_failure
