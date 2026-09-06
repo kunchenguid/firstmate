@@ -511,7 +511,7 @@ This section is the single owner of the canonical schema.
 }
 ```
 
-Each entry needs a unique non-empty `name` and at least one probe: `command`, `git`, or `published`.
+Each entry needs a unique non-empty `name` and at least one of `command` or `git`; an entry may carry both.
 A `published` probe also requires `command` to supply the installed version; it can accompany `git` and an announcement on the same entry.
 A `command` entry gives the `PATH` comparison above, and adding `announce_pattern` also reports the tool's own update announcement, which is how a tool that already reports its own updates is read rather than reimplemented.
 A tool does not always announce a new release on the command that prints its version: `no-mistakes --version` prints only the version, while its other commands carry the announcement.
@@ -533,7 +533,7 @@ These queries use `curl` and the existing `jq` parser, without an npm installati
 The HTTP reads ignore curl configuration and send no credentials, follow no redirects, and fail within the probe bound on an unavailable source, HTTP error, or unreadable version.
 All probe kinds are read-only and bounded, and a probe that cannot answer is reported as a check failure rather than assumed current.
 Malformed configuration stops `arm` with a diagnostic.
-During a sweep, a malformed tool entry is reported as that tool's check failure while the other entries are checked; an unreadable registry or invalid top-level structure is reported as a registry failure.
+During a sweep, malformed configuration is reported as a registry failure and no tools are checked.
 See [`docs/examples/watched-tools.json`](examples/watched-tools.json) for a starting point to copy into local `config/watched-tools.json`.
 
 Arm the check once per home with `bin/fm-tool-update-check.sh arm`.

@@ -310,14 +310,18 @@ config_announce_patterns_usable() {
   return 0
 }
 
-# Shared validation keeps arm strict while check isolates malformed entries.
-# shellcheck disable=SC2016  # jq variables, not shell expansions.
-CONFIG_RULES='
+config_validate() {
+  local problem status
+  if ! command -v jq >/dev/null 2>&1; then
+    CONFIG_PROBLEM='jq is required to read the watched tool registry'
+    return 1
+  fi
+  problem=$(jq -r '
     def tool_problem($t):
       if ($t | type) != "object" then "every entry in tools must be an object"
       elif ($t.name | type) != "string" or ($t.name | length) == 0 then "every tool needs a non-empty name"
       elif ($t.name | test("^[A-Za-z0-9._+-]+$") | not) then "tool name \($t.name) may use only letters, digits, dot, underscore, plus, and dash"
-      elif ($t | has("command") | not) and ($t | has("git") | not) and ($t | has("published") | not) then "tool \($t.name) needs command, git, or published"
+      elif ($t | has("command") | not) and ($t | has("git") | not) then "tool \($t.name) needs command, git, or both"
       elif ($t | has("command")) and (($t.command | type) != "string" or ($t.command | test("^[A-Za-z0-9._+-]+$") | not)) then "tool \($t.name) command must be a bare executable name"
       elif ($t | has("version_args")) and (($t.version_args | type) != "array" or ($t.version_args | length) == 0) then "tool \($t.name) version_args must be a non-empty array"
       elif ($t | has("version_args")) and ([$t.version_args[] | select((type != "string") or (test("^[A-Za-z0-9._=+/:-]+$") | not))] | length) > 0 then "tool \($t.name) version_args must be simple flag strings without spaces"
@@ -341,24 +345,15 @@ CONFIG_RULES='
         (($t.published | keys) - (if $t.published.source == "npm" then ["source", "package"] else ["source", "repo"] end) | length) > 0 then "tool \($t.name) published has unsupported fields"
       else empty
       end;
-    def entry_problem($tools; $t):
-      tool_problem($t) //
-      (if ([$tools[] | objects | select(.name == $t.name)] | length) > 1
-       then "tool names must be unique: \($t.name)" else empty end);
-'
-
-config_validate() {
-  local problem status
-  if ! command -v jq >/dev/null 2>&1; then
-    CONFIG_PROBLEM='jq is required to read the watched tool registry'
-    return 1
-  fi
-  problem=$(jq -r --arg mode "${1:-arm}" "$CONFIG_RULES"'
-    if type != "object" then "the top level must be an object"
-    elif (.tools | type) != "array" then "tools must be an array"
-    elif (.tools | length) == 0 then "tools must list at least one tool"
-    elif $mode == "arm" then [.tools as $tools | .tools[] | entry_problem($tools; .)] | .[0] // "ok"
-    else "ok" end
+    def problems:
+      if type != "object" then ["the top level must be an object"]
+      elif (.tools | type) != "array" then ["tools must be an array"]
+      elif (.tools | length) == 0 then ["tools must list at least one tool"]
+      else
+        [.tools[] | tool_problem(.)]
+        + (if ([.tools[].name] | unique | length) != (.tools | length) then ["tool names must be unique"] else [] end)
+      end;
+    problems | .[0] // "ok"
   ' "$CONFIG" 2>/dev/null)
   status=$?
   if [ "$status" -ne 0 ] || [ -z "$problem" ]; then
@@ -379,15 +374,8 @@ config_validate() {
 FIELD_SEP=$(printf '\037')
 
 config_records() {
-  jq -r "$CONFIG_RULES"'
-    .tools as $tools | .tools | to_entries[] |
-    .key as $index | .value |
-    (entry_problem($tools; .) // "") as $problem |
-    if $problem != "" then
-      [(if type == "object" and (.name | type) == "string" and (.name | test("^[A-Za-z0-9._+-]+$"))
-        then .name else "entry-\($index + 1)" end)] +
-      ([range(9)] | map("")) + [($problem | gsub("[[:cntrl:]]"; " "))]
-    else [
+  jq -r '
+    .tools[] | [
       .name,
       (.command // ""),
       ((.version_args // ["--version"]) | join(" ")),
@@ -397,9 +385,8 @@ config_records() {
       (.git.remote // "origin"),
       (.git.branch // ""),
       (.published.source // ""),
-      (.published.package // .published.repo // ""),
-      ""
-    ] end | join("\u001f")
+      (.published.package // .published.repo // "")
+    ] | join("\u001f")
   ' "$CONFIG" 2>/dev/null
 }
 
@@ -783,7 +770,7 @@ record_write() {
 
 action_check() {
   local name command_name args_joined announce announce_args repo remote branch
-  local line now source package problem
+  local line now source package
 
   [ -f "$CONFIG" ] || return 0
 
@@ -800,16 +787,12 @@ action_check() {
     emit "sweep budget ${BUDGET_CUT_FROM}s cut to ${BUDGET_SECS}s to stay inside the watcher check timeout of ${CHECK_TIMEOUT}s"
   fi
 
-  if ! config_validate check; then
+  if ! config_validate; then
     emit "watched tool registry: $CONFIG_PROBLEM"
   else
-    while IFS=$FIELD_SEP read -r name command_name args_joined announce announce_args repo remote branch source package problem; do
+    while IFS=$FIELD_SEP read -r name command_name args_joined announce announce_args repo remote branch source package; do
       [ -n "$name" ] || continue
       budget_allows "$name" || break
-      if [ -n "$problem" ]; then
-        emit "$name check failed: $problem"
-        continue
-      fi
       COMMAND_VERSION=
       [ -z "$command_name" ] || command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args"
       [ -z "$source" ] || published_findings "$name" "$source" "$package" "$COMMAND_VERSION"

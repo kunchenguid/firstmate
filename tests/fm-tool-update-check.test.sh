@@ -750,14 +750,14 @@ SH
   pass "published probes obey their bound and incomplete sweeps leave no record"
 }
 
-test_malformed_published_config_is_refused_and_isolated() {
+test_malformed_published_config_refuses_whole_registry() {
   local home dir out entry status
   home=$(make_home release-invalid)
   dir="$home/bin"
   out="$home/out.txt"
-  make_copy "$dir" "$TOOL" '0.8.0'
+  make_counting_copy "$dir" "$TOOL" '0.8.0' "$home/probes"
   while IFS= read -r entry; do
-    write_config "$home" "{\"tools\":[$entry,{\"name\":\"other\",\"command\":\"fm-absent-release-fixture\"}]}"
+    write_config "$home" "{\"tools\":[{\"name\":\"other\",\"command\":\"$TOOL\"},$entry]}"
     status=0
     FM_HOME="$home" "$CHECK" arm > "$out" 2>&1 || status=$?
     expect_code 1 "$status" "arm with invalid entry $entry"
@@ -765,8 +765,9 @@ test_malformed_published_config_is_refused_and_isolated() {
     assert_absent "$home/state/tool-updates.check.sh" "invalid entry armed the watcher"
     rm -f "$home/state/.tool-updates"
     run_check "$home" "$(fixture_path "$dir")" "$out"
-    assert_contains "$(cat "$out")" 'check failed:' "malformed entry was ignored"
-    assert_contains "$(cat "$out")" 'other check failed:' "malformed entry prevented checking the next tool"
+    assert_contains "$(cat "$out")" 'watched tool registry:' "malformed entry was not a registry failure"
+    assert_not_contains "$(cat "$out")" 'other check failed:' "malformed registry produced a per-tool failure"
+    assert_absent "$home/probes" "malformed registry allowed a valid tool to be probed"
   done <<'EOF'
 {"name":"bad","command":"herdr-fixture","published":null}
 {"name":"bad","published":{"source":"npm","package":"gnhf"}}
@@ -782,7 +783,7 @@ test_malformed_published_config_is_refused_and_isolated() {
 {"name":"other","command":"herdr-fixture"}
 42
 EOF
-  pass "arm refuses malformed entries and a sweep isolates them from other tools"
+  pass "arm and sweep refuse the whole registry for malformed entries"
 }
 
 test_published_dedupe_and_composition() {
@@ -874,7 +875,7 @@ test_malformed_registry_is_reported_not_ignored() {
   printf '%s\n' '{"tools":[{"name":"herdr"}]}' > "$home/config/watched-tools.json"
   rm -f "$home/state/.tool-updates"
   run_check "$home" "$PATH" "$out"
-  assert_contains "$(cat "$out")" "tool herdr needs command, git, or published" "a tool entry with no update source was accepted"
+  assert_contains "$(cat "$out")" "tool herdr needs command, git, or both" "a tool entry with no update source was accepted"
 
   printf '%s\n' '{"tools":[{"name":"herdr","command":"herdr; rm -rf /"}]}' > "$home/config/watched-tools.json"
   rm -f "$home/state/.tool-updates"
@@ -1244,7 +1245,7 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
 test_published_versions_for_the_three_motivating_tools
 test_published_failures_do_not_blind_other_tools
 test_published_probe_bounds_and_incomplete_record
-test_malformed_published_config_is_refused_and_isolated
+test_malformed_published_config_refuses_whole_registry
 test_published_dedupe_and_composition
 test_published_numeric_comparison_and_failed_installed_command
 
