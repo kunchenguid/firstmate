@@ -755,15 +755,37 @@ remote_recovery_paths_validate() {
 # bin/fm-pending-reply-lib.sh moves settled records into a real archive/
 # subdirectory, so that one name is a legitimate directory here while every other
 # entry, and everything inside the archive, must still be a plain file.
+remote_pending_resolution_stage_is_safe() {  # <entry-path>
+  local entry=$1 base corr
+  [ -f "$entry" ] && [ ! -L "$entry" ] || return 1
+  base=${entry##*/}
+  case "$base" in .*.resolving) ;; *) return 1 ;; esac
+  corr=${base#.}
+  corr=${corr%.resolving}
+  [ "${#corr}" -eq 16 ] || return 1
+  case "$corr" in *[!0-9a-f]*) return 1 ;; esac
+  [ "$(fm_meta_get "$entry" schema)" = fm-pending-reply.v1 ] || return 1
+  [ "$(fm_meta_get "$entry" corr_id)" = "$corr" ] || return 1
+  [ -n "$(fm_meta_get "$entry" task_id)" ]
+}
+
 remote_pending_entry_is_safe() {  # <entry-path>
   local entry=$1 archived
   if [ "${entry##*/}" = archive ]; then
     [ -d "$entry" ] && [ ! -L "$entry" ] \
       || { echo "REFUSED: pending-replies archive is unsafe" >&2; return 1; }
-    for archived in "$entry"/*; do
+    for archived in "$entry"/* "$entry"/.*.resolving; do
       [ -e "$archived" ] || [ -L "$archived" ] || continue
-      [ -f "$archived" ] && [ ! -L "$archived" ] \
-        || { echo "REFUSED: pending-replies archive contains an unsafe recovery entry" >&2; return 1; }
+      case "${archived##*/}" in
+        .*.resolving)
+          remote_pending_resolution_stage_is_safe "$archived" \
+            || { echo "REFUSED: pending-replies archive contains an unsafe resolution stage" >&2; return 1; }
+          ;;
+        *)
+          [ -f "$archived" ] && [ ! -L "$archived" ] \
+            || { echo "REFUSED: pending-replies archive contains an unsafe recovery entry" >&2; return 1; }
+          ;;
+      esac
     done
     return 0
   fi
@@ -779,10 +801,13 @@ remote_pending_replies_cleanup() {
     [ "$(pwd -P)" = "$REMOTE_PENDING_DIR_REAL" ] || exit 1
     # Settled records live in archive/ (bin/fm-pending-reply-lib.sh), so a
     # retiring mate's records are removed from both the hot set and the archive.
-    for rec in ./* ./archive/*; do
+    for rec in ./* ./archive/* ./archive/.*.resolving; do
       [ "$rec" = ./archive ] && continue
       [ -e "$rec" ] || [ -L "$rec" ] || continue
-      [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1
+      case "$rec" in
+        ./archive/.*.resolving) remote_pending_resolution_stage_is_safe "$rec" || exit 1 ;;
+        *) [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1 ;;
+      esac
       [ "$(fm_meta_get "$rec" task_id)" = "$ID" ] && rm -f -- "$rec"
     done
   )
