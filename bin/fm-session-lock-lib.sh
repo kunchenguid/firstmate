@@ -2,7 +2,7 @@
 # Shared session-lock harness identity.
 #
 # ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
+# lock, and does the current session own that lock?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
@@ -152,20 +152,124 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
-# True when state dir $1 holds a session lock whose pid is ANY harness ancestor
-# of the current process: this script runs inside the session that owns the
-# home's fleet lock. Membership is the honest test of that question, because the
-# lock owner sits at an unknown depth in a contiguous Claude run - it is the
-# outermost pid when the hook fires inside the session's own nested worker chain,
-# and an inner pid when a harness-named daemon parents the session. A missing
-# lock, a malformed lock, a lock held by a harness outside this ancestry, or an
-# ancestry that cannot be resolved all fail closed.
+# Print the pid of the session the harness itself publishes for lock path $1,
+# or return 1.
+#
+# Ancestry answers "which harness am I running inside" only while the caller is
+# actually a descendant of its session. Claude Code serves tool and hook
+# commands from a per-user worker pool (claude daemon run -> bg-pty-host ->
+# bg-spare) that is reparented to init, so the ancestry of such a call
+# terminates at pid 1 inside the pool and never reaches the interactive session
+# that acquired this home's lock. CLAUDE_PID is exported into every one of those
+# commands and names that session directly, which is why it survives the gap
+# that ancestry cannot cross. Claude Code is the only verified harness that
+# publishes one today; every other harness has no such variable and keeps the
+# ancestry-only behavior below unchanged.
+#
+# The pid is trusted only while it is still a live Claude Code process that
+# strictly predates the lock. The lock's existing mtime is process-generation
+# evidence: if an exited session's pid is recycled, the replacement process
+# starts at or after the lock the original session published and is rejected
+# even when the replacement is another Claude process.
+#
+# Trust boundary. The variable is inherited by any child, so on its own it says
+# "a Claude session named this pid", never "I am that session". That is why
+# callers must use it strictly to WIDEN ownership and never to replace the
+# ancestry test: the only conclusion drawn from it here is that a lock ALREADY
+# recording this exact pid belongs to a live session rather than a competing
+# one, which is true however deep the caller sits below that session. It can
+# therefore never let a caller take a lock away from another session, and never
+# turns an unheld lock into a held one.
+fm_harness_session_pid() {  # <lock-path>
+  local lock=$1 pid=${CLAUDE_PID:-} started started_epoch lock_epoch
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
+  fm_harness_pid_alive "$pid" || return 1
+  [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
+  started=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  started=$(printf '%s' "$started" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  [ -n "$started" ] || return 1
+  started_epoch=$(LC_ALL=C date -d "$started" +%s 2>/dev/null) \
+    || started_epoch=$(LC_ALL=C date -j -f '%a %b %e %T %Y' "$started" +%s 2>/dev/null) \
+    || return 1
+  lock_epoch=$(stat -f %m "$lock" 2>/dev/null) \
+    || lock_epoch=$(stat -c %Y "$lock" 2>/dev/null) \
+    || return 1
+  case "$started_epoch:$lock_epoch" in
+    *[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  # A session already running when this change landed cannot prove ownership if
+  # its existing lock was published during its process-start second. That is the
+  # same behavior the session already had, not a regression: the old writer
+  # recorded no generation evidence that could distinguish the original process
+  # from a pid recycled within that second, so this path declines to widen rather
+  # than inventing evidence. The gap lasts at most that session's lifetime and
+  # self-heals when the next session publishes after the bounded wait below.
+  [ "$started_epoch" -lt "$lock_epoch" ] || return 1
+  printf '%s\n' "$pid"
+}
+
+# Wait until a new lock for harness pid $1 can carry unambiguous whole-second
+# generation evidence when the verified Claude signals are available. Claude's
+# published session pid is the only identity that uses lock mtime, so every
+# other harness and every unverified environment return immediately. ps exposes
+# process start only to whole-second precision on both supported platforms;
+# publishing during that same second would make a recycled pid indistinguishable
+# from the original process. The bounded wait moves the one initial lock
+# publication past that boundary so the strict comparison above can reject
+# equality without making a normal just-started session read-only.
+fm_session_lock_wait_until_publishable() {  # <harness-pid>
+  local pid=$1 started started_epoch now i=0
+  [ "${CLAUDE_PID:-}" = "$pid" ] || return 0
+  fm_harness_pid_alive "$pid" || return 0
+  [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 0
+  started=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 0
+  started=$(printf '%s' "$started" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  [ -n "$started" ] || return 0
+  started_epoch=$(LC_ALL=C date -d "$started" +%s 2>/dev/null) \
+    || started_epoch=$(LC_ALL=C date -j -f '%a %b %e %T %Y' "$started" +%s 2>/dev/null) \
+    || return 0
+  case "$started_epoch" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  while [ "$i" -lt 40 ]; do
+    now=$(date +%s 2>/dev/null) || return 0
+    case "$now" in
+      ''|*[!0-9]*) return 0 ;;
+    esac
+    [ "$now" -gt "$started_epoch" ] && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# True when state dir $1 holds a session lock owned by the current session.
+# Ancestry membership is the ordinary test of that question, because the lock
+# owner sits at an unknown depth in a contiguous Claude run - it is the outermost
+# pid when the hook fires inside the session's own nested worker chain, and an
+# inner pid when a harness-named daemon parents the session. A missing lock, a
+# malformed lock, a lock held by a harness outside this ancestry, or an ancestry
+# that cannot be resolved all fail closed unless the published-session check
+# below establishes the worker-pool case.
+#
+# Membership proves ownership when it holds, but its absence proves nothing: a
+# call served by a reparented worker pool has no ancestry path to its own
+# session at all, so a session that genuinely holds this lock would be refused
+# its own home and forced read-only. The published session pid answers exactly
+# that case and is checked first. It only ever widens acceptance - a lock this
+# session does not already hold is still decided by the ancestry walk below.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids pid session_pid
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  if session_pid=$(fm_harness_session_pid "$state/.lock") && [ "$session_pid" = "$lock_pid" ]; then
+    return 0
+  fi
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0

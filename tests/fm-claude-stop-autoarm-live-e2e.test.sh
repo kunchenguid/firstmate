@@ -6,7 +6,8 @@
 # session lock can run fm-session-start.sh first; session start reclaims the
 # dead owner; at least two tokenless auto-arm and rewake cycles then complete
 # with zero model-issued arm commands; and the cooperative guard consumes no
-# forced continuation while the hook's launch is healthy.
+# forced continuation while the hook's launch is healthy; and every real Bash
+# hook receives a live Claude session pid that becomes the acquired lock owner.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication. No live fleet home, worktree, or session is touched.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
@@ -67,6 +68,8 @@ cat > "$PROJECT/bin/tool-logger.sh" <<'SH'
 #!/usr/bin/env bash
 P=$(cat 2>/dev/null || true)
 printf '%s\n' "$P" | jq -r '.tool_input.command // "unknown"' >> "$FM_HOME/state/tool-calls.log" 2>/dev/null
+VALIDATED_PID=$(bash -c '. "$1"; fm_harness_session_pid "$2"' _ "$CLAUDE_PROJECT_DIR/bin/fm-session-lock-lib.sh" "$FM_HOME/state/.lock" 2>/dev/null || true)
+printf '%s\t%s\n' "${CLAUDE_PID:-}" "$VALIDATED_PID" >> "$FM_HOME/state/claude-session-pids.log"
 exit 0
 SH
 chmod +x "$PROJECT/bin/tool-logger.sh"
@@ -128,6 +131,17 @@ grep -q 'stale: fixture-rapid-2' "$TRANSCRIPT" || fail "second rapid rewake reas
   || fail "fresh Claude session did not run session start first: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)"
 [ "$(cat "$HOME_DIR/state/.lock" 2>/dev/null)" != 9999999 ] \
   || fail "session start did not reclaim the stale dead-owner lock"
+PUBLISHED_PID=$(awk -F '\t' 'NR == 1 { print $1 }' "$HOME_DIR/state/claude-session-pids.log" 2>/dev/null)
+case "$PUBLISHED_PID" in
+  ''|*[!0-9]*) fail "Claude $CLAUDE_VERSION did not export a numeric CLAUDE_PID to its Bash hook" ;;
+esac
+awk -F '\t' -v pid="$PUBLISHED_PID" '
+  NF != 2 || $1 != pid || $2 != pid { inconsistent = 1 }
+  END { exit inconsistent }
+' "$HOME_DIR/state/claude-session-pids.log" \
+  || fail "Claude $CLAUDE_VERSION did not export one live Claude CLAUDE_PID consistently to every Bash hook: $(cat "$HOME_DIR/state/claude-session-pids.log")"
+[ "$(cat "$HOME_DIR/state/.lock" 2>/dev/null)" = "$PUBLISHED_PID" ] \
+  || fail "session start recorded $(cat "$HOME_DIR/state/.lock" 2>/dev/null), not hook-published CLAUDE_PID $PUBLISHED_PID"
 if [ -f "$HOME_DIR/state/tool-calls.log" ]; then
   ! grep -q 'fm-watch-arm.sh' "$HOME_DIR/state/tool-calls.log" \
     || fail "model issued an arm command despite Stop-owned continuity: $(cat "$HOME_DIR/state/tool-calls.log")"
@@ -162,4 +176,4 @@ printf '%s\n' '{"session_id":"live-owner-control"}' \
 [ ! -s "$LAB/live-owner.out" ] && [ ! -s "$LAB/live-owner.err" ] || fail "competing Stop hook produced a rewake while another live session owned the home"
 wait "$LIVE_OWNER_PID"
 
-printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"
+printf 'ok - Claude %s live E2E propagated one verified CLAUDE_PID through every Bash hook, recorded it as the session lock, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"

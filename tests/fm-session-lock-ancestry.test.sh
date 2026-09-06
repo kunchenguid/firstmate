@@ -220,6 +220,297 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# --- unit layer: identity when the call is served by a worker pool -----------
+
+# Claude Code serves tool and hook commands from a per-user worker pool
+# (claude daemon run -> bg-pty-host -> bg-spare) that is reparented to init, so
+# the interactive session that acquired the lock is not an ancestor of the call
+# at all. Pid 700 below is that live session and it appears NOWHERE in the chain
+# the walk can reach; 650 is a second, unrelated live session.
+write_pool_ps() {  # <fakebin>
+  cat > "$1/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  700:comm=) printf '%s\n' claude ;;
+  700:args=) printf '%s\n' 'claude --model opus' ;;
+  700:ppid=) printf '%s\n' 1 ;;
+  700:lstart=) printf '%s\n' "${FM_TEST_SESSION_START:-Thu Jan  1 00:00:00 1970}" ;;
+  650:comm=) printf '%s\n' claude ;;
+  650:args=) printf '%s\n' 'claude --model opus' ;;
+  650:ppid=) printf '%s\n' 1 ;;
+  660:comm=) printf '%s\n' codex ;;
+  660:args=) printf '%s\n' 'codex' ;;
+  660:ppid=) printf '%s\n' 1 ;;
+  300:comm=) printf '%s\n' claude ;;
+  300:args=) printf '%s\n' 'claude daemon run' ;;
+  300:ppid=) printf '%s\n' 1 ;;
+  310:comm=) printf '%s\n' claude ;;
+  310:args=) printf '%s\n' 'claude bg-pty-host' ;;
+  310:ppid=) printf '%s\n' 300 ;;
+  320:comm=) printf '%s\n' claude ;;
+  320:args=) printf '%s\n' 'claude bg-spare' ;;
+  320:ppid=) printf '%s\n' 310 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-session-start.sh' ;;
+  *:ppid=)
+    if [ "${FM_TEST_CONTIGUOUS_SESSION:-0}" = 1 ]; then
+      printf '%s\n' 700
+    else
+      printf '%s\n' 320
+    fi
+    ;;
+esac
+SH
+  chmod +x "$1/ps"
+  cat > "$1/stat" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  -f:%m|-c:%Y)
+    if [ -n "${FM_TEST_LOCK_MTIME:-}" ]; then
+      printf '%s\n' "$FM_TEST_LOCK_MTIME"
+      exit 0
+    fi
+    ;;
+esac
+exec /usr/bin/stat "$@"
+SH
+  chmod +x "$1/stat"
+}
+
+lstart_epoch() {  # <ps lstart value>
+  LC_ALL=C date -d "$1" +%s 2>/dev/null \
+    || LC_ALL=C date -j -f '%a %b %e %T %Y' "$1" +%s 2>/dev/null
+}
+
+test_pool_served_session_owns_the_lock_it_holds() {
+  local dir fakebin
+  dir="$TMP_ROOT/pool-owned"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  write_pool_ps "$fakebin"
+  printf '700\n' > "$dir/state/.lock"
+
+  # The reachable ancestry terminates in the pool at pid 1, so membership alone
+  # cannot see the session and every re-verification would refuse this home.
+  [ "$(lib_eval "$fakebin" 'fm_harness_ancestry_pid')" = 300 ] \
+    || fail "fixture did not reproduce a pool-served call rooted at pid 1"
+  FM_TEST_LOCK_MTIME=172800 CLAUDE_PID=700 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a session served by a reparented worker pool could not prove it owns its own lock"
+  pass "session-lock: a session served by a worker pool proves it owns the lock it holds"
+}
+
+test_pool_served_session_never_claims_another_session_lock() {
+  local dir fakebin
+  dir="$TMP_ROOT/pool-foreign"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  write_pool_ps "$fakebin"
+
+  # 650 is a different live session. Widening ownership to the published session
+  # pid must not widen it to any other live harness.
+  printf '650\n' > "$dir/state/.lock"
+  if FM_TEST_LOCK_MTIME=172800 CLAUDE_PID=700 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a lock held by a different live session was claimed as this session's own"
+  fi
+  pass "session-lock: a pool-served session never claims a lock held by another session"
+}
+
+test_same_second_lock_declines_widening_and_falls_back_to_ancestry() {
+  local dir fakebin same_epoch
+  dir="$TMP_ROOT/pool-same-second"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  write_pool_ps "$fakebin"
+  same_epoch=$(lstart_epoch 'Sun Jan  4 00:00:00 1970') \
+    || fail "could not derive the same-second fixture timestamp"
+
+  printf '700\n' > "$dir/state/.lock"
+  if FM_TEST_LOCK_MTIME="$same_epoch" FM_TEST_SESSION_START='Sun Jan  4 00:00:00 1970' CLAUDE_PID=700 \
+    lib_eval "$fakebin" "fm_harness_session_pid '$dir/state/.lock'"; then
+    fail "a same-second lock widened ownership without process-generation evidence"
+  fi
+  if FM_TEST_LOCK_MTIME="$same_epoch" FM_TEST_SESSION_START='Sun Jan  4 00:00:00 1970' CLAUDE_PID=700 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a pool-served same-second lock bypassed the ancestry fallback"
+  fi
+
+  FM_TEST_LOCK_MTIME="$same_epoch" FM_TEST_SESSION_START='Sun Jan  4 00:00:00 1970' CLAUDE_PID=700 \
+    FM_TEST_CONTIGUOUS_SESSION=1 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a same-second lock did not fall back to proven ancestry ownership"
+  pass "session-lock: a same-second lock declines widening and falls back to ancestry"
+}
+
+test_published_session_pid_requires_the_original_live_harness_generation() {
+  local dir fakebin same_epoch
+  dir="$TMP_ROOT/pool-stale"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  write_pool_ps "$fakebin"
+  same_epoch=$(lstart_epoch 'Sun Jan  4 00:00:00 1970') \
+    || fail "could not derive the replacement fixture's same-second timestamp"
+
+  # 999 is not a harness in this table: a stale exported value whose pid has
+  # been recycled onto something else proves nothing and must fail closed.
+  printf '999\n' > "$dir/state/.lock"
+  if CLAUDE_PID=999 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a published session pid that is not a live harness was trusted"
+  fi
+  if CLAUDE_PID=not-a-pid lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a malformed published session pid was trusted"
+  fi
+
+  # 660 is a live harness, but not a Claude one, so the pid cannot be the
+  # session that published this variable - it was recycled or inherited.
+  printf '660\n' > "$dir/state/.lock"
+  if CLAUDE_PID=660 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a published session pid pointing at a different harness was trusted"
+  fi
+
+  # A replacement Claude process can reuse the same numeric pid after the
+  # original session exits. It is still not the process that published this
+  # lock, and its start time after the lock mtime must make ownership fail.
+  printf '700\n' > "$dir/state/.lock"
+  if FM_TEST_LOCK_MTIME=172800 FM_TEST_SESSION_START='Sun Jan  4 00:00:00 1970' CLAUDE_PID=700 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a replacement Claude process that reused the published pid was trusted"
+  fi
+
+  # Whole-second process timestamps cannot distinguish two process generations
+  # inside one second. Equality therefore fails closed; the real acquisition
+  # path below proves an ordinary just-started session publishes after the
+  # ambiguous boundary instead of being rejected.
+  if FM_TEST_LOCK_MTIME="$same_epoch" FM_TEST_SESSION_START='Sun Jan  4 00:00:00 1970' CLAUDE_PID=700 \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "a same-second replacement Claude process was trusted"
+  fi
+  pass "session-lock: a published session pid requires the original live Claude process generation"
+}
+
+test_lock_acquire_publishes_after_the_session_start_second() {
+  local dir fakebin session_pid out rc started_epoch lock_epoch
+  dir="$TMP_ROOT/pool-publish-boundary"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  sleep 120 &
+  session_pid=$!
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  "$FM_TEST_SESSION_PID:comm=") printf '%s\n' claude ;;
+  "$FM_TEST_SESSION_PID:args=") printf '%s\n' 'claude --model opus' ;;
+  "$FM_TEST_SESSION_PID:ppid=") printf '%s\n' 1 ;;
+  "$FM_TEST_SESSION_PID:lstart=") exec /usr/bin/ps -p "$pid" -o lstart= ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' "$FM_TEST_SESSION_PID" ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  out=$(PATH="$fakebin:$PATH" FM_TEST_SESSION_PID="$session_pid" CLAUDE_PID="$session_pid" \
+    FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" 2>&1) && rc=0 || rc=$?
+  started_epoch=$(LC_ALL=C /usr/bin/ps -p "$session_pid" -o lstart= | \
+    xargs -I{} date -d "{}" +%s 2>/dev/null) \
+    || started_epoch=$(LC_ALL=C /usr/bin/ps -p "$session_pid" -o lstart= | \
+      xargs -I{} date -j -f '%a %b %e %T %Y' "{}" +%s 2>/dev/null) \
+    || started_epoch=''
+  lock_epoch=$(stat -f %m "$dir/state/.lock" 2>/dev/null) \
+    || lock_epoch=$(stat -c %Y "$dir/state/.lock" 2>/dev/null) \
+    || lock_epoch=''
+  kill "$session_pid" 2>/dev/null || true
+  wait "$session_pid" 2>/dev/null || true
+
+  [ "$rc" -eq 0 ] || fail "a just-started Claude session could not acquire its lock (rc=$rc): $out"
+  [ -n "$started_epoch" ] && [ -n "$lock_epoch" ] \
+    || fail "could not read the acquired lock's generation timestamps"
+  [ "$started_epoch" -lt "$lock_epoch" ] \
+    || fail "lock publication did not advance beyond the session start second ($started_epoch >= $lock_epoch)"
+  pass "session-lock: a just-started Claude session publishes after the ambiguous start second"
+}
+
+# The reported failure is reached through bin/fm-lock.sh, which compares the
+# recorded pid against this call's ancestry and refuses when they differ. The
+# session pid here is a real live process so the script's own kill -0 liveness
+# check runs unstubbed; only ps is shadowed.
+test_lock_acquire_is_not_refused_to_the_session_that_holds_it() {
+  local dir fakebin session_pid out rc
+  dir="$TMP_ROOT/pool-acquire"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  sleep 120 &
+  session_pid=$!
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  "$FM_TEST_SESSION_PID:comm=") printf '%s\n' claude ;;
+  "$FM_TEST_SESSION_PID:args=") printf '%s\n' 'claude --model opus' ;;
+  "$FM_TEST_SESSION_PID:ppid=") printf '%s\n' 1 ;;
+  "$FM_TEST_SESSION_PID:lstart=") exec /usr/bin/ps -p "$pid" -o lstart= ;;
+  300:comm=) printf '%s\n' claude ;;
+  300:args=) printf '%s\n' 'claude daemon run' ;;
+  300:ppid=) printf '%s\n' 1 ;;
+  310:comm=) printf '%s\n' claude ;;
+  310:args=) printf '%s\n' 'claude bg-pty-host' ;;
+  310:ppid=) printf '%s\n' 300 ;;
+  320:comm=) printf '%s\n' claude ;;
+  320:args=) printf '%s\n' 'claude bg-spare' ;;
+  320:ppid=) printf '%s\n' 310 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' 320 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  CLAUDE_PID="$session_pid" FM_TEST_SESSION_PID="$session_pid" \
+    lib_eval "$fakebin" "fm_session_lock_wait_until_publishable '$session_pid'"
+  printf '%s\n' "$session_pid" > "$dir/state/.lock"
+
+  out=$(PATH="$fakebin:$PATH" FM_TEST_SESSION_PID="$session_pid" CLAUDE_PID="$session_pid" \
+    FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" 2>&1) && rc=0 || rc=$?
+  kill "$session_pid" 2>/dev/null || true
+  wait "$session_pid" 2>/dev/null || true
+
+  [ "$rc" -eq 0 ] \
+    || fail "the session holding the lock was refused its own home (rc=$rc): $out"
+  case "$out" in
+    *"another live firstmate session"*)
+      fail "the session holding the lock was told another session holds it: $out" ;;
+  esac
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$session_pid" ] \
+    || fail "the lock moved off the session that holds it"
+  pass "session-lock: acquire is not refused to the pool-served session that already holds the lock"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +651,12 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_pool_served_session_owns_the_lock_it_holds
+test_pool_served_session_never_claims_another_session_lock
+test_same_second_lock_declines_widening_and_falls_back_to_ancestry
+test_published_session_pid_requires_the_original_live_harness_generation
+test_lock_acquire_publishes_after_the_session_start_second
+test_lock_acquire_is_not_refused_to_the_session_that_holds_it
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

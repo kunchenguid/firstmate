@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
-# Writes the harness (agent) process PID found by walking the shell's ancestry,
-# which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# Writes the verified harness (agent) process PID that identifies the session.
+# This ordinarily comes from the shell's ancestry; a Claude call served through
+# a reparented worker pool may instead retain its already-recorded published
+# session PID. Either PID lives as long as the firstmate session, unlike the
+# transient subshell PID of any one tool call.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -17,9 +19,9 @@ mkdir -p "$STATE" 2>/dev/null || {
   exit 1
 }
 
-# Harness identity (FM_HARNESS_RE, ancestry walk, holder liveness) is owned by
-# the shared session-lock lib so the Claude Stop auto-arm applies the exact
-# same identity contract.
+# Harness identity (FM_HARNESS_RE, ancestry or published session identity, and
+# holder liveness) is owned by the shared session-lock lib so the Claude Stop
+# auto-arm applies the exact same identity contract.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
@@ -34,6 +36,19 @@ if [ "${1:-}" = "status" ]; then
 fi
 
 me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+# A call served by a reparented worker pool is rooted at pid 1, so the session
+# that acquired this lock is not in the ancestry $me came from and every check
+# below would read this session's own lock as a competing session's. When the
+# harness names its session itself and the lock already records exactly that pid,
+# this IS the owning session: adopt the recorded pid so those checks compare like
+# with like. Ownership is only ever recognized here, never transferred - a lock
+# this session does not already hold leaves $me as the ancestry resolved it.
+if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
+  session_pid=$(fm_harness_session_pid "$LOCK") || session_pid=''
+  if [ -n "$session_pid" ] && [ "$session_pid" = "$(cat "$LOCK" 2>/dev/null || true)" ]; then
+    me=$session_pid
+  fi
+fi
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -91,6 +106,7 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     exit 1
   fi
 fi
+fm_session_lock_wait_until_publishable "$me"
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1

@@ -314,14 +314,21 @@ That inertness result is scoped to the builds it exercised: it did not establish
 
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
-Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
+Session-lock ownership in `bin/fm-session-lock-lib.sh` is ordinarily decided against a session's whole contiguous harness ancestry, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
+Ancestry cannot answer it when Claude Code serves the call from a per-user worker pool reparented to init, because the chain terminates at pid 1 without reaching the interactive session that acquired the lock.
+The session pid Claude Code publishes as `CLAUDE_PID` widens acceptance for exactly that gap: a lock the session does not already record as its own is still decided by the ancestry walk, and the published pid is trusted only while it identifies a live Claude harness whose process start strictly predates the lock publication.
+Because both supported `ps` implementations expose the process start at whole-second precision, initial Claude lock publication waits for the next whole-second boundary with a bounded retry count.
+The strict lock-mtime generation check then rejects an old inherited value when its numeric pid is recycled onto another Claude session, including a replacement that starts during the original lock-publication second.
+A session already running when this change lands cannot widen ownership for a pre-existing lock published during its process-start second because that writer recorded no evidence that distinguishes the original process from a pid recycled within the same second.
+That unchanged limitation lasts at most the existing session's lifetime and self-heals when the next session publishes after the bounded wait.
 Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
-`tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
+`tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table, covers the reparented worker-pool gap and competing-owner boundary, and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
 
-The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
+The Claude product live path ran with Claude Code 2.1.241 on 2026-08-23.
+Every real Bash `PreToolUse` hook received the same numeric `CLAUDE_PID`, `fm_harness_session_pid` verified it as a live Claude process while the hook ran, and session start recorded that exact pid as the lock owner across the daemon-served tool path.
 
 ```sh
 claude --version
@@ -331,8 +338,8 @@ FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh
 Observed output:
 
 ```text
-2.1.219 (Claude Code)
-ok - Claude 2.1.219 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
+2.1.241 (Claude Code)
+ok - Claude 2.1.241 (Claude Code) live E2E propagated one verified CLAUDE_PID through every Bash hook, recorded it as the session lock, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
 ```
 
 Current entry points:
