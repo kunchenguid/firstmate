@@ -26,7 +26,9 @@
 #
 # Every write chooses exactly one category through fm_parent_channel_append:
 #   transition -> a decision open or close is appended only when the folded
-#                 live state needs that transition, under the channel lock
+#                 live state needs that transition, under the channel lock;
+#                 when an origin task is supplied, the current and new
+#                 transitions must carry that exact task provenance
 #   receipt    -> an immutable unique receipt is deduplicated by exact content
 #   event      -> every occurrence is appended, including identical repeats
 # Missing and unknown categories are refused.
@@ -107,22 +109,68 @@ fm_parent_channel_path() {  # <home> <state-dir>
   printf '%s\n' "$path"
 }
 
+fm_parent_channel_line_task() {  # <status-line>
+  local head task rest
+  head=${1%%:*}
+  case "$head" in *\[task=*\]*) ;; *) return 1 ;; esac
+  task=${head#*\[task=}
+  task=${task%%\]*}
+  rest=${head#*\[task=}
+  rest=${rest#*\]}
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
+  case "$rest" in *\[task=*\]*) return 2 ;; esac
+  printf '%s\n' "$task"
+}
+
+fm_parent_channel_open_task() {  # <path> <key>
+  local path=$1 wanted=$2 open line verb key note task='' line_task
+  open=$(status_open_decisions "$path") || return 2
+  _fm_open_set_has "$open" "$wanted" || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    key=$(_fm_decision_key "$line") || continue
+    [ "$key" = "$wanted" ] || continue
+    note=$(status_line_note "$line")
+    _fm_decision_key_transition_allowed "$key" "$note" || continue
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      needs-decision|blocked)
+        if line_task=$(fm_parent_channel_line_task "$line"); then
+          task=$line_task
+        else
+          task=''
+        fi
+        ;;
+      "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|"${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}")
+        task=''
+        ;;
+    esac
+  done < "$path" || return 2
+  [ -n "$task" ] || return 2
+  printf '%s\n' "$task"
+}
+
 fm_parent_channel_append() {
   [ "$#" -ge 3 ] || return 1
-  local category=$1 path=$2 line=$3 action='' key='' self_state=''
-  local lock open='' is_open=0 append_rc=0 rc=0
+  local category=$1 path=$2 line=$3 action='' key='' self_state='' origin_task=''
+  local lock open='' is_open=0 append_rc=0 rc=0 line_task existing_task existing_rc
   shift 3
   case "$category" in
     receipt|event)
       [ "$#" -eq 0 ] || return 1
       ;;
     transition)
-      [ "$#" -ge 2 ] && [ "$#" -le 3 ] || return 1
+      [ "$#" -ge 2 ] && [ "$#" -le 4 ] || return 1
       action=$1
       key=$2
       self_state=${3:-}
+      origin_task=${4:-}
       case "$action" in open|close) ;; *) return 1 ;; esac
       [ -n "$key" ] || return 1
+      if [ -n "$origin_task" ]; then
+        case "$origin_task" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+        line_task=$(fm_parent_channel_line_task "$line") || return 1
+        [ "$line_task" = "$origin_task" ] || return 1
+      fi
       ;;
     *) return 1 ;;
   esac
@@ -148,8 +196,16 @@ fm_parent_channel_append() {
           case "$open" in
             "$key"$'\t'*|*$'\n'"$key"$'\t'*) is_open=1 ;;
           esac
-          if { [ "$action" = open ] && [ "$is_open" -eq 0 ]; } \
-            || { [ "$action" = close ] && [ "$is_open" -eq 1 ]; }; then
+          if [ -n "$origin_task" ] && [ "$is_open" -eq 1 ]; then
+            existing_rc=0
+            existing_task=$(fm_parent_channel_open_task "$path" "$key") || existing_rc=$?
+            if [ "$existing_rc" -ne 0 ] || [ "$existing_task" != "$origin_task" ]; then
+              rc=1
+            fi
+          fi
+          if [ "$rc" -eq 0 ] \
+            && { { [ "$action" = open ] && [ "$is_open" -eq 0 ]; } \
+              || { [ "$action" = close ] && [ "$is_open" -eq 1 ]; }; }; then
             if [ -n "$self_state" ]; then
               fm_wake_status_append_self_announced "$self_state" "$path" "$line" || append_rc=$?
               [ "$append_rc" -ne 2 ] || rc=1

@@ -248,6 +248,7 @@ When a keyed phase ends without another reportable state, append \`resolved [key
 \`resolved\` separately closes an escalated decision or blocker, and only a \`resolved\` line carrying that decision's exact key closes it: a later \`done\` or \`working\` event never does, even when the answer is what started that work.
 The main firstmate's answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append \`resolved: {how it cleared}\` yourself (keyed with \`[key=<slug>]\` if you opened it with one) as your domain resumes.
 For a decision or blocker YOU raise, rather than an answer to a marked request, use \`bin/fm-secondmate-report.sh --escalate <verb> --key <slug> "<note>"\`: it resolves this channel from your home's own bindings, so the line lands where the main firstmate actually reads it instead of only in your home.
+When relaying a decision from your worker, add \`--task <worker-task-id>\` so the upstream copy retains the worker's ownership and cannot collide with another task reusing the same key.
 Do not hand-write the same decision into two logs to make it travel. When you answer your own worker with \`bin/fm-send.sh <task> --resolve-key <key>\`, that close also lands on this channel for any key you escalated here, so one close settles both copies.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 

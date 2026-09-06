@@ -133,10 +133,28 @@ test_missing_remote_fails_closed() {
   pass "a missing feed remote fails closed"
 }
 
+test_config_internal_whitespace_is_rejected() {
+  local w out rc before
+  w=$(new_world whitespace)
+  advance "$w" original B
+  mkdir -p "$w/config"
+  printf '  up stream  \n' > "$w/config/fork-feed-source"
+  before=$(fork_main "$w")
+
+  out=$(FM_ROOT_OVERRIDE="$w/work" FM_CONFIG_OVERRIDE="$w/config" "$SYNC" --apply 2>&1); rc=$?
+
+  [ "$rc" -eq 2 ] || fail "internally-spaced config remote did not exit 2 (got $rc)"
+  assert_contains "$out" "unsafe remote name: 'up stream'" \
+    "config parsing collapsed internal whitespace into a valid remote"
+  [ "$(fork_main "$w")" = "$before" ] || fail "unsafe config changed the fork"
+  pass "configured remotes trim edges without collapsing internal whitespace"
+}
+
 test_clean_ff
 test_diverged_never_discards
 test_fork_ahead_nothing_to_feed
 test_already_current
 test_missing_remote_fails_closed
+test_config_internal_whitespace_is_rejected
 
 echo "# all fm-fork-sync tests passed"

@@ -217,7 +217,9 @@ resolve_update_remote() {
   if [ -n "${FM_UPDATE_REMOTE:-}" ]; then
     val=$FM_UPDATE_REMOTE
   elif [ -f "$dir/config/update-remote" ]; then
-    val=$(sed -n '1p' "$dir/config/update-remote" 2>/dev/null | tr -d '[:space:]')
+    val=$(sed -n '1p' "$dir/config/update-remote" 2>/dev/null)
+    val=${val#"${val%%[![:space:]]*}"}
+    val=${val%"${val##*[![:space:]]}"}
   fi
   case "$val" in
     '') printf 'origin\n' ;;

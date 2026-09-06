@@ -18,14 +18,14 @@
 # at all, because the only correlated-report helper demanded a corr= id that a
 # self-raised decision has by contract.
 #
-# Chosen resolution: propagate the close to every live copy of the key. The
-# parent's log is a real append-only stream that wake classification,
-# crew-state, pending-reply resolution, and the open-decision fold all read
-# directly; it cannot become a projection of some other owner without a new
-# source of truth spanning two independent homes with no shared transaction.
-# Propagation matches the existing grain instead - the close is already an
-# append written by the answerer, and a serialized live-state append makes it
-# safe under replay and key reuse.
+# Chosen resolution: tag relayed opens with their originating task and propagate
+# a close only to the upstream copy owned by the answered task. The parent's log
+# is a real append-only stream that wake classification, crew-state,
+# pending-reply resolution, and the open-decision fold all read directly; it
+# cannot become a projection of some other owner without a new source of truth
+# spanning two independent homes with no shared transaction. Serialized channel
+# writes make same-task retries idempotent and reject a different task reusing an
+# already-open key.
 #
 # These tests drive the real executables and assert through the real consumer
 # (fm-wake-drain.sh's OPEN DECISIONS section for the parent home), never
@@ -41,6 +41,8 @@
 #   5. The reserved pending-reply-<id> namespace keeps its single owner: a
 #      close aimed at it never propagates a foreign line into the parent
 #      channel.
+#   6. Conflicting same-key opens and answers for another task fail before any
+#      decision or delivery state changes.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -196,7 +198,7 @@ test_full_cycle_close_reaches_parent_channel() {
   fm_write_meta "$mate/state/wi812.meta" "window=sess:fm-wi812" "kind=ship"
   printf 'needs-decision [key=review-4-scope]: fix 24+25, defer 26/27/28?\n' \
     > "$mate/state/wi812.status"
-  printf 'needs-decision [key=review-4-scope]: relaying my worker: fix 24+25, defer 26/27/28?\n' \
+  printf 'needs-decision [key=review-4-scope] [task=wi812]: relaying my worker: fix 24+25, defer 26/27/28?\n' \
     > "$parent/state/amplifica.status"
 
   # (b) The parent sees it.
@@ -231,7 +233,7 @@ test_answer_enumerates_every_live_ledger() {
 
   fm_write_meta "$mate/state/w7.meta" "window=sess:fm-w7" "kind=ship"
   printf 'captain-held [key=all-copies]: tracked by all-copies\n' > "$mate/state/w7.status"
-  printf 'needs-decision [key=all-copies]: choose a or b\n' > "$parent/state/ledger-mate.status"
+  printf 'needs-decision [key=all-copies] [task=w7]: choose a or b\n' > "$parent/state/ledger-mate.status"
   printf 'queued\n' > "$tasks/all-copies.state"
   printf 'captain\n' > "$tasks/all-copies.hold"
 
@@ -330,7 +332,7 @@ test_reopened_key_closes_and_close_replay_is_idempotent() {
   env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
     "$REPORT" --escalate resolved "same default answer" >/dev/null 2>&1 \
     || fail "the reopened default-key decision could not close"
-  n=$(grep -c '^resolved: same default answer$' "$channel" || true)
+  n=$(grep -c '^resolved \[task=beta\]: same default answer$' "$channel" || true)
   [ "$n" = 2 ] || fail "two default-key lifetimes produced $n closes"
   out=$(drain_out "$parent")
   if printf '%s' "$out" | grep -F '[key=default]' >/dev/null; then
@@ -605,7 +607,7 @@ test_parent_evidence_without_identity_refuses() {
 
   fm_write_meta "$mate/state/w5.meta" "window=sess:fm-w5" "kind=ship"
   printf 'needs-decision [key=upstream]: a or b\n' > "$mate/state/w5.status"
-  printf 'needs-decision [key=upstream]: a or b\n' > "$parent/state/iota.status"
+  printf 'needs-decision [key=upstream] [task=w5]: a or b\n' > "$parent/state/iota.status"
   rm -f "$mate/.fm-secondmate-home"
 
   : > "$log"
@@ -640,7 +642,7 @@ test_long_key_metadata_survives_and_closes() {
   long_note=$(printf 'n%.0s' {1..240})
 
   env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
-    "$REPORT" --escalate needs-decision --key "$long_key" "$long_note" \
+    "$REPORT" --escalate needs-decision --key "$long_key" --task w6 "$long_note" \
     >/dev/null 2>&1; rc=$?
   expect_code 0 "$rc" "a key that fits with intact metadata should be accepted"
   grep -F "[key=$long_key]" "$parent/state/kappa.status" >/dev/null \
@@ -659,6 +661,60 @@ test_long_key_metadata_survives_and_closes() {
     fail "the long key remained open after resolving it with the original value: $out"
   fi
   pass "parent channel: long decision keys preserve metadata and remain closeable"
+}
+
+test_same_key_different_task_refuses_before_send() {
+  local dir fb log err parent mate pair channel rc before
+  dir="$TMP_ROOT/task-provenance"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/err.log"
+  pair=$(setup_pair task-provenance provenance-mate)
+  parent=${pair% *}; mate=${pair#* }
+  channel="$parent/state/provenance-mate.status"
+
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    "$REPORT" --escalate needs-decision --key deploy --task worker-a \
+    "worker A needs a deploy choice" >/dev/null 2>&1 \
+    || fail "the first task-owned escalation should succeed"
+  before=$(cat "$channel")
+  assert_contains "$before" "[task=worker-a]" \
+    "the relayed decision did not persist its originating task"
+  if env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+      "$REPORT" --escalate needs-decision --key deploy --task worker-b \
+      "worker B independently needs a deploy choice" >/dev/null 2>"$err"; then
+    fail "a conflicting same-key open from another task was treated as a retry"
+  fi
+  [ "$(cat "$channel")" = "$before" ] \
+    || fail "the conflicting open changed the original task-owned decision"
+  assert_contains "$(cat "$err")" "could not append" \
+    "the conflicting same-key open did not fail loudly"
+
+  fm_write_meta "$mate/state/worker-b.meta" "window=sess:fm-worker-b" "kind=ship"
+  printf 'needs-decision [key=deploy]: worker B local copy\n' > "$mate/state/worker-b.status"
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" worker-b --resolve-key deploy "deploy B" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "worker B's answer silently closed worker A's upstream decision"
+  [ ! -s "$log" ] || fail "the conflicting-key refusal still typed the answer"
+  assert_contains "$(cat "$err")" "assigns this key to task 'worker-a', not target task 'worker-b'" \
+    "the answer refusal did not identify both conflicting task owners"
+  grep -F 'resolved [key=deploy]' "$channel" >/dev/null 2>&1 \
+    && fail "worker A's upstream decision was closed by worker B's answer"
+  grep -F 'resolved [key=deploy]' "$mate/state/worker-b.status" >/dev/null 2>&1 \
+    && fail "the refused answer closed worker B's local decision"
+
+  printf 'needs-decision [key=legacy]: unprovenanced upstream copy\n' >> "$channel"
+  fm_write_meta "$mate/state/worker-c.meta" "window=sess:fm-worker-c" "kind=ship"
+  printf 'needs-decision [key=legacy]: worker C local copy\n' > "$mate/state/worker-c.status"
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" worker-c --resolve-key legacy "answer C" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unprovenanced parent decision was guessed to belong to worker C"
+  [ ! -s "$log" ] || fail "the unprovenanced-key refusal still typed the answer"
+  assert_contains "$(cat "$err")" "without usable task provenance" \
+    "the unprovenanced parent decision did not fail loudly before send"
+  pass "parent channel: same-key decisions retain task ownership and conflicts refuse before send"
 }
 
 # ---------------------------------------------------------------------------
@@ -709,4 +765,5 @@ test_channel_requires_positive_usable_shape
 test_corrupt_identity_marker_refuses
 test_parent_evidence_without_identity_refuses
 test_long_key_metadata_survives_and_closes
+test_same_key_different_task_refuses_before_send
 test_reserved_namespace_is_not_propagated

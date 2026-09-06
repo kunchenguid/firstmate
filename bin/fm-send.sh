@@ -67,7 +67,7 @@
 # "resolved [key=<key>]: answered: <capped excerpt>" line to that status file,
 # so the captain-facing OPEN DECISIONS record closes at answer time and never
 # depends on the busy worker writing a matching resolved line. The close reaches
-# every LIVE COPY of the answered key, never only the first one found.
+# every live copy owned by the answered task, never only the first one found.
 #
 # For a crewmate, scout, or secondmate target that is this home's own direct
 # report, that copy is a local append in this home's state dir, because the
@@ -75,14 +75,15 @@
 # crosses the backend or remote transport.
 #
 # When THIS home is itself a secondmate, one more copy can be live. The mate
-# relays a worker's decision onto its parent escalation channel (the parent's own
-# state/<mate>.status, or the mirrored parent-replies.status on a remote route -
-# bin/fm-parent-channel-lib.sh owns the resolution), so the same key exists in two
-# logs that know nothing about each other. Answering the WORKER used to close only
-# the worker's copy, leaving the parent's fold showing an answered, already
-# executed decision as open forever - the one surface the captain reads to know
-# what still waits on them. So a key open in the parent channel is closed there
-# too, in the same confirmed-delivery step, with a serialized live-state append
+# relays a worker's decision with that worker's task provenance onto its parent
+# escalation channel (the parent's own state/<mate>.status, or the mirrored
+# parent-replies.status on a remote route - bin/fm-parent-channel-lib.sh owns the
+# resolution), so the same owned decision exists in two logs that know nothing
+# about each other. Answering the WORKER used to close only the worker's copy,
+# leaving the parent's fold showing an answered, already executed decision as
+# open forever - the one surface the captain reads to know what still waits on
+# them. So a key open in the parent channel for that worker is closed there too,
+# in the same confirmed-delivery step, with a serialized live-state append
 # (the parent's log is not this home's bookkeeping: the append must wake the
 # parent, and a replay must not stack duplicates). The invariant is that a decision closes
 # in the channel where it opened; when this home is a secondmate whose parent
@@ -501,6 +502,17 @@ if [ -n "$RESOLVE_KEYS" ]; then
         # thing that may open or close it. Leave that copy entirely alone rather
         # than propagating a foreign close into it.
         if ! fm_classify_decision_key_is_reserved "$k"; then
+          parent_task_rc=0
+          parent_open_task=$(fm_parent_channel_open_task "$RESOLVE_PARENT_CHANNEL" "$k") \
+            || parent_task_rc=$?
+          if [ "$parent_task_rc" -ne 0 ]; then
+            echo "error: --resolve-key '$k': the parent escalation channel has an open decision without usable task provenance; refusing to guess which task owns it, and nothing was sent." >&2
+            exit 1
+          fi
+          if [ "$parent_open_task" != "$RESOLVE_TASK_ID" ]; then
+            echo "error: --resolve-key '$k': the parent escalation channel assigns this key to task '$parent_open_task', not target task '$RESOLVE_TASK_ID'; conflicting same-key decisions must be resolved separately, and nothing was sent." >&2
+            exit 1
+          fi
           RESOLVE_PARENT_KEYS="${RESOLVE_PARENT_KEYS}${RESOLVE_PARENT_KEYS:+ }$k"
           resolve_key_owned=1
         fi
@@ -541,10 +553,10 @@ fm_send_close_resolved_keys() {  # <answer-text>
   # wake the parent because it is the parent's own log, not this home's
   # bookkeeping.
   for k in $RESOLVE_PARENT_KEYS; do
-    prefix="resolved [key=$k]: answered: "
+    prefix="resolved [key=$k] [task=$RESOLVE_TASK_ID]: answered: "
     fm_cap_prefixed_line_var "$prefix" "$note" || return 1
-    if ! fm_parent_channel_append transition "$RESOLVE_PARENT_CHANNEL" "$FM_LINE_CAP_LINE" close "$k"; then
-      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in the parent escalation channel $RESOLVE_PARENT_CHANNEL, where this home opened it. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_PARENT_CHANNEL - do not resend the answer." >&2
+    if ! fm_parent_channel_append transition "$RESOLVE_PARENT_CHANNEL" "$FM_LINE_CAP_LINE" close "$k" "" "$RESOLVE_TASK_ID"; then
+      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in the parent escalation channel $RESOLVE_PARENT_CHANNEL, where task '$RESOLVE_TASK_ID' opened it. Close it manually with: echo 'resolved [key=$k] [task=$RESOLVE_TASK_ID]: <how it was answered>' >> $RESOLVE_PARENT_CHANNEL - do not resend the answer." >&2
       return 1
     fi
   done

@@ -19,12 +19,13 @@
 # Usage:
 #   fm-secondmate-report.sh <status-file> <verb> <corr_id> <note...>
 #   fm-secondmate-report.sh --doc <status-file> <verb> <corr_id> <doc-path> <note...>
-#   fm-secondmate-report.sh --escalate <verb> [--key <slug>] <note...>
+#   fm-secondmate-report.sh --escalate <verb> [--key <slug>] [--task <id>] <note...>
 #
 # Examples:
 #   fm-secondmate-report.sh "$STATUS" done abcdef0123456789 "audit clean"
 #   fm-secondmate-report.sh --doc "$STATUS" done abcdef0123456789 data/x/report.md "see report"
 #   fm-secondmate-report.sh --escalate needs-decision --key money-risk "two findings look like real money leaving"
+#   fm-secondmate-report.sh --escalate needs-decision --key review --task wi812 "worker needs scope"
 #   fm-secondmate-report.sh --escalate resolved --key money-risk "captain scoped it to a separate scout"
 #
 # The status file must be the absolute parent route from the secondmate charter
@@ -52,7 +53,7 @@ usage() {
 Usage:
   fm-secondmate-report.sh <status-file> <verb> <corr_id> <note...>
   fm-secondmate-report.sh --doc <status-file> <verb> <corr_id> <doc-path> <note...>
-  fm-secondmate-report.sh --escalate <verb> [--key <slug>] <note...>
+  fm-secondmate-report.sh --escalate <verb> [--key <slug>] [--task <id>] <note...>
 EOF
   exit 2
 }
@@ -64,11 +65,24 @@ if [ "${1:-}" = "--escalate" ]; then
   VERB=$1
   shift
   KEY=
-  if [ "${1:-}" = "--key" ]; then
-    [ $# -ge 2 ] || usage
-    KEY=$2
-    shift 2
-  fi
+  ORIGIN_TASK=
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --key)
+        [ $# -ge 2 ] || usage
+        [ -z "$KEY" ] || { echo "error: --key may be supplied only once" >&2; exit 1; }
+        KEY=$2
+        shift 2
+        ;;
+      --task)
+        [ $# -ge 2 ] || usage
+        [ -z "$ORIGIN_TASK" ] || { echo "error: --task may be supplied only once" >&2; exit 1; }
+        ORIGIN_TASK=$2
+        shift 2
+        ;;
+      *) break ;;
+    esac
+  done
   # The paused and resolved spellings come from fm-classify-lib.sh's own
   # constants rather than being restated here, so this writer cannot drift from
   # the vocabulary the fold consumes.
@@ -89,6 +103,19 @@ if [ "${1:-}" = "--escalate" ]; then
       exit 1
       ;;
   esac
+  case "$ORIGIN_TASK" in
+    '') ;;
+    *[!A-Za-z0-9._-]*)
+      echo "error: --task '$ORIGIN_TASK' is not a valid task id (allowed: A-Z a-z 0-9 . _ -)" >&2
+      exit 1
+      ;;
+  esac
+  if [ -n "$ORIGIN_TASK" ]; then
+    case "$VERB" in
+      needs-decision|blocked|"$ESC_RESOLVE_VERB") ;;
+      *) echo "error: --task applies only to a decision, blocker, or resolution" >&2; exit 1 ;;
+    esac
+  fi
   NOTE=$*
   [ -n "$NOTE" ] || { echo "error: --escalate requires a note" >&2; exit 1; }
   FM_HOME=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}
@@ -114,20 +141,25 @@ if [ "${1:-}" = "--escalate" ]; then
       exit 1
       ;;
   esac
+  [ -n "$ORIGIN_TASK" ] || ORIGIN_TASK=$(fm_parent_channel_self_id "$FM_HOME") \
+    || { echo "error: cannot identify this secondmate as the escalation's origin task" >&2; exit 1; }
   NOTE=$(printf '%s' "$NOTE" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
-  if [ -n "$KEY" ]; then
-    LINE_PREFIX="$VERB [key=$KEY]: "
-  else
-    LINE_PREFIX="$VERB: "
-  fi
+  case "$VERB" in
+    needs-decision|blocked|"$ESC_RESOLVE_VERB")
+      LINE_PREFIX="$VERB${KEY:+ [key=$KEY]} [task=$ORIGIN_TASK]: "
+      ;;
+    *)
+      LINE_PREFIX="$VERB${KEY:+ [key=$KEY]}: "
+      ;;
+  esac
   fm_cap_prefixed_line_var "$LINE_PREFIX" "$NOTE" \
     || { echo "error: --key '$KEY' is too long to preserve in the parent escalation channel" >&2; exit 1; }
   case "$VERB" in
     needs-decision|blocked)
-      fm_parent_channel_append transition "$CHANNEL" "$FM_LINE_CAP_LINE" open "${KEY:-default}"
+      fm_parent_channel_append transition "$CHANNEL" "$FM_LINE_CAP_LINE" open "${KEY:-default}" "" "$ORIGIN_TASK"
       ;;
     "$ESC_RESOLVE_VERB")
-      fm_parent_channel_append transition "$CHANNEL" "$FM_LINE_CAP_LINE" close "${KEY:-default}"
+      fm_parent_channel_append transition "$CHANNEL" "$FM_LINE_CAP_LINE" close "${KEY:-default}" "" "$ORIGIN_TASK"
       ;;
     *)
       fm_parent_channel_append event "$CHANNEL" "$FM_LINE_CAP_LINE"

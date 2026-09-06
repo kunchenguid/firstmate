@@ -391,10 +391,33 @@ test_config_remote_preserves_guards() {
   pass "T14 fast-forward guards are preserved when the source is the fork"
 }
 
+test_config_remote_internal_whitespace_falls_back_to_origin() {
+  local w out
+  w=$(new_world t15)
+  add_fork "$w"
+  git -C "$w/main" remote rename origin upstream
+  git -C "$w/main" remote rename fork origin
+  git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+  bump_origin "$w" instr
+  mkdir -p "$w/main/config"
+  printf '  up stream  \n' > "$w/main/config/update-remote"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: already current" \
+    "an unsafe configured token should retain the documented origin fallback"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
+    || fail "internal whitespace was collapsed into the unrelated upstream remote"
+  [ "$(git -C "$w/main" rev-parse HEAD)" != "$(git -C "$w/origin.git" rev-parse main)" ] \
+    || fail "the unsafe token selected upstream instead of falling back to origin"
+  pass "T15 internal remote-token whitespace is rejected without changing identity"
+}
+
 test_updates_main_and_secondmate
 test_config_remote_redirects_to_fork
 test_config_remote_missing_skipped
 test_config_remote_preserves_guards
+test_config_remote_internal_whitespace_falls_back_to_origin
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
