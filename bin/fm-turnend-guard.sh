@@ -72,6 +72,17 @@
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
 #      fail-open only for an already verified failure episode.
+#
+# Stow nudge, --claude mode only: every Stop this guard would otherwise ALLOW
+# after its scope check first asks bin/fm-stow-mark.sh check, with the Stop
+# payload's transcript_path and session_id, whether the primary's /stow memory
+# pass is due. A due pass becomes one exit-2 continuation carrying the nudge
+# text on stderr - the same route a watcher wake takes - and that script's own
+# once-per-cycle marker keeps it from repeating until the next completed pass.
+# The supervision verdict above is never displaced: a block still blocks, the
+# terminal attended alarm keeps its exit 0, and every other harness mode stays
+# a documented no-op because only Claude's payload carries the transcript
+# (docs/turnend-guard.md "Stow nudge").
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -168,16 +179,37 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
+# The ordinary allow. In --claude mode it first offers the Stop to the stow
+# nudge (header above): bin/fm-stow-mark.sh check owns the record, the
+# measure, the lock-owning-primary gate, and the once-per-cycle marker, and
+# answers exit 3 with the nudge text exactly when a pass is due. Anything else
+# - no transcript in the payload, not due, already delivered, not the
+# lock-owning primary, or the helper itself failing - allows silently.
+allow_stop() {
+  local transcript session nudge status
+  [ "$CLAUDE_MODE" -eq 1 ] || exit 0
+  transcript=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // empty' 2>/dev/null) || exit 0
+  [ -n "$transcript" ] || exit 0
+  session=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null) || session=
+  set -- --transcript "$transcript"
+  [ -z "$session" ] || set -- "$@" --session "$session"
+  nudge=$("$SCRIPT_DIR/fm-stow-mark.sh" check "$@" 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] && [ -n "$nudge" ] || exit 0
+  printf '%s\n' "$nudge" >&2
+  exit 2
+}
+
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
-  exit 0
+  allow_stop
 fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
-  fm_failure_episode_reset "$STATE" && exit 0
+  fm_failure_episode_reset "$STATE" && allow_stop
   exit 2
 }
 
@@ -427,7 +459,7 @@ while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
       fm_failure_episode_reset "$STATE" || exit 2
     fi
-    exit 0
+    allow_stop
   fi
   sleep 0.1
   i=$((i + 1))
@@ -436,7 +468,7 @@ if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     fm_failure_episode_reset "$STATE" || exit 2
   fi
-  exit 0
+  allow_stop
 fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
@@ -455,5 +487,5 @@ if [ "$terminal_status" -eq 0 ]; then
   printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
   exit 0
 fi
-[ "$terminal_status" -eq 2 ] && exit 0
+[ "$terminal_status" -eq 2 ] && allow_stop
 block_stop

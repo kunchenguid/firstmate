@@ -9,6 +9,7 @@
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
+#                 "STOW_NUDGE: invalid config/stow-nudge - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
@@ -1466,7 +1467,26 @@ detect_local_config() {
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
+  detect_stow_mark
   detect_home_summary_publication
+}
+
+# The last-/stow record, read through its owner (bin/fm-stow-mark.sh summary).
+# A pass older than the stow-nudge horizon is printed on every session start
+# because the nudge itself counts from the new session's first turn end, so this
+# line is the captain's only startup view of an overdue pass; a recent pass or
+# no pass at all is a routine fact and stays verbose-only. A malformed
+# config/stow-nudge is actionable: it disables the nudge until corrected.
+detect_stow_mark() {
+  local line status
+  line=$("$SCRIPT_DIR/fm-stow-mark.sh" summary 2>/dev/null)
+  status=$?
+  [ -n "$line" ] || return 0
+  case "$status" in
+    1) echo "STOW_NUDGE: invalid config/stow-nudge - $line" ;;
+    3) echo "BOOTSTRAP_INFO: $line" ;;
+    0) [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: $line" ;;
+  esac
 }
 
 # This home's ledger publication is deliberately best-effort: every lifecycle

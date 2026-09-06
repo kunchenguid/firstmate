@@ -372,6 +372,7 @@ It is deliberately not a reconciliation of durable records against repository or
 Task-scoped notes use `tasks-axi show <id> --full` followed by `tasks-axi update <id> --body-file <path>`, adding `--archive-body` when the prior body should remain recoverable.
 The stow pass never writes a skill, but a separately executed, captain-approved migration may move conditional knowledge into a user-owned local skill excluded from the Firstmate clone; changes to Firstmate's tracked skills remain deliberate repository work through the normal PR pipeline.
 Invoked in a primary home, `/stow` then cascades the same sweep to every registered secondmate, enumerated through `bin/fm-stow-cascade.sh`: each home is accounted and curated against its own startup-memory allowance, a live secondmate sweeps its own session, and a slow or unreachable home is reported as an exception rather than blocking the primary.
+A Claude primary is also nudged automatically, once per stow cycle, to run the pass before its context compacts; [`turnend-guard.md`](turnend-guard.md#stow-nudge) owns that mechanism and [`configuration.md`](configuration.md#stow-nudge-configstow-nudge) its thresholds.
 
 ## Local clones stay fresh
 
