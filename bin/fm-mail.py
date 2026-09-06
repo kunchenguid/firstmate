@@ -376,13 +376,16 @@ def cmd_poll_list():
                 new_emitted += 1
         # Emit the mailbox generation guard first, then each message row
         # (uid, date, from, subject, status) so the bash layer diffs against
-        # the cursor and the retry set. The retry cursor is advanced before
-        # emission so a failed write can never leave rows emitted by a poll
-        # that then fails.
-        save_retry_pos(retry_pos_path, len(retry_order), window, retry_pos)
+        # the cursor and the retry set. The rows must be printed BEFORE the
+        # retry-scan position is persisted: an interruption between emission
+        # and the position write must never advance the cursor over rows that
+        # never reached the bash wake layer. A failed position write still
+        # fails the poll loudly, so the same bounded window is re-scanned on
+        # the next poll rather than silently restarting from the old head.
         print('uidvalidity\t%s' % uidv)
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
+        save_retry_pos(retry_pos_path, len(retry_order), window, retry_pos)
         try:
             m.logout()
         except Exception:
