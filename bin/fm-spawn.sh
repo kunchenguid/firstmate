@@ -2165,8 +2165,12 @@ spawn_worktree_isolated() {  # <path>
     return 1
   fi
   SPAWN_WT_TOP=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)
+  # A path in no repository leaves the toplevel empty, and that empty value must
+  # never reach `cd`: bash before 5.3 accepts `cd ""` as a successful no-op, so
+  # it would resolve to fm-spawn's OWN cwd and report the path as a subdirectory
+  # of whatever checkout firstmate happens to be running from.
   wt_top_real=
-  if ! wt_top_real=$(cd "$SPAWN_WT_TOP" 2>/dev/null && pwd -P); then
+  if [ -n "$SPAWN_WT_TOP" ] && ! wt_top_real=$(cd "$SPAWN_WT_TOP" 2>/dev/null && pwd -P); then
     wt_top_real=
   fi
   if [ -z "$wt_top_real" ]; then
