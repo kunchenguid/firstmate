@@ -1082,6 +1082,88 @@ PYEOF
   pass "fm-mail: the retry-scan cursor advances past persistent failures"
 }
 
+test_poll_retry_emission_precedes_position_save() {
+  # The durable retry-scan position must be persisted only AFTER the buffered
+  # rows are printed. If the position write fails (or the process is killed
+  # between emission and the write), the rows have already reached the bash
+  # wake layer and the same bounded window is re-scanned next poll instead of
+  # being silently skipped until the scan wraps.
+  local harness out rc=0 pos
+  harness="$TMP_ROOT/retry-pos-order-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_RETRY_POS': sys.argv[3],
+    'FM_MAIL_POLL_MAX_WAKES': '1',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'81 82'])
+        if cmd == 'fetch':
+            # 81 is still failing; 82 has just recovered real metadata.
+            if args[0] == b'81':
+                return ('NO', None)
+            return ('OK', [(b'', b'Subject: recovered\r\nFrom: bob@x.com\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[4])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+if len(sys.argv) > 5 and sys.argv[5] == 'failpos':
+    def failing_save(*a, **k):
+        raise OSError('simulated position write failure')
+    mod.save_retry_pos = failing_save
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  # Both uids are already cursor-recorded from prior degraded wakes; 81 is
+  # still unfetchable, 82 has recovered. cap=1 emits only the recovered row.
+  {
+    printf 'uidvalidity=90009\n'
+    printf '81\n82\n'
+  } > "$HOME_DIR/state/.mail-seen"
+  printf '81\n82\n' > "$HOME_DIR/state/.mail-retry"
+  : > "$HOME_DIR/state/.mail-retry-pos"
+
+  # Simulate an interruption after emission but before the position is saved:
+  # the recovered row must still be emitted, the poll must fail closed, and
+  # the position must not advance.
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" failpos 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll must fail closed when the position write fails"
+  assert_contains "$out" $'82\t\tbob@x.com\trecovered\tretry' \
+    "row is emitted before the failing position write"
+  pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "" "$pos" "position must not advance when the write fails"
+
+  # A subsequent successful poll re-emits the same recovered row and advances
+  # the position, proving the recovered metadata was never lost or delayed.
+  rc=0
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  expect_code 0 "$rc" "retry poll must succeed once the position write is restored"
+  assert_contains "$out" $'82\t\tbob@x.com\trecovered\tretry' \
+    "recovered row surfaces once the position write succeeds"
+  pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "1" "$pos" "position advances by the window after emission and save"
+  pass "fm-mail: retry-scan position is saved only after rows are emitted"
+}
+
 test_poll_skips_unfetchable_uid_but_keeps_progress() {
   local harness out rc=0
   harness="$TMP_ROOT/poll-window-harness.py"
@@ -1637,6 +1719,7 @@ test_poll_bounded_fetch_progresses_large_backlog
 test_poll_skips_unfetchable_uid_but_keeps_progress
 test_poll_retries_transient_fetch_and_surfaces_real_metadata
 test_poll_retry_cursor_advances_past_failures
+test_poll_retry_emission_precedes_position_save
 test_poll_retry_surfaces_under_new_mail_flood
 test_poll_resurfaces_degraded_uid_whose_wake_never_recorded
 test_poll_cap_one_never_suppresses_new_mail
