@@ -222,10 +222,11 @@ test_supported_backend_endpoint_records_validate() {
 
   id=orca-task
   fm_write_meta "$dir/home/state/$id.meta" \
-    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
-    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=worktree-9"
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term_6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b::$dir/worktree"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Orca endpoint refused"
-  [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] || fail "Orca validation did not select its terminal"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = term_6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b ] || fail "Orca validation did not select its terminal"
 
   id=cmux-task
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -241,6 +242,53 @@ test_supported_backend_endpoint_records_validate() {
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
   pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
+}
+
+test_orca_composite_worktree_id_shapes() {
+  local dir id=orca-shape bad
+  dir=$(make_case orca-composite-shapes)
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+
+  write_orca_meta() {  # <worktree-id>
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=fm-$id" "endpoint_task_id=$id" "terminal=term_9b1d" \
+      "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+      "orca_worktree_id=$1"
+  }
+
+  write_orca_meta "6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b::$dir/worktree"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "composite Orca worktree id (uuid::absolute-path) refused"
+
+  write_orca_meta "6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b::/path/with spaces/worktree"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "composite Orca worktree id with a spaced path refused"
+
+  write_orca_meta "6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b::/Users/O'Brien/worktree"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "composite Orca worktree id with an apostrophe in the path refused"
+
+  write_orca_meta "6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b::/Users/café/wörktree"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "composite Orca worktree id with a unicode path refused"
+
+  # shellcheck disable=SC2016 # The injection shapes must stay unexpanded literals.
+  for bad in \
+    "worktree-9" \
+    "::$dir/worktree" \
+    "6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b::" \
+    "6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b::relative/worktree" \
+    "6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b::/tmp/x;rm -rf /" \
+    '6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b::/tmp/$(evil)' \
+    '6f0b2c1e-9a4d-4f7e-8b2a-1c3d5e7f9a0b::/tmp/`evil`' \
+    "bad:uuid::$dir/worktree"; do
+    write_orca_meta "$bad"
+    if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+      fail "malformed Orca worktree id accepted: $bad"
+    fi
+  done
+  pass "cleanup identity: Orca composite worktree ids require uuid::absolute-path and refuse injection shapes"
 }
 
 test_tmux_empty_target_refuses_without_invocation() {
@@ -369,6 +417,7 @@ test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
+test_orca_composite_worktree_id_shapes
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup
