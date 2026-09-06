@@ -147,7 +147,35 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# A task record owns its pooled worktree until teardown or recovery removes the
+# record, even when the task endpoint is dead.
+test_recorded_worktree_claim_refuses_reuse() {
+  local rec id claimant out status
+  id=settle-colliding-claim-z3
+  claimant=dead-owner-z0
+  rec=$(make_settle_case settle-colliding-claim "$id" 0)
+  read_settle_record "$rec"
+  printf '%s\n' "window=fm-$claimant" "worktree=$WT_DIR" 'kind=ship' \
+    > "$HOME_DIR/state/$claimant.meta"
+
+  set +e
+  out=$(run_settle_spawn "$id")
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "spawn silently reused a pooled worktree claimed by $claimant"
+  assert_contains "$out" "claimed by task $claimant" \
+    "collision refusal did not identify the task that owns the worktree"
+  assert_contains "$out" "teardown or recovery" \
+    "collision refusal did not name the supported claim-release path"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "refused spawn published a second task record for the claimed worktree"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$claimant.meta" \
+    "collision refusal altered the existing owner's task record"
+  pass "a pooled worktree claimed by another task record is refused"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_recorded_worktree_claim_refuses_reuse
 
 echo "# all fm-spawn-worktree-settle tests passed"
