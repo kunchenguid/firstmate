@@ -807,6 +807,403 @@ test_away_idle_scan_buffers_capacity_held() {
   pass "away scan: an idle home with a capacity-only hold and free slots buffers the held-on-capacity line"
 }
 
+# --- lane floor -------------------------------------------------------------
+# The captain's floor on running lanes (config/lane-floor) and the broader
+# dispatchable-work read behind it. These pin the two halves the idle-capacity
+# block above cannot see: work held for a reason other than the captain, and
+# openspec Changes carrying unticked boxes in a registered project clone.
+
+# A registered project clone with one openspec Change. Echoes nothing; the
+# Change's tasks.md gets <open> unticked and one ticked box.
+make_change() {  # <home> <project> <change> <open-boxes>
+  local home=$1 project=$2 change=$3 open=$4 dir i
+  dir="$home/projects/$project/openspec/changes/$change"
+  mkdir -p "$dir"
+  {
+    printf '# Tasks\n\n## 1. Work\n\n'
+    printf -- '- [x] 1.0 already landed\n'
+    i=1
+    while [ "$i" -le "$open" ]; do
+      printf -- '- [ ] 1.%s still open\n' "$i"
+      i=$((i + 1))
+    done
+  } > "$dir/tasks.md"
+  grep -q "repository: $home/projects/$project" "$home/data/projects.md" 2>/dev/null \
+    || register_project "$home" "$project" "$home/projects/$project"
+}
+
+lane_floor_report() {  # <home>
+  local home=$1
+  PATH="$home/fakebin:$PATH" bash -c '
+    . "$1/bin/fm-supervision-lib.sh"
+    fm_lane_floor_report "$2/state" "$2/data" "$2" "$2/config"' _ "$ROOT" "$home"
+}
+
+# The same call with tasks-axi removed from PATH entirely, so the backlog read
+# genuinely fails rather than being stubbed out.
+lane_floor_report_without_tasks_axi() {  # <home>
+  local home=$1
+  PATH="$home/fakebin:/usr/bin:/bin" bash -c '
+    . "$1/bin/fm-supervision-lib.sh"
+    fm_lane_floor_report "$2/state" "$2/data" "$2" "$2/config"' _ "$ROOT" "$home"
+}
+
+# Proves the breach line appears from work the idle-capacity block cannot see,
+# and that a captain-kind hold is the one thing it refuses to count.
+test_lane_floor_counts_non_captain_work_only() {
+  local home out
+  home=$(make_home lane-floor-counts 3)
+  make_change "$home" proj alpha 2
+  add_hold "$home" captain-call "waiting on the captain to choose a vendor"
+  add_load_hold "$home" cap-held
+  : > "$home/state/live-1.meta"
+  out=$(lane_floor_report "$home")
+  case "$out" in
+    *"LANE FLOOR: live=1 floor=10 dispatchable=2"*) ;;
+    *) fail "expected the counted LANE FLOOR header, got: $out" ;;
+  esac
+  case "$out" in
+    *"openspec proj:alpha:2"*) ;;
+    *) fail "an openspec Change with open boxes must be listed, got: $out" ;;
+  esac
+  case "$out" in
+    *"backlog cap-held"*) ;;
+    *) fail "a hold whose kind is not captain is firstmate's own to dispatch, got: $out" ;;
+  esac
+  case "$out" in
+    *captain-call*) fail "a captain-kind hold must never be counted as dispatchable: $out" ;;
+  esac
+  pass "lane floor: the breach counts openspec Changes and non-captain holds, never a captain hold"
+}
+
+# The floor is the whole condition: identical work, enough lanes, no line.
+test_lane_floor_silent_at_the_floor() {
+  local home out
+  home=$(make_home lane-floor-met 3)
+  make_change "$home" proj alpha 2
+  : > "$home/state/live-1.meta"
+  printf '1\n' > "$home/config/lane-floor"
+  out=$(lane_floor_report "$home")
+  [ -z "$out" ] \
+    || fail "a home at its floor must print nothing even with dispatchable work, got: $out"
+  pass "lane floor: a home at its floor is silent with the same dispatchable work"
+}
+
+test_lane_floor_malformed_value_falls_back_to_default() {
+  local home out
+  home=$(make_home lane-floor-malformed 3)
+  make_change "$home" proj alpha 1
+  printf 'ten\n' > "$home/config/lane-floor"
+  out=$(lane_floor_report "$home")
+  case "$out" in
+    *"floor=10"*) ;;
+    *) fail "a non-numeric floor must read as unconfigured (10), never as zero, got: $out" ;;
+  esac
+  pass "lane floor: a malformed floor reads as the default, so a typo cannot disable enforcement"
+}
+
+# A Change a live worker is already implementing is not idle capacity.
+test_lane_floor_excludes_a_change_a_live_brief_names() {
+  local home out
+  home=$(make_home lane-floor-brief 3)
+  make_change "$home" proj alpha 2
+  make_change "$home" proj beta 1
+  : > "$home/state/live-1.meta"
+  mkdir -p "$home/data/live-1"
+  printf 'Complete the alpha Change under projects/proj.\n' > "$home/data/live-1/brief.md"
+  out=$(lane_floor_report "$home")
+  case "$out" in
+    *"openspec proj:beta:1"*) ;;
+    *) fail "an unclaimed Change must still be listed, got: $out" ;;
+  esac
+  case "$out" in
+    *"proj:alpha"*) fail "a Change named by a live worker's instructions is not idle capacity: $out" ;;
+  esac
+  pass "lane floor: a Change a live worker's instructions name is excluded, an unclaimed sibling is not"
+}
+
+test_lane_floor_excludes_archived_changes() {
+  local home out
+  home=$(make_home lane-floor-archive 3)
+  make_change "$home" proj alpha 1
+  mkdir -p "$home/projects/proj/openspec/changes/archive/old"
+  printf -- '- [ ] 9.1 never dispatched again\n' \
+    > "$home/projects/proj/openspec/changes/archive/old/tasks.md"
+  out=$(lane_floor_report "$home")
+  case "$out" in
+    *"dispatchable=1"*) ;;
+    *) fail "archived Changes must not be counted, got: $out" ;;
+  esac
+  case "$out" in
+    *archive*|*old*) fail "an archived Change must never be listed: $out" ;;
+  esac
+  pass "lane floor: openspec/changes/archive is landed history and is never dispatchable"
+}
+
+# A lane declaring a bounded external wait is not a lane the floor can count.
+test_lane_floor_does_not_count_a_paused_lane() {
+  local home out
+  home=$(make_home lane-floor-paused 3)
+  make_change "$home" proj alpha 1
+  : > "$home/state/live-1.meta"
+  : > "$home/state/live-2.meta"
+  printf 'working: started\npaused: waiting on an upstream release\n' \
+    > "$home/state/live-2.status"
+  printf 'working: still going\n' > "$home/state/live-1.status"
+  out=$(lane_floor_report "$home")
+  case "$out" in
+    *"live=1 "*) ;;
+    *) fail "a lane whose newest event declares an external wait must not count as live, got: $out" ;;
+  esac
+  pass "lane floor: a paused lane is excluded from the live count"
+}
+
+# An unreadable backlog contributes no work rather than manufacturing a breach,
+# and does not take the rest of the read down with it. Both halves are asserted
+# against the same home: with the tool gone the ready item it holds vanishes
+# from the count, while the openspec Change beside it is still reported.
+test_lane_floor_fails_soft_without_tasks_axi() {
+  local home out
+  home=$(make_home lane-floor-no-tool 3)
+  add_ready "$home" would-be-dispatchable
+  out=$(lane_floor_report_without_tasks_axi "$home")
+  [ -z "$out" ] \
+    || fail "a backlog that could not be read must never assert a breach, got: $out"
+  make_change "$home" proj alpha 2
+  out=$(lane_floor_report_without_tasks_axi "$home")
+  case "$out" in
+    *"LANE FLOOR: live=0 floor=10 dispatchable=1"*) ;;
+    *) fail "a failed backlog read must not suppress the work that WAS read, got: $out" ;;
+  esac
+  case "$out" in
+    *"openspec proj:alpha:2"*) ;;
+    *) fail "the openspec Change must still be listed, got: $out" ;;
+  esac
+  case "$out" in
+    *would-be-dispatchable*) fail "an unread backlog item must never be counted: $out" ;;
+  esac
+  pass "lane floor: an unreadable backlog contributes nothing and suppresses nothing"
+}
+
+# A home at its concurrency cap cannot spawn another worker, so there is no
+# breach to enforce: blocking one would nag for a dispatch the session has no
+# way to perform.
+test_lane_floor_silent_at_the_concurrency_cap() {
+  local home out
+  home=$(make_home lane-floor-at-cap 3)
+  make_change "$home" proj alpha 2
+  : > "$home/state/live-1.meta"
+  : > "$home/state/live-2.meta"
+  printf '5\n' > "$home/config/lane-floor"
+  out=$(lane_floor_report "$home")
+  case "$out" in
+    *"LANE FLOOR: live=2 floor=5"*) ;;
+    *) fail "under the cap the breach must still report, got: $out" ;;
+  esac
+  printf '2\n' > "$home/config/concurrency-cap"
+  out=$(lane_floor_report "$home")
+  [ -z "$out" ] \
+    || fail "a home at its concurrency cap has nothing to dispatch into, got: $out"
+  pass "lane floor: the concurrency cap bounds the floor, so it never demands an impossible dispatch"
+}
+
+# A paused lane still holds its worktree slot, so it counts against the cap even
+# though it does not count as a live lane.
+test_lane_floor_cap_counts_a_paused_lane() {
+  local home out
+  home=$(make_home lane-floor-cap-paused 3)
+  make_change "$home" proj alpha 2
+  : > "$home/state/live-1.meta"
+  : > "$home/state/live-2.meta"
+  printf 'paused: waiting on an upstream release\n' > "$home/state/live-2.status"
+  printf '2\n' > "$home/config/concurrency-cap"
+  out=$(lane_floor_report "$home")
+  [ -z "$out" ] \
+    || fail "a paused lane still occupies its slot and must count against the cap, got: $out"
+  pass "lane floor: a paused lane is not a live lane but still holds its slot against the cap"
+}
+
+# The floor governs the fleet, not one home: a secondmate that inherits nothing
+# would keep its own lanes idle under a floor the captain set once.
+test_lane_floor_is_inherited_by_secondmate_homes() {
+  # shellcheck source=bin/fm-config-inherit-lib.sh
+  . "$ROOT/bin/fm-config-inherit-lib.sh"
+  case " $FM_INHERITABLE_CONFIG " in
+    *" lane-floor "*) ;;
+    *) fail "config/lane-floor must be in FM_INHERITABLE_CONFIG so one floor governs the fleet" ;;
+  esac
+  pass "lane floor: the floor is inherited into secondmate homes with the rest of local config"
+}
+
+# --- lane floor at the wake drain -------------------------------------------
+# The drain is where firstmate looks at the fleet, so the breach must reach it
+# on EVERY drain - including the empty-queue path, where an idle home with a
+# full queue is exactly the state that used to go unreported.
+
+drain() {  # <home>
+  FM_HOME="$1" PATH="$1/fakebin:$PATH" "$ROOT/bin/fm-wake-drain.sh" 2>&1
+}
+
+test_drain_prints_lane_floor_with_an_empty_queue() {
+  local home out
+  home=$(make_home drain-lane-floor 3)
+  make_change "$home" proj alpha 2
+  out=$(drain "$home") || fail "the drain failed on an empty queue: $out"
+  case "$out" in
+    *"LANE FLOOR: live=0 floor=10 dispatchable=1"*) ;;
+    *) fail "an empty-queue drain must still report the lane-floor breach, got: $out" ;;
+  esac
+  case "$out" in
+    *"openspec proj:alpha:2"*) ;;
+    *) fail "the drain must list the dispatchable work, got: $out" ;;
+  esac
+  pass "lane floor: the wake drain reports the breach even when the queue is empty"
+}
+
+# No once-per-tuple dedupe: an unchanged breach must nag on every drain, unlike
+# the idle-capacity escalation beside it.
+test_drain_repeats_the_lane_floor_while_it_holds() {
+  local home first second
+  home=$(make_home drain-lane-floor-repeat 3)
+  make_change "$home" proj alpha 2
+  first=$(drain "$home")
+  second=$(drain "$home")
+  case "$first" in *"LANE FLOOR:"*) ;; *) fail "the first drain must report, got: $first" ;; esac
+  case "$second" in
+    *"LANE FLOOR:"*) ;;
+    *) fail "an unchanged breach must nag on every drain, not once: $second" ;;
+  esac
+  pass "lane floor: an unchanged breach is reported on every drain, never deduped away"
+}
+
+test_drain_silent_when_the_floor_is_met() {
+  local home out
+  home=$(make_home drain-lane-floor-met 3)
+  make_change "$home" proj alpha 2
+  printf '0\n' > "$home/config/lane-floor"
+  out=$(drain "$home")
+  case "$out" in
+    *"LANE FLOOR"*) fail "a home at its floor must add nothing to the drain: $out" ;;
+  esac
+  pass "lane floor: the drain says nothing about a fleet that is already at its floor"
+}
+
+# --- lane floor at the turn end ---------------------------------------------
+
+# The Stop-hook payload the guard reads, with the session id these cases key
+# their block budget on.
+guard_stop() {  # <home> <session-id> [--claude]
+  local home=$1 session=$2; shift 2
+  printf '{"stop_hook_active":false,"session_id":"%s"}' "$session" |
+    PATH="$home/fakebin:$PATH" FM_HOME="$home" "$home/bin/fm-turnend-guard.sh" "$@" 2>&1
+}
+
+test_guard_blocks_a_turn_that_would_end_below_the_floor() {
+  local home out rc
+  home=$(make_home guard-lane-floor 3)
+  install_guard_home "$home"
+  make_change "$home" proj alpha 2
+  set +e
+  out=$(guard_stop "$home" lf-1 --claude)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] \
+    || fail "an idle home with dispatchable work must block the turn (rc=$rc): $out"
+  case "$out" in
+    *"TURN WOULD END IDLE - LANES ARE BELOW THE FLOOR"*) ;;
+    *) fail "the block must name the lane floor as the reason, got: $out" ;;
+  esac
+  case "$out" in
+    *"●  LANE FLOOR: live=0 floor=10 dispatchable=1"*) ;;
+    *) fail "the block must carry the counted LANE FLOOR line in banner style, got: $out" ;;
+  esac
+  pass "lane floor: a Claude turn that would end below the floor is blocked"
+}
+
+test_guard_lane_floor_is_claude_only() {
+  local home out rc
+  home=$(make_home guard-lane-floor-default 3)
+  install_guard_home "$home"
+  make_change "$home" proj alpha 2
+  set +e
+  out=$(guard_stop "$home" lf-2)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "the passive adapters must not be given a lane-floor block (rc=$rc): $out"
+  case "$out" in
+    *"LANES ARE BELOW THE FLOOR"*) fail "lane floor must not fire outside --claude: $out" ;;
+  esac
+  pass "lane floor: the turn-end block is Claude-only, because exit 2 means something else elsewhere"
+}
+
+# The fail-safe half: a check that cannot complete allows the stop.
+test_guard_lane_floor_check_error_does_not_block() {
+  local home out rc
+  home=$(make_home guard-lane-floor-error 3)
+  install_guard_home "$home"
+  add_ready "$home" would-be-dispatchable
+  set +e
+  out=$(printf '{"stop_hook_active":false,"session_id":"lf-3"}' |
+    PATH="$home/fakebin:/usr/bin:/bin" FM_HOME="$home" \
+    "$home/bin/fm-turnend-guard.sh" --claude 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "a lane-floor check that could not read the backlog must allow the stop (rc=$rc): $out"
+  case "$out" in
+    *"LANES ARE BELOW THE FLOOR"*) fail "an unreadable backlog must never block a turn: $out" ;;
+  esac
+  pass "lane floor: a failed check allows the stop; only a positively read breach blocks"
+}
+
+# Unbounded blocking would wedge the session instead of enforcing anything.
+test_guard_lane_floor_block_budget_is_bounded() {
+  local home out rc i blocked=0
+  home=$(make_home guard-lane-floor-budget 3)
+  install_guard_home "$home"
+  make_change "$home" proj alpha 2
+  i=1
+  while [ "$i" -le 4 ]; do
+    set +e
+    out=$(guard_stop "$home" lf-budget --claude)
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] && blocked=$((blocked + 1))
+    i=$((i + 1))
+  done
+  [ "$blocked" -eq 3 ] \
+    || fail "consecutive lane-floor blocks must stop at the budget of 3, got $blocked: $out"
+  pass "lane floor: consecutive turn-end blocks are bounded, so a session is nagged and never wedged"
+}
+
+# A breach that clears must return the session's full budget, or a home that
+# dispatched correctly and later fell back below the floor gets no enforcement.
+test_guard_lane_floor_budget_resets_when_the_breach_clears() {
+  local home out rc
+  home=$(make_home guard-lane-floor-reset 3)
+  install_guard_home "$home"
+  make_change "$home" proj alpha 2
+  set +e
+  guard_stop "$home" lf-reset --claude >/dev/null
+  guard_stop "$home" lf-reset --claude >/dev/null
+  guard_stop "$home" lf-reset --claude >/dev/null
+  set -e
+  # The captain raises enough lanes to clear it, then the fleet drains again.
+  printf '0\n' > "$home/config/lane-floor"
+  set +e
+  guard_stop "$home" lf-reset --claude >/dev/null
+  set -e
+  rm -f "$home/config/lane-floor"
+  set +e
+  out=$(guard_stop "$home" lf-reset --claude)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] \
+    || fail "a cleared breach must return the full budget to the next one (rc=$rc): $out"
+  pass "lane floor: clearing the breach resets the block budget for the next one"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_report_counts_and_disposition
@@ -849,3 +1246,21 @@ test_away_live_scan_buffers_idle_capacity
 test_away_idle_scan_buffers_idle_capacity
 test_away_scan_escalates_idle_capacity_once_per_unchanged_tuple
 test_away_idle_scan_buffers_capacity_held
+test_lane_floor_counts_non_captain_work_only
+test_lane_floor_silent_at_the_floor
+test_lane_floor_malformed_value_falls_back_to_default
+test_lane_floor_excludes_a_change_a_live_brief_names
+test_lane_floor_excludes_archived_changes
+test_lane_floor_does_not_count_a_paused_lane
+test_lane_floor_fails_soft_without_tasks_axi
+test_lane_floor_silent_at_the_concurrency_cap
+test_lane_floor_cap_counts_a_paused_lane
+test_lane_floor_is_inherited_by_secondmate_homes
+test_drain_prints_lane_floor_with_an_empty_queue
+test_drain_repeats_the_lane_floor_while_it_holds
+test_drain_silent_when_the_floor_is_met
+test_guard_blocks_a_turn_that_would_end_below_the_floor
+test_guard_lane_floor_is_claude_only
+test_guard_lane_floor_check_error_does_not_block
+test_guard_lane_floor_block_budget_is_bounded
+test_guard_lane_floor_budget_resets_when_the_breach_clears

@@ -38,6 +38,11 @@
 # how many workers this home runs at once regardless of any project's free
 # slots; at or over the cap, FM_IDLE_AT_CAP is true and the report has no idle
 # work to propose dispatching right now.
+# LANE FLOOR. config/lane-floor (a bare integer, default 10) is the captain's
+# standing floor on how many lanes this home keeps running while work exists.
+# fm_lane_floor_report renders its breach and fm_dispatchable_work enumerates
+# the work behind it; see the LANE FLOOR section below for why that enumeration
+# is deliberately broader than the idle-capacity read above.
 # state/.dispatch-freeze is the captain's own silencing record. Line 1 is the
 # reason, line 2 a YYYY-MM-DD date it stops applying on. Only a captain
 # instruction creates it; no script writes it. While it applies, the block
@@ -203,6 +208,20 @@ fm_idle_project_root() {  # <data-dir> <root> <project-label>
   printf '%s\n' "$hit"
 }
 
+# The ceiling on concurrent workers in this home, or the default when the file
+# is absent, unreadable, or not a bare integer. The one owner of that read:
+# both the idle-capacity block and the lane floor below weigh work against it.
+FM_CONCURRENCY_CAP_DEFAULT=13
+fm_concurrency_cap_value() {  # [config-dir]
+  local config=${1:-} cap=$FM_CONCURRENCY_CAP_DEFAULT
+  if [ -n "$config" ] && [ -f "$config/concurrency-cap" ]; then
+    IFS= read -r cap < "$config/concurrency-cap" 2>/dev/null || cap=$FM_CONCURRENCY_CAP_DEFAULT
+    cap=${cap%$'\r'}
+    case "$cap" in ''|*[!0-9]*) cap=$FM_CONCURRENCY_CAP_DEFAULT ;; esac
+  fi
+  printf '%s\n' "$cap"
+}
+
 # Populate the idle-capacity fields for one home. Never prints, never writes.
 #   FM_IDLE_READY   ready (dispatchable now) item count, across every project
 #   FM_IDLE_HELD    held item count
@@ -293,11 +312,7 @@ fm_idle_capacity_compute() {  # <state-dir> [data-dir] [root] [config-dir]
 
   FM_IDLE_FREEZE=$(fm_idle_freeze_line "$state") || FM_IDLE_FREEZE=''
 
-  cap=13
-  if [ -f "$config/concurrency-cap" ]; then
-    IFS= read -r cap < "$config/concurrency-cap" 2>/dev/null || cap=13
-    case "$cap" in ''|*[!0-9]*) cap=13 ;; esac
-  fi
+  cap=$(fm_concurrency_cap_value "$config")
   [ "$FM_IDLE_LIVE" -lt "$cap" ] || FM_IDLE_AT_CAP=true
 
   if [ "$FM_IDLE_HELD" -gt 0 ]; then
@@ -595,6 +610,232 @@ fm_idle_capacity_should_escalate() {  # <state-dir>
 # gated has actually been delivered.
 fm_idle_capacity_mark_escalated() {  # <state-dir>
   printf '%s\n' "$(fm_idle_capacity_signature)" > "$1/.idle-capacity-last-escalated" 2>/dev/null || true
+}
+
+# --- lane floor -------------------------------------------------------------
+# The captain's standing rule that dispatchable capacity never sits idle while
+# work exists: a home running fewer than config/lane-floor unpaused lanes while
+# ANY work is dispatchable without a captain decision is in breach, and both the
+# wake drain and the Claude turn-end guard say so. This is deliberately BROADER
+# than the idle-capacity block above, which only counts backlog items whose hold
+# is a capacity hold and only while a worktree slot is provably free: the fleet
+# sat at 3-6 lanes for an hour because the work that could have filled the rest
+# was held under non-capacity reasons or lived in a project's own openspec
+# Changes, neither of which that block can see.
+# EVERY read here fails SOFT to "no breach": a missing tasks-axi, an unreadable
+# registry, an absent projects/ directory, an unreadable project, or a malformed
+# floor contributes no work and never manufactures a breach. A breach is only
+# ever asserted from work this home positively read.
+FM_LANE_FLOOR_DEFAULT=10
+
+# How many dispatchable items the block lists before disclosing the rest as a count.
+FM_LANE_FLOOR_LIST_LIMIT=${FM_LANE_FLOOR_LIST_LIMIT:-20}
+
+# The configured floor, or the default when the file is absent, unreadable, or
+# not a bare integer - the same "malformed reads as unconfigured" rule
+# config/concurrency-cap uses above, so a typo can never disable enforcement by
+# reading as zero.
+fm_lane_floor_value() {  # [config-dir]
+  local config=${1:-} floor=$FM_LANE_FLOOR_DEFAULT
+  if [ -n "$config" ] && [ -f "$config/lane-floor" ]; then
+    IFS= read -r floor < "$config/lane-floor" 2>/dev/null || floor=$FM_LANE_FLOOR_DEFAULT
+    floor=${floor%$'\r'}
+    case "$floor" in ''|*[!0-9]*) floor=$FM_LANE_FLOOR_DEFAULT ;; esac
+  fi
+  printf '%s\n' "$floor"
+}
+
+# Lanes this home is actually running: one per state/<id>.meta, minus every task
+# whose newest status event declares a bounded external wait. A paused lane is
+# not progress the floor can count, and it is not a lane the captain's rule
+# wants replaced either - it is simply not occupying dispatch attention.
+# bin/fm-classify-lib.sh's status_is_paused owns the pause-verb contract; this is
+# a deliberate local read of the same leading verb, because this file is
+# self-contained by design (see the header) and the Stop hook path may not pay
+# for that library.
+fm_lane_floor_live() {  # <state-dir>
+  local state=$1 meta id last verb live=0
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename -- "$meta" .meta)
+    last=$(grep -v '^[[:space:]]*$' "$state/$id.status" 2>/dev/null | tail -1)
+    # Verb before the first colon, with any correlation bracket and surrounding
+    # whitespace stripped, so "paused [key=x]: ..." reads the same as "paused:".
+    verb=${last%%:*}
+    verb=${verb%%\[*}
+    verb=${verb#"${verb%%[![:space:]]*}"}
+    verb=${verb%"${verb##*[![:space:]]}"}
+    [ "$verb" = paused ] && continue
+    live=$((live + 1))
+  done
+  printf '%s\n' "$live"
+}
+
+# Every openspec Change in one project clone that still carries unticked task
+# boxes and is not already named by a live task's brief. Prints
+# "<change>\t<open-box-count>" lines, or nothing. openspec/changes/archive/ is
+# the landed history and is excluded; the glob's own depth already skips it, and
+# the explicit case below keeps that true if a tasks.md is ever added there.
+fm_lane_floor_project_changes() {  # <project-root> <live-brief-text>
+  local root=$1 brief_text=$2 tasks change open_boxes
+  [ -n "$root" ] && [ -d "$root/openspec/changes" ] || return 0
+  for tasks in "$root"/openspec/changes/*/tasks.md; do
+    [ -f "$tasks" ] || continue
+    change=$(basename -- "$(dirname -- "$tasks")")
+    case "$change" in ''|archive) continue ;; esac
+    open_boxes=$(awk '/^[[:space:]]*- \[ \]/ { n++ } END { print n + 0 }' "$tasks" 2>/dev/null) || continue
+    case "$open_boxes" in ''|*[!0-9]*) continue ;; esac
+    [ "$open_boxes" -gt 0 ] || continue
+    # A Change a live worker is already implementing is not idle capacity. The
+    # substring match is deliberately generous: over-excluding a Change costs
+    # one unfilled lane, while under-excluding one dispatches a second worker
+    # onto work already under way.
+    case "$brief_text" in *"$change"*) continue ;; esac
+    printf '%s\t%s\n' "$change" "$open_boxes"
+  done
+}
+
+# fm_dispatchable_work <state-dir> [data-dir] [root]
+# Every item firstmate could dispatch RIGHT NOW without a captain decision, one
+# per line, or nothing at all. Never prints a diagnostic and never writes.
+#   backlog <id>                     a ready backlog item (tasks-axi's own ready
+#                                    listing already reads a hold whose --until
+#                                    has passed as queued rather than held, so an
+#                                    expired hold of any kind arrives here), or a
+#                                    held item whose hold kind is anything but
+#                                    captain - a load, blocked, or unkinded hold
+#                                    is firstmate's own call to make
+#   openspec <project>:<change>:<n>  an openspec Change under a registered
+#                                    project clone with n unticked task boxes
+#                                    that no live task's brief names
+# A captain-kind hold is deliberately the ONLY backlog exclusion: it is the one
+# state where dispatching would answer a question the captain owns.
+fm_dispatchable_work() {  # <state-dir> [data-dir] [root]
+  local state=$1 data=${2:-} root=${3:-$FM_IDLE_SELF_ROOT}
+  local backlog ready_out row id hold_kind
+  local meta brief brief_text='' name project_root change open_boxes
+
+  [ -n "$data" ] || data=$(dirname -- "$state")/data
+  backlog="$data/backlog.md"
+  if [ -f "$backlog" ] && command -v tasks-axi >/dev/null 2>&1 \
+    && ready_out=$(tasks-axi ready --file "$backlog" --include-held 2>/dev/null); then
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      id=${row%%,*}
+      [ -n "$id" ] && printf 'backlog %s\n' "$id"
+    done < <(printf '%s\n' "$ready_out" | awk '
+      /^ready\[/ { rows = 1; next }
+      /^[^[:space:]]/ { rows = 0 }
+      rows && /^[[:space:]]/ { sub(/^[[:space:]]+/, ""); print }')
+    # hold_kind is read by stripping hold_until (the true last field) off the
+    # END of the row, the same right-anchored idiom the capacity-held block
+    # above uses and for the same reason: title and hold_reason are free text
+    # that may contain commas, so a counted-field read would silently misread.
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      id=${row%%,*}
+      [ -n "$id" ] || continue
+      hold_kind=${row%,*}; hold_kind=${hold_kind##*,}
+      hold_kind=${hold_kind#\"}; hold_kind=${hold_kind%\"}
+      [ "$hold_kind" = captain ] && continue
+      printf 'backlog %s\n' "$id"
+    done < <(printf '%s\n' "$ready_out" | awk '
+      /^held\[/ { rows = 1; next }
+      /^[^[:space:]]/ { rows = 0 }
+      rows && /^[[:space:]]/ { sub(/^[[:space:]]+/, ""); print }')
+  fi
+
+  # Every live task's brief in one read, so the per-Change exclusion below is a
+  # substring test rather than a grep per Change.
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    brief="$data/$(basename -- "$meta" .meta)/brief.md"
+    [ -f "$brief" ] || continue
+    brief_text="$brief_text"$'\n'"$(cat "$brief" 2>/dev/null)"
+  done
+
+  # Registered project clones only: data/projects.md is the one registry, and
+  # fm_idle_project_root above is the one resolver from a project name to its
+  # recorded repository path.
+  [ -f "$data/projects.md" ] || return 0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    project_root=$(fm_idle_project_root "$data" "$root" "$name") || continue
+    while IFS="$(printf '\t')" read -r change open_boxes; do
+      [ -n "$change" ] || continue
+      printf 'openspec %s:%s:%s\n' "$name" "$change" "$open_boxes"
+    done < <(fm_lane_floor_project_changes "$project_root" "$brief_text")
+  done < <(awk '$1 == "-" && $2 != "" && /repository: / { print $2 }' "$data/projects.md" 2>/dev/null)
+  return 0
+}
+
+# Populate the lane-floor fields for one home. Never prints, never writes.
+#   FM_LANE_FLOOR        the configured floor (config/lane-floor, default 10)
+#   FM_LANE_FLOOR_LIVE   unpaused lanes this home is running
+#   FM_LANE_FLOOR_WORK   fm_dispatchable_work's lines, newline separated - the
+#                        evidence for a breach, so it is left EMPTY whenever
+#                        there is none, including when the enumeration was
+#                        skipped because this home is already at its floor or at
+#                        its concurrency cap
+#   FM_LANE_FLOOR_COUNT  how many of them
+#   FM_LANE_FLOOR_BREACH true only when this home runs fewer than the floor and
+#                        some work is dispatchable without a captain decision
+fm_lane_floor_compute() {  # <state-dir> [data-dir] [root] [config-dir]
+  local state=$1 data=${2:-} root=${3:-$FM_IDLE_SELF_ROOT} config=${4:-}
+  local meta running=0
+  [ -n "$data" ] || data=$(dirname -- "$state")/data
+  [ -n "$config" ] || config=$(dirname -- "$state")/config
+  FM_LANE_FLOOR=$(fm_lane_floor_value "$config")
+  FM_LANE_FLOOR_LIVE=$(fm_lane_floor_live "$state")
+  FM_LANE_FLOOR_WORK=''
+  FM_LANE_FLOOR_COUNT=0
+  FM_LANE_FLOOR_BREACH=false
+  # Two cheap exits before the enumeration, which reads a backlog and walks
+  # every registered project. A home at or above its floor is the ordinary busy
+  # case and must not pay for that walk on every turn end.
+  [ "$FM_LANE_FLOOR_LIVE" -lt "$FM_LANE_FLOOR" ] || return 0
+  # A home already at its concurrency cap cannot spawn another worker, so there
+  # is no breach to assert: enforcing one would block a turn on a condition the
+  # session has no way to clear. The cap counts every worker, paused included,
+  # because a paused lane still holds its slot.
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    running=$((running + 1))
+  done
+  [ "$running" -lt "$(fm_concurrency_cap_value "$config")" ] || return 0
+  FM_LANE_FLOOR_WORK=$(fm_dispatchable_work "$state" "$data" "$root")
+  FM_LANE_FLOOR_COUNT=$(printf '%s\n' "$FM_LANE_FLOOR_WORK" | sed '/^$/d' | wc -l | tr -d '[:space:]')
+  case "$FM_LANE_FLOOR_COUNT" in ''|*[!0-9]*) FM_LANE_FLOOR_COUNT=0 ;; esac
+  [ "$FM_LANE_FLOOR_COUNT" -gt 0 ] && FM_LANE_FLOOR_BREACH=true
+  return 0
+}
+
+# Render the breach from the fields fm_lane_floor_compute already populated, or
+# nothing at all when there is no breach. Bounded to FM_LANE_FLOOR_LIST_LIMIT
+# listed items with the rest disclosed as a count. Always returns 0: like the
+# idle-capacity block above, this is a report, never a gate.
+fm_lane_floor_render() {
+  local shown=0 item
+  [ "${FM_LANE_FLOOR_BREACH:-false}" = true ] || return 0
+  printf 'LANE FLOOR: live=%s floor=%s dispatchable=%s - load the lane-floor skill and dispatch before ending this turn\n' \
+    "$FM_LANE_FLOOR_LIVE" "$FM_LANE_FLOOR" "$FM_LANE_FLOOR_COUNT"
+  while IFS= read -r item; do
+    [ -n "$item" ] || continue
+    if [ "$shown" -ge "$FM_LANE_FLOOR_LIST_LIMIT" ]; then
+      printf '  (%s more dispatchable)\n' "$((FM_LANE_FLOOR_COUNT - shown))"
+      break
+    fi
+    printf '  %s\n' "$item"
+    shown=$((shown + 1))
+  done <<< "$FM_LANE_FLOOR_WORK"
+  return 0
+}
+
+# Compute and render in one call, for the sites with no branch of their own to
+# take between the two halves.
+fm_lane_floor_report() {  # <state-dir> [data-dir] [root] [config-dir]
+  fm_lane_floor_compute "$@"
+  fm_lane_floor_render
 }
 
 # fm_supervision_status <state-dir> [grace-seconds]

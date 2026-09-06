@@ -53,6 +53,23 @@ A daemon that cannot record its own identity at startup logs a warning and keeps
 The proof covers ownership only, never freshness: the fresh-beacon half of the predicate is unchanged, so a daemon that stops restarting its watcher still blocks once the beacon passes grace, and a home with no daemon and no watcher blocks exactly as it did before.
 With away mode off the daemon lock proves nothing and the strict watcher predicate is unchanged.
 
+### Lane floor
+
+A blind fleet is not the only way a turn ends badly.
+A home running fewer lanes than `config/lane-floor` while work is dispatchable without a captain decision wastes the captain's time just as surely, and healthy supervision is exactly the state that would otherwise allow that turn to end.
+So the guard evaluates a second, independent blocking condition at both points that would otherwise allow the stop: the idle-home exit and the shared `allow_supervised_stop` contract.
+[`configuration.md`](configuration.md#lane-floor-configlane-floor) owns the floor's default, its inheritance, and what `fm_dispatchable_work` counts as dispatchable.
+
+The block is deliberately `--claude` only, because `exit 2` blocks a Claude Stop while the passive OpenCode, Pi, and Cursor adapters render it as a bounded follow-up with different semantics.
+There is deliberately no captain-present or away-mode exemption: the captain asked for this enforced whether or not he is at the keys.
+It stands down whenever a different live session holds this home's lock, on the same authority test as the foreign-lock case above, because a session that cannot dispatch must not be blocked for not dispatching.
+
+Consecutive lane-floor blocks are bounded by `FM_LANE_FLOOR_BLOCK_BUDGET` (default 3) in `state/.turnend-lane-floor-blocks`, a counter kept separate from the supervision block budget so neither condition can spend the other's allowance.
+Claude Code hard-overrides at 8 consecutive blocks, so an unbounded block would wedge the session rather than enforce anything; the wake drain's own lane-floor escalation carries no dedupe and keeps nagging on every drain while the breach holds.
+The counter is cleared the moment the breach clears, so a later drop below the floor in the same session gets its own full budget.
+Every read fails safe to no breach: a missing `tasks-axi`, an unreadable registry or project, a malformed floor, or a failed budget write allows the stop rather than blocking on an unknown.
+When supervision is missing as well, the blind-fleet banner carries the lane-floor lines rather than a second block being raised.
+
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot safely read loop-guard fields.

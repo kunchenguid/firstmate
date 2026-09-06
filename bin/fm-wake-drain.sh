@@ -26,6 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
@@ -192,6 +193,16 @@ esac
 # Never let a guard hiccup change the drain's exit status.
 assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
+}
+
+# The captain's lane floor, printed on EVERY drain the way OPEN DECISIONS is -
+# including a drain with an empty queue - rather than folded into the heartbeat-
+# gated idle-capacity report below. A fleet sitting under its floor with
+# dispatchable work is the condition the captain wants nagged until it clears,
+# so this deliberately carries no once-per-tuple dedupe. Silent when there is no
+# breach, and silent on any read it could not complete.
+print_lane_floor_section() {
+  fm_lane_floor_report "$STATE" "$DATA" "$FM_ROOT" "$CONFIG" || true
 }
 
 # Mark presentation-stage inactive terminal outcomes only after the handling
@@ -753,6 +764,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   (print_status_presentation) || true
+  print_lane_floor_section
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
@@ -769,6 +781,7 @@ if [ "$ACTOR" = main ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     DRAIN_LOCK_HELD=false
     (print_status_presentation) || true
+    print_lane_floor_section
     assert_watcher_liveness
     exit 0
   fi
@@ -831,5 +844,6 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (print_status_presentation "$RAW_ROWS") || true
+print_lane_floor_section
 assert_watcher_liveness
 exit 0

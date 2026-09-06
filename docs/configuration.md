@@ -301,10 +301,25 @@ A newer merge rewrites that record with its own commit rather than queueing behi
 ## Concurrency cap (config/concurrency-cap)
 
 `config/concurrency-cap` is an optional local, gitignored file holding a bare integer that bounds how many workers this home runs at once.
-It is read by the idle-capacity report (`bin/fm-supervision-lib.sh`'s `fm_idle_capacity_compute`), which never proposes dispatching more work once this home's own live worker count (`state/*.meta`) is at or over the cap, regardless of any project's own free worktree slots.
+It is read through `bin/fm-supervision-lib.sh`'s `fm_concurrency_cap_value` by the idle-capacity report, which never proposes dispatching more work once this home's own live worker count (`state/*.meta`) is at or over the cap, regardless of any project's own free worktree slots, and by the lane floor below, which asserts no breach at all once the cap is reached.
 Absent, empty, or non-numeric contents fall back to a default of 13; only the first line is read.
 The cap is independent of any single project's pool size: a project can have free slots and still see no dispatch line while this home overall sits at its cap.
 A frozen or at-cap home with ready work still keeps a watcher armed so it notices once the freeze lifts or the cap has room again; only the dispatch-now line itself is suppressed.
+
+## Lane floor (config/lane-floor)
+
+`config/lane-floor` is an optional local, gitignored file holding a bare integer: the fewest lanes this home keeps running while any work is dispatchable without a captain decision.
+Absent, empty, or non-numeric contents fall back to a default of 10; only the first line is read, so a typo reads as unconfigured rather than as a floor of zero.
+It is inherited by secondmate homes through the primary-authoritative push in [`bin/fm-config-inherit-lib.sh`](../bin/fm-config-inherit-lib.sh), so one setting governs the whole fleet.
+
+It is read by the lane-floor report (`bin/fm-supervision-lib.sh`'s `fm_lane_floor_compute`), which counts this home's live workers (`state/*.meta`, minus any task whose newest status event declares a bounded external wait) and compares that against the work `fm_dispatchable_work` can enumerate.
+That enumeration is deliberately broader than the concurrency cap's idle-capacity read above: it counts every ready backlog item, every held item whose hold kind is anything but `captain`, and every `openspec/changes/<name>/tasks.md` with unticked boxes under a registered project clone that no live task's brief names.
+A breach - fewer live lanes than the floor while that enumeration is non-empty - is escalated on every wake drain while it holds, and blocks a Claude turn end through [`bin/fm-turnend-guard.sh`](../bin/fm-turnend-guard.sh) (see [turnend-guard.md](turnend-guard.md)).
+
+The cap and the floor bound opposite ends of the same number: the cap is a ceiling on concurrent workers, the floor a minimum on running lanes while work exists.
+The cap wins where they meet.
+A home already at its concurrency cap cannot spawn another worker, so it reports no breach at all rather than demanding a dispatch it has no way to perform; a paused lane counts against the cap because it still holds its worktree slot, even though it does not count as a live lane.
+That makes a floor set above the cap harmless rather than unsatisfiable, but it also means such a floor enforces nothing above the cap.
 
 ## Required checks for GitHub PR merges (config/required-checks/PROJECT)
 

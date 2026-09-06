@@ -39,6 +39,10 @@
 # test, is what proves supervision there - see fm_afk_daemon_owns_supervision in
 # bin/fm-wake-lib.sh. The strict watcher predicate is unchanged everywhere else.
 #
+# Lane floor: this guard also blocks a Claude turn whose fleet is running fewer
+# lanes than config/lane-floor while work is dispatchable without a captain
+# decision (see the "lane floor" section below and docs/turnend-guard.md).
+#
 # Loop-guard, codex/Grok (default) mode: never block twice in the same turn.
 # Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
 # takes precedence when both spellings are present. A true value means the
@@ -160,6 +164,9 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
+LANE_FLOOR_BUDGET_FILE="$STATE/.turnend-lane-floor-blocks"
+LANE_FLOOR_BLOCK_BUDGET=${FM_LANE_FLOOR_BLOCK_BUDGET:-3}
+case "$LANE_FLOOR_BLOCK_BUDGET" in ''|*[!0-9]*|0) LANE_FLOOR_BLOCK_BUDGET=3 ;; esac
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
@@ -171,14 +178,93 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
+# --- lane floor -------------------------------------------------------------
+# A blind fleet is not the only way a turn ends badly. A home running fewer
+# lanes than config/lane-floor while work is dispatchable without a captain
+# decision wastes the captain's time just as surely, and healthy supervision is
+# exactly the state that used to let that turn end. So the gate below runs at
+# BOTH points that otherwise allow the stop - the idle-home exit and
+# allow_supervised_stop - rather than at one of them; the supervision-missing
+# path instead appends the same lines to its own banner (block_stop), because a
+# blind fleet is the more urgent message and one block should carry both.
+# Deliberately --claude only: exit 2 blocks a Claude Stop, while the passive
+# opencode/pi/cursor adapters render it as a bounded follow-up with different
+# semantics. There is deliberately NO captain-present or away-mode exemption -
+# the captain asked for this enforced whether or not he is at the keys.
+# Fail-safe throughout: only a positively read breach blocks, and any failure to
+# read the work, account the budget, or resolve authority allows the stop.
+
+# A session that cannot dispatch must not be blocked for not dispatching: the
+# same authority test as the foreign-lock stand-down below, applied here because
+# that block sits too late to protect this gate.
+lane_floor_authority() {
+  local pid
+  fm_session_lock_owned_by_self "$STATE" && return 0
+  pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  fm_harness_pid_alive "$pid" && return 1
+  return 0
+}
+
+# Consecutive lane-floor blocks in this session, bounded like the supervision
+# block budget above and kept in its OWN counter so a supervision-repair block
+# can never spend the lane-floor budget or the reverse. Claude Code hard-
+# overrides at 8 consecutive blocks, so an unbounded block would wedge the
+# session rather than enforce anything; the wake drain's own lane-floor
+# escalation stays unbounded and keeps nagging while the breach holds.
+lane_floor_account() {
+  local old_session old_count tmp
+  LANE_FLOOR_COUNT=1
+  if [ -f "$LANE_FLOOR_BUDGET_FILE" ]; then
+    old_session=$(sed -n '1s/^session=//p' "$LANE_FLOOR_BUDGET_FILE" 2>/dev/null || true)
+    old_count=$(sed -n '2s/^count=//p' "$LANE_FLOOR_BUDGET_FILE" 2>/dev/null || true)
+    case "$old_count" in ''|*[!0-9]*) old_count=0 ;; esac
+    [ "${old_session:-}" = "$SESSION_ID" ] && LANE_FLOOR_COUNT=$((old_count + 1))
+  fi
+  tmp="$LANE_FLOOR_BUDGET_FILE.tmp.$$"
+  if ! printf 'session=%s\ncount=%s\n' "$SESSION_ID" "$LANE_FLOOR_COUNT" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$LANE_FLOOR_BUDGET_FILE" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+lane_floor_gate() {
+  local rule
+  [ "$CLAUDE_MODE" -eq 1 ] || return 0
+  lane_floor_authority || return 0
+  fm_lane_floor_compute "$STATE" "$DATA" "$FM_ROOT" "$CONFIG" || return 0
+  if [ "${FM_LANE_FLOOR_BREACH:-false}" != true ]; then
+    # The breach cleared: a later drop below the floor in this same session gets
+    # its own full budget, never the remainder of an earlier episode's.
+    rm -f "$LANE_FLOOR_BUDGET_FILE" 2>/dev/null || true
+    return 0
+  fi
+  lane_floor_account || return 0
+  [ "$LANE_FLOOR_COUNT" -le "$LANE_FLOOR_BLOCK_BUDGET" ] || return 0
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$rule"
+    printf '●  TURN WOULD END IDLE - LANES ARE BELOW THE FLOOR\n'
+    fm_lane_floor_render | sed 's/^/●  /'
+    printf '●%s\n' "$rule"
+  } >&2
+  exit 2
+}
+
 fm_supervision_status "$STATE" "$GRACE" "$DATA" "$FM_ROOT"
 if [ "$FM_SUP_NEEDED" = false ]; then
+  lane_floor_gate
   [ -e "$FAILURE_NOTICE" ] || budget_reset
   exit 0
 fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
+  lane_floor_gate
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
   exit 2
@@ -227,6 +313,7 @@ block_stop() {
     fi
     printf '●  %s\n' "$reason"
     fm_idle_capacity_report "$STATE" "$DATA" "$FM_ROOT" | sed 's/^/●  /'
+    fm_lane_floor_report "$STATE" "$DATA" "$FM_ROOT" "$CONFIG" | sed 's/^/●  /'
     printf '●%s\n' "$rule"
   } >&2
   exit 2
