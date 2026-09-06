@@ -37,7 +37,9 @@
 #      branch (branch_sync.state=pipeline_owned), its own custody attribution
 #      binds an ACTIVE run without head equality (fm_nm_run_is_pipeline_owned_active
 #      in bin/fm-nm-run-lib.sh).
-#      A run PARKED at a gate (awaiting_approval/fix_review) binds without head
+#      A run PARKED at a gate - a non-empty awaiting_agent field, status in
+#      {awaiting_approval, fix_review}, a non-empty scalar gate name, or a
+#      nested gate block (nm_run_is_parked_at_gate) - binds without head
 #      equality too, because the run object is the only source carrying gate
 #      detail and a parked run's head is routinely unpushed for the whole
 #      review..lint window (nm_run_parked_at_gate_binds_worktree below).
