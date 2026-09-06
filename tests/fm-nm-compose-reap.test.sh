@@ -18,6 +18,7 @@ printf '%s\n' "$*" >> "$FM_FAKE_DOCKER_LOG"
 if [ "$1 $2" = 'container ls' ]; then
   case "$*" in
     *com.docker.compose.project=orphan-a*)
+      [ "${FM_FAKE_EMPTY_PROJECT:-}" != orphan-a ] || exit 0
       printf 'aaa111\torphan-a\t%s/repo/gone-a\n' "$FM_FAKE_ROOTS"
       printf 'aaa222\torphan-a\t%s/repo/gone-a\n' "$FM_FAKE_ROOTS"
       ;;
@@ -89,6 +90,17 @@ test_failure_is_loud() {
   pass "partial cleanup failure is loud while successful repair remains quantified"
 }
 
+test_empty_revalidation_is_loud() {
+  local out rc=0
+  : > "$LOG"
+  out=$(FM_FAKE_EMPTY_PROJECT=orphan-a run_reaper) || rc=$?
+  [ "$rc" -ne 0 ] || fail "empty project revalidation returned success"
+  assert_contains "$out" \
+    'NO_MISTAKES_DOCKER: project orphan-a became unclaimed during revalidation; a Compose network may have been left orphaned, and this sweep cannot rediscover it' \
+    "project that lost its last container during revalidation was silent"
+  pass "empty project revalidation exposes the possible undiscoverable network orphan"
+}
+
 test_bootstrap_runs_cleanup_only_with_mutation_authority() {
   local home="$TMP_ROOT/bootstrap-home"
   mkdir -p "$home/config" "$home/data" "$home/state"
@@ -112,5 +124,6 @@ test_bootstrap_runs_cleanup_only_with_mutation_authority() {
 
 test_scoped_cleanup_and_family_count
 test_failure_is_loud
+test_empty_revalidation_is_loud
 test_bootstrap_runs_cleanup_only_with_mutation_authority
 printf 'All fm-nm-compose-reap tests passed.\n'

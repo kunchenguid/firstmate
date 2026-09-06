@@ -134,7 +134,11 @@ main() {
       continue
     fi
     [ "$live" -eq 0 ] || continue
-    [ "$safe" -eq 1 ] && [ "${#ids[@]}" -gt 0 ] || continue
+    if [ "${#ids[@]}" -eq 0 ]; then
+      printf 'NO_MISTAKES_DOCKER: project %s became unclaimed during revalidation; a Compose network may have been left orphaned, and this sweep cannot rediscover it\n' "$project"
+      failures=$((failures + 1))
+      continue
+    fi
 
     project_containers=${#ids[@]}
     if ! docker container rm --force "${ids[@]}" >/dev/null 2>&1; then
