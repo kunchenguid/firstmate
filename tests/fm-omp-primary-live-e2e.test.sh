@@ -27,9 +27,9 @@ fail() {
   printf 'not ok - %s\n' "$1" >&2
   if [ -f "${RPC_LOG:-}" ]; then
     printf '# rpc frame types seen:\n' >&2
-    jq -R -r 'fromjson? | [.type, (.toolName // .name // "")] | @tsv' "$RPC_LOG" 2>/dev/null | sort | uniq -c | sort -rn | head -40 >&2
+    grep -o '"type":"[a-z_]*"' "$RPC_LOG" 2>/dev/null | sort | uniq -c | sort -rn | head -30 >&2
     printf '# guard spy log:\n' >&2
-    cat "${GUARD_SPY_LOG:-/dev/null}" 2>/dev/null | tail -12 >&2
+    tail -12 "${GUARD_SPY_LOG:-/dev/null}" >&2 2>/dev/null
     printf '# last stderr lines:\n' >&2
     tail -5 "${RPC_ERR:-/dev/null}" >&2
     if [ "${FM_OMP_LIVE_KEEP:-0}" = 1 ]; then
@@ -50,6 +50,12 @@ command -v jq >/dev/null 2>&1 || fail "jq not found"
 
 OMP_VERSION=$(omp --version 2>/dev/null | head -1)
 MODEL=${FM_OMP_LIVE_MODEL:-openai-codex/gpt-6-astra}
+# The guard's beacon grace for this lab. The watcher beats every FM_POLL=1s, so
+# a 20s grace is comfortably healthy in normal operation and lets stage 3 make
+# the beacon stale by freezing the watcher for a bounded time instead of killing
+# it: a killed watcher closes its arm child and the extension re-arms within
+# milliseconds, which would keep the guard from ever firing.
+GUARD_GRACE=20
 LAB="$ROOT/.omp-live-e2e.$$"
 PROJECT="$LAB/project"
 RPC_IN="$LAB/rpc.in"
@@ -183,7 +189,7 @@ mkfifo "$RPC_IN" || fail "could not create the rpc fifo"
     env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       -u FM_HOME -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE \
       FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 \
-      FM_WATCH_REARM_RETRY_LIMIT=0 FM_WATCH_REARM_RETRY_BASE_MS=50 FM_WATCH_REARM_RETRY_MAX_MS=100 \
+      FM_GUARD_GRACE="$GUARD_GRACE" \
       omp --mode rpc --no-session --cwd "$PROJECT" --config "$PROJECT/.omp/fm-worker-overlay.yml" --auto-approve \
         --model "$MODEL" --thinking low < "$RPC_IN" > "$RPC_LOG" 2> "$RPC_ERR"
 ) &
@@ -212,12 +218,13 @@ pass "omp $OMP_VERSION: before_agent_start delivered the digest into model conte
 
 # --- 2. watcher arm, successor, and wake delivery ------------------------------
 : > "$PROJECT/state/omp-e2e.meta"
-line_before=$(wc -l < "$RPC_LOG")
 rpc_send '{"id":"p2","type":"prompt","message":"Call the fm_watch_arm_omp tool exactly once now, then reply with its result text verbatim and nothing else. Never run bin/fm-watch-arm.sh through bash."}'
 wait_for_log "watcher: started omp extension arm child 1" 360 || fail "omp did not render the initial watcher tool result: $(tail -3 "$RPC_ERR")"
 wait_for_agent_ends 2 360 || fail "omp did not finish the arm turn"
 watcher_pid=$(cat "$PROJECT/state/.watch.lock/pid" 2>/dev/null || true)
-[ -n "$watcher_pid" ] && kill -0 "$watcher_pid" 2>/dev/null || fail "no live watcher holds the lab home lock after fm_watch_arm_omp"
+if [ -z "$watcher_pid" ] || ! kill -0 "$watcher_pid" 2>/dev/null; then
+  fail "no live watcher holds the lab home lock after fm_watch_arm_omp"
+fi
 pass "omp $OMP_VERSION: fm_watch_arm_omp started a live watcher through the extension"
 
 printf 'done: omp live e2e watcher fire\n' > "$PROJECT/state/omp-e2e.status"
@@ -236,16 +243,25 @@ arm_calls=$(tool_call_count fm_watch_arm_omp)
 pass "omp $OMP_VERSION: an actionable close spawned a ledger-linked successor and woke main exactly once"
 
 # --- 3. the compelled turn-end guard continuation -------------------------------
-# With the extension's retry bound at zero, killing the watcher leaves the home
-# unsupervised at the next turn end, so session_stop must compel the guard
-# continuation and the model must repair through the tool.
+# Freeze the successor watcher (SIGSTOP) so its beacon goes stale past the lab
+# grace while its arm child stays attached: the extension sees no close and
+# schedules no retry, so the next turn end is genuinely unsupervised and
+# session_stop must compel the guard continuation. The model's repair call then
+# returns the extension's ownership no-op (it still owns the frozen arm), and
+# thawing the watcher restores the same cycle.
 successor_pid=$(cat "$PROJECT/state/.watch.lock/pid" 2>/dev/null || true)
 [ -n "$successor_pid" ] || fail "no successor watcher recorded before the guard probe"
-arm_pid=$(ps -p "$successor_pid" -o ppid= 2>/dev/null | tr -d ' ' || true)
-lab_pid_is_safe "$successor_pid" || fail "refusing to kill a watcher outside the lab ($successor_pid)"
-kill -TERM "$successor_pid" 2>/dev/null || true
-if [ -n "$arm_pid" ] && lab_pid_is_safe "$arm_pid"; then kill -TERM "$arm_pid" 2>/dev/null || true; fi
-sleep 2
+lab_pid_is_safe "$successor_pid" || fail "refusing to freeze a watcher outside the lab ($successor_pid)"
+kill -STOP "$successor_pid" 2>/dev/null || fail "could not freeze the successor watcher"
+thaw() { kill -CONT "$successor_pid" 2>/dev/null || true; }
+i=0
+while [ "$i" -lt 60 ]; do
+  age=$(( $(date +%s) - $(stat -f %m "$PROJECT/state/.last-watcher-beat" 2>/dev/null || stat -c %Y "$PROJECT/state/.last-watcher-beat" 2>/dev/null || date +%s) ))
+  [ "$age" -gt "$GUARD_GRACE" ] && break
+  sleep 1
+  i=$((i + 1))
+done
+[ "$age" -gt "$GUARD_GRACE" ] || { thaw; fail "the frozen watcher's beacon never went stale (age ${age}s)"; }
 rpc_send '{"id":"p3","type":"prompt","message":"Reply with exactly GUARD_PROBE and nothing else. Do not call any tool unless a later instruction in this turn tells you supervision is off."}'
 # The guard must have refused a stop (rc=2) and omp must then have raised the
 # continuation's own stop with stop_hook_active true.
@@ -255,8 +271,8 @@ while [ "$i" -lt 360 ]; do
   sleep 0.5
   i=$((i + 1))
 done
-grep -q '^rc=2 ' "$GUARD_SPY_LOG" 2>/dev/null || fail "the turn-end guard never refused a stop after the watcher was killed (spy log: $(cat "$GUARD_SPY_LOG" 2>/dev/null))"
-grep -q 'stop_hook_active":true' "$GUARD_SPY_LOG" 2>/dev/null || fail "omp did not raise the compelled continuation's own stop (spy log: $(cat "$GUARD_SPY_LOG" 2>/dev/null))"
+grep -q '^rc=2 ' "$GUARD_SPY_LOG" 2>/dev/null || { thaw; fail "the turn-end guard never refused a stop while the watcher was frozen (spy log: $(cat "$GUARD_SPY_LOG" 2>/dev/null))"; }
+grep -q 'stop_hook_active":true' "$GUARD_SPY_LOG" 2>/dev/null || { thaw; fail "omp did not raise the compelled continuation's own stop (spy log: $(cat "$GUARD_SPY_LOG" 2>/dev/null))"; }
 i=0
 while [ "$i" -lt 360 ]; do
   [ "$(tool_call_count fm_watch_arm_omp)" -ge 2 ] && break
@@ -264,11 +280,15 @@ while [ "$i" -lt 360 ]; do
   i=$((i + 1))
 done
 [ "$(tool_call_count fm_watch_arm_omp)" -ge 2 ] \
-  || fail "the model did not repair supervision through fm_watch_arm_omp after the compelled continuation"
-wait_for_agent_ends 4 360 || fail "omp did not settle after the guard repair"
+  || { thaw; fail "the model did not reach for fm_watch_arm_omp after the compelled continuation"; }
+wait_for_agent_ends 4 360 || { thaw; fail "omp did not settle after the compelled continuation"; }
+thaw
+sleep 3
 repaired_pid=$(cat "$PROJECT/state/.watch.lock/pid" 2>/dev/null || true)
-[ -n "$repaired_pid" ] && kill -0 "$repaired_pid" 2>/dev/null || fail "no live watcher after the guard repair"
-pass "omp $OMP_VERSION: session_stop compelled the guard continuation and the model repaired through fm_watch_arm_omp"
+if [ -z "$repaired_pid" ] || ! kill -0 "$repaired_pid" 2>/dev/null; then
+  fail "no live watcher after the guard stage"
+fi
+pass "omp $OMP_VERSION: session_stop compelled the guard continuation (guard rc=2, then a stop_hook_active stop) and the model reached for fm_watch_arm_omp"
 
 # --- shutdown: closing stdin disposes the session and exits 0 ------------------
 exec 3>&-
