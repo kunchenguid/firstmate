@@ -853,9 +853,8 @@ busy_turn_over_age() {  # <task>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason scope_due=0
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration
   key=$(window_key "$win")
-  [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" = "$h" ] || scope_due=1
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
@@ -871,15 +870,8 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  if [ "$scope_due" -eq 0 ] && [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] \
-    && [ "$(age_of "$STATE/.paused-resurfaced-$key")" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    scope_due=1
-  fi
-  if [ "$scope_due" -eq 1 ]; then
-    stale_wait_declaration "$task" 1
-    resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" \
-      "stale: $win ($reason)" "$STALE_WAIT_DECLARATION"
-  fi
+  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
@@ -1037,53 +1029,42 @@ pause_state_class() {  # <window> <task>
 # and a row this home does not carry all keep alarming exactly as they do today -
 # a wait this watcher cannot prove is not a wait.
 #
-# `--identity` comes back with that 0 because the task id alone is not the call.
-# A task can be held, answered with `--release`, and re-held as a genuinely
-# DIFFERENT captain call without any status append, and the second call's first
-# sight must alarm rather than inherit the first call's silence.
-#
 # The read costs one subprocess and runs only where the watcher is about to
-# alarm, beside the crew-state read the same paths already pay.
-CAPTAIN_CALL_IDENTITY=
+# alarm, so at most once per distinct stale hash per window, beside the crew-state
+# read the same paths already pay.
 STALE_WAIT_DECLARATION=
 
 task_captain_call_open() {  # <task>
   local task=$1
-  CAPTAIN_CALL_IDENTITY=
   [ -n "$task" ] || return 1
-  CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
-    open "$task" --identity 2>/dev/null) || return 1
-  return 0
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" >/dev/null 2>&1
 }
 
-# The identity a re-surface throttle is bound to. It always carries the task's
-# whole status-log signature, so any new status event - a replacement wait, a
-# fresh delivery, a blocker - starts its own window instead of inheriting the
-# silence of the one before it. When a captain call is open it also carries that
-# call's lifecycle identity, so a released-then-re-held task does too. With no
-# open call, a status-declared wait retains its existing declared:<signature>
-# scope exactly.
-stale_wait_declaration() {  # <task> <status-declared: 0|1>
-  local task=$1 status_declared=$2 declaration
-  declaration="declared:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
-  STALE_WAIT_DECLARATION=
-  if task_captain_call_open "$task"; then
-    STALE_WAIT_DECLARATION="$declaration:captain-hold:$CAPTAIN_CALL_IDENTITY"
-    return 0
-  fi
-  [ "$status_declared" -eq 1 ] || return 1
-  STALE_WAIT_DECLARATION=$declaration
-  return 0
+# The identity a re-surface throttle is bound to: the task's whole status-log
+# signature. Any new status event - a replacement wait, a fresh delivery, a
+# blocker - changes it and so starts its own window instead of inheriting the
+# silence of the one before it.
+stale_wait_declaration() {  # <task>
+  printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
 }
 
 # 0 when <declaration> has already been alarmed for this window inside the
-# current PAUSE_RESURFACE_SECS. A pure read; recording is stale_wait_record's.
+# current PAUSE_RESURFACE_SECS. A pure read: recording an alarm is the caller's,
+# so the throttle is never advanced by a sighting it just absorbed.
 stale_wait_throttled() {  # <window-key> <declaration>
   local throttle="$STATE/.paused-resurfaced-$1"
   [ "$(cat "$throttle" 2>/dev/null || true)" = "$2" ] \
     && [ "$(age_of "$throttle")" -lt "$PAUSE_RESURFACE_SECS" ]
 }
 
+# The same bound, for a stale window whose last line IS captain-relevant. That
+# line is real and its first sight must still reach the captain, but a delivery
+# they are already holding has nothing new to say on the next pane tick.
+# Sets STALE_WAIT_DECLARATION to the scope this sighting is bound to, and leaves
+# it EMPTY when no open captain call bounds it, so an unheld delivery, a blocker,
+# and a failure alarm exactly as they do today.
+# Returns 0 to absorb this sighting; 1 to alarm, after which the caller records
+# the throttle through stale_wait_record once its own wake append has succeeded.
 # Record a fired wake against the bounded cadence, and ONLY after that wake was
 # durably appended. A marker written ahead of the append outlives a failed one:
 # the watcher exits with no wake queued, and the next sighting reads the fresh
@@ -1094,21 +1075,11 @@ stale_wait_record() {  # <window-key>
   printf '%s' "$STALE_WAIT_DECLARATION" > "$STATE/.paused-resurfaced-$1"
 }
 
-stale_wait_timer_record() {  # <window-key> <timer-file>
-  local marker="$STATE/.paused-resurfaced-$1" timer=$2 since
-  since=$(stat_mtime "$marker") || since=$(date +%s)
-  printf '%s\n' "$since" > "$timer"
-}
-
-# Decide one stale sighting against the captain call the backlog may hold for it.
-# Sets STALE_WAIT_DECLARATION to the scope this sighting is bound to, and leaves
-# it EMPTY when no open call bounds it, so the caller alarms exactly as before.
-# 0 = absorb this sighting; 1 = the caller must alarm, and must then call
-# stale_wait_record once its own wake append has succeeded.
 captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
-  stale_wait_declaration "$task" 0 || return 1
+  task_captain_call_open "$task" || return 1
+  STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
@@ -1132,15 +1103,21 @@ captain_call_stale_bound() {  # <window-key> <task>
 # line the worker declared, and the backlog hold firstmate recorded once the
 # captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last declared=0 bounded=1 throttled=1
+  local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
   STALE_WAIT_DECLARATION=
-  status_is_paused_or_captain_held "$last" && declared=1
-  if stale_wait_declaration "$task" "$declared"; then
+  if status_is_paused_or_captain_held "$last"; then
+    declared=0
     bounded=0
+    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
     stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
+  elif captain_call_stale_bound "$key" "$task"; then
+    bounded=0
+    throttled=0
+  elif [ -n "$STALE_WAIT_DECLARATION" ]; then
+    bounded=0
   fi
   if [ "$throttled" -ne 0 ]; then
     fm_wake_append stale "$win" "stale: $win" || exit 1
@@ -1149,7 +1126,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
-  if [ "$declared" -eq 1 ]; then
+  if [ "$declared" -eq 0 ]; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
   elif [ "$bounded" -eq 0 ]; then
@@ -2048,23 +2025,21 @@ EOF
             elif captain_call_stale_bound "$key" "$task"; then
               # The line is captain-relevant and stays so, but the backlog says
               # the captain already holds this work: further sights of the SAME
-              # call and status-log state have nothing to add, and the pane keeps
-              # churning a new hash into this branch for as long as they are
-              # deciding. Only that repetition is bounded - the first sight
-              # already alarmed and the window's end alarms once more.
+              # status-log state have nothing to add, and the pane keeps churning
+              # a new hash into this branch for as long as they are deciding. Only
+              # that repetition is bounded - the first sight already alarmed and
+              # the window's end alarms once more - and the bookkeeping matches the
+              # alarm it replaces, so a stable hash stays as inert here as it
+              # already was after a first terminal alarm.
               printf '%s' "$h" > "$sf"
-              stale_wait_timer_record "$key" "$ssf"
+              rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"
               printf '%s' "$h" > "$sf"
-              if [ -n "$STALE_WAIT_DECLARATION" ]; then
-                stale_wait_timer_record "$key" "$ssf"
-              else
-                rm -f "$ssf"
-              fi
+              rm -f "$ssf"
               clear_write_tracking "$key"
               stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
               stale_record=$(status_span_first_actionable_record "$stale_status" 0)
@@ -2076,44 +2051,11 @@ EOF
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then
-            # This exact hash already has a local alarm deadline - keep treating
-            # it that way
+            # This exact hash was already overridden as provably-working (a
+            # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            #
-            # That timer outlives the work it was started for: a captain call can
-            # open on this task after the override, with neither the pane nor the
-            # status log changing, and nothing above would ever see it because the
-            # backlog is read only on a NEW hash. The timer then keeps firing
-            # possible-wedge alarms through a legitimate wait. So consult the call
-            # here too - but only where an alarm is actually due, so an ordinary
-            # repeat poll under the bound stays the pure local read it was, and a
-            # missing or malformed timer still self-heals in wedge_timer_check.
-            STALE_WAIT_DECLARATION=
-            terminal_since=$(cat "$ssf" 2>/dev/null || true)
-            terminal_due=1
-            terminal_bound=$STALE_ESCALATE_SECS
-            [ -e "$STATE/.paused-resurfaced-$key" ] && terminal_bound=$PAUSE_RESURFACE_SECS
-            case "$terminal_since" in
-              ''|*[!0-9]*)
-                wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
-                terminal_due=0
-                ;;
-              *) [ "$(( $(date +%s) - terminal_since ))" -ge "$terminal_bound" ] || terminal_due=0 ;;
-            esac
-            if [ "$terminal_due" -eq 1 ] && captain_call_stale_bound "$key" "$task"; then
-              stale_wait_timer_record "$key" "$ssf"
-              triage_log "absorbed stale (open captain call already surfaced for this status): $w"
-            elif [ "$terminal_due" -eq 1 ] && [ -n "$STALE_WAIT_DECLARATION" ]; then
-              # Held, and its window elapsed: one bounded re-surface, and the idle
-              # timer restarts so the wedge path resumes cleanly once answered.
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              stale_wait_record "$key"
-              stale_wait_timer_record "$key" "$ssf"
-              wake "stale: $w"
-            elif [ "$terminal_due" -eq 1 ]; then
-              wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
-            fi
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
