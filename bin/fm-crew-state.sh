@@ -54,7 +54,13 @@
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
-#      agree, and are reported as parked.
+#      agree, and are reported as parked. A `blocked:` line that reports a
+#      refused or missing daemon socket remains blocked even if an attributed
+#      run record is stale or terminal. Other daemon, timeout, or unreachability
+#      claims are superseded BECAUSE THE RUN IS ALIVE when the run is
+#      running/fixing with recent reported activity: a killed or timed-out drive
+#      call is not daemon death, so that claim is answered by steering the crew
+#      to reattach, not by escalating.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
@@ -315,6 +321,61 @@ log_reports_ci_ready() {
   esac
 }
 
+# 0 when a status-log line reports positive daemon socket failure rather than a
+# client-side timeout or generic unreachability.
+log_reports_daemon_socket_down() {  # <line>
+  local line
+  line=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$line" in
+    *daemon*|*no-mistakes*) ;;
+    *) return 1 ;;
+  esac
+  case "$line" in
+    *"connection refused"*|*"connections refused"*|*"socket refused connection"*|*"socket refuses connection"*|*"socket refusing connection"*|*"socket missing"*|*"socket is missing"*|*"missing socket"*) return 0 ;;
+  esac
+  return 1
+}
+
+# 0 when a status-log line blames the pipeline's transport rather than the work.
+# None of these claims alone is evidence the daemon died: a drive call is only
+# waiting for a read while the fix round runs in the background.
+log_claims_pipeline_unreachable() {  # <line>
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    *daemon*|*timeout*|*"timed out"*|*unreachab*) return 0 ;;
+  esac
+  return 1
+}
+
+# Rows of the `active_steps[N]{...}:` table in the captured run output
+# ($RUN_OUT), which the pipeline emits only while a step is actually running or
+# fixing. Column order is deliberately not assumed: the header's own indentation
+# bounds the block, and callers below read the table as text.
+nm_active_steps_rows() {
+  printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*active_steps\[[0-9]+\]\{/ { hdr = index($0, "active_steps"); inblock = 1; next }
+    inblock {
+      if ($0 ~ /^[[:space:]]*$/) { inblock = 0; next }
+      match($0, /[^ \t]/)
+      if (RSTART <= hdr) { inblock = 0; next }
+      print
+    }
+  '
+}
+
+# 0 when the pipeline itself reports RECENT activity on an actively running or
+# fixing step. The client prefixes a step's `last_activity` with `quiet` once no
+# step log or native-agent lifecycle event has arrived for longer than its
+# configured quiet warning, so its own recency verdict is the signal here rather
+# than a second threshold invented in firstmate. Positive evidence is required:
+# an absent table is not recency, so a run record that merely still says
+# `running` while nothing executes it never reads as alive.
+nm_run_activity_is_recent() {
+  local rows
+  rows=$(nm_active_steps_rows)
+  [ -n "$rows" ] || return 1
+  ! printf '%s\n' "$rows" | grep -q 'quiet'
+}
+
 nm_ci_step_status() {
   local row rest
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
@@ -548,11 +609,29 @@ if [ "$HAVE_RUN" = 1 ]; then
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
+  #
+  # A refused or missing daemon socket is positive daemon-down evidence and
+  # outranks any attributed run record, including a terminal one left behind
+  # after the daemon stopped. Other blocked claims caused by a timed-out drive
+  # call are contradicted only when the run reports recent
+  # activity; the answer is then to steer the crew to reattach without touching
+  # the shared daemon.
   case "$LOG_VERB" in
     needs-decision|blocked)
+      if [ "$LOG_VERB" = blocked ] \
+        && log_reports_daemon_socket_down "$LOG_LINE"; then
+        emit blocked status-log "$(status_line_note "$LOG_LINE")${SEP}daemon socket down despite attributed run record"
+      fi
       if [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
-          RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
+          if [ "$LOG_VERB" = blocked ] \
+            && log_claims_pipeline_unreachable "$LOG_LINE" \
+            && { [ "$RUN_STATUS" = running ] || [ "$RUN_STATUS" = fixing ]; } \
+            && nm_run_activity_is_recent; then
+            RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded: run alive, not a daemon failure (steer reattach)"
+          else
+            RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
+          fi
         else
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded (run $RUN_STATE)"
         fi

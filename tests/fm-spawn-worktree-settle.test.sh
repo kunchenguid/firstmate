@@ -131,20 +131,19 @@ test_single_stale_first_read_is_not_accepted() {
 # costs the loop's existing one-second inter-poll sleep to confirm - not an
 # extra full cycle on top of that.
 test_already_settled_pane_costs_one_confirm_sleep() {
-  local rec id out status start end elapsed
+  local rec id out status pane_reads expected_reads
   id=settle-already-settled-z2
   rec=$(make_settle_case settle-already-settled "$id" 0)
   read_settle_record "$rec"
 
-  start=$(date +%s)
   out=$(run_settle_spawn "$id")
   status=$?
-  end=$(date +%s)
-  elapsed=$((end - start))
+  pane_reads=$(cat "$COUNTFILE")
+  expected_reads=2
   expect_code 0 "$status" "spawn should succeed when the pane is already settled"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
     "meta did not record the already-settled worktree"
-  [ "$elapsed" -le 5 ] || fail "already-settled pane took ${elapsed}s to confirm - expected close to the single inter-poll sleep"
+  [ "$pane_reads" -eq "$expected_reads" ] || fail "already-settled pane used $pane_reads pane reads; expected $expected_reads (initial read plus one confirmation)"
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
