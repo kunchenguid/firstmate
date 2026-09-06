@@ -52,7 +52,7 @@ bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
 If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
-Pass `--no-projects` instead of a project list to scaffold a project-less charter for a domain whose subject is the firstmate repo itself, whose home is a firstmate worktree and whose crews take pooled worktrees of the same repo.
+Pass `--no-projects` instead of a project list to scaffold a project-less charter for a domain whose subject is the firstmate repo itself, whose home is a firstmate worktree and whose crews take worktrees from that home's bound pool.
 `--no-projects` is mutually exclusive with a project list, and omitting both still fails loudly, so an accidental omission is never mistaken for a deliberate project-less seed.
 Re-seeding a populated home as project-less is refused non-destructively when the home contains project clones or `data/projects.md` entries.
 Retire or clean that home first, and re-scaffold a stale project-bearing charter with `--no-projects` before seeding.
