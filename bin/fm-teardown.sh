@@ -152,7 +152,11 @@
 #     credits a run by): a run another task binds, or any run on a branch
 #     where another task binds one while this task binds none, is left alone
 #     and its owner is named; a bound task whose own run is not the repo's
-#     current one asks for it by id so its own parked run is still concluded.
+#     current one asks for it by id so its own parked run is still concluded,
+#     and a binding the same lib declines as STALE (its run terminal while the
+#     repo's current run is a different id on this branch) drops this task to
+#     the unbound path rather than blinding the abort to the live run it
+#     restarted without re-binding.
 #     When the run head is absent from this copy's object store - the pipeline
 #     committed its fix round in its own repo and the task copy never fetched
 #     it - attribution falls to the same lib's shared
@@ -1628,8 +1632,12 @@ TASK_RUN_ID=
 # The run binding this task recorded through bin/fm-run-bind.sh (empty when it
 # never bound one). The ownership rule that reads it is bin/fm-nm-run-lib.sh's,
 # shared with bin/fm-crew-state.sh, so the read path and this abort path never
-# disagree about whose run a run is.
+# disagree about whose run a run is. A binding DECLINED as stale by
+# fm_nm_binding_is_declined reads as unbound for the rest of the evaluation, so
+# ownership falls through to the unbound path exactly as it does there.
+TASK_BOUND_RUN_DECLINED=0
 task_bound_run() {
+  [ "$TASK_BOUND_RUN_DECLINED" = 0 ] || return 0
   fm_nm_task_bound_run "$META"
 }
 
@@ -1708,7 +1716,8 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
 }
 
 task_run_is_own_parked_run() {  # <worktree>
-  local wt=$1 out own
+  local wt=$1 out own current branch
+  TASK_BOUND_RUN_DECLINED=0
   # Accepted best-effort residual: query failures stay fail-open because making
   # no-mistakes availability a prerequisite would block ship tasks with no run.
   out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status)
@@ -1719,7 +1728,22 @@ task_run_is_own_parked_run() {  # <worktree>
     # branch, or one repo). This task's own run is still addressable by the one
     # unambiguous identifier, so ask for it by id: a parked run of this task's
     # own is concluded even when a sibling's run is the current one.
+    current=$out
     out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status --run "$own")
+    branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if fm_nm_binding_is_declined "$out" "$current" "$branch"; then
+      # A STALE binding must not blind this abort path either. This task
+      # restarted validation at the same head and never re-bound, so its own
+      # binding names a finished run while the run the repo is currently
+      # reporting on this branch is the live one it is really validating.
+      # Trusting the binding here would let teardown remove the worktree while
+      # that run stayed parked at a gate awaiting the very agent being removed -
+      # the orphaned run this whole step exists to prevent. So the binding is
+      # declined and this task falls through to the unbound path, where the
+      # current run is aborted only if no bound sibling holds the branch.
+      TASK_BOUND_RUN_DECLINED=1
+      out=$current
+    fi
   fi
   task_status_is_own_parked_run "$wt" "$out"
 }

@@ -18,6 +18,11 @@
 #   (d) an unknown task is refused and nothing is created
 #   (e) a malformed run id is refused and an existing binding is left untouched
 #   (f) a malformed task id is refused
+#   (g) a rewrite that cannot read the record is refused and leaves it intact,
+#       rather than publishing a record reduced to the binding line alone
+#   (h) a record carrying nothing but bindings is refused for the same reason
+#   (i) the republished record keeps its own mode, so a bind after
+#       bin/fm-pr-check.sh hardened it to 0600 cannot widen it back
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -123,11 +128,62 @@ test_malformed_task_id_is_refused() {
   pass "a malformed task id is refused"
 }
 
+file_mode() {  # <path> -> the file's permission bits, e.g. 600
+  stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1" 2>/dev/null
+}
+
+test_unreadable_record_is_refused_and_left_intact() {
+  local d meta rc=0 before
+  d=$(new_case unreadable)
+  meta="$d/state/feat.meta"
+  fm_write_meta "$meta" "window=fm:fm-feat" "worktree=$d/wt" "kind=ship" "spawn_gen=3"
+  before=$(cat "$meta")
+  if [ "$(id -u)" = 0 ]; then
+    pass "an unreadable record is refused and the original record survives (skipped as root)"
+    return 0
+  fi
+  chmod 000 "$meta"
+  run_bind "$d" feat 01RUNAAAAAAAAAAAAAAAAAAAAA >/dev/null 2>&1 || rc=$?
+  chmod 600 "$meta"
+  [ "$rc" != 0 ] || fail "a record the rewrite cannot read must be refused"
+  [ "$(cat "$meta")" = "$before" ] \
+    || fail "a rewrite that could not be completed must leave the original record byte-identical"
+  pass "an unreadable record is refused and the original record survives"
+}
+
+test_record_with_no_other_keys_is_never_published() {
+  local d meta rc=0
+  d=$(new_case bindings-only)
+  meta="$d/state/feat.meta"
+  printf 'nm_run=01RUNAAAAAAAAAAAAAAAAAAAAA\n' > "$meta"
+  run_bind "$d" feat 01RUNBBBBBBBBBBBBBBBBBBBBB >/dev/null 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail "a record that would be published as a lone binding line must be refused"
+  [ "$(meta_binding "$meta")" = 01RUNAAAAAAAAAAAAAAAAAAAAA ] \
+    || fail "a refused bind must leave the record untouched"
+  pass "a record carrying nothing but its binding is refused rather than republished"
+}
+
+test_bind_preserves_the_records_private_mode() {
+  local d meta
+  d=$(new_case mode)
+  meta="$d/state/feat.meta"
+  fm_write_meta "$meta" "window=fm:fm-feat" "worktree=$d/wt" "kind=ship"
+  chmod 600 "$meta"
+  ( umask 022; run_bind "$d" feat 01RUNAAAAAAAAAAAAAAAAAAAAA >/dev/null )
+  [ "$(meta_binding "$meta")" = 01RUNAAAAAAAAAAAAAAAAAAAAA ] || fail "the bind did not land"
+  [ "$(file_mode "$meta")" = 600 ] \
+    || fail "binding widened a private task record to the ambient umask ($(file_mode "$meta"))"
+  pass "a bind republishes the record with its own mode rather than the ambient umask"
+}
+
 test_first_bind_records_the_run
 test_rebind_replaces_the_previous_value
 test_rebinding_the_same_id_is_a_noop
 test_unknown_task_is_refused
 test_malformed_run_id_is_refused
 test_malformed_task_id_is_refused
+test_unreadable_record_is_refused_and_left_intact
+test_record_with_no_other_keys_is_never_published
+test_bind_preserves_the_records_private_mode
 
 echo "all fm-run-bind tests passed"

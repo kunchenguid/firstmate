@@ -21,8 +21,10 @@
 # replaces the previous value, so a restarted or superseded run is rebound rather
 # than accumulating. The write takes the task's own metadata lock and lands
 # through the atomic record publication owned by bin/fm-backlog-transition-lib.sh,
-# so a concurrent supervisor read never observes a partial record. An unknown
-# task, an unusable record, or a malformed run id is refused and nothing is
+# so a concurrent supervisor read never observes a partial record, and the
+# republished record keeps the mode it already had rather than the ambient
+# umask. An unknown task, an unreadable record, a record that would be reduced
+# to its binding line alone, or a malformed run id is refused and nothing is
 # changed.
 #
 # Usage: fm-run-bind.sh <task-id> <run-id>
@@ -86,15 +88,55 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   exit 1
 fi
 
-PREVIOUS=$(grep '^nm_run=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+# Read the record ONCE, keeping every line that is not a binding. A read loop
+# rather than `grep -v`, and an unreadable record is an error rather than an
+# empty result: a swallowed read failure would stage a file holding nothing but
+# the binding line, and publishing that would leave every supervisor reading
+# worktree=, kind= and spawn_gen= as empty for a live task. The same shape
+# bin/fm-pr-check.sh already uses for its own single-key rewrite.
+KEPT=()
+PREVIOUS=''
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    nm_run=*) PREVIOUS=${line#nm_run=} ;;
+    *) KEPT+=("$line") ;;
+  esac
+done < "$META" || { echo "error: task record for $ID could not be read: $META" >&2; exit 1; }
+
 if [ "$PREVIOUS" = "$RUN_ID" ]; then
   echo "bound $ID to run $RUN_ID (unchanged)"
   exit 0
 fi
 
+if [ "${#KEPT[@]}" -eq 0 ]; then
+  echo "error: task record for $ID carries no keys besides its run binding; refusing to publish a record that would lose its identity" >&2
+  exit 1
+fi
+
+# The staged file inherits the RECORD's mode rather than the ambient umask, so a
+# bind after bin/fm-pr-check.sh has hardened the same record to 0600 cannot
+# widen it back (bin/fm-captain-hold.sh's binding writer chmods its staged file
+# for the same reason).
+META_MODE=$(fm_pr_file_mode "$META" || true)
+case "$META_MODE" in ''|*[!0-7]*) META_MODE=600 ;; esac
 TMP="$STATE/.$ID.meta.run-bind.${BASHPID:-$$}"
-grep -v '^nm_run=' "$META" > "$TMP" || true
-printf 'nm_run=%s\n' "$RUN_ID" >> "$TMP"
+stage_failed() {
+  echo "error: task record for $ID could not be staged at $TMP; nothing was changed" >&2
+  exit 1
+}
+: > "$TMP" || stage_failed
+for line in "${KEPT[@]}"; do
+  printf '%s\n' "$line" >> "$TMP" || stage_failed
+done
+printf 'nm_run=%s\n' "$RUN_ID" >> "$TMP" || stage_failed
+chmod "$META_MODE" "$TMP" || stage_failed
+# Every kept line plus exactly one binding line, or the rewrite lost content on
+# the way to disk and the original record is left untouched.
+STAGED_LINES=$(wc -l < "$TMP" | tr -d '[:space:]')
+if [ "$STAGED_LINES" != "$(( ${#KEPT[@]} + 1 ))" ]; then
+  echo "error: task record for $ID lost content while staging the binding; nothing was changed" >&2
+  exit 1
+fi
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
   exit 1

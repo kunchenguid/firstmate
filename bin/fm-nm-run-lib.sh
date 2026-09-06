@@ -9,11 +9,13 @@
 # crew-state for an ACTIVE run, so a fix round never reads as an older failed
 # run, and teardown for a run PARKED at a gate, so cleanup concludes it
 # instead of orphaning it. Both then apply the ONE run-ownership rule at the
-# end of this file (fm_nm_run_owned_by_task and fm_nm_branch_credit_owned_by_task),
-# which separates concurrent crews whose worktrees sit on one branch through the
-# run binding each crew records with bin/fm-run-bind.sh. Getting this wrong in
-# either direction is unsafe: a false negative hides a genuinely parked run,
-# and a false positive lets teardown act on a run it does not own.
+# end of this file (fm_nm_binding_is_declined for the stale-binding decline both
+# make at their by-id refetch, then fm_nm_run_owned_by_task and
+# fm_nm_branch_credit_owned_by_task), which separates concurrent crews whose
+# worktrees sit on one branch through the run binding each crew records with
+# bin/fm-run-bind.sh. Getting this wrong in either direction is unsafe: a false
+# negative hides a genuinely parked run, and a false positive lets teardown act
+# on a run it does not own.
 #
 # Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
@@ -258,6 +260,35 @@ fm_nm_task_meta_value() {  # <meta-file> <key>
 # record is absent or unbound.
 fm_nm_task_bound_run() {  # <meta-file>
   fm_nm_task_meta_value "$1" nm_run
+}
+
+# The DECLINE rule for a stale binding, applied by BOTH consumers at the point
+# where they refetch their own run by id, so the read path and the abort path
+# never diverge about which answer a binding is worth. A crew that restarts
+# validation and does not re-bind would otherwise be pinned to its own finished
+# run: fm-crew-state.sh reports `state: failed - run cancelled` for a crew that
+# is actively validating, and fm-teardown.sh finds no parked run of its own and
+# removes the worktree while that crew's genuinely live run stays parked at a
+# gate, orphaned - the exact outcome its "Fix 1" exists to prevent. So the
+# binding is declined, and the caller falls through to the unbound path (the
+# branch guess this whole contract exists to improve on, which is what makes a
+# missed re-bind self-healing rather than a confident wrong answer), when ALL of:
+#   - the bound run's own answer (TOON $1) reached a terminal outcome
+#   - the repo's CURRENT run (TOON $2) is a DIFFERENT id
+#   - that current run is on the crew's own branch $3
+# An ACTIVE bound run always keeps precedence, so a genuinely running own run is
+# never given up for a sibling's, and a current run on ANOTHER branch says
+# nothing about this crew and never declines its binding. An empty or malformed
+# bound answer reads as active here and is likewise never declined: a CLI that
+# did not respond is not evidence that a binding is stale.
+fm_nm_binding_is_declined() {  # <bound-run-toon> <current-run-toon> <crew-branch>
+  local bound=$1 current=$2 branch=$3 bound_id current_id
+  [ -n "$bound" ] && [ -n "$current" ] && [ -n "$branch" ] || return 1
+  bound_id=$(fm_nm_strip_quotes "$(fm_nm_field "$bound" id)")
+  current_id=$(fm_nm_strip_quotes "$(fm_nm_field "$current" id)")
+  [ -n "$current_id" ] && [ "$current_id" != "$bound_id" ] || return 1
+  [ "$(fm_nm_strip_quotes "$(fm_nm_field "$current" branch)")" = "$branch" ] || return 1
+  ! fm_nm_run_is_active "$bound"
 }
 
 # Prints the id of the task OTHER than $2 whose record in state dir $1 binds run

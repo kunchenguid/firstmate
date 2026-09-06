@@ -73,7 +73,9 @@
 #          this branch (it still owns the run it bound on the id route).
 #          A binding is DECLINED, and the crew falls through to the unbound
 #          path, when the bound run has reached a terminal outcome while the
-#          repo's current run is a different id on this same branch: that is a
+#          repo's current run is a different id on this same branch (the rule is
+#          fm_nm_binding_is_declined, applied at BOTH consumers' by-id refetch,
+#          so this read path and teardown's abort path cannot drift): that is a
 #          crew which restarted validation and did not re-bind, and pinning it
 #          to its own finished row would report `failed` for a crew that is
 #          actively validating and let teardown remove its worktree without
@@ -582,7 +584,6 @@ if [ "$KIND" = ship ] && [ "$RUN_ELIGIBLE" = 1 ] && [ -n "$CREW_BRANCH" ] \
     # the ledger fallback: an empty primary answer means the CLI itself did not
     # respond, and a second bounded call would only double the wait.
     CURRENT_RUN_OUT=$RUN_OUT
-    CURRENT_RUN_BRANCH=$(strip_quotes "$(nm_field branch)")
     RUN_OUT=$(nm_run axi status --run "$NM_BOUND_RUN")
     # A STALE binding must not pin the crew to a finished run. A crew that
     # restarts validation at the same head and does not re-bind would otherwise
@@ -596,9 +597,11 @@ if [ "$KIND" = ship ] && [ "$RUN_ELIGIBLE" = 1 ] && [ -n "$CREW_BRANCH" ] \
     # binding degrades to the old behaviour rather than to a confident wrong
     # answer, which is what makes a missed re-bind self-healing. A bound run
     # that is still ACTIVE keeps precedence, so a genuinely running own run is
-    # never given up for a sibling's.
-    if [ -n "$RUN_OUT" ] && [ "$CURRENT_RUN_BRANCH" = "$CREW_BRANCH" ] \
-      && ! fm_nm_run_is_active "$RUN_OUT"; then
+    # never given up for a sibling's. The rule itself is
+    # fm_nm_binding_is_declined in bin/fm-nm-run-lib.sh, shared with
+    # bin/fm-teardown.sh's identical by-id refetch so the read path and the
+    # abort path cannot drift.
+    if fm_nm_binding_is_declined "$RUN_OUT" "$CURRENT_RUN_OUT" "$CREW_BRANCH"; then
       NM_BOUND_RUN=''
       RUN_OUT=$CURRENT_RUN_OUT
     fi
