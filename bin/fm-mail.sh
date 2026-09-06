@@ -423,9 +423,9 @@ mail_heal() {
   # Both are generation-scoped: only evidence matching the CURRENT mailbox
   # generation is healed, so a legacy key or a stale prior-generation wake can
   # never mark a reused numeric uid as surfaced in the new mailbox.
-  local generation=$1 jgen juid keyrest keygen keyuid heal_ok=0
+  local generation=$1 jgen juid jtag keyrest keygen keyuid heal_ok=0
   if [ -s "$WOKEN" ]; then
-    while IFS=$'\t' read -r jgen juid; do
+    while IFS=$'\t' read -r jgen juid jtag; do
       [ -n "$juid" ] || continue
       [ "$jgen" != "$generation" ] && continue
       if ! mail_seen "$juid"; then
