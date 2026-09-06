@@ -268,7 +268,7 @@ EOF
 }
 
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
-  local snapshot=$1 task endpoint ident event event_endpoint line verb key receipt store lock ready
+  local snapshot=$1 task endpoint ident event event_endpoint line verb receipt store lock ready
   local output='' used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000 rc=0
   [ "$ACTOR" = main ] || return 0
 
@@ -307,13 +307,12 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
     verb=$(status_line_verb "$event")
     case "$verb" in
       needs-decision|blocked)
-        key=$(_fm_decision_key "$event") || key=
         # Parseable decisions belong exclusively to the durable fold. That
         # includes reserved-key transitions the fold rejects; resurfacing one
-        # here would let a foreign writer bypass the namespace guard. A line
-        # with malformed key syntax has no fold representation, so the
-        # captain-facing backstop remains its only safe presentation path.
-        [ -z "$key" ] || continue
+        # here would let a foreign writer bypass the namespace guard. Only a
+        # line with genuinely malformed key syntax has no fold representation,
+        # so the captain-facing backstop remains its only safe presentation path.
+        if _fm_decision_keys "$event" >/dev/null; then continue; fi
         ;;
     esac
     load_branch_outcome_index "$task"
@@ -421,7 +420,14 @@ print_open_decisions_section() {
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
     line="$task"
-    [ "$key" = default ] || line="$line [key=$key]"
+    # Always show the REGISTERED key, including "default" - never inferred
+    # from the note text. A misplaced-position [key=...] token folds to
+    # "default" (fm-classify-lib.sh's decision-key grammar), and the note
+    # text can still carry that stray, non-functioning token verbatim; a
+    # reader who trusted the note's bracket text over an omitted "[key=...]"
+    # annotation would pass that visible-but-unregistered key to
+    # --resolve-key and be refused with no way to tell why.
+    line="$line [key=$key]"
     line="$line $verb: $note"
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item

@@ -49,9 +49,13 @@ test_uncovered_keyless_captain_events_surface_on_the_next_main_drain() {
     || fail "uncovered keyless events produced no outcome backstop: $(cat "$out")"
   body=$(backstop_body "$out")
   case "$body" in *'done-task done: PR https://example.test/3346 checks green'*) ;; *) fail "keyless done event did not surface in the backstop: $body" ;; esac
-  grep -F 'blocked-task blocked: release credential unavailable' "$out" >/dev/null \
+  # The drain annotates every open decision with its REGISTERED key, "default"
+  # included, so a reader never has to guess which key --resolve-key will accept
+  # (bin/fm-wake-drain.sh owns that rule). The event still has to surface here;
+  # only its rendering carries the key.
+  grep -F 'blocked-task [key=default] blocked: release credential unavailable' "$out" >/dev/null \
     || fail "keyless blocked event did not surface through OPEN DECISIONS: $(cat "$out")"
-  grep -F 'decision-task needs-decision: choose REST or RPC' "$out" >/dev/null \
+  grep -F 'decision-task [key=default] needs-decision: choose REST or RPC' "$out" >/dev/null \
     || fail "keyless needs-decision event did not surface through OPEN DECISIONS: $(cat "$out")"
   pass "a newest keyless done, blocked, or needs-decision event with no newer branch outcome surfaces on the next main drain"
 }

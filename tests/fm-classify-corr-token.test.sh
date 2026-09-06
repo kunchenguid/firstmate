@@ -106,10 +106,10 @@ test_token_is_read_through_in_every_position_it_is_written_in() {
   view=$(drain_open "$state" "$out")
   case "$view" in *'t1'*'[key=before]'*) ;; *) fail "token before the key did not open: $view" ;; esac
   case "$view" in *'t2'*'[key=after]'*) ;; *) fail "token after the key did not open: $view" ;; esac
-  # The drain prints the default key as a bare verb, with no [key=...] segment.
-  case "$view" in *'t3 blocked:'*) ;; *) fail "token with no key did not open the default key: $view" ;; esac
+  # The drain always shows the registered key, including "default".
+  case "$view" in *'t3 [key=default] blocked:'*) ;; *) fail "token with no key did not open the default key: $view" ;; esac
   case "$view" in *'t4'*'[key=twice]'*) ;; *) fail "two tokens on one line did not open: $view" ;; esac
-  case "$view" in *'t5 needs-decision:'*) ;; *) fail "the bracketed helper token did not open: $view" ;; esac
+  case "$view" in *'t5 [key=default] needs-decision:'*) ;; *) fail "the bracketed helper token did not open: $view" ;; esac
 
   # ...and each closes from the same position.
   printf 'resolved corr=%s [key=before]: closed\n' "$CORR" >> "$state/t1.status"
@@ -136,7 +136,7 @@ test_untokened_pair_is_unchanged() {
   printf 'blocked: no key at all\n' > "$state/bare.status"
   view=$(drain_open "$state" "$out")
   case "$view" in *'keyed'*'[key=api-shape]'*) ;; *) fail "an untokened keyed opener regressed: $view" ;; esac
-  case "$view" in *'bare blocked:'*) ;; *) fail "an untokened bare opener regressed: $view" ;; esac
+  case "$view" in *'bare [key=default] blocked:'*) ;; *) fail "an untokened bare opener regressed: $view" ;; esac
 
   printf 'resolved [key=api-shape]: went with REST\n' >> "$state/keyed.status"
   printf 'resolved: cleared on its own\n' >> "$state/bare.status"

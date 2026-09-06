@@ -129,13 +129,28 @@ function statusLineVerb(line: string): string {
   return words.filter((word, index) => index === 0 || !/^corr=[0-9a-f]{16}$/i.test(word)).join(" ");
 }
 
-function decisionKey(line: string): string | null {
+const DECISION_SLUG_RE = /^[A-Za-z0-9._-]+$/;
+
+// Every "[key=...]" token before the line's first colon names its own
+// independent decision (bin/fm-classify-lib.sh: "Status metadata may contain
+// any number of "[name=value]" tags before the colon, in any order"); a
+// single-token note-head position remains the fallback when none appear
+// there. A malformed token anywhere in the recognized position(s) rejects the
+// whole line - the fold skips it entirely - rather than silently dropping
+// just that token or falling back to "default". No token anywhere still
+// yields "default", preserving the historical one-open-decision-per-task
+// behavior.
+function decisionKeys(line: string): string[] {
   const colon = line.indexOf(":");
   const beforeColon = colon < 0 ? line : line.slice(0, colon);
-  const beforeMatch = beforeColon.match(/\[key=([^\]]*)\]/);
-  const noteMatch = beforeMatch || colon < 0 ? null : line.slice(colon + 1).trimStart().match(/^\[key=([^\]]*)\]/);
-  const key = (beforeMatch ?? noteMatch)?.[1] ?? "default";
-  return /^[A-Za-z0-9._-]+$/.test(key) ? key : null;
+  const beforeMatches = [...beforeColon.matchAll(/\[key=([^\]]*)\]/g)].map((m) => m[1]);
+  if (beforeMatches.length > 0) {
+    return beforeMatches.every((key) => DECISION_SLUG_RE.test(key)) ? beforeMatches : [];
+  }
+  if (colon < 0) return ["default"];
+  const noteMatch = line.slice(colon + 1).trimStart().match(/^\[key=([^\]]*)\]/);
+  if (!noteMatch) return ["default"];
+  return DECISION_SLUG_RE.test(noteMatch[1]) ? [noteMatch[1]] : [];
 }
 
 function statusLineNote(line: string): string {
@@ -176,13 +191,15 @@ function hasOpenNeedsDecision(
   for (const line of lines) {
     const verb = statusLineVerb(line);
     if (!["needs-decision", "blocked", resolveVerb, heldVerb].includes(verb)) continue;
-    const key = decisionKey(line);
-    if (!key) continue;
+    const keys = decisionKeys(line);
+    if (keys.length === 0) continue;
     const note = statusLineNote(line);
-    const reservedPrefix = reservedPrefixes.find((prefix) => key.startsWith(prefix));
-    if (reservedPrefix && !(note.startsWith(reservedPrefix) && note.slice(reservedPrefix.length).includes(":"))) continue;
-    if (verb === "needs-decision" || verb === "blocked") open.set(key, verb);
-    else open.delete(key);
+    for (const key of keys) {
+      const reservedPrefix = reservedPrefixes.find((prefix) => key.startsWith(prefix));
+      if (reservedPrefix && !(note.startsWith(reservedPrefix) && note.slice(reservedPrefix.length).includes(":"))) continue;
+      if (verb === "needs-decision" || verb === "blocked") open.set(key, verb);
+      else open.delete(key);
+    }
   }
   return [...open.values()].includes("needs-decision");
 }
