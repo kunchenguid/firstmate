@@ -252,12 +252,12 @@ While `bin/fm-prepush-voice-guard.sh` is absent from the base branch the check d
 It reports that skip as a warning annotation and a job summary line rather than passing silently, and it does not fall back to the pull request's copy, because that fallback is the same vulnerability with extra steps.
 The condition ends as soon as the file is on the base branch, and the residual that follows is that deleting the scanner from the default branch would make this check skip again until it is restored.
 
-The refusal also covers a pointer to the working session that produced a change, as a trailer or as a bare link, because that is internal material leaving the machine in the same artifact at the same moment; three such trailers are already in merged history.
-It refuses the pointer shape rather than the word, so the 333 merged lines using "session" in its ordinary technical sense still pass.
-The same guard refuses two private work-document path shapes, `data/<id>/<file>` and `.lavish/<file>`, at any depth below those roots, which catch three merged leaks without refusing flat data files, a nested `tests/data/` fixture path, the bare words `report` and `brief`, or the 59 merged mentions of the bare word `Lavish`.
+The refusal also covers a pointer to the working session that produced a change, as a trailer or as a bare link, because that is internal material leaving the machine in the same artifact at the same moment.
+It matches the fleet's literal pointer format rather than the word `session`, so ordinary technical uses still pass.
+The same guard refuses relative or machine-root-qualified `data/<id>/<file>` paths and `.lavish/<file>` paths at any depth, while flat data files, nested `tests/data/` fixture paths, and the bare words `report`, `brief`, and `Lavish` remain outside that coverage.
 Those two families are the whole of that coverage: `state/`, `config/`, `projects/`, `.no-mistakes/`, and `.env` paths all have legitimate merged mentions and are deliberately left out, with their counts recorded in the script's header.
 
-The script's header owns the rule set, the evidence behind each rule, and the rules that were rejected.
+The script's header owns the rule set, current merged-history evidence, admitted path roots and delimiters, and the rules that were rejected.
 The short version is that the admissible signal is the syntactic position of an address or a pointer rather than any vocabulary: this repo's own subject matter is the fleet, so `captain hold`, `captain intent`, the `/ahoy` skill, and `shipshape` are legitimate and must keep shipping.
 Its name is deliberately outside the `bin/fm-voice-*` audio relay family, which is unrelated.
 `tests/fm-prepush-voice-guard.test.sh` pins both directions against the real merged history the rules were selected on.
