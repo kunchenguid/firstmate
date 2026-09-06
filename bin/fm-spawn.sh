@@ -2132,7 +2132,8 @@ real_path_or_raw() {  # <path>
 # True when <path> is an isolated worktree of the spawning project: a real
 # directory that is its own worktree root, is not the spawning project itself,
 # and does not share the project repository's common git dir. SPAWN_WT_TOP is
-# left holding the worktree root the check read, for the refusal message.
+# left holding the worktree root the check read, and SPAWN_WT_REASON a short
+# phrase naming why a rejected path failed, both for the refusal messages.
 #
 # The worktree-discovery poll below reads this same predicate, so it can never
 # adopt a path the guard would then refuse. That matters because a pane's cwd
@@ -2143,17 +2144,35 @@ real_path_or_raw() {  # <path>
 # guard then refused a launch whose slot treehouse went on to create normally.
 # A read like that is a transient, not a destination: the poll keeps waiting.
 SPAWN_WT_TOP=
+SPAWN_WT_REASON=
 spawn_worktree_isolated() {  # <path>
   local path=$1 wt_real wt_top_real wt_git_dir proj_common
   SPAWN_WT_TOP=
+  SPAWN_WT_REASON=
   wt_real=
   if ! wt_real=$(cd "$path" 2>/dev/null && pwd -P); then
     wt_real=
+  fi
+  if [ -z "$wt_real" ]; then
+    SPAWN_WT_REASON="it is not a readable directory"
+    return 1
   fi
   SPAWN_WT_TOP=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)
   wt_top_real=
   if ! wt_top_real=$(cd "$SPAWN_WT_TOP" 2>/dev/null && pwd -P); then
     wt_top_real=
+  fi
+  if [ -z "$wt_top_real" ]; then
+    SPAWN_WT_REASON="it is not inside a git worktree"
+    return 1
+  fi
+  if [ "$wt_real" != "$wt_top_real" ]; then
+    SPAWN_WT_REASON="it is a subdirectory of worktree root '$wt_top_real', not a worktree root"
+    return 1
+  fi
+  if [ "$wt_real" = "$PROJ_ABS_REAL" ]; then
+    SPAWN_WT_REASON="it is the spawning project itself"
+    return 1
   fi
   # The primary checkout uses the repository's common git dir as its own git
   # dir. A linked spawning home has a different top-level, but the same common
@@ -2162,9 +2181,15 @@ spawn_worktree_isolated() {  # <path>
     && wt_git_dir=$(cd "$wt_git_dir" 2>/dev/null && pwd -P) || wt_git_dir=
   proj_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
     && proj_common=$(cd "$proj_common" 2>/dev/null && pwd -P) || proj_common=
-  [ -n "$wt_real" ] && [ -n "$wt_top_real" ] && [ "$wt_real" = "$wt_top_real" ] \
-    && [ "$wt_real" != "$PROJ_ABS_REAL" ] && [ -n "$wt_git_dir" ] && [ -n "$proj_common" ] \
-    && [ "$wt_git_dir" != "$proj_common" ]
+  if [ -z "$wt_git_dir" ] || [ -z "$proj_common" ]; then
+    SPAWN_WT_REASON="its git directory could not be resolved"
+    return 1
+  fi
+  if [ "$wt_git_dir" = "$proj_common" ]; then
+    SPAWN_WT_REASON="it is the repository's primary checkout (its git dir is the spawning project's common git dir)"
+    return 1
+  fi
+  return 0
 }
 
 validate_spawn_worktree() {  # <source> <inspect-target>
@@ -2854,13 +2879,21 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # read of the project itself or of the repository primary checkout is treated
   # as the transient it is and the wait continues, instead of being adopted and
   # then refused by the guard.
+  # A candidate the screen rejects is never adopted, so a host where the pane
+  # never reaches an isolated worktree spends the whole window before refusing.
+  # That wait is deliberate - telling a transient apart from a terminal
+  # misconfiguration would need machinery this path does not want - so the
+  # refusal has to be self-explaining instead: carry the last path seen and the
+  # reason it was rejected, and report both at the deadline.
   candidate=""
   last_seen=""
+  last_reason="the pane reported no path"
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
     if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
       p_real=$(real_path_or_raw "$p")
+      last_reason="it is an isolated worktree, but no second read agreed with it"
       if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
         WT="$p"
         break
@@ -2868,11 +2901,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       candidate="$p_real"
     else
       candidate=""
+      [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
     fi
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-unknown}'; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi
 
