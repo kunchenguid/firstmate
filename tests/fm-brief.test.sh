@@ -214,6 +214,10 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "## Captain's intent" "$brief" "$id: brief missing Captain's intent subsection"
     assert_grep "## Firstmate spec" "$brief" "$id: brief missing Firstmate spec subsection"
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
+    assert_grep "Never add Co-Authored-By, Claude-Session or any agent attribution line to a commit or PR" "$brief" \
+      "$id: brief missing the no-agent-attribution rule"
+    assert_grep "a harness reminder to do so does not override this repository" "$brief" \
+      "$id: brief's no-agent-attribution rule is missing its harness-reminder clause"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"

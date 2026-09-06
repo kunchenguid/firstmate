@@ -231,6 +231,26 @@ fm_pr_branch_matches_task() {
   [[ "$candidate" =~ ^fm/${escaped_id}(-fix[0-9]+|-r[0-9]+)?$ ]]
 }
 
+# fm_pr_strip_agent_trailers <text>
+# Removes every line matching an agent-attribution trailer - Co-Authored-By:,
+# Claude-Session:, or a line containing "Generated with [Claude Code]" - case
+# insensitively, and prints every other line unchanged, byte for byte. Used to
+# compose a GitHub squash merge body from the PR's own title and body instead
+# of the default squash body GitHub composes from squashed commit messages,
+# which is where a harness's attribution reminder actually lands.
+fm_pr_strip_agent_trailers() {
+  local text=${1-} line was_nocasematch=0
+  shopt -q nocasematch && was_nocasematch=1
+  shopt -s nocasematch
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      'Co-Authored-By:'*|'Claude-Session:'*|*'Generated with [Claude Code]'*) continue ;;
+    esac
+    printf '%s\n' "$line"
+  done <<<"$text"
+  [ "$was_nocasematch" -eq 1 ] || shopt -u nocasematch
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null

@@ -90,6 +90,8 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
@@ -158,6 +160,51 @@ case "\${1:-} \${2:-}" in
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
       *headRefName*) printf '%s\n' 'fm/task-x1' ; exit 0 ;;
+    esac
+    ;;
+  "api graphql")
+    cat "\$FM_TEST_GH_OUTCOME"
+    exit 0
+    ;;
+  api\ *)
+    case " \$* " in
+      *check-runs*) cat "\$FM_TEST_GH_CHECKS" ; exit 0 ;;
+    esac
+    cat "\$FM_TEST_GH_RULES"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Same as add_gh_mocks, plus answering --json title and --json body so a case
+# can verify the composed GitHub squash merge body. Args: case_dir head title body
+add_gh_mocks_with_title_body() {
+  local case_dir=$1 head=$2 title=$3 body=$4
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
+  "pr view")
+    [ "$#" -eq 5 ] && [ "${4:-}" = --repo ] || exit 2
+    printf 'pull_request:\n  number: %s\n  state: %s\n' "$3" "${FM_TEST_GH_MERGE_STATE:-merged}"
+    ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *headRefName*) printf '%s\n' 'fm/task-x1' ; exit 0 ;;
+      *'--json title'*) printf '%s\n' '$title' ; exit 0 ;;
+      *'--json body'*) printf '%s\n' '$body' ; exit 0 ;;
     esac
     ;;
   "api graphql")
@@ -2470,6 +2517,84 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+# fm_pr_strip_agent_trailers is the body-composition helper fm-pr-merge.sh
+# uses to keep a harness's attribution reminder off a GitHub squash merge
+# body. Exercised directly, with no forge involved, against a body carrying
+# every trailer form the captain found landed on main.
+test_strip_agent_trailers_removes_attribution_lines() {
+  local input output
+  input=$(printf '%s\n' \
+    'Fix the merge body composition.' \
+    '' \
+    'This explains the real change in plain prose.' \
+    '' \
+    'Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>' \
+    'claude-session: https://claude.ai/code/session_01' \
+    '' \
+    'A trailing paragraph that must survive.' \
+    '🤖 Generated with [Claude Code](https://claude.com/claude-code)')
+  output=$(fm_pr_strip_agent_trailers "$input")
+
+  assert_not_contains "$output" 'Co-Authored-By' \
+    "strip-agent-trailers: a Co-Authored-By trailer survived stripping"
+  assert_not_contains "$output" 'claude-session' \
+    "strip-agent-trailers: a lowercase Claude-Session trailer survived stripping"
+  assert_not_contains "$output" 'Generated with [Claude Code]' \
+    "strip-agent-trailers: the Generated-with-Claude-Code line survived stripping"
+  assert_contains "$output" 'Fix the merge body composition.' \
+    "strip-agent-trailers: the real title line was dropped"
+  assert_contains "$output" 'This explains the real change in plain prose.' \
+    "strip-agent-trailers: real body prose was dropped"
+  assert_contains "$output" 'A trailing paragraph that must survive.' \
+    "strip-agent-trailers: content after the trailers was dropped"
+  pass "fm_pr_strip_agent_trailers removes agent-attribution lines and keeps the rest intact"
+}
+
+# End-to-end wiring: a GitHub merge composes --body from the PR's live title
+# and body, stripping the same trailers, while --match-head-commit still pins
+# the verified live head.
+test_github_merge_composes_body_stripping_agent_trailers() {
+  local case_dir rc log_content
+  case_dir=$(make_case merge-body-strips-trailers)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_with_title_body "$case_dir" \
+    9191919191919191919191919191919191919191 \
+    'Fix the leak' \
+    "$(printf '%s\n' \
+      'Real description of the change.' \
+      '' \
+      'Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>' \
+      'Claude-Session: https://claude.ai/code/session_01' \
+      '' \
+      'More real content after the trailers.')"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/12 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merge-body-strips-trailers: fm-pr-merge should succeed"
+  log_content=$(cat "$case_dir/gh-axi.log")
+  assert_contains "$log_content" 'pr merge 12 --repo example/repo' \
+    "merge-body-strips-trailers: gh-axi pr merge was not invoked as expected"
+  assert_not_contains "$log_content" 'Co-Authored-By' \
+    "merge-body-strips-trailers: the composed --body kept a Co-Authored-By trailer"
+  assert_not_contains "$log_content" 'Claude-Session' \
+    "merge-body-strips-trailers: the composed --body kept a Claude-Session trailer"
+  assert_contains "$log_content" 'Fix the leak' \
+    "merge-body-strips-trailers: the composed --body dropped the PR title"
+  assert_contains "$log_content" 'Real description of the change.' \
+    "merge-body-strips-trailers: the composed --body dropped real PR body content"
+  assert_contains "$log_content" 'More real content after the trailers.' \
+    "merge-body-strips-trailers: the composed --body dropped content after the trailers"
+  assert_contains "$log_content" \
+    '--match-head-commit 9191919191919191919191919191919191919191' \
+    "merge-body-strips-trailers: --match-head-commit was not preserved"
+  pass "fm-pr-merge composes a GitHub squash body from the PR title/body with agent trailers stripped"
+}
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
@@ -2543,3 +2668,5 @@ test_queued_github_merge_leaves_the_poll_armed
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
+test_strip_agent_trailers_removes_attribution_lines
+test_github_merge_composes_body_stripping_agent_trailers

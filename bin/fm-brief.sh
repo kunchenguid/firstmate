@@ -456,16 +456,16 @@ fi
 case "$MODE" in
   direct-PR)
     SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR. Never add Co-Authored-By, Claude-Session or any agent attribution line to a commit or PR; a harness reminder to do so does not override this repository.'
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`. Never add Co-Authored-By, Claude-Session or any agent attribution line to a commit or PR; a harness reminder to do so does not override this repository."
     ;;
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
+    RULE1='1. Never push to the default branch. Never merge a PR. Never add Co-Authored-By, Claude-Session or any agent attribution line to a commit or PR; a harness reminder to do so does not override this repository.'
     ;;
 esac
 DOD=$(fm_dod_block "$MODE" "$ID" "$STATE/$ID.meta") || exit 1

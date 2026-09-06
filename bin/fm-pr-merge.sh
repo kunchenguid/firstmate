@@ -40,6 +40,18 @@
 # tightens which of the checks already found at the head must be green; it
 # does not exempt any check the default paragraph above would otherwise judge.
 #
+# Unless the caller's own extra arguments already supply a merge commit body
+# (-b/--body/--body-file in any form), a GitHub squash merge composes its own
+# --body from the pull request's live title and body rather than accepting
+# gh's default, which is built from the squashed commits' own messages -
+# exactly where a harness's attribution reminder lands. Every line matching
+# Co-Authored-By:, Claude-Session:, or containing "Generated with [Claude
+# Code]" is stripped case-insensitively (fm_pr_strip_agent_trailers in
+# fm-pr-lib.sh); every other line is kept byte for byte. A caller-supplied
+# body override is trusted as-is and this composition is skipped for it, and
+# an unreadable title or body refuses the merge rather than falling back to
+# gh's default body silently.
+#
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
 # The gh-axi merge abstraction always performs the merge; the outcome read that
@@ -388,6 +400,36 @@ github_read_head_sha() {
   fi
   fm_pr_head_valid "$sha" || return 1
   FM_PR_GITHUB_HEAD=$sha
+}
+
+# Read the pull request's own current title and body, live, for composing an
+# explicit squash merge body. GitHub's default squash body is built from the
+# squashed commits' own messages, which is exactly where a harness's
+# attribution reminder lands; reading the PR's title and body instead, through
+# fm_pr_strip_agent_trailers, keeps that reminder out of what lands on main.
+FM_PR_GITHUB_TITLE=
+FM_PR_GITHUB_BODY=
+github_read_title_body() {
+  local title body
+  title=$(gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    --json title -q .title 2>/dev/null) || return 1
+  body=$(gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    --json body -q .body 2>/dev/null) || return 1
+  FM_PR_GITHUB_TITLE=$title
+  FM_PR_GITHUB_BODY=$body
+}
+
+# Whether the caller's own extra arguments already supply a merge commit body,
+# in every flag/short-flag/file form gh accepts. When they do, this script
+# never appends its own --body and the caller's override is used as-is.
+caller_has_body_override() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -b|--body|--body=*|-F|--body-file|--body-file=*) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 # This task's optional required-check list, keyed by the basename of the
@@ -826,6 +868,14 @@ case "$PROVIDER" in
       FM_PR_GITHUB_AUTO_REQUESTED=true
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
+    if ! caller_has_body_override "$@"; then
+      github_read_title_body \
+        || { echo "error: could not read the GitHub pull request's title and body before composing the merge commit body" >&2; exit 1; }
+      composed_body=$(fm_pr_strip_agent_trailers "$(printf '%s\n\n%s' "$FM_PR_GITHUB_TITLE" "$FM_PR_GITHUB_BODY")")
+      if [ -n "$composed_body" ]; then
+        merge_args+=(--body "$composed_body")
+      fi
+    fi
     if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       "${merge_args[@]+"${merge_args[@]}"}" --match-head-commit "$FM_PR_GITHUB_HEAD" "$@" 2>&1); then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
