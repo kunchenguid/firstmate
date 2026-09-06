@@ -380,6 +380,37 @@ fm_procevent_claim_capture_reservation_remove_locked() {
   fm_procevent_capture_reservation_remove_claim "$FM_PROCEVENT_CLAIM_STATE_ROOT" "$FM_PROCEVENT_CLAIM_TOKEN"
 }
 
+# fm_procevent_claim_generation_gone_locked
+# True only when the loaded claim's owner is stale and the process group it led
+# independently has no members left. The separate group check also covers a
+# reused live pid whose identity differs while the old generation survives.
+# A live matched owner (state 0), an unreadable identity (state 2), and a
+# crashed leader whose owned group is still running (state 3) all return false.
+fm_procevent_claim_generation_gone_locked() {
+  local state=0
+  fm_procevent_pid_state "${FM_PROCEVENT_CLAIM_PID:-}" "${FM_PROCEVENT_CLAIM_IDENTITY:-}" || state=$?
+  [ "$state" -eq 1 ] \
+    && ! fm_procevent_group_alive "${FM_PROCEVENT_CLAIM_PID:-}"
+}
+
+# Capture-reservation cleanup for a claim being reclaimed.
+#
+# Reservation records are keyed by CLAIM TOKEN, and every replacement claims a
+# fresh token, so a dead generation's leftovers can never collide with the
+# generation that replaces it. They are hygiene, not an ownership invariant -
+# the runner's own successful-capture path already tidies them best-effort.
+# Gating ownership on that tidying is what wedged a source forever whenever the
+# recorded state-root identity could no longer be revalidated: reconcile could
+# not clear the dead claim and retire refused with "cannot release source
+# ownership", while the pid and its whole process group were provably gone.
+#
+# So the cleanup is still attempted and still authoritative for a generation
+# that is not provably gone; it only stops being a veto once it is.
+fm_procevent_claim_capture_reservation_reclaim_locked() {
+  fm_procevent_claim_capture_reservation_remove_locked && return 0
+  fm_procevent_claim_generation_gone_locked
+}
+
 # fm_procevent_group_alive <pid>
 # True while any process remains in the process group a runner leads. A runner
 # started by reconcile is its own group leader, so this is what distinguishes a
@@ -469,7 +500,7 @@ fm_procevent_claim_acquire_locked() {
             fi
           fi
           if [ "$status" -eq 0 ]; then
-            fm_procevent_claim_capture_reservation_remove_locked || status=1
+            fm_procevent_claim_capture_reservation_reclaim_locked || status=1
           fi
           [ "$status" -ne 0 ] || rm -f -- "$claim" || status=1
         else
@@ -553,7 +584,7 @@ fm_procevent_claim_release_locked() {
     && [ "$FM_PROCEVENT_CLAIM_HOME" = "$home" ] \
     && [ "$FM_PROCEVENT_CLAIM_PID" = "$pid" ] \
     && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$token" ]; then
-    fm_procevent_claim_capture_reservation_remove_locked || return 1
+    fm_procevent_claim_capture_reservation_reclaim_locked || return 1
     rm -f -- "$claim"
     return $?
   fi

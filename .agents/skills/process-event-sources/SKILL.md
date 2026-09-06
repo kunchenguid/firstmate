@@ -118,7 +118,7 @@ Supported by tests:
 - the handled acknowledgement is generation-keyed to the exact source and sequence, private, path-safe, durable, and idempotent, and is the only thing that stops re-announcement;
 - one identity-matched owner per canonical source, across homes that share one underlying source store;
 - registration and ownership transitions share one per-source boundary, release is generation-bound, and uncertain process identity preserves the source for retry;
-- ownership moves only once a whole generation is gone, so a crashed runner leader whose owned process group is still running never reads as stale: that surviving group is stopped before any replacement starts, and the claim is kept for retry when it cannot be;
+- ownership moves only when the owner is stale and an independent process-group check proves the whole generation gone, so neither a crashed leader nor a reused pid relaxes cleanup while the old group survives; a safely identified surviving group is stopped before replacement, and the claim is kept for retry when it cannot be;
 - stored argv is executed directly, so an argument containing spaces or shell metacharacters is never re-split or interpreted;
 - oversized output is bounded rather than published whole or silently dropped.
 
