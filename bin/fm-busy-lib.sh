@@ -41,7 +41,7 @@
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, muse-session-log,
+#   endpoint-gone, herdr-native, grok-regex, rovo-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target
 #
@@ -52,16 +52,18 @@
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
-#      muse session-log and cursor transcript pull sources, then the Grok-only
-#      temporary regex fallback classifies a grok task from its rendered tail,
-#      then unknown missing
+#      muse session-log and cursor transcript pull sources, then the Grok/Rovo
+#      temporary regex fallbacks classify a grok or rovo task from its
+#      rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
-# The Grok arm is the ONLY rendered-text classification that survives the
-# redesign, because Grok's structured lifecycle was not credited-live-verified
-# in the approved audit; it is scoped to harness=grok and can never classify
-# another adapter. The delivery guards in bin/fm-composer-lib.sh match rendered
-# footers for submit acknowledgement and away-mode supervisor injection only;
-# neither is a recorded worker state source.
+# Grok and Rovo are the ONLY rendered-text classifications that survive the
+# redesign, because neither's structured lifecycle was credited-live-verified
+# in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
+# path firstmate drives, see references/harness/rovo.md); each is scoped to
+# its own harness= and can never classify another adapter. The delivery
+# guards in bin/fm-composer-lib.sh match rendered footers for submit
+# acknowledgement and away-mode supervisor injection only; neither is a
+# recorded worker state source.
 #
 # The muse pull source is semantic, not rendered: it folds muse's own durable
 # session event log. It has no writer, no arm, and no gen, because
@@ -834,6 +836,19 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
+# fm_busy_rovo_tail_busy: the Rovo-only temporary rendered-tail fallback.
+# Consumes the tail on stdin; 0 when Rovo's verified animated busy line
+# matches (the "Rovo is thinking..." text rendered while a turn is running,
+# verified live on rovo 202609.1.2; both observed glyph variants share this
+# literal text). rovo has no turn-end hook - its eventHooks fire at tool
+# granularity only - so this fallback, like Grok's, is the only source; it is
+# never armed as a semantic writer (fm_busy_sources_for_harness trusts
+# nothing for rovo). FM_BUSY_ROVO_REGEX overrides the signature.
+fm_busy_rovo_tail_busy() {
+  grep -v '^[[:space:]]*$' | tail -12 \
+    | grep -qiE "${FM_BUSY_ROVO_REGEX:-Rovo is thinking}"
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
@@ -937,6 +952,28 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         printf 'busy grok-regex'
       else
         printf 'idle grok-regex'
+      fi
+      return 0
+      ;;
+    rovo*)
+      if [ -z "$tail40" ]; then
+        if command -v fm_backend_capture >/dev/null 2>&1; then
+          tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
+            printf 'unknown capture-failed'
+            return 0
+          }
+        else
+          printf 'unknown capture-failed'
+          return 0
+        fi
+      fi
+      # This fallback is best-effort: a long turn can scroll the busy marker
+      # out of the captured tail, so its absence means "can't tell," never
+      # definitive idle - matching the muse and cursor arms above.
+      if printf '%s' "$tail40" | fm_busy_rovo_tail_busy; then
+        printf 'busy rovo-regex'
+      else
+        printf 'unknown rovo-regex'
       fi
       return 0
       ;;

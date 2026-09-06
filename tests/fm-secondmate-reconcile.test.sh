@@ -564,6 +564,7 @@ META
     fm_lock_release "$home/state/.control-mate.lock"
     : > "$lifecycle_done"
   ) &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   lifecycle_pid=$!
 
   sleep 0.1
@@ -664,6 +665,7 @@ SH
   rc=0
   FM_RECONCILE_RACE_SIGNAL="$signal" FM_RECONCILE_RACE_RELEASE="$release" \
     run_remote_notify "$home" "$fakebin" "$snap" > "$home/notify.out" 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   notify_pid=$!
   while [ ! -f "$signal" ]; do
     kill -0 "$notify_pid" 2>/dev/null || fail "reconcile exited before entering fm-send"

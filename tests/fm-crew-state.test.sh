@@ -11,6 +11,11 @@
 # source):
 #   (a) active run-step is authoritative                          -> run-step
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
+#   (b2) blocked log claiming the daemon/timeout while the run is fixing with
+#       fresh activity = superseded BECAUSE THE RUN IS ALIVE; the same claim
+#       a genuine socket-refusal claim over a stale or terminal run record
+#       remains blocked, and an ordinary blocked log over a live run keeps the generic
+#       superseded reading
 #   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
 #   (e) cross-branch attribution: this branch's own run found via list lookup
@@ -231,6 +236,41 @@ run:
 EOF
 }
 
+# A fixing run whose active step reports FRESH activity. `axi status` emits the
+# active_steps table only while a step is running or fixing, and leaves
+# last_activity unprefixed while step-log or agent lifecycle events keep
+# arriving - that is the client's own recency verdict.
+run_fixing_active_recent() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fixing
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  active_steps[1]{step,active_for,last_activity,agent_pid,round}:
+    review,12m3s,8s,44121,"auto-fix 1/3"
+EOF
+}
+
+# The same run gone QUIET: the client prefixes last_activity with `quiet` once
+# nothing has arrived for longer than its configured quiet warning. This is the
+# shape a run record keeps when the daemon really did die under it.
+run_fixing_active_quiet() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fixing
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  active_steps[1]{step,active_for,last_activity,agent_pid,round}:
+    review,42m8s,"quiet 31m2s",44121,"auto-fix 1/3"
+EOF
+}
+
 run_top_level_ci() {  # <branch>
   cat <<EOF
 run:
@@ -415,6 +455,118 @@ test_stale_blocked_superseded() {
   assert_contains "$out" "state: working" "resumed run -> working despite blocked log"
   assert_contains "$out" "superseded" "stale blocked log flagged superseded"
   pass "stale blocked over active run is superseded"
+}
+
+# A crew whose drive call timed out or was killed by its harness command limit
+# routinely blocks claiming the pipeline died. The daemon accepts `respond`
+# immediately and runs the fix round in the background, so such a claim over a
+# run that is fixing WITH fresh activity is contradicted by the run itself: the
+# supervisor answer is to steer a reattach, not to escalate a dead pipeline.
+test_daemon_claim_over_live_run_reads_run_alive() {
+  reset_fakes
+  local d; d=$(new_case daemon-claim-live)
+  make_repo_on_branch "$d/wt" fm/feat-dl
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dl.meta" "window=fm:fm-feat-dl" "worktree=$d/wt" "kind=ship"
+  printf 'blocked: no-mistakes daemon unreachable, drive run: read response: i/o timeout\n' \
+    > "$d/state/feat-dl.status"
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-dl)"
+  local out; out=$(run_crew_state "$d" feat-dl)
+  assert_contains "$out" "state: working" "live run beats the crew's death claim"
+  assert_contains "$out" "source: run-step" "live run -> run-step source"
+  assert_contains "$out" "run alive" "daemon claim over a live run is named as run alive"
+  assert_contains "$out" "reattach" "the reading names the reattach steer"
+  assert_not_contains "$out" "superseded by active run" \
+    "the daemon claim gets the sharper reading, not the generic one"
+  pass "daemon/timeout blocked claim over a live fixing run reads as run alive"
+}
+
+# A genuine refused socket outranks the persisted fixing record, which can
+# survive after the daemon exits.
+test_socket_refusal_over_stale_fixing_run_reports_blocked() {
+  reset_fakes
+  local d; d=$(new_case daemon-socket-refused)
+  make_repo_on_branch "$d/wt" fm/feat-dq
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dq.meta" "window=fm:fm-feat-dq" "worktree=$d/wt" "kind=ship"
+  printf 'blocked: no-mistakes daemon socket refused connections\n' \
+    > "$d/state/feat-dq.status"
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_quiet fm/feat-dq)"
+  local out; out=$(run_crew_state "$d" feat-dq)
+  assert_contains "$out" "state: blocked" "socket refusal outranks a stale fixing record"
+  assert_contains "$out" "source: status-log" "socket refusal remains status-log evidence"
+  assert_contains "$out" "socket refused connections" "socket failure is preserved"
+  assert_not_contains "$out" "run alive" "stale fixing record is not reported alive"
+
+  # Exercise the exact alternate wordings emitted by the generated crew rule.
+  printf 'blocked: no-mistakes daemon socket refuses connections\n' \
+    > "$d/state/feat-dq.status"
+  out=$(run_crew_state "$d" feat-dq)
+  assert_contains "$out" "state: blocked" "socket-refuses wording outranks a stale fixing record"
+  assert_not_contains "$out" "state: working" "socket-refuses wording cannot be suppressed by a stale active record"
+
+  printf 'blocked: no-mistakes daemon socket is missing\n' \
+    > "$d/state/feat-dq.status"
+  out=$(run_crew_state "$d" feat-dq)
+  assert_contains "$out" "state: blocked" "missing socket outranks a stale fixing record"
+  assert_contains "$out" "source: status-log" "missing socket remains status-log evidence"
+  assert_not_contains "$out" "state: working" "missing socket cannot be suppressed by a stale active record"
+  pass "socket refusal or missing socket over a stale fixing run reports blocked"
+}
+
+# A terminal run record can be the final persisted state after the daemon exits.
+# Positive socket-failure evidence must not be discarded merely because that
+# attributed record no longer has an active status.
+test_socket_refusal_over_terminal_run_reports_blocked() {
+  reset_fakes
+  local d; d=$(new_case daemon-socket-refused-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-dqt
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dqt.meta" "window=fm:fm-feat-dqt" "worktree=$d/wt" "kind=ship"
+  printf 'blocked: no-mistakes daemon socket refused connections\n' \
+    > "$d/state/feat-dqt.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-dqt)"
+  local out; out=$(run_crew_state "$d" feat-dqt)
+  assert_contains "$out" "state: blocked" "socket refusal outranks a terminal run record"
+  assert_contains "$out" "source: status-log" "terminal run cannot suppress socket-failure evidence"
+  assert_not_contains "$out" "state: failed" "terminal run state is not emitted over socket-failure evidence"
+  pass "socket refusal over a terminal attributed run reports blocked"
+}
+
+# And the claim half: an ordinary blocked line over the same live run keeps the
+# generic reading, so the sharper one cannot fire on every superseded block.
+test_ordinary_blocked_over_live_run_keeps_plain_superseded() {
+  reset_fakes
+  local d; d=$(new_case ordinary-blocked-live)
+  make_repo_on_branch "$d/wt" fm/feat-ob
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ob.meta" "window=fm:fm-feat-ob" "worktree=$d/wt" "kind=ship"
+  printf 'blocked: database upload failed with broken pipe\n' > "$d/state/feat-ob.status"
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-ob)"
+  local out; out=$(run_crew_state "$d" feat-ob)
+  assert_contains "$out" "state: working" "ordinary blocked log over an active run -> working"
+  assert_contains "$out" "superseded by active run" "ordinary blocked keeps the generic reading"
+  assert_not_contains "$out" "run alive" "broken pipe is not a pipeline-unreachable alias"
+  pass "broken-pipe blocker over a live run keeps the plain superseded reading"
+}
+
+# The genuine daemon-down case still reaches the supervisor as blocked: the
+# socket refused connections and no run is executing anywhere.
+test_genuine_daemon_down_reports_blocked() {
+  reset_fakes
+  local d; d=$(new_case daemon-down)
+  make_repo_on_branch "$d/wt" fm/feat-dd
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dd.meta" "window=fm:fm-feat-dd" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'blocked: no-mistakes daemon socket refused connections\n' > "$d/state/feat-dd.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-dd
+  local out; out=$(run_crew_state "$d" feat-dd)
+  assert_contains "$out" "state: blocked" "a genuine daemon-down claim with no run stays blocked"
+  assert_contains "$out" "source: status-log" "no run -> status-log source"
+  assert_not_contains "$out" "run alive" "nothing is alive to report"
+  pass "genuine daemon-down blocked line still reports blocked"
 }
 
 # (c) genuine parked run + needs-decision log AGREE -> parked, NOT superseded
@@ -746,6 +898,27 @@ EOF
 
 # The runs list is newest-first; a branch with an OLDER completed run must not
 # shadow its own newer active one - the first (topmost) matching row wins.
+test_coarse_socket_refusal_reports_blocked() {
+  reset_fakes
+  local d short; d=$(new_case coarse-socket-refused)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-down
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-coarse-down.meta" "window=fm:fm-feat-coarse-down" "worktree=$d/wt" "kind=ship"
+  printf 'blocked: no-mistakes daemon connection refused\n' > "$d/state/feat-coarse-down.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-07-02 22:10
+  running    fm/feat-coarse-down ${short}  2026-07-02 22:05
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-coarse-down)
+  assert_contains "$out" "state: blocked" "socket refusal outranks a coarse active record"
+  assert_contains "$out" "source: status-log" "coarse socket refusal remains status-log evidence"
+  assert_not_contains "$out" "state: working" "coarse active record cannot suppress socket refusal"
+  pass "socket refusal over a coarse active run reports blocked"
+}
+
 test_cross_branch_attribution_picks_most_recent_row() {
   reset_fakes
   local d short; d=$(new_case crossbranch-mostrecent)
@@ -1873,6 +2046,11 @@ EOF
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
+test_daemon_claim_over_live_run_reads_run_alive
+test_socket_refusal_over_stale_fixing_run_reports_blocked
+test_socket_refusal_over_terminal_run_reports_blocked
+test_ordinary_blocked_over_live_run_keeps_plain_superseded
+test_genuine_daemon_down_reports_blocked
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
@@ -1891,6 +2069,7 @@ test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
+test_coarse_socket_refusal_reports_blocked
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored

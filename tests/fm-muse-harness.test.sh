@@ -912,6 +912,35 @@ test_muse_trusts_no_record_sources() {
   pass "muse trusts no busy record source"
 }
 
+test_spawn_environment_allowlist_credential_preflight() {
+  local setting rec case_dir home proj wt fakebin id out status
+  for setting in withheld allowed stored; do
+    rec=$(make_spawn_case "allowlist-$setting")
+    IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+    : > "$home/config/launch-env-allowlist"
+    case "$setting" in
+      allowed) printf 'META_API_KEY\n' > "$home/config/launch-env-allowlist" ;;
+      stored)
+        mkdir -p "$home/xdgconfig/muse"
+        printf '{"schema_version":1}\n' > "$home/xdgconfig/muse/auth.json"
+        ;;
+    esac
+    out=$(run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
+    status=$?
+    if [ "$setting" = withheld ]; then
+      expect_code 1 "$status" "withheld Muse key must not satisfy preflight"
+      assert_contains "$out" "no worker-reachable credential" "missing credential explanation"
+      assert_absent "$home/state/$id.meta" "withheld Muse key still launched a worker"
+    else
+      expect_code 0 "$status" "Muse $setting credential must remain usable: $out"
+    fi
+  done
+  pass "Muse preflight respects the allowlist while retaining stored authentication"
+}
+
+test_spawn_environment_allowlist_credential_preflight
 test_detects_versioned_process_ancestor
 test_detection_is_anchored
 test_spawn_clears_inherited_foreign_harness_markers

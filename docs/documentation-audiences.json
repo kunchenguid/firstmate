@@ -213,6 +213,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/rovo.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -425,6 +429,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/lint-option-a.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/muse.md",
       "audience": "maintainer-verification"
     },
@@ -437,11 +445,15 @@
       "audience": "maintainer-verification"
     },
     {
-      "path": "docs/verification/secondmate-parent-channel.md",
+      "path": "docs/verification/rovo.md",
       "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/runtime-backends.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/secondmate-parent-channel.md",
       "audience": "maintainer-verification"
     },
     {

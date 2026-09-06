@@ -1007,6 +1007,225 @@ test_batch_forwards_codex_home_to_every_pair() {
   pass "batch dispatch forwards a shared --codex-home to every pair"
 }
 
+# Execute the actual emitted command in a synthetic pane environment: the
+# fake backend records delivery, while real shells exercise the env boundary.
+# No developer environment or credential values are inspected by these probes.
+test_launch_environment_allowlist() {
+  local setting rec id out status probe result expected launch value pane_shell
+  # shellcheck disable=SC2016
+  value='synthetic value; $(touch SHOULD_NOT_EXIST) `false` "quoted"'
+  for setting in absent missing-config enabled empty; do
+    id="env-$setting"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    case "$setting" in
+      missing-config) rm "$HOME_DIR/config/crew-harness"; rmdir "$HOME_DIR/config" ;;
+      enabled) printf '# Synthetic credential name\nFM_TEST_ALLOWED\nFM_TEST_EMPTY\nFM_TEST_UNSET\n' > "$HOME_DIR/config/launch-env-allowlist" ;;
+      empty) : > "$HOME_DIR/config/launch-env-allowlist" ;;
+    esac
+    probe="$CASE_DIR/probe.sh"
+    cat > "$probe" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "${FM_TEST_ALLOWED-unset}" \
+  "${FM_TEST_EMPTY-unset}" "${FM_TEST_UNSET-unset}" "$HOME" "$PATH" "$TERM" "$TMUX" "$GOTMPDIR"
+SH
+    out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness "/bin/sh '$probe'")
+    status=$?
+    expect_code 0 "$status" "allowlist=$setting spawn should succeed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    for pane_shell in /bin/sh /bin/bash /bin/zsh; do
+      [ -x "$pane_shell" ] || continue
+      result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
+      FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED="$value" FM_TEST_EMPTY='' \
+      "$pane_shell" -c "$launch") || fail "allowlist=$setting emitted launch failed in $pane_shell"
+      case "$setting" in
+        absent|missing-config) expected=$(printf '%s\n' synthetic-unrelated "$value" '' unset) ;;
+        enabled) expected=$(printf '%s\n' unset "$value" '' unset) ;;
+        empty) expected=$(printf '%s\n' unset unset unset unset) ;;
+      esac
+      expected="$expected"$'\n'"$HOME_DIR/user-home"$'\n/usr/bin:/bin\nxterm\nsynthetic-pane\n/synthetic/gotmp'
+      [ "$result" = "$expected" ] || fail "allowlist=$setting worker environment mismatch: $result"
+    done
+    pass "allowlist=$setting preserves the operational floor and filters only when opted in"
+  done
+}
+
+test_launch_environment_invalid_config_refuses() {
+  local rec id bad out status
+  id=env-invalid
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  for bad in 'FM_TEST_ALLOWED=value' 'NAME;false' '1INVALID' '*'; do
+    printf '%s\n' "$bad" > "$HOME_DIR/config/launch-env-allowlist"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "invalid allowlist must refuse spawn"
+    assert_contains "$out" 'launch-env-allowlist' "refusal must identify the config file"
+    [ ! -s "$LAUNCH_LOG" ] || fail "invalid allowlist delivered a launch command"
+    [ ! -f "$HOME_DIR/state/$id.meta" ] || fail "invalid allowlist published a task"
+  done
+  pass "invalid allowlist names refuse before launch or task publication"
+}
+
+test_launch_environment_inaccessible_config_refuses() {
+  local setting presence rec id blocked out status
+  if [ "$(id -u)" = 0 ]; then
+    printf '# skip - inaccessible launch configuration requires a non-root user\n'
+    return
+  fi
+  for setting in config ancestor; do
+    for presence in present absent; do
+      id="env-inaccessible-$setting-$presence"
+      rec=$(make_spawn_case "$id" codex "$id")
+      read_case_record "$rec"
+      if [ "$presence" = present ]; then
+        printf 'FM_TEST_ALLOWED\n' > "$HOME_DIR/config/launch-env-allowlist"
+      fi
+      blocked="$HOME_DIR/config"
+      if [ "$setting" = ancestor ]; then
+        blocked="$HOME_DIR/config-parent"
+        mkdir "$blocked"
+        mv "$HOME_DIR/config" "$blocked/config"
+        ln -s config-parent/config "$HOME_DIR/config"
+      fi
+      chmod 600 "$blocked" || fail "could not remove configuration search permission"
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "$id" "$PROJ_DIR" --harness codex --backend tmux)
+      status=$?
+      chmod 700 "$blocked" || fail "could not restore configuration search permission"
+      expect_code 1 "$status" "inaccessible $setting with $presence allowlist must refuse spawn: $out"
+      assert_contains "$out" 'launch-env-allowlist' "refusal must identify the launch configuration"
+      [ ! -s "$LAUNCH_LOG" ] || fail "inaccessible configuration delivered a launch command"
+      [ ! -f "$HOME_DIR/state/$id.meta" ] || fail "inaccessible configuration published a task"
+      pass "inaccessible $setting with $presence allowlist refuses before launch or task publication"
+    done
+  done
+}
+
+test_launch_environment_inherited_by_secondmate() {
+  local rec id sm out status result
+  id=env-secondmate
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  printf 'FM_TEST_ALLOWED\n' > "$HOME_DIR/config/launch-env-allowlist"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate with an allowlist should spawn: $out"
+  cmp -s "$HOME_DIR/config/launch-env-allowlist" "$sm/config/launch-env-allowlist" \
+    || fail "secondmate did not inherit the launch environment contract"
+  cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "$FM_TEST_ALLOWED" "$FM_HOME" "${FM_STATE_OVERRIDE-unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/codex"
+  result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" \
+    FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED=synthetic-provider \
+    /bin/sh -c "$(cat "$LAUNCH_LOG")") || fail "secondmate's emitted command failed"
+  [ "$result" = "unset"$'\nsynthetic-provider\n'"$sm" ] \
+    || fail "secondmate's environment lost filtering or explicit home assignments: $result"
+  # Exercise the same inheritance owner used by local and remote transfers;
+  # removal must restore absence downstream as well as copying an opt-in.
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-config-inherit-lib.sh"
+    rm "$HOME_DIR/config/launch-env-allowlist"
+    propagate_secondmate_inheritance "$HOME_DIR" "$sm" >/dev/null
+  ) || fail "allowlist removal failed to converge"
+  [ ! -e "$sm/config/launch-env-allowlist" ] || fail "secondmate retained a removed allowlist"
+  pass "secondmate launch inherits the allowlist for subsequent worker launches"
+}
+
+run_launch_environment_inheritance() {
+  local route=$1 home=$2 dest=$3 fakebin=$4 generation=$5
+  if [ "$route" = local ]; then
+    (
+      # shellcheck source=/dev/null
+      . "$ROOT/bin/fm-config-inherit-lib.sh"
+      FM_INHERITABLE_CONFIG=launch-env-allowlist \
+        propagate_inheritable_config "$home/config" "$dest/config"
+    )
+  else
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_DATA_OVERRIDE="$home/data" FM_INHERITABLE_CONFIG=launch-env-allowlist \
+      FM_SSH_BIN="$fakebin/inherit-ssh" \
+      "$ROOT/bin/fm-remote-inherit-push.sh" inherited-env "$generation"
+  fi
+}
+
+test_launch_environment_inheritance_preserves_on_source_errors() {
+  local route rec id dest out status
+  if [ "$(id -u)" = 0 ]; then
+    printf '# skip - inaccessible inheritance sources require a non-root user\n'
+    return
+  fi
+  for route in local remote; do
+    id="env-inherit-$route"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    dest="$CASE_DIR/inherited-home"
+    mkdir -p "$dest/config"
+    printf 'FM_TEST_ALLOWED\n' > "$HOME_DIR/config/launch-env-allowlist"
+    printf -- '- inherited-env - Test route (host: inherit-host; root: %s; home: %s; scope: test; projects: ; added 2026-09-05)\n' \
+      "$ROOT" "$dest" > "$HOME_DIR/data/secondmates.md"
+    cat > "$FAKEBIN_DIR/inherit-ssh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+[ "$#" -eq 6 ] && [ "$1" = inherit-host ] && [ "$2" = fm-remote-entrypoint.sh ] && [ "$3" = 1 ] || exit 91
+remote_root=$(printf '%s' "$4" | base64 --decode)
+remote_home=$(printf '%s' "$5" | base64 --decode)
+args=()
+while IFS= read -r -d '' arg; do args+=("$arg"); done < <(printf '%s' "$6" | base64 --decode)
+[ "${args[0]}" = fm-remote-inherit.sh ] || exit 92
+FM_HOME="$remote_home" FM_STATE_OVERRIDE="$remote_home/state" \
+  exec "$remote_root/bin/${args[0]}" "${args[@]:1}"
+SH
+    chmod +x "$FAKEBIN_DIR/inherit-ssh"
+    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 1 2>&1)
+    status=$?
+    expect_code 0 "$status" "$route allowlist inheritance should succeed: $out"
+    [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
+      || fail "$route inheritance did not publish the allowlist"
+
+    chmod 600 "$HOME_DIR/config" || fail "could not remove source search permission"
+    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 2 2>&1)
+    status=$?
+    chmod 700 "$HOME_DIR/config" || fail "could not restore source search permission"
+    expect_code 1 "$status" "$route inheritance must refuse an inaccessible source: $out"
+    assert_contains "$out" launch-env-allowlist "$route inspection error must identify the allowlist"
+    [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
+      || fail "$route inheritance removed or changed the allowlist after an inspection error"
+
+    rm "$HOME_DIR/config/launch-env-allowlist"
+    ln -s missing-allowlist "$HOME_DIR/config/launch-env-allowlist"
+    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 3 2>&1)
+    status=$?
+    expect_code 1 "$status" "$route inheritance must refuse a dangling source link: $out"
+    [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
+      || fail "$route inheritance treated a dangling source link as absence"
+
+    rm "$HOME_DIR/config/launch-env-allowlist"
+    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 4 2>&1)
+    status=$?
+    expect_code 0 "$status" "$route inheritance should mirror proven absence: $out"
+    [ ! -e "$dest/config/launch-env-allowlist" ] || fail "$route inheritance retained a removed allowlist"
+    pass "$route inheritance preserves the allowlist on source errors and mirrors proven absence"
+  done
+}
+
+test_launch_environment_allowlist
+test_launch_environment_invalid_config_refuses
+test_launch_environment_inaccessible_config_refuses
+test_launch_environment_inherited_by_secondmate
+test_launch_environment_inheritance_preserves_on_source_errors
+
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
