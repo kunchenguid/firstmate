@@ -6,12 +6,13 @@ When this session owns supervision and away mode is not active:
 2. Source `__FM_X_MODE_ENV__` first when Relay is active.
 3. First cycle: run one foreground watcher checkpoint with `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`.
 4. Ordinary wake: if the command prints `signal:`, `stale:`, `check:`, or `heartbeat`, drain queued wakes, handle that wake, then start the next checkpoint.
-5. If the command prints `checkpoint:` or exits 124 with no wake, drain queued wakes anyway, process any queued user message now visible to Codex, then start the next checkpoint.
+5. Quiet deadline only: if the command prints `checkpoint: no actionable wake` and exits 124, drain queued wakes anyway, process any queued user message now visible to Codex, then start the next checkpoint.
 6. Never use shell `&` or Codex background tasks for firstmate watcher supervision.
 7. Do not run `bin/fm-watch-arm.sh` as Codex's normal supervision command.
    If it is ever shelled anyway, a backgrounded, piped, or bundled anti-pattern is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.codex/hooks.json`.
 8. Failure or missing cycle only: drain queued wakes and inspect the failure and current watcher ownership before starting a fresh foreground checkpoint.
-   A checkpoint that ends without a wake before its deadline is a failed wait; `bin/fm-watch-checkpoint.sh --help` owns its exit-status contract.
+   A `checkpoint: FAILED` line means the watcher ended without delivering a wake, and `checkpoint: watcher is already running` means another watcher owns supervision; both are failed waits rather than quiet deadlines, so never treat either as rule 5.
+   `bin/fm-watch-checkpoint.sh --help` owns its exit-status contract.
 
 Codex cannot reason while a foreground tool call is running.
 The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.
