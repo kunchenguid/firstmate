@@ -167,7 +167,9 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
     case "$sha" in *[!A-Fa-f0-9]*|'') return 0 ;; esac
     case "$day" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) return 0 ;; esac
     case "$clock" in [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;; *) return 0 ;; esac
-    case "$pr" in ''|https://*) ;; *) return 0 ;; esac
+    # A Gitea/Forgejo instance can be plain http (bin/fm-pr-lib.sh), so the
+    # optional PR-URL column is accepted with either scheme.
+    case "$pr" in ''|https://*|http://*) ;; *) return 0 ;; esac
     [ "${#sha}" -ge 7 ] && [ "${#sha}" -le 40 ] || return 0
     year_num=$((10#${day%%-*}))
     month_num=${day#*-}; month_num=${month_num%%-*}; month_num=$((10#$month_num))

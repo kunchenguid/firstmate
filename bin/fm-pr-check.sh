@@ -3,8 +3,10 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# A GitHub pull request URL, a GitLab merge request URL, and a Gitea (or
+# API-compatible Forgejo) pull request URL are all accepted, including on a
+# self-hosted GitLab or Gitea instance. A Gitea URL is accepted only when its
+# instance base URL is listed in config/gitea-instances (fm-pr-lib.sh).
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -12,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -35,6 +38,21 @@ PROVIDER=$FM_PR_PROVIDER
 HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
+PR_OWNER=$FM_PR_OWNER
+PR_REPO=$FM_PR_REPO
+
+# A Gitea URL only names a shape; the instance base URL must be allow-listed in
+# config/gitea-instances before this arms a watch against it. Resolve the tea
+# login here too so a later missing-tool refusal is reported before any side
+# effect (the byte-static poll re-derives the same login from the base URL).
+GITEA_LOGIN=
+if [ "$PROVIDER" = gitea ]; then
+  if ! fm_pr_gitea_instance_resolve "$CONFIG" "$HOST"; then
+    echo "error: $HOST is not an allow-listed Gitea instance; add its base URL to $CONFIG/gitea-instances" >&2
+    exit 1
+  fi
+  GITEA_LOGIN=$FM_PR_GITEA_LOGIN
+fi
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -60,6 +78,26 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   exit 1
 fi
 
+# Same reasoning for Gitea: refuse to arm a watch the poll could never fire,
+# whether tea or jq is absent, or the login for this instance is not
+# configured. The poll reads the merged state out of tea's raw API JSON, so it
+# needs jq the way the GitLab poll does not - reporting it here is the one
+# place a missing JSON processor is visible rather than indistinguishable from
+# an unmerged pull request.
+if [ "$PROVIDER" = gitea ]; then
+  GITEA_MISSING=
+  command -v tea >/dev/null 2>&1 || GITEA_MISSING="tea"
+  command -v jq >/dev/null 2>&1 || GITEA_MISSING="${GITEA_MISSING:+$GITEA_MISSING and }jq"
+  if [ -n "$GITEA_MISSING" ]; then
+    echo "error: watching a Gitea pull request requires $GITEA_MISSING on PATH" >&2
+    exit 1
+  fi
+  if ! tea login list -o csv 2>/dev/null | tail -n +2 | cut -d, -f1 | grep -qxF "$GITEA_LOGIN"; then
+    echo "error: watching a Gitea pull request needs a tea login named '$GITEA_LOGIN' for $HOST (run: tea login add --name $GITEA_LOGIN --url $HOST --token <token>)" >&2
+    exit 1
+  fi
+fi
+
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
@@ -71,10 +109,20 @@ fi
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
 # bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
 # and treats a recorded value that disagrees as stale rather than authoritative.
+# For Gitea the head is read through tea, pulling head.sha out of the raw API
+# JSON with jq (a Gitea watch requirement, checked above); bin/fm-pr-merge.sh
+# still reads the Gitea head live at merge time and treats a recorded value
+# that disagrees as stale, the same as for GitLab.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+    && fm_pr_head_valid "$REMOTE_HEAD"; then
+    PR_HEAD=$REMOTE_HEAD
+  fi
+elif [ "$PROVIDER" = gitea ] && command -v jq >/dev/null 2>&1; then
+  if REMOTE_HEAD=$(tea api --login "$GITEA_LOGIN" "repos/$PR_OWNER/$PR_REPO/pulls/$NUMBER" 2>/dev/null \
+      | jq -r 'if type == "object" and (.head.sha | type == "string") then .head.sha else empty end' 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi

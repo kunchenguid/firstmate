@@ -4,7 +4,24 @@
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
 # addressed through gh-axi by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
-# host and path, so any instance works and no host is hardcoded.
+# host and path, so any instance works and no host is hardcoded; a Gitea (or
+# API-compatible Forgejo) pull request is addressed through tea by the derived
+# owner and repository plus the tea login re-derived from the instance base URL,
+# and is accepted only when that base URL is allow-listed in
+# config/gitea-instances (bin/fm-pr-lib.sh).
+#
+# Gitea merge and outcome read: tea and jq are both required and reported
+# together before anything is recorded, the same as glab and jq for GitLab.
+# The pre-merge check reads one live view of the pull request and refuses unless
+# it is open, not already merged, and mergeable, reporting every failing
+# condition. The merge itself runs through "tea pr merge" (default style squash,
+# matching the GitHub default; the caller may pass --style). After tea returns
+# success, Gitea's live state is read back through "tea api" and accepted only
+# when the pull request reads merged; an outcome that cannot be positively
+# confirmed refuses and leaves the PR metadata and merge poll recorded, exactly
+# like the GitHub readback. tea pr merge exposes no head-commit binding, so the
+# Gitea path matches the GitHub model (no --sha equivalent) rather than the
+# GitLab one; a recorded pr_head that disagrees with the live head is reported.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -70,6 +87,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -100,6 +118,19 @@ PR_NUMBER=$FM_PR_NUMBER
 # glab resolves the instance from the project URL passed to -R, so the host is
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
+
+# A Gitea URL only names a shape; the instance base URL must be allow-listed in
+# config/gitea-instances before this merges against it. Resolve the tea login
+# from that same base URL (fm-pr-lib.sh).
+GITEA_LOGIN=
+if [ "$PROVIDER" = gitea ]; then
+  if ! fm_pr_gitea_instance_resolve "$CONFIG" "$FM_PR_HOST"; then
+    echo "error: $FM_PR_HOST is not an allow-listed Gitea instance; add its base URL to $CONFIG/gitea-instances" >&2
+    exit 1
+  fi
+  GITEA_LOGIN=$FM_PR_GITEA_LOGIN
+fi
+
 shift 2
 [ "${1:-}" = "--" ] && shift
 
@@ -185,8 +216,29 @@ reject_head_overrides() {
   done
 }
 
+# tea addresses the repository and the login only from values this script
+# derives, so an extra arg must not carry --repo/-r, --remote/-R, or --login/-l
+# in any spelling, including a bundled short-option cluster.
+reject_gitea_overrides() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --repo|--repo=*|--remote|--remote=*|--login|--login=*)
+        echo "error: extra merge arguments must not override the repository or login" >&2
+        return 1
+        ;;
+      --*) ;;
+      -*[rRl]*)
+        echo "error: extra merge arguments must not override the repository or login" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
 reject_repo_overrides "$@" || exit 1
 [ "$PROVIDER" != gitlab ] || reject_head_overrides "$@" || exit 1
+[ "$PROVIDER" != gitea ] || reject_gitea_overrides "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -210,10 +262,28 @@ if [ "$PROVIDER" = gitlab ]; then
   fi
 fi
 
+# Same for Gitea: the pre-merge read and the strict outcome read both need tea
+# and jq, reported together and before anything is recorded.
+GITEA_MISSING=
+if [ "$PROVIDER" = gitea ]; then
+  command -v tea >/dev/null 2>&1 || GITEA_MISSING="tea"
+  if ! command -v jq >/dev/null 2>&1; then
+    GITEA_MISSING="${GITEA_MISSING:+$GITEA_MISSING and }jq"
+  fi
+  if [ -n "$GITEA_MISSING" ]; then
+    echo "error: merging a Gitea pull request requires $GITEA_MISSING on PATH" >&2
+    exit 1
+  fi
+  if ! tea login list -o csv 2>/dev/null | tail -n +2 | cut -d, -f1 | grep -qxF "$GITEA_LOGIN"; then
+    echo "error: merging a Gitea pull request needs a tea login named '$GITEA_LOGIN' for $FM_PR_HOST (run: tea login add --name $GITEA_LOGIN --url $FM_PR_HOST --token <token>)" >&2
+    exit 1
+  fi
+fi
+
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
 # because that script re-records pr= and drops a pr_head= it cannot resolve.
 RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ]; then
+if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = gitea ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
@@ -623,6 +693,89 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
+# One live view of the Gitea pull request through tea api. Refuses, after
+# reporting every failing condition, unless it is open, not already merged, and
+# mergeable. tea exposes no head-commit binding on merge, so this only reports a
+# recorded pr_head that disagrees rather than refusing on it.
+gitea_pr_json() {
+  tea api --login "$GITEA_LOGIN" "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" 2>/dev/null
+}
+
+gitea_verify_open_mergeable() {
+  local json state merged mergeable live_head refusals=''
+  if ! json=$(gitea_pr_json) || [ -z "$json" ]; then
+    echo "error: could not read the Gitea pull request state before merging" >&2
+    return 1
+  fi
+  if ! state=$(printf '%s' "$json" | jq -r \
+      'if type == "object" then ((.state // "") | tostring) else error("not an object") end' \
+      2>/dev/null); then
+    echo "error: could not read the Gitea pull request state before merging" >&2
+    return 1
+  fi
+  # Note: jq's // treats false as empty, so a boolean is read explicitly rather
+  # than with a // default.
+  merged=$(printf '%s' "$json" | jq -r 'if (.merged | type) == "boolean" then (.merged | tostring) else "" end' 2>/dev/null) || merged=''
+  mergeable=$(printf '%s' "$json" | jq -r 'if (.mergeable | type) == "boolean" then (.mergeable | tostring) else "" end' 2>/dev/null) || mergeable=''
+  live_head=$(printf '%s' "$json" | jq -r 'if (.head.sha | type) == "string" then .head.sha else "" end' 2>/dev/null) || live_head=''
+  if ! fm_pr_head_valid "$live_head"; then
+    echo "error: could not read the Gitea pull request head commit before merging" >&2
+    return 1
+  fi
+  if [ -n "$RECORDED_HEAD" ] && [ "$RECORDED_HEAD" != "$live_head" ]; then
+    printf 'notice: recorded head %s disagrees with the live head %s; tea cannot bind the merge to a head, so this verifies the live view only\n' \
+      "$RECORDED_HEAD" "$live_head" >&2
+  fi
+  [ "$state" = open ] \
+    || refusals="$refusals  - state is \"${state:-unreadable}\", not open
+"
+  [ "$merged" = false ] \
+    || refusals="$refusals  - the pull request is already merged (merged=\"${merged:-unreadable}\")
+"
+  [ "$mergeable" = true ] \
+    || refusals="$refusals  - mergeable is \"${mergeable:-unreadable}\", not true
+"
+  if [ -n "$refusals" ]; then
+    printf 'error: refusing to merge %s\n' "$URL" >&2
+    printf '%s' "$refusals" >&2
+    return 1
+  fi
+  printf 'verified: %s is open and mergeable at head %s\n' "$URL" "$live_head" >&2
+}
+
+# Read Gitea's live state back after tea returns success. 0 = confirmed merged,
+# 1 = read fine but not merged (refuse loudly - Gitea merges synchronously and
+# has no queue, so this should not happen), 2 = could not read (leave the poll
+# armed to catch it).
+gitea_confirm_merged() {
+  local json merged
+  if ! json=$(gitea_pr_json) || [ -z "$json" ]; then
+    printf 'actionable: Gitea accepted the merge for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  if ! merged=$(printf '%s' "$json" | jq -r \
+      'if type == "object" and (.merged | type == "boolean") then (.merged | tostring) else error("invalid merged") end' \
+      2>/dev/null); then
+    printf 'actionable: Gitea accepted the merge for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  [ "$merged" = true ] && return 0
+  return 1
+}
+
+# Whether the caller's own extra arguments already choose a tea merge style.
+caller_has_gitea_style() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --style|--style=*|-s) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # Record before either forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
@@ -683,6 +836,28 @@ case "$PROVIDER" in
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
+    ;;
+  gitea)
+    gitea_verify_open_mergeable || exit 1
+    # Default style squash, matching the GitHub default; the caller may pass
+    # --style/-s. tea is non-interactive for merge and has no confirmation
+    # prompt to skip.
+    if caller_has_gitea_style "$@"; then
+      tea pr merge --repo "$PR_OWNER/$PR_REPO" --login "$GITEA_LOGIN" "$@" "$PR_NUMBER"
+    else
+      tea pr merge --repo "$PR_OWNER/$PR_REPO" --login "$GITEA_LOGIN" --style squash "$@" "$PR_NUMBER"
+    fi
+    gitea_confirm_rc=0
+    gitea_confirm_merged || gitea_confirm_rc=$?
+    case "$gitea_confirm_rc" in
+      0) ;;
+      2) exit 0 ;;
+      *)
+        printf 'error: tea reported the merge for %s succeeded but Gitea does not read it back as merged; refusing to report an unconfirmed merge\n' \
+          "$URL" >&2
+        exit 1
+        ;;
+    esac
     ;;
   *)
     echo "error: invalid PR merge request" >&2

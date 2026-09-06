@@ -320,6 +320,94 @@ make_gitlab_case() {
   printf '%s\n' "$case_dir"
 }
 
+# --- Gitea fixture --------------------------------------------------------------
+GITEA_BASE_URL=http://alps:3222
+GITEA_LOGIN_NAME=firstmate-alps-3222
+GITEA_OWNER=babbarc
+GITEA_REPO=dotfiles
+GITEA_PR_URL="$GITEA_BASE_URL/$GITEA_OWNER/$GITEA_REPO/pulls/7"
+GITEA_HEAD=dddddddddddddddddddddddddddddddddddddddd
+
+# tea mock: "login list -o csv" lists FM_TEST_TEA_LOGINS (default the derived
+# name); "api ... pulls/<n>" answers from FM_TEST_TEA_JSON, or the post-merge
+# payload once "pr merge" ran, and fails on the tea-api-fails marker; "pr merge"
+# records the call and fails on the tea-merge-fails marker.
+add_tea_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+case_dir=$(dirname "$FM_TEST_TEA_JSON")
+case "$1" in
+  login)
+    [ "$2" = list ] || exit 0
+    printf 'Name,URL,SSH Host,User,Default\n'
+    IFS=, read -ra _l <<< "${FM_TEST_TEA_LOGINS-firstmate-alps-3222}"
+    for _n in "${_l[@]}"; do
+      [ -n "$_n" ] || continue
+      printf '%s,http://alps:3222,,babbarc,true\n' "$_n"
+    done
+    exit 0
+    ;;
+  api)
+    [ ! -e "$case_dir/tea-api-fails" ] || exit 1
+    if [ -e "$case_dir/tea-merge-called" ] && [ -f "$case_dir/gitea-pr-post.json" ]; then
+      cat "$case_dir/gitea-pr-post.json"
+    else
+      cat "$FM_TEST_TEA_JSON"
+    fi
+    exit 0
+    ;;
+  pr|pulls)
+    [ "$2" = merge ] || exit 0
+    [ ! -e "$case_dir/tea-merge-fails" ] || { echo "tea: merge failed" >&2; exit 1; }
+    : > "$case_dir/tea-merge-called"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tea"
+  ln -sf "$JQ_BIN" "$case_dir/fakebin/jq"
+}
+
+# write_gitea_pr_json <file> [<field>=<value> ...]: a pull request payload that
+# satisfies every pre-merge condition, with named fields overridden.
+write_gitea_pr_json() {
+  local file=$1 kv key value
+  local state=open merged=false mergeable=true head=$GITEA_HEAD
+  shift
+  for kv in "$@"; do
+    key=${kv%%=*}; value=${kv#*=}
+    case "$key" in
+      state) state=$value ;;
+      merged) merged=$value ;;
+      mergeable) mergeable=$value ;;
+      head) head=$value ;;
+      *) fail "write_gitea_pr_json: unknown field '$key'" ;;
+    esac
+  done
+  printf '{"number":7,"state":"%s","merged":%s,"mergeable":%s,"head":{"sha":"%s"},"html_url":"%s"}\n' \
+    "$state" "$merged" "$mergeable" "$head" "$GITEA_PR_URL" > "$file"
+}
+
+# make_gitea_case <name> [<field>=<value> ...]: a case dir with the tea and gh
+# mocks, an allow-list config, and a pull request payload. Echoes the case dir.
+make_gitea_case() {
+  local name=$1 case_dir
+  shift
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt" "$case_dir/config"
+  printf '%s %s\n' "$GITEA_BASE_URL" "$GITEA_LOGIN_NAME" > "$case_dir/config/gitea-instances"
+  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  add_tea_mock "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/tea.log"
+  write_gitea_pr_json "$case_dir/gitea-pr.json" "$@"
+  write_gitea_pr_json "$case_dir/gitea-pr-post.json" state=closed merged=true
+  printf '%s\n' "$case_dir"
+}
+
 # mirror_path_without <dir> <tool> [<bindir> ...]: the whole search path
 # re-exposed by symlink except one tool, because a real copy anywhere on PATH
 # would prove nothing. The named bindirs are mirrored ahead of the search path,
@@ -356,6 +444,7 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_HOME="${FM_TEST_HOME:-$ROOT}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
@@ -364,6 +453,8 @@ run_pr_merge() {
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
+  FM_TEST_TEA_LOG="$case_dir/tea.log" \
+  FM_TEST_TEA_JSON="$case_dir/gitea-pr.json" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -1783,6 +1874,181 @@ test_github_still_forwards_sha_arg() {
   pass "fm-pr-merge leaves GitHub extra-arg handling unchanged, including --sha"
 }
 
+# --- Gitea ------------------------------------------------------------------
+
+test_gitea_verified_merge_records_and_confirms() {
+  local case_dir rc
+  case_dir=$(make_gitea_case gitea-verified)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$GITEA_PR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitea-verified: fm-pr-merge should merge and confirm"
+  assert_grep "pr=$GITEA_PR_URL" "$case_dir/state/task-x1.meta" \
+    "gitea-verified: the canonical URL was not recorded"
+  grep -qF 'pr merge --repo babbarc/dotfiles --login firstmate-alps-3222 --style squash 7' "$case_dir/tea.log" \
+    || fail "gitea-verified: tea was not asked to merge by owner/repo, derived login, and default squash style"
+  [ -e "$case_dir/tea-merge-called" ] || fail "gitea-verified: the merge was never attempted"
+  grep -qF 'api --login firstmate-alps-3222 repos/babbarc/dotfiles/pulls/7' "$case_dir/tea.log" \
+    || fail "gitea-verified: the outcome was not read back through tea api"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "gitea-verified: a GitHub CLI was reached for a Gitea URL"
+  pass "fm-pr-merge merges a Gitea pull request and records it only after a merged readback"
+}
+
+test_gitea_pre_merge_conditions_refuse_independently() {
+  local case_dir rc name
+  for name in state=closed merged=true mergeable=false; do
+    case_dir=$(make_gitea_case "gitea-refuse-${name%%=*}" "$name")
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$GITEA_PR_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "gitea-refuse-$name: fm-pr-merge should refuse"
+    assert_grep "refusing to merge $GITEA_PR_URL" "$case_dir/stderr" \
+      "gitea-refuse-$name: the refusal did not name the pull request"
+    [ ! -e "$case_dir/tea-merge-called" ] || fail "gitea-refuse-$name: the merge ran despite a failing condition"
+    assert_grep "pr=$GITEA_PR_URL" "$case_dir/state/task-x1.meta" \
+      "gitea-refuse-$name: a refusal after recording still leaves the audit trail"
+    assert_grep "armed:" "$case_dir/stdout" \
+      "gitea-refuse-$name: the merge poll was not left armed"
+  done
+  pass "fm-pr-merge refuses a Gitea merge for any failing pre-merge condition and still records state"
+}
+
+test_gitea_unconfirmed_merge_refuses_loudly() {
+  local case_dir rc
+  # tea returns success but the pull request never reads back as merged.
+  case_dir=$(make_gitea_case gitea-unconfirmed)
+  rm -f "$case_dir/gitea-pr-post.json"   # post-merge read still says open/merged=false
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$GITEA_PR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitea-unconfirmed: an unconfirmed merge must refuse"
+  assert_grep 'does not read it back as merged' "$case_dir/stderr" \
+    "gitea-unconfirmed: the refusal did not explain the unconfirmed outcome"
+  assert_grep "pr=$GITEA_PR_URL" "$case_dir/state/task-x1.meta" \
+    "gitea-unconfirmed: the PR reference was lost"
+  pass "fm-pr-merge refuses to report a Gitea merge it cannot read back as merged"
+}
+
+test_gitea_unreadable_outcome_keeps_poll_armed() {
+  local case_dir rc
+  case_dir=$(make_gitea_case gitea-unreadable)
+  # The pre-merge read succeeds; the post-merge read cannot be performed.
+  cat > "$case_dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+case_dir=$(dirname "$FM_TEST_TEA_JSON")
+case "$1" in
+  login) [ "$2" = list ] || exit 0
+    printf 'Name,URL,SSH Host,User,Default\nfirstmate-alps-3222,http://alps:3222,,babbarc,true\n'; exit 0 ;;
+  api)
+    [ ! -e "$case_dir/tea-merge-called" ] || exit 1
+    cat "$FM_TEST_TEA_JSON"; exit 0 ;;
+  pr|pulls) [ "$2" = merge ] || exit 0; : > "$case_dir/tea-merge-called"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tea"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$GITEA_PR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitea-unreadable: an unconfirmable outcome leaves the poll armed, not a failure"
+  assert_grep 'landed state could not be confirmed' "$case_dir/stderr" \
+    "gitea-unreadable: the actionable notice was not printed"
+  assert_grep "pr=$GITEA_PR_URL" "$case_dir/state/task-x1.meta" \
+    "gitea-unreadable: the PR reference was lost"
+  assert_grep "armed:" "$case_dir/stdout" \
+    "gitea-unreadable: the merge poll was not left armed"
+  pass "an unreadable Gitea outcome after a merge leaves the poll armed instead of claiming or denying a merge"
+}
+
+test_gitea_missing_tool_and_allowlist_refuse_before_recording() {
+  local case_dir rc out nodir tool
+  # tea or jq absent, reported before anything is recorded.
+  for tool in tea jq; do
+    case_dir=$(make_gitea_case "gitea-no-$tool")
+    nodir="$case_dir/no-$tool"
+    mirror_path_without "$nodir" "$tool" "$case_dir/fakebin"
+    set +e
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+      FM_CONFIG_OVERRIDE="$case_dir/config" FM_TEST_TEA_LOG="$case_dir/tea.log" \
+      FM_TEST_TEA_JSON="$case_dir/gitea-pr.json" \
+      PATH="$nodir" "$PR_MERGE" task-x1 "$GITEA_PR_URL" 2>&1)
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "gitea-no-$tool: fm-pr-merge should refuse"
+    case "$out" in *"requires $tool"*|*"requires tea and jq"*|*"requires $tool on PATH"*) ;; *) fail "gitea-no-$tool: refusal did not name the missing tool: $out" ;; esac
+    assert_no_grep "pr=$GITEA_PR_URL" "$case_dir/state/task-x1.meta" \
+      "gitea-no-$tool: state was recorded despite a missing tool"
+  done
+
+  # Instance not on the allow-list.
+  case_dir=$(make_gitea_case gitea-not-allowlisted)
+  printf '# empty\n' > "$case_dir/config/gitea-instances"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$GITEA_PR_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitea-not-allowlisted: fm-pr-merge should refuse"
+  assert_grep 'not an allow-listed Gitea instance' "$case_dir/stderr" \
+    "gitea-not-allowlisted: the refusal did not name the allow-list"
+  assert_no_grep "pr=$GITEA_PR_URL" "$case_dir/state/task-x1.meta" \
+    "gitea-not-allowlisted: state was recorded for a non-allow-listed instance"
+
+  # Derived login not configured in tea.
+  case_dir=$(make_gitea_case gitea-login-missing)
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" FM_TEST_TEA_LOG="$case_dir/tea.log" \
+    FM_TEST_TEA_JSON="$case_dir/gitea-pr.json" FM_TEST_TEA_LOGINS=some-other \
+    PATH="$case_dir/fakebin:$PATH" "$PR_MERGE" task-x1 "$GITEA_PR_URL" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitea-login-missing: fm-pr-merge should refuse"
+  case "$out" in *"needs a tea login named 'firstmate-alps-3222'"*) ;; *) fail "gitea-login-missing: refusal did not name the login: $out" ;; esac
+  assert_no_grep "pr=$GITEA_PR_URL" "$case_dir/state/task-x1.meta" \
+    "gitea-login-missing: state was recorded despite the unconfigured login"
+  pass "fm-pr-merge refuses a Gitea merge for a missing tool, a non-allow-listed instance, or an unconfigured login before recording"
+}
+
+test_gitea_repo_and_login_override_args_refuse() {
+  local case_dir rc arg n=0
+  # --login and -r are caught only by the Gitea-specific check; --repo and -R
+  # are already caught by the shared repository-override check that runs first.
+  for arg in "--repo other/x" "--login evil" "-R other" "-r other/x"; do
+    n=$((n + 1))
+    case_dir=$(make_gitea_case "gitea-override-$n")
+    set +e
+    # shellcheck disable=SC2086
+    run_pr_merge "$case_dir" task-x1 "$GITEA_PR_URL" -- $arg \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "gitea-override '$arg': fm-pr-merge should refuse"
+    case "$(cat "$case_dir/stderr")" in
+      *"must not override the reposit"*) ;;
+      *) fail "gitea-override '$arg': the refusal did not explain the override" ;;
+    esac
+    [ ! -e "$case_dir/tea-merge-called" ] || fail "gitea-override '$arg': the merge ran despite an override arg"
+    assert_no_grep "pr=$GITEA_PR_URL" "$case_dir/state/task-x1.meta" \
+      "gitea-override '$arg': state was recorded despite an override arg"
+  done
+  pass "fm-pr-merge refuses caller repository or login overrides on the Gitea path"
+}
+
 # --- durable merge outcome ---------------------------------------------------
 # A merge that lands must leave a record outside the merging agent's memory.
 # bin/fm-merge-outcome-lib.sh owns where that record goes; these cases pin the
@@ -2132,6 +2398,12 @@ test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses
 test_gitlab_missing_tool_refuses_before_recording
 test_gitlab_head_override_args_refuse_before_recording
+test_gitea_verified_merge_records_and_confirms
+test_gitea_pre_merge_conditions_refuse_independently
+test_gitea_unconfirmed_merge_refuses_loudly
+test_gitea_unreadable_outcome_keeps_poll_armed
+test_gitea_missing_tool_and_allowlist_refuse_before_recording
+test_gitea_repo_and_login_override_args_refuse
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
 test_gitlab_merge_reports_upward

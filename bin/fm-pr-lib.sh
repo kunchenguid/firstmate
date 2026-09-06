@@ -4,13 +4,23 @@
 # constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# "path" is the full project path, which is owner/repository on GitHub and
+# Gitea and an arbitrarily nested group/subgroup/project namespace on GitLab. A
+# GitLab project can sit at any depth, so no owner/repository pair can address
+# one and the sidecar carries the whole path instead. GitLab and Gitea both run
+# on self-hosted instances, so the host is part of that identity rather than a
+# constant. Every consumer re-derives the identity from the stored URL and
+# refuses any record whose parts do not reconstruct that exact URL.
+#
+# Gitea (which also covers API-compatible Forgejo) is self-hosted with no fixed
+# domain, no guaranteed TLS, and often a non-default port, so its "host" field
+# stores the whole instance base URL - scheme, host, and any port,
+# e.g. "http://gitea.example:3222". A Gitea PR URL is
+# "<base-url>/<owner>/<repo>/pulls/<index>". Because that admits a plain-http
+# origin, fm_pr_url_parse only checks the URL SHAPE; the arming paths
+# (bin/fm-pr-check.sh, bin/fm-pr-merge.sh) additionally require the base URL to
+# match a line in the local config/gitea-instances allow-list before any side
+# effect (fm_pr_gitea_instance_resolve).
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -24,6 +34,7 @@ FM_PR_PATH=
 FM_PR_OWNER=
 FM_PR_REPO=
 FM_PR_NUMBER=
+FM_PR_GITEA_LOGIN=
 FM_PR_DATA_PROVIDER=
 FM_PR_DATA_URL=
 FM_PR_DATA_HOST=
@@ -156,17 +167,161 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
+# A Gitea instance authority is <host>[:<port>]. The host is a lowercase DNS
+# name or a dotted IPv4 literal - never bracketed IPv6, which no self-hosted
+# Gitea URL in this fleet uses - and the port, when present, is a plain decimal
+# in 1..65535 with no leading zero. github.com and gitlab.com are refused as a
+# Gitea authority the same way fm_pr_gitlab_host_valid refuses github.com: they
+# are those forges' own hosts and never a Gitea instance.
+fm_pr_gitea_authority_valid() {
+  local authority=${1-} host port label
+  local LC_ALL=C
+  local -a labels
+  [ "${#authority}" -ge 1 ] && [ "${#authority}" -le 261 ] || return 1
+  case "$authority" in
+    *:*)
+      host=${authority%:*}
+      port=${authority##*:}
+      case "$port" in
+        ''|*[!0-9]*|0*) return 1 ;;
+      esac
+      [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+      ;;
+    *)
+      host=$authority
+      ;;
+  esac
+  [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
+  [ "$host" != github.com ] && [ "$host" != gitlab.com ] || return 1
+  case "$host" in
+    .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
+  esac
+  IFS=. read -ra labels <<< "$host"
+  for label in "${labels[@]}"; do
+    [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || return 1
+    case "$label" in
+      -*|*-) return 1 ;;
+    esac
+  done
+}
+
+# A Gitea owner or repository name segment. Gitea allows letters, digits, "-",
+# "_" and "." and forbids the "." and ".." names and a ".git" suffix; a leading
+# hyphen or dot is refused here to keep one canonical spelling per repository.
+fm_pr_gitea_name_valid() {
+  local name=${1-}
+  local LC_ALL=C
+  [ "${#name}" -ge 1 ] && [ "${#name}" -le 100 ] || return 1
+  case "$name" in
+    .|..|-*|.*|*.git|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
+# A Gitea instance base URL: http:// or https://, then a valid authority, and
+# nothing else - no path, no query, no trailing slash.
+fm_pr_gitea_base_url_valid() {  # <base-url>
+  local url=${1-} rest
+  local LC_ALL=C
+  case "$url" in
+    http://*) rest=${url#http://} ;;
+    https://*) rest=${url#https://} ;;
+    *) return 1 ;;
+  esac
+  case "$rest" in
+    */*|'') return 1 ;;
+  esac
+  fm_pr_gitea_authority_valid "$rest"
+}
+
+# The tea login name firstmate uses for a Gitea instance, derived from the
+# instance base URL as "firstmate-<host>-<port>" (host with "." replaced by
+# "-"). The port is always part of the identity - the explicit port when the
+# base URL carries one, otherwise the scheme default (443 for https, 80 for
+# http) - so two allow-listed instances on the same host but different ports,
+# or the same host:port under different schemes, never collide on one login
+# name. Both the arming paths and the byte-static poll derive it the same way
+# from the same base URL, so no login name is ever stored - the poll needs no
+# config read and no extra per-task artifact to know which tea login to use.
+fm_pr_gitea_derive_login() {  # <base-url>
+  local url=${1-} scheme authority host port
+  local LC_ALL=C
+  case "$url" in
+    http://*) scheme=http; authority=${url#http://} ;;
+    https://*) scheme=https; authority=${url#https://} ;;
+    *) return 1 ;;
+  esac
+  case "$authority" in
+    */*|'') return 1 ;;
+    *:*) host=${authority%:*}; port=${authority##*:} ;;
+    *) host=$authority; port= ;;
+  esac
+  case "$host" in
+    ''|*[!a-z0-9.-]*) return 1 ;;
+  esac
+  if [ -z "$port" ]; then
+    case "$scheme" in https) port=443 ;; *) port=80 ;; esac
+  fi
+  case "$port" in ''|*[!0-9]*) return 1 ;; esac
+  printf 'firstmate-%s-%s\n' "${host//./-}" "$port"
+}
+
+# Read config/gitea-instances and, when <base-url> matches a configured line's
+# first field exactly, set FM_PR_GITEA_LOGIN to the derived tea login name and
+# return 0. Return non-zero when the file is absent, unreadable, or has no
+# matching line. A line is one instance base URL, optionally followed by
+# whitespace and the tea login name; when present that second field is only
+# accepted when it equals the derived "firstmate-<host>-<port>", because the
+# byte-static poll always re-derives the login rather than reading this file,
+# so a divergent name would arm a watch that silently never fires. Blank lines
+# and lines whose first non-blank character is "#" are ignored. This is the
+# instance allow-list the arming paths consult before any side effect.
+fm_pr_gitea_instance_resolve() {  # <config-dir> <base-url>
+  local config_dir=${1-} base_url=${2-} file line rest url named login
+  local LC_ALL=C
+  FM_PR_GITEA_LOGIN=
+  [ -n "$config_dir" ] && [ -n "$base_url" ] || return 1
+  file="$config_dir/gitea-instances"
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|[[:space:]]*'#'*|'#'*) continue ;;
+    esac
+    # Trim surrounding whitespace, then split off an optional second field.
+    rest=${line#"${line%%[![:space:]]*}"}
+    rest=${rest%"${rest##*[![:space:]]}"}
+    url=${rest%%[[:space:]]*}
+    named=${rest#"$url"}
+    named=${named#"${named%%[![:space:]]*}"}
+    named=${named%%[[:space:]]*}
+    [ "$url" = "$base_url" ] || continue
+    fm_pr_gitea_base_url_valid "$url" || return 1
+    login=$(fm_pr_gitea_derive_login "$url") || return 1
+    case "$login" in
+      ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    [ -z "$named" ] || [ "$named" = "$login" ] || return 1
+    FM_PR_GITEA_LOGIN=$login
+    return 0
+  done < "$file"
+  return 1
+}
+
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# unchanged, GitLab gets its own host and namespace rules rather than a
+# loosened GitHub rule, and Gitea gets its own instance-authority and
+# owner/repository rules.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
+# FM_PR_OWNER and FM_PR_REPO are additionally set for github and gitea because
+# bin/fm-pr-merge.sh addresses both by owner/repository. A gitlab URL leaves
 # them empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
 # instead, so a merge request on any instance resolves without a hardcoded host.
+# For gitea, FM_PR_HOST is the instance base URL ("<scheme>://<authority>"), so
+# the merge request or pull request on any instance resolves without a
+# hardcoded host and the stored URL reconstructs as
+# "$FM_PR_HOST/$FM_PR_PATH/pulls/$FM_PR_NUMBER".
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path scheme authority owner repo
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -175,6 +330,10 @@ fm_pr_url_parse() {
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
+  # Consumed by bin/fm-pr-check.sh and bin/fm-pr-merge.sh via
+  # fm_pr_gitea_instance_resolve, not within this file.
+  # shellcheck disable=SC2034
+  FM_PR_GITEA_LOGIN=
   pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
     [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
@@ -195,16 +354,43 @@ fm_pr_url_parse() {
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
   pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    path=${BASH_REMATCH[2]}
+    fm_pr_gitlab_host_valid "$host" || return 1
+    fm_pr_gitlab_path_valid "$path" || return 1
+    FM_PR_PROVIDER=gitlab
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH=$path
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # Gitea/Forgejo: "<scheme>://<authority>/<owner>/<repo>/pulls/<index>". Only
+  # the shape is checked here; the arming paths require the base URL to match
+  # config/gitea-instances (fm_pr_gitea_instance_resolve) before any side
+  # effect, which is what makes accepting a plain-http origin safe.
+  pattern='^(https?)://([a-z0-9.:-]{1,261})/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
-  host=${BASH_REMATCH[1]}
-  path=${BASH_REMATCH[2]}
-  fm_pr_gitlab_host_valid "$host" || return 1
-  fm_pr_gitlab_path_valid "$path" || return 1
-  FM_PR_PROVIDER=gitlab
+  scheme=${BASH_REMATCH[1]}
+  authority=${BASH_REMATCH[2]}
+  owner=${BASH_REMATCH[3]}
+  repo=${BASH_REMATCH[4]}
+  fm_pr_gitea_authority_valid "$authority" || return 1
+  fm_pr_gitea_name_valid "$owner" || return 1
+  fm_pr_gitea_name_valid "$repo" || return 1
+  FM_PR_PROVIDER=gitea
   FM_PR_URL=$raw
-  FM_PR_HOST=$host
-  FM_PR_PATH=$path
-  FM_PR_NUMBER=${BASH_REMATCH[3]}
+  FM_PR_HOST="$scheme://$authority"
+  FM_PR_PATH="$owner/$repo"
+  # Consumed by bin/fm-pr-merge.sh and bin/fm-pr-check.sh, which address Gitea
+  # by owner/repository through tea.
+  # shellcheck disable=SC2034
+  FM_PR_OWNER=$owner
+  # shellcheck disable=SC2034
+  FM_PR_REPO=$repo
+  FM_PR_NUMBER=${BASH_REMATCH[5]}
+  [ "$FM_PR_URL" = "$FM_PR_HOST/$FM_PR_PATH/pulls/$FM_PR_NUMBER" ] || { FM_PR_PROVIDER=; return 1; }
 }
 
 fm_pr_head_valid() {

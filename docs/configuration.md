@@ -109,6 +109,18 @@ A `manual` home owns its backlog file outright: the lifecycle transitions above 
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## Gitea instances (config/gitea-instances)
+
+`config/gitea-instances` is an optional local, gitignored file that lists the self-hosted Gitea (or API-compatible Forgejo) instances firstmate's delivery tooling may act against.
+It exists because a Gitea PR URL is `http(s)://<host>[:<port>]/<owner>/<repo>/pulls/<index>` with no fixed domain and no guaranteed TLS, so - unlike GitHub - the URL shape alone cannot be trusted; a Gitea URL is accepted for a merge watch, a merge, or a teardown landed-work check only when its `scheme://host[:port]` base URL matches a line here.
+Each non-blank, non-`#` line is one instance base URL with no path and no trailing slash, for example `http://gitea.example:3222`, optionally followed by whitespace and the `tea` login name for documentation.
+The `tea` login firstmate uses for an instance is always derived from that base URL as `firstmate-<host>-<port>` (the host with `.` replaced by `-`, and the explicit port or, when the base URL omits one, the scheme default 443/80), so `tea login add --name firstmate-<host>-<port> --url <base-url> --token <token>` is the matching one-time setup; the token needs the `write:repository` and `read:user` scopes.
+The port is part of the derived name so two allow-listed instances on the same host but different ports never collide on one `tea` login.
+An explicit second field is accepted only when it equals that derived name, because the byte-static merge poll always re-derives the login rather than reading this file.
+The `tea` login and its token are per-host and per-home: this file is inherited into a secondmate home, but that home still needs its own `tea login add` run before it can ship Gitea work.
+`bin/fm-pr-lib.sh` owns the exact line format and the login-name derivation; `bin/fm-pr-check.sh` and `bin/fm-pr-merge.sh` consult the allow-list before any side effect and the byte-static merge poll never reads it.
+This file is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md), so a secondmate resolves the same instances.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
