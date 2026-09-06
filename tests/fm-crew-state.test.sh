@@ -619,6 +619,31 @@ test_socket_refusal_over_terminal_run_reports_blocked() {
   pass "socket refusal over a terminal attributed run reports blocked"
 }
 
+# The socket-down override is evidence about the log's CURRENT tip, not a latch:
+# once the crew appends any later event the attributed run is the better witness.
+test_socket_refusal_override_expires_when_the_crew_moves_on() {
+  reset_fakes
+  local d out
+  d=$(new_case daemon-socket-refused-superseded)
+  make_repo_on_branch "$d/wt" fm/feat-ds
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ds.meta" "window=fm:fm-feat-ds" "worktree=$d/wt" "kind=ship"
+  printf 'blocked: no-mistakes daemon socket is missing\n' > "$d/state/feat-ds.status"
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-ds)"
+  out=$(run_crew_state "$d" feat-ds)
+  assert_contains "$out" "state: blocked" "socket-down as the latest event still outranks a live run"
+  assert_contains "$out" "source: status-log" "the override remains status-log evidence"
+  assert_contains "$out" "daemon socket down despite attributed run record" "the override names its reason"
+
+  printf 'working: reattached and continuing\n' >> "$d/state/feat-ds.status"
+  out=$(run_crew_state "$d" feat-ds)
+  assert_contains "$out" "state: working" "a later working event hands the reading back to the live run"
+  assert_contains "$out" "source: run-step" "the superseded override no longer emits status-log state"
+  assert_not_contains "$out" "daemon socket down despite attributed run record" \
+    "a stale socket-down blocker cannot override a live run forever"
+  pass "socket-down evidence outranks a live run only while it is the log's latest event"
+}
+
 # And the claim half: an ordinary blocked line over the same live run keeps the
 # generic reading, so the sharper one cannot fire on every superseded block.
 test_ordinary_blocked_over_live_run_keeps_plain_superseded() {
@@ -2386,6 +2411,7 @@ test_stale_blocked_superseded
 test_daemon_claim_over_live_run_reads_run_alive
 test_socket_refusal_over_stale_fixing_run_reports_blocked
 test_socket_refusal_over_terminal_run_reports_blocked
+test_socket_refusal_override_expires_when_the_crew_moves_on
 test_ordinary_blocked_over_live_run_keeps_plain_superseded
 test_genuine_daemon_down_reports_blocked
 test_secondmate_open_block_survives_unrelated_append

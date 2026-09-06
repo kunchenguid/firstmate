@@ -714,13 +714,16 @@ if [ "$HAVE_RUN" = 1 ]; then
   #
   # A refused or missing daemon socket is positive daemon-down evidence and
   # outranks any attributed run record, including a terminal one left behind
-  # after the daemon stopped. Other blocked claims caused by a timed-out drive
-  # call are contradicted only when the run reports recent
+  # after the daemon stopped, for as long as that blocker is still the log's
+  # latest event: a later event of any kind means the crew has moved on, and the
+  # attributed run is the better witness again. Other blocked claims caused by a
+  # timed-out drive call are contradicted only when the run reports recent
   # activity; the answer is then to steer the crew to reattach without touching
   # the shared daemon.
   case "$LOG_VERB" in
     needs-decision|blocked)
       if [ "$LOG_VERB" = blocked ] \
+        && [ "$(status_line_verb "$(last_status_line "$LOG")")" = blocked ] \
         && log_reports_daemon_socket_down "$LOG_LINE"; then
         emit blocked status-log "$(status_line_note "$LOG_LINE")${SEP}daemon socket down despite attributed run record"
       fi
