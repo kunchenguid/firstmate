@@ -88,6 +88,26 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+# Codex can execute a project hook in a detached helper process, so the hook's
+# ancestry may not reach the Codex process that owns the Herdr pane. Herdr's
+# pane process record is an equivalent identity proof here: the pane id is
+# injected into every process in that pane, and process-info reports the exact
+# foreground agent. Use this only for a native Codex process under Herdr, and
+# only after the ordinary ancestry walk finds no harness at all.
+fm_herdr_codex_pid() {
+  local payload
+  [ "${HERDR_ENV:-}" = 1 ] || return 1
+  [ -n "${HERDR_PANE_ID:-}" ] || return 1
+  command -v herdr >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  payload=$(herdr pane process-info --pane "$HERDR_PANE_ID" 2>/dev/null) || return 1
+  printf '%s\n' "$payload" | jq -r '
+    .result.process_info.foreground_processes[]?
+    | select(.name == "codex" or (.name == "node" and ((.cmdline // "") | test("(^|/|[[:space:]])codex([[:space:]]|$)"))))
+    | .pid
+  ' 2>/dev/null | awk 'match($0, /^[0-9]+$/) { print; exit }'
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -122,6 +142,14 @@ fm_harness_ancestry_pids() {
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
   done
+  if [ "$printed" -eq 0 ]; then
+    local herdr_pid
+    herdr_pid=$(fm_herdr_codex_pid 2>/dev/null || true)
+    case "$herdr_pid" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s\n' "$herdr_pid"; printed=1 ;;
+    esac
+  fi
   [ "$printed" -eq 1 ]
 }
 

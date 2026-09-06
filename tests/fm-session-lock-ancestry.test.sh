@@ -220,6 +220,51 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_detached_codex_hook_uses_exact_herdr_pane_identity() {
+  local dir fakebin got
+  dir="$TMP_ROOT/detached-codex-herdr"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  720:comm=) printf '%s\n' codex ;;
+  720:args=) printf '%s\n' '/opt/codex/codex' ;;
+  720:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"result":{"process_info":{"foreground_processes":[{"name":"codex","pid":720,"cmdline":"/opt/codex/codex"}]}}}'
+SH
+  chmod +x "$fakebin/ps" "$fakebin/herdr"
+  printf '720\n' > "$dir/state/.lock"
+
+  got=$(HERDR_ENV=1 HERDR_PANE_ID=w2:p1 HERDR_SESSION=firstmate-codex \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a detached Codex hook did not resolve its exact Herdr pane agent"
+  [ "$got" = 720 ] || fail "Herdr fallback resolved '$got', expected Codex pid 720"
+  HERDR_ENV=1 HERDR_PANE_ID=w2:p1 HERDR_SESSION=firstmate-codex \
+    lib_eval "$fakebin" 'fm_harness_pid_alive 720' \
+    || fail "the Herdr-resolved Codex process was not considered live"
+  HERDR_ENV=1 HERDR_PANE_ID=w2:p1 HERDR_SESSION=firstmate-codex \
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the detached Codex hook did not recognize its own Herdr lock"
+  pass "session-lock: a detached Codex hook uses the exact Herdr pane identity"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +405,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_detached_codex_hook_uses_exact_herdr_pane_identity
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
