@@ -1500,6 +1500,20 @@ fm_wake_clean_field() {
 }
 
 fm_wake_append() {
+  local status=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_wake_append_locked "$@" || status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+# fm_wake_append_locked <kind> <key> <payload>
+# Locked core of fm_wake_append: appends the wake row under an already-held
+# FM_WAKE_QUEUE_LOCK. Callers that must commit another durable record atomically
+# with the append (holding this lock excludes the drain's acknowledgement, which
+# deletes consumed rows under the same lock) acquire the lock once, run this and
+# their own write, then release.
+fm_wake_append_locked() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   local recovery_marker
   case "$kind" in
@@ -1514,7 +1528,6 @@ fm_wake_append() {
   recovery_marker="$STATE/.watcher-down"
   status=0
 
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
@@ -1527,7 +1540,6 @@ fm_wake_append() {
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
 

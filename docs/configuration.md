@@ -532,6 +532,35 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Mail plane (.env)
+
+The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
+Its `poll` command surfaces each new message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
+Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
+A duplicate wake is possible if the process is killed between the queue append and the journal write and the drain acknowledges that row before the next poll heals it, or under a triple write fault that leaves a queued row with no durable record; neither case drops mail.
+IMAP and SMTP use implicit TLS on the default ports 993 and 465 (`IMAP4_SSL` / `SMTP_SSL`).
+STARTTLS and port 587 are not supported.
+It is off unless the home's gitignored `.env` provides the connection values.
+This section is the single owner of the mail-plane configuration schema; for direct invocations, environment values override `.env`, matching the Relay contract.
+
+Required, in the home's gitignored `.env`:
+
+```sh
+FM_MAIL_USER=   # IMAP/SMTP login
+FM_MAIL_PASS=   # IMAP/SMTP password
+FM_IMAP_HOST=   # IMAP server hostname
+FM_SMTP_HOST=   # SMTP server hostname
+```
+
+`FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
+The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus already-surfaced retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
+A message whose header cannot be fetched is surfaced with a degraded summary instead of being skipped, so it is never missed and cannot block later mail.
+A later poll retries that fetch and, on success, surfaces the real sender and subject; a persistently unfetchable message stays degraded without repeating that wake.
+
+A home that wants mail polled unattended arms the standing check in the live home: `bin/fm-mail-check.sh arm`.
+Arming writes `state/mail.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`), so the plane's `poll` runs on its own: new mail still surfaces as `check: mail <uid>` wakes from the poll, while the standing check itself prints a line (and the watcher turns that line into a wake) only when the poll fails, exceeds `FM_MAIL_CHECK_BUDGET` seconds (default 15, valid 5..25, cut to fit `FM_CHECK_TIMEOUT`), or `fm-mail.sh` is missing from the check's home.
+`bin/fm-mail-check.sh disarm` removes the standing check.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -880,6 +909,9 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls
 FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may sit before the watcher attempts doorbell delivery on an idle pane; also the minimum spacing between attempts
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
+FM_MAIL_POLL_MAX_WAKES=20   # per-poll wake cap for a mail poll; valid 1..200, keeps a flood from flooding firstmate
+FM_MAIL_TIMEOUT=20   # mail-plane IMAP/SMTP socket timeout in seconds; invalid or non-positive values become 20
 FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 probes on every run, other values must be 60..86400
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
@@ -893,6 +925,12 @@ FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort in
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed directly
 FM_TEARDOWN_NM_RUNS_LIMIT=200  # recent no-mistakes run rows scanned to prove an unresolved-head parked run belongs to teardown's task
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_MAIL_USER=      # mail-plane IMAP/SMTP login, from .env or environment (docs/configuration.md "Mail plane")
+FM_MAIL_PASS=      # mail-plane IMAP/SMTP password
+FM_IMAP_HOST=      # mail-plane IMAP server hostname
+FM_IMAP_PORT=993   # mail-plane IMAP server port
+FM_SMTP_HOST=      # mail-plane SMTP server hostname
+FM_SMTP_PORT=465   # mail-plane SMTP server port
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
