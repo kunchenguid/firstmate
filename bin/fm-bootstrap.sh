@@ -80,9 +80,10 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          secondmate_handoff_resume, x_mode_setup, fleet_sync, no-mistakes
+#          orphan Compose cleanup) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
@@ -92,6 +93,9 @@
 #          X-mode artifacts, project clones, or repair instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
+#          FM_NM_COMPOSE_REAP_TIMEOUT bounds the local orphan Compose cleanup
+#          in seconds (default 8); invalid or zero values use the default, and a
+#          timeout always prints a NO_MISTAKES_DOCKER diagnostic.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
 #          alone and run the network half concurrently:
@@ -147,6 +151,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
@@ -1100,6 +1106,24 @@ startup_memory_budget_setup() {
   fi
 }
 
+no_mistakes_compose_reap() {
+  local budget=${FM_NM_COMPOSE_REAP_TIMEOUT:-8} rc=0 out
+  command -v docker >/dev/null 2>&1 || return 0
+  case "$budget" in ''|*[!0-9]*|0) budget=8 ;; esac
+  out=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-nm-compose.XXXXXX") || {
+    echo "NO_MISTAKES_DOCKER: could not create cleanup report"
+    return 0
+  }
+  fm_run_timed "$budget" "$SCRIPT_DIR/fm-nm-compose-reap.sh" > "$out" 2>&1 || rc=$?
+  cat "$out"
+  rm -f "$out"
+  case "$rc" in
+    0|1) ;;
+    124) echo "NO_MISTAKES_DOCKER: orphan Compose sweep hit the ${budget}s bound before finishing" ;;
+    *) echo "NO_MISTAKES_DOCKER: orphan Compose sweep exited $rc before finishing" ;;
+  esac
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -1124,6 +1148,7 @@ fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
   startup_memory_budget_setup
+  no_mistakes_compose_reap
 fi
 
 # Local detection: presence, version floors, and configuration. Nothing here
