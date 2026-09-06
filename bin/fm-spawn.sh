@@ -146,6 +146,13 @@
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from both the spawning project and its repository's
 #   primary checkout, including when the spawning project is a linked worktree.
+#   On the backends that discover that path by reading the task pane's own cwd,
+#   the same isolation test screens every read: a pane still showing the project
+#   or the repository primary while `treehouse get` prepares the slot is waited
+#   out as a transient rather than adopted and then refused, so a home that is
+#   itself a linked worktree of the project repository still launches. A pane
+#   that never reaches an isolated worktree refuses at the end of that wait,
+#   naming the last path seen and why it was rejected.
 #   Only after this isolation check, a fresh ship or scout's clean task worktree
 #   fetches origin, resolves the current remote default branch, and resets to its tip.
 #   Relaunch reuses the recorded worktree without fetching or resetting its base.
