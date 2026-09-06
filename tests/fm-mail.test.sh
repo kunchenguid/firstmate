@@ -29,6 +29,26 @@ test_missing_secret_fails_cleanly() {
   pass "fm-mail: missing required configuration fails cleanly naming the variable"
 }
 
+test_env_overrides_env_file() {
+  local env_home out
+  env_home="$TMP_ROOT/envfile-home"
+  mkdir -p "$env_home"
+  cat > "$env_home/.env" <<'EOF'
+FM_MAIL_USER=fromfile@example.com
+FM_MAIL_PASS=filepass
+FM_IMAP_HOST=imap.file.invalid
+FM_SMTP_HOST=smtp.file.invalid
+EOF
+  # No environment: .env supplies the configuration.
+  out=$(FM_HOME="$env_home" "$MAIL" status 2>&1)
+  assert_contains "$out" "mail account: fromfile@example.com" "status uses .env when environment is unset"
+  # A single environment value wins for that key; the other keys still come
+  # from .env, matching the Relay/FMX "env wins over .env" contract.
+  out=$(FM_MAIL_USER=fromenv@example.com FM_HOME="$env_home" "$MAIL" status 2>&1)
+  assert_contains "$out" "mail account: fromenv@example.com" "environment overrides .env for a direct invocation"
+  pass "fm-mail: environment values override the .env file"
+}
+
 test_status_without_network() {
   local out rc
   out=$(FM_MAIL_USER="test@example.com" FM_MAIL_PASS="test-pass" \
@@ -319,6 +339,101 @@ SH
   wakeq=$(grep -c "check: mail 55" "$HOME_DIR/state/.wake-queue" 2>/dev/null || true)
   expect_code 0 "$wakeq" "recovery must not append a second wake for uid 55"
   pass "fm-mail: journal recovers a wake the drain already acknowledged"
+}
+
+test_poll_duplicate_wakes_on_interrupted_poll() {
+  # A poll killed after the wake row was appended but before the journal or
+  # cursor was written leaves the uid only in the durable queue. The next poll
+  # must record the uid from that queued key, not surface the mail again.
+  local fakebin homedir_bin interrupted_home out rc=0 wakeq
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  interrupted_home="$TMP_ROOT/interrupted-home"
+  homedir_bin="$interrupted_home/bin"
+  mkdir -p "$homedir_bin" "$interrupted_home/state"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity	80008\n'
+printf '33\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  # First poll appends the wake and writes the evidence.
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$interrupted_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "first poll must succeed"
+  assert_contains "$out" "woke for 33" "first poll wakes uid 33"
+  assert_contains "$(cat "$interrupted_home/state/.mail-woken" 2>/dev/null)" "80008" \
+    "first poll writes the journal generation"
+  assert_contains "$(cat "$interrupted_home/state/.mail-woken" 2>/dev/null)" "33" \
+    "first poll writes the journal uid"
+
+  # Simulate a kill between the queue append and the evidence writes: keep the
+  # queued wake row, but drop both journal and cursor records.
+  printf 'uidvalidity=80008\n' > "$interrupted_home/state/.mail-seen"
+  : > "$interrupted_home/state/.mail-woken"
+  wakeq=$(grep -c "check: mail 33" "$interrupted_home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 1 "$wakeq" "the wake row survived the simulated interruption"
+
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$interrupted_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "healing poll must succeed"
+  assert_not_contains "$out" "woke for 33" "healing poll must not duplicate the queued mail"
+  assert_contains "$(cat "$interrupted_home/state/.mail-seen" 2>/dev/null)" "33" \
+    "healing poll records the uid from the queued wake key"
+  wakeq=$(grep -c "check: mail 33" "$interrupted_home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 1 "$wakeq" "the queued wake row stays appended exactly once"
+  pass "fm-mail: a poll interrupted before evidence writes does not duplicate on recovery"
+}
+
+test_poll_acknowledged_wake_evading_recovery() {
+  # A poll killed after the journal was written but before the cursor, followed
+  # by the drain acknowledging the wake, leaves the uid only in the journal.
+  # The next poll must record the uid from the journal and clear the journal,
+  # never re-waking the mail.
+  local fakebin homedir_bin acked_home out rc=0 wakeq
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  acked_home="$TMP_ROOT/acked-home"
+  homedir_bin="$acked_home/bin"
+  mkdir -p "$homedir_bin" "$acked_home/state"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t90009\n'
+printf '44\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$acked_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "first poll must succeed"
+  assert_contains "$out" "woke for 44" "first poll wakes uid 44"
+
+  # Simulate: journal survived, cursor did not, and the drain consumed the wake.
+  printf 'uidvalidity=90009\n' > "$acked_home/state/.mail-seen"
+  printf '%s\t%s\n' '90009' '44' > "$acked_home/state/.mail-woken"
+  grep -v "check: mail 44" "$acked_home/state/.wake-queue" > "$TMP_ROOT/wakeq.acked" 2>/dev/null || true
+  mv "$TMP_ROOT/wakeq.acked" "$acked_home/state/.wake-queue"
+
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$acked_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "recovery poll must succeed"
+  assert_not_contains "$out" "woke for 44" "recovery must not re-wake the acknowledged mail"
+  assert_contains "$(cat "$acked_home/state/.mail-seen" 2>/dev/null)" "44" \
+    "journal heal records the acknowledged uid in the cursor"
+  assert_equals "" "$(cat "$acked_home/state/.mail-woken" 2>/dev/null)" \
+    "journal is cleared once every uid is durably recorded"
+  wakeq=$(grep -c "check: mail 44" "$acked_home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 0 "$wakeq" "recovery must not append a second wake for uid 44"
+  pass "fm-mail: an acknowledged wake whose cursor record was lost is recovered from the journal"
 }
 
 test_poll_legacy_wake_does_not_leak_into_generation() {
@@ -1269,8 +1384,50 @@ PYEOF
   expect_code 0 "$rc" "read must succeed when one uid is unfetchable"
   assert_contains "$out" "Uid: 7" "unfetchable uid is still named"
   assert_contains "$out" "unfetchable body" "unfetchable uid is reported degraded"
+  assert_contains "$out" "Body: (body unavailable)" "degraded fetch row always prints a Body line"
   assert_contains "$out" "Subj: ok" "a later fetchable uid is still shown"
   pass "fm-mail: read does not silently hide an unfetchable uid"
+}
+
+test_read_tolerates_none_payload() {
+  local harness out rc=0
+  harness="$TMP_ROOT/read-none-payload-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+})
+class FakeConn:
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'9'])
+        if cmd == 'fetch':
+            # imaplib may return a tuple whose payload bytes are None.
+            return ('OK', [(b'', None)])
+        return ('NO', None)
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_read())
+PYEOF
+  out=$(python3 "$harness" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  expect_code 0 "$rc" "read must succeed when the fetch payload is None"
+  assert_contains "$out" "Uid: 9" "None-payload uid is still named"
+  assert_contains "$out" "Body: (body unavailable)" "None-payload degraded row prints a Body line"
+  pass "fm-mail: read tolerates a None payload without crashing"
 }
 
 test_invalid_port_fails_cleanly() {
@@ -1456,27 +1613,8 @@ SH
 }
 
 test_missing_secret_fails_cleanly
-test_env_overrides_env_file() {
-  local env_home out
-  env_home="$TMP_ROOT/envfile-home"
-  mkdir -p "$env_home"
-  cat > "$env_home/.env" <<'EOF'
-FM_MAIL_USER=fromfile@example.com
-FM_MAIL_PASS=filepass
-FM_IMAP_HOST=imap.file.invalid
-FM_SMTP_HOST=smtp.file.invalid
-EOF
-  # No environment: .env supplies the configuration.
-  out=$(FM_HOME="$env_home" "$MAIL" status 2>&1)
-  assert_contains "$out" "mail account: fromfile@example.com" "status uses .env when environment is unset"
-  # A single environment value wins for that key; the other keys still come
-  # from .env, matching the Relay/FMX "env wins over .env" contract.
-  out=$(FM_MAIL_USER=fromenv@example.com FM_HOME="$env_home" "$MAIL" status 2>&1)
-  assert_contains "$out" "mail account: fromenv@example.com" "environment overrides .env for a direct invocation"
-  pass "fm-mail: environment values override the .env file"
-}
-test_status_without_network
 test_env_overrides_env_file
+test_status_without_network
 test_help_plumbing
 test_unknown_subcommand_prints_usage
 test_no_secret_leaked_to_status
@@ -1485,8 +1623,10 @@ test_poll_error_propagates
 test_poll_dedupes_surfaces_by_uid
 test_poll_resurfaces_uid_after_generation_change
 test_poll_heals_wake_without_cursor_record
+test_poll_duplicate_wakes_on_interrupted_poll
 test_poll_serializes_overlapping_invocations
 test_poll_recovers_journaled_wake_after_ack
+test_poll_acknowledged_wake_evading_recovery
 test_poll_legacy_wake_does_not_leak_into_generation
 test_poll_missing_wake_lib_does_not_suppress
 test_poll_rolls_back_wake_without_durable_record
@@ -1512,5 +1652,6 @@ test_poll_keeps_journal_when_heal_cannot_record
 test_poll_heal_failure_does_not_rewake_unseen_mail
 test_body_preview_falls_back_from_empty_plain
 test_body_preview_tolerates_none_payload
+test_read_tolerates_none_payload
 test_read_surfaces_unfetchable_uid
 test_invalid_port_fails_cleanly

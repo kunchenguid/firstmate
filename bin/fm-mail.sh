@@ -223,8 +223,12 @@ mail_record_evidence() {
   # At least one must survive with a queued wake row, or the drain could
   # acknowledge the wake with no durable record of its uid.
   local generation=$1 id=$2 journal_ok=0 cursor_ok=0
-printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN" && journal_ok=1 || journal_ok=0
-printf '%s\n' "$id" >> "$CURSOR" && cursor_ok=1 || cursor_ok=0
+  if printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN"; then
+    journal_ok=1
+  fi
+  if printf '%s\n' "$id" >> "$CURSOR"; then
+    cursor_ok=1
+  fi
   if [ "$journal_ok" -eq 1 ] || [ "$cursor_ok" -eq 1 ]; then
     return 0
   fi
