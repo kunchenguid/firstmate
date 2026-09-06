@@ -641,6 +641,19 @@ test_socket_refusal_override_expires_when_the_crew_moves_on() {
   assert_contains "$out" "source: run-step" "the superseded override no longer emits status-log state"
   assert_not_contains "$out" "daemon socket down despite attributed run record" \
     "a stale socket-down blocker cannot override a live run forever"
+
+  # The later event does not have to be one the decision fold accepts. A blocked
+  # line on a reserved key whose note does not speak that namespace is folded as
+  # ordinary status, so the socket-down blocker stays the reconciled declaration
+  # while the tip of the log has moved on; the override reads the tip, not the
+  # declaration, so the stale daemon evidence stays retired.
+  printf 'blocked: no-mistakes daemon socket is missing\nblocked [key=pending-reply-t3]: still waiting on the answer\n' \
+    > "$d/state/feat-ds.status"
+  out=$(run_crew_state "$d" feat-ds)
+  assert_contains "$out" "state: working" "a later unfolded blocked event also hands the reading back to the run"
+  assert_contains "$out" "source: run-step" "the retired override emits no status-log state"
+  assert_not_contains "$out" "daemon socket down despite attributed run record" \
+    "an unrelated later blocker cannot republish stale socket-down evidence"
   pass "socket-down evidence outranks a live run only while it is the log's latest event"
 }
 
