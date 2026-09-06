@@ -217,20 +217,18 @@ fm_session_lock_describe_pid() {  # <pid>
 # every acquire and replaced in place; never removed, because a record naming a
 # process that is gone already classifies as stale.
 #
-# A record that cannot pin an identity is worse than no record: it names a pid
-# and nothing else, so a pid recycled after a reboot could never be proven a
-# mismatch and would reproduce the very lockout this record exists to close.
-# fm_pid_identity can come back empty for ordinary reasons - an unreadable
-# /proc entry, a process exiting in the race, a ps that returns nothing - so
-# this fails rather than writing a pid-only record, and the caller reports that
-# it cannot record ownership.
+# An identity that cannot be read records as empty rather than failing the
+# acquire. Being unable to describe a process is a reason to be careful about
+# taking a home AWAY from a session, never a reason to refuse to give a session
+# its own home: a hard failure here would put the whole session read-only with
+# no competing lock involved at all. The caution belongs in the verification
+# below, which never reclaims from an owner it cannot disprove.
 fm_session_lock_record_owner() {  # <state> <pid>
   local state=$1 pid=$2 identity acquired tmp
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ -d "$state" ] || return 1
   _fm_session_lock_require_identity
   identity=$(fm_pid_identity "$pid" 2>/dev/null | tr -d '\n' || true)
-  [ -n "$identity" ] || return 1
   acquired=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
   tmp=$(mktemp "$state/.lock-owner.XXXXXX" 2>/dev/null) || return 1
   if ! {
@@ -255,7 +253,7 @@ fm_session_lock_record_owner() {  # <state> <pid>
 #   free        no lock file at all
 #   malformed   the lock is not a regular file, or carries no numeric pid
 #   dead        that pid is gone, or is no longer a verified harness
-#   unrecorded  this home holds no usable owner record for that live pid
+#   unrecorded  no session in this home ever recorded that live pid as owner
 #   unverified  this home's owner record names a different pid
 #   reused      an unrelated process now occupies that pid
 #   live        a verified live owner
@@ -314,13 +312,13 @@ fm_session_lock_live_owner() {  # <state>
     FM_LOCK_OWNER_STATUS=unverified
     return 1
   fi
-  if [ -z "$rec_pid" ] || [ -z "$rec_identity" ]; then
+  if [ -z "$rec_pid" ]; then
     FM_LOCK_OWNER_STATUS=unrecorded
     return 1
   fi
   _fm_session_lock_require_identity
   live_identity=$(fm_pid_identity "$lock_pid" 2>/dev/null | tr -d '\n' || true)
-  if [ -n "$live_identity" ] && [ "$rec_identity" != "$live_identity" ]; then
+  if [ -n "$rec_identity" ] && [ -n "$live_identity" ] && [ "$rec_identity" != "$live_identity" ]; then
     FM_LOCK_OWNER_STATUS=reused
     return 1
   fi

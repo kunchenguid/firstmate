@@ -507,10 +507,11 @@ test_original_holder_repairs_its_own_missing_owner_record() {
   pass "session-lock: the original holder repairs its own missing owner record in place"
 }
 
-# An owner record that pins only a pid could never later prove a mismatch, so it
-# would reproduce the original lockout after a reboot recycles that pid. Acquire
-# fails closed instead of writing one.
-test_acquire_fails_closed_when_identity_cannot_be_read() {
+# Being unable to describe a process is a reason to be careful about taking a
+# home away from someone, never a reason to refuse a session its own home: an
+# unreadable identity still acquires and records what it can, because failing
+# here would put the session read-only with nothing else holding the lock.
+test_acquire_still_succeeds_when_identity_cannot_be_read() {
   local dir fakebin foreign session out status
   dir="$TMP_ROOT/identity-blind"
   fakebin=$(fm_fakebin "$dir")
@@ -523,14 +524,21 @@ test_acquire_fails_closed_when_identity_cannot_be_read() {
   out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
     FM_TEST_IDENTITY_BLIND="$session" PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
-  stop_fixture_processes
 
-  expect_code 1 "$status" "an unpinnable owner record was accepted: $out"
-  assert_contains "$out" "cannot record session-lock ownership" \
-    "the refusal did not name the ownership record as the reason"
-  assert_absent "$dir/state/.lock-owner" "a pid-only owner record was written anyway"
-  assert_absent "$dir/state/.lock" "the lock was published without a verifiable owner"
-  pass "session-lock: an owner record that cannot pin a process fails the acquire closed"
+  expect_code 0 "$status" "an unreadable process identity refused a free home: $out"
+  assert_contains "$out" "lock acquired: harness pid $session" \
+    "the session did not get its own home"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$session" ] \
+    || fail "the lock was not published: $(cat "$dir/state/.lock")"
+
+  # The record it could write still holds the home: the session that owns it
+  # keeps it, and a second session is refused rather than handed the home.
+  out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  stop_fixture_processes
+  assert_contains "$out" "lock: held by live harness pid $session" \
+    "an owner recorded without a readable identity lost its own home: $out"
+  pass "session-lock: an unreadable process identity still acquires and holds the home"
 }
 
 test_owner_record_still_refuses_a_genuine_second_session() {
@@ -592,7 +600,7 @@ test_recycled_pid_never_inherits_the_previous_owners_lock() {
 
 test_legacy_bare_pid_lock_is_held_not_reclaimed
 test_original_holder_repairs_its_own_missing_owner_record
-test_acquire_fails_closed_when_identity_cannot_be_read
+test_acquire_still_succeeds_when_identity_cannot_be_read
 test_owner_record_still_refuses_a_genuine_second_session
 test_recycled_pid_never_inherits_the_previous_owners_lock
 
