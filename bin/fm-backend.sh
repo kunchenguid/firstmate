@@ -388,10 +388,9 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
-# Orca has returned both an opaque atom and a composite <atom>::<absolute-path>
-# as its worktree identifier.
-# Keep the opaque compatibility form, but validate each half of the composite
-# independently so the generic atom boundary remains strict for every caller.
+# Orca metadata records <atom>::<absolute-path> as one worktree identifier.
+# Spaces are valid path characters; safety depends on every consumer preserving
+# the complete value as one quoted argument.
 fm_backend_orca_worktree_id_valid() {  # <value>
   local value=$1 worktree_id worktree_path
   case "$value" in
@@ -408,7 +407,7 @@ fm_backend_orca_worktree_id_valid() {  # <value>
         *[!A-Za-z0-9._@%+/\ -]*) return 1 ;;
       esac
       ;;
-    *) fm_backend_endpoint_atom_valid "$value" ;;
+    *) return 1 ;;
   esac
 }
 

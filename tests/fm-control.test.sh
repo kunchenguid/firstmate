@@ -418,7 +418,7 @@ test_orca_refuses_an_escape_harness_interrupt() {
   {
     cat "$dir/home/state/t1.meta"
     echo "terminal=term-1"
-    echo "orca_worktree_id=wt-1"
+    echo "orca_worktree_id=wt-1::$dir/wt-t1"
   } > "$dir/home/state/t1.meta.new"
   sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
   out=$(run_control "$dir" t1 interrupt); rc=$?
@@ -431,7 +431,7 @@ test_orca_composite_worktree_id_reaches_each_control_verb() {
   local dir out rc verb id=t1 worktree_id
   dir=$(new_case orca-composite-control)
   add_task "$dir" "$id" grok ship orca term-composite
-  worktree_id="839d4e34-8224-4ef8-a1bd-056a615b57d7::$dir/wt-$id"
+  worktree_id="worktree-10::$dir/wt $id"
   {
     cat "$dir/home/state/$id.meta"
     echo "terminal=term-composite"

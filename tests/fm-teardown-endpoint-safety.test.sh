@@ -191,7 +191,7 @@ test_metadata_lock_serializes_destructive_cleanup() {
 }
 
 test_supported_backend_endpoint_records_validate() {
-  local dir id backend target
+  local dir id backend target worktree_id
   dir=$(make_case valid-backends)
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
@@ -220,18 +220,12 @@ test_supported_backend_endpoint_records_validate() {
     "backend=zellij" "zellij_session=lab" "zellij_tab_id=3" "zellij_pane_id=7"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Zellij endpoint refused"
 
-  id=orca-task
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
-    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=worktree-9"
-  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Orca endpoint refused"
-  [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] || fail "Orca validation did not select its terminal"
-
   id=orca-composite-task
+  worktree_id="worktree-10::$dir/work tree"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-8" \
-    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
-    "orca_worktree_id=worktree-10::$dir/worktree"
+    "worktree=$dir/work tree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=$worktree_id"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
     || fail "valid composite Orca endpoint refused"
   [ "$FM_BACKEND_VALIDATED_TARGET" = term-8 ] \
@@ -276,6 +270,7 @@ test_invalid_orca_composite_worktree_ids_refuse_before_mutation() {
   assert_invalid_orca_worktree_id_refused empty-path 'worktree-1::'
   assert_invalid_orca_worktree_id_refused relative-path \
     'worktree-1::relative/worktree'
+  assert_invalid_orca_worktree_id_refused bare-atom 'worktree-9'
   pass "fm-teardown: malformed and hostile Orca composite worktree ids refuse before mutation"
 }
 
