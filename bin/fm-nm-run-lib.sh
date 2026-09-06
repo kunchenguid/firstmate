@@ -346,7 +346,7 @@ fm_nm_step_progress_probe() {  # <worktree> <timeout_secs>
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=''
   [ -n "$branch" ] || return 1
-  status_out=$(fm_nm_run "$wt" "$timeout_secs" axi status)
+  status_out=$(fm_nm_run_checked "$wt" "$timeout_secs" axi status) || return 1
   [ -n "$status_out" ] || return 1
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$status_out" branch)")
   [ "$run_branch" = "$branch" ] || return 1
