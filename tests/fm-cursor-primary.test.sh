@@ -34,7 +34,10 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
 # to bash is not sufficient on Linux: /proc resolves it to bash, so the real
 # Cursor ancestry classifier correctly rejects that process as an impostor.
 CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
-[ -n "$CC_BIN" ] || fail "a C compiler is required to build the fake Cursor process"
+if [ -z "$CC_BIN" ]; then
+  printf 'skip: no C compiler available to build the fake Cursor process\n'
+  exit 0
+fi
 cat > "$TMP_ROOT/fake-cursor.c" <<'C'
 #include <errno.h>
 #include <string.h>

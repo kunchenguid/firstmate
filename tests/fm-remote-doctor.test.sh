@@ -525,6 +525,14 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$MANAGER_BIN/codex"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$MANAGER_BIN/grok"
 chmod +x "$MANAGER_BIN/codex" "$MANAGER_BIN/grok"
 mv "$CASE_BIN/tasks-axi" "$MANAGER_BIN/tasks-axi"
+HOST_TOOL_PATHS=
+for tool in tasks-axi claude codex cursor-agent opencode pi grok kimi gemini rovo muse; do
+  resolved=$(command -v "$tool" 2>/dev/null || true)
+  [ -z "$resolved" ] || HOST_TOOL_PATHS="${HOST_TOOL_PATHS:+$HOST_TOOL_PATHS:}$resolved"
+done
+fm_test_hide_command "$CASE_STATE/no-host-managed-tools.bash" \
+  'tasks-axi claude codex cursor-agent opencode pi grok kimi gemini rovo muse' \
+  "$HOST_TOOL_PATHS"
 doctor
 expect_code 1 "$DOCTOR_RC" "a version-manager-only required tool was reported ready"
 assert_contains "$DOCTOR_OUT" 'required tasks-axi=MISSING' "the missing managed tool was not reported"
@@ -557,6 +565,7 @@ assert_contains "$DOCTOR_OUT" 'fix required-treehouse=failed:' \
   "the non-Firstmate wrapper refusal was not reported"
 [ "$(cat "$CASE_HOME/.local/bin/treehouse")" = 'operator wrapper' ] \
   || fail "--fix overwrote an operator-owned wrapper"
+unset BASH_ENV
 pass "--fix creates only owned version-manager wrappers and never clobbers an operator file"
 
 new_case Linux with-herdr no-gui

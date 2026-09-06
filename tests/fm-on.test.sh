@@ -337,7 +337,12 @@ printf 'Linux\n'
 SH
 chmod +x "$DOCTOR_BIN/uname"
 set +e
-out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+out=$(
+  fm_test_hide_command "$TMP_ROOT/no-managed-tools.bash" \
+    'tasks-axi claude codex cursor-agent opencode pi grok kimi gemini rovo muse'
+  HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$ROOT/bin/fm-remote-doctor.sh" 2>&1
+)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "the remote doctor passed with a missing required tool"

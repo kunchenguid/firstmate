@@ -56,15 +56,27 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
-# fm_test_hide_command <bash-env-file> <command>
+# fm_test_hide_command <bash-env-file> <command-list> [<resolved-path-list>]
 # Mask command discovery even when the host supplies the tool in a system PATH.
+# Lists are space-separated commands and colon-separated paths. When resolved
+# paths are supplied, only those host paths are masked, allowing fixture-owned
+# replacements earlier on PATH to become discoverable later.
 # Callers declare local BASH_ENV to scope the exported mask to their test case.
 fm_test_hide_command() {
-  local file=$1 tool=$2
+  local file=$1 tools=$2 hidden_paths=${3-}
   cat > "$file" <<SH
 command() {
-  if [ "\${1:-}" = -v ] && [ "\${2:-}" = "$tool" ]; then
-    return 1
+  if [ "\${1:-}" = -v ]; then
+    case " $tools " in
+      *" \${2:-} "*)
+        if [ -z "$hidden_paths" ]; then
+          return 1
+        fi
+        case ":$hidden_paths:" in
+          *":\$(builtin command -v "\$2" 2>/dev/null || true):"*) return 1 ;;
+        esac
+        ;;
+    esac
   fi
   builtin command "\$@"
 }
