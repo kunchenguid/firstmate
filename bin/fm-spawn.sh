@@ -2866,9 +2866,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
+  # The project comparison is physical: spawn_worktree_isolated screens each
+  # read against PROJ_ABS_REAL, not PROJ_ABS, because a symlinked project prefix
+  # would otherwise make the pane's OS-level cwd read differ from PROJ_ABS on
+  # the very first poll, before the pane has actually moved.
   #
   # A single read that already looks isolated is not proof the pane settled
   # there: on some tmux/WSL setups a brand-new window's pane_current_path
