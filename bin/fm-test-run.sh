@@ -111,6 +111,10 @@
 # live-capability (a live-harness guard governed by fm_live_gate, which records
 # unavailable tools and explicit policy skips; see tests/lib.sh), or none.
 #
+# Every selected script runs isolated from the host's global and system Git
+# configuration, including one that sources no test helper of its own;
+# tests/git-config-helpers.sh owns that contract and its limits.
+#
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
 # owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a
@@ -1438,6 +1442,8 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       ;;
     tests/git-config-helpers.sh)
+      # The reference scan is not transitive, so match the two helpers that
+      # source this one as well: most suites inherit it only through them.
       families_for_test_reference git-config-helpers.sh lib.sh herdr-test-safety.sh \
         || printf '%s\n' "__unmapped__:$path"
       ;;
@@ -2188,6 +2194,9 @@ record_script_result() {
 # because an unbounded suite is what silently outruns its caller's budget.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
+  # Declaring the variables local first keeps the helper's export scoped to this
+  # call and its child script, so the runner's own environment is left as the
+  # caller had it.
   local GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
   # shellcheck source=tests/git-config-helpers.sh
   . "$ROOT/tests/git-config-helpers.sh" || return
