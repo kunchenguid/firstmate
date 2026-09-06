@@ -15,8 +15,9 @@
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
 #   (f) base= recorded -> diff against that branch, not the repo default branch
-#   (g) base= recorded but never pushed -> diff against its local ref with a warning
-#   (h) base= recorded and resolving nowhere -> refuse, naming the branch and its source
+#   (g) base= recorded but never pushed, remote reachable -> local ref + warning
+#   (h) origin unreachable -> refuse; a base that cannot be confirmed is never guessed
+#   (i) base= recorded and resolving nowhere -> refuse, naming the branch and its source
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -234,9 +235,36 @@ test_unpushed_recorded_base_uses_the_local_ref() {
     "local-base: the task's own change must be in the diff"
   assert_not_contains "$out" 'local-stack-only' \
     "local-base: commits the local stack already carries must not read as the task's work"
-  assert_contains "$err" 'could not fetch feat/local-stack from origin' \
-    "local-base: the local-ref fallback must say the remote copy was unavailable"
+  assert_contains "$err" 'origin has no feat/local-stack' \
+    "local-base: the local-ref fallback must say the remote does not carry the branch"
   pass "fm-review-diff reviews an unpushed delivery target branch against its local ref"
+}
+
+# An unreachable remote is a STOP, not a fallback. It cannot be told apart from a
+# ref-absent remote by `git fetch`'s exit status alone, and guessing wrong means
+# reviewing against a local base that lags origin - which presents commits the
+# crewmate never wrote as its work, on the tool that gates the merge.
+test_unreachable_remote_refuses_rather_than_guessing() {
+  local case_dir status out err
+  case_dir=$(make_case unreachable-remote)
+  stale_and_pr_commits "$case_dir"
+  write_task_meta "$case_dir"
+  git -C "$case_dir/project" remote set-url origin "$case_dir/does-not-exist.git"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  status=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 1 "$status" "unreachable-remote: an unreachable origin must stop the review"
+  assert_not_contains "$out" 'diff base:' \
+    "unreachable-remote: must not review against a base it could not confirm"
+  assert_contains "$err" 'cannot reach origin' \
+    "unreachable-remote: the refusal must say the remote could not be reached"
+  assert_contains "$err" "$case_dir/does-not-exist.git" \
+    "unreachable-remote: git's own reason must survive on stderr, not be discarded"
+  pass "fm-review-diff refuses to review when origin cannot be reached"
 }
 
 # A base that resolves NEITHER on the remote NOR locally is refused rather than
@@ -268,4 +296,5 @@ test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_recorded_base_is_the_review_base
 test_unpushed_recorded_base_uses_the_local_ref
+test_unreachable_remote_refuses_rather_than_guessing
 test_unresolvable_recorded_base_is_refused
