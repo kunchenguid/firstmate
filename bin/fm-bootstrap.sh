@@ -15,6 +15,8 @@
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "TANGLE: <remediation>",
+#                 "NO_MISTAKES_MIRROR: <project> remote=<url>|absent
+#                 expected-root=<root>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -65,6 +67,19 @@
 #          quota-axi is required for the agent-owned dispatch-profile array
 #          procedure in AGENTS.md section 4 and
 #          .agents/skills/quota-array-dispatch/SKILL.md.
+#          NO_MISTAKES_MIRROR is detect-only drift reporting (never a repair):
+#          a no-mistakes-posture project clone, or this home's own firstmate
+#          checkout, whose "no-mistakes" gate remote is absent or lives outside
+#          <root>/repos/ is pushing its gates to a mirror root no daemon serves.
+#          <root> is resolved exactly as the installed CLI resolves it from
+#          that clone: $NM_HOME when set (non-empty), else ~/.no-mistakes
+#          (verified against no-mistakes v1.60.2: `NM_HOME=/x no-mistakes
+#          doctor` prints "data directory /x", empty NM_HOME falls back to the
+#          default, and `no-mistakes init --help` documents that init sets up a
+#          local bare gate repo and adds or repairs the "no-mistakes" remote).
+#          The operator fix, named in the printed line, is rerunning
+#          `no-mistakes init` inside that clone; bootstrap itself never modifies
+#          a clone and never runs init.
 #          On a primary home, the locked mutable path materializes the visible
 #          default config/startup-memory-budget=7500 when absent. It never
 #          guesses at malformed or unsafe existing files, and secondmate homes
@@ -1435,6 +1450,53 @@ detect_local_tools() {
   fi
 }
 
+# One checkout's no-mistakes gate-remote placement. Silent when the remote
+# sits under <root>/repos/ or the path is not a git work tree (so a non-git
+# FM_ROOT fixture or a plain directory stays inert); one diagnostic line
+# otherwise. The header's NO_MISTAKES_MIRROR paragraph owns the contract.
+check_no_mistakes_mirror_one() {  # <label> <clone> <root>
+  local label=$1 clone=$2 root=$3 url
+  git -C "$clone" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  url=$(git -C "$clone" remote get-url no-mistakes 2>/dev/null || true)
+  # A bare "/" root must not double the leading slash: "$root"/repos/* would
+  # become //repos/* and never match a healthy /repos/<repo>.git remote, and
+  # re-running no-mistakes init against the same root could never clear it.
+  case "$root" in
+    /) case "$url" in /repos/*) return 0 ;; esac ;;
+    *) case "$url" in "$root"/repos/*) return 0 ;; esac ;;
+  esac
+  [ -n "$url" ] || url=absent
+  echo "NO_MISTAKES_MIRROR: $label remote=$url expected-root=$root (run no-mistakes init inside $clone to point its gate at the active root)"
+}
+
+# Detect-only no-mistakes mirror drift for this home: every registered
+# no-mistakes-posture project clone (bin/fm-project-mode.sh owns the registry
+# posture parse), plus this home's own firstmate checkout, must carry a
+# "no-mistakes" remote under the root the installed CLI would resolve.
+detect_no_mistakes_mirror() {
+  local root name mode clone
+  root=${NM_HOME:-}
+  [ -n "$root" ] || root=$HOME/.no-mistakes
+  # init canonicalizes NM_HOME when it writes the remote, so a trailing-slash
+  # NM_HOME must not poison the <root>/repos/* prefix match below. A bare "/"
+  # root is already canonical and must survive the strip.
+  while [ "$root" != "/" ] && [ "$root" != "${root%/}" ]; do root=${root%/}; done
+  check_no_mistakes_mirror_one firstmate "$FM_ROOT" "$root"
+  [ -f "$DATA/projects.md" ] || return 0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    mode=$("$SCRIPT_DIR/fm-project-mode.sh" --raw "$name" 2>/dev/null || true)
+    mode=${mode%% *}
+    case "$mode" in
+      no-mistakes|no-mistakes-prod-only) ;;
+      *) continue ;;
+    esac
+    clone="$PROJECTS/$name"
+    [ -d "$clone" ] || continue
+    check_no_mistakes_mirror_one "$name" "$clone" "$root"
+  done < <(awk '$1=="-" && $2!="" { print $2 }' "$DATA/projects.md" 2>/dev/null)
+}
+
 detect_local_config() {
   # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
   # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
@@ -1467,6 +1529,7 @@ detect_local_config() {
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
   detect_home_summary_publication
+  detect_no_mistakes_mirror
 }
 
 # This home's ledger publication is deliberately best-effort: every lifecycle
