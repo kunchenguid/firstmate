@@ -793,22 +793,51 @@ remote_pending_entry_is_safe() {  # <entry-path>
     || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
 }
 
+remote_pending_reply_cleanup_corr() {  # <correlation-id>
+  local corr=$1 lock hot archived staged rec task rc=0
+  lock="$STATE/.pending-reply-$corr.lock"
+  if ! fm_lock_acquire_wait_bounded "$lock" 10; then
+    echo "REFUSED: pending reply $corr remained locked during remote retirement" >&2
+    return 1
+  fi
+  hot="$STATE/pending-replies/$corr"
+  archived="$STATE/pending-replies/archive/$corr"
+  staged="$STATE/pending-replies/archive/.$corr.resolving"
+  for rec in "$hot" "$archived" "$staged"; do
+    [ -e "$rec" ] || [ -L "$rec" ] || continue
+    case "$rec" in
+      "$staged") remote_pending_resolution_stage_is_safe "$rec" || { rc=1; break; } ;;
+      *)
+        [ -f "$rec" ] && [ ! -L "$rec" ] \
+          && [ "$(fm_meta_get "$rec" corr_id)" = "$corr" ] || { rc=1; break; }
+        ;;
+    esac
+    task=$(fm_meta_get "$rec" task_id)
+    if [ "$task" = "$ID" ]; then
+      rm -f -- "$rec" || { rc=1; break; }
+    fi
+  done
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
 remote_pending_replies_cleanup() {
-  local rec
+  local rec base corr
   [ "$REMOTE_PENDING_DIR_PRESENT" -eq 1 ] || return 0
   (
     CDPATH='' cd -- "$STATE/pending-replies" 2>/dev/null || exit 1
     [ "$(pwd -P)" = "$REMOTE_PENDING_DIR_REAL" ] || exit 1
-    # Settled records live in archive/ (bin/fm-pending-reply-lib.sh), so a
-    # retiring mate's records are removed from both the hot set and the archive.
     for rec in ./* ./archive/* ./archive/.*.resolving; do
       [ "$rec" = ./archive ] && continue
       [ -e "$rec" ] || [ -L "$rec" ] || continue
+      base=${rec##*/}
       case "$rec" in
-        ./archive/.*.resolving) remote_pending_resolution_stage_is_safe "$rec" || exit 1 ;;
-        *) [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1 ;;
+        ./archive/.*.resolving) corr=${base#.}; corr=${corr%.resolving} ;;
+        *) corr=$base ;;
       esac
-      [ "$(fm_meta_get "$rec" task_id)" = "$ID" ] && rm -f -- "$rec"
+      [ "${#corr}" -eq 16 ] || exit 1
+      case "$corr" in *[!0-9a-f]*) exit 1 ;; esac
+      remote_pending_reply_cleanup_corr "$corr" || exit 1
     done
   )
 }
