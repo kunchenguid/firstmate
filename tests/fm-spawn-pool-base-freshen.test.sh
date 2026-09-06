@@ -397,8 +397,7 @@ test_interrupted_local_env_seed_leaves_the_slot_acquirable() {
     || fail "an interrupted seed left work in the pool slot that the next acquisition would refuse"
 
   retry='pool-env-local-r6-retry'
-  mkdir -p "$HOME_DIR/data/$retry"
-  printf 'brief for %s\n' "$retry" > "$HOME_DIR/data/$retry/brief.md"
+  fm_test_spawn_brief "$HOME_DIR" "$retry"
   out=$(run_spawn "$retry" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "a slot whose earlier seed was interrupted should still be acquirable"
@@ -467,8 +466,7 @@ test_interrupted_seed_scratch_does_not_outlive_revocation() {
   chmod 0600 "$POOL_DIR/.env.local"
 
   retry='pool-env-local-r7-retry'
-  mkdir -p "$HOME_DIR/data/$retry"
-  printf 'brief for %s\n' "$retry" > "$HOME_DIR/data/$retry/brief.md"
+  fm_test_spawn_brief "$HOME_DIR" "$retry"
   out=$(run_spawn "$retry" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should reissue a slot after the source .env.local was revoked"
@@ -524,8 +522,7 @@ test_scratch_is_swept_even_when_the_retire_phase_refuses() {
   chmod 0600 "$POOL_DIR/.env.local"
 
   retry='pool-env-local-r10-retry'
-  mkdir -p "$HOME_DIR/data/$retry"
-  printf 'brief for %s\n' "$retry" > "$HOME_DIR/data/$retry/brief.md"
+  fm_test_spawn_brief "$HOME_DIR" "$retry"
   out=$(run_spawn "$retry" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] \
@@ -627,8 +624,7 @@ test_unanswerable_filesystem_question_still_refuses() {
 # by dropping a file into the slot and asserting the outcome that follows.
 prepare_second_acquisition() {  # <id>
   local id=$1
-  mkdir -p "$HOME_DIR/data/$id"
-  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
 }
 
 test_unignored_copy_matching_the_source_is_retired() {
@@ -1291,6 +1287,56 @@ test_teardown_keeps_its_seeded_copy_when_another_check_refuses() {
   pass "a refused teardown leaves firstmate's own seeded copy in place"
 }
 
+add_teardown_order_stubs() {  # <fakebin>
+  local fakebin=$1
+  add_teardown_stubs "$fakebin"
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+printf 'lsof\n' >> "$FM_TEARDOWN_ORDER_LOG"
+exit 0
+SH
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "$FM_TEARDOWN_ORDER_TARGET" ]; then
+    printf 'rm-env-local\n' >> "$FM_TEARDOWN_ORDER_LOG"
+  fi
+done
+exec /bin/rm "$@"
+SH
+  chmod +x "$fakebin/lsof" "$fakebin/rm"
+}
+
+test_teardown_reaps_before_retiring_seeded_copy() {
+  local rec id out status lsof_line rm_line
+  id='pool-env-local-r17'
+  rec=$(make_case env-local-teardown-reap-order "$id")
+  read_case_record "$rec"
+  add_teardown_order_stubs "$FAKEBIN_DIR"
+
+  ignore_local_env_file
+  : > "$PROJECT_DIR/.env.local"
+  chmod 0600 "$PROJECT_DIR/.env.local"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should seed the slot before teardown ordering is tested"
+  [ -f "$POOL_DIR/.env.local" ] || fail "the fixture never got a seeded .env.local"
+
+  land_task_branch_without_the_ignore_rule "$id"
+  export FM_TEARDOWN_ORDER_LOG="$CASE_DIR/teardown-order.log"
+  export FM_TEARDOWN_ORDER_TARGET="$POOL_DIR/.env.local"
+  : > "$FM_TEARDOWN_ORDER_LOG"
+  out=$(run_teardown "$id")
+  status=$?
+  expect_code 0 "$status" "teardown should retire the seeded copy after reaping"
+  lsof_line=$(awk '$0 == "lsof" { print NR; exit }' "$FM_TEARDOWN_ORDER_LOG")
+  rm_line=$(awk '$0 == "rm-env-local" { print NR; exit }' "$FM_TEARDOWN_ORDER_LOG")
+  [ -n "$lsof_line" ] || fail "teardown did not run the process reaper"
+  [ -n "$rm_line" ] || fail "teardown did not retire the seeded copy"
+  [ "$lsof_line" -lt "$rm_line" ] || fail "teardown retired the seeded copy before reaping task processes"
+  pass "teardown reaps task processes before retiring the seeded local environment copy"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
@@ -1315,6 +1361,7 @@ test_teardown_returns_a_slot_whose_task_dropped_the_ignore_rule
 test_teardown_still_refuses_a_task_authored_local_env_file
 test_teardown_refuses_a_task_authored_copy_matching_the_source
 test_teardown_keeps_its_seeded_copy_when_another_check_refuses
+test_teardown_reaps_before_retiring_seeded_copy
 test_tracked_local_env_file_is_never_touched
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
