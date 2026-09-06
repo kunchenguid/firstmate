@@ -260,9 +260,10 @@ decision_card_is_stale() {  # <task-id> <landed-0-or-1>
     printf 'structured subject already landed\n'
     return 0
   fi
-  "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" >/dev/null 2>&1 || rc=$?
-  # 1 is a definite "no longer an open captain call". 2 is "cannot tell", and a
-  # call wrongly hidden is worse than a card wrongly shown, so it stays.
+  "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" --distinguish-absent >/dev/null 2>&1 || rc=$?
+  # 1 is a definite "no longer an open captain call". 2 is "cannot tell", 3 is
+  # absent from this backlog, and a call wrongly hidden is worse than a card
+  # wrongly shown, so both uncertain and absent cards stay.
   if [ "$rc" -eq 1 ]; then
     printf 'no longer an open captain call\n'
     return 0

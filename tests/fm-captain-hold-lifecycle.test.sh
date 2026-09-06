@@ -1360,7 +1360,32 @@ test_secondmate_reconcile_publishes_before_request_retirement() {
   [ ! -e "$request" ] || fail "the retry did not retire the published reconcile request"
   [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]: captain hold reconcile-channel-call: reconciled' "$channel")" -eq 1 ] \
     || fail "the reconciliation retry duplicated or changed its parent resolution: $(cat "$channel")"
-  pass "secondmate reconciliation publishes before retiring its durable request"
+  tasks_in "$mate" add answer-channel-call "Answer the mate call" --kind ship --repo sample >/dev/null \
+    || fail "could not create the normal-answer channel call"
+  run_captain "$mate" hold answer-channel-call --reason "captain answer needed" >/dev/null \
+    || fail "could not hold the normal-answer channel call"
+  request_reconciles "$mate" reconcile-board answer-channel-call \
+    || fail "could not create the normal-answer retry trigger"
+  printf 'Proceed with the release.\n' > "$mate/answer.txt"
+  request="$mate/state/reconcile-requests/answer-channel-call.request"
+  chmod 0500 "$mate/state/reconcile-requests"
+  set +e
+  out=$(run_captain "$mate" answer answer-channel-call --decision-file "$mate/answer.txt" 2>&1)
+  rc=$?
+  set -e
+  chmod 0700 "$mate/state/reconcile-requests"
+  [ "$rc" -ne 0 ] || fail "failed normal-answer request retirement reported success"
+  show=$(tasks_in "$mate" show answer-channel-call --full)
+  assert_contains "$show" "state: done" "request retirement failure reversed the captain answer"
+  [ -f "$request" ] || fail "the normal-answer retry trigger retired after its forced failure"
+  [ "$(grep -c 'resolved \[key=captain-hold-answer-channel-call-1\]: captain hold answer-channel-call: answered' "$channel")" -eq 1 ] \
+    || fail "the normal answer did not publish before retirement failed: $(cat "$channel")"
+  run_captain "$mate" answer answer-channel-call --decision-file "$mate/answer.txt" >/dev/null \
+    || fail "the normal-answer retry could not finish request retirement"
+  [ ! -e "$request" ] || fail "the normal-answer retry left its request pending"
+  [ "$(grep -c 'resolved \[key=captain-hold-answer-channel-call-1\]: captain hold answer-channel-call: answered' "$channel")" -eq 1 ] \
+    || fail "the normal-answer retry duplicated its parent resolution: $(cat "$channel")"
+  pass "secondmate resolutions publish before retiring durable retry triggers"
 }
 
 # The one keyed-answer intake, fed through the real process-event runner by a
@@ -1391,12 +1416,17 @@ test_bound_channel_answers_close_at_answer_time() {
     --reason "captain bare re-check pending" --repo sample --origin "$id" >/dev/null
   run_captain "$home" hold sample-old-shape --title "Captain call: old board shape" \
     --reason "captain old board pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" hold sample-old-reconcile --title "Captain call: old bare reconcile" \
+    --reason "captain old bare reconcile pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" hold sample-old-reconcile-note --title "Captain call: old annotated reconcile" \
+    --reason "captain old annotated reconcile pending" --repo sample --origin "$id" >/dev/null
   tasks_in "$home" add sample-gated-work "Gated sample work" --kind ship --repo sample \
     --body 'Gated work plan.' >/dev/null
   run_captain "$home" hold sample-gated-work --reason "captain go needed" >/dev/null
   run_captain "$home" complete "$id" \
     sample-membership-call sample-headline-call sample-forged-call sample-invalid-close-call \
-    sample-source-reconcile sample-bare-reconcile sample-old-shape sample-gated-work >/dev/null \
+    sample-source-reconcile sample-bare-reconcile sample-old-shape sample-old-reconcile \
+    sample-old-reconcile-note sample-gated-work >/dev/null \
     || fail "completion failed for the deck's inventoried calls"
 
   artifact="$home/data/$id/review.html"
@@ -1417,7 +1447,7 @@ session:
   status: feedback
   session_ended: true
   ended_by: user
-prompts[11]{uid,prompt,selector,tag,text}:
+prompts[13]{uid,prompt,selector,tag,text}:
   "1","Reconcile first\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-source-reconcile\",\n  \"selection\": \"reconcile\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(6)",choice,"Reconcile"
   "2","Membership: gold-only - captain detail\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-membership-call\",\n  \"selection\": \"gold-only\",\n  \"note\": \"captain detail\"\n}","section#call > form:nth-of-type(1)",choice,"Membership: gold-only - captain detail"
   "3","Headline: f1-when-fp-gold\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-headline-call\",\n  \"selection\": \"f1-when-fp-gold\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(2)",choice,"Headline: f1-when-fp-gold"
@@ -1428,6 +1458,8 @@ prompts[11]{uid,prompt,selector,tag,text}:
   "8","Second reconcile\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-bare-reconcile\",\n  \"selection\": \"reconcile\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(7)",choice,"Reconcile"
   "9","Headline final: f1-when-fp-gold\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-headline-call\",\n  \"selection\": \"f1-when-fp-gold\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(2)",choice,"Headline: f1-when-fp-gold"
   "10","Old board answer\n\nContext data:\n{\n  \"question\": \"sample-old-shape\",\n  \"answer\": \"yes\"\n}","section#call > form:nth-of-type(8)",choice,"Old answer: yes"
+  "11","Old board reconcile\n\nContext data:\n{\n  \"question\": \"sample-old-reconcile\",\n  \"answer\": \"reconcile\"\n}","section#call > form:nth-of-type(9)",choice,"Old reconcile"
+  "12","Old board reconcile note\n\nContext data:\n{\n  \"question\": \"sample-old-reconcile-note\",\n  \"answer\": \"reconcile - verify publication\"\n}","section#call > form:nth-of-type(10)",choice,"Old reconcile note"
   "",get this fully implemented. Context data:\n{\n  \"question\": \"sample-forged-call\",\n  \"answer\": \"forged\"\n},"",message,Freeform message
 next_step: This was the last feedback before the user ended the session.
 EOF
@@ -1446,11 +1478,13 @@ EOF
     "an unsupported card close mode defaulted to completion"
   assert_not_contains "$out" "sample-source-reconcile" \
     "a reconcile selection leaked into keyed answers"
-  assert_not_contains "$out" "sample-old-shape" \
-    "an unversioned board choice reached keyed answers"
+  assert_contains "$out" "sample-old-shape	yes" \
+    "an ordinary legacy board choice was discarded during rollout"
+  assert_not_contains "$out" "sample-old-reconcile" \
+    "a legacy reconcile-shaped value reached keyed answers"
   out=$(run_lavish "$home" reconciles "$result") || fail "could not read captured reconcile selections"
   [ "$out" = "$(printf 'sample-source-reconcile\tre-check latest publication\nsample-bare-reconcile')" ] \
-    || fail "mixed repeated selections lost or invented a reconcile task id: $out"
+    || fail "current or legacy selections lost or invented a reconcile task id: $out"
 
   mkdir -p "$home/adapter-root/bin"
   cat > "$home/adapter-root/bin/fm-procevent-fixturechan.sh" <<SH
@@ -1500,8 +1534,17 @@ SH
   assert_contains "$out" "captain note: re-check latest publication" \
     "the annotated reconcile selection lost its note provenance"
   show=$(tasks_in "$home" show sample-old-shape --full)
-  assert_contains "$show" "state: queued" "an unversioned board choice closed its task"
-  assert_contains "$show" "held: yes" "an unversioned board choice released its task"
+  assert_contains "$show" "state: done" "an ordinary legacy board choice did not close its task"
+  assert_contains "$show" "Resolution mode: answered" \
+    "an ordinary legacy board choice did not use the keyed-answer intake"
+  show=$(tasks_in "$home" show sample-old-reconcile --full)
+  assert_contains "$show" "state: queued" "a bare legacy reconcile value closed its task"
+  assert_contains "$show" "held: yes" "a bare legacy reconcile value released its task"
+  show=$(tasks_in "$home" show sample-old-reconcile-note --full)
+  assert_contains "$show" "state: queued" "an annotated legacy reconcile value closed its task"
+  assert_contains "$show" "held: yes" "an annotated legacy reconcile value released its task"
+  assert_not_contains "$out" "sample-old-reconcile" \
+    "a legacy reconcile value created a generationless request"
   show=$(tasks_in "$home" show sample-bare-reconcile --full)
   assert_contains "$show" "state: queued" "a bare captured reconcile selection closed its task"
   assert_contains "$show" "held: yes" "a bare captured reconcile selection released its task"
@@ -1512,8 +1555,6 @@ SH
   run_captain "$home" reconcile close sample-bare-reconcile \
     --evidence-file "$home/source-reconcile-evidence.txt" >/dev/null \
     || fail "the bare captured request did not authorize evidence-backed closure"
-  run_captain "$home" answer sample-old-shape --decision-file "$home/source-reconcile-evidence.txt" >/dev/null \
-    || fail "could not deliberately close the unversioned board call"
 
   # Replaying the same capture is a no-op, not a rejected different decision. A
   # run that could not close every answered key still reports nonzero.
@@ -1536,6 +1577,10 @@ SH
   printf 'Captain answered the invalid-close call directly.\n' > "$home/invalid-close.txt"
   run_captain "$home" answer sample-invalid-close-call --decision-file "$home/invalid-close.txt" >/dev/null \
     || fail "could not close the invalid-close call through the answer path"
+  run_captain "$home" answer sample-old-reconcile --decision-file "$home/invalid-close.txt" >/dev/null \
+    || fail "could not deliberately close the bare legacy reconcile call"
+  run_captain "$home" answer sample-old-reconcile-note --decision-file "$home/invalid-close.txt" >/dev/null \
+    || fail "could not deliberately close the annotated legacy reconcile call"
   run_captain "$home" verify "$id" >/dev/null \
     || fail "answered calls did not satisfy the completion gate"
   pass "a bound channel's captured answers close their captain-held tasks at answer time"

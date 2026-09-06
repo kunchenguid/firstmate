@@ -156,8 +156,9 @@
 # retire a task's row: is this task still an open captain call? Exit 0 means it
 # is (not Done, hold kind captain), 1 means it is not, and 2 means the answer
 # could not be established, so a caller that must never close a live call can
-# treat "cannot tell" as its own case instead of as a no. It prints nothing on
-# 0 or 1 and mutates nothing. bin/fm-teardown.sh asks it before its automatic
+# treat "cannot tell" as its own case instead of as a no. With
+# `--distinguish-absent`, an absent local task returns 3 instead of 1. It prints
+# nothing on these predicate results and mutates nothing. bin/fm-teardown.sh asks it before its automatic
 # backlog close and, on 0, returns the row to Queued with its deliverable
 # recorded instead (bin/fm-backlog-transition-lib.sh owns that transition), so
 # holding the very work item a question gates is safe; `answer` remains the
@@ -938,11 +939,10 @@ command_answer() {
       [ "$release" = 0 ] \
         || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
       remove_interrupted_answer_stamp "$id"
-      reconcile_request_retire "$id"
       if [ "$recorded_mode" = repaired ]; then
-        publish_parent_hold "$id" $((occurrence - 1)) resolved "answered (repaired)"
+        publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "answered (repaired)"
       else
-        publish_parent_hold "$id" $((occurrence - 1)) resolved answered
+        publish_parent_resolution_then_retire "$id" $((occurrence - 1)) answered
       fi
       printf 'answered: %s\n' "$id"
       return 0
@@ -955,12 +955,11 @@ command_answer() {
       || fail "task $id was never held for the captain; nothing to record an answer on"
     write_resolution_record "$id" repaired "$body"
     remove_interrupted_answer_stamp "$id"
-    reconcile_request_retire "$id"
     show=$(task_show "$id") || fail "task $id disappeared while recording the answer"
     [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
-    publish_parent_hold "$id" "$occurrence" resolved "answered (repaired)"
+    publish_parent_resolution_then_retire "$id" "$occurrence" "answered (repaired)"
     printf 'repaired: %s\n' "$id"
     return 0
   fi
@@ -984,8 +983,7 @@ command_answer() {
         fail "could not close answered captain-held task $id"
       fi
       remove_interrupted_answer_stamp "$id"
-      reconcile_request_retire "$id"
-      publish_parent_hold "$id" $((occurrence - 1)) resolved "$outcome"
+      publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "$outcome"
       printf '%s: %s\n' "$outcome" "$id"
       return 0
     fi
@@ -997,8 +995,7 @@ command_answer() {
     show=$(task_show "$id") || fail "task $id disappeared after closing"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
-    reconcile_request_retire "$id"
-    publish_parent_hold "$id" "$occurrence" resolved "$outcome"
+    publish_parent_resolution_then_retire "$id" "$occurrence" "$outcome"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
   fi
@@ -1011,8 +1008,7 @@ command_answer() {
     [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
     remove_interrupted_answer_stamp "$id"
-    reconcile_request_retire "$id"
-    publish_parent_hold "$id" $((occurrence - 1)) resolved released
+    publish_parent_resolution_then_retire "$id" $((occurrence - 1)) released
     printf 'released: %s\n' "$id"
     return 0
   fi
@@ -1211,11 +1207,10 @@ command_answers() {
         || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
           && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
         occurrence=$(resolution_record_count "$body")
-        reconcile_request_retire "$id"
         case "$recorded_mode" in
-          repaired) publish_parent_hold "$id" "$occurrence" resolved "answered (repaired)" ;;
-          released) publish_parent_hold "$id" "$occurrence" resolved released ;;
-          *) publish_parent_hold "$id" "$occurrence" resolved answered ;;
+          repaired) publish_parent_resolution_then_retire "$id" "$occurrence" "answered (repaired)" ;;
+          released) publish_parent_resolution_then_retire "$id" "$occurrence" released ;;
+          *) publish_parent_resolution_then_retire "$id" "$occurrence" answered ;;
         esac
         printf 'closed: %s\n' "$id"
         closed=$((closed + 1))
@@ -1300,6 +1295,16 @@ reconcile_request_read() {  # <task-id>; sets RECONCILE_REQUESTED/RECONCILE_SOUR
 reconcile_request_retire() {  # <task-id>
   rm -f -- "$(reconcile_request_path "$1")" \
     || fail "could not retire the pending reconcile request for $1"
+}
+
+publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
+  local id=$1 occurrence=$2 note=$3 request
+  request=$(reconcile_request_path "$id")
+  publish_parent_hold "$id" "$occurrence" resolved "$note"
+  if [ -e "$request" ] && [ "$PARENT_HOLD_PUBLISHED" != 1 ]; then
+    fail "could not publish the answered captain-held task $id to its parent"
+  fi
+  reconcile_request_retire "$id"
 }
 
 command_reconcile_requests() {
@@ -1745,12 +1750,16 @@ EOF
 }
 
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
-# A row this home does not carry holds no captain call, so an absent task is a
-# plain no; every other read failure is a 2, printed to stderr, because a
-# mechanical closer must never read "cannot tell" as permission to close.
-command_open() {  # <task-id>
-  local id=${1:-} data state
-  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+# A row this home does not carry is 3 when the caller requests the distinction;
+# every other read failure is a 2, printed to stderr, because a mechanical
+# closer must never read "cannot tell" as permission to close.
+command_open() {  # <task-id> [--distinguish-absent]
+  local id=${1:-} data state distinguish_absent=0
+  [ "$#" -ge 1 ] && [ "$#" -le 2 ] || { usage >&2; exit 2; }
+  if [ "$#" -eq 2 ]; then
+    [ "$2" = --distinguish-absent ] || { usage >&2; exit 2; }
+    distinguish_absent=1
+  fi
   case "$id" in
     ''|*[!A-Za-z0-9._-]*)
       printf 'fm-captain-hold: task id must be a non-empty privacy-safe slug: %s\n' "$id" >&2
@@ -1767,7 +1776,10 @@ command_open() {  # <task-id>
     fi
     return 1
   fi
-  [ "$FM_BACKLOG_ROW_RESULT" != not_found ] || return 1
+  if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+    [ "$distinguish_absent" = 0 ] || return 3
+    return 1
+  fi
   printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_ROW_ERROR" >&2
   exit 2
 }

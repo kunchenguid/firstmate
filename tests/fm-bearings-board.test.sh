@@ -657,6 +657,36 @@ test_build_drops_decision_cards_whose_subject_already_landed() {
   pass "build drops decision cards whose subject already landed and keeps open ones"
 }
 
+test_build_keeps_a_decision_absent_from_the_main_backlog() {
+  local home data board out
+  home=$(make_home remote-decision-card)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  write_valid_payload "$data"
+  jq '.captains_call = [{
+        "key":"remote-mate-call","type":"decision","repo":"sample",
+        "title":"Remote secondmate decision",
+        "options":[{"value":"yes","label":"Yes"}]
+      }]
+      | .landed = []' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  out=$(run_board "$home" build "$data" 2>&1) || fail "the remote-card build failed: $out"
+  assert_not_contains "$out" "dropped-landed-card: remote-mate-call" \
+    "an absent remote card was reported as landed: $out"
+  extract_payload "$board" | jq -e '
+    [.captains_call[] | select(.key == "remote-mate-call")] | length == 1
+  ' >/dev/null || fail "the hygiene check dropped a decision absent from the main backlog"
+  pass "build keeps remote decisions absent from the main backlog"
+}
+
 # --- part 3: every decision card offers reconcile ---------------------------
 
 test_build_fails_when_reconcile_cannot_establish_a_listener() {
@@ -750,6 +780,7 @@ test_build_reopens_when_an_opened_session_ends_before_listing
 test_build_refuses_to_arm_when_the_session_stays_ended
 test_build_starts_a_listener_for_an_already_armed_board
 test_build_drops_decision_cards_whose_subject_already_landed
+test_build_keeps_a_decision_absent_from_the_main_backlog
 test_build_fails_when_reconcile_cannot_establish_a_listener
 test_every_decision_card_carries_the_reconcile_choice
 test_build_refuses_a_payload_that_occupies_the_reconcile_value
