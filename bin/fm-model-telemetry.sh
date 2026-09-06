@@ -963,7 +963,15 @@ spawn_failure_command() {
   require_safe_task_id "$task"
   canonical=$(canonical_json "$payload")
   validate_spawn_failure "$canonical"
-  with_lock_begin
+  if ! fm_lock_try_acquire "$LOCK"; then
+    if [ -n "${FM_LOCK_HELD_PID:-}" ] && fm_pid_alive "$FM_LOCK_HELD_PID"; then
+      echo "spawn-failure evidence skipped: ledger lock held (pid $FM_LOCK_HELD_PID)" >&2
+    else
+      echo "spawn-failure evidence skipped: ledger lock unavailable (holder unknown)" >&2
+    fi
+    return 1
+  fi
+  LOCK_HELD=1
   validate_ledger_for_write
   event=$(jq -cnS --arg v "$SCHEMA_VERSION" --arg eid "mre_$(new_uuid)" --arg at "$(now_rfc3339)" --argjson payload "$canonical" \
     '{schemaVersion:$v,eventType:"spawn-failure",eventId:$eid,recordedAt:$at,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"},failure:$payload}')

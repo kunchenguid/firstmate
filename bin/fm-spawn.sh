@@ -552,6 +552,26 @@ fm_record_spawn_failure() {
   fi
 }
 
+spawn_lease_cause() {
+  local detail=${1:-}
+  detail=$(printf '%s' "$detail" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | LC_ALL=C cut -c1-300)
+  if [ -n "$detail" ]; then
+    printf 'treehouse could not acquire a durable task lease: %s' "$detail"
+  else
+    printf '%s' 'treehouse could not acquire a durable task lease'
+  fi
+}
+
+spawn_lease_refusal() {
+  local message=$1
+  echo "error: $message" >&2
+  fm_record_spawn_failure other "treehouse lease: $message" unknown not-applicable
+}
+
+if [ "${FM_SPAWN_SOURCE_ONLY:-0}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
+
 # Classify a quota-cooldown refusal so a quota-READ credential gap is recorded
 # as failureKind=quota-reader (pool still dispatchable, just can't read its
 # quota) and never as failureKind=quota (real exhaustion) or failureKind=
@@ -1316,6 +1336,7 @@ TREEHOUSE_ACQUIRED_PATH=
 TREEHOUSE_NEW_ALLOCATION=0
 TREEHOUSE_LEASE=
 TREEHOUSE_SLOT=
+SPAWN_TREEHOUSE_LEASE_ERROR_FILE=
 TREEHOUSE_ACQUISITION_LOCK="$STATE/.treehouse-acquisition.lock"
 TREEHOUSE_ACQUISITION_LOCK_HELD=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
@@ -1373,6 +1394,10 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  [ -z "${SPAWN_TREEHOUSE_LEASE_ERROR_FILE:-}" ] || {
+    rm -f -- "$SPAWN_TREEHOUSE_LEASE_ERROR_FILE" 2>/dev/null || true
+    SPAWN_TREEHOUSE_LEASE_ERROR_FILE=
+  }
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -3679,11 +3704,11 @@ spawn_reuse_recorded_writer_lease() {
   recorded_lease=$(fm_meta_get "$meta" treehouse_lease)
   recorded_slot=$(fm_meta_get "$meta" treehouse_slot)
   if [ -z "$recorded_wt" ] || [ -z "$recorded_lease" ] || [ -z "$recorded_slot" ]; then
-    echo "error: recorded writer recovery is missing treehouse lease identity; refusing a generic allocation that would split the task" >&2
+    spawn_lease_refusal "recorded writer recovery is missing treehouse lease identity; refusing a generic allocation that would split the task"
     return 1
   fi
   json=$(CDPATH='' cd -- "$PROJ_ABS" && treehouse status --json 2>/dev/null) || {
-    echo "error: treehouse occupancy for recorded writer $ID is unreadable; refusing to allocate another slot" >&2
+    spawn_lease_refusal "treehouse occupancy for recorded writer $ID is unreadable; refusing to allocate another slot"
     return 1
   }
   [ -n "$json" ] || json='[]'
@@ -3694,39 +3719,42 @@ spawn_reuse_recorded_writer_lease() {
         and (.lease_holder|tostring)==$holder
         and ((.path|tostring)==$path or (.path|tostring)==$raw)
         and ((.name|tostring)==$slot))]') || {
-    echo "error: treehouse occupancy for recorded writer $ID is unreadable; refusing to allocate another slot" >&2
+    spawn_lease_refusal "treehouse occupancy for recorded writer $ID is unreadable; refusing to allocate another slot"
     return 1
   }
   count=$(printf '%s\n' "$matches" | jq -r 'length') || {
-    echo "error: treehouse occupancy for recorded writer $ID is unreadable; refusing to allocate another slot" >&2
+    spawn_lease_refusal "treehouse occupancy for recorded writer $ID is unreadable; refusing to allocate another slot"
     return 1
   }
   [ "$count" = 1 ] || {
-    echo "error: recorded writer $ID does not uniquely occupy its treehouse lease; refusing to allocate another slot" >&2
+    spawn_lease_refusal "recorded writer $ID does not uniquely occupy its treehouse lease; refusing to allocate another slot"
     return 1
   }
-  entry=$(printf '%s\n' "$matches" | jq -c '.[0]') || return 1
+  entry=$(printf '%s\n' "$matches" | jq -c '.[0]') || {
+    spawn_lease_refusal "recorded writer occupancy could not be parsed"
+    return 1
+  }
   path=$(printf '%s\n' "$entry" | jq -er '.path | strings | select(length>0)') || {
-    echo "error: recorded writer occupancy omitted its worktree path" >&2
+    spawn_lease_refusal "recorded writer occupancy omitted its worktree path"
     return 1
   }
   lease=$(printf '%s\n' "$entry" | jq -er '.lease_id | strings | select(length>0)') || {
-    echo "error: recorded writer occupancy omitted its lease identity" >&2
+    spawn_lease_refusal "recorded writer occupancy omitted its lease identity"
     return 1
   }
   holder=$(printf '%s\n' "$entry" | jq -er '.lease_holder | strings | select(length>0)') || {
-    echo "error: recorded writer occupancy omitted its task holder" >&2
+    spawn_lease_refusal "recorded writer occupancy omitted its task holder"
     return 1
   }
   slot=$(printf '%s\n' "$entry" | jq -er '.name | strings | select(length>0)') || {
-    echo "error: recorded writer occupancy omitted its slot identity" >&2
+    spawn_lease_refusal "recorded writer occupancy omitted its slot identity"
     return 1
   }
   status=$(printf '%s\n' "$entry" | jq -r '.status // empty')
   case "$status" in
     leased|in-use) ;;
     *)
-      echo "error: recorded writer $ID is not occupying its leased worktree; refusing to allocate another slot" >&2
+      spawn_lease_refusal "recorded writer $ID is not occupying its leased worktree; refusing to allocate another slot"
       return 1
       ;;
   esac
@@ -3735,7 +3763,7 @@ spawn_reuse_recorded_writer_lease() {
     && { [ "$entry_real" = "$recorded_real" ] || [ "$path" = "$recorded_wt" ]; }; then
     :
   else
-    echo "error: recorded writer occupancy does not match the saved treehouse lease identity" >&2
+    spawn_lease_refusal "recorded writer occupancy does not match the saved treehouse lease identity"
     return 1
   fi
   WT=$path
@@ -3770,13 +3798,57 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reade
   if [ -f "$STATE/$ID.meta" ]; then
     spawn_reuse_recorded_writer_lease || exit 1
   else
-    TREEHOUSE_ALLOCATION=$(CDPATH='' cd -- "$PROJ_ABS" \
-      && treehouse get --lease --json --lease-holder "$ID" 2>/dev/null) || {
-      echo "error: treehouse could not acquire a durable task lease" >&2
+    lease_attempt_marker=spawn-lease-attempted
+    if SPAWN_TREEHOUSE_LEASE_ERROR_FILE=$(mktemp "$TASK_TMP/.treehouse-lease-stderr.XXXXXX" 2>/dev/null) \
+      || SPAWN_TREEHOUSE_LEASE_ERROR_FILE=$(mktemp "${TMPDIR:-/tmp}/.treehouse-lease-stderr.XXXXXX" 2>/dev/null); then
+      if lease_output=$(
+        {
+          printf '%s\n' "$lease_attempt_marker"
+          CDPATH='' cd -- "$PROJ_ABS" \
+            && treehouse get --lease --json --lease-holder "$ID"
+        } 2>"$SPAWN_TREEHOUSE_LEASE_ERROR_FILE"
+      ); then
+        lease_status=0
+      else
+        lease_status=$?
+      fi
+      case "$lease_output" in
+        "$lease_attempt_marker"*)
+          TREEHOUSE_ALLOCATION=${lease_output#"$lease_attempt_marker"}
+          TREEHOUSE_ALLOCATION=${TREEHOUSE_ALLOCATION#$'\n'}
+          if [ "$lease_status" -eq 0 ]; then
+            rm -f -- "$SPAWN_TREEHOUSE_LEASE_ERROR_FILE" 2>/dev/null || true
+            SPAWN_TREEHOUSE_LEASE_ERROR_FILE=
+          elif [ -r "$SPAWN_TREEHOUSE_LEASE_ERROR_FILE" ]; then
+            lease_stderr=
+            IFS= read -r lease_stderr < "$SPAWN_TREEHOUSE_LEASE_ERROR_FILE" || true
+            spawn_lease_refusal "$(spawn_lease_cause "$lease_stderr")"
+            exit 1
+          else
+            spawn_lease_refusal "$(spawn_lease_cause "")"
+            exit 1
+          fi
+          ;;
+        *)
+          if TREEHOUSE_ALLOCATION=$(CDPATH='' cd -- "$PROJ_ABS" \
+            && treehouse get --lease --json --lease-holder "$ID" 2>/dev/null); then
+            rm -f -- "$SPAWN_TREEHOUSE_LEASE_ERROR_FILE" 2>/dev/null || true
+            SPAWN_TREEHOUSE_LEASE_ERROR_FILE=
+          else
+            spawn_lease_refusal "$(spawn_lease_cause "")"
+            exit 1
+          fi
+          ;;
+      esac
+    elif TREEHOUSE_ALLOCATION=$(CDPATH='' cd -- "$PROJ_ABS" \
+      && treehouse get --lease --json --lease-holder "$ID" 2>/dev/null); then
+      :
+    else
+      spawn_lease_refusal "$(spawn_lease_cause "")"
       exit 1
-    }
+    fi
     WT=$(printf '%s\n' "$TREEHOUSE_ALLOCATION" | jq -er '.path | strings | select(length>0)') || {
-      echo "error: treehouse acquisition omitted its worktree path" >&2
+      spawn_lease_refusal "treehouse acquisition omitted its worktree path"
       exit 1
     }
     TREEHOUSE_ACQUIRED_PATH=$WT
