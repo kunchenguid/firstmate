@@ -324,7 +324,15 @@ FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 # leading braille spinner plus elapsed cell (`⠧ 11s`) is the second, independent
 # busy signal, so no single vendor string is load-bearing; its idle form is a
 # static identity glyph with no elapsed time.
-FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT='Working…|^[[:space:]]*[⠁-⣿][[:space:]]+[0-9]+[smh]'
+# The spinner is an alternation of omp 18.1.11's unicode-preset frames (its
+# `status` set ⣾⣽⣻⢿⡿⣟⣯⣷ and `activity` set ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏, read from the
+# build that rendered the live `⠧`), declared once for the busy regex and the
+# status-row furniture rule below. It is deliberately NOT a bracket range over
+# the braille block: GNU grep rejects a range between multibyte endpoints
+# ("Invalid collation character"), so `[⠁-⣿]` compiled on macOS and failed
+# every omp busy and furniture read on Linux CI.
+FM_OMP_SPINNER_FRAMES_RE='(⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷)'
+FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT='Working…|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]'
 FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
 # same version rendered both `Working` and `Running` beside its braille spinner
@@ -393,13 +401,14 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # nerd, and ` ⠧ 11s  · …` while busy. Without this rule the bare composer's
 # wrap region walks straight into that row and an idle omp pane reads
 # `pending`, the false verdict that skipped the doorbell on the first live omp
-# worker. A row is omp status furniture when it opens with one short cell then
-# a middle dot, when it opens with a braille spinner then an elapsed cell, or
-# when it carries the context-usage cell after a middle dot. It is consulted
-# only as the boundary BELOW a bare composer, never on the composer row itself,
-# and the short-cell bound is bytes under LC_ALL=C, so a four-byte nerd glyph
-# still relies on the context-cell alternative there.
-FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*[^[:space:]]{1,4}[[:space:]]+·[[:space:]]|^[[:space:]]*[⠁-⣿][[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
+# worker. A row is omp status furniture when it opens with omp's identity cell
+# then a middle dot (`π` under the unicode preset, `󰵗` under nerd, `pi` under
+# ascii: the `icon.omp` of each omp 18.1.11 preset, never an arbitrary short
+# token, so a wrapped typed row such as `fix · tests` stays composer input),
+# when it opens with one of omp's spinner frames then an elapsed cell, or when
+# it carries the context-usage cell after a middle dot. It is consulted only as
+# the boundary BELOW a bare composer, never on the composer row itself.
+FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗|pi)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
 
 # The bounded row window adapters should capture for a composer read. One
 # shared policy (previously three per-backend variables that had drifted to

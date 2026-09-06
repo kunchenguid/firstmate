@@ -295,7 +295,7 @@ test_matrix_omp_status_row_bounds_bare_composer() {
   # row from the 18.1.2 investigation. Without the status-row rule the bare
   # wrap region swallows that row and an idle omp pane reads `pending`, which
   # skipped the doorbell on the first live omp worker.
-  local idle_unicode idle_nerd busy typed
+  local idle_unicode idle_nerd busy typed wrapped
   idle_unicode=$'transcript line
 
 ❯
@@ -326,11 +326,22 @@ test_matrix_omp_status_row_bounds_bare_composer() {
     && fail "ordinary typed text must not be mistaken for omp status furniture"
   _fm_composer_row_is_omp_status 'please rerun the suite and report' \
     && fail "ordinary prose must not be mistaken for omp status furniture"
+  # Only omp's identity cell opens the row: a wrapped typed row that happens
+  # to begin with a short word and a spaced middle dot is composer input.
+  _fm_composer_row_is_omp_status 'fix · tests before pushing' \
+    && fail "wrapped typed text with a middle dot must not be mistaken for omp status furniture"
+  _fm_composer_row_is_omp_status ' ⣾ 3s  · ◔ GPT-6-Astra' \
+    || fail "the status-set omp spinner row must be recognized as furniture"
   assert_screen "idle omp (unicode preset)" empty "$CAPS_STYLED" "$idle_unicode"
   assert_screen "idle omp (nerd preset)" empty "$CAPS_STYLED" "$idle_nerd"
   assert_screen "busy omp keeps an empty composer" empty "$CAPS_STYLED" "$busy"
   assert_screen "typed omp text is pending" pending "$CAPS_STYLED" "$typed"
   assert_screen "idle omp on a plain capture" empty "$CAPS_PLAIN" "$idle_unicode"
+  # The boundary must not cut a bare composer's own wrapped input: with the
+  # cursor on a continuation row that opens `fix · tests`, the composer is a
+  # proven wrap region and reads pending, exactly as it did before the rule.
+  wrapped=$'transcript line\n\n❯ please run the suite and then\nfix · tests before pushing'
+  assert_screen "wrapped typed text with a middle dot stays pending" pending "$CAPS_TMUX" "$wrapped" 3
   pass "matrix: omp's status row bounds the bare composer's wrap region"
 }
 
