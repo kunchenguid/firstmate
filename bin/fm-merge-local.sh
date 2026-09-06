@@ -31,14 +31,17 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 fm_lease_forbid_branch "local-only landing (fm-merge-local)"
 ID=${1:?usage: fm-merge-local.sh <task-id>}
-META="$STATE/$ID.meta"
-[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
 MERGE_CONTROL_LOCK=
 merge_control_cleanup() {
   [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
 }
 trap merge_control_cleanup EXIT
+MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
+fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
+
+META="$STATE/$ID.meta"
+[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
@@ -82,8 +85,6 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
 fi
 
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
-MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
-fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
 hold_status=0
 FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
   "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" || hold_status=$?

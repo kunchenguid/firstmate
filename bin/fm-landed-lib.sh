@@ -60,7 +60,8 @@ FM_LANDED_JQ_DEFS='
   def landed_record:
     .state == "done" and .structured
     and (landed_delivery
-      or (.hold_kind != "captain"
+      or (.kind != "captain"
+        and .hold_kind != "captain"
         and (.pr_url // null) == null
         and (.report_path // null) == null
         and (.local_note // null) == null));
