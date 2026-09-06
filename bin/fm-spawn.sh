@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--codex-home <path>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--codex-home <path>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -23,7 +23,7 @@
 #   notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--codex-home <path>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -33,8 +33,10 @@
 #   backend, kind, project or home, worktree, endpoint - comes from the task's
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
-#   model, and effort may change, which is what makes a harness switch one
-#   ordinary relaunch. It refuses unless the recorded endpoint is positively
+#   model, effort, and the Codex account home may change, which is what makes
+#   a harness switch one ordinary relaunch. With no --codex-home, a relaunch
+#   that stays on codex carries the recorded codex_home= forward unchanged and
+#   re-validates it; a relaunch onto another harness drops it. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
 #   worktree, and clears the previous harness's per-task wiring before arming
@@ -45,6 +47,24 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --codex-home <path> is the Codex ACCOUNT axis: the directory holding the
+#   auth.json of the ChatGPT account this worker should draw on, resolved by
+#   firstmate from a dispatch profile's codexHome (docs/configuration.md "Crew
+#   dispatch profiles"). It is accepted only when the resolved harness is codex
+#   and only for ship, scout, and --relaunch spawns, never --secondmate. The
+#   value may be absolute or `~/`-prefixed; `~/` expands against the launching
+#   user's $HOME here, at spawn time, because the profile file is inherited
+#   byte-exact into secondmate homes on machines with other users. The expanded
+#   directory must exist and hold a non-empty auth.json (bin/fm-codex-home-lib.sh
+#   owns that check; it reads the file's size, never its contents), and its
+#   physical path becomes the account identity. A missing directory, missing or
+#   empty auth.json, relative path, or control byte refuses the spawn: a Codex
+#   worker never silently falls back to the default ~/.codex account. On success
+#   the launch is prefixed with CODEX_HOME=<quoted physical path>, exactly as
+#   CLAUDE_CONFIG_DIR is forwarded onto claude launches, and the physical path
+#   is recorded as codex_home= in state/<id>.meta. Without the flag no prefix is
+#   added and no codex_home= line
+#   is written, so the single-account default path is byte-identical to before.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -160,7 +180,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--model/--effort/--codex-home/--backend/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -253,6 +273,8 @@
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
+# A codex ship, scout, or relaunch given --codex-home records the physical account
+# directory as codex_home=; every other spawn writes no such line.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
 # When the home session's frozen trace-context decision is enabled (see
@@ -371,6 +393,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-codex-home-lib.sh
+. "$SCRIPT_DIR/fm-codex-home-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -388,6 +412,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+CODEX_HOME_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -395,13 +420,14 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+CODEX_HOME_SET=0
 RELAUNCH=0
 POS=()
 want_value=
 for a in "$@"; do
   if [ -n "$want_value" ]; then
     case "$a" in
-      --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
+      --*) echo "error: --${want_value//_/-} requires a value" >&2; exit 1 ;;
     esac
     case "$want_value" in
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
@@ -411,6 +437,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      codex_home) CODEX_HOME_ARG=$a; CODEX_HOME_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -434,10 +461,12 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --codex-home) want_value=codex_home ;;
+    --codex-home=*) CODEX_HOME_ARG=${a#--codex-home=}; CODEX_HOME_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
-[ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ -z "$want_value" ] || { echo "error: --${want_value//_/-} requires a value" >&2; exit 1; }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
@@ -445,6 +474,14 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$CODEX_HOME_SET" -eq 0 ] || [ -n "$CODEX_HOME_ARG" ] || { echo "error: --codex-home requires a non-empty value" >&2; exit 1; }
+# The Codex account axis is a crewmate/scout dispatch decision; a secondmate
+# launch is untouched by it (its harness pin has no account axis), so refuse
+# rather than let the flag look honored on a launch that never reads it.
+if [ "$CODEX_HOME_SET" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: --codex-home applies to ship, scout, and relaunch spawns only; a --secondmate launch has no Codex account axis" >&2
+  exit 1
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -913,6 +950,7 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            [ -z "${CODEX_HOME_RESOLVED:-}" ] || echo "codex_home=$CODEX_HOME_RESOLVED"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -1028,6 +1066,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$CODEX_HOME_ARG" ] || shared_args+=(--codex-home "$CODEX_HOME_ARG")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -1494,6 +1533,32 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+# Codex account axis (header: --codex-home). Resolved here, once the harness
+# is known and before any endpoint, worktree, or record exists, so a bad
+# account refuses with nothing to unwind. A relaunch that stays on codex
+# carries the task's recorded account forward and re-validates it, because
+# silently moving a task back onto the default ~/.codex account is exactly the
+# fallback this axis exists to prevent; a relaunch onto another harness drops it.
+CODEX_HOME_RESOLVED=
+if [ "$RELAUNCH" -eq 1 ] && [ "$CODEX_HOME_SET" -eq 0 ] && [ "$HARNESS" = codex ]; then
+  CODEX_HOME_ARG=$(fm_meta_get "$RELAUNCH_META" codex_home)
+fi
+if [ -n "$CODEX_HOME_ARG" ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --codex-home applies to ship, scout, and relaunch spawns only; a secondmate launch has no Codex account axis" >&2
+    exit 1
+  fi
+  if [ "$HARNESS" != codex ]; then
+    echo "error: --codex-home applies only to harness codex; this spawn resolved harness '$HARNESS'" >&2
+    exit 1
+  fi
+  fm_codex_home_validate "$CODEX_HOME_ARG" || {
+    echo "error: --codex-home refused: $FM_CODEX_HOME_ERROR" >&2
+    exit 1
+  }
+  CODEX_HOME_RESOLVED=$FM_CODEX_HOME_PATH
+fi
 
 # muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
@@ -3291,7 +3356,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort codex_home busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3309,6 +3374,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$CODEX_HOME_RESOLVED" ] || echo "codex_home=$CODEX_HOME_RESOLVED"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -3437,6 +3503,12 @@ esac
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+# The Codex account axis rides the same shape: the pane's codex reads its
+# account from CODEX_HOME, so the validated directory is forwarded as a launch
+# prefix. Only when an account was selected; the default launch is unchanged.
+if [ "$HARNESS" = codex ] && [ -n "$CODEX_HOME_RESOLVED" ]; then
+  LAUNCH="CODEX_HOME=$(shell_quote "$CODEX_HOME_RESOLVED") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

@@ -24,6 +24,7 @@ Deterministic shell owns only schema, configuration, and version validation plus
 The canonical shell helper for a worker that has already performed its model-selection reasoning and now needs to pick the first viable candidate is `bin/fm-quota-choose.sh`.
 Pass it the intake's already-captured default TOON or permitted JSON fallback through stdin or `--snapshot`; it never takes another quota snapshot, so it selects from the same quota state as the intake.
 Pass each candidate as `harness:model`, with earlier candidates preferred.
+It reads one snapshot and takes no account axis, so candidates that differ by `codexHome` stay with the per-home intake procedure below rather than this helper.
 The helper maps each harness to its primary provider family and applies the provider-wide scopes plus the exact model or product scopes for the model.
 An `exhausted_now` runway vetoes the candidate.
 The helper selects a candidate only when its applicable quota has a known `effectivePercentRemaining` greater than zero.
@@ -32,10 +33,16 @@ Authoritative multi-provider routing - including provider discovery from the har
 Use it only when the brief already fixed the candidate order and every candidate's provider is the harness's primary family.
 It does not replace the reasoning-class, runway-feasibility, or authentication gates above.
 Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
+Arm it for a worker launched with `--codex-home` as `--provider codex --codex-home <that home>`, because a watch without the account axis reads the ambient `~/.codex` account and is no evidence for a worker on another home.
 
 ## Read the default TOON
 
-Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate.
+Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate that names no `codexHome`.
+A candidate carrying `codexHome` is one ChatGPT account, so it gets its own read: `CODEX_HOME=<expanded home> quota-axi --provider codex`, once per distinct home at that intake (`bin/fm-quota-axi-lib.sh`'s `fm_quota_axi_read_codex_home` is the script-side form and refuses a home with no non-empty `auth.json`).
+Expand `~/` against the launching user's `$HOME`, never the author's, because the profile file is inherited into homes on other machines.
+Treat that read's `codex` row as provider-level evidence for that home alone: it bounds every candidate sharing the same `codexHome` and no candidate with a different one or with none, and the ambient read's `codex` row bounds only the candidates with no `codexHome`.
+A home with no non-empty `auth.json` is concrete contradictory evidence for that candidate, because `fm-spawn` refuses to launch on it; name the home and the missing sign-in rather than ranking it.
+Six accounts that differ only by `codexHome` therefore rank through the ordinary procedure below with six independent `spendPriority` scalars, and `fm-spawn` receives the winner's home as `--codex-home`.
 Post-consolidation quota-axi (the floor owned by `bin/fm-quota-axi-lib.sh`) puts `spendPriority` in the default `quota[]` block beside `effectivePercentRemaining`, `runway`, `confidence`, `limitedBy`, and `resetsAt`.
 Sparse `exhaustion[]` carries finite-runway seconds only for `projected_exhaustion` and `exhausted_now`.
 Sparse `attention[]` names auth, stale, and unmeasurable facts.

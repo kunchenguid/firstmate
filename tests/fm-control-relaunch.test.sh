@@ -297,6 +297,149 @@ SH
   chmod +x "$dir/fakebin/tasks-axi"
 }
 
+# --- Codex account axis (--codex-home) ---------------------------------------
+# A codex task records the account it runs on as codex_home=; the directory
+# holds that account's auth.json. Fixtures use placeholder files only.
+make_codex_account() {  # <dir>
+  mkdir -p "$1"
+  printf '%s\n' '{"placeholder":"fixture"}' > "$1/auth.json"
+}
+
+# add_codex_task <case-dir> <id> <codex-home>: a live codex ship task recorded
+# on the given account.
+add_codex_task() {
+  local dir=$1 id=$2 acct=$3
+  add_ship_task "$dir" "$id" codex
+  printf 'codex_home=%s\n' "$acct" >> "$dir/home/state/$id.meta"
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+}
+
+test_same_harness_relaunch_carries_the_codex_account() {
+  local dir out rc acct
+  dir=$(new_case codexcarry rl50)
+  acct="$dir/accounts/codex-1"
+  make_codex_account "$acct"
+  add_codex_task "$dir" rl50 "$acct"
+  out=$(run_control "$dir" rl50 relaunch --note "same account"); rc=$?
+  expect_code 0 "$rc" "a same-harness codex relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl50 codex_home)" = "$acct" ] \
+    || fail "the recorded Codex account must carry across a same-harness relaunch, got '$(meta_field "$dir" rl50 codex_home)'"
+  grep -F "CODEX_HOME='$acct' " "$dir/fake/literal" >/dev/null \
+    || fail "the replacement launch must be prefixed with the carried account's CODEX_HOME"$'\n'"$(cat "$dir/fake/literal")"
+  [ "$(journal_field "$dir" rl50 to_codex_home)" = "$acct" ] || fail "the journal should record the carried account"
+  assert_contains "$out" "codex_home=$acct" "the relaunch report should name the account it kept"
+  pass "fm-control relaunch: a same-harness codex relaunch carries codex_home forward unchanged"
+}
+
+test_explicit_codex_home_replaces_the_recorded_account() {
+  local dir out rc acct1 acct2
+  dir=$(new_case codexswitch rl51)
+  acct1="$dir/accounts/codex-1"
+  acct2="$dir/accounts/codex-2"
+  make_codex_account "$acct1"
+  make_codex_account "$acct2"
+  add_codex_task "$dir" rl51 "$acct1"
+  out=$(run_control "$dir" rl51 relaunch --codex-home "$acct2" --note "moving account"); rc=$?
+  expect_code 0 "$rc" "a relaunch onto another account should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl51 codex_home)" = "$acct2" ] || fail "an explicit --codex-home should be recorded"
+  [ "$(grep -c '^codex_home=' "$dir/home/state/rl51.meta")" = 1 ] || fail "the record must hold exactly one codex_home= line"
+  grep -F "CODEX_HOME='$acct2' " "$dir/fake/literal" >/dev/null || fail "the replacement must launch on the new account"
+  ! grep -F "CODEX_HOME='$acct1' " "$dir/fake/literal" >/dev/null || fail "the replacement must not launch on the old account"
+  pass "fm-control relaunch: an explicit --codex-home replaces the recorded account"
+}
+
+test_codex_home_tilde_expands_against_the_launching_home() {
+  local dir out rc acct
+  dir=$(new_case codextilde rl52)
+  make_codex_account "$dir/accounts/codex-1"
+  add_codex_task "$dir" rl52 "$dir/accounts/codex-1"
+  # run_control launches under HOME=<case>/user-home.
+  make_codex_account "$dir/user-home/.codex-3"
+  # shellcheck disable=SC2088  # the literal ~/ spelling is the input under test
+  out=$(run_control "$dir" rl52 relaunch --codex-home '~/.codex-3' --note "tilde"); rc=$?
+  expect_code 0 "$rc" "a ~/ codex home should be accepted"$'\n'"$out"
+  [ "$(meta_field "$dir" rl52 codex_home)" = "$dir/user-home/.codex-3" ] \
+    || fail "a tilde home must expand against the launching user's HOME, got '$(meta_field "$dir" rl52 codex_home)'"
+  pass "fm-control relaunch: --codex-home ~/ expands against the launching user's HOME"
+}
+
+test_harness_switch_drops_the_codex_account() {
+  local dir out rc acct
+  dir=$(new_case codexdrop rl53)
+  acct="$dir/accounts/codex-1"
+  make_codex_account "$acct"
+  add_codex_task "$dir" rl53 "$acct"
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl53 relaunch --harness claude --note "leaving codex"); rc=$?
+  expect_code 0 "$rc" "a harness switch off codex should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl53 codex_home)" ] || fail "a Codex account must not carry to a non-codex harness"
+  ! grep -F "CODEX_HOME=" "$dir/fake/literal" >/dev/null || fail "a claude replacement must not be launched with CODEX_HOME"
+  pass "fm-control relaunch: a harness switch away from codex drops the recorded account"
+}
+
+test_codex_home_on_a_non_codex_target_refuses_before_stop() {
+  local dir out rc acct before after
+  dir=$(new_case codexforeign rl54)
+  add_ship_task "$dir" rl54 claude
+  acct="$dir/accounts/codex-1"
+  make_codex_account "$acct"
+  before=$(cat "$dir/home/state/rl54.meta")
+  out=$(run_control "$dir" rl54 relaunch --codex-home "$acct" --note "wrong axis"); rc=$?
+  [ "$rc" -ne 0 ] || fail "--codex-home on a claude relaunch should be refused"$'\n'"$out"
+  assert_contains "$out" "--codex-home applies only to harness codex" "refusal must name the axis mismatch"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the running agent must not have been stopped"
+  after=$(cat "$dir/home/state/rl54.meta")
+  [ "$before" = "$after" ] || fail "a pre-stop refusal must leave the record byte-identical"
+  [ ! -e "$dir/home/state/rl54.control-relaunch" ] || fail "a profile refusal must happen before any journal is written"
+  pass "fm-control relaunch: --codex-home on a non-codex target refuses before the agent is touched"
+}
+
+test_signed_out_carried_account_refuses_before_stop() {
+  local dir out rc acct before after
+  dir=$(new_case codexsignedout rl55)
+  acct="$dir/accounts/codex-1"
+  mkdir -p "$acct"
+  add_codex_task "$dir" rl55 "$acct"
+  before=$(cat "$dir/home/state/rl55.meta")
+  out=$(run_control "$dir" rl55 relaunch --note "account vanished"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a relaunch carrying a signed-out account should be refused"$'\n'"$out"
+  assert_contains "$out" "has no non-empty auth.json" "refusal must name the missing sign-in"
+  [ "$(cat "$dir/fake/command")" = codex ] || fail "the running agent must not have been stopped"
+  after=$(cat "$dir/home/state/rl55.meta")
+  [ "$before" = "$after" ] || fail "a pre-stop refusal must leave the record byte-identical"
+  pass "fm-control relaunch: a carried account with no auth.json refuses before the agent is touched"
+}
+
+test_spawn_relaunch_carries_the_codex_account_from_the_record() {
+  local dir out acct
+  dir=$(new_case spawncodex rl56)
+  acct="$dir/accounts/codex-1"
+  make_codex_account "$acct"
+  add_codex_task "$dir" rl56 "$acct"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl56 --relaunch)
+  assert_contains "$out" "spawned rl56 harness=codex" "the direct relaunch should launch codex"$'\n'"$out"
+  [ "$(meta_field "$dir" rl56 codex_home)" = "$acct" ] \
+    || fail "fm-spawn --relaunch without --codex-home must reuse the recorded account, got '$(meta_field "$dir" rl56 codex_home)'"
+  grep -F "CODEX_HOME='$acct' " "$dir/fake/literal" >/dev/null || fail "the direct relaunch must launch on the recorded account"
+  pass "fm-spawn --relaunch: with no --codex-home it reuses the task's recorded Codex account"
+}
+
+test_spawn_relaunch_refuses_a_signed_out_recorded_account() {
+  local dir out rc acct
+  dir=$(new_case spawncodexout rl57)
+  acct="$dir/accounts/codex-1"
+  mkdir -p "$acct"
+  add_codex_task "$dir" rl57 "$acct"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl57 --relaunch); rc=$?
+  [ "$rc" -ne 0 ] || fail "a direct relaunch onto a signed-out recorded account should be refused"$'\n'"$out"
+  assert_contains "$out" "has no non-empty auth.json" "refusal must name the missing sign-in"
+  ! grep -F "encode launch-brief" "$dir/fake/literal" >/dev/null || fail "nothing must be launched on the default account"
+  pass "fm-spawn --relaunch: a recorded account with no auth.json refuses instead of falling back"
+}
+
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
@@ -403,14 +546,16 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_RELEASE="$launch_release" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 200 ]; do
+  # Process startup can exceed two seconds under the full parallel test runner,
+  # but the assertion remains bounded so a deadlock still fails this case.
+  while [ ! -e "$prepare" ] && [ "$i" -lt 1000 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
   [ -e "$prepare" ] || {
     kill "$control_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
-    fail "relaunch did not reach trace delivery"
+    fail "relaunch did not reach trace delivery: $(cat "$dir/control.out")"
   }
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_REAL_MV="$(command -v mv)" \
@@ -820,6 +965,53 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
   [ "$(meta_field "$dir" sm7 harness)" = claude ] \
     || fail "a refused relaunch must leave the durable record on the recorded harness"
   pass "fm-control relaunch: an adapter unverified for this task kind refuses before the agent is stopped"
+}
+
+# A secondmate has no Codex account axis: bin/fm-spawn.sh refuses --codex-home
+# for kind=secondmate, but only after the running agent has been stopped. The
+# control plane refuses the same flag before it touches anything, even when the
+# secondmate already runs on codex and the account itself is signed in.
+test_secondmate_relaunch_with_codex_home_refuses_before_stop() {
+  local dir home out rc acct before after
+  dir=$(new_case smcodexhome sm8)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm8"
+  printf 'codex\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sm8/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm8\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm8"
+    echo "endpoint_task_id=sm8"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=codex"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm8.meta"
+  printf '%s\n' "fm-sm8" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  acct="$dir/accounts/codex-1"
+  make_codex_account "$acct"
+  before=$(cat "$home/state/sm8.meta")
+  out=$(run_control "$dir" sm8 relaunch --codex-home "$acct"); rc=$?
+  expect_code 1 "$rc" "--codex-home on a secondmate relaunch should be refused"$'\n'"$out"
+  assert_contains "$out" "a secondmate launch has no Codex account axis" \
+    "the refusal should name the missing axis the way fm-spawn does"
+  [ "$(cat "$dir/fake/command")" = codex ] \
+    || fail "the refusal must land before the running secondmate is stopped"
+  after=$(cat "$home/state/sm8.meta")
+  [ "$before" = "$after" ] || fail "a pre-stop refusal must leave the record byte-identical"
+  [ ! -e "$home/state/sm8.control-relaunch" ] || fail "a profile refusal must happen before any journal is written"
+  pass "fm-control relaunch: --codex-home on a secondmate refuses before the agent is touched"
 }
 
 test_explicit_secondmate_harness_ignores_configured_profile_axes() {
@@ -1533,6 +1725,14 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_same_harness_relaunch_carries_the_codex_account
+test_explicit_codex_home_replaces_the_recorded_account
+test_codex_home_tilde_expands_against_the_launching_home
+test_harness_switch_drops_the_codex_account
+test_codex_home_on_a_non_codex_target_refuses_before_stop
+test_signed_out_carried_account_refuses_before_stop
+test_spawn_relaunch_carries_the_codex_account_from_the_record
+test_spawn_relaunch_refuses_a_signed_out_recorded_account
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1552,6 +1752,7 @@ test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
+test_secondmate_relaunch_with_codex_home_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
