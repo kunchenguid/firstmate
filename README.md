@@ -42,6 +42,7 @@ Launching a supported harness inside it for your primary session instantiates yo
 ## Features
 
 - **One liaison** - you talk only to the first mate; it dispatches, supervises, escalates only real decisions, and reports plain outcomes.
+- **Quality-preserving capacity** - each home runs at most two ship or scout tasks by default and keeps excess work queued; a captain-approved one-shot override can spend more concurrency without silently changing model, effort, evidence, or delivery rigor.
 - **A visible crew** - every crewmate works in its own tmux window, experimental herdr/zellij tab, cmux workspace, or Orca terminal you can watch or type into; the first mate reconciles.
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, or an Orca-managed worktree when `backend=orca`, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver authorized changes; scout tasks leave standalone investigation reports when the intake contract warrants separate research.
@@ -177,6 +178,13 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/bearings`        | Generate a concise four-section chat digest from bounded fleet state, including registered remote-home ledgers; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` for live GitHub enrichment |
 | `/updatefirstmate` | Fast-forward the running firstmate and its secondmates, then persist and restart every live mate successfully left on the target commit - including already-current homes - with an honest re-read nudge only when restart cannot be proven |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
+
+For the best quality-to-cost tradeoff, keep one coherent objective in the primary session, use `/stow` before starting an unrelated objective, and then start a fresh session.
+For continuing work, compact after a major milestone once `/stow` has made the handoff durable, especially as visible context approaches 100,000 tokens; use `/afk` for unattended waits.
+When the captain explicitly approves a temporary higher limit, scope it to the single spawn command, such as `FM_CREW_CONCURRENCY_LIMIT=3 bin/fm-spawn.sh ...`, rather than exporting it for later dispatches.
+Activation does not require restarting the Mac.
+After this change is merged and Firstmate is updated, invoke `/stow` and start a fresh primary agent session so it loads the new policy.
+Existing secondmates do not need to be killed, and new ship and scout dispatches use the enforced capacity automatically.
 
 Bearings invocation examples:
 

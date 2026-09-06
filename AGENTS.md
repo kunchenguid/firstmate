@@ -239,6 +239,10 @@ Each secondmate reconciles work already in its own home and then idles; recovery
 If away mode is present, load `/afk` and let its daemon own supervision rather than arming another cycle.
 Surface only captain-relevant decisions, review-ready PRs, failures, and credential needs; otherwise resume the emitted supervision protocol silently.
 A restart must be a non-event because durable state and live backend inventory, not conversation memory, are authoritative.
+Keep one coherent objective in the primary session.
+Before switching to unrelated work, invoke `/stow`, report that durable state is current, and recommend a fresh session rather than carrying the old objective's context forward.
+For a continuing objective whose visible context approaches 100,000 tokens, finish the current milestone, invoke `/stow`, and compact only after the durable handoff is current; never interrupt a critical reasoning or validation step merely to meet the threshold.
+When the captain steps away during live work, use `/afk` so its daemon owns no-change waits instead of extending the primary model session.
 
 ## 6. Project and knowledge management
 
@@ -304,8 +308,9 @@ On a `no-mistakes-prod-only` project, classify the task's surface: internal-only
 An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, `yolo` merge posture, and the one-line reason for any deviation in the backlog item note.
 
-Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
-Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
+Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, but keep at most two ship or scout tasks active in one home by default.
+Dispatch independent work until that capacity is full, then keep additional work queued without downgrading its model, effort, evidence, or delivery path; raise the one-shot limit only when the captain explicitly prioritizes wall-clock speed for independently implementable and validatable work.
+Serialize regardless of spare capacity for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.
 Fill the task subsections according to section 11.
 

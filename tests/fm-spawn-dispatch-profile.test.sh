@@ -797,14 +797,55 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   enable_dispatch_profile "$HOME_DIR"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
+  printf '%s\n' 'kind=ship' > "$HOME_DIR/state/active-ship.meta"
+  printf '%s\n' 'kind=scout' > "$HOME_DIR/state/active-scout.meta"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
-  expect_code 0 "$status" "secondmate spawn should be exempt from the dispatch-profile explicit harness requirement"
+  expect_code 0 "$status" "secondmate spawn should be exempt from crew dispatch profile and capacity requirements"
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
-  pass "active crew-dispatch profile does not block secondmate launches"
+  pass "active crew-dispatch profile and full crew capacity do not block secondmate launches"
+}
+
+test_default_crew_capacity_refuses_third_task_before_launch() {
+  local rec id out status
+  id=profile-capacity-default-z20
+  rec=$(make_spawn_case profile-capacity-default codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'kind=ship' > "$HOME_DIR/state/active-ship.meta"
+  printf '%s\n' 'kind=scout' > "$HOME_DIR/state/active-scout.meta"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a third active crew task should stay queued by default"
+  assert_contains "$out" "crew capacity is full (2/2 active ship/scout tasks)" \
+    "default capacity refusal did not report the measured occupancy"
+  assert_contains "$out" "leave task $id queued" \
+    "default capacity refusal did not preserve the queued-work next action"
+  assert_absent "$HOME_DIR/state/$id.meta" "capacity refusal published task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "capacity refusal launched a harness"
+  pass "default crew capacity keeps a third task queued before launch"
+}
+
+test_captain_approved_crew_capacity_override_allows_third_task() {
+  local rec id out status
+  id=profile-capacity-override-z21
+  rec=$(make_spawn_case profile-capacity-override codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'kind=ship' > "$HOME_DIR/state/active-ship.meta"
+  printf '%s\n' 'kind=scout' > "$HOME_DIR/state/active-scout.meta"
+
+  out=$(FM_CREW_CONCURRENCY_LIMIT=3 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "an explicit capacity of three should admit the third task"
+  assert_contains "$out" "spawned $id harness=codex" \
+    "capacity override did not reach the ordinary spawn path"
+  assert_grep 'kind=ship' "$HOME_DIR/state/$id.meta" \
+    "capacity override did not publish ordinary ship metadata"
+  pass "one-shot crew capacity override admits explicitly authorized parallel work"
 }
 
 # Execute the actual emitted command in a synthetic pane environment: the
@@ -1124,5 +1165,7 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_default_crew_capacity_refuses_third_task_before_launch
+test_captain_approved_crew_capacity_override_allows_third_task
 
 echo "# all fm-spawn-dispatch-profile tests passed"

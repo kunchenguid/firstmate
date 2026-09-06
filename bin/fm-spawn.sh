@@ -108,6 +108,10 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
+#   Fresh crewmate and scout spawns also share a per-home admission limit under
+#   that task-set lock. FM_CREW_CONCURRENCY_LIMIT is a positive one-shot override;
+#   its default is 2. A full home refuses before endpoint or worktree creation so
+#   the caller can leave the task queued until teardown frees capacity.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -1125,6 +1129,28 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  CREW_CONCURRENCY_LIMIT=${FM_CREW_CONCURRENCY_LIMIT:-2}
+  case "$CREW_CONCURRENCY_LIMIT" in
+    ''|*[!0-9]*|0)
+      echo "error: FM_CREW_CONCURRENCY_LIMIT must be a positive integer" >&2
+      exit 2
+      ;;
+  esac
+  ACTIVE_CREW=0
+  for ACTIVE_META in "$STATE"/*.meta; do
+    [ -e "$ACTIVE_META" ] || continue
+    ACTIVE_KIND=$(sed -n 's/^kind=//p' "$ACTIVE_META" 2>/dev/null | head -n 1 || true)
+    case "$ACTIVE_KIND" in
+      secondmate) ;;
+      *) ACTIVE_CREW=$((ACTIVE_CREW + 1)) ;;
+    esac
+  done
+  if [ "$ACTIVE_CREW" -ge "$CREW_CONCURRENCY_LIMIT" ]; then
+    echo "error: crew capacity is full ($ACTIVE_CREW/$CREW_CONCURRENCY_LIMIT active ship/scout tasks); leave task $ID queued and retry after teardown, or use a captain-approved one-shot FM_CREW_CONCURRENCY_LIMIT override" >&2
+    exit 1
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
