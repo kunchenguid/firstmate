@@ -367,13 +367,13 @@ FM_WATCHER_BUSY_HOLDER_STATUS=64
 # Sets FM_WATCHER_BUSY_PID, FM_WATCHER_BUSY_AGE, and
 # FM_WATCHER_BUSY_AGE_SOURCE on success.
 #
-# An aged beacon here is evidence of a SUSPECTED STALL and nothing stronger.
-# Identity verification proves WHICH process holds the lock - that it is this
-# home's watcher rather than a recycled pid - not that the process is stuck. A
-# slow phase, a descheduled process and a genuine wedge are indistinguishable
-# from the outside, which is why no caller of this predicate may signal, kill or
-# replace the holder: the captain ruled on 2026-09-05 that a running monitor is
-# never terminated on age alone.
+# A stale or absent beacon here is evidence of a SUSPECTED STALL and nothing
+# stronger. Identity verification proves WHICH process holds the lock - that it
+# is this home's watcher rather than a recycled pid - not that the process is
+# stuck. A slow phase, a descheduled process and a genuine wedge are
+# indistinguishable from the outside, so no caller may signal, kill or replace
+# the holder: the captain ruled on 2026-09-05 that a running monitor is never
+# terminated on age alone.
 fm_watcher_busy_holder() {  # <state-dir> <watch-path> [grace] [home]
   local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
   local lockdir beat pid age source

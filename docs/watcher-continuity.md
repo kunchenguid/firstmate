@@ -105,10 +105,11 @@ The beacon records watcher-owned progress, not merely elapsed time: the watch lo
 That is what makes an aged beacon meaningful at all - before it, one poll iteration that had grown past the grace made a perfectly healthy watcher read as dead.
 Bounded check captures enforce their deadline in the watcher, while unbounded work cannot refresh the beacon without reaching another progress boundary, so a stall still lets the beacon age.
 
-An aged beacon on a LIVE, identity-matched holder is a suspected stall and nothing stronger.
-Identity proves which process holds the lock, never that the process is stuck, so no caller may signal, stop or replace that holder: `bin/fm-watch.sh` leaves through a typed busy-holder status, and `bin/fm-watch-arm.sh` waits for up to half the effective stale grace and attaches when it beats again.
+A stale beacon, or an absent beacon on a LIVE identity-matched holder, is a suspected stall and nothing stronger.
+Identity proves which process holds the lock, never that the process is stuck, so no caller may signal, stop, or replace that holder: `bin/fm-watch.sh` leaves through a typed busy-holder status, and `bin/fm-watch-arm.sh` waits for up to half the effective stale grace and attaches when it beats again.
 When that wait expires, the arm reports the holder, leaves it alone, and lets the next turn end retry through the ordinary path.
-A live holder this home cannot identify as its own watcher is not a busy holder and stays a loud failure.
+A live PID whose current identity provably differs from the watcher identity recorded by this home's otherwise matching lock is a reused-PID stale lock, so the watcher publishes recovery, reclaims only the lock, and never signals that unrelated process.
+A dead-PID stale lock is likewise reclaimed with recovery, while any other live lock lacking complete matching watcher evidence remains a loud failure.
 
 ## Regression coverage
 
@@ -117,7 +118,7 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
-The same suite pins that an identity-matched stalled holder is left alive, keeps its lock, gets no successor and is never reported failed, that an unidentified live lock holder still fails loudly without being signalled, that a holder which beats again mid-wait is attached to rather than replaced, and that lock ownership survives sibling subshells of one shell.
+The same suite pins that an identity-matched stalled holder is left alive, keeps its lock, gets no successor and is never reported failed, that a proven reused-PID lock is cleared without signalling its unrelated process, that an otherwise unidentifiable live lock fails loudly without being signalled, that a holder which beats again mid-wait is attached to rather than replaced, and that lock ownership survives sibling subshells of one shell.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.

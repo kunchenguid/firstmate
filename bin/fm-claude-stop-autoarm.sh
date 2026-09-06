@@ -274,11 +274,12 @@ if ! need_supervision; then
   exit 0
 fi
 
-# A live, identity-matched watcher still holds this home with an aged beacon.
-# That is a suspected stall, not a broken auto-arm mechanism, so the cycle closes
-# quietly and the next turn end arms again. Reporting it as "auto-arm FAILED" is
-# the exact false alarm the 2026-09-04 investigation traced: supervision was
-# working, and the notice cost the main firstmate about four recovery turns.
+# A live, identity-matched watcher still holds this home with a stale or absent
+# beacon. That is a suspected stall, not a broken auto-arm mechanism, so the
+# cycle closes quietly and the next turn end arms again. Reporting it as
+# "auto-arm FAILED" is the exact false alarm the 2026-09-04 investigation traced:
+# supervision was working, and the notice cost the main firstmate about four
+# recovery turns.
 # Nothing here signals, kills or replaces the holder.
 if [ "$BUSY_HOLDER" -eq 1 ]; then
   fm_autoarm_reset_owned "$STATE" "$MY_GEN" >/dev/null 2>&1 || true
