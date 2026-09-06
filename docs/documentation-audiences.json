@@ -280,6 +280,34 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/war-room/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/war-room/templates/adversary.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/war-room/templates/coder.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/war-room/templates/driver.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/war-room/templates/lead.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/war-room/templates/opinion-seat.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/war-room/templates/researcher.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".cursor/skills/verify-firstmate/SKILL.md",
       "audience": "agent-runtime"
     },

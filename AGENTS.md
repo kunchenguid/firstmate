@@ -245,7 +245,7 @@ When the captain invokes `/updatefirstmate` or asks to update Firstmate, load `u
 ## 13. Agent-only reference skills
 
 Earlier sections own common skill triggers.
-Additionally, load `firstmate-orca` for Orca work, `process-event-sources` before arming or handling a registered long poll, `planning-room` before commissioning an adversarial planning gap review, and `firstmate-codexapp` for visible Codex Desktop coordination.
+Additionally, load `firstmate-orca` for Orca work, `process-event-sources` before arming or handling a registered long poll, `planning-room` before commissioning an adversarial planning gap review, `firstmate-codexapp` for visible Codex Desktop coordination, and `war-room` before starting or supervising a reusable program room.
 Never run a registered source's blocking command in a conversational turn.
 
 ## 14. X mode
