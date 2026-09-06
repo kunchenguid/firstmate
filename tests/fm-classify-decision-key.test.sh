@@ -427,3 +427,36 @@ test_bare_prose_cannot_impersonate_a_terminal_declaration() {
 }
 
 test_bare_prose_cannot_impersonate_a_terminal_declaration
+
+test_bare_prose_cannot_open_or_close_a_decision() {
+  local dir f word blocked
+  dir=$(case_dir prose-decision)
+  blocked=$(printf 'default\tblocked\tneed release access\n')
+  for word in blocked needs-decision resolved; do
+    f="$dir/open-$word.status"
+    printf 'kind=ship\n' > "$dir/open-$word.meta"
+    printf 'working: investigating the deploy\nOptions considered:\n %s\n' "$word" > "$f"
+    assert_fold "$f" '' "bare '$word' prose opened a decision"
+
+    f="$dir/close-$word.status"
+    printf 'kind=ship\n' > "$dir/close-$word.meta"
+    printf 'blocked: need release access\nSteps remaining:\n %s\n' "$word" > "$f"
+    assert_fold "$f" "$blocked" "bare '$word' prose moved an open decision"
+  done
+
+  f="$dir/keyed-colonless.status"
+  printf 'kind=ship\n' > "$dir/keyed-colonless.meta"
+  printf 'blocked [key=access]\n' > "$f"
+  assert_fold "$f" "$(printf 'access\tblocked\tblocked [key=access]\n')" \
+    "a keyed colonless line stopped opening its key"
+  printf 'resolved [key=access]\n' >> "$f"
+  assert_fold "$f" '' "a keyed colonless line stopped closing its key"
+
+  f="$dir/real-resolution.status"
+  printf 'kind=ship\n' > "$dir/real-resolution.meta"
+  printf 'blocked: need release access\nresolved: access granted\n' > "$f"
+  assert_fold "$f" '' "a genuine resolution stopped closing its decision"
+  pass "only a colon-bearing or keyed line is a decision transition in the fold"
+}
+
+test_bare_prose_cannot_open_or_close_a_decision
