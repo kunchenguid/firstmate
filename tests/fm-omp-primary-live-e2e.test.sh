@@ -11,8 +11,9 @@
 #      and the session lock names the omp process (ancestry detection);
 #   3. fm_watch_arm_omp starts a real watcher, an actionable close spawns a
 #      ledger-linked successor, and the wake arrives as one follow-up turn;
-#   4. with retries exhausted and the watcher gone, session_stop compels the
-#      turn-end guard continuation and the model repairs through the tool.
+#   4. with the successor watcher frozen until its beacon passes the lab grace,
+#      the next turn end is genuinely unsupervised, so session_stop must compel
+#      the turn-end guard continuation and the model reaches for the tool.
 set -u
 
 if [ "${FM_OMP_LIVE_E2E:-0}" != 1 ]; then
