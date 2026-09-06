@@ -38,6 +38,10 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (q2) no-mistakes + squash-merged, local followed pipeline rebase -> ALLOW
+#   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
+#   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
+#   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -269,6 +273,94 @@ echo "error: pull request not found" >&2
 exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Squash-merged history whose pipeline rebased the branch onto a newer main that
+# edited the same shared file. A local copy left behind by that rebase holds
+# different content for the shared file, so its per-commit patch ids against the
+# PR head differ and merge-tree against main conflicts; teardown refuses it on
+# purpose rather than reading a shared path as proof the local content landed.
+# local_mode: rebased | stale | rebased-plus-unlanded
+# Echoes: <pr_head>
+setup_squash_rebased_history() {
+  local case_dir=$1 local_mode=$2 tmp local_head pr_head
+  tmp="$case_dir/_shared_base"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' base > "$tmp/shared.txt"
+  git -C "$tmp" add -- shared.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "shared base"
+  git -C "$tmp" push -q origin main
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" reset -q --hard origin/main
+  rm -rf "$tmp"
+
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  printf '%s\n' base feature-edit > "$case_dir/wt/shared.txt"
+  git -C "$case_dir/wt" add -- shared.txt
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    commit -q -m "edit shared from feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  tmp="$case_dir/_main_move"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' base main-edit > "$tmp/shared.txt"
+  git -C "$tmp" add -- shared.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "main edits shared"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+
+  tmp="$case_dir/_pipeline"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q -b fm/task-x1
+  printf '%s\n' hello > "$tmp/feature.txt"
+  git -C "$tmp" add -- feature.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "add feature"
+  printf '%s\n' base main-edit feature-edit > "$tmp/shared.txt"
+  git -C "$tmp" add -- shared.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t \
+    commit -q -m "edit shared from feature"
+  pr_head=$(git -C "$tmp" rev-parse HEAD)
+  git -C "$tmp" push -q origin "HEAD:refs/pull/7/head"
+  git -C "$tmp" checkout -q main
+  git -C "$tmp" merge -q --squash fm/task-x1 >/dev/null
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "feat: squash (#7)"
+  git -C "$tmp" push -q origin main
+  rm -rf "$tmp"
+
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/wt" fetch -q origin "refs/pull/7/head:refs/fm-test/pr-head"
+  case "$local_mode" in
+    rebased)
+      git -C "$case_dir/wt" reset -q --hard "$pr_head"
+      ;;
+    stale)
+      git -C "$case_dir/wt" reset -q --hard "$local_head"
+      ;;
+    rebased-plus-unlanded)
+      git -C "$case_dir/wt" reset -q --hard "$pr_head"
+      wt_commit_file "$case_dir" later.txt local-only "local follow-up"
+      ;;
+    *)
+      fail "setup_squash_rebased_history: unknown local_mode $local_mode"
+      ;;
+  esac
+  printf '%s\n' "$pr_head"
+}
+
+# A refusal must leave every recovery route intact: the isolated copy, its task
+# branch still at the unlanded commit, and the durable task record. A completed
+# teardown detaches and deletes that branch and removes the record, so these hold
+# only while nothing destructive ran before the refusal was reported.
+# Args: case_dir label head-before-teardown
+assert_refusal_retained_task_state() {
+  local case_dir=$1 label=$2 head=$3
+  [ -d "$case_dir/wt" ] || fail "$label: refusal removed the isolated copy"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = fm/task-x1 ] \
+    || fail "$label: refusal dropped the task branch"
+  [ "$(git -C "$case_dir/wt" rev-parse HEAD 2>/dev/null)" = "$head" ] \
+    || fail "$label: refusal moved the task branch off the unlanded commit"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "$label: refusal erased the durable task record"
 }
 
 append_pr_meta_for_current_head() {
@@ -849,6 +941,98 @@ test_merged_pr_with_later_local_commit_refuses() {
   expect_code 1 "$rc" "stale-pr-head: teardown should refuse when HEAD moved after PR recording"
   grep -q REFUSED "$case_dir/stderr" || fail "stale-pr-head: no REFUSED line in stderr"
   pass "merged PR does not allow teardown after a later local commit"
+}
+
+test_squash_merged_rebased_branch_allows() {
+  local case_dir rc pr_head
+  case_dir=$(make_case squash-rebased)
+  write_meta "$case_dir" no-mistakes ship
+  pr_head=$(setup_squash_rebased_history "$case_dir" rebased)
+  printf '%s\n' \
+    'pr=https://github.com/example/repo/pull/7' \
+    "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "squash-rebased: teardown should succeed when the worktree followed the pipeline rebase"$'\n'"$(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-rebased: teardown printed a REFUSED line"
+  pass "squash-merged task whose local branch followed the pipeline rebase is torn down"
+}
+
+test_squash_merged_same_file_different_content_refuses() {
+  local case_dir rc pr_head local_head
+  case_dir=$(make_case squash-same-path-diverged)
+  write_meta "$case_dir" no-mistakes ship
+  # The pipeline rebase produced a different blob for shared.txt than the stale
+  # local still holds, then squash-merged. Same path is not proof the local
+  # content landed.
+  pr_head=$(setup_squash_rebased_history "$case_dir" stale)
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' \
+    'pr=https://github.com/example/repo/pull/7' \
+    "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "squash-same-path-diverged: teardown should refuse when the same file has different content"$'\n'"$(cat "$case_dir/stderr")"
+  grep -q REFUSED "$case_dir/stderr" || fail "squash-same-path-diverged: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" squash-same-path-diverged "$local_head"
+  pass "squash-merged same-path different content still refuses"
+}
+
+# The local branch followed the pipeline rebase, so without later.txt this is the
+# q2 ALLOW case exactly. The one unlanded follow-up commit is the sole difference
+# and must be the sole reason teardown refuses.
+test_squash_merged_rebased_local_with_unlanded_commit_refuses() {
+  local case_dir rc pr_head local_head
+  case_dir=$(make_case squash-rebased-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  pr_head=$(setup_squash_rebased_history "$case_dir" rebased-plus-unlanded)
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' \
+    'pr=https://github.com/example/repo/pull/7' \
+    "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "squash-rebased-unlanded: teardown should refuse extra local commits that never landed"$'\n'"$(cat "$case_dir/stderr")"
+  grep -q REFUSED "$case_dir/stderr" || fail "squash-rebased-unlanded: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" squash-rebased-unlanded "$local_head"
+  pass "squash-merged rebased local still refuses a genuinely unlanded follow-up commit"
+}
+
+test_squash_merged_stale_local_refuses_when_forge_unreachable() {
+  local case_dir rc pr_head local_head
+  case_dir=$(make_case squash-stale-offline)
+  write_meta "$case_dir" no-mistakes ship
+  pr_head=$(setup_squash_rebased_history "$case_dir" stale)
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' \
+    'pr=https://github.com/example/repo/pull/7' \
+    "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+  add_gh_axi_error "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "squash-stale-offline: teardown should refuse when the forge is down and trees conflict"$'\n'"$(cat "$case_dir/stderr")"
+  grep -q REFUSED "$case_dir/stderr" || fail "squash-stale-offline: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" squash-stale-offline "$local_head"
+  pass "squash-merged stale local still refuses when the forge is unreachable"
 }
 
 test_pr_check_does_not_refresh_stale_pr_head() {
@@ -3491,6 +3675,10 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
+test_squash_merged_rebased_branch_allows
+test_squash_merged_same_file_different_content_refuses
+test_squash_merged_rebased_local_with_unlanded_commit_refuses
+test_squash_merged_stale_local_refuses_when_forge_unreachable
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
