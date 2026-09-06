@@ -50,7 +50,13 @@
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      green, so a green PR is never silently read as still-validating. And a
+#      terminal FAILED run whose only failure is the ci monitor step, after
+#      every substantive step completed and the ci log's last marker reads
+#      checks green, also reads done (held-for-merge), never failed: a monitor
+#      whose only remaining job is to observe a human merge decision must not
+#      convert the absence of that decision into a failure verdict
+#      (nm_failed_run_is_green_held_ci; 2026-09-05 jr-voice incident).
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -362,6 +368,24 @@ nm_active_steps_rows() {
   '
 }
 
+# Rows of the `steps[N]{step,status,findings,duration_ms}:` table in the
+# captured run output ($RUN_OUT) - the full per-step ledger, present on
+# terminal runs too, unlike active_steps[] which the pipeline emits only while
+# a step is actually running or fixing. Column order is deliberately not
+# assumed: the header's own indentation bounds the block, and callers below
+# read the table as text.
+nm_steps_rows() {
+  printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*steps\[[0-9]+\]\{/ { hdr = index($0, "steps"); inblock = 1; next }
+    inblock {
+      if ($0 ~ /^[[:space:]]*$/) { inblock = 0; next }
+      match($0, /[^ \t]/)
+      if (RSTART <= hdr) { inblock = 0; next }
+      print
+    }
+  '
+}
+
 # 0 when the pipeline itself reports RECENT activity on an actively running or
 # fixing step. The client prefixes a step's `last_activity` with `quiet` once no
 # step log or native-agent lifecycle event has arrived for longer than its
@@ -374,6 +398,55 @@ nm_run_activity_is_recent() {
   rows=$(nm_active_steps_rows)
   [ -n "$rows" ] || return 1
   ! printf '%s\n' "$rows" | grep -q 'quiet'
+}
+
+# 0 when a terminal FAILED run's only failure is the ci monitor step and the
+# ci log's last recognized marker reads checks green. Requires the exact
+# shape, all on positive evidence: a steps[] table where every step completed
+# except exactly `ci` failed (any other non-completed status, or a second
+# failed step, disqualifies), plus nm_ci_checks_state=green (a genuinely red
+# check, or an unreadable ci log, keeps the failure a failure). This is the
+# orphaned-CI-monitor gap (2026-09-05 jr-voice): a run held for a captain
+# merge decision polls until the shared daemon restarts under it and marks
+# the run failed, although GitHub's own check state - the actual shippability
+# authority - is green and every substantive step completed.
+nm_failed_run_is_green_held_ci() {
+  local rows row rest step status saw_ci_failed
+  rows=$(nm_steps_rows)
+  [ -n "$rows" ] || return 1
+  saw_ci_failed=0
+  while IFS= read -r row; do
+    row=$(trim "$row")
+    step=$(trim "${row%%,*}")
+    rest=${row#*,}
+    status=$(strip_quotes "$(trim "${rest%%,*}")")
+    case "$status" in
+      completed) continue ;;
+      failed)
+        [ "$step" = ci ] || return 1
+        saw_ci_failed=1
+        continue
+        ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$rows
+EOF
+  [ "$saw_ci_failed" = 1 ] || return 1
+  [ "$(nm_ci_checks_state)" = green ]
+}
+
+# Reclassify a terminal failed run as done (held-for-merge) when
+# nm_failed_run_is_green_held_ci matches, surfacing the run's PR URL so the
+# supervisor reads the concrete review-ready outcome instead of a failure.
+nm_reclassify_failed_run_as_held_green() {
+  nm_failed_run_is_green_held_ci || return 1
+  RUN_STATE="done"
+  RUN_DETAIL="checks green: PR held for merge (ci monitor ended)"
+  local pr_url
+  pr_url=$(strip_quotes "$(nm_field pr)")
+  [ -n "$pr_url" ] && RUN_DETAIL="$RUN_DETAIL: $pr_url"
+  return 0
 }
 
 nm_ci_step_status() {
@@ -542,7 +615,10 @@ if [ "$HAVE_RUN" = 1 ]; then
       case "$outcome" in
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
-        failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
+        failed)
+          if nm_reclassify_failed_run_as_held_green; then :; else
+            RUN_STATE=failed; RUN_DETAIL="run failed"
+          fi ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
@@ -566,7 +642,10 @@ if [ "$HAVE_RUN" = 1 ]; then
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
-        failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
+        failed)
+          if nm_reclassify_failed_run_as_held_green; then :; else
+            RUN_STATE=failed; RUN_DETAIL="run failed"
+          fi ;;
         cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
