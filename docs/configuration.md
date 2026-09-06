@@ -470,6 +470,7 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 A well-formed `home` whose directory is missing or holds no `auth.json` is instead reported once per home as `CREW_DISPATCH: codex home unavailable: <path> - ...`, which makes only the candidates naming that home ineligible and leaves the rest of the file dispatchable.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+An inherited `home` is an absolute path on the machine that wrote it, so on a home whose machine holds no such Codex login it simply reports the per-home unavailable diagnostic above and takes those candidates out of that home's dispatch while every other profile still runs.
 
 ## Toolchain
 
