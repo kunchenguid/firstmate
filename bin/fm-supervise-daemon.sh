@@ -417,7 +417,7 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
   fi
   if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
     # A DECLARED external-wait pause or a verified captain-held transfer
-    # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
+    # (fm-classify-lib.sh owns which declarations qualify): an unattended pane is
     # EXPECTED, so this is not a wedge. The caller records a pause marker (long
     # re-surface cadence in housekeeping) rather than a wedge stale marker. Cheap:
     # reuses the status line already read, no fm-crew-state.sh call, mirroring the
