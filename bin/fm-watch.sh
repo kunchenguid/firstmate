@@ -221,10 +221,11 @@ SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-60}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent surfaces on first sight
-# and is then held to that same cadence; a secondmate earns the cadence on its
-# declaration alone, because its endpoint liveness is deliberately never read
-# (pause_state_class owns that split).
+# bounded cadence. A live agent with a resolvable idle or busy verdict still
+# surfaces on first sight and is then held to that cadence, but an unresolvable
+# busy verdict is not a reason to disbelieve the declaration. A secondmate earns
+# the cadence on its declaration alone, because its endpoint liveness is
+# deliberately never read (pause_state_class owns that split).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -251,6 +252,26 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
+# window_busy_verdict: the raw fm_busy_classify(_meta) verdict string
+# (bin/fm-busy-lib.sh) for <window>, via the meta-file contract when the
+# window resolves to a task with a meta file, else the harness/backend
+# fallback. <task> may be passed by a caller that already resolved it
+# (sparing a redundant window_to_task lookup); otherwise it is resolved here.
+# Shared by window_is_busy and pause_live_agent_blocks_absorb so the same
+# window/tail40 is classified only once per call rather than reimplementing
+# this resolution twice.
+window_busy_verdict() {  # <window> <tail40> [task]
+  local w=$1 tail40=$2 task=${3-} meta
+  [ -n "$task" ] || task=$(window_to_task "$w" "$STATE")
+  meta="$STATE/$task.meta"
+  if [ -n "$task" ] && [ -f "$meta" ]; then
+    fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40"
+  else
+    fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
+      "${task:-unknown}" "$STATE" "$tail40"
+  fi
+}
+
 # window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through
 # the semantic busy-state contract (bin/fm-busy-lib.sh). Only an exact busy
 # verdict returns 0: idle, unknown, and dead all return 1, so a converted
@@ -259,15 +280,8 @@ hash_pane() {
 # <tail40> is the same bounded capture already read for hashing and is
 # consumed only by the Grok-scoped fallback inside the contract.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 task meta verdict
-  task=$(window_to_task "$w" "$STATE")
-  meta="$STATE/$task.meta"
-  if [ -n "$task" ] && [ -f "$meta" ]; then
-    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
-  else
-    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
-      "${task:-unknown}" "$STATE" "$tail40")
-  fi
+  local w=$1 tail40=$2 verdict
+  verdict=$(window_busy_verdict "$w" "$tail40")
   [ "${verdict%% *}" = busy ]
 }
 
@@ -955,10 +969,31 @@ clear_pause_tracking() {  # <window-key>
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
-# recovered only for a confidently dead ordinary crew, or for a secondmate, whose
-# endpoint liveness this function deliberately never reads.
-pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive kind
+# recovered for a confidently dead ordinary crew, for a secondmate (whose endpoint
+# liveness this function deliberately never reads), or when the endpoint is
+# CONFIRMED alive but its busy state is unresolvable: a well-formed declared pause
+# is status-log evidence and is believed even if the terminal cannot be classified.
+# An endpoint whose liveness itself could not be read stays unresolved rather than
+# absorbed, so an unreadable or lost worker still takes the bounded stale
+# inspection path instead of hiding for the whole pause cadence.
+#
+# pause_live_agent_blocks_absorb: 0 when a live ordinary crew with a resolvable
+# busy or idle verdict must still surface, so a worker at a live decision gate
+# is not silenced. 1 when the agent is confirmed dead, or confirmed alive with an
+# unresolvable busy verdict. Liveness itself reading unknown returns 0, since that
+# case cannot rule out a live decision gate.
+pause_live_agent_blocks_absorb() {  # <window> <task> [tail40]
+  local win=$1 task=$2 tail40=${3-} agent_alive busy_state verdict
+  agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+  [ "$agent_alive" != dead ] || return 1
+  [ "$agent_alive" = alive ] || return 0
+  verdict=$(window_busy_verdict "$win" "$tail40" "$task")
+  busy_state=${verdict%% *}
+  [ "$busy_state" != unknown ]
+}
+
+pause_state_class() {  # <window> <task> [tail40]
+  local win=$1 task=$2 tail40=${3-} key last recheck_file class kind
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
@@ -972,13 +1007,10 @@ pause_state_class() {  # <window> <task>
   # far more common no-declaration path above still costs none.
   kind=$(window_kind "$win")
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$kind" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
+    if [ "$kind" != secondmate ] && pause_live_agent_blocks_absorb "$win" "$task" "$tail40"; then
+      rm -f "$recheck_file"
+      printf 'none'
+      return
     fi
     printf 'paused'
     return
@@ -989,22 +1021,20 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
-  if [ "$kind" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
-      return
-    fi
+  if [ "$kind" != secondmate ] && pause_live_agent_blocks_absorb "$win" "$task" "$tail40"; then
+    rm -f "$recheck_file"
+    printf 'none'
+    return
   fi
   # Recover paused classification for a declared wait that authoritative crew state
-  # could not name. Reaching here already proves the only two admissible cases: an
-  # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
-  # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
-  # read and so cannot supply that confirmation. Without the mate case a mate's
-  # captain hold - which has no current-state mapping and so arrives as `none` -
-  # would be silenced by every caller rather than taking the bounded re-surface
-  # cadence, and a forgotten hold would rot invisibly.
+  # could not name. Reaching here already proves an admissible case: an ordinary
+  # crew whose agent is confirmed dead, or confirmed alive with an unresolvable
+  # busy verdict, so no live decision gate with a readable pane is being silenced,
+  # or a secondmate, whose endpoint liveness is deliberately never read and so
+  # cannot supply that confirmation. Without the mate case a mate's captain hold -
+  # which has no current-state mapping and so arrives as `none` - would be
+  # silenced by every caller rather than taking the bounded re-surface cadence,
+  # and a forgotten hold would rot invisibly.
   [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
@@ -1015,10 +1045,13 @@ pause_state_class() {  # <window> <task>
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
-# a decision, or be wedged. pause_state_class deliberately answers `none` for a
-# still-LIVE agent even under a declared wait, so a worker genuinely waiting on a
-# decision is never silenced - which routes every parked-but-live worker here, on
-# first sight of each distinct stale hash.
+# a decision, or be wedged. pause_state_class answers `none` for a still-LIVE
+# agent with a resolvable idle or busy verdict even under a declared wait, so a
+# worker genuinely waiting on a decision is never silenced - which routes every
+# parked-but-live worker whose busy state can be read here, on first sight of
+# each distinct stale hash. A confirmed-alive agent with an unresolvable busy
+# verdict takes the paused-absorb path instead; an agent whose liveness itself
+# is unresolvable also lands here, since it cannot rule out a live decision gate.
 #
 # So a declared wait bounds this path to the same once-per-PAUSE_RESURFACE_SECS
 # cadence resurface_absorbed owns for the absorbed paths, throttled by this
@@ -1905,7 +1938,7 @@ EOF
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
-          case "$(pause_state_class "$w" "$task")" in
+          case "$(pause_state_class "$w" "$task" "$tail40")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
@@ -1978,7 +2011,7 @@ EOF
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
-            case "$(pause_state_class "$w" "$task")" in
+            case "$(pause_state_class "$w" "$task" "$tail40")" in
               working)
                 clear_pause_tracking "$key"
                 printf '%s' "$h" > "$sf"
@@ -1995,7 +2028,7 @@ EOF
           else
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
-              case "$(pause_state_class "$w" "$task")" in
+              case "$(pause_state_class "$w" "$task" "$tail40")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
@@ -2040,7 +2073,7 @@ EOF
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
-        case "$(pause_state_class "$w" "$task")" in
+        case "$(pause_state_class "$w" "$task" "$tail40")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           # Inconclusive, but the declared wait itself still stands, so only the
           # per-hash bookkeeping resets. The re-surface throttle bounds the

@@ -324,6 +324,14 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   pane_busy pi-signed pi-signed || fail "pi-signed should share Pi's exact Working footer"
   printf 'Ctrl+c:cancel\n' > "$composer"
   pane_busy grok grok || fail "Grok cancel footer should be busy"
+  printf 'Shift+Tab:mode | Esc:cancel | Ctrl+x:shortcuts\n' > "$composer"
+  pane_busy grok13 grok || fail "Grok 1.0.13 mid-turn footer should be busy"
+  printf 'Shift+Tab:mode | Ctrl+x:shortcuts\n' > "$composer"
+  pane_busy grok13idle grok && fail "Grok 1.0.13 idle footer must not be busy"
+  printf 'Shift+Tab:mode | Esc:cancel | Ctrl+x:shortcuts\n' > "$composer"
+  pane_busy unknown kimi && fail "idle Kimi must ignore Grok 1.0.13 Esc:cancel"
+  printf 'Shift+Tab:mode | Esc:cancel | Ctrl+x:shortcuts\n' > "$composer"
+  pane_busy fallback || fail "no-harness fallback should retain Grok 1.0.13 Esc:cancel"
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
 }
 
