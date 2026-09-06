@@ -786,6 +786,63 @@ SH
   pass "fm-mail: a recovered wake that cannot append restores the retry instead of stranding the metadata"
 }
 
+test_poll_failed_retry_restore_does_not_strand_metadata() {
+  # If a recovered-metadata wake fails to publish and the retry record cannot
+  # be restored, the uid must be removed from the cursor as a fallback so the
+  # next poll re-surfaces the mail as new and re-fetches real metadata.
+  local fakebin homedir_bin restore_home out rc=0 wakeq
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  restore_home="$TMP_ROOT/restore-fail-home"
+  homedir_bin="$restore_home/bin"
+  mkdir -p "$homedir_bin" "$restore_home/state"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity	90009\n'
+printf '77\t2026-09-05T00:00:00Z\tfrom@x\tRe: hi\tretry\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  # Cursor records the uid from the earlier degraded wake; retry set exists.
+  printf 'uidvalidity=90009\n77\n' > "$restore_home/state/.mail-seen"
+  printf '77\n' > "$restore_home/state/.mail-retry"
+
+  # Make the retry set unwritable-as-a-file (directory) so mail_retry_remove
+  # no-ops and mail_retry_add fails. Make the wake-queue seq read-only so the
+  # recovered wake cannot append, forcing the retry-restore path.
+  rm -rf "$restore_home/state/.mail-retry"
+  mkdir -p "$restore_home/state/.mail-retry"
+  : > "$restore_home/state/.wake-queue.seq"
+  chmod 0000 "$restore_home/state/.wake-queue.seq"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$restore_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll must fail closed when the retry record cannot be restored"
+  assert_contains "$out" "could not restore retry" "poll reports the failed retry restore"
+  assert_contains "$out" "removing cursor record" "poll attempts the cursor-removal fallback"
+  assert_not_contains "$(cat "$restore_home/state/.mail-seen" 2>/dev/null)" "77" \
+    "cursor line is removed as a fallback so the uid is not stranded"
+
+  # Restore writable state: the next poll must re-surface the uid as new and
+  # re-fetch the real metadata instead of leaving it unseen forever.
+  rm -rf "$restore_home/state/.mail-retry"
+  : > "$restore_home/state/.mail-retry"
+  rm -f "$restore_home/state/.wake-queue.seq"
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$restore_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "follow-up poll must succeed and re-fetch the metadata"
+  assert_contains "$out" "woke for 77" "follow-up poll re-surfaces the uid"
+  assert_contains "$(cat "$restore_home/state/.mail-seen" 2>/dev/null)" "77" \
+    "follow-up poll records the uid in the cursor"
+  wakeq=$(grep -c "check: mail 77" "$restore_home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 1 "$wakeq" "exactly one wake is appended for the re-fetched uid"
+  pass "fm-mail: a failed retry restore falls back to cursor removal so metadata is never stranded"
+}
+
 test_poll_fails_closed_when_poll_list_fails() {
   local fakebin out rc=0
   fakebin=$(fm_fakebin "$TMP_ROOT")
@@ -1730,6 +1787,7 @@ test_poll_fails_closed_when_stale_retry_clear_fails
 test_assert_equals_rejects_mismatch
 test_poll_fails_closed_when_poll_list_fails
 test_poll_restores_retry_when_recovered_wake_cannot_append
+test_poll_failed_retry_restore_does_not_strand_metadata
 test_poll_fetch_raise_does_not_abort_the_scan
 test_poll_keeps_journal_when_heal_cannot_record
 test_poll_heal_failure_does_not_rewake_unseen_mail
