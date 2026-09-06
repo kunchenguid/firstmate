@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 "$ENTER_WAIT")` loop after
+# `treehouse get`).
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -30,6 +31,7 @@ make_settle_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 case "$*" in
   *"#{pane_current_path}"*)
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
@@ -147,7 +149,52 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# FM_SPAWN_ENTER_WAIT_SECS overrides the enter-wait bound: with the pane never
+# leaving the project (candidate never settles), the loop exhausts and the
+# failure names the configured bound, proving the override drives the loop.
+test_enter_wait_override_changes_the_bound() {
+  local rec id out status start end elapsed
+  id=enter-wait-override-z3
+  rec=$(make_settle_case enter-wait-override "$id" 0)
+  read_settle_record "$rec"
+
+  start=$(date +%s)
+  # Point the fake pane at the project itself so it never enters a worktree.
+  out=$(FM_SPAWN_ENTER_WAIT_SECS=1 WT_DIR="$PROJ_DIR" STALE_DIR="$PROJ_DIR" run_settle_spawn "$id")
+  status=$?
+  end=$(date +%s)
+  elapsed=$((end - start))
+  expect_code 1 "$status" "spawn should fail when the pane never enters a worktree"
+  assert_contains "$out" "within 1s" "failure did not report the overridden enter-wait bound"
+  [ "$elapsed" -le 5 ] || fail "enter-wait=1 loop took ${elapsed}s - the override did not bound the loop"
+  pass "FM_SPAWN_ENTER_WAIT_SECS bounds the treehouse-enter wait loop"
+}
+
+# A non-positive-integer override (including all-digit zero like 00) is refused
+# before the endpoint window exists or treehouse get is sent.
+test_enter_wait_invalid_is_refused() {
+  local rec id out status bad tmux_log
+  for bad in nope 00; do
+    id="enter-wait-invalid-$bad-z4"
+    rec=$(make_settle_case "enter-wait-invalid-$bad" "$id" 0)
+    read_settle_record "$rec"
+    tmux_log="$HOME_DIR/tmux-calls.log"
+    : > "$tmux_log"
+
+    out=$(FM_SPAWN_ENTER_WAIT_SECS="$bad" FM_FAKE_TMUX_LOG="$tmux_log" run_settle_spawn "$id")
+    status=$?
+    expect_code 1 "$status" "spawn should refuse enter-wait '$bad'"
+    assert_contains "$out" "FM_SPAWN_ENTER_WAIT_SECS must be a positive integer, got '$bad'" \
+      "spawn did not refuse enter-wait '$bad'"
+    assert_no_grep "new-window" "$tmux_log" "enter-wait '$bad' was refused only after creating the endpoint window"
+    assert_no_grep "treehouse get" "$tmux_log" "enter-wait '$bad' was refused only after sending treehouse get"
+  done
+  pass "a non-positive-integer FM_SPAWN_ENTER_WAIT_SECS is refused before any endpoint exists"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_enter_wait_override_changes_the_bound
+test_enter_wait_invalid_is_refused
 
 echo "# all fm-spawn-worktree-settle tests passed"
