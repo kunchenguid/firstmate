@@ -4,6 +4,7 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--codex-home <path>] [--selection-receipt <path>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--codex-home <path>] [--selection-receipt <path>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--codex-home <path>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -69,6 +70,12 @@
 #   or ranks a provider.
 #   Nothing else in this home's environment changes, and a spawn without the
 #   flag behaves exactly as it did before the flag existed.
+#   A LOCAL secondmate accepts it too, which pins that secondmate's own agent to
+#   one account; there is no dispatch profile behind that choice, so it is the
+#   caller's. The prefix reaches only the secondmate's own launch: its crewmates
+#   are separate spawns that resolve their own home, or none. The REMOTE
+#   secondmate route refuses the flag outright, because its launch is composed on
+#   another host whose Codex homes this one cannot validate.
 #   A --relaunch carries the recorded value forward whenever the replacement
 #   resolves to the codex harness, including through the raw-launch escape hatch
 #   (`--harness 'codex --search'`), and revalidates it; bin/fm-control.sh
