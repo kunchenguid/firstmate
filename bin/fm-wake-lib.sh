@@ -45,12 +45,33 @@ fm_current_pid() {  # [output-variable]
   fi
 }
 
+fm_pid_zombie() {  # <pid>
+  local pid=$1 proc_root stat_line state
+  local -a stat_fields
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${stat_fields[0]:-}" = Z ]
+    return
+  fi
+  state=$(ps -o stat= -p "$pid" 2>/dev/null) || return 1
+  state=${state#"${state%%[![:space:]]*}"}
+  case "$state" in Z*) return 0 ;; esac
+  return 1
+}
+
 fm_pid_alive() {
   local pid=$1
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  kill -0 "$pid" 2>/dev/null
+  kill -0 "$pid" 2>/dev/null || return 1
+  fm_pid_zombie "$pid" && return 1
+  return 0
 }
 
 fm_pid_identity() {
