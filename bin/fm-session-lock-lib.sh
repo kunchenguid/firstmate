@@ -88,6 +88,38 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+# Cached result of whether this platform's `ps` understands the POSIX -o
+# custom-format option (`-o comm=`, `-o ppid=`, `-o args=`), which every
+# function below depends on to read process identity. Verified broken: the
+# Cygwin ps 3.6.9 shipped with Git for Windows supports only
+# [-aefls] [-u UID] [-p PID] and rejects -o outright, so every comm/args/ppid
+# read above silently comes back empty (stderr is normally discarded) and the
+# ancestry walk fails on its very first hop. Probed once and cached because ps
+# is invoked many times per session.
+FM_PS_SUPPORTS_O=
+fm_ps_supports_o() {
+  if [ -z "$FM_PS_SUPPORTS_O" ]; then
+    if ps -o comm= -p $$ >/dev/null 2>&1; then
+      FM_PS_SUPPORTS_O=1
+    else
+      FM_PS_SUPPORTS_O=0
+    fi
+  fi
+  [ "$FM_PS_SUPPORTS_O" = 1 ]
+}
+
+# True when this process's environment carries one of the verified harness
+# markers fm-harness.sh's detect_own() trusts as its Layer 1: only claude, pi,
+# and grok set one of their own (codex, opencode, and kimi are markerless, so
+# they have no fallback here and still depend entirely on the ps ancestry walk
+# below). Keep in sync with detect_own() by hand - see comment there.
+fm_harness_verified_env_marker() {
+  [ "${CLAUDECODE:-}" = "1" ] && return 0
+  [ "${PI_CODING_AGENT:-}" = "true" ] && return 0
+  [ "${GROK_AGENT:-}" = "1" ] && return 0
+  return 1
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -108,6 +140,14 @@ fm_harness_process_matches() {  # <comm> <args>
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
+  if ! fm_ps_supports_o && fm_harness_verified_env_marker; then
+    # ps can't report comm/ppid/args at all on this platform (see
+    # fm_ps_supports_o), so the walk below can never succeed. A verified env
+    # marker already proves this process runs under that harness, so trust it
+    # and report just the current pid instead of failing closed every time.
+    printf '%s\n' "$pid"
+    return 0
+  fi
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -147,6 +187,13 @@ EOF
 fm_harness_pid_alive() {
   local pid=$1 comm args
   kill -0 "$pid" 2>/dev/null || return 1
+  if ! fm_ps_supports_o; then
+    # Cannot verify identity via comm/args on this platform (see
+    # fm_ps_supports_o); trust liveness alone when a verified env marker is
+    # present, exactly as the ancestry fallback above does.
+    fm_harness_verified_env_marker
+    return $?
+  fi
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
   fm_harness_process_matches "$comm" "$args"

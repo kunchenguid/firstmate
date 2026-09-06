@@ -220,6 +220,39 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_broken_ps_without_o_falls_back_to_verified_env_marker() {
+  local dir fakebin
+  dir="$TMP_ROOT/broken-ps-no-o"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  # Simulates the Cygwin ps 3.6.9 shipped with Git for Windows: its entire
+  # flag set is [-aefls] [-u UID] [-p PID] and it rejects -o outright, so
+  # every comm/args/ppid read in the ancestry walk fails identically no
+  # matter what pid is requested.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+echo "ps: unknown option -- o" >&2
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  # Clear all three verified markers explicitly: this suite may itself be
+  # running inside a real Claude Code session, which sets CLAUDECODE=1 in the
+  # ambient environment that lib_eval's subshell would otherwise inherit.
+  if CLAUDECODE= PI_CODING_AGENT= GROK_AGENT= lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
+    fail "ancestry succeeded despite ps lacking -o support and no verified env marker present"
+  fi
+  if CLAUDECODE= PI_CODING_AGENT= GROK_AGENT= lib_eval "$fakebin" 'fm_harness_pid_alive 12345'; then
+    fail "pid_alive succeeded despite ps lacking -o support and no verified env marker present"
+  fi
+
+  CLAUDECODE=1 lib_eval "$fakebin" 'me=$$; got=$(fm_harness_ancestry_pid); [ "$got" = "$me" ]' \
+    || fail "CLAUDECODE=1 did not fall back to the current pid when ps lacks -o support"
+  CLAUDECODE=1 lib_eval "$fakebin" 'fm_harness_pid_alive 12345' \
+    || fail "CLAUDECODE=1 did not trust liveness alone for pid_alive when ps lacks -o support"
+  pass "session-lock: a verified env marker (CLAUDECODE=1) is trusted as a fallback when ps lacks -o support"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +393,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_broken_ps_without_o_falls_back_to_verified_env_marker
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
