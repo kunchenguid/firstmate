@@ -827,6 +827,100 @@ SH
   pass "T11 spawn warns when pre-launch sync is skipped"
 }
 
+# --- T3b: a customized TRACKED .tasks.toml is skipped by a reason that names it -
+# This is the one home the carry cannot help: it edited .tasks.toml while the file
+# was still tracked, so the edit reads as ordinary dirt and the guard stops the
+# advance before the carry runs. The stall is durable - the target commit deletes
+# that tracked path, so the modification never clears itself - which makes a bare
+# "dirty working tree" a dead end for the operator holding the only customized
+# copy. The skip must stand; the reason must point at the way out.
+test_ff_dirty_names_a_modified_tracked_tasks_config() {
+  local w c1 base before
+  w=$(new_world ff-dirty-tasks-config)
+  printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\n' \
+    > "$w/main/.tasks.toml"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm seed-tasks-toml
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+
+  # The advance under test untracks the file, so the home's edit can never be
+  # reconciled by waiting.
+  git -C "$w/main" mv .tasks.toml .tasks.toml.example
+  printf '.tasks.toml\n' >> "$w/main/.gitignore"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm untrack-tasks-toml
+  base=$(primary_head_commit "$w/main")
+
+  printf 'done_keep = 99\n' >> "$w/sm/.tasks.toml"
+  before=$(head_of "$w/sm")
+
+  run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped, got '$FF_STATUS'"
+  assert_contains "$FF_OUT" ".tasks.toml is modified and still tracked here" \
+    "the skip reason does not name the file that caused it"
+  assert_contains "$FF_OUT" "checkout -- .tasks.toml" \
+    "the skip reason does not tell the operator how to clear it"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "the guard must still refuse to advance"
+  grep -q 'done_keep = 99' "$w/sm/.tasks.toml" || fail "the customization was discarded"
+  pass "T3b a modified tracked .tasks.toml is skipped with a reason that names it"
+}
+
+# --- T11b: the pre-launch sync surfaces a home that lost its backlog config ---
+# spawn captures ff output and re-emits only what matches ': skipped:', so an
+# advance that SUCCEEDS while failing to carry .tasks.toml lands its diagnostic in
+# a variable that is thrown away and the home launches unaddressed in silence.
+test_spawn_surfaces_a_tasks_config_loss_before_launch() {
+  local w c1 fakebin err shim real_mktemp
+  w=$(new_world spawn-tasks-config)
+  printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\n' \
+    > "$w/main/.tasks.toml"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm seed-tasks-toml
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  printf 'sm\n' > "$w/sm/.fm-secondmate-home"
+  mkdir -p "$w/sm/data"
+  printf 'charter\n' > "$w/sm/data/charter.md"
+
+  git -C "$w/main" mv .tasks.toml .tasks.toml.example
+  printf '.tasks.toml\n' >> "$w/main/.gitignore"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm untrack-tasks-toml
+
+  fakebin="$w/fakebin"
+  err="$w/spawn.err"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  # Failing the carry's own temp file is the deterministic way to reach the
+  # branch where the advance succeeds but the home really does lose the file.
+  shim="$w/shim"
+  mkdir -p "$shim"
+  real_mktemp=$(command -v mktemp)
+  cat > "$shim/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in *fm-tasks-toml.*) exit 1 ;; esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$shim/mktemp"
+
+  PATH="$shim:$fakebin:$BASE_PATH" TMUX='' \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>"$err" || true
+
+  assert_contains "$(cat "$err")" "sm/.tasks.toml and it could not be restored" \
+    "the pre-launch sync swallowed a home that lost its backlog config"
+  pass "T11b spawn surfaces a pre-launch sync that could not carry .tasks.toml"
+}
+
 # --- T12: a freshly seeded home reads clean once the primary ignores the marker -
 # The seed marker used to leave every home permanently dirty: bin/fm-fleet-sync.sh
 # and any other plain `git status --porcelain` check counts the untracked marker,
@@ -1054,6 +1148,72 @@ test_remote_sync_reports_the_changed_instruction_surface() {
   assert_contains "$REMOTE_SYNC_OUT" "instr=" "an advance with no instruction change must still report the field"
   assert_not_contains "$REMOTE_SYNC_OUT" "instr=bin" "a README-only advance must not claim bin changed"
   pass "R1b a remote sync names exactly which instruction paths its advance changed"
+}
+
+# --- R1c: the remote leg keeps a home's .tasks.toml, and says so when it cannot -
+# The carry itself lives in ff_target, so a remote persistent home is covered by
+# it. The REPORTING is the part this leg can lose: it captures ff output to drive
+# its own protocol line, so a home that really did lose its backlog config is as
+# silent as if nothing carried it at all.
+test_remote_sync_carries_tasks_config_and_reports_a_loss() {
+  local w c_untrack c_seed before shim real_mktemp saved_path
+  w=$(new_remote_world remote-tasks-config)
+
+  # Pre-rename world: .tasks.toml is TRACKED, so a home running on it holds the
+  # very copy the rename below deletes.
+  printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\ndone_keep = 10\n' \
+    > "$w/main/.tasks.toml"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm seed-tasks-toml
+  c_seed=$(head_of "$w/main")
+
+  # The advance under test: the tracked file becomes a tracked example plus a
+  # gitignore entry, which is what removes a live home's copy.
+  git -C "$w/main" mv .tasks.toml .tasks.toml.example
+  printf '.tasks.toml\n' >> "$w/main/.gitignore"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm untrack-tasks-toml
+  c_untrack=$(head_of "$w/main")
+  git -C "$w/coderoot" fetch -q --no-tags "$w/main" "$c_untrack"
+
+  add_remote_home "$w" sm "$w/main" "$c_seed"
+  before=$(cat "$w/sm/.tasks.toml")
+  remote_sync "$w" sm "$c_untrack"
+
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "the untracking advance did not sync: $REMOTE_SYNC_OUT"
+  assert_contains "$REMOTE_SYNC_OUT" "synced: $c_untrack" "the sync result line was lost"
+  [ "$(cat "$w/sm/.tasks.toml")" = "$before" ] \
+    || fail "the remote sync did not preserve the home's .tasks.toml"
+  assert_contains "$REMOTE_SYNC_OUT" "sm/.tasks.toml, which the update removed" \
+    "the remote leg swallowed the restore it actually made"
+
+  # A home whose snapshot cannot be staged really does lose the file. Failing the
+  # carry's own temp file is the one deterministic way to reach that branch, and
+  # it is exactly the case the diagnostic exists for.
+  shim="$w/shim"
+  mkdir -p "$shim"
+  real_mktemp=$(command -v mktemp)
+  cat > "$shim/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in *fm-tasks-toml.*) exit 1 ;; esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$shim/mktemp"
+
+  add_remote_home "$w" sm2 "$w/main" "$c_seed"
+  saved_path=$PATH
+  PATH="$shim:$PATH"
+  remote_sync "$w" sm2 "$c_untrack"
+  PATH=$saved_path
+
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "the unstageable advance did not sync: $REMOTE_SYNC_OUT"
+  [ ! -e "$w/sm2/.tasks.toml" ] \
+    || fail "precondition: an unstageable carry should leave the home without the file"
+  assert_contains "$REMOTE_SYNC_OUT" "sm2/.tasks.toml and it could not be restored" \
+    "the remote leg swallowed a home that lost its backlog config"
+  assert_contains "$REMOTE_SYNC_OUT" "synced: $c_untrack" \
+    "the protocol line must still be readable alongside the diagnostic"
+  pass "R1c a remote sync carries .tasks.toml and reports the home it could not carry"
 }
 
 test_remote_sync_imports_from_host_copy() {
@@ -1345,6 +1505,7 @@ test_remote_launch_does_not_retarget_host_copy() {
 test_ff_updated
 test_ff_current
 test_ff_dirty
+test_ff_dirty_names_a_modified_tracked_tasks_config
 test_scratchpad2_does_not_dirty_home
 test_ff_diverged
 test_ff_inflight_feature_branch
@@ -1360,11 +1521,13 @@ test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
+test_spawn_surfaces_a_tasks_config_loss_before_launch
 test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
 test_seed_marker_does_not_mask_real_dirt
 test_remote_sync_targets_primary_not_host_copy
 test_remote_sync_reports_the_changed_instruction_surface
+test_remote_sync_carries_tasks_config_and_reports_a_loss
 test_remote_sync_imports_from_host_copy
 test_remote_sync_imports_from_origin
 test_remote_sync_uses_present_objects

@@ -645,9 +645,10 @@ spawn_remote_secondmate() {
   if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
     if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
       "$sm_primary_head" < /dev/null 2>&1); then
-      :
+      tasks_config_report_lines "$sync_out" >&2
     else
       sync_rc=$?
+      tasks_config_report_lines "$sync_out" >&2
       echo "warning: remote secondmate $id sync skipped before launch: $(remote_sync_failure_reason "$sync_rc" "$sync_out")" >&2
     fi
   else
@@ -1986,6 +1987,11 @@ if [ "$KIND" = secondmate ]; then
     :
   elif sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
     sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
+    # The capture can carry a TASKS_CONFIG diagnostic ahead of the status line.
+    # It is this home's own backlog config, so it is reported rather than dropped,
+    # and taken out of the way so the skip reason below is still the real one.
+    tasks_config_report_lines "$sm_ff_out" >&2
+    sm_ff_out=$(tasks_config_strip_report_lines "$sm_ff_out")
     case "$sm_ff_out" in
       *': skipped:'*)
         sm_ff_line=$(first_line "$sm_ff_out")

@@ -426,7 +426,7 @@ jobs:
       - name: Personal fleet paths must not be tracked
         run: |
           set -eu
-          tracked=$(git ls-files -- data state config projects .no-mistakes)
+          tracked=$(git ls-files -- data state config projects .no-mistakes .tasks.toml)
           if [ -n "$tracked" ]; then
             echo "::error::Personal fleet paths are tracked in git:"
             printf '%s\n' "$tracked"

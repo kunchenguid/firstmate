@@ -1352,8 +1352,18 @@ families_for_changed_path() {
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
     bin/fm-vendor-auth-probe.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
-    bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
+    bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-ff-lib.sh)
+      # The one fast-forward implementation. Its own behavior - the ancestry and
+      # dirty guards, and the per-home .tasks.toml carry - is covered by
+      # tests/fm-update.test.sh in session-bootstrap and
+      # tests/fm-secondmate-sync.test.sh in secondmate, so a change here that
+      # selected only the contract family would run none of it.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' session-bootstrap
+      printf '%s\n' secondmate
       ;;
     .agents/skills/quota-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit
@@ -1374,7 +1384,13 @@ families_for_changed_path() {
     docs/fm-test-isolation-proof.json)
       printf '%s\n' pure-contract-unit
       ;;
-    .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
+    .tasks.toml.example)
+      # Bootstrap copies this template into a home that has none, so its bytes
+      # are the backlog config a fresh home actually runs on.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' session-bootstrap
+      ;;
+    .github/*|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;

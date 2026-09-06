@@ -9,6 +9,7 @@
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
+#                 "TASKS_CONFIG: <why this home has no .tasks.toml>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
@@ -65,6 +66,12 @@
 #          quota-axi is required for the agent-owned dispatch-profile array
 #          procedure in AGENTS.md section 4 and
 #          .agents/skills/quota-array-dispatch/SKILL.md.
+#          The locked mutable path copies the tracked .tasks.toml.example into
+#          this home as .tasks.toml when the home has none, so a home that never
+#          customized its backlog config still addresses data/backlog.md instead
+#          of falling back to tasks-axi's built-in defaults. An existing
+#          .tasks.toml is this home's own choice and is never read or rewritten;
+#          only a failed create prints TASKS_CONFIG.
 #          On a primary home, the locked mutable path materializes the visible
 #          default config/startup-memory-budget=7500 when absent. It never
 #          guesses at malformed or unsafe existing files, and secondmate homes
@@ -487,6 +494,7 @@ secondmate_sync() {
       secondmate\ *': skipped:'*) echo "SECONDMATE_SYNC: $line" ;;
       BOOTSTRAP_INFO:\ *) echo "$line" ;;
       NUDGE_SECONDMATES:\ *) echo "$line" ;;
+      TASKS_CONFIG:\ *) echo "$line" ;;
     esac
   done < "$tmp"
   rm -f "$tmp"
@@ -598,9 +606,11 @@ secondmate_sync() {
     converged=1
     if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
       "$primary_head" < /dev/null 2>&1); then
-      case "$sync_out" in synced:*) nudge_needed=1 ;; esac
+      tasks_config_report_lines "$sync_out"
+      if printf '%s\n' "$sync_out" | grep -q '^synced: '; then nudge_needed=1; fi
     else
       sync_rc=$?
+      tasks_config_report_lines "$sync_out"
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(remote_sync_failure_reason "$sync_rc" "$sync_out")"
       converged=0
     fi
@@ -1316,6 +1326,87 @@ backlog_record_reconcile() {
   done
 }
 
+tasks_config_setup() {
+  # .tasks.toml is per-home local material, so every home materializes its own
+  # from the example that ships beside these scripts in the tracked code root.
+  # An existing file is this home's own customization and stays byte-for-byte
+  # untouched; only a failed create is reported, because a home with no
+  # .tasks.toml silently loses data/backlog.md addressing, its archive path, and
+  # done_keep (see bin/fm-backlog-transition-lib.sh).
+  # The file is materialized at the backlog's addressing root - the parent of
+  # the configured data directory (fm_backlog_root), not FM_HOME - because that
+  # is where tasks-axi resolves it from, and it resolves the example's
+  # data-relative path values against that root. The two coincide only for the
+  # default $FM_HOME/data layout; a data directory relocated by FM_DATA_OVERRIDE
+  # would otherwise run on tasks-axi's built-in defaults with the generated file
+  # sitting unread at FM_HOME. The example's paths assume the data directory is
+  # named data under the root, so a relocation under another name readdresses
+  # them to the configured directory and the archive stays beside the backlog.
+  # The root is derived from the canonical data directory (the same cd/pwd -P
+  # resolution fm_backlog_data_absolute applies for every backlog consumer), so
+  # an override reaching its data through a symlink publishes where tasks-axi
+  # actually resolves the config, not beside the raw path.
+  local check=$DATA root rel_data
+  if ! check=$(CDPATH='' cd -- "$check" 2>/dev/null && pwd -P); then
+    # An unresolvable data directory still gets the raw-path fallback so the
+    # degradation below (and its actionable report) stays reachable.
+    check=$DATA
+  fi
+  while [ "$check" != / ] && [ "${check%/}" != "$check" ]; do check=${check%/}; done
+  case "$check" in
+    */*) root=${check%/*} rel_data=${check##*/} ;;
+    *) root=. rel_data=$check ;;
+  esac
+  if [ -e "$root/.tasks.toml" ] || [ -L "$root/.tasks.toml" ]; then
+    return 0
+  fi
+  local example="$SCRIPT_DIR/../.tasks.toml.example"
+  if [ ! -f "$example" ] || [ -L "$example" ]; then
+    echo "TASKS_CONFIG: this home has no .tasks.toml and $example is missing or not a regular file"
+    return 0
+  fi
+  local tmp
+  tmp=$(mktemp "$root/.tasks.toml.XXXXXX" 2>/dev/null) || {
+    echo "TASKS_CONFIG: could not create $root/.tasks.toml from $example"
+    return 0
+  }
+  if [ "$rel_data" = data ]; then
+    if ! cp "$example" "$tmp" 2>/dev/null; then
+      rm -f "$tmp" 2>/dev/null
+      echo "TASKS_CONFIG: could not create $root/.tasks.toml from $example"
+      return 0
+    fi
+  else
+    # tasks-axi resolves the example's data-relative path values against the
+    # root (its working directory), so a data directory under another name
+    # would otherwise send pruned rows and archived bodies to a sibling data
+    # directory. Escape the value for sed's replacement side first.
+    local esc
+    esc=$(printf '%s' "$rel_data" | sed 's/[&/\\]/\\&/g') \
+      && sed -e "s|\"data/backlog.md\"|\"$esc/backlog.md\"|" \
+             -e "s|\"data/done-archive.md\"|\"$esc/done-archive.md\"|" \
+             "$example" > "$tmp" 2>/dev/null
+    if [ ! -s "$tmp" ]; then
+      rm -f "$tmp" 2>/dev/null
+      echo "TASKS_CONFIG: could not create $root/.tasks.toml from $example"
+      return 0
+    fi
+  fi
+  # Publish with a hard link, not a rename: link creation fails atomically
+  # when the target already exists, so a .tasks.toml created by an overlapping
+  # bootstrap or by the user after the existence check above is never
+  # clobbered by the tracked defaults. The temp file sits beside the target,
+  # so the link stays on one filesystem.
+  if ln "$tmp" "$root/.tasks.toml" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+    if [ ! -e "$root/.tasks.toml" ] && [ ! -L "$root/.tasks.toml" ]; then
+      echo "TASKS_CONFIG: could not create $root/.tasks.toml from $example"
+    fi
+  fi
+}
+
 startup_memory_budget_setup() {
   # Primary bootstrap owns default publication. A secondmate is deliberately
   # passive here because its setting must converge from the primary through the
@@ -1348,6 +1439,7 @@ fi
 # sessions never touch state, and the deferred network pass never repeats it:
 # the local pass that ran first already closed that window.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
+  tasks_config_setup
   BOOTSTRAP_BACKLOG_GATE_KIND=secondmate
   if [ -e "$STATE" ] || [ -L "$STATE" ]; then
     if ! fm_backlog_directory_present "$STATE" "state directory"; then

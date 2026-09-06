@@ -251,7 +251,7 @@ test_registration_cannot_consume_before_any_origin_binding() {
   hold="$origin-decision-$key"
   board="$home/.lavish/bearings-board.html"
 
-  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$home/.tasks.toml"
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 
