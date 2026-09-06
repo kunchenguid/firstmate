@@ -1177,6 +1177,9 @@ families_for_changed_path() {
       # only proven by running them: its own contract test passing says the
       # runner's logic is right, not that the suite it drives still runs.
       printf '%s\n' pure-contract-unit
+      # The runner's own fixture Git isolation is proven by a standalone-family
+      # script, which the family above never reaches.
+      printf '%s\n' "__script__:fm-test-fixtures.test.sh"
       ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh)
       printf '%s\n' real-herdr-gated
