@@ -41,6 +41,346 @@ EOF
   pass "fm-pipeline.sh: line format preserves probe=unknown"
 }
 
+test_probe_state_unavailable_is_explicit_and_noncreating() {
+  local root state target before after output rc=0
+  root=$(new_state state-unavailable)
+  state="$root/missing-state"
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$state" "$SCRIPT" probe 2>&1) || rc=$?
+  expect_code 1 "$rc" "a missing state directory must refuse the probe"
+  assert_contains "$output" "state unavailable: $state (absent)" \
+    "a missing state directory must name its path and kind"
+  [ ! -e "$state" ] || fail "a missing state directory was created"
+
+  target="$root/target-state"
+  mkdir -p "$target"
+  printf '%s\n' sentinel > "$target/sentinel"
+  before=$(shasum -a 256 "$target/sentinel")
+  state="$root/symlink-state"
+  ln -s "$target" "$state"
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$state" "$SCRIPT" probe 2>&1) || rc=$?
+  expect_code 1 "$rc" "a symlinked state directory must refuse the probe"
+  assert_contains "$output" "state unavailable: $state (symlink)" \
+    "a symlinked state directory must name its path and kind"
+  [ -L "$state" ] || fail "the state symlink was changed"
+  after=$(shasum -a 256 "$target/sentinel")
+  [ "$before" = "$after" ] || fail "the state symlink target changed"
+  [ ! -e "$target/pipeline-events.log" ] || fail "the state symlink target received an event log"
+
+  state="$root/not-a-directory"
+  printf '%s\n' sentinel > "$state"
+  before=$(shasum -a 256 "$state")
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$state" "$SCRIPT" probe 2>&1) || rc=$?
+  expect_code 1 "$rc" "a non-directory state path must refuse the probe"
+  assert_contains "$output" "state unavailable: $state (not-a-directory)" \
+    "a non-directory state path must name its path and kind"
+  after=$(shasum -a 256 "$state")
+  [ "$before" = "$after" ] || fail "the non-directory state path changed"
+  pass "fm-pipeline.sh: unavailable state paths are explicit and non-creating"
+}
+
+test_probe_activity_read_failure_leaves_unknown_trace() {
+  local root bad_status output line rc=0
+  root=$(new_state activity-read-failure)
+  bad_status="$root/state/bad.status"
+  printf 'paused: [key=bad-wait] waiting on an unreadable status file\n' > "$bad_status"
+  printf 'kind=ship\nstep=working\nspawn_gen=bad-gen\n' > "$root/state/bad.meta"
+  printf 'paused: [key=good-wait] waiting on a readable status file\n' > "$root/state/good.status"
+  printf 'kind=ship\nstep=working\nspawn_gen=good-gen\n' > "$root/state/good.meta"
+  chmod 000 "$bad_status"
+  if cat "$bad_status" >/dev/null 2>&1; then
+    chmod 0600 "$bad_status"
+    pass "fm-pipeline.sh: activity-read-failure fixture skipped when permissions are readable"
+    return
+  fi
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" probe 2>&1) || rc=$?
+  chmod 0600 "$bad_status"
+  expect_code 0 "$rc" "a failed activity read should leave a trace and continue"
+  line=$(rg 'task=bad ' "$root/state/pipeline-events.log" || true)
+  assert_contains "$line" 'probe=unknown' "a failed activity read must remain unknown"
+  assert_contains "$line" 'rule=- action=none' "a failed activity read must not request healing"
+  assert_contains "$line" 'evidence=scan:activity-read-failed' \
+    "a failed activity read must name its scan evidence"
+  assert_contains "$line" 'wait=ext:-' "a failed activity read must use the unkeyed wait identity"
+  [ "$(rg -c 'task=bad ' "$root/state/pipeline-events.log")" -eq 1 ] \
+    || fail "a failed activity read produced more than one row"
+  [ ! -e "$root/state/bad.pipeline-seen" ] \
+    || fail "a failed activity read polluted the pause observation cache"
+  line=$(rg 'task=good ' "$root/state/pipeline-events.log" || true)
+  assert_contains "$line" 'evidence=state/good.status:' \
+    "a readable task should retain its normal activity evidence"
+  assert_not_contains "$line" 'activity-read-failed' \
+    "a readable task inherited another task's read failure"
+  pass "fm-pipeline.sh: failed activity reads produce one unknown row without affecting peers"
+}
+
+test_probe_deadline_coverage_is_clock_scripted() {
+  local root fakebin epochs date_log output rc=0 start cutoff cursor before id expected_deadline served
+  root=$(new_state deadline-clock)
+  fakebin="$root/fakebin"
+  epochs="$root/epochs"
+  date_log="$root/date-served"
+  mkdir -p "$fakebin"
+  for id in alpha beta gamma; do
+    printf 'paused: [key=%s-wait] waiting on the fixture\n' "$id" > "$root/state/$id.status"
+    printf 'kind=ship\nstep=working\nspawn_gen=%s-gen\n' "$id" > "$root/state/$id.meta"
+  done
+  cat > "$fakebin/date" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = '+%s' ]; then
+  value=$(awk 'NR == 1 { print; exit }' "$FM_PIPELINE_TEST_DATE_EPOCHS") || exit 1
+  [ -n "$value" ] || exit 1
+  tail -n +2 "$FM_PIPELINE_TEST_DATE_EPOCHS" > "$FM_PIPELINE_TEST_DATE_EPOCHS.next" || exit 1
+  mv "$FM_PIPELINE_TEST_DATE_EPOCHS.next" "$FM_PIPELINE_TEST_DATE_EPOCHS" || exit 1
+  printf '%s\n' "$value" >> "$FM_PIPELINE_TEST_DATE_LOG"
+  printf '%s\n' "$value"
+  exit 0
+fi
+if [ "${1:-}" = '-u' ] && [ "${2:-}" = '+%Y-%m-%dT%H:%M:%SZ' ]; then
+  printf '%s\n' '2026-09-06T00:00:00Z'
+  exit 0
+fi
+exec /bin/date "$@"
+EOF
+  chmod +x "$fakebin/date"
+  printf '%s\n' 100 100 101 104 105 106 > "$epochs"
+  : > "$date_log"
+  output=$(PATH="$fakebin:$PATH" FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
+    FM_PIPELINE_DEADLINE=5 FM_PIPELINE_TEST_DATE_EPOCHS="$epochs" \
+    FM_PIPELINE_TEST_DATE_LOG="$date_log" "$SCRIPT" probe 2>&1) || rc=$?
+  expect_code 1 "$rc" "a crossed deadline must return one"
+  served=$(cat "$date_log")
+  start=$(awk 'NR == 1 { print; exit }' "$date_log")
+  cutoff=$((start + 5))
+  cursor=2
+  expected_deadline=
+  for id in alpha beta gamma; do
+    before=$(awk -v line="$cursor" 'NR == line { print; exit }' "$date_log")
+    cursor=$((cursor + 1))
+    if [ "$before" -ge "$cutoff" ]; then
+      expected_deadline="${expected_deadline}${id}\n"
+    else
+      cursor=$((cursor + 1))
+    fi
+  done
+  [ "$served" = $'100\n100\n101\n104\n105\n106' ] \
+    || fail "the controlled clock did not record the real date-call sequence: $served"
+  for id in alpha beta gamma; do
+    if printf '%b' "$expected_deadline" | rg -Fx "$id" >/dev/null; then
+      [ "$(rg -c "task=$id " "$root/state/pipeline-events.log")" -eq 1 ] \
+        || fail "deadline task $id did not receive exactly one row"
+      rg -F "task=$id " "$root/state/pipeline-events.log" | rg -F 'evidence=scan:deadline' >/dev/null \
+        || fail "deadline task $id did not receive scan:deadline evidence"
+    else
+      [ "$(rg -c "task=$id " "$root/state/pipeline-events.log")" -eq 1 ] \
+        || fail "visited task $id did not receive exactly one row"
+      rg -F "task=$id " "$root/state/pipeline-events.log" | rg -F 'evidence=state/' >/dev/null \
+        || fail "visited task $id did not receive activity evidence"
+    fi
+  done
+  [ "$(rg -c 'evidence=scan:deadline' "$root/state/pipeline-events.log")" -eq 1 ] \
+    || fail "deadline coverage emitted the wrong number of rows"
+
+  root=$(new_state deadline-disabled)
+  for id in alpha beta; do
+    printf 'paused: [key=%s-wait] waiting on the fixture\n' "$id" > "$root/state/$id.status"
+    printf 'kind=ship\nstep=working\nspawn_gen=%s-gen\n' "$id" > "$root/state/$id.meta"
+  done
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" FM_PIPELINE_DEADLINE=0 \
+    "$SCRIPT" probe 2>&1) || rc=$?
+  expect_code 0 "$rc" "zero must disable deadline coverage"
+  [ "$(rg -c '^' "$root/state/pipeline-events.log")" -eq 2 ] \
+    || fail "disabled deadline did not visit every task"
+  assert_not_contains "$(cat "$root/state/pipeline-events.log")" 'scan:deadline' \
+    "disabled deadline emitted a deadline row"
+
+  root=$(new_state deadline-large)
+  printf 'paused: [key=fixture] waiting on the fixture\n' > "$root/state/task.status"
+  printf 'kind=ship\nstep=working\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
+    FM_PIPELINE_DEADLINE=9223372036854775807 "$SCRIPT" probe 2>&1) || rc=$?
+  expect_code 0 "$rc" "the largest representable deadline must not expire immediately"
+  [ "$(rg -c '^' "$root/state/pipeline-events.log")" -eq 1 ] \
+    || fail "the largest representable deadline did not visit the task"
+  assert_not_contains "$(cat "$root/state/pipeline-events.log")" 'scan:deadline' \
+    "the largest representable deadline expired at elapsed zero"
+  pass "fm-pipeline.sh: deadline coverage follows a controlled call-boundary clock and large values fail safely"
+}
+
+test_probe_invalid_deadline_refuses_before_scan() {
+  local value root output rc
+  for value in '' abc -1 9223372036854775808 18446744073709551616; do
+    root=$(new_state "deadline-invalid-${value:-empty}")
+    printf 'paused: [key=fixture] waiting on the fixture\n' > "$root/state/task.status"
+    printf 'kind=ship\nstep=working\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+    rc=0
+    output=$(FM_PIPELINE_DEADLINE="$value" FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
+      "$SCRIPT" probe 2>&1) || rc=$?
+    expect_code 2 "$rc" "invalid deadline '$value' must refuse before scanning"
+    assert_contains "$output" 'invalid FM_PIPELINE_DEADLINE:' \
+      "invalid deadline '$value' did not name the variable"
+    assert_contains "$output" '(non-negative integer seconds; 0 disables)' \
+      "invalid deadline '$value' did not name its domain"
+    [ ! -e "$root/state/pipeline-events.log" ] \
+      || fail "invalid deadline '$value' wrote an event before refusing"
+    [ ! -e "$root/state/task.pipeline" ] \
+      || fail "invalid deadline '$value' reconciled before refusing"
+  done
+  pass "fm-pipeline.sh: invalid deadline values refuse before any scan"
+}
+
+test_pipeline_probe_units() {
+  local root output
+  root=$(new_state probe-units)
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" FM_PIPELINE_SOURCE_ONLY=1 \
+    bash -c '
+      set -u
+      source "$1"
+      for case in "100 100 0" "100 104 5" "100 105 5" "100 100 9223372036854775807"; do
+        set -- $case
+        printf "decision=%s\n" "$(pipeline_deadline_decision "$1" "$2" "$3")"
+      done
+      printf "max=%s\n" "$(pipeline_deadline_validate 9223372036854775807)"
+      large_rc=0
+      pipeline_deadline_validate 9223372036854775808 >/dev/null || large_rc=$?
+      printf "large_rc=%s\n" "$large_rc"
+      row=$(pipeline_probe_row 2026-09-06T00:00:00Z task ship working 0 unknown - none scan:deadline gen-1 - ext:-)
+      event_valid "$row"
+      printf "row=%s\n" "$row"
+    ' _ "$SCRIPT")
+  assert_contains "$output" 'decision=continue' "deadline unit did not preserve a continuing scan"
+  assert_contains "$output" 'decision=stop' "deadline unit did not stop at the boundary"
+  assert_contains "$output" 'max=9223372036854775807' "deadline unit did not preserve the maximum value"
+  assert_contains "$output" 'large_rc=1' "deadline unit accepted an overflowing value"
+  assert_contains "$output" 'evidence=scan:deadline' "probe row unit omitted scan evidence"
+  assert_contains "$output" 'wait=ext:-' "probe row unit omitted the unkeyed wait"
+  pass "fm-pipeline.sh: deadline decision and scan-row units validate through event_valid"
+}
+
+test_probe_stress_measurement() {
+  local live_dir live_status live_lines candidate candidate_lines
+  command -v python3 >/dev/null 2>&1 || {
+    pass "fm-pipeline.sh: stress measurement skipped (python3 is unavailable)"
+    return
+  }
+  run_stress_python() {
+    python3 - "$SCRIPT" "$TMP_ROOT/stress" "$1" "$2" "$3" <<'PY'
+import hashlib
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+script, base, live_lines, live_source, enabled = sys.argv[1:]
+
+
+def censored_median(results, censored):
+    ordered = sorted(results) + [float("inf")] * censored
+    middle = ordered[len(ordered) // 2]
+    return None if middle == float("inf") else middle
+
+
+assert censored_median([10.0], 2) is None
+assert censored_median([10.0, 20.0], 1) == 20.0
+print("median_unit=mixed-censored-ok")
+if enabled != "1" or live_source == "-":
+    if enabled == "1":
+        print("stress=live fixture skipped (no live status file found)")
+    raise SystemExit(0)
+
+os.makedirs(base, exist_ok=True)
+live_fixture = os.path.join(base, "live.status")
+with open(live_source, "rb") as source_handle:
+    live_bytes = source_handle.read()
+with open(live_fixture, "wb") as fixture_handle:
+    fixture_handle.write(live_bytes)
+live_fixture_lines = live_bytes.count(b"\n")
+print(
+    f"stress=live fixture_lines={live_fixture_lines} "
+    f"fixture_sha256={hashlib.sha256(live_bytes).hexdigest()}"
+)
+
+
+def measure(label, line_count, source):
+    results = []
+    censored = 0
+    for index in range(3):
+        home = f"{base}-{label}-{index}"
+        state = os.path.join(home, "state")
+        os.makedirs(state, exist_ok=True)
+        status = os.path.join(state, "task.status")
+        if source == "-":
+            with open(status, "w", encoding="utf-8") as handle:
+                handle.write("paused: [key=one] waiting on the fixture\n")
+                handle.write("paused: [key=two] waiting on the fixture\n")
+                handle.write("paused: [key=three] waiting on the fixture\n")
+                for filler in range(line_count - 3):
+                    handle.write(f"note: filler line {filler}\n")
+        else:
+            shutil.copyfile(source, status)
+        with open(os.path.join(state, "task.meta"), "w", encoding="utf-8") as handle:
+            handle.write("kind=ship\nstep=working\nspawn_gen=stress\n")
+        process = subprocess.Popen(
+            [script, "probe"],
+            cwd=home,
+            env={**os.environ, "FM_HOME": home, "FM_STATE_OVERRIDE": state, "FM_PIPELINE_DEADLINE": "0"},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        started = time.monotonic()
+        try:
+            result = process.wait(timeout=30)
+            elapsed = time.monotonic() - started
+            print(f"stress={label} run={index + 1} seconds={elapsed:.3f} rc={result}")
+            if result != 0:
+                raise SystemExit(result)
+            results.append(elapsed)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            censored += 1
+            print(f"stress={label} run={index + 1} censored=>30s")
+    median = censored_median(results, censored)
+    if median is None:
+        print(f"stress={label} median_seconds=>30s censored={censored}")
+    else:
+        print(f"stress={label} median_seconds={median:.3f} censored={censored}")
+
+
+measure("20000", 20000, "-")
+measure(str(live_fixture_lines), live_fixture_lines, live_fixture)
+PY
+  }
+  if [ "${FM_PIPELINE_STRESS:-0}" != 1 ]; then
+    run_stress_python 0 - 0 || return 1
+    pass "fm-pipeline.sh: stress measurement skipped (set FM_PIPELINE_STRESS=1)"
+    return
+  fi
+  live_dir=${FM_PIPELINE_STRESS_LIVE_STATE_DIR:-${FM_HOME:-$ROOT}/state}
+  live_status=
+  live_lines=0
+  for candidate in "$live_dir"/*.status; do
+    [ -f "$candidate" ] || continue
+    candidate_lines=$(wc -l < "$candidate" | tr -d ' ')
+    if [ "$candidate_lines" -gt "$live_lines" ]; then
+      live_lines=$candidate_lines
+      live_status=$candidate
+    fi
+  done
+  run_stress_python "$live_lines" "${live_status:--}" 1 || return $?
+  if [ -z "$live_status" ]; then
+    pass "fm-pipeline.sh: stress measurement skipped (no live status file found)"
+  else
+    pass "fm-pipeline.sh: opt-in stress measurement completed for 20k and fixed live-max content"
+  fi
+}
+
 test_would_heal_without_evidence_is_rejected() {
   local root output rc=0
   root=$(new_state invalid-evidence)
@@ -1496,6 +1836,12 @@ EOF
 }
 
 test_line_format_and_unknown_preservation
+test_probe_state_unavailable_is_explicit_and_noncreating
+test_probe_activity_read_failure_leaves_unknown_trace
+test_probe_deadline_coverage_is_clock_scripted
+test_probe_invalid_deadline_refuses_before_scan
+test_pipeline_probe_units
+test_probe_stress_measurement
 test_would_heal_without_evidence_is_rejected
 test_append_rejects_malformed_fields
 test_event_log_symlink_is_rejected

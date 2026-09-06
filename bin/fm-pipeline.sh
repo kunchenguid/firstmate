@@ -12,6 +12,9 @@
 #   fm-pipeline.sh arm [--force]
 #   fm-pipeline.sh disarm
 #
+# FM_PIPELINE_DEADLINE controls probe-all coverage: unset defaults to 20 seconds,
+# zero disables the deadline, and another value must be non-negative decimal seconds.
+#
 # disarm writes state/pipeline-probe.disabled. arm refuses while a valid
 # marker is present, unless --force clears it first; an absent marker never
 # blocks arm, and an invalid one (symlink, directory, wrong mode) refuses the
@@ -64,15 +67,32 @@ die() {
 }
 
 usage() {
-  sed -n '2,20p' "$0" | sed 's/^# //' >&2
+  sed -n '2,22p' "$0" | sed 's/^# //' >&2
+}
+
+pipeline_state_unavailable_report() {
+  local kind
+  if [ -L "$STATE" ]; then
+    kind=symlink
+  elif [ -e "$STATE" ]; then
+    kind=not-a-directory
+  else
+    kind=absent
+  fi
+  printf 'fm-pipeline.sh: state unavailable: %s (%s)\n' "$STATE" "$kind" >&2
 }
 
 command=${1:-}
 case "$command" in
   arm|disarm|--help|-h|'') ;;
+  probe)
+    if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
+      pipeline_state_unavailable_report
+      exit 1
+    fi
+    ;;
   *) [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable" ;;
 esac
-[ ! -L "$STATE" ] || die "state directory is unavailable"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -474,7 +494,9 @@ wait_identity() {  # <tagged-key>
 active_paused() {  # <status-file> -> line-number<TAB>key<TAB>line per active pause
   local file=$1 activities active_key active_verb pause
   local line key number latest_number latest_key latest_line
-  activities=$(status_open_activities_with_key "$file" pipeline_status_key)
+  if ! activities=$(status_open_activities_with_key "$file" pipeline_status_key); then
+    return 1
+  fi
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   while IFS=$'\t' read -r active_key active_verb _; do
     [ "$active_verb" = "$pause" ] || continue
@@ -1328,8 +1350,54 @@ pipeline_board_json() {
   return "$rc"
 }
 
+pipeline_deadline_validate() {  # <seconds>
+  local value=${1-20} normalized max=9223372036854775807
+  case "$value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  normalized=$value
+  while [ "${normalized#0}" != "$normalized" ]; do
+    normalized=${normalized#0}
+  done
+  [ -n "$normalized" ] || normalized=0
+  if [ "${#normalized}" -ge 19 ]; then
+    [ "${#normalized}" -eq 19 ] || return 1
+    [ "$(printf '%s\n' "$normalized" "$max" | LC_ALL=C sort | tail -n 1)" = "$max" ] || return 1
+  fi
+  printf '%s\n' "$((10#$normalized))"
+}
+
+pipeline_deadline_decision() {  # <started> <now> <deadline>
+  local started=$1 now=$2 deadline=$3 elapsed
+  if [ "$deadline" -eq 0 ] || [ "$now" -le "$started" ]; then
+    printf '%s\n' continue
+    return
+  fi
+  elapsed=$((now - started))
+  if [ "$elapsed" -lt "$deadline" ]; then
+    printf '%s\n' continue
+  else
+    printf '%s\n' stop
+  fi
+}
+
+pipeline_probe_row() {  # <ts> <task> <kind> <step> <since> <probe> <rule> <action> <evidence> <gen> <attempt> <wait>
+  printf 'ts=%s task=%s kind=%s step=%s since=%s probe=%s rule=%s action=%s mode=shadow evidence=%s gen=%s attempt=%s wait=%s snap=-\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}"
+}
+
+pipeline_scan_unknown_row() {  # <task> <scan-reason>
+  local id=$1 reason=$2 ts
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) || die 'could not read UTC time'
+  lock_log
+  append_event_locked "$(pipeline_probe_row "$ts" "$id" - - 0 unknown - none "scan:$reason" - - ext:-)" \
+    || die 'cannot append event log'
+  fm_lock_release "$PIPELINE_LOCK_DIR" || die 'cannot release event log lock'
+  trap - EXIT
+}
+
 probe_task() {  # <id> [quiet]
-  local id=$1 quiet=${2:-} status_file meta
+  local id=$1 quiet=${2:-} status_file meta activity_read_failed=0
   local pauses line_no key line now ts since kind step gen attempt wait rule action probe evidence
   fm_task_id_path_safe "$id" || die "invalid task id: $id"
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
@@ -1346,7 +1414,26 @@ probe_task() {  # <id> [quiet]
     fi
   fi
   [ -f "$status_file" ] || return 0
-  pauses=$(active_paused "$status_file")
+  if ! pauses=$(active_paused "$status_file"); then
+    activity_read_failed=1
+  fi
+  if [ "$activity_read_failed" -eq 1 ]; then
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    kind=${PIPELINE_RECORD_KIND:--}
+    step=${PIPELINE_RECORD_STEP:--}
+    gen=${PIPELINE_RECORD_GEN:--}
+    attempt=${PIPELINE_RECORD_ATTEMPT:--}
+    [ -n "$kind" ] || kind=-
+    [ -n "$step" ] || step=-
+    [ -n "$gen" ] || gen=-
+    [ -n "$attempt" ] || attempt=-
+    lock_log
+    append_event_locked "$(pipeline_probe_row "$ts" "$id" "$kind" "$step" 0 unknown - none \
+      scan:activity-read-failed "$gen" "$attempt" ext:-)" || die 'cannot append event log'
+    fm_lock_release "$PIPELINE_LOCK_DIR" || die 'cannot release event log lock'
+    trap - EXIT
+    return 0
+  fi
   [ -n "$pauses" ] || return 0
   now=$(date +%s)
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -1366,7 +1453,7 @@ probe_task() {  # <id> [quiet]
     rule=-
     action=none
     since=$(observation_elapsed_since "$id" "$wait" "$step" "$gen" "$evidence" "$now") || die "cannot record pipeline observation"
-    append_event_locked "ts=$ts task=$id kind=$kind step=$step since=$since probe=$probe rule=$rule action=$action mode=shadow evidence=$evidence gen=$gen attempt=$attempt wait=$wait snap=-" || die "cannot append event log"
+    append_event_locked "$(pipeline_probe_row "$ts" "$id" "$kind" "$step" "$since" "$probe" "$rule" "$action" "$evidence" "$gen" "$attempt" "$wait")" || die "cannot append event log"
   done <<EOF
 $pauses
 EOF
@@ -1375,22 +1462,45 @@ EOF
 }
 
 probe_all() {
-  local file id
-  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
-  for file in "$STATE"/*.meta; do
+  local file id deadline started now task_list timed_out=0
+  if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
+    pipeline_state_unavailable_report
+    return 1
+  fi
+  if ! deadline=$(pipeline_deadline_validate "${FM_PIPELINE_DEADLINE-20}"); then
+    printf 'fm-pipeline.sh: invalid FM_PIPELINE_DEADLINE: %s (non-negative integer seconds; 0 disables)\n' \
+      "${FM_PIPELINE_DEADLINE-}" >&2
+    return 2
+  fi
+  task_list=$(for file in "$STATE"/*.meta "$STATE"/*.status; do
     pipeline_state_file_valid "$file" || continue
     id=${file##*/}
-    id=${id%.meta}
+    id=${id%.*}
     fm_task_id_path_safe "$id" || continue
-    [ -f "$STATE/$id.status" ] || probe_task "$id" quiet || true
-  done
-  for file in "$STATE"/*.status; do
-    pipeline_state_file_valid "$file" || continue
-    id=${file##*/}
-    id=${id%.status}
-    fm_task_id_path_safe "$id" || continue
-    probe_task "$id" quiet || true
-  done
+    printf '%s\n' "$id"
+  done | sort -u) || return 1
+  if [ "$deadline" -ne 0 ]; then
+    started=$(date +%s) || return 1
+  else
+    started=0
+  fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    if [ "$timed_out" -eq 0 ] && [ "$deadline" -ne 0 ]; then
+      now=$(date +%s) || return 1
+      if [ "$(pipeline_deadline_decision "$started" "$now" "$deadline")" = stop ]; then
+        timed_out=1
+      fi
+    fi
+    if [ "$timed_out" -eq 1 ]; then
+      pipeline_scan_unknown_row "$id" deadline || return 1
+    else
+      probe_task "$id" quiet || true
+    fi
+  done <<EOF
+$task_list
+EOF
+  return "$timed_out"
 }
 
 if [ "${FM_PIPELINE_SOURCE_ONLY:-0}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
