@@ -70,10 +70,11 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
-#          Fleet sync fetches, fast-forwards safe default-branch states, reports
-#          recovered and STUCK clone drift, and prunes gone local branches; it is
-#          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
-#          numeric override, while non-numeric values fall back to 20s.
+#          Fleet sync completes shallow clones, fetches, fast-forwards safe
+#          default-branch states, reports recovered and STUCK clone drift, and
+#          prunes gone local branches; it is bounded by
+#          FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty numeric
+#          override, while non-numeric values fall back to 20s.
 #          When the override is unset or blank, the timeout is
 #          max(20, 5 + 3 * origin-backed project clone count). A timed-out
 #          refresh relays any completed fm-fleet-sync.sh output before the
@@ -186,12 +187,14 @@ network_sweep_authorized() {
 }
 
 fleet_sync_origin_backed_project_count() {
-  local count proj
+  local count proj proj_top proj_abs
   count=0
   [ -d "$PROJECTS" ] || { echo 0; return 0; }
-  for proj in "$PROJECTS"/*; do
+  for proj in "$PROJECTS"/* "$PROJECTS"/.[!.]* "$PROJECTS"/..?*; do
     [ -d "$proj" ] || continue
-    git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
+    proj_top=$(git -C "$proj" rev-parse --show-toplevel 2>/dev/null) || continue
+    proj_abs=$(cd "$proj" && pwd -P) || continue
+    [ "$proj_top" = "$proj_abs" ] || continue
     git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue
     count=$((count + 1))
   done

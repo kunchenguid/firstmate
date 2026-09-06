@@ -179,8 +179,10 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+Before allocating a fresh ship or scout lane, it also requires the primary clone to be its own Git worktree root and completes shallow history from origin.
+That repair adds missing history objects without moving branches or touching the worktree, reports measured before/after commit counts, and refuses the spawn before lane creation or metadata publication when it cannot finish.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
-Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
+Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage for isolation, shallow repair, and base freshness.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
@@ -335,12 +337,16 @@ Invoked in a primary home, `/stow` then cascades the same sweep to every registe
 
 ## Local clones stay fresh
 
-The locked session-start deferred network stage, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.
+The locked session-start deferred network stage, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones.
 Wake-time refreshes can target a single clone by project name, so the primary home also catches up when a secondmate reports a merge from its own home.
+Whole-fleet refresh checks every immediate directory under `projects/`, including dot-prefixed clones, and silently ignores entries that are not roots of their own Git worktrees.
+For each clone, an already-complete repository passes the depth check silently, while a shallow repository is completed from origin before ordinary branch-safety classification.
+The repair is additive and idempotent: it adds missing history objects but does not touch the worktree, move branches, or discard work, and each success reports measured before/after commit counts.
+A repair that cannot complete is reported loudly, leaves the clone shallow, and skips its remaining refresh; `tests/fm-fleet-sync.test.sh` owns the portable regression coverage.
 Clean default-branch clones fast-forward to `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
-Dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.
+After the depth check, dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and receive no branch or worktree change.
 Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and remove the lock only when the shared staleness proof can prove it abandoned; [configuration.md](configuration.md#toolchain) owns the recovery details and tuning knobs.
-Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
+Once the depth check passes, local-only projects, clones without an origin remote, and ordinary refresh fetch failures remain benign skips; a shallow clone whose repair cannot reach origin is instead the loud failure above.
 The refresh also prunes local branches whose remote is gone and that no worktree still needs.
 
 ## Self-updates stay safe

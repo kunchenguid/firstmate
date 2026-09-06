@@ -134,6 +134,11 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   The ship delivery-contract validation runs before any shallow-history repair,
+#   so an invalid delivery request cannot trigger that network mutation.
+#   Before creating a fresh ship/scout lane, spawn completes a shallow primary
+#   project clone from origin. It reports the before/after history count when it
+#   repairs one and refuses the lane loudly when the repair cannot complete.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -260,6 +265,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-project-depth-lib.sh
+. "$SCRIPT_DIR/fm-project-depth-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1674,6 +1681,17 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
+if { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } && [ "$RELAUNCH" -eq 0 ]; then
+  PROJECT_DEPTH_OUT=
+  if ! PROJECT_DEPTH_OUT=$(fm_project_unshallow_if_needed "$PROJ_ABS"); then
+    echo "error: project $(basename "$PROJ_ABS") depth repair failed: $PROJECT_DEPTH_OUT; refusing to create a worker lane" >&2
+    exit 1
+  fi
+  if [ -n "$PROJECT_DEPTH_OUT" ]; then
+    echo "project $(basename "$PROJ_ABS"): recovered: $PROJECT_DEPTH_OUT"
   fi
 fi
 

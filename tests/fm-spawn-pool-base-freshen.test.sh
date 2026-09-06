@@ -4,8 +4,8 @@
 # A treehouse pool can return a clean detached worktree whose origin/main was
 # advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin/main tip or stops when origin is
-# unreachable.
+# completes a shallow primary clone before lane creation, starts the worker from
+# the fetched origin/main tip, or stops when origin is unreachable.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -67,6 +67,35 @@ make_case() {
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
 
+make_shallow_case() {
+  local name=$1 id=$2 case_dir home source project origin pool fakebin remote_abs n
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  source="$case_dir/source"
+  project="$case_dir/project"
+  origin="$case_dir/origin.git"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$source"
+  for n in 1 2 3 4 5 6; do
+    printf 'history %s\n' "$n" > "$source/README.md"
+    git -C "$source" add README.md
+    git -C "$source" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "history-$n"
+  done
+  git clone --quiet --bare "$source" "$origin"
+  remote_abs=$(cd "$origin" && pwd)
+  git clone --quiet --depth 2 "file://$remote_abs" "$project"
+  git -C "$project" worktree add --quiet --detach "$pool" HEAD
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$(git -C "$project" rev-parse HEAD)|main"
+}
+
 read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR INITIAL_SHA DEFAULT_BRANCH <<EOF
 $1
@@ -94,6 +123,8 @@ test_stale_pool_base_refreshes_before_branching() {
   status=$?
   expect_code 0 "$status" "spawn should refresh a stale pooled worktree"
   assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_not_contains "$out" "unshallowed repository history" \
+    "a complete project should stay silent for the shallow check"
   current=$(git -C "$POOL_DIR" rev-parse origin/main)
   branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
   [ "$branch_head" = "$current" ] || fail "spawn left the pooled worktree on stale history"
@@ -119,6 +150,74 @@ test_stale_pool_base_refreshes_before_branching() {
   assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
     "the branch created after spawn omitted advanced-main content"
   pass "a stale pooled worktree refreshes to current origin/main before a crew branch is created"
+}
+
+test_shallow_project_repairs_before_lane_creation() {
+  local rec id out status before_head
+  id='pool-shallow-repair-r12'
+  rec=$(make_shallow_case shallow-repair "$id")
+  read_case_record "$rec"
+  before_head=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+  [ "$(git -C "$PROJECT_DIR" rev-parse --is-shallow-repository)" = true ] \
+    || fail "spawn shallow fixture is not shallow"
+  [ "$(git -C "$PROJECT_DIR" rev-list --count origin/main)" = 2 ] \
+    || fail "spawn shallow fixture does not start with two visible commits"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+
+  expect_code 0 "$status" "spawn should repair a shallow primary clone"
+  assert_contains "$out" "project project: recovered: unshallowed repository history (2 -> 6 commits)" \
+    "spawn did not report the shallow repair history growth"
+  [ "$(git -C "$PROJECT_DIR" rev-parse --is-shallow-repository)" = false ] \
+    || fail "spawn left the primary clone shallow"
+  [ "$(git -C "$PROJECT_DIR" rev-list --count origin/main)" = 6 ] \
+    || fail "spawn did not restore the complete origin/main history"
+  [ "$(git -C "$PROJECT_DIR" rev-parse HEAD)" = "$before_head" ] \
+    || fail "spawn's shallow repair moved the primary clone HEAD"
+  pass "spawn completes a shallow primary clone before creating the worker lane"
+}
+
+test_shallow_project_without_network_refuses_lane_loudly() {
+  local rec id out status
+  id='pool-shallow-offline-r13'
+  rec=$(make_shallow_case shallow-offline "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" remote set-url origin "file://$CASE_DIR/missing-origin.git"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "spawn created a lane after shallow repair failed"
+  assert_contains "$out" "depth repair failed: could not unshallow repository history at 2 commits:" \
+    "spawn did not report why the shallow project could not be repaired"
+  [ "$(git -C "$PROJECT_DIR" rev-parse --is-shallow-repository)" = true ] \
+    || fail "failed spawn shallow repair changed the repository depth marker"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "spawn published task metadata despite refusing the shallow project"
+  pass "spawn refuses a shallow project with unreachable origin before lane creation"
+}
+
+test_nested_project_path_does_not_repair_enclosing_clone() {
+  local rec id enclosing out status
+  id='pool-shallow-nested-r14'
+  rec=$(make_shallow_case shallow-nested "$id")
+  read_case_record "$rec"
+  enclosing=$PROJECT_DIR
+  PROJECT_DIR="$enclosing/nested"
+  mkdir -p "$PROJECT_DIR"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "spawn accepted a nested directory as a project clone"
+  assert_contains "$out" "project path is not its own Git worktree root" \
+    "spawn did not report the invalid nested project path"
+  [ "$(git -C "$enclosing" rev-parse --is-shallow-repository)" = true ] \
+    || fail "spawn repaired the enclosing clone through a nested project path"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "spawn published task metadata for a nested project path"
+  pass "spawn rejects a nested path without repairing its enclosing clone"
 }
 
 test_non_main_default_branch_refreshes_before_branching() {
@@ -228,6 +327,9 @@ test_unresolved_remote_default_refuses_pool() {
 }
 
 test_stale_pool_base_refreshes_before_branching
+test_shallow_project_repairs_before_lane_creation
+test_shallow_project_without_network_refuses_lane_loudly
+test_nested_project_path_does_not_repair_enclosing_clone
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work

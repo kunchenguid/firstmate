@@ -21,6 +21,10 @@
 # worktree dir as its cwd also blocks removal (the clone-dir liveness check); a
 # transient lock that self-clears is retried without a force-remove; and any
 # non-packed-refs.lock fetch failure keeps today's behavior with no retry.
+#
+# Shallow clones are completed before the ordinary refresh. The successful path
+# reports the before/after history count and preserves the checked-out branch and
+# worktree, while an unreachable origin leaves the clone shallow and fails loud.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -72,6 +76,27 @@ build_pair() {
   printf '%s\n' "$clone"
 }
 
+# build_shallow_pair <home> <name>: create a six-commit origin and a depth-two
+# clone under projects/, so the real --unshallow path has four missing commits.
+build_shallow_pair() {
+  local home=$1 name=$2 work remote clone remote_abs n
+  work="$home/work-$name"
+  remote="$home/remotes/$name.git"
+  clone="$home/projects/$name"
+  mkdir -p "$home/remotes"
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD refs/heads/main
+  for n in 1 2 3 4 5 6; do
+    commit_file "$work" file.txt "v$n" "C$n"
+  done
+
+  git clone --quiet --bare "$work" "$remote"
+  remote_abs=$(cd "$remote" && pwd)
+  git clone --quiet --depth 2 "file://$remote_abs" "$clone"
+  printf '%s\n' "$clone"
+}
+
 # advance_origin <home> <name> <msg>: push one more commit to <name>'s origin via
 # its work repo, so the clone (until it fetches) is one commit behind origin/main.
 advance_origin() {
@@ -88,6 +113,40 @@ run_sync() {
   local home=$1
   shift
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" "$@" 2>/dev/null
+}
+
+# build_enclosing_home <name>: an FM_HOME that is itself nested inside another git
+# repository - firstmate's own layout, where projects/ sits inside the firstmate
+# checkout. The enclosing repo is a clean clone of a bare origin that is one commit
+# ahead, so a sync that walked git discovery UP out of projects/<dir> would find a
+# fast-forward available and visibly take it. Echoes the enclosing repo, which is
+# also the home. Its work tree is left pristine so the only thing under projects/
+# is what the test puts there.
+build_enclosing_home() {
+  local name=$1 root work remote enclosing remote_abs
+  root="$TMP_ROOT/enclosing-$name"
+  work="$root/work"
+  remote="$root/remote.git"
+  enclosing="$root/enclosing"
+  mkdir -p "$root"
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD refs/heads/main
+  printf '/projects/\n' > "$work/.gitignore"
+  git -C "$work" add .gitignore
+  commit_file "$work" AGENTS.md v0 C0
+
+  git clone --quiet --bare "$work" "$remote"
+  remote_abs=$(cd "$remote" && pwd)
+  git -C "$work" remote add origin "file://$remote_abs"
+  git -C "$work" push -q -u origin main
+
+  git clone --quiet "file://$remote_abs" "$enclosing"
+  commit_file "$work" AGENTS.md v1 C1
+  git -C "$work" push -q origin main
+
+  mkdir -p "$enclosing/projects"
+  printf '%s\n' "$enclosing"
 }
 
 # --- packed-refs.lock fixtures ----------------------------------------------
@@ -336,6 +395,8 @@ test_already_current_unchanged() {
   assert_contains "$out" "eta: already current" "already-current clone reports unchanged"
   assert_not_contains "$out" "STUCK" "already-current is not flagged STUCK"
   assert_not_contains "$out" "recovered" "already-current is not labelled recovered"
+  assert_not_contains "$out" "unshallowed repository history" \
+    "a complete clone should stay silent for the shallow check"
   [ "$(head_sha "$clone")" = "$before" ] || fail "already-current clone was moved"
   pass "already-current clone is reported unchanged"
 }
@@ -450,8 +511,105 @@ test_whole_fleet_form() {
   pass "whole-fleet form processes every clone under projects/"
 }
 
+test_shallow_clone_unshallows_and_reports() {
+  local home clone out before_head before_branch
+  home=$(new_home)
+  clone=$(build_shallow_pair "$home" shallow-repair)
+  git -C "$clone" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/retired
+  before_head=$(git -C "$clone" rev-parse HEAD)
+  before_branch=$(git -C "$clone" symbolic-ref --short HEAD)
+  [ "$(git -C "$clone" rev-parse --is-shallow-repository)" = true ] \
+    || fail "shallow-repair fixture is not shallow"
+  [ "$(git -C "$clone" rev-list --count origin/main)" = 2 ] \
+    || fail "shallow-repair fixture does not start with two visible commits"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "shallow-repair: recovered: unshallowed repository history (2 -> 6 commits)" \
+    "shallow repair with stale origin/HEAD did not report measured history growth"
+  assert_not_contains "$out" "unknown" \
+    "successful shallow repair reported an unknown commit count"
+  [ "$(git -C "$clone" rev-parse --is-shallow-repository)" = false ] \
+    || fail "fleet sync left the repaired clone shallow"
+  [ "$(git -C "$clone" rev-list --count origin/main)" = 6 ] \
+    || fail "fleet sync did not restore the complete origin/main history"
+  [ "$(git -C "$clone" rev-parse HEAD)" = "$before_head" ] \
+    || fail "shallow repair moved HEAD"
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = "$before_branch" ] \
+    || fail "shallow repair changed the checked-out branch"
+  pass "a shallow clone is completed additively and reports its history growth"
+}
+
+test_shallow_clone_without_network_fails_loud() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_shallow_pair "$home" shallow-offline)
+  git -C "$clone" remote set-url origin "file://$home/remotes/missing.git"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "shallow-offline: skipped: could not unshallow repository history at 2 commits:" \
+    "failed shallow repair was not reported as an explicit skip"
+  [ "$(git -C "$clone" rev-parse --is-shallow-repository)" = true ] \
+    || fail "failed shallow repair changed the repository depth marker"
+  pass "a shallow clone with an unreachable origin stays shallow and fails loud"
+}
+
+test_hidden_shallow_clone_unshallows_and_reports() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_shallow_pair "$home" .hidden-shallow)
+  [ "$(git -C "$clone" rev-parse --is-shallow-repository)" = true ] \
+    || fail "hidden shallow fixture is not shallow"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" ".hidden-shallow: recovered: unshallowed repository history (2 -> 6 commits)" \
+    "whole-fleet sync did not repair an immediate hidden shallow clone"
+  [ "$(git -C "$clone" rev-parse --is-shallow-repository)" = false ] \
+    || fail "whole-fleet sync left the hidden clone shallow"
+  [ "$(git -C "$clone" rev-list --count origin/main)" = 6 ] \
+    || fail "whole-fleet sync did not restore the hidden clone history"
+  pass "an immediate hidden shallow clone is repaired like a visible clone"
+}
+
+test_hidden_non_repo_directory_stays_silent() {
+  local home before out after
+  home=$(build_enclosing_home hidden-nonrepo)
+  mkdir -p "$home/projects/.cache"
+  before=$(head_sha "$home")
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-fleet-sync.sh" 2>&1)
+  after=$(head_sha "$home")
+
+  assert_not_contains "$out" ".cache:" \
+    "hidden non-repository directory produced a fleet-sync outcome"
+  [ -d "$home/projects/.cache" ] || fail "hidden non-repository directory was removed"
+  [ "$before" = "$after" ] || fail "hidden non-repository directory advanced the enclosing home"
+  pass "an immediate hidden non-repository directory is ignored silently"
+}
+
+test_direct_non_repo_directory_reports_while_fleet_stays_silent() {
+  local home candidate fleet_out direct_out
+  home=$(new_home)
+  candidate="$home/projects/not-a-repo"
+  mkdir -p "$candidate"
+
+  fleet_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-fleet-sync.sh" 2>&1)
+  direct_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-fleet-sync.sh" "$candidate" 2>&1)
+
+  assert_not_contains "$fleet_out" "not-a-repo:" \
+    "whole-fleet enumeration reported a non-repository directory"
+  assert_contains "$direct_out" "not-a-repo: skipped: not a git repo" \
+    "direct invocation did not report the same invalid directory"
+  pass "direct invalid paths report while whole-fleet enumeration stays silent"
+}
+
 test_bootstrap_relays_recovered_and_stuck() {
-  local home stuck rec out
+  local home stuck rec shallow shallow_offline out
   home=$(new_home)
   # A clone we will leave STUCK (dirty), and one that self-heals (detached-clean-ancestor).
   stuck=$(build_pair "$home" stuck-clone)
@@ -460,6 +618,9 @@ test_bootstrap_relays_recovered_and_stuck() {
   rec=$(build_pair "$home" rec-clone)
   advance_origin "$home" rec-clone C1
   git -C "$rec" checkout --detach --quiet
+  shallow=$(build_shallow_pair "$home" .shallow-clone)
+  shallow_offline=$(build_shallow_pair "$home" shallow-offline-clone)
+  git -C "$shallow_offline" remote set-url origin "file://$home/remotes/missing.git"
 
   # Full bootstrap: no state/ dir -> secondmate sync no-ops; no .env -> X mode off.
   # We only assert the fleet-sync relay lines; other detect lines are irrelevant.
@@ -467,6 +628,11 @@ test_bootstrap_relays_recovered_and_stuck() {
 
   assert_contains "$out" "FLEET_SYNC: stuck-clone: STUCK:" "bootstrap relays the STUCK outcome"
   assert_contains "$out" "FLEET_SYNC: rec-clone: recovered:" "bootstrap relays the recovered outcome"
+  assert_contains "$out" "FLEET_SYNC: .shallow-clone: recovered: unshallowed repository history (2 -> 6 commits)" \
+    "bootstrap relays the shallow-repair history growth"
+  assert_contains "$out" "FLEET_SYNC: shallow-offline-clone: skipped: could not unshallow repository history at 2 commits:" \
+    "bootstrap relays an unreachable shallow-repair failure"
+  : "$shallow $shallow_offline"
   pass "bootstrap relays recovered: and STUCK: fleet-sync outcomes"
 }
 
@@ -582,6 +748,57 @@ test_transient_packed_refs_lock_self_clears() {
   pass "a transient packed-refs.lock that self-clears is retried without a force-remove"
 }
 
+test_non_clone_dir_never_syncs_the_enclosing_repo() {
+  local home before out after
+  home=$(build_enclosing_home nonclone)
+  # A worktree container, not a clone: the repo is one level BELOW it.
+  mkdir -p "$home/projects/not-a-clone/wt"
+  before=$(head_sha "$home")
+
+  out=$(run_sync "$home")
+  after=$(head_sha "$home")
+
+  assert_not_contains "$out" "not-a-clone:" \
+    "a whole-fleet refresh reported a visible non-project directory"
+  assert_not_contains "$out" "not-a-clone: synced" \
+    "a non-repo directory must never be reported as a synced project"
+  [ "$before" = "$after" ] || \
+    fail "fleet-sync fast-forwarded the enclosing repo ($before -> $after) under a project's label"
+  pass "a non-repo directory under projects/ never fast-forwards the enclosing repo"
+}
+
+test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo() {
+  local home before out after
+  home=$(build_enclosing_home nonclonedirect)
+  mkdir -p "$home/projects/not-a-clone"
+  before=$(head_sha "$home")
+
+  out=$(run_sync "$home" not-a-clone)
+  after=$(head_sha "$home")
+
+  assert_contains "$out" "not-a-clone: skipped: not a clone root" \
+    "the single-project form must apply the same clone-root guard"
+  [ "$before" = "$after" ] || \
+    fail "the single-project form fast-forwarded the enclosing repo ($before -> $after)"
+  pass "the single-project form also refuses a directory that is not its own clone root"
+}
+
+test_symlinked_clone_still_syncs() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" sigma)
+  advance_origin "$home" sigma C1
+  # A symlinked clone dir is a real clone root; the guard compares resolved paths,
+  # so it must not be mistaken for a directory nested in someone else's repo.
+  mv "$clone" "$home/real-sigma"
+  ln -s "$home/real-sigma" "$clone"
+
+  out=$(run_sync "$home")
+
+  assert_contains "$out" "sigma: synced" "a symlinked clone must still fast-forward"
+  pass "the clone-root guard accepts a symlinked clone directory"
+}
+
 test_non_signature_fetch_failure_is_not_retried() {
   local home fakebin clone out err
   home=$(new_home)
@@ -619,9 +836,17 @@ test_single_project_by_projects_relative_name_resolves
 test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unresolvable_name_still_skips
 test_whole_fleet_form
+test_shallow_clone_unshallows_and_reports
+test_shallow_clone_without_network_fails_loud
+test_hidden_shallow_clone_unshallows_and_reports
+test_hidden_non_repo_directory_stays_silent
+test_direct_non_repo_directory_reports_while_fleet_stays_silent
 test_bootstrap_relays_recovered_and_stuck
 test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
 test_transient_packed_refs_lock_self_clears
 test_non_signature_fetch_failure_is_not_retried
+test_non_clone_dir_never_syncs_the_enclosing_repo
+test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
+test_symlinked_clone_still_syncs

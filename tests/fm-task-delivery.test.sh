@@ -119,11 +119,45 @@ EOF
 # disagrees with the brief's recorded contract must refuse instead of launching a
 # worker whose instructions contradict the recorded task delivery.
 test_spawn_refuses_a_brief_mode_mismatch() {
-  local rec home proj fakebin out status
+  local rec home proj fakebin out status source origin remote_abs real_git fetch_log n
+  local before_head before_count before_worktrees before_branches
   rec=$(make_home agreement)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
+  # A real shallow clone plus a fetch-recording Git wrapper proves the delivery
+  # refusal wins before either automatic history repair or lane preparation.
+  source="$TMP_ROOT/agreement/source"
+  origin="$TMP_ROOT/agreement/origin.git"
+  git init --quiet -b main "$source"
+  for n in 1 2 3; do
+    printf 'history %s\n' "$n" > "$source/README.md"
+    git -C "$source" add README.md
+    git -C "$source" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -qm "history-$n"
+  done
+  git clone --quiet --bare "$source" "$origin"
+  remote_abs=$(cd "$origin" && pwd -P)
+  rmdir "$proj"
+  git clone --quiet --depth 1 "file://$remote_abs" "$proj"
+  [ "$(git -C "$proj" rev-parse --is-shallow-repository)" = true ] \
+    || fail "delivery mismatch fixture is not shallow"
+  before_head=$(git -C "$proj" rev-parse HEAD)
+  before_count=$(git -C "$proj" rev-list --count HEAD)
+  before_worktrees=$(git -C "$proj" worktree list --porcelain)
+  before_branches=$(git -C "$proj" for-each-ref --format='%(refname)' refs/heads)
+
+  real_git=$(command -v git)
+  fetch_log="$TMP_ROOT/agreement/fetch.log"
+  {
+    printf '#!/bin/sh\n'
+    printf 'for arg in "$@"; do\n'
+    printf "  [ \"\$arg\" = fetch ] && printf \"fetch\\\\n\" >> \"%s\"\n" "$fetch_log"
+    printf 'done\n'
+    printf 'exec "%s" "$@"\n' "$real_git"
+  } > "$fakebin/git"
+  chmod +x "$fakebin/git"
+
   write_brief "$home" delivery-mismatch-b1 no-mistakes
   out=$(run_spawn "$home" "$fakebin" delivery-mismatch-b1 "$proj" claude --mode direct-PR --yolo off)
   status=$?
@@ -132,6 +166,17 @@ EOF
   assert_contains "$out" "the brief says mode=no-mistakes but this spawn passed --mode direct-PR" \
     "mismatch refusal did not show both sides of the disagreement"
   assert_absent "$home/state/delivery-mismatch-b1.meta" "mismatched spawn wrote task metadata"
+  assert_absent "$fetch_log" "mismatched spawn fetched the shallow project before refusing"
+  [ "$(git -C "$proj" rev-parse --is-shallow-repository)" = true ] \
+    || fail "mismatched spawn repaired the shallow project before refusing"
+  [ "$(git -C "$proj" rev-parse HEAD)" = "$before_head" ] \
+    || fail "mismatched spawn moved the project HEAD before refusing"
+  [ "$(git -C "$proj" rev-list --count HEAD)" = "$before_count" ] \
+    || fail "mismatched spawn changed the visible project history before refusing"
+  [ "$(git -C "$proj" worktree list --porcelain)" = "$before_worktrees" ] \
+    || fail "mismatched spawn changed the project worktree inventory before refusing"
+  [ "$(git -C "$proj" for-each-ref --format='%(refname)' refs/heads)" = "$before_branches" ] \
+    || fail "mismatched spawn changed the project branches before refusing"
 
   # The agreeing case clears the check and only fails later, at the refusing tmux.
   write_brief "$home" delivery-agree-b2 direct-PR
