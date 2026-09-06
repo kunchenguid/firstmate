@@ -31,10 +31,14 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
-| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
+| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone, or the recorded endpoint authoritatively absent (a seat that closed itself on exit is a stronger stop, never a failure). Already-stopped is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
 
-An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
+Exit verification keys on the positive stop state with two bounded waits: the exit window, then a shorter confirm window that catches a stop landing just after the first window expires.
+A window's expiry is not evidence the action failed - it only means the stop state was not observed yet.
+An exit that delivers lifecycle input but whose stop state was not observed therefore reports `exit=unconfirmed` with the observed agent state and any interrupt cancellation claim, never a definite "did not stop" failure claim, and never claims that nothing changed.
+Only a definite refusal before or during delivery reports the action as failed.
+Reading a succeeded action as failed aims recovery at a seat that already did exactly what it was told.
 Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
