@@ -1093,13 +1093,15 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
 
-test_crew_dispatch_validation() {
-  local label body expect mode case_dir fakebin out n
+# Each row is "<label>^<config body>^<empty|exact|grep>^<expected diagnostic>",
+# read from stdin so several cases can share one bootstrap run shape.
+crew_dispatch_expect_rows() {
+  local prefix=$1 label body expect mode case_dir fakebin out n
   n=0
   while IFS='^' read -r label body mode expect; do
     [ -n "$label" ] || continue
     n=$((n + 1))
-    case_dir="$TMP_ROOT/dispatch-$n"
+    case_dir="$TMP_ROOT/$prefix-$n"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
@@ -1115,7 +1117,11 @@ test_crew_dispatch_validation() {
       grep)
         printf '%s\n' "$out" | grep -Fx "$expect" >/dev/null || fail "$label: missing '$expect' (got: $out)" ;;
     esac
-  done <<'ROWS'
+  done
+}
+
+test_crew_dispatch_validation() {
+  crew_dispatch_expect_rows dispatch <<'ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
 unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
@@ -1148,6 +1154,163 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_crew_dispatch_codex_home_validation() {
+  local homes work personal never
+  # A logged-in Codex home is a directory holding auth.json. Bootstrap tests only
+  # for that file's presence and never reads it, so an empty file is enough here.
+  homes="$TMP_ROOT/codex-homes"
+  work="$homes/work"
+  personal="$homes/personal"
+  never="$homes/never-logged-in"
+  mkdir -p "$work" "$personal" "$never"
+  : > "$work/auth.json"
+  : > "$personal/auth.json"
+
+  crew_dispatch_expect_rows dispatch-home <<ROWS
+two logged-in codex homes are accepted^{"rules":[{"when":"long runs","use":[{"harness":"codex","model":"gpt-5.5","home":"$work"},{"harness":"codex","model":"gpt-5.5","home":"$personal"}]}]}^empty^
+a default profile home is accepted^{"default":[{"harness":"codex","home":"$work"}]}^empty^
+a home on another harness is flagged^{"rules":[{"when":"x","use":{"harness":"claude","home":"$work"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - home is only valid for the codex harness: claude
+a relative home is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":".codex"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - home must be an absolute path: .codex
+an empty home is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - profile home must be a non-empty string when present
+a missing home directory is reported per home^{"rules":[{"when":"x","use":{"harness":"codex","home":"$homes/absent"}}]}^exact^CREW_DISPATCH: codex home unavailable: $homes/absent - directory not found; candidates naming this home are ineligible, every other profile still dispatches
+a home with no login is reported per home^{"rules":[{"when":"x","use":{"harness":"codex","home":"$never"}}]}^exact^CREW_DISPATCH: codex home unavailable: $never - no auth.json (log that account in with CODEX_HOME=$never codex login); candidates naming this home are ineligible, every other profile still dispatches
+an exact Astra receipt requirement is accepted^{"default":{"harness":"codex","model":"gpt-6-astra","effort":"high","requiresSelectionReceipt":true}}^empty^
+a non-codex receipt requirement is accepted^{"default":{"harness":"claude","model":"claude-opus","effort":"high","requiresSelectionReceipt":true}}^empty^
+a receipt requirement without a model is flagged^{"default":{"harness":"codex","requiresSelectionReceipt":true}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - requiresSelectionReceipt needs a profile with non-empty harness and model
+a non-boolean receipt requirement is flagged^{"default":{"harness":"codex","model":"gpt-6-astra","effort":"high","requiresSelectionReceipt":"yes"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - requiresSelectionReceipt must be true when present
+ROWS
+  pass "bootstrap accepts a per-account codex home and reports every unusable one"
+}
+
+# A logged-out account must cost that account its candidates and nothing else.
+# The whole point of naming two homes is that one of them can go down, so an
+# unavailable home may never be reported as file-wide invalidity - that verdict
+# stops profile-based dispatch for every rule, including rules naming no home.
+test_crew_dispatch_unavailable_home_is_candidate_local() {
+  local homes work never case_dir fakebin out
+  homes="$TMP_ROOT/codex-homes-local"
+  work="$homes/work"
+  never="$homes/never-logged-in"
+  mkdir -p "$work" "$never"
+  : > "$work/auth.json"
+
+  case_dir="$TMP_ROOT/dispatch-home-local"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/config/crew-dispatch.json" <<JSON
+{
+  "rules": [
+    {
+      "when": "long runs",
+      "use": [
+        { "harness": "codex", "model": "gpt-5.5", "home": "$work" },
+        { "harness": "codex", "model": "gpt-5.5", "home": "$never" }
+      ]
+    },
+    { "when": "quick edits", "use": { "harness": "claude" } }
+  ]
+}
+JSON
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_VERBOSE_FACTS=1 "$ROOT/bin/fm-bootstrap.sh")
+
+  printf '%s\n' "$out" \
+    | grep -Fx "CREW_DISPATCH: codex home unavailable: $never - no auth.json (log that account in with CODEX_HOME=$never codex login); candidates naming this home are ineligible, every other profile still dispatches" >/dev/null \
+    || fail "expected the logged-out home to be named as unavailable, got: $out"
+  printf '%s\n' "$out" | grep -F "CREW_DISPATCH: invalid" >/dev/null \
+    && fail "a logged-out home must not invalidate the whole dispatch file, got: $out"
+  printf '%s\n' "$out" | grep -F "unavailable: $work" >/dev/null \
+    && fail "the logged-in home must stay usable, got: $out"
+  # Verbose facts are bootstrap's statement of what dispatch is configured, so
+  # their survival is the observable proof the file is still dispatchable.
+  printf '%s\n' "$out" | grep -Fx "BOOTSTRAP_INFO: crew dispatch rule: quick edits -> claude" >/dev/null \
+    || fail "rules naming no home must stay dispatchable, got: $out"
+  pass "an unavailable codex home is candidate-local and leaves the rest of the file dispatchable"
+}
+
+# Every home problem must be visible in one pass; stopping at the first one hides
+# the second account's state behind the first account's.
+test_crew_dispatch_reports_every_unavailable_home() {
+  local homes absent never case_dir fakebin out
+  homes="$TMP_ROOT/codex-homes-multi"
+  absent="$homes/absent"
+  never="$homes/never-logged-in"
+  mkdir -p "$never"
+
+  case_dir="$TMP_ROOT/dispatch-home-multi"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/config/crew-dispatch.json" <<JSON
+{
+  "rules": [
+    {
+      "when": "long runs",
+      "use": [
+        { "harness": "codex", "home": "$absent" },
+        { "harness": "codex", "home": "$never" }
+      ]
+    }
+  ]
+}
+JSON
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+
+  printf '%s\n' "$out" | grep -F "unavailable: $absent - directory not found" >/dev/null \
+    || fail "expected the absent home to be reported, got: $out"
+  printf '%s\n' "$out" | grep -F "unavailable: $never - no auth.json" >/dev/null \
+    || fail "expected the logged-out home to be reported in the same pass, got: $out"
+  pass "bootstrap reports every unavailable codex home in one pass"
+}
+
+# The two-account rule's candidates agree on harness, model, and effort, so the
+# home is the only axis that tells them apart. A verbose fact that omits it
+# prints the rule as two identical profiles and states nothing about which
+# accounts are configured.
+test_crew_dispatch_verbose_facts_distinguish_codex_homes() {
+  local homes work personal case_dir fakebin out expect
+  homes="$TMP_ROOT/codex-homes-verbose"
+  work="$homes/work"
+  personal="$homes/personal"
+  mkdir -p "$work" "$personal"
+  : > "$work/auth.json"
+  : > "$personal/auth.json"
+
+  case_dir="$TMP_ROOT/dispatch-home-verbose"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/config/crew-dispatch.json" <<JSON
+{
+  "rules": [
+    {
+      "when": "long runs",
+      "use": [
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high", "home": "$work" },
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high", "home": "$personal" }
+      ]
+    },
+    { "when": "quick edits", "use": { "harness": "claude" } }
+  ],
+  "default": { "harness": "codex", "home": "$work" }
+}
+JSON
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_VERBOSE_FACTS=1 "$ROOT/bin/fm-bootstrap.sh")
+
+  expect="BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json
+BOOTSTRAP_INFO: crew dispatch rule: long runs -> quota-balanced[codex/gpt-5.5/high@$work, codex/gpt-5.5/high@$personal]
+BOOTSTRAP_INFO: crew dispatch rule: quick edits -> claude
+BOOTSTRAP_INFO: crew dispatch default: codex@$work"
+  [ "$out" = "$expect" ] || fail "codex home verbose facts mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
+  pass "verbose dispatch facts name each candidate's configured codex home"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1176,3 +1339,7 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_crew_dispatch_codex_home_validation
+test_crew_dispatch_unavailable_home_is_candidate_local
+test_crew_dispatch_reports_every_unavailable_home
+test_crew_dispatch_verbose_facts_distinguish_codex_homes

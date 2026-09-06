@@ -2637,6 +2637,102 @@ test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned() {
   pass "a fresh remote secondmate spawn refuses while the task set is owned"
 }
 
+test_remote_secondmate_spawn_refuses_codex_home_before_remote_routing() {
+  local home fakebin ssh_log err
+  home="$TMP_ROOT/remote-codex-home"
+  fakebin=$(fm_fakebin "$TMP_ROOT/remote-codex-home-fake")
+  ssh_log="$TMP_ROOT/remote-codex-home.ssh"
+  err="$TMP_ROOT/remote-codex-home.err"
+  mkdir -p "$home/state" "$home/data"
+  printf '%s\n' '- remote-codex - remote domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote work; projects: alpha; added 2026-08-02)' \
+    > "$home/data/secondmates.md"
+  cat > "$fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' "$*" >> "$FM_SSH_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/fake-ssh"
+
+  if FM_HOME="$home" FM_SPAWN_NO_GUARD=1 FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_SSH_LOG="$ssh_log" "$ROOT/bin/fm-spawn.sh" remote-codex --secondmate \
+    --harness codex --codex-home /remote/codex-home >/dev/null 2>"$err"; then
+    fail "a remote secondmate spawn accepted --codex-home"
+  fi
+  assert_contains "$(cat "$err")" "--codex-home is not supported for remote secondmate route 'remote-codex'" \
+    "the refusal should name the unsupported flag and remote route"
+  [ ! -s "$ssh_log" ] || fail "a refused --codex-home spawn still attempted remote routing"
+  [ ! -e "$home/state/remote-codex.meta" ] \
+    || fail "a refused --codex-home spawn still published remote metadata"
+  pass "a remote secondmate spawn refuses --codex-home before remote routing"
+}
+
+# The local secondmate route is the other half of that refusal. No dispatch
+# profile stands behind a secondmate, so pinning its account is the caller's
+# choice rather than a resolved one - but the prefix must still reach that one
+# launch and be recorded, exactly as it is for a crewmate.
+test_local_secondmate_spawn_pins_its_codex_home() {
+  local home sub sub_abs fakebin log meta codex_home
+  home="$TMP_ROOT/local-codex-home"
+  sub="$TMP_ROOT/local-codex-subhome"
+  codex_home="$TMP_ROOT/local-codex-account"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  mkdir -p "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
+  # A logged-in Codex home is a directory holding auth.json; nothing reads it.
+  mkdir -p "$codex_home"
+  : > "$codex_home/auth.json"
+  mark_firstmate_home "$sub"
+  printf 'localcodex\n' > "$sub/.fm-secondmate-home"
+  printf '# Charter\n\nHandled work.\n' > "$sub/data/charter.md"
+  sub_abs=$(cd "$sub" && pwd -P)
+  printf -- '- localcodex - pinned account (home: %s; scope: pinned work; projects: alpha; added 2026-09-05)' \
+    "$sub_abs" > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/local-codex-fake")
+  log="$TMP_ROOT/local-codex-fake/tmux.log"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/local-codex-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" localcodex codex --secondmate --codex-home "$codex_home" >/dev/null 2>&1 \
+    || fail "a local secondmate spawn rejected --codex-home"
+  meta="$home/state/localcodex.meta"
+  assert_grep "codex_home=$codex_home" "$meta" \
+    "a local secondmate spawn did not record the Codex home it was pinned to"
+  assert_contains "$(cat "$log")" "CODEX_HOME='$codex_home'" \
+    "a local secondmate launch did not export the pinned Codex home"
+  pass "a local secondmate spawn pins and records its Codex home"
+}
+
+# The same fail-closed rule as every other route: a home that is not logged in
+# must refuse before the secondmate exists, never fall back to ambient ~/.codex.
+test_local_secondmate_spawn_refuses_a_logged_out_codex_home() {
+  local home sub sub_abs fakebin log err codex_home
+  home="$TMP_ROOT/local-codex-out-home"
+  sub="$TMP_ROOT/local-codex-out-subhome"
+  codex_home="$TMP_ROOT/local-codex-out-account"
+  err="$TMP_ROOT/local-codex-out.err"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  mkdir -p "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
+  mkdir -p "$codex_home"
+  mark_firstmate_home "$sub"
+  printf 'localcodexout\n' > "$sub/.fm-secondmate-home"
+  printf '# Charter\n\nHandled work.\n' > "$sub/data/charter.md"
+  sub_abs=$(cd "$sub" && pwd -P)
+  printf -- '- localcodexout - pinned account (home: %s; scope: pinned work; projects: alpha; added 2026-09-05)' \
+    "$sub_abs" > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/local-codex-out-fake")
+  log="$TMP_ROOT/local-codex-out-fake/tmux.log"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/local-codex-out-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" localcodexout codex --secondmate --codex-home "$codex_home" \
+    >/dev/null 2>"$err"; then
+    fail "a local secondmate spawn accepted a Codex home with no auth.json"
+  fi
+  assert_contains "$(cat "$err")" "--codex-home has no auth.json: $codex_home" \
+    "the refusal should name the account that is not logged in"
+  [ ! -e "$home/state/localcodexout.meta" ] \
+    || fail "a refused local secondmate spawn still published metadata"
+  pass "a local secondmate spawn refuses a Codex home that is not logged in"
+}
+
 test_secondmate_force_teardown_refuses_child_active_home_descendant() {
   local home subhome childproj childwt fakebin err log
   home="$TMP_ROOT/child-active-descendant-home"
@@ -3023,6 +3119,9 @@ test_force_teardown_locks_descendant_with_absent_state
 test_force_teardown_refuses_while_a_task_is_being_published
 test_fresh_spawn_refuses_while_a_forced_teardown_owns_the_task_set
 test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned
+test_remote_secondmate_spawn_refuses_codex_home_before_remote_routing
+test_local_secondmate_spawn_pins_its_codex_home
+test_local_secondmate_spawn_refuses_a_logged_out_codex_home
 test_secondmate_force_teardown_refuses_child_active_home_descendant
 test_secondmate_force_teardown_refuses_child_repo_descendant
 test_secondmate_force_teardown_refuses_unregistered_child_worktree

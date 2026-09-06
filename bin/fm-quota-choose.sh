@@ -23,6 +23,15 @@
 # reasoning-class or runway-feasibility gates; it only answers which ordered
 # candidate remains eligible under the captured quota evidence.
 #
+# Per-home limitation: candidates are `harness:model` only, and the snapshot is
+# a single already-captured one, so a codex candidate that names its own Codex
+# home (docs/configuration.md "Crew dispatch profiles") cannot be expressed here:
+# every candidate would be scored against whichever account produced the one
+# snapshot. Such candidates need one snapshot per home, which is the
+# quota-array-dispatch skill's procedure, not this helper's. This is stated
+# rather than half-supported so a caller never reads a per-home choice out of a
+# single-home measurement.
+#
 # Multi-provider limitation: this helper maps each harness to ONE primary
 # provider family (see provider_for_harness below) and checks quota for that
 # family only. Some harnesses can run models from several providers - for

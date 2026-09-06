@@ -200,12 +200,47 @@ run_spawn() {  # <case-dir> <args...>
     "$SPAWN" "$@" 2>&1
 }
 
+wait_for_marker_or_child_exit() {  # <marker> <child-pid> <child-output> <description>
+  local marker=$1 child_pid=$2 child_output=$3 description=$4 deadline child_rc
+  deadline=$((SECONDS + 8))
+  while [ ! -e "$marker" ] && [ "$SECONDS" -lt "$deadline" ]; do
+    if ! kill -0 "$child_pid" 2>/dev/null; then
+      wait "$child_pid"; child_rc=$?
+      fail "$description exited before its rendezvous (exit $child_rc): $(cat "$child_output" 2>/dev/null || true)"
+    fi
+    /bin/sleep 0.01
+  done
+  [ -e "$marker" ] && return 0
+  if kill -0 "$child_pid" 2>/dev/null; then
+    kill "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
+    fail "$description did not reach its rendezvous within the bounded wait; child output: $(cat "$child_output" 2>/dev/null || true)"
+  fi
+  wait "$child_pid"; child_rc=$?
+  fail "$description exited before its rendezvous (exit $child_rc): $(cat "$child_output" 2>/dev/null || true)"
+}
+
 meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
 }
 
 journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
+}
+
+make_control_selection_receipt() {  # <case-dir> <task-id>
+  local dir=$1 id=$2 snapshot="$1/quota-axi.json" receipt="$1/selection-receipt.json" digest created_at
+  created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf 'generatedAt: "%s"\nquota: []\n' "$created_at" > "$snapshot"
+  digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
+  jq -n --arg id "$id" --arg created_at "$created_at" --arg snapshot "$snapshot" --arg digest "$digest" '
+    {version: 1, createdAt: $created_at, task: $id, harness: "codex",
+     model: "gpt-6-astra", effort: "high", taskFit: "relaunch remains in scope",
+     candidates: [{harness: "codex", model: "gpt-6-astra", effort: "high",
+                   disposition: "selected", rationale: "current primary evidence"}],
+     catalogEvidence: ["synthetic catalog evidence"],
+     quotaSnapshot: {path: $snapshot, sha256: $digest}}' > "$receipt"
+  printf '%s\n' "$receipt"
 }
 
 make_git_failure_stub() {  # <case-dir>
@@ -403,15 +438,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_RELEASE="$launch_release" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 200 ]; do
-    /bin/sleep 0.01
-    i=$((i + 1))
-  done
-  [ -e "$prepare" ] || {
-    kill "$control_pid" 2>/dev/null || true
-    wait "$control_pid" 2>/dev/null || true
-    fail "relaunch did not reach trace delivery"
-  }
+  wait_for_marker_or_child_exit "$prepare" "$control_pid" "$dir/control.out" "relaunch trace delivery"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_REAL_MV="$(command -v mv)" \
     FM_FAKE_LOCK_WAITING="$waiting" \
@@ -619,6 +646,106 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   [ "$(meta_field "$dir" rl6 model)" = opus ] || fail "the model should carry across a same-harness relaunch"
   [ "$(meta_field "$dir" rl6 effort)" = high ] || fail "the effort should carry across a same-harness relaunch"
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
+}
+
+test_relaunch_keeps_the_codex_account_until_the_harness_changes() {
+  local dir out rc home
+  dir=$(new_case codexhome rl6b)
+  add_ship_task "$dir" rl6b codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  home="$dir/codex-personal"
+  mkdir -p "$home"
+  : > "$home/auth.json"
+  printf 'codex_home=%s\n' "$home" >> "$dir/home/state/rl6b.meta"
+
+  out=$(run_control "$dir" rl6b relaunch --note "same account"); rc=$?
+  expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl6b codex_home)" = "$home" ] \
+    || fail "a replacement on the same harness should keep the Codex account it was dispatched against"
+  assert_grep "CODEX_HOME='$home'" "$dir/fake/literal" \
+    "the replacement launch should run against the recorded Codex account"
+
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl6b relaunch --harness claude --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl6b codex_home)" ] \
+    || fail "a Codex account must not survive a switch to another harness"
+  pass "fm-control relaunch: the recorded Codex account carries across a same-harness replacement only"
+}
+
+test_missing_codex_home_refuses_before_stopping_anything() {
+  local dir out rc home
+  dir=$(new_case missingcodexhome rl6c)
+  add_ship_task "$dir" rl6c codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  home="$dir/codex-personal"
+  mkdir -p "$home"
+  : > "$home/auth.json"
+  printf 'codex_home=%s\n' "$home" >> "$dir/home/state/rl6c.meta"
+  rm -rf "$home"
+
+  out=$(run_control "$dir" rl6c relaunch --note "same account"); rc=$?
+  expect_code 1 "$rc" "a relaunch whose recorded Codex home disappeared should refuse"
+  assert_contains "$out" "--codex-home directory not found: $home" \
+    "the refusal should identify the missing recorded Codex home"
+  [ "$(cat "$dir/fake/command")" = codex ] \
+    || fail "a missing recorded Codex home must not stop the running worker"
+  [ -z "$(cat "$dir/fake/literal")" ] && [ -z "$(cat "$dir/fake/keys")" ] \
+    || fail "a missing recorded Codex home must deliver no lifecycle input"
+  [ ! -e "$dir/home/state/rl6c.control-relaunch" ] \
+    || fail "a missing recorded Codex home must refuse before creating a durable journal"
+  pass "fm-control relaunch: a missing Codex home refuses before the worker is touched"
+}
+
+test_control_byte_codex_home_refuses_before_stopping_anything() {
+  local dir out rc home
+  dir=$(new_case controlcodexhome rl6d)
+  add_ship_task "$dir" rl6d codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  home="$dir/"$'codex\tpersonal'
+  mkdir -p "$home"
+  : > "$home/auth.json"
+  printf 'codex_home=%s\n' "$home" >> "$dir/home/state/rl6d.meta"
+
+  out=$(run_control "$dir" rl6d relaunch --note "same account"); rc=$?
+  expect_code 1 "$rc" "a relaunch whose recorded Codex home contains a control byte should refuse"
+  assert_contains "$out" "--codex-home contains an invalid control byte" \
+    "the refusal should identify the unsafe recorded Codex home"
+  [ "$(cat "$dir/fake/command")" = codex ] \
+    || fail "an unsafe recorded Codex home must not stop the running worker"
+  [ -z "$(cat "$dir/fake/literal")" ] && [ -z "$(cat "$dir/fake/keys")" ] \
+    || fail "an unsafe recorded Codex home must deliver no lifecycle input"
+  [ ! -e "$dir/home/state/rl6d.control-relaunch" ] \
+    || fail "an unsafe recorded Codex home must refuse before creating a durable journal"
+  pass "fm-control relaunch: an unsafe Codex home refuses before the worker is touched"
+}
+
+test_astra_relaunch_requires_and_revalidates_a_selection_receipt_before_stop() {
+  local dir out rc receipt
+  dir=$(new_case astrareceipt rl-astra)
+  add_ship_task "$dir" rl-astra codex
+  mkdir -p "$dir/home/config"
+  printf '%s\n' '{"default":{"harness":"codex","model":"gpt-6-astra","effort":"high","requiresSelectionReceipt":true}}' \
+    > "$dir/home/config/crew-dispatch.json"
+  {
+    echo "model=gpt-6-astra"
+    echo "effort=high"
+  } >> "$dir/home/state/rl-astra.meta"
+
+  out=$(run_control "$dir" rl-astra relaunch --note "revalidate primary evidence"); rc=$?
+  expect_code 1 "$rc" "an Astra relaunch without a receipt should refuse"
+  assert_contains "$out" "requires a current --selection-receipt" "missing relaunch receipt did not name the configured gate"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "missing relaunch receipt stopped the current agent"
+  [ ! -e "$dir/home/state/rl-astra.control-relaunch" ] || fail "missing relaunch receipt began a durable transaction"
+
+  receipt=$(make_control_selection_receipt "$dir" rl-astra)
+  out=$(run_control "$dir" rl-astra relaunch --note "revalidate primary evidence" --selection-receipt "$receipt"); rc=$?
+  expect_code 0 "$rc" "a current Astra receipt should permit relaunch: $out"
+  assert_grep "selection_receipt=$receipt" "$dir/home/state/rl-astra.meta" "relaunch did not record its current receipt"
+  pass "fm-control relaunch: Astra receipt validation happens before stop and reaches fm-spawn"
 }
 
 test_explicit_model_wins_over_the_recorded_one() {
@@ -885,6 +1012,77 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
     || fail "fm-spawn --relaunch without --harness must reuse the recorded harness, got '$(meta_field "$dir" rl21 harness)'"
   assert_contains "$out" "spawned rl21 harness=claude" "the launch should report the recorded harness"
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
+}
+
+test_spawn_relaunch_keeps_the_recorded_codex_home() {
+  local dir home out
+  dir=$(new_case spawnhome rl21b)
+  add_ship_task "$dir" rl21b codex
+  home="$dir/codex-personal"
+  mkdir -p "$home"
+  : > "$home/auth.json"
+  printf 'codex_home=%s\n' "$home" >> "$dir/home/state/rl21b.meta"
+  printf 'zsh' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+
+  out=$(run_spawn "$dir" rl21b --relaunch)
+  assert_contains "$out" "spawned rl21b harness=codex" \
+    "the direct relaunch should report the recorded Codex harness"
+  [ "$(meta_field "$dir" rl21b codex_home)" = "$home" ] \
+    || fail "fm-spawn --relaunch dropped the recorded Codex home from metadata"
+  assert_contains "$(cat "$dir/fake/literal")" "CODEX_HOME='$home'" \
+    "the direct relaunch should launch against the recorded Codex home"
+  pass "fm-spawn --relaunch: a Codex task keeps its recorded account home"
+}
+
+# `--harness 'codex --search'` is the raw-launch escape hatch, and its resolved
+# harness is still codex, so the replacement runs the codex CLI. Deciding the
+# account carry-forward on the pre-resolution token dropped it here and launched
+# the replacement against whatever ambient ~/.codex the environment resolves -
+# a DIFFERENT account, with no refusal and no diagnostic.
+test_spawn_relaunch_keeps_the_codex_home_through_a_raw_command() {
+  local dir home out
+  dir=$(new_case spawnhomeraw rl21c)
+  add_ship_task "$dir" rl21c codex
+  home="$dir/codex-personal"
+  mkdir -p "$home"
+  : > "$home/auth.json"
+  printf 'codex_home=%s\n' "$home" >> "$dir/home/state/rl21c.meta"
+  printf 'zsh' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+
+  out=$(run_spawn "$dir" rl21c --relaunch --harness 'codex --search')
+  assert_contains "$out" "spawned rl21c harness=codex" \
+    "a raw codex launch command should still resolve to the codex harness"
+  [ "$(meta_field "$dir" rl21c codex_home)" = "$home" ] \
+    || fail "a raw-command relaunch dropped the recorded Codex home from metadata"
+  assert_contains "$(cat "$dir/fake/literal")" "CODEX_HOME='$home' env -u CURSOR_AGENT" \
+    "a raw-command relaunch must launch against the recorded account, not ambient ~/.codex"
+  assert_contains "$(cat "$dir/fake/literal")" "codex --search" \
+    "carrying the account forward must not alter the raw launch command"
+  pass "fm-spawn --relaunch: a raw codex launch command keeps the recorded account home"
+}
+
+# Carrying the account forward may never become a way to smuggle an unusable one
+# past validation: a home that was logged out since the task was dispatched is a
+# refusal on the raw-command path exactly as it is on the canonical one.
+test_spawn_relaunch_refuses_a_logged_out_carried_codex_home() {
+  local dir home out rc
+  dir=$(new_case spawnhomegone rl21d)
+  add_ship_task "$dir" rl21d codex
+  home="$dir/codex-personal"
+  mkdir -p "$home"
+  printf 'codex_home=%s\n' "$home" >> "$dir/home/state/rl21d.meta"
+  printf 'zsh' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+
+  out=$(run_spawn "$dir" rl21d --relaunch --harness 'codex --search'); rc=$?
+  expect_code 1 "$rc" "a carried Codex home with no auth.json must refuse"$'\n'"$out"
+  assert_contains "$out" "--codex-home has no auth.json: $home" \
+    "the refusal should name the account that is no longer logged in"
+  assert_not_contains "$(cat "$dir/fake/literal")" "codex --search" \
+    "a refused relaunch must not launch a replacement at all"
+  pass "fm-spawn --relaunch: a carried Codex home is revalidated on the raw-command path"
 }
 
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
@@ -1544,6 +1742,10 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_relaunch_keeps_the_codex_account_until_the_harness_changes
+test_missing_codex_home_refuses_before_stopping_anything
+test_control_byte_codex_home_refuses_before_stopping_anything
+test_astra_relaunch_requires_and_revalidates_a_selection_receipt_before_stop
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
@@ -1555,6 +1757,9 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_keeps_the_recorded_codex_home
+test_spawn_relaunch_keeps_the_codex_home_through_a_raw_command
+test_spawn_relaunch_refuses_a_logged_out_carried_codex_home
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
