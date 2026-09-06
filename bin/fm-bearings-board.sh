@@ -58,8 +58,11 @@
 # THE RECONCILE CHOICE. Every decision card carries the standard `reconcile`
 # option, injected here so the guarantee does not depend on the composer's
 # memory, and the payload validator reserves that value across every card type.
-# Its meaning, and the reason it can never reach the keyed-answer
-# intake as a blind close, are owned by docs/captain-hold-lifecycle.md.
+# The validator's reservation scope must equal the adapter's reconcile
+# classification scope, which is all card types because the captured payload
+# carries no card type. Its meaning, and the reason it can never reach the
+# keyed-answer intake as a blind close, are owned by
+# docs/captain-hold-lifecycle.md.
 #
 # Validation is fail-closed: the payload must be valid JSON with
 # schema=fm-bearings-board.v1 and every renderer-consumed field must satisfy

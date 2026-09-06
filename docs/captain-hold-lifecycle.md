@@ -109,8 +109,9 @@ Three checks run, all on exact identity and none on prose:
   A landed row carrying the same artifact at that version or a newer one supersedes the card, so the published quota-axi 0.1.38 release drops a 0.1.37 call without parsing prose.
 
 Dropped cards are named on stderr as `dropped-landed-card:` lines so a rebuild states what it removed rather than quietly shrinking Captain's Call.
-The first board rebuild after this change lands performs the captain-authorized one-time cleanup of already-stale cards, including merged-PR and superseded-version cards, rather than using a committed migration or touching live state from the change worktree.
+As a committed delivery step, firstmate rebuilds the board immediately after landing this change; that rebuild performs the captain-authorized one-time cleanup of already-stale cards, including merged-PR and superseded-version cards, without a committed migration or live-state mutation from the change worktree.
 A subject whose state cannot be established is kept, because a wrongly shown card is safer than a wrongly hidden call.
+The validator's reservation scope must equal the adapter's reconcile-classification scope, which is all card types because the captured payload carries no card type.
 The reconcile option is the recovery path for whatever still slips through.
 
 ## Structured read surfaces
