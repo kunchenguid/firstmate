@@ -76,18 +76,26 @@
 # private as data/<id>/report.md, and a rule that stopped at two components
 # would refuse the shallow leak while passing the deeper one.
 #
-# MEASURED COUNTS, all against origin/main's 14,965 merged message lines, and
+# MEASURED COUNTS, all against origin/main's 16,485 merged message lines, and
 # current as of this rule set. These are the figures the rules were selected on;
 # any change to a rule must restate them:
-#   captain-address-opening      219   every leaked line carries a commit prefix
+#   captain-address-opening      222   every leaked line carries a commit prefix
 #   captain-address-line           0   kept for the paragraph-initial shape
 #   captain-address-trailing       6   leaks reachable by no other rule
 #   captain-address-greeting       0   the address, not the nautical vocabulary
-#   delivery-machinery-handoff     4   including "for the outer executor"
-#   internal-session-pointer       3   real trailers already published
-#   internal-session-link          3   the same three, seen as bare links
+#   delivery-machinery-handoff     7   including "for the outer executor"
+#   internal-session-pointer      16   real trailers already published
+#   internal-session-link         16   the same trailers, seen as bare links
 #   private-task-work-document     3   the two data/<id>/report.md leaks
 #   private-review-artifact        0   no legitimate line to displace
+#
+# The dash and root-qualified forms added to the address and work-document rules
+# were measured on this same corpus and changed no count: both the address total
+# and the work-document total are identical before and after them. They close a
+# reachable shape rather than widening what the rules already refuse. The counts
+# above are higher than the ones the rules were first selected on only because
+# merged history itself grew from 14,965 lines to 16,485; the address total was
+# 222 under the previous expression too.
 #
 # WHICH DOCUMENT FAMILIES ARE COVERED. Exactly two: data/<id>/<file> and
 # .lavish/<file>. Deliberately left out, each because it has legitimate merged
@@ -113,10 +121,11 @@
 #   - Bare nautical words (ahoy, shipshape, avast). This repo ships an /ahoy
 #     skill and a "Captain, shipshape." acknowledgement rule; 13 legitimate
 #     merged commits mention them. Banned as an ADDRESS instead (captain-greeting).
-#   - An unscoped "captain" followed by a spaced dash. One legitimate merged
-#     line reads "so the pane still reaches the captain - once per
+#   - An unscoped "captain" followed by a dash of any kind. One legitimate
+#     merged line reads "so the pane still reaches the captain - once per
 #     PAUSE_RESURFACE_SECS". The admitted position-scoped dash and period forms
-#     each have zero matches in merged history.
+#     each have zero matches in merged history, for the ASCII, em, and en dash
+#     alike.
 #   - A period accepted as bare punctuation after "captain", which is what
 #     putting "." inside the punctuation class does. It accepts any following
 #     character and so refuses "docs: captain.md now records the fleet owner"
@@ -206,7 +215,15 @@ FM_VOICE_RULES=()
 # punctuation class. Inside the class it would accept any following character
 # and refuse "docs: captain.md now records the fleet owner", one of the flat
 # private files this guard promises keeps shipping.
-FM_VOICE_RULES+=("captain-address-opening${TAB}i${TAB}(^[*-][[:space:]]+|[.!?][[:space:]]+|:[[:space:]]+)captain([,:!?]|\\.([[:space:]]|\$)|[[:space:]]+-)${TAB}A commit message describes a change to the repository; it never addresses a person. Drop the address and state the change.")
+#
+# The em and en dash are admitted alongside the spaced ASCII dash because an
+# address is an address whichever dash follows it, and the ASCII form alone left
+# "…: Captain — fixed the…" reaching published history through a rule that
+# already refused its plain-dash twin. Their surrounding space is optional, since
+# the em dash is conventionally set unspaced, and the repo's own style rule
+# against em dashes is why neither form costs a legitimate line: both measure
+# zero matches across merged history.
+FM_VOICE_RULES+=("captain-address-opening${TAB}i${TAB}(^[*-][[:space:]]+|[.!?][[:space:]]+|:[[:space:]]+)captain([,:!?]|\\.([[:space:]]|\$)|[[:space:]]+-|[[:space:]]*(—|–))${TAB}A commit message describes a change to the repository; it never addresses a person. Drop the address and state the change.")
 
 # The same address opening a line of its own. Capital-only on purpose: a wrapped
 # body line can legitimately begin with a lowercase "captain," carried over from
@@ -214,7 +231,7 @@ FM_VOICE_RULES+=("captain-address-opening${TAB}i${TAB}(^[*-][[:space:]]+|[.!?][[
 # paragraph is capitalized. Zero matches in merged history, because every leak
 # there carries a commit prefix and is caught by the opening rule; it is kept
 # for the paragraph-initial shape that prefix cannot reach.
-FM_VOICE_RULES+=("captain-address-line${TAB}s${TAB}^Captain([,:!?]|\\.([[:space:]]|\$)|[[:space:]]+-)${TAB}A commit message describes a change to the repository; it never addresses a person. Drop the address and state the change.")
+FM_VOICE_RULES+=("captain-address-line${TAB}s${TAB}^Captain([,:!?]|\\.([[:space:]]|\$)|[[:space:]]+-|[[:space:]]*(—|–))${TAB}A commit message describes a change to the repository; it never addresses a person. Drop the address and state the change.")
 
 # The trailing form, which the opening rules miss: "…, captain" at the end of a
 # line. Six leaked lines in merged history have only this shape.
@@ -255,7 +272,17 @@ FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}https?://[^[:space:]?#]*/ses
 # ".lavish" is a distinctive dot-prefixed directory whose parent path is
 # irrelevant, so a preceding slash is allowed there. Both leading classes
 # exclude "." so a longer dotted name cannot be split into a false match.
-FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}(^|[^[:alnum:]_/.-])data/[[:alnum:]_.-]+/[[:alnum:]_./-]+${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
+#
+# That slash exclusion is also what let a ROOT-QUALIFIED path through, because
+# the leak this guard is for is usually pasted absolute: the same private report
+# written as /Users/<user>/<home>/data/<id>/report.md has a slash before "data"
+# and so escaped the rule that refuses its relative spelling. The second
+# alternative admits exactly that shape - an absolute or "~"-rooted path, of any
+# depth, ending in the same data/<id>/<file> tail - while still requiring a
+# non-word character before the leading slash, which is what keeps the relative
+# tests/data/fixtures/x.txt passing: the slash before "data" there follows a
+# letter. It matches no additional line in merged history.
+FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}((^|[^[:alnum:]_/.-])|(^|[^[:alnum:]_])~?(/[[:alnum:]_.-]+)*/)data/[[:alnum:]_.-]+/[[:alnum:]_./-]+${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
 
 # The local Lavish review artifact, which is the other private work-document
 # shape this repo produces. Keyed on the dot-prefixed directory path so the 59
