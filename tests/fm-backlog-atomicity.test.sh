@@ -349,6 +349,37 @@ test_fm_tasks_axi_fails_closed_when_nothing_can_bound_the_call() {
   pass "fm_tasks_axi fails closed rather than running unbounded when no bounding mechanism exists"
 }
 
+test_fm_tasks_axi_gnu_timeout_forces_termination_of_a_sigterm_ignoring_child() {
+  local case_dir fb out rc=0 started
+  if ! command -v timeout >/dev/null 2>&1; then
+    pass "fm_tasks_axi's GNU timeout forces termination (skipped: no timeout binary on this host)"
+    return 0
+  fi
+  case_dir=$(make_home fm-tasks-axi-kill-after)
+  # A real GNU timeout on the PATH, and a tasks-axi that ignores SIGTERM
+  # (the ignored disposition survives exec into sleep). timeout alone would
+  # wait forever for such a child; only its kill-after stops it, so this
+  # test fails on an unforced bound and passes once TERM is followed by
+  # KILL at one further bound.
+  fb="$case_dir/gnubin"
+  mkdir -p "$fb"
+  ln -s "$(command -v timeout)" "$fb/timeout"
+  ln -s "$(command -v sleep)" "$fb/sleep"
+  printf '#!/bin/bash\ntrap "" TERM\nexec sleep 300\n' > "$fb/tasks-axi"
+  chmod +x "$fb/tasks-axi"
+  started=$SECONDS
+  out=$(run_bounded_fm_tasks_axi "$fb" 2 show never-answers) || rc=$?
+  case $rc in
+    124 | 137) ;;
+    *) fail "the GNU timeout path did not report the TERM-ignoring child as timed out (rc=$rc, out=$out)" ;;
+  esac
+  [ $((SECONDS - started)) -ge 2 ] \
+    || fail "the GNU timeout path fired before the bound elapsed"
+  [ $((SECONDS - started)) -lt 20 ] \
+    || fail "the GNU timeout path did not force-terminate the TERM-ignoring child (${SECONDS}s)"
+  pass "fm_tasks_axi's GNU timeout kills a child that ignores SIGTERM after one further bound"
+}
+
 change_row_on_second_show() {  # <case-dir> <done|rm>
   local case_dir=$1 action=$2 real
   real=$(command -v tasks-axi)
@@ -2610,6 +2641,7 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi
 test_fm_tasks_axi_fallback_bounds_the_call_without_a_timeout_binary
 test_fm_tasks_axi_fallback_passes_the_child_status_and_output_through
 test_fm_tasks_axi_fails_closed_when_nothing_can_bound_the_call
+test_fm_tasks_axi_gnu_timeout_forces_termination_of_a_sigterm_ignoring_child
 test_dispatch_interruption_during_kimi_readiness_fails_before_commit
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight

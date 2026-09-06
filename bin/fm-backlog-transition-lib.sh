@@ -213,26 +213,38 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
 # holds a lock across the call - the spawn commit and its preservation
 # read-back run under the per-task meta lock - sets the bound, so an
 # unresponsive tasks-axi cannot hold that lock open indefinitely; a timed-out
-# call exits 124 and the callers report the timeout as the reason through
-# their existing error plumbing. GNU timeout is used where it exists,
+# call exits 124, or 137 when the kill-after had to fire (GNU timeout's own
+# status for a KILL-forced expiry), and the callers treat either as the bound
+# expiring and report the timeout as the reason through their existing error
+# plumbing. GNU timeout is used where it exists,
 # gtimeout where coreutils ships under that name, and a small perl watchdog
 # elsewhere (a stock macOS host has perl but no timeout variant; perl is
 # already a hard dependency of this library's byte validators, so the
-# fallback adds no new tool). When a bound was requested but no bounding
-# mechanism exists at all, the call fails closed instead of running unbounded:
-# an unbounded call under the lock is exactly the hang the bound exists to
-# prevent. Must be the last command of a subshell: the exec keeps the
-# tasks-axi process exactly where the plain call sat, and the bound kills the
-# child, not the caller.
+# fallback adds no new tool). Every bounded path forces termination: a
+# tasks-axi that ignores SIGTERM must not outlive the bound, since an
+# unbounded call under the lock is exactly the hang the bound exists to
+# prevent - so the GNU variants carry a kill-after of one further bound
+# (TERM at the bound, KILL after that grace) and the watchdog kills the
+# same way. When a bound was requested but no bounding mechanism exists at
+# all, the call fails closed instead of running unbounded. Must be the last
+# command of a subshell: the exec keeps the tasks-axi process exactly where
+# the plain call sat, and the bound kills the child, not the caller.
+fm_tasks_axi_timeout_expired() {  # <status>
+  case $1 in
+    124 | 137) return 0 ;;
+  esac
+  return 1
+}
+
 fm_tasks_axi() {
   local bound=${FM_TASKS_AXI_TIMEOUT:-}
   if [ -z "$bound" ]; then
     exec tasks-axi "$@"
   fi
   if command -v timeout >/dev/null 2>&1; then
-    exec timeout "$bound" tasks-axi "$@"
+    exec timeout -k "$bound" "$bound" tasks-axi "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout "$bound" tasks-axi "$@"
+    exec gtimeout -k "$bound" "$bound" tasks-axi "$@"
   elif command -v perl >/dev/null 2>&1; then
     # Fork, run tasks-axi in the child, and poll waitpid(WNOHANG) until the
     # child exits or the bound expires: the same contract as
@@ -335,7 +347,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     else
       FM_BACKLOG_ROW_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
       if [ -z "$FM_BACKLOG_ROW_ERROR" ]; then
-        if [ "$command_status" -eq 124 ] && [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
+        if fm_tasks_axi_timeout_expired "$command_status" && [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
           FM_BACKLOG_ROW_ERROR="tasks-axi show $id did not finish within ${FM_TASKS_AXI_TIMEOUT}s"
         else
           FM_BACKLOG_ROW_ERROR="tasks-axi show $id failed with no output"
@@ -388,7 +400,7 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   [ "$command_status" -ne 0 ] || return 0
   FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
   if [ -z "$FM_BACKLOG_TRANSITION_ERROR" ]; then
-    if [ "$command_status" -eq 124 ] && [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
+    if fm_tasks_axi_timeout_expired "$command_status" && [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
       FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb $id did not finish within ${FM_TASKS_AXI_TIMEOUT}s"
     else
       FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb $id failed with no output"
