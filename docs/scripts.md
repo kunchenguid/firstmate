@@ -31,7 +31,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-backlog-receive.sh`  | Idempotently ingest one confined remote handoff outbox through tasks-axi             |
 | `fm-captain-hold.sh`     | Hold tasks for the captain, record the captain's answers, gate investigation completion, and report record divergence between the status log and the backlog |
 | `fm-decision-hold.sh`    | One-release compatibility shim mapping the retired decision commands onto fm-captain-hold.sh |
-| `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, secondmate-charter, Herdr-lab, and visual-evidence briefs with separate intent and implementation-spec subsections |
+| `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, secondmate-charter, Herdr-lab, and visual-evidence briefs; the ordinary Rules section owns the instructed wait-premise status syntax |
 | `fm-pr-body.sh`          | Render, check, and publish colleague-facing PR text from private or repository templates                |
 | `fm-dod-lib.sh`          | One owner of the ship definition of done and no-mistakes `--intent` contract, rendered by both brief scaffolding and scout promotion |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
@@ -95,6 +95,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, guard injection by the detected primary harness, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state or worker-liveness line for a crew             |
+| `fm-wait-premise.sh`      | Read only the latest status line and print one verdict when a check completes; an omitted premise is unbindable, an unreadable or unsupported owner check stays silent, and the instructed syntax is owned by `fm-brief.sh` |
 | `fm-pipeline.sh`          | Record shadow pipeline probe events in the append-only event log                       |
 | `fm-unadvanceable-work.sh` | Report in-flight tasks with no worker, hold, or dependency edge                    |
 | `fm-nm-run-lib.sh`       | Shared no-mistakes home selection and branch-and-code-identity attribution          |

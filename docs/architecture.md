@@ -51,6 +51,32 @@ That bound is load-bearing rather than cosmetic: churn and staleness read the sa
 If two metadata records derive the same per-window marker key, including two records that name the same endpoint, that marker is not attributable churn evidence for either task, so the bare turn-ended wake surfaces without changing or migrating existing marker state.
 A `kind=secondmate` task's status signal is the parent-directed reply stream and is never absorbed as provably working; its bare turn-ended signal is absorbed only by the ordinary authoritative working proof because an active secondmate does not enter the staleness backbone that would resurface deferred pane-churn evidence.
 A crew that declares `paused:` for a known external wait, or carries a verified `captain-held` transfer, is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
+The instructed machine-readable wait-premise form for that `paused` line is owned by [`bin/fm-brief.sh`](../bin/fm-brief.sh).
+[`bin/fm-wait-premise.sh`](../bin/fm-wait-premise.sh) reads only the latest status line.
+A latest paused line without a premise still reads and yields `unbindable`; the reader does not require the instructed form.
+When the latest status cannot be read, or when a bound PR or quota owner check is unreadable or unsupported, the reader prints nothing even if a paused line is readable.
+That silence is the unknown branch; do not expect one of the three verdict strings on every attempt.
+To validate the landed instruction in a disposable home, never against a live task log:
+
+```sh
+home=$(mktemp -d)
+mkdir -p "$home/state" "$home/data" "$home/config"
+(
+  export FM_HOME="$home"
+  export FM_STATE_OVERRIDE="$home/state"
+  export FM_DATA_OVERRIDE="$home/data"
+  export FM_CONFIG_OVERRIDE="$home/config"
+  bin/fm-brief.sh wait-doc-check firstmate --mode direct-PR
+  rg -F 'wait=pr:<full PR URL>' "$home/data/wait-doc-check/brief.md"
+  printf 'paused: holding for an upstream release\n' > "$home/state/wait-doc-check.status"
+  bin/fm-wait-premise.sh wait-doc-check
+)
+```
+
+The subshell pins home, state, data, and config so an ambient `FM_*_OVERRIDE` cannot write or read a live task log.
+The `rg` command matches the brief-owned sentence.
+The reader then prints exactly `unbindable` and a newline.
+PR and quota premises call their existing owners after that local control; those cases can print `still-waiting` or `expired`, or stay silent when the owner check cannot be read.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint; the pause classification itself is recovered only when the backend confidently reports its agent dead.
 Outside the explicit unavailable-state-source pause exception, live or inconclusive liveness remains fail-open at that initial surface, so a worker genuinely waiting on a decision is never silenced.
 Its later sights are still held to that same bounded cadence rather than re-alarming on every pane-hash change, because the throttle is keyed to the declaration and not to the pane an idle parked worker keeps ticking.
