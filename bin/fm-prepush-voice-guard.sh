@@ -36,7 +36,7 @@
 # than adding a commit on top.
 #
 # WHAT IT REFUSES, and why the set is this narrow. Every rule below was selected
-# against the real merged history of this repo (530 commits, ~15k message lines)
+# against the real merged history of this repo (16,547 message lines)
 # and kept only when it matched real leaks with ZERO matches on legitimate
 # messages. Rules that intuition suggested and evidence rejected are recorded in
 # "REJECTED" below, because the reason they were rejected is the whole design:
@@ -84,7 +84,7 @@
 #   delivery-machinery-handoff     7   including "for the outer executor"
 #   internal-session-pointer      16   real trailers already published
 #   internal-session-link         16   the same trailers, seen as bare links
-#   private-task-work-document     3   the two data/<id>/report.md leaks
+#   private-task-work-document     3   the three data/<id>/report.md leaks
 #   private-review-artifact        0   no legitimate line to displace
 #
 # The dash and root-qualified forms added to the address and work-document rules
@@ -212,7 +212,7 @@ FM_VOICE_RULES=()
 # An address to the captain that opens the message's prose: after a conventional
 # commit "type(scope): " prefix, after a "* " or "- " bullet (the shape a squash
 # merge body gives every branch commit), or after a sentence boundary. This rule
-# matches 219 leaked lines in merged history. Spaced dash and period forms had
+# matches 222 leaked lines in merged history. Spaced dash and period forms had
 # zero matches in merged history at these positions.
 #
 # The period must END A SENTENCE, so it is spelled as its own alternative
@@ -248,12 +248,12 @@ FM_VOICE_RULES+=("captain-address-trailing${TAB}i${TAB},[[:space:]]*captain[[:sp
 FM_VOICE_RULES+=("captain-address-greeting${TAB}i${TAB}(^|[^[:alnum:]_])(ahoy|hello|hi|dear|aye),?[[:space:]]+captain([^[:alnum:]_]|\$)${TAB}Greetings belong in a reply, not in published history. Drop the greeting and state the change.")
 
 # Narration of the delivery machinery handing work between agents: text about
-# how the change was produced rather than what it does. Four leaked lines in
+# how the change was produced rather than what it does. Seven leaked lines in
 # merged history, including "Changes remain uncommitted for the outer executor".
 FM_VOICE_RULES+=("delivery-machinery-handoff${TAB}i${TAB}(^|[^[:alnum:]_])outer[[:space:]]+(executor|pipeline|run)([^[:alnum:]_]|\$)${TAB}Published history must not narrate how the change was validated or which agent finishes it. State what the change does.")
 
 # A pointer at the working session that produced the change, as a trailer whose
-# value is a URL or an opaque id. Three such trailers are already in merged
+# value is a URL or an opaque id. Sixteen such trailers are already in merged
 # history, so this is a recurring leak rather than a hypothetical one. Requiring
 # an exact hyphen-separated key token and the value shape separates a pointer
 # from ordinary prose, configuration, and compound technical terms.

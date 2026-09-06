@@ -160,12 +160,12 @@ fm_lint_run_workflows() {
   "$SELF_DIR/fm-lint-workflows.sh"
 }
 
-# Default no-args lint also reads back every commit message that is about to be
-# pushed. This step is here rather than in a git hook because the messages that
-# leaked came from the gate's own fix agents, which commit inside the gate's
-# separate repository: lint is the last firstmate-owned code that runs in that
-# repository before the first push. bin/fm-prepush-voice-guard.sh owns the
-# rule set.
+# Default no-args lint also reads back every commit message that is not yet on
+# the default branch. This step is here rather than in a git hook because the
+# messages that leaked came from the gate's own fix agents, which commit inside
+# the gate's separate repository: lint is the last firstmate-owned code that
+# runs in that repository before the first push.
+# bin/fm-prepush-voice-guard.sh owns the rule set.
 fm_lint_run_voice_guard() {
   [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
   "$SELF_DIR/fm-prepush-voice-guard.sh"

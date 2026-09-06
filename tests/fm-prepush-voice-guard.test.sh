@@ -204,7 +204,7 @@ Captain, this also removes the second copy.') || rc=$?
 test_refuses_a_pointer_to_the_working_session() {
   local tmp out rc=0
 
-  # The exact trailer shape already in merged history three times.
+  # The exact trailer shape already in merged history sixteen times.
   rc=0
   out=$(fm_voice_text 'Claude-Session: https://claude.ai/code/session_01HoVE1w6AQB5qritmXc1aLC') || rc=$?
   expect_code 1 "$rc" "a session trailer was not refused"
