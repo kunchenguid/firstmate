@@ -308,17 +308,21 @@ Ctrl+c:cancel')
 # classifies a working Grok pane idle. busy_tail and idle_tail are verbatim
 # captures from docs/verification/grok-queued-enter.md (grok 1.0.13,
 # 2026-09-06); legacy_tail is the older recorded Ctrl+c:cancel token, which
-# that session never observed. This file sources bin/fm-busy-lib.sh without
+# that session never observed. quoted_tail is an idle pane whose finished turn
+# quoted the token in prose: the signature matches the measured footer row, so
+# only the row classifies busy. This file sources bin/fm-busy-lib.sh without
 # its canonical owner bin/fm-composer-lib.sh, so the plain calls exercise the
 # defensive literal duplicate; the final arm sources the owner and must agree
 # with it.
 test_grok_regex_active_turn_busy() {
-  local state out busy_tail idle_tail legacy_tail
+  local state out busy_tail idle_tail legacy_tail quoted_tail
   state=$(new_state_dir grok-active-turn)
   busy_tail='    ⠧ Run sleep 30 and wait for completion… 9.8s                                                                      11s ⇣36.2k [↓][stop]
   Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+x:shortcuts'
   legacy_tail='Ctrl+c:cancel'
   idle_tail='  Shift+Tab:mode  │  Ctrl+x:shortcuts'
+  quoted_tail='The measured busy footer is `Esc:cancel`, not `esc interrupt`.
+  Shift+Tab:mode  │  Ctrl+x:shortcuts'
 
   out=$(fm_busy_classify tmux w1 grok t1 "$state" "$busy_tail")
   [ "$out" = "busy grok-regex" ] \
@@ -329,6 +333,9 @@ test_grok_regex_active_turn_busy() {
   out=$(fm_busy_classify tmux w1 grok t1 "$state" "$idle_tail")
   [ "$out" = "idle grok-regex" ] \
     || fail "grok's measured idle footer must classify idle, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" "$quoted_tail")
+  [ "$out" = "idle grok-regex" ] \
+    || fail "a finished turn quoting Esc:cancel must classify idle, got '$out'"
 
   out=$(. "$ROOT/bin/fm-composer-lib.sh"
     fm_busy_classify tmux w1 grok t1 "$state" "$busy_tail")
@@ -338,6 +345,10 @@ test_grok_regex_active_turn_busy() {
     fm_busy_classify tmux w1 grok t1 "$state" "$idle_tail")
   [ "$out" = "idle grok-regex" ] \
     || fail "the canonical grok signature must not match the idle footer, got '$out'"
+  out=$(. "$ROOT/bin/fm-composer-lib.sh"
+    fm_busy_classify tmux w1 grok t1 "$state" "$quoted_tail")
+  [ "$out" = "idle grok-regex" ] \
+    || fail "the canonical grok signature must not match quoted prose, got '$out'"
   pass "grok classifies busy for its measured active-turn footer under both signature copies"
 }
 

@@ -290,14 +290,20 @@ fm_composer_strip_ghost() {
 # Matching a footer to confirm a keystroke landed is a different question from
 # asking what a worker is doing, and the two must not be conflated.
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working...". grok renders
-# "Esc:cancel" during an active TOOL turn (measured live on grok 1.0.13,
-# 2026-09-06: docs/verification/grok-queued-enter.md, which captured no
-# thinking-only frame and claims none, so that sub-state is still owed a
-# measurement); "Ctrl+c:cancel" is the older recorded Grok footer and is kept
-# so a build that still renders it does not read idle mid-turn. Neither token appears in Grok's idle bar
-# ("Shift+Tab:mode  |  Ctrl+x:shortcuts"), and this regex is Grok's ONLY busy
-# source (bin/fm-busy-lib.sh has no semantic writer for grok), so a token this
+# interrupt"; opencode: "esc interrupt"; pi: "Working...". grok renders an
+# active-turn footer ROW whose "Esc:cancel" key always sits one separator after
+# "Shift+Tab:mode" (measured live on grok 1.0.13, 2026-09-06:
+# docs/verification/grok-queued-enter.md, which captured no thinking-only frame
+# and claims none, so that sub-state is still owed a measurement). The
+# alternative matches that ROW SHAPE, not the bare token, for the same reason
+# the Kimi signature below is anchored: ordinary output quoting "Esc:cancel"
+# must not classify an idle pane busy. The separator is matched as any
+# non-alphanumeric run because the captured glyph is a box-drawing character
+# and the pattern stays ASCII. "Ctrl+c:cancel" is the older recorded Grok
+# footer and is kept so a build that still renders it does not read idle
+# mid-turn. Neither footer appears in Grok's idle bar ("Shift+Tab:mode  |
+# Ctrl+x:shortcuts"), and this regex is Grok's ONLY busy source
+# (bin/fm-busy-lib.sh has no semantic writer for grok), so a footer this
 # signature misses classifies a working Grok pane idle.
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
@@ -335,7 +341,7 @@ FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
-FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Esc:cancel|Ctrl\+c:cancel'
+FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Shift\+Tab:mode[[:space:]]+[^[:alnum:][:space:]]+[[:space:]]+Esc:cancel|Ctrl\+c:cancel'
 # cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
 # same version rendered both `Working` and `Running` beside its braille spinner
 # in two consecutive turns, while `ctrl+c to stop` was present for the whole

@@ -208,7 +208,8 @@ This manual real-CLI experiment establishes the vendor behavior those synthetic 
 The measured busy footer is **`Esc:cancel`**, not `esc interrupt`, `esc to interrupt`, or `Ctrl+c:cancel`.
 Every capture above shows it during a running tool turn, so this record establishes the token for an active tool turn; no thinking-only frame was captured and none is claimed.
 The pre-existing `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'` never matched that footer, and it is Grok's only busy source, so a Grok 1.0.13 worker rendering the captures above classified `idle grok-regex` while demonstrably mid-turn.
-This measurement therefore refreshes that per-harness signature to `Esc:cancel|Ctrl\+c:cancel`, keeping the older recorded token so a Grok build that still renders it does not read idle, and refreshes the defensive duplicate of that literal in `bin/fm-busy-lib.sh` with it.
+This measurement therefore refreshes that per-harness signature to the captured footer-row shape - `Esc:cancel` one separator after `Shift+Tab:mode`, the layout common to both captured busy rows above - alternated with the older recorded `Ctrl+c:cancel` token so a Grok build that still renders it does not read idle, and refreshes the defensive duplicate of that literal in `bin/fm-busy-lib.sh` with it.
+The row shape rather than the bare token is matched because the token also appears in ordinary rendered output (this record itself quotes it), and Grok's regex is its only busy source, so a bare match would classify an idle pane busy and suppress its stale escalation.
 The refresh is pinned by `test_grok_regex_active_turn_busy` in `tests/fm-busy-state.test.sh`, which fails against the single-token regex, and by `test_grok_busy_signature_uses_measured_footer` in `tests/fm-tmux-submit-busy.test.sh`.
 
 The shared union `FM_DELIVERY_BUSY_REGEX_DEFAULT` carries NEITHER Grok token: it does not gain `Esc:cancel`, and the legacy `Ctrl+c:cancel` is removed from it.

@@ -331,9 +331,12 @@ test_claude_busy_signature_uses_real_capture_shapes() {
 
 # Grok's delivery signature after the 2026-09-06 live measurement
 # (docs/verification/grok-queued-enter.md, grok 1.0.13): the active-turn footer
-# is `Esc:cancel`, and it stays per-harness. The harness-less union must NOT
-# match it, because fm_tmux_submit_core reads the pane with no harness and
-# would convert a proven-pending grok composer to `empty` (reported delivered).
+# row renders `Esc:cancel` one separator after `Shift+Tab:mode`, and it stays
+# per-harness. The harness-less union must NOT match it, because
+# fm_tmux_submit_core reads the pane with no harness and would convert a
+# proven-pending grok composer to `empty` (reported delivered). The legacy
+# `Ctrl+c:cancel` token is owned by
+# test_claude_busy_signature_uses_real_capture_shapes above.
 test_grok_busy_signature_uses_measured_footer() {
   local dir fakebin composer
   dir="$TMP_ROOT/grok-signature"
@@ -361,11 +364,11 @@ test_grok_busy_signature_uses_measured_footer() {
   printf '  Shift+Tab:mode  │  Ctrl+x:shortcuts\n' > "$composer"
   pane_busy idle grok && fail "Grok's measured idle footer must not be busy"
 
-  # The older recorded footer stays busy for grok, and stays out of the union.
-  printf 'Ctrl+c:cancel\n' > "$composer"
-  pane_busy old grok || fail "Grok's older cancel footer should still be busy"
-  pane_busy old && fail "Grok's older cancel footer must not match the harness-less union"
-  pass "fm_pane_is_busy: both Grok busy footers are per-harness only, never the union"
+  # An idle pane whose finished turn quoted the token is still idle: the
+  # signature matches the footer row, not the bare token.
+  printf 'The measured busy footer is `Esc:cancel`, not `esc interrupt`.\n  Shift+Tab:mode  │  Ctrl+x:shortcuts\n' > "$composer"
+  pane_busy quoted grok && fail "quoted Esc:cancel prose must not make an idle Grok pane busy"
+  pass "fm_pane_is_busy: Grok's measured footer row is busy, per-harness, and not a bare token"
 }
 
 test_busy_pane_pending_returns_empty

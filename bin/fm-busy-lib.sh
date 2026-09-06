@@ -829,17 +829,20 @@ fm_busy_cursor_turn_state() {  # <transcript>
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches:
-# "Esc:cancel" during an active TOOL turn (measured live on grok 1.0.13,
-# 2026-09-06: docs/verification/grok-queued-enter.md; no thinking-only frame
-# was captured, so that sub-state is still owed a measurement) or the older
-# recorded "Ctrl+c:cancel". bin/fm-composer-lib.sh's FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT
-# is the canonical owner; the literal below is a defensive duplicate for
+# the active-turn footer row that renders "Esc:cancel" one separator after
+# "Shift+Tab:mode" (measured live on grok 1.0.13, 2026-09-06:
+# docs/verification/grok-queued-enter.md; no thinking-only frame was captured,
+# so that sub-state is still owed a measurement) or the older recorded
+# "Ctrl+c:cancel". The row shape, not the bare token, is matched so that
+# rendered output quoting "Esc:cancel" cannot classify an idle pane busy.
+# bin/fm-composer-lib.sh's FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT is the
+# canonical owner; the literal below is a defensive duplicate for
 # callers that source this file without that one, and must be refreshed with
 # it. FM_BUSY_REGEX still globally overrides the signature, mirroring the
 # historical operator escape hatch.
 fm_busy_grok_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
-    | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Esc:cancel|Ctrl\\+c:cancel}}"
+    | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Shift\\+Tab:mode[[:space:]]+[^[:alnum:][:space:]]+[[:space:]]+Esc:cancel|Ctrl\\+c:cancel}}"
 }
 
 # fm_busy_rovo_tail_busy: the Rovo-only temporary rendered-tail fallback.
