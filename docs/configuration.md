@@ -426,6 +426,22 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Project-local environment file (.env.local)
+
+Many projects keep local credentials in a git-ignored `.env.local` at the checkout root, and a task worktree - newly created or reissued from the pool - starts without one.
+`bin/fm-spawn.sh` therefore copies that file from the project's primary checkout into every fresh ship and scout task worktree while acquiring it, on every runtime backend, and refreshes the copy on each acquisition so a reissued slot never serves an earlier task's credential.
+Deleting your own `.env.local` retires those copies on each slot's next acquisition, so a revoked credential stops reaching new tasks.
+A relaunch reuses the worktree it already has, and a secondmate home is a provisioned firstmate home rather than a task worktree, so neither is touched.
+
+The project must git-ignore `.env.local` for any of this to happen.
+An unignored copy would be untracked work, which both the base-freshness check and teardown refuse, so the spawn reports the missing ignore rule and seeds nothing rather than wedging the slot.
+If a task removes that ignore rule after the file was seeded, firstmate retires its own copy so the worktree still returns, and it does that only after every check that protects unfinished work has already passed.
+It retires only the exact file it recorded seeding, unchanged since: a file changed since seeding, or one without a matching record, is left alone and reported as your uncommitted work.
+If a task-authored file is byte-identical to the recorded seed, teardown cannot distinguish it from the seeded copy and retires it as firstmate's own credential artifact.
+A `.env.local` the project tracks is version-controlled content that this seeding never writes over and never deletes, so a project that commits the file keeps exactly what it committed.
+The copy preserves the source's mode, and its contents are never printed to logs, status lines, or task metadata.
+`bin/fm-spawn.sh --help` and `bin/fm-env-local-lib.sh` own the exact per-edge behavior, including which states refuse the spawn and which degrade to a warning that names the file to fix by hand.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
