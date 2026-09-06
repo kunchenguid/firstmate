@@ -31,9 +31,26 @@ case "${1:-}" in
     exit 0
     ;;
   list-windows)
-    if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
-      printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
-    fi
+    session=
+    prev=
+    for arg in "$@"; do
+      if [ "$prev" = -t ]; then session=$arg; break; fi
+      prev=$arg
+    done
+    while IFS= read -r recorded; do
+      [ -n "$recorded" ] || continue
+      if [ -z "$session" ]; then
+        printf '%s\n' "$recorded"
+        continue
+      fi
+      case "$recorded" in
+        "$session":*) printf '%s\n' "${recorded#*:}" ;;
+        *:*) ;;
+        *) printf '%s\n' "$recorded" ;;
+      esac
+    done <<EOF
+${FM_FAKE_TMUX_WINDOW:-}
+EOF
     exit 0
     ;;
   display-message)

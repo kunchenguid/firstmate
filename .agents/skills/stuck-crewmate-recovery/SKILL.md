@@ -3,6 +3,7 @@ name: stuck-crewmate-recovery
 description: >-
   Agent-only playbook for stuck or missing ordinary Firstmate direct reports.
   Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
+  Also use on the inverse case: a live crewmate reporting the no-mistakes pipeline dead, unreachable, or timed out.
   Reconciles recorded work before escalating from targeted inspection through safe relaunch or failure.
 user-invocable: false
 metadata:
@@ -38,6 +39,25 @@ Before relaunch, prove that no live agent still owns the recorded task and that 
 Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
+
+## A live crewmate claiming the pipeline is dead
+
+This is the inverse of the dead-endpoint case above: the worker is alive and the pipeline it declares dead usually is too.
+A drive call blocks until the next gate or outcome, far longer than a harness lets one command run, and the daemon accepts a response immediately and runs the round in the background.
+So a crewmate's timed-out, killed, or errored drive call leaves it waiting on a read it never got, and the "the daemon is gone" conclusion it draws from that is a guess, not evidence.
+
+Read the two authoritative sources yourself before believing the claim:
+
+1. `no-mistakes daemon status` for the socket.
+2. `no-mistakes axi status --run <id>` for the run, or `bin/fm-crew-state.sh <id>`, which already folds this contradiction in and reports a non-socket daemon-or-timeout `blocked:` line over a running or fixing run with fresh activity as superseded because the run is alive.
+
+A refused connection or missing socket from `daemon status` is positive daemon-down evidence and must be escalated even if the persisted run record still says running or fixing; that record can be stale after the daemon exits.
+Otherwise, if the run is still running or fixing with recent activity, the claim is wrong: steer the crewmate to reattach with `no-mistakes axi run` from its own worktree, which is safe and idempotent while the run still matches its `HEAD`, and tell it a timeout is not daemon death.
+Nothing reaches the captain in that case.
+
+Never restart, stop, or update the shared daemon on a crewmate's claim.
+It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
+Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
 
 ## Live-endpoint escalation
 

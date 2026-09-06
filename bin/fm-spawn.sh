@@ -14,15 +14,18 @@
 #   scaffolded before that line existed warns once and launches on the flag. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, or an incomplete pair of Task subsections.
-#   For a no-mistakes ship, spawn renders `launch-brief.md` with the current
-#   `--intent` contract and the extracted captain intent. A legacy mixed Task is
-#   accepted there only under bin/fm-dod-lib.sh's provenance-marking rules;
-#   unmarked legacy Tasks stop for migration rather than becoming intent. That
-#   library owns the parsing and intent rules. When the explicit mode carries
-#   less rigor than the project's standing posture, a loud one-line deviation
-#   notice is printed and the spawn continues.
+#   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
+#   it also carries the current `--intent` contract and the extracted captain
+#   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
+#   provenance-marking rules; unmarked legacy Tasks stop for migration rather
+#   than becoming intent. That library owns the parsing and intent rules. When
+#   the explicit mode carries less rigor than the project's standing posture, a
+#   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   Ship/scout launches always supply fm-dod-lib.sh's current worker role scope
+#   using the same private launch-brief overlay. This never rewrites a project's
+#   instruction files or a secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
@@ -1830,18 +1833,24 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         exit 1
       fi
     fi
-    SOURCE_BRIEF=$BRIEF
-    BRIEF="$DATA/$ID/launch-brief.md"
-    BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
-    {
-      cat "$SOURCE_BRIEF"
-      fm_brief_intent_overlay "$CAPTAIN_INTENT"
-    } > "$BRIEF_TMP" || { rm -f -- "$BRIEF_TMP"; echo "error: could not render current intent contract for $SOURCE_BRIEF" >&2; exit 1; }
-    if ! mv "$BRIEF_TMP" "$BRIEF"; then
-      rm -f -- "$BRIEF_TMP"
-      echo "error: could not publish current intent contract for $SOURCE_BRIEF" >&2
-      exit 1
-    fi
+  fi
+  # Use the existing launch-brief overlay for every worker kind, including
+  # pre-scope briefs and relaunches. Charters never enter this worker path.
+  SOURCE_BRIEF=$BRIEF
+  BRIEF="$DATA/$ID/launch-brief.md"
+  BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
+  {
+    cat "$SOURCE_BRIEF" &&
+      printf '\n' &&
+      fm_brief_worker_role &&
+      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+        fm_brief_intent_overlay "$CAPTAIN_INTENT"
+      fi
+  } > "$BRIEF_TMP" || { rm -f -- "$BRIEF_TMP"; echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2; exit 1; }
+  if ! mv "$BRIEF_TMP" "$BRIEF"; then
+    rm -f -- "$BRIEF_TMP"
+    echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
+    exit 1
   fi
 fi
 

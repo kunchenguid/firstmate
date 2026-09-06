@@ -64,6 +64,9 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and defers self-governance recognition and insertion to
 # fm-ensure-agents-md.sh's contract.
+# Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
+# fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
+# second owner of a contract that must stay current across relaunches.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -387,8 +390,17 @@ The report is the only thing that survives, so anything worth keeping must be in
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+   every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
+   manages the daemon.
+   Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
+   \`no-mistakes axi status\`. If the daemon socket refuses connections or is missing, append
+   \`blocked: {the daemon error}\` and stop even when the local run record still says running or
+   fixing, because that record can be stale after the daemon exits. A run record failed with a
+   daemon error is also a real block.
+   Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
+   going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
+   the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
+   timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
 
@@ -469,8 +481,17 @@ $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
-   daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+   every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
+   manages the daemon.
+   Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
+   \`no-mistakes axi status\`. If the daemon socket refuses connections or is missing, append
+   \`blocked: {the daemon error}\` and stop even when the local run record still says running or
+   fixing, because that record can be stale after the daemon exits. A run record failed with a
+   daemon error is also a real block.
+   Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
+   going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
+   the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
+   timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
 

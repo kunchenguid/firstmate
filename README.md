@@ -37,7 +37,7 @@ firstmate is not a model, not a harness, not a skill, not an MCP server, and not
 firstmate is an agent distro for running a crew of agents.
 An agent distro is a portable directory of instructions, skills, tooling, policies, and state conventions that turns a general-purpose agent into a specialized one.
 There is no app to install: the cloned repo is the distro - `AGENTS.md`, bundled firstmate skills, and helper scripts that any terminal coding agent can follow.
-Launching a supported harness inside it instantiates your first mate - and makes you the captain.
+Launching a supported harness inside it for your primary session instantiates your first mate - and makes you the captain.
 
 ## Features
 
@@ -215,7 +215,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi and `pi-signed`, Grok, Cursor, and unknown harness fallback.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
 - [docs/documentation-audiences.md](docs/documentation-audiences.md) - documentation audiences and the machine-checked placement boundary.
-- [`AGENTS.md`](AGENTS.md) - the distro's always-loaded operating contract and routing index for conditional procedures.
+- [`AGENTS.md`](AGENTS.md) - the supervisor contract, role boundary, and routing index for conditional procedures.
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.
 
 ## Contributing
