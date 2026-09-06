@@ -158,6 +158,15 @@ run_park() {  # <dir> [loop_count] [loop_ceiling]
   fi
 }
 
+# Run the park as a child of the fake cursor harness WITHOUT taking the home
+# lock: the shape of a crew/scout worktree, which never takes a home's helm.
+run_park_unlocked() {  # <dir>
+  local dir=$1 payload
+  payload='{"session_id":"sess-cursor","generation_id":"gen-0","loop_count":0,"status":"completed","hook_event_name":"stop","cursor_version":"2026.08.11-e8db854"}'
+  printf '%s' "$payload" | env -u PI_CODING_AGENT FM_HOME="$dir" FM_CURSOR_PARK_POLL=1 \
+    "$FAKE_CURSOR" -c '"$FM_HOME/bin/fm-turnend-guard-cursor.sh"' 2>/dev/null
+}
+
 run_session() {  # <dir> <event> <source> [session-id]
   local dir=$1 event=$2 source=$3 session_id=${4:-sess-cursor} payload
   payload=$(printf '{"hook_event_name":"%s","session_id":"%s","cursor_version":"x"}' "$event" "$session_id")
@@ -588,7 +597,7 @@ test_park_inert_in_child_worktree() {
   install_scripts "$child"
   : > "$child/state/task1.meta"
   write_arm_fixture "$child" actionable
-  out=$(run_park "$child")
+  out=$(run_park_unlocked "$child")
   [ -z "$out" ] || fail "a crewmate worktree must stay outside primary scope: $out"
   pass "cursor park: inert inside a child crewmate worktree"
 }

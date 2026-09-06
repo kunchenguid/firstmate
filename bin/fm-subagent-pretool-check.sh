@@ -175,13 +175,8 @@ FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pw
 FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 
-# Scope to a genuine primary home, exactly as the session-start nudge and the
-# turn-end guard do. fm_primary_scope_matches accepts a plain checkout or a
-# marked secondmate home - both operate a fleet and must dispatch through it -
-# and rejects a linked task worktree, which is the shape bin/fm-spawn.sh always
-# hands a crewmate. A crewmate using delegation tools inside its own task
-# worktree is legitimate and stays allowed. Any failure to confirm the home is
-# inert (exit 0), never a block, so a broken environment never denies a call.
+# Primary scope is owned by bin/fm-primary-scope-lib.sh (docs/turnend-guard.md);
+# any failure to confirm the home is inert (exit 0), never a block.
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
