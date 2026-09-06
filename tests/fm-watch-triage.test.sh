@@ -702,6 +702,115 @@ test_delivered_terminal_footer_change_is_absorbed() {
   pass "a delivered terminal lifecycle absorbs changing cosmetic footer content"
 }
 
+write_claude_statusline_case() {
+  local dir=$1 delivered=$2 state window status_file key pane_hash sig
+  state="$dir/state"
+  window="test:fm-claude-statusline"
+  status_file="$state/claude-statusline.status"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/claude-statusline.meta"
+  printf 'done: PR https://example.test/pr/claude-statusline\n' > "$status_file"
+  printf 'finished, awaiting review\n5h ███ 61%% (1h34m) | api wait 11s\n' > "$dir/pane.txt"
+  prime_status_seen "$state" "$status_file" || return 1
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text $'finished, awaiting review\n5h ███ 61% (1h34m) | api wait 11s')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  if [ "$delivered" = 1 ]; then
+    printf 'done: PR https://example.test/pr/claude-statusline' > "$state/.hb-surfaced-claude-statusline"
+  fi
+}
+
+run_claude_statusline_transition() {
+  local state=$1 fakebin=$2 out=$3 capture_file=$4 status_file=$5 window=$6 line=$7 row=$8 mode=$9
+  local key pane_hash pid
+  printf '%s\n' "$line" >> "$status_file"
+  if [ "$mode" = stale ]; then
+    prime_status_seen "$state" "$status_file" || return 1
+  fi
+  printf 'finished, awaiting review\n%s\n' "$row" > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, awaiting review
+$row")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 \
+    watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+  if [ "$mode" = stale ]; then
+    grep -Fx "stale: $window" "$out" >/dev/null || return 1
+  else
+    grep -F "signal: $status_file" "$out" >/dev/null || return 1
+  fi
+  [ "$(cat "$state/.hb-surfaced-claude-statusline")" = "$line" ] || return 1
+  ack_stopped_cycle "$state" || return 1
+}
+
+test_delivered_terminal_claude_statusline_change_is_absorbed() {
+  local dir state fakebin out capture_file window key first_hash second_hash pid absorbed
+  local status_file raw_dir raw_state raw_fakebin raw_out raw_capture raw_window
+  dir=$(make_case terminal-claude-statusline-delivered)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  write_claude_statusline_case "$dir" 1 || fail "could not create the delivered Claude statusLine fixture"
+  window="test:fm-claude-statusline"; status_file="$state/claude-statusline.status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  first_hash=$(hash_text $'finished, awaiting review
+5h ███ 61% (1h34m) | api wait 11s')
+  second_hash=$(hash_text $'finished, awaiting review
+5h ███ 61% (1h34m) | api wait 12s')
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  absorbed=0
+  await_absorbed_stale "$pid" "$out" "$state/.stale-$key" "$first_hash" || absorbed=$?
+  case "$absorbed" in
+    1) reap "$pid"; fail "a delivered Claude statusLine state with no tick woke the watcher: $(cat "$out")" ;;
+    2) reap "$pid"; fail "delivered Claude statusLine state did not reach stale bookkeeping" ;;
+  esac
+  printf 'finished, awaiting review\n5h ███ 61%% (1h34m) | api wait 12s\n' > "$capture_file"
+  printf '%s' "$second_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  absorbed=0
+  await_absorbed_stale "$pid" "$out" "$state/.stale-$key" "$second_hash" || absorbed=$?
+  case "$absorbed" in
+    1) reap "$pid"; fail "a ticking Claude statusLine row woke a delivered terminal worker: $(cat "$out")" ;;
+    2) reap "$pid"; fail "stale bookkeeping did not advance after the Claude statusLine tick" ;;
+  esac
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "ticking Claude statusLine text queued a duplicate wake"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "ticking Claude statusLine text started a wedge timer"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the quiet delivered Claude statusLine cycle"
+
+  raw_dir=$(make_case terminal-claude-statusline-undelivered)
+  raw_state="$raw_dir/state"; raw_fakebin="$raw_dir/fakebin"; raw_out="$raw_dir/watch.out"; raw_capture="$raw_dir/pane.txt"
+  write_claude_statusline_case "$raw_dir" 0 || fail "could not create the undelivered Claude statusLine fixture"
+  raw_window="test:fm-claude-statusline"; status_file="$raw_state/claude-statusline.status"
+  PATH="$raw_fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$raw_window" FM_FAKE_TMUX_CAPTURE="$raw_capture" \
+    FM_STATE_OVERRIDE="$raw_state" FM_CREW_STATE_BIN="$raw_fakebin/fm-crew-state.sh" FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$raw_out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the first undelivered Claude statusLine terminal state did not wake"; }
+  [ "$(grep -cF "stale: $raw_window" "$raw_out")" -eq 1 ] || fail "the first undelivered Claude statusLine state did not wake exactly once: $(cat "$raw_out")"
+  [ "$(cat "$raw_state/.hb-surfaced-claude-statusline")" = "done: PR https://example.test/pr/claude-statusline" ] || fail "the first Claude statusLine wake did not record delivery"
+  ack_stopped_cycle "$raw_state" || fail "could not acknowledge the first Claude statusLine wake"
+
+  run_claude_statusline_transition "$raw_state" "$raw_fakebin" "$raw_out" "$raw_capture" "$status_file" "$raw_window" \
+    "blocked: credentials expired" '5h ███ 61% (1h34m) | api wait 13s' stale \
+    || fail "a later blocked transition did not wake after Claude statusLine churn"
+  run_claude_statusline_transition "$raw_state" "$raw_fakebin" "$raw_out" "$raw_capture" "$status_file" "$raw_window" \
+    "failed: rate-limit probe failed" '5h ███ 61% (1h34m) | api wait 14s' stale \
+    || fail "a later failed transition did not wake after Claude statusLine churn"
+  run_claude_statusline_transition "$raw_state" "$raw_fakebin" "$raw_out" "$raw_capture" "$status_file" "$raw_window" \
+    "needs-decision [key=credential]: renew credentials" '5h ███ 61% (1h34m) | api wait 15s' signal \
+    || fail "a later decision transition did not wake after Claude statusLine churn"
+  run_claude_statusline_transition "$raw_state" "$raw_fakebin" "$raw_out" "$raw_capture" "$status_file" "$raw_window" \
+    "merged" '5h ███ 61% (1h34m) | api wait 16s' signal \
+    || fail "a later merged transition did not wake after Claude statusLine churn"
+  pass "Claude statusLine churn is absorbed after delivery while first and later real transitions wake"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -2220,6 +2329,7 @@ test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_delivered_terminal_footer_change_is_absorbed
+test_delivered_terminal_claude_statusline_change_is_absorbed
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

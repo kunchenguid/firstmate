@@ -16,7 +16,7 @@ make_home() {
 }
 
 write_terminal_footer_case() {
-  local home=$1 delivered=$2 fakebin key sig hash
+  local home=$1 delivered=$2 style=${3:-herdr} fakebin key sig hash
   fakebin="$home/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
@@ -37,9 +37,17 @@ SH
   printf 'done: PR https://example.test/pr/footer\n' > "$home/state/footer.status"
   sig=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_signal_sig "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/footer.status")
   printf '%s' "$sig" > "$home/state/.seen-footer_status"
-  printf 'finished, awaiting review\n⏱  16m | 12%% context\n' > "$home/state/pane.txt"
+  if [ "$style" = claude-statusline ]; then
+    printf 'finished, awaiting review\n5h ███ 61%% (1h34m) | api wait 12s\n' > "$home/state/pane.txt"
+  else
+    printf 'finished, awaiting review\n⏱  16m | 12%% context\n' > "$home/state/pane.txt"
+  fi
   key=test_fm-footer
-  hash=$(hash_text $'finished, awaiting review\n⏱  15m | 12% context')
+  if [ "$style" = claude-statusline ]; then
+    hash=$(hash_text $'finished, awaiting review\n5h ███ 61% (1h34m) | api wait 11s')
+  else
+    hash=$(hash_text $'finished, awaiting review\n⏱  15m | 12% context')
+  fi
   printf '%s' "$hash" > "$home/state/.hash-$key"
   printf '1\n' > "$home/state/.count-$key"
   if [ "$delivered" = 1 ]; then
@@ -180,9 +188,46 @@ test_undelivered_terminal_footer_checkpoint_wakes_once() {
   pass "the first undelivered changing-footer state wakes the Codex checkpoint once"
 }
 
+test_delivered_terminal_claude_statusline_checkpoint_is_quiet() {
+  local home out status absorbed
+  home=$(make_home claude-statusline-delivered)
+  out="$home/out.txt"
+  write_terminal_footer_case "$home" 1 claude-statusline
+  absorbed=$(hash_text $'finished, awaiting review
+5h ███ 61% (1h34m) | api wait 12s')
+  status=0
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW=test:fm-footer \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$CHECKPOINT" --seconds 20 >"$out" 2>&1 || status=$?
+  expect_code 124 "$status" "delivered Claude statusLine checkpoint exit"
+  assert_contains "$(cat "$out")" "checkpoint: no actionable wake within 20s" "quiet delivered Claude statusLine checkpoint line missing"
+  assert_absent "$home/state/.wake-queue" "delivered Claude statusLine checkpoint queued a wake"
+  [ "$(cat "$home/state/.stale-test_fm-footer" 2>/dev/null || true)" = "$absorbed" ] \
+    || fail "the quiet checkpoint never reached the delivered Claude statusLine absorb"
+  assert_no_live_watch_lock "$home/state/.watch.lock" "delivered Claude statusLine checkpoint left a live watcher"
+  pass "delivered Claude statusLine churn stays quiet through the Codex checkpoint"
+}
+
+test_undelivered_terminal_claude_statusline_checkpoint_wakes_once() {
+  local home out status
+  home=$(make_home claude-statusline-undelivered)
+  out="$home/out.txt"
+  write_terminal_footer_case "$home" 0 claude-statusline
+  status=0
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW=test:fm-footer \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$CHECKPOINT" --seconds 60 >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "undelivered Claude statusLine checkpoint exit"
+  [ "$(grep -c '^stale: test:fm-footer$' "$out")" -eq 1 ] \
+    || fail "undelivered Claude statusLine checkpoint did not pass through exactly one stale wake: $(cat "$out")"
+  pass "the first undelivered Claude statusLine state wakes the Codex checkpoint once"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
 test_delivered_terminal_footer_checkpoint_is_quiet
 test_undelivered_terminal_footer_checkpoint_wakes_once
+test_delivered_terminal_claude_statusline_checkpoint_is_quiet
+test_undelivered_terminal_claude_statusline_checkpoint_wakes_once

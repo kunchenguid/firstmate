@@ -155,7 +155,7 @@ SH
 }
 
 write_real_terminal_watch_fixture() {
-  local dir=$1 delivered=$2 key hash sig
+  local dir=$1 delivered=$2 style=${3:-herdr} key hash sig
   mkdir -p "$dir/fakebin"
   cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -174,11 +174,19 @@ SH
   chmod +x "$dir/fakebin/tmux" "$dir/fakebin/fm-crew-state.sh"
   printf 'window=test:fm-footer\nkind=ship\n' > "$dir/state/footer.meta"
   printf 'done: PR https://example.test/pr/footer\n' > "$dir/state/footer.status"
-  printf 'finished, awaiting review\n⏱  15m | 12%% context\n' > "$dir/state/pane.txt"
+  if [ "$style" = claude-statusline ]; then
+    printf 'finished, awaiting review\n5h ███ 61%% (1h34m) | api wait 11s\n' > "$dir/state/pane.txt"
+  else
+    printf 'finished, awaiting review\n⏱  15m | 12%% context\n' > "$dir/state/pane.txt"
+  fi
   sig=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_wake_signal_sig "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state/footer.status")
   printf '%s' "$sig" > "$dir/state/.seen-footer_status"
   key=test_fm-footer
-  hash=$(hash_text $'finished, awaiting review\n⏱  15m | 12% context')
+  if [ "$style" = claude-statusline ]; then
+    hash=$(hash_text $'finished, awaiting review\n5h ███ 61% (1h34m) | api wait 10s')
+  else
+    hash=$(hash_text $'finished, awaiting review\n⏱  15m | 12% context')
+  fi
   printf '%s' "$hash" > "$dir/state/.hash-$key"
   printf '1\n' > "$dir/state/.count-$key"
   if [ "$delivered" = 1 ]; then
@@ -200,7 +208,11 @@ PATH="$FM_HOME/fakebin:$PATH" FM_STATE_OVERRIDE="$FM_HOME/state" FM_CREW_STATE_B
 pid=$!
 sleep 0.3
 if [ "${FM_TEST_FOOTER_TICK:-0}" = 1 ] && watcher_live "$pid"; then
-  printf 'finished, awaiting review\n⏱  16m | 12%% context\n' > "$FM_HOME/state/pane.txt"
+  if [ "${FM_TEST_FOOTER_STYLE:-herdr}" = claude-statusline ]; then
+    printf 'finished, awaiting review\n5h ███ 61%% (1h34m) | api wait 12s\n' > "$FM_HOME/state/pane.txt"
+  else
+    printf 'finished, awaiting review\n⏱  16m | 12%% context\n' > "$FM_HOME/state/pane.txt"
+  fi
 fi
 i=0
 settled=0
@@ -448,6 +460,35 @@ test_delivered_terminal_footer_change_does_not_rewake_claude() {
   pass "Claude Stop stays quiet for delivered changing-footer state and rewakes once for the first undelivered state"
 }
 
+test_delivered_terminal_claude_statusline_change_does_not_rewake_claude() {
+  local dir out status watch_pid post_tick_hash
+  dir=$(make_primary_dir "$TMP_ROOT/terminal-claude-statusline-delivered")
+  : > "$dir/state/task.meta"
+  write_real_terminal_watch_fixture "$dir" 1 claude-statusline
+  post_tick_hash=$(hash_text $'finished, awaiting review
+5h ███ 61% (1h34m) | api wait 12s')
+  out=$(FM_WATCH_SCRIPT="$ROOT/bin/fm-watch.sh" FM_TEST_FOOTER_STYLE=claude-statusline FM_TEST_FOOTER_TICK=1 \
+    FM_TEST_FOOTER_STALE_HASH="$post_tick_hash" run_autoarm "$dir" 2>/dev/null); status=$?
+  [ "$status" -eq 0 ] || fail "a delivered Claude statusLine change must not trigger a Claude Stop rewake: rc=$status output=$out"
+  [ -z "$out" ] || fail "a delivered Claude statusLine change produced Claude Stop feedback: $out"
+  [ "$(epoch_outcome "$dir")" = clean ] || fail "a delivered Claude statusLine change did not record a clean Claude cycle"
+  [ "$(cat "$dir/state/.stale-test_fm-footer" 2>/dev/null || true)" = "$post_tick_hash" ] \
+    || fail "the quiet Claude cycle never reached the delivered-statusLine absorb"
+  watch_pid=$(cat "$dir/state/fixture-watcher-pid")
+  kill "$watch_pid" 2>/dev/null || true
+  wait "$watch_pid" 2>/dev/null || true
+
+  dir=$(make_primary_dir "$TMP_ROOT/terminal-claude-statusline-undelivered")
+  : > "$dir/state/task.meta"
+  write_real_terminal_watch_fixture "$dir" 0 claude-statusline
+  out=$(FM_WATCH_SCRIPT="$ROOT/bin/fm-watch.sh" FM_TEST_FOOTER_STYLE=claude-statusline \
+    run_autoarm "$dir" 2>/dev/null); status=$?
+  [ "$status" -eq 2 ] || fail "the first undelivered Claude statusLine terminal state must trigger exactly one rewake: rc=$status output=$out"
+  assert_contains "$out" "stale: test:fm-footer" "the Claude statusLine rewake must carry the real watcher reason"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the first undelivered Claude statusLine state did not record a rewake"
+  pass "Claude Stop stays quiet for delivered statusLine churn and rewakes once for the first undelivered state"
+}
+
 test_actionable_close_with_live_successor_rewakes_once() {
   local dir out out2 status status2 pid identity
   dir=$(make_primary_dir "$TMP_ROOT/actionable-live-successor")
@@ -688,6 +729,7 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_delivered_terminal_footer_change_does_not_rewake_claude
+test_delivered_terminal_claude_statusline_change_does_not_rewake_claude
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying

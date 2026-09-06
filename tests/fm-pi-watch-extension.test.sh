@@ -61,7 +61,7 @@ JS
 }
 
 write_pi_terminal_footer_case() {
-  local home=$1 delivered=$2 key hash sig
+  local home=$1 delivered=$2 style=${3:-herdr} key hash sig
   mkdir -p "$home/state" "$home/config" "$home/fakebin"
   cat > "$home/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -83,11 +83,19 @@ SH
   chmod +x "$home/fakebin/tmux" "$home/fakebin/fm-crew-state.sh"
   printf 'window=test:fm-footer\nkind=ship\n' > "$home/state/footer.meta"
   printf 'done: PR https://example.test/pr/footer\n' > "$home/state/footer.status"
-  printf 'finished, awaiting review\n⏱  15m | 12%% context\n' > "$home/state/pane.txt"
+  if [ "$style" = claude-statusline ]; then
+    printf 'finished, awaiting review\n5h ███ 61%% (1h34m) | api wait 11s\n' > "$home/state/pane.txt"
+  else
+    printf 'finished, awaiting review\n⏱  15m | 12%% context\n' > "$home/state/pane.txt"
+  fi
   sig=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_signal_sig "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/footer.status")
   printf '%s' "$sig" > "$home/state/.seen-footer_status"
   key=test_fm-footer
-  hash=$(hash_text $'finished, awaiting review\n⏱  15m | 12% context')
+  if [ "$style" = claude-statusline ]; then
+    hash=$(hash_text $'finished, awaiting review\n5h ███ 61% (1h34m) | api wait 10s')
+  else
+    hash=$(hash_text $'finished, awaiting review\n⏱  15m | 12% context')
+  fi
   printf '%s' "$hash" > "$home/state/.hash-$key"
   printf '1\n' > "$home/state/.count-$key"
   if [ "$delivered" = 1 ]; then
@@ -107,6 +115,27 @@ exec env PATH="$FM_HOME/fakebin:$PATH" FM_STATE_OVERRIDE="$FM_HOME/state" FM_CRE
       printf "watcher: started pid=%s (beacon fresh)\\n" "$$"
     fi
     exec "$FM_WATCH_SCRIPT"
+  '
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+}
+
+write_pi_claude_statusline_arm() {
+  local repo=$1
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+env PATH="$FM_HOME/fakebin:$PATH" FM_STATE_OVERRIDE="$FM_HOME/state" FM_CREW_STATE_BIN="$FM_HOME/fakebin/fm-crew-state.sh" \
+  FM_FAKE_TMUX_WINDOW=test:fm-footer FM_FAKE_TMUX_CAPTURE="$FM_HOME/state/pane.txt" FM_POLL=0.2 FM_SIGNAL_GRACE=0.1 \
+  FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 sh -c '
+    if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+      printf "watcher: started pid=%s (beacon fresh)\\n" "$$"
+    fi
+    "$FM_WATCH_SCRIPT" &
+    pid=$!
+    sleep 0.3
+    printf "finished, awaiting review\\n5h ███ 61%% (1h34m) | api wait 12s\\n" > "$FM_HOME/state/pane.txt"
+    wait "$pid"
   '
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
@@ -189,6 +218,30 @@ test_delivered_terminal_footer_change_does_not_send_pi_followup() {
   write_pi_terminal_footer_case "$home" 0
   run_pi_terminal_footer_case "$repo" "$home" 1 || fail "Pi undelivered footer fixture failed"
   pass "Pi sends no follow-up for delivered changing-footer state and sends one for the first undelivered state"
+}
+
+test_delivered_terminal_claude_statusline_change_does_not_send_pi_followup() {
+  local repo home pane_hash
+  repo="$TMP_ROOT/pi-claude-statusline-root"
+  home="$TMP_ROOT/pi-claude-statusline-delivered"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  write_pi_terminal_footer_case "$home" 1 claude-statusline
+  write_pi_claude_statusline_arm "$repo"
+  pane_hash=$(hash_text $'finished, awaiting review
+5h ███ 61% (1h34m) | api wait 12s')
+  FM_TEST_FOOTER_STYLE=claude-statusline run_pi_terminal_footer_case "$repo" "$home" 0 "$pane_hash" \
+    || fail "Pi delivered Claude statusLine fixture failed"
+  [ "$(cat "$home/state/.stale-test_fm-footer" 2>/dev/null || true)" = "$pane_hash" ] \
+    || fail "the quiet Pi cycle never reached the delivered Claude statusLine absorb"
+  [ ! -e "$home/state/.stale-since-test_fm-footer" ] || fail "the delivered Claude statusLine absorb left a wedge timer running for Pi"
+
+  home="$TMP_ROOT/pi-claude-statusline-undelivered"
+  mkdir -p "$home/state" "$home/config"
+  write_pi_terminal_footer_case "$home" 0 claude-statusline
+  FM_TEST_FOOTER_STYLE=claude-statusline run_pi_terminal_footer_case "$repo" "$home" 1 \
+    || fail "Pi undelivered Claude statusLine fixture failed"
+  pass "Pi sends no follow-up for delivered Claude statusLine churn and sends one for the first undelivered state"
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
@@ -2283,6 +2336,7 @@ EOF
 }
 
 test_delivered_terminal_footer_change_does_not_send_pi_followup
+test_delivered_terminal_claude_statusline_change_does_not_send_pi_followup
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
