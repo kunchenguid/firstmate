@@ -4269,6 +4269,17 @@ else
     exit 1
   fi
 fi
+if [ -d "$STATE" ]; then
+  if retire_output=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$FM_ROOT/bin/fm-pipeline.sh" retire "$ID" 2>&1 >/dev/null); then
+    :
+  else
+    retire_status=$?
+    retire_output=${retire_output//$'\n'/ }
+    printf 'warning: pipeline record for %s was not retired (rc=%s): %s; retry: fm-pipeline.sh retire %s once state/%s.meta is confirmed absent\n' \
+      "$ID" "$retire_status" "$retire_output" "$ID" "$ID" >&2
+  fi
+fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

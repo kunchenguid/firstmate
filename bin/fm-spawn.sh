@@ -4583,6 +4583,15 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_META_TMP=
+  if reconcile_output=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$FM_ROOT/bin/fm-pipeline.sh" reconcile "$ID" 2>&1 >/dev/null); then
+    :
+  else
+    reconcile_status=$?
+    reconcile_output=${reconcile_output//$'\n'/ }
+    printf 'warning: pipeline record for %s was not reconciled (rc=%s): %s\n' \
+      "$ID" "$reconcile_status" "$reconcile_output" >&2
+  fi
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created
@@ -4604,6 +4613,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+  if reconcile_output=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$FM_ROOT/bin/fm-pipeline.sh" reconcile "$ID" 2>&1 >/dev/null); then
+    :
+  else
+    reconcile_status=$?
+    reconcile_output=${reconcile_output//$'\n'/ }
+    printf 'warning: pipeline record for %s was not reconciled (rc=%s): %s\n' \
+      "$ID" "$reconcile_status" "$reconcile_output" >&2
+  fi
 fi
 TREEHOUSE_ABORT_CLEANUP=0
 TREEHOUSE_ACQUIRED_PATH=

@@ -1099,6 +1099,202 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+write_pipeline_fixture() {
+  local case_dir=$1
+  printf '%s\n' \
+    'schema=fm-pipeline.v3 task=task-x1 kind=ship gen=teardown-test-task-x1' \
+    'rev=1 ts=2026-09-06T00:00:00Z step=dispatched evidence=meta:state/task-x1.meta gen=teardown-test-task-x1 head=unknown attempt=-' \
+    > "$case_dir/state/task-x1.pipeline"
+  printf '%s\n' 'wait=ext:fixture step=- gen=- evidence=state/task-x1.status:1 observed_at=1' \
+    > "$case_dir/state/task-x1.pipeline-seen"
+}
+
+test_teardown_skips_pipeline_retirement_when_nested_home_is_gone() {
+  local case_dir rc
+  case_dir=$(make_case pipeline-nested-state-gone)
+  write_meta "$case_dir" local-only secondmate
+  printf '%s\n' task-x1 > "$case_dir/state/.fm-secondmate-home"
+  printf '%s\n' "home=$case_dir/state" >> "$case_dir/state/task-x1.meta"
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "pipeline-nested-state-gone: teardown should succeed"
+  [ ! -e "$case_dir/state" ] || fail "pipeline-nested-state-gone: teardown recreated the removed state directory"
+  ! rg -F 'warning: pipeline record for task-x1' "$case_dir/stderr" >/dev/null \
+    || fail "pipeline-nested-state-gone: teardown warned after the nested state was removed"
+  pass "nested-home teardown skips pipeline retirement after state removal"
+}
+
+test_teardown_retires_pipeline_records_on_normal_remove() {
+  local case_dir rc
+  case_dir=$(setup_allow_local_teardown pipeline-remove)
+  write_pipeline_fixture "$case_dir"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "pipeline-remove: teardown should succeed"
+  assert_absent "$case_dir/state/task-x1.pipeline" \
+    "pipeline-remove: teardown left the lifecycle record"
+  assert_absent "$case_dir/state/task-x1.pipeline-seen" \
+    "pipeline-remove: teardown left the observation cache"
+  pass "normal teardown retires the task pipeline record and observation cache"
+}
+
+test_teardown_retires_pipeline_records_on_backlog_close() {
+  local case_dir rc
+  case_dir=$(setup_allow_local_teardown pipeline-backlog-close)
+  write_pipeline_fixture "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "pipeline-backlog-close: teardown should succeed"
+  assert_absent "$case_dir/state/task-x1.pipeline" \
+    "pipeline-backlog-close: teardown left the lifecycle record"
+  assert_absent "$case_dir/state/task-x1.pipeline-seen" \
+    "pipeline-backlog-close: teardown left the observation cache"
+  pass "backlog-close teardown retires the task pipeline record and observation cache"
+}
+
+test_teardown_warns_without_following_pipeline_cache_symlink() {
+  local case_dir rc stderr pipeline_before
+  case_dir=$(setup_allow_local_teardown pipeline-symlink)
+  write_pipeline_fixture "$case_dir"
+  pipeline_before="$case_dir/pipeline.before"
+  cp -- "$case_dir/state/task-x1.pipeline" "$pipeline_before"
+  rm -f "$case_dir/state/task-x1.pipeline-seen"
+  ln -s /dev/null "$case_dir/state/task-x1.pipeline-seen"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "pipeline-symlink: teardown should finish its own job"
+  stderr=$(cat "$case_dir/stderr")
+  assert_contains "$stderr" "warning: pipeline record for task-x1 was not retired" \
+    "pipeline-symlink: teardown did not warn about the owner refusal"
+  assert_contains "$stderr" "refused:unsafe-record-path" \
+    "pipeline-symlink: warning omitted the owner refusal"
+  assert_contains "$stderr" "retry: fm-pipeline.sh retire task-x1" \
+    "pipeline-symlink: warning omitted the retry instruction"
+  [ -L "$case_dir/state/task-x1.pipeline-seen" ] \
+    || fail "pipeline-symlink: teardown followed or removed the symlink"
+  [ "$(readlink "$case_dir/state/task-x1.pipeline-seen")" = /dev/null ] \
+    || fail "pipeline-symlink: teardown changed the symlink target"
+  cmp -s "$pipeline_before" "$case_dir/state/task-x1.pipeline" \
+    || fail "pipeline-symlink: owner refusal changed the lifecycle record"
+  pass "teardown warns and preserves an unsafe pipeline cache path"
+}
+
+test_teardown_reclaims_ownerless_pipeline_lock() {
+  local case_dir rc
+  case_dir=$(setup_allow_local_teardown pipeline-ownerless-lock)
+  write_pipeline_fixture "$case_dir"
+  mkdir "$case_dir/state/pipeline-events.log.lock"
+  touch -t 202001010000 "$case_dir/state/pipeline-events.log.lock"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "pipeline-stale-lock: teardown should succeed"
+  assert_absent "$case_dir/state/task-x1.pipeline" \
+    "pipeline-stale-lock: teardown left the lifecycle record"
+  assert_absent "$case_dir/state/task-x1.pipeline-seen" \
+    "pipeline-stale-lock: teardown left the observation cache"
+  [ ! -e "$case_dir/state/pipeline-events.log.lock" ] \
+    || fail "pipeline-stale-lock: teardown left the reclaimed owner lock"
+  pass "teardown reclaims an ownerless pipeline lock"
+}
+
+test_teardown_reclaims_dead_pipeline_lock() {
+  local case_dir rc dead lock owner
+  case_dir=$(setup_allow_local_teardown pipeline-dead-lock)
+  write_pipeline_fixture "$case_dir"
+  lock="$case_dir/state/pipeline-events.log.lock"
+  owner="$lock.owner.dead"
+  dead=999999
+  while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+  mkdir "$owner"
+  printf '%s\n' "$dead" > "$owner/pid"
+  ln -s "$owner" "$lock"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "pipeline-dead-lock: teardown should succeed"
+  assert_absent "$case_dir/state/task-x1.pipeline" \
+    "pipeline-dead-lock: teardown left the lifecycle record"
+  assert_absent "$case_dir/state/task-x1.pipeline-seen" \
+    "pipeline-dead-lock: teardown left the observation cache"
+  [ ! -e "$lock" ] || fail "pipeline-dead-lock: teardown left the reclaimed owner lock"
+  pass "teardown reclaims a dead pipeline lock holder"
+}
+
+test_teardown_finishes_when_pipeline_lock_is_live() {
+  local case_dir out rc pipeline_before lock_ready release holder_pid holder_rc=0 retire_out retire_rc=0
+  case_dir=$(setup_allow_local_teardown pipeline-live-lock)
+  write_pipeline_fixture "$case_dir"
+  pipeline_before="$case_dir/pipeline.before"
+  cp -- "$case_dir/state/task-x1.pipeline" "$pipeline_before"
+  lock_ready="$case_dir/pipeline-lock-ready"
+  release="$case_dir/pipeline-lock-release"
+  (
+    FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+      bash -c '
+        set -eu
+        root=$1 lock=$2 ready=$3 release=$4
+        . "$root/bin/fm-wake-lib.sh"
+        fm_lock_try_acquire "$lock"
+        trap '\''fm_lock_release "$lock"'\'' EXIT
+        : > "$ready"
+        while [ ! -e "$release" ]; do sleep 0.05; done
+      ' _ "$ROOT" "$case_dir/state/pipeline-events.log.lock" "$lock_ready" "$release"
+  ) &
+  holder_pid=$!
+  for _ in $(seq 1 100); do
+    [ -e "$lock_ready" ] && break
+    sleep 0.01
+  done
+  [ -e "$lock_ready" ] || {
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+    fail "pipeline-live-lock: lock holder did not start"
+  }
+
+  set +e
+  out=$(FM_PIPELINE_LOCK_TIMEOUT=1 run_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  : > "$release"
+  wait "$holder_pid" || holder_rc=$?
+  expect_code 0 "$rc" "pipeline-live-lock: teardown should finish its own job"
+  expect_code 0 "$holder_rc" "pipeline-live-lock: lock holder should release cleanly"
+  assert_contains "$out" "warning: pipeline record for task-x1 was not retired" \
+    "pipeline-live-lock: teardown did not report the owner refusal"
+  assert_contains "$out" "refused:lock-held" \
+    "pipeline-live-lock: warning omitted the live-lock refusal"
+  assert_contains "$out" "not retired (rc=3)" \
+    "pipeline-live-lock: warning omitted the bounded refusal status"
+  assert_contains "$out" "retry: fm-pipeline.sh retire task-x1" \
+    "pipeline-live-lock: warning omitted the retry instruction"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "pipeline-live-lock: teardown left the task record behind"
+  [ ! -e "$case_dir/state/.meta-task-x1.lock" ] \
+    || fail "pipeline-live-lock: teardown did not release its metadata lock"
+  cmp -s "$pipeline_before" "$case_dir/state/task-x1.pipeline" \
+    || fail "pipeline-live-lock: owner refusal changed the lifecycle record"
+  retire_out=$(FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-pipeline.sh" retire task-x1 2>&1) || retire_rc=$?
+  expect_code 0 "$retire_rc" "pipeline-live-lock: retire should succeed after the holder releases: $retire_out"
+  assert_absent "$case_dir/state/task-x1.pipeline" \
+    "pipeline-live-lock: post-release retire left the lifecycle record"
+  assert_absent "$case_dir/state/task-x1.pipeline-seen" \
+    "pipeline-live-lock: post-release retire left the observation cache"
+  pass "teardown preserves bytes under a live lock and retires them after release"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -4541,6 +4737,13 @@ test_local_only_missing_task_base_is_diagnosed
 test_local_only_empty_commit_does_not_seal_accepted
 test_local_only_delivery_seals_true_outcome_and_usage
 test_local_only_fork_remote_allows
+test_teardown_skips_pipeline_retirement_when_nested_home_is_gone
+test_teardown_retires_pipeline_records_on_normal_remove
+test_teardown_retires_pipeline_records_on_backlog_close
+test_teardown_warns_without_following_pipeline_cache_symlink
+test_teardown_reclaims_ownerless_pipeline_lock
+test_teardown_reclaims_dead_pipeline_lock
+test_teardown_finishes_when_pipeline_lock_is_live
 test_teardown_closes_the_backlog_item_itself
 test_teardown_allows_when_no_linked_kit_run
 test_teardown_refuses_unsealed_linked_kit_run_before_return
