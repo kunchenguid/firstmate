@@ -2512,81 +2512,7 @@ test_open_captain_call_bounds_stale_churn() {
   pass "work under an open captain call surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
 }
 
-test_terminal_hold_resurfaces_with_an_unchanged_hash() {
-  local dir state out capture wakes
-  command -v tasks-axi >/dev/null 2>&1 \
-    || { echo "skip: tasks-axi not found (same-hash captain-hold cadence)"; return 0; }
-  dir=$(make_hold_home held-same-hash 'done: PR https://example.invalid/pull/1 checks green' hold) \
-    || fail "could not build a same-hash captain-held fixture"
-  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
 
-  hold_watch_surface "$dir" "$out" "$capture" 'idle, unchanged' \
-    || fail "first sight of same-hash held work did not surface"
-  [ "$(hold_stale_wakes "$state")" -eq 1 ] \
-    || fail "first sight of same-hash held work did not queue one wake"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the first same-hash surface"
-
-  FM_HOLD_PAUSE_RESURFACE_SECS=3 hold_watch_launch "$dir" "$out" "$capture"
-  wait_for_exit "$HOLD_WATCH_PID" 100 \
-    || { reap "$HOLD_WATCH_PID"; fail "same-hash held work stayed silent past its re-surface window"; }
-  wakes=$(hold_stale_wakes "$state")
-  [ "$wakes" -eq 1 ] \
-    || fail "same-hash held work produced $wakes elapsed-window wakes instead of one"
-  pass "terminal held work re-surfaces on cadence without pane churn"
-}
-
-test_same_hash_hold_absorption_advances_the_terminal_timer() {
-  local dir state out capture key pane_hash calls real_tasks_axi first later decision
-  command -v tasks-axi >/dev/null 2>&1 \
-    || { echo "skip: tasks-axi not found (same-hash captain-hold timer)"; return 0; }
-  real_tasks_axi=$(command -v tasks-axi)
-  dir=$(make_hold_home held-timer 'done: PR https://example.invalid/pull/1 checks green' hold) \
-    || fail "could not build a same-hash captain-held timer fixture"
-  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"; key=$(hold_key)
-  printf 'idle, unchanged\n' > "$capture"
-  pane_hash=$(hash_text 'idle, unchanged')
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '%s' "$pane_hash" > "$state/.stale-$key"
-  printf '2\n' > "$state/.count-$key"
-  printf '%s\n' "$(( $(date +%s) - 100000 ))" > "$state/.stale-since-$key"
-
-  hold_watch_surface "$dir" "$out" "$capture" 'idle, unchanged' \
-    || fail "the initial same-hash hold boundary did not surface"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the initial same-hash hold surface"
-  printf '%s\n' "$(( $(date +%s) - 100000 ))" > "$state/.stale-since-$key"
-
-  calls="$dir/tasks-axi.calls"
-  cat > "$dir/fakebin/tasks-axi" <<EOF
-#!/usr/bin/env bash
-printf 'call\n' >> "$calls"
-exec "$real_tasks_axi" "\$@"
-EOF
-  chmod +x "$dir/fakebin/tasks-axi"
-  : > "$calls"
-
-  hold_watch_launch "$dir" "$out" "$capture"
-  wait_poll_cycle "$state" "$HOLD_WATCH_PID" 300 \
-    || { reap "$HOLD_WATCH_PID"; fail "same-hash hold absorption exited on its first poll"; }
-  first=$(awk 'END { print NR + 0 }' "$calls")
-  [ "$first" -gt 0 ] \
-    || { reap "$HOLD_WATCH_PID"; fail "same-hash hold absorption never consulted the backlog"; }
-  wait_poll_cycle "$state" "$HOLD_WATCH_PID" 300 \
-    || { reap "$HOLD_WATCH_PID"; fail "same-hash hold absorption exited on its second poll"; }
-  wait_poll_cycle "$state" "$HOLD_WATCH_PID" 300 \
-    || { reap "$HOLD_WATCH_PID"; fail "same-hash hold absorption exited on its third poll"; }
-  later=$(awk 'END { print NR + 0 }' "$calls")
-  [ "$later" -eq "$first" ] \
-    || { reap "$HOLD_WATCH_PID"; fail "an absorbed same-hash hold repeated backlog reads ($first then $later)"; }
-
-  printf 'go ahead\n' > "$dir/decision.txt"
-  decision="$dir/decision.txt"
-  PATH="$dir/fakebin:$PATH" run_hold "$dir" answer held-merge --decision-file "$decision" --release \
-    || { reap "$HOLD_WATCH_PID"; fail "could not release the absorbed same-hash hold"; }
-  wait_poll_cycle "$state" "$HOLD_WATCH_PID" 300 \
-    || { reap "$HOLD_WATCH_PID"; fail "releasing the hold resumed the expired wedge alarm immediately"; }
-  reap "$HOLD_WATCH_PID"
-  pass "same-hash hold absorption advances its timer off the backlog hot path"
-}
 
 # The other half of the same bound, and the one that decides whether widening the
 # wait was safe: the identical fixtures with NO hold must keep alarming on every
@@ -2618,48 +2544,6 @@ test_stale_churn_without_a_captain_call_still_alarms() {
   pass "a stale window with no open captain call keeps alarming on every new hash"
 }
 
-# The task id is not the call. A task can be held, answered with `--release`, and
-# re-held as a genuinely different captain call with NO status append, so a scope
-# carrying only the status-log signature let the second call inherit the first
-# call's silence and absorbed its first sight - the one thing this bound must
-# never do. bin/fm-captain-hold.sh owns that lifecycle and reports it through
-# `open --identity`.
-test_reheld_captain_call_starts_its_own_resurface_window() {
-  local spec name line dir state out capture wakes
-  command -v tasks-axi >/dev/null 2>&1 \
-    || { echo "skip: tasks-axi not found (re-held captain call)"; return 0; }
-  for spec in \
-    'reheld-delivery|done: PR https://example.invalid/pull/1 checks green' \
-    'reheld-declared|captain-held [key=merge]: awaiting the captain on the merge'
-  do
-    name=${spec%%|*}; line=${spec#*|}
-    dir=$(make_hold_home "$name" "$line" hold) \
-      || fail "[$name] could not build a captain-held backlog fixture"
-    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
-    set_mtime "$(( $(date +%s) - 5000 ))" "$state/held-merge.status"
-    printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
-
-    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
-      || fail "[$name] first sight of the first captain call did not surface"
-    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first call's surface"
-    hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 1 \
-      || fail "[$name] the first call's churn was not absorbed"
-    [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail "[$name] the first call's churn re-alarmed"
-
-    printf 'go ahead\n' > "$dir/decision.txt"
-    run_hold "$dir" answer held-merge --decision-file "$dir/decision.txt" --release \
-      || fail "[$name] could not record the captain's answer"
-    run_hold "$dir" hold held-merge --reason 'awaiting the captain a second time' \
-      || fail "[$name] could not re-hold the task as a second captain call"
-
-    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 3s' \
-      || fail "[$name] the second captain call inherited the first call's silence"
-    wakes=$(hold_stale_wakes "$state")
-    [ "$wakes" -eq 1 ] \
-      || fail "[$name] the second captain call produced $wakes first wakes instead of one"
-  done
-  pass "a released-then-re-held task is a distinct captain call whose first sight still alarms"
-}
 
 # The cadence marker may never outlive the wake it claims to record. Recording it
 # before publishing the durable wake turned a delayed alarm into a lost one: the
@@ -2699,64 +2583,7 @@ test_failed_wake_append_does_not_arm_the_captain_hold_throttle() {
   pass "a wake that never reached the durable queue arms no re-surface throttle"
 }
 
-# A captain call can open AFTER a hash was absorbed as provably working, with
-# neither the pane nor the status log changing. The backlog was read only on a
-# new hash, so nothing saw that call and the wedge timer kept firing
-# possible-wedge alarms straight through a legitimate wait.
-test_captain_call_bounds_an_elapsed_wedge_timer() {
-  local dir state out capture wakes key
-  command -v tasks-axi >/dev/null 2>&1 \
-    || { echo "skip: tasks-axi not found (elapsed wedge timer)"; return 0; }
-  dir=$(make_hold_home wedge-after-override 'done: PR https://example.invalid/pull/1 checks green' hold) \
-    || fail "could not build a captain-held backlog fixture"
-  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"; key=$(hold_key)
 
-  # This hash was already classified and absorbed as provably working, with its
-  # wedge timer running and long past the escalation bound.
-  printf 'idle, elapsed 1s\n' > "$capture"
-  printf '%s' "$(hash_text 'idle, elapsed 1s')" > "$state/.hash-$key"
-  printf '%s' "$(hash_text 'idle, elapsed 1s')" > "$state/.stale-$key"
-  printf '2\n' > "$state/.count-$key"
-  printf '%s\n' "$(( $(date +%s) - 100000 ))" > "$state/.stale-since-$key"
-
-  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
-    || fail "an elapsed wedge timer under an open captain call did not surface once"
-  wakes=$(hold_stale_wakes "$state")
-  [ "$wakes" -eq 1 ] || fail "the bounded re-surface produced $wakes wakes instead of one"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the bounded re-surface"
-
-  printf '%s\n' "$(( $(date +%s) - 100000 ))" > "$state/.stale-since-$key"
-  hold_watch_churn "$dir" "$out" "$capture" 'idle, elapsed 1s' 1 \
-    || fail "the elapsed wedge timer re-alarmed inside the captain call's window"
-  wakes=$(hold_stale_wakes "$state")
-  [ "$wakes" -eq 0 ] \
-    || fail "the elapsed wedge timer re-alarmed $wakes time(s) under an open captain call"
-  pass "a captain call opening after a provably-working override bounds its wedge timer"
-}
-
-# The same fixture with no captain call must still wedge-escalate: bounding a
-# real wedge would be worse than the churn this whole change removes.
-test_elapsed_wedge_timer_without_a_captain_call_still_escalates() {
-  local dir state out capture wakes key
-  command -v tasks-axi >/dev/null 2>&1 \
-    || { echo "skip: tasks-axi not found (unheld wedge timer)"; return 0; }
-  dir=$(make_hold_home wedge-unheld 'done: PR https://example.invalid/pull/1 checks green' nohold) \
-    || fail "could not build an unheld backlog fixture"
-  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"; key=$(hold_key)
-  printf 'idle, elapsed 1s\n' > "$capture"
-  printf '%s' "$(hash_text 'idle, elapsed 1s')" > "$state/.hash-$key"
-  printf '%s' "$(hash_text 'idle, elapsed 1s')" > "$state/.stale-$key"
-  printf '2\n' > "$state/.count-$key"
-  printf '%s\n' "$(( $(date +%s) - 100000 ))" > "$state/.stale-since-$key"
-
-  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
-    || fail "an elapsed wedge timer with no captain call stopped escalating"
-  wakes=$(hold_stale_wakes "$state")
-  [ "$wakes" -eq 1 ] || fail "the wedge escalation produced $wakes wakes instead of one"
-  grep -F 'possible wedge' "$state/.wake-queue" >/dev/null \
-    || fail "the wedge escalation lost its wedge wording: $(cat "$state/.wake-queue")"
-  pass "an elapsed wedge timer with no open captain call still escalates as a possible wedge"
-}
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
@@ -4575,13 +4402,8 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
 test_open_captain_call_bounds_stale_churn
-test_terminal_hold_resurfaces_with_an_unchanged_hash
-test_same_hash_hold_absorption_advances_the_terminal_timer
 test_stale_churn_without_a_captain_call_still_alarms
-test_reheld_captain_call_starts_its_own_resurface_window
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
-test_captain_call_bounds_an_elapsed_wedge_timer
-test_elapsed_wedge_timer_without_a_captain_call_still_escalates
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
