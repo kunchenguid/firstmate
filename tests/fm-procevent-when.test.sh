@@ -390,4 +390,147 @@ assert_absent "$ACTION_TAMPER_LOG" "the mutated action was not executed"
 assert_absent "$H/state/when/when-action-tamper.fired" "no fire was claimed for mutated action bytes"
 pass "mutated action bytes are refused before claiming the fire"
 
+# --- an action environment reaches the action, and its NAME is validated ------
+H="$TMP_ROOT/h-action-env"; new_home "$H"
+ENVLOG="$TMP_ROOT/action-env-act"
+# An action that records the one variable the assignment carries, so "the
+# environment reached the action" is observable rather than inferred.
+ENVACT="$TMP_ROOT/env-act.sh"
+cat > "$ENVACT" <<'SH'
+#!/usr/bin/env bash
+printf 'FM_TEST_HOME=%s\n' "${FM_TEST_HOME:-unset}" >> "$1"
+SH
+chmod +x "$ENVACT"
+if when "$H" arm bad-env --action-env 'not a name=x' \
+  --condition true --action "$ENVACT" "$ENVLOG" 2>"$TMP_ROOT/bad-env.err"; then
+  fail "an assignment with an invalid NAME must be refused"
+fi
+assert_grep 'action-env' "$TMP_ROOT/bad-env.err" "the refusal names the offending option"
+# A shell-safe NAME is not enough: an interpreter/loader-hijacking name must be
+# refused too, or the argv[0] trust binding is worthless for any action that is
+# itself a `#!/usr/bin/env`-shebang script.
+if when "$H" arm hijack-env --action-env 'LD_PRELOAD=/tmp/evil.so' \
+  --condition true --action "$ENVACT" "$ENVLOG" 2>"$TMP_ROOT/hijack-env.err"; then
+  fail "an interpreter/loader-hijacking NAME must be refused"
+fi
+assert_grep 'action-env' "$TMP_ROOT/hijack-env.err" "the LD_PRELOAD refusal names the offending option"
+assert_absent "$H/state/when/when-hijack-env.spec" "a refused LD_PRELOAD assignment is never armed"
+if when "$H" arm hijack-path --action-env 'PATH=/tmp/evil-bin' \
+  --condition true --action "$ENVACT" "$ENVLOG" 2>"$TMP_ROOT/hijack-path.err"; then
+  fail "a PATH action-env assignment must be refused"
+fi
+assert_grep 'action-env' "$TMP_ROOT/hijack-path.err" "the PATH refusal names the offending option"
+when "$H" arm action-env --interval 0.1 --stable 1 \
+  --action-env "FM_TEST_HOME=$H" \
+  --condition true --action "$ENVACT" "$ENVLOG" >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-action-env || fail "the action-env watch produced no outcome"
+assert_grep "FM_TEST_HOME=$H" "$ENVLOG" "the action ran under the registered assignment"
+RESULT=$(first_result "$H" when-action-env)
+assert_grep 'status: fired' "$RESULT" "an action with an environment still fires normally"
+pass "an action environment reaches the action and an invalid NAME is refused"
+
+# --- a repeat watch rings again after each fire, silently --------------------
+# The condition is true exactly while a trigger file exists, so the test drives
+# the watch through two independent "changes" and can prove the second ring is
+# a real re-arm rather than a leftover from the first.
+H="$TMP_ROOT/h-repeat"; new_home "$H"
+REPEAT_TRIG="$TMP_ROOT/repeat-trigger"
+REPEATLOG="$TMP_ROOT/repeat-act"
+when "$H" arm repeat --interval 0.1 --stable 1 --repeat \
+  --condition "$COND" "$REPEAT_TRIG" "$TMP_ROOT/repeat-count" \
+  --action "$ACT" "$REPEATLOG" >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_file "$TMP_ROOT/repeat-count" || fail "the repeat condition was never polled"
+: > "$REPEAT_TRIG"
+wait_for_result "$H" when-repeat || fail "the repeat watch captured no first outcome"
+RESULT=$(first_result "$H" when-repeat)
+assert_grep 'status: fired' "$RESULT" "the first repeat fire is recorded as fired"
+assert_grep 'repeat: continues' "$RESULT" "the first repeat fire declares that the watch continues"
+assert_contains "$(when "$H" classify "$RESULT")" fired "classify still reads a repeat fire as fired"
+if when "$H" terminal "$RESULT"; then
+  fail "a repeat watch's successful fire must not be terminal"
+fi
+when "$H" silent "$RESULT" || fail "a repeat watch's successful fire must be silent"
+assert_present "$H/state/when/when-repeat.fires" "the fire journal records the fire"
+# The registration survives, because only a terminal outcome retires a source.
+assert_present "$H/state/procevent/when-repeat.source" "a repeat fire keeps the watch registered"
+# Nothing woke firstmate, and the runner acknowledged the outcome itself, so a
+# later reconcile cannot re-announce it either.
+assert_not_contains "$(wake_payloads "$H")" "procevent when when-repeat" \
+  "a successful repeat fire never reaches the durable wake queue"
+SEQ=$(basename "$RESULT" | sed 's/^when-repeat\.//; s/\.result$//')
+assert_contains "$(pe "$H" handled when-repeat "$SEQ")" "already-handled" \
+  "the runner recorded the silent repeat fire as handled itself"
+# A second change must ring again, which only a re-armed watch can do.
+rm -f -- "$REPEAT_TRIG"
+for _ in $(seq 1 150); do
+  [ "$(count_lines "$REPEATLOG")" -ge 1 ] && break
+  sleep 0.1
+done
+: > "$REPEAT_TRIG"
+for _ in $(seq 1 150); do
+  [ "$(count_lines "$REPEATLOG")" -ge 2 ] && break
+  pe "$H" reconcile >/dev/null 2>&1
+  sleep 0.1
+done
+[ "$(count_lines "$REPEATLOG")" -ge 2 ] || fail "the repeat watch never rang a second time"
+assert_not_contains "$(wake_payloads "$H")" "procevent when when-repeat" \
+  "no repeat fire wakes firstmate"
+pass "a repeat watch rings again after each fire without waking firstmate"
+
+# --- retire stops a repeat watch ---------------------------------------------
+STOPPED=$(count_lines "$REPEATLOG")
+when "$H" retire repeat >/dev/null
+assert_absent "$H/state/procevent/when-repeat.source" "retire drops the repeat registration"
+assert_absent "$H/state/when/when-repeat.fires" "retire removes the fire journal"
+pe "$H" reconcile >/dev/null
+sleep 0.6
+assert_contains "$(count_lines "$REPEATLOG")" "$STOPPED" "a retired repeat watch never rings again"
+pass "retire stops a repeat watch"
+
+# --- a failing action still ends a repeat watch and wakes firstmate ----------
+H="$TMP_ROOT/h-repeat-fail"; new_home "$H"
+REPEATFAILLOG="$TMP_ROOT/repeat-fail-act"
+when "$H" arm repeat-fail --interval 0.1 --stable 1 --repeat \
+  --condition true --action "$ACT" "$REPEATFAILLOG" 9 >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-repeat-fail || fail "the failing repeat action captured no outcome"
+RESULT=$(first_result "$H" when-repeat-fail)
+assert_grep 'status: action-failed' "$RESULT" "the failure is captured under repeat too"
+assert_grep 'action_exit: 9' "$RESULT" "the exact exit code survives"
+when "$H" terminal "$RESULT" || fail "a failed action must stay terminal under repeat"
+if when "$H" silent "$RESULT"; then
+  fail "a failed action must never be silenced"
+fi
+for _ in $(seq 1 100); do
+  [ ! -e "$H/state/procevent/when-repeat-fail.source" ] && break
+  sleep 0.1
+done
+assert_absent "$H/state/procevent/when-repeat-fail.source" "a failed repeat watch retires itself"
+assert_contains "$(wake_payloads "$H")" "procevent when when-repeat-fail" \
+  "the failure reaches the durable wake queue"
+pass "a failing action ends a repeat watch and wakes firstmate"
+
+# --- the shape fm-spawn arms: a repeat watch whose action rings a task -------
+# fm-spawn arms this watch for every no-mistakes ship, and fm-send refuses to
+# resolve a target without an explicit FM_HOME, so the assignment is what makes
+# the ring land at all. This exercises that exact shape end to end rather than
+# reading fm-spawn's source.
+H="$TMP_ROOT/h-spawn-shape"; new_home "$H"
+RING_TASK=ring-task
+printf 'window=none\nbackend=tmux\n' > "$H/state/$RING_TASK.meta"
+when "$H" arm "nm-state-$RING_TASK" --interval 0.1 --stable 1 --repeat \
+  --action-env "FM_HOME=$H" \
+  --condition true \
+  --action "$ROOT/bin/fm-send.sh" "$RING_TASK" 'no-mistakes state changed' >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" "when-nm-state-$RING_TASK" || fail "the spawn-shaped watch captured no outcome"
+RESULT=$(first_result "$H" "when-nm-state-$RING_TASK")
+assert_grep 'status: fired' "$RESULT" "the ring succeeded, so FM_HOME reached fm-send"
+assert_grep 'repeat: continues' "$RESULT" "the spawn-shaped watch keeps watching"
+assert_present "$H/state/$RING_TASK.inbox" "the ring landed in the task's steering inbox"
+when "$H" retire "nm-state-$RING_TASK" >/dev/null
+pass "the watch shape fm-spawn arms rings a task and keeps watching"
+
 printf 'all fm-procevent-when tests passed\n'

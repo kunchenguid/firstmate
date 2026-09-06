@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Condition->action adapter for the generic process-to-event runner: register a
 # deterministic condition and a deterministic action once, let the runner's
-# blocking child poll the condition tokenlessly, fire the action at most once on
-# a stable true, and publish one terminal outcome, re-announced until handled.
+# blocking child poll the condition tokenlessly, fire the action on a stable
+# true, and publish one terminal outcome, re-announced until handled.
 #
 # Usage:
 #   fm-procevent-when.sh arm <name> [options] --condition <argv>... --action <argv>...
 #   fm-procevent-when.sh classify <result-file>
 #   fm-procevent-when.sh terminal <result-file>
+#   fm-procevent-when.sh silent <result-file>
 #   fm-procevent-when.sh source-id <name>
 #   fm-procevent-when.sh retire <name>
 #   fm-procevent-when.sh run <source-id>
@@ -29,6 +30,21 @@
 #              --action-timeout <secs>     bound on the action run (default 1800)
 #              --error-budget <n>          consecutive condition errors tolerated
 #                                          before waking firstmate (default 3)
+#              --action-env <NAME=VALUE>   one environment assignment to run the
+#                                          action under; repeatable. The
+#                                          assignments are part of the
+#                                          hash-bound spec, and the action
+#                                          executable itself stays argv[0], so
+#                                          its bytes remain trust-bound. NAME is
+#                                          refused outright when it could hijack
+#                                          an interpreter or loader instead of
+#                                          configuring the action (PATH,
+#                                          LD_PRELOAD, PYTHONPATH, and similar -
+#                                          see env_assignment_valid for the
+#                                          exact list).
+#              --repeat                    keep watching after a successful
+#                                          fire instead of ending there (see
+#                                          REPEAT MODE below)
 #            The condition argv must exit 0 for true, 1 for a clean false;
 #            any other exit (or a per-poll timeout) is an error, never a true.
 #            POLICY, not enforceable here: both halves must be exact and
@@ -41,14 +57,21 @@
 # classify   Print the captured outcome class a handler should act on:
 #            fired, action-failed, condition-error, never-true, ambiguous,
 #            rejected, or unknown.
-# terminal   Exit 0 when the captured result ends this source. Every when
-#            outcome is terminal because the pair fires at most once; the
-#            generic runner then retires the registration itself.
+# terminal   Exit 0 when the captured result ends this source. Every outcome of
+#            a one-shot watch is terminal because the pair fires at most once.
+#            A repeat watch's successful fire is the one non-terminal outcome,
+#            so the generic runner keeps the registration and restarts the poll;
+#            every other outcome is terminal there too.
+# silent     Exit 0 when the captured result is a routine no-op the generic
+#            runner should record as handled instead of announcing. That is
+#            exactly a repeat watch's successful fire: the worker was already
+#            rung by the action itself, so waking firstmate to say so is a model
+#            turn spent learning nothing.
 # source-id  Print the canonical source id for <name>.
 # retire     Stop the watch: retire the registration and remove the spec, trust
-#            record, and fired marker. Idempotent. Captured results and their
-#            handled acknowledgements are never touched. Warns when the action
-#            had already fired without a captured outcome.
+#            record, fired marker, and fire journal. Idempotent. Captured
+#            results and their handled acknowledgements are never touched.
+#            Warns when the action had already fired without a captured outcome.
 # run        The blocking child the generic runner executes; never run it in a
 #            conversational turn. It polls the condition on the registered
 #            cadence, requires the stable count of consecutive trues, claims a
@@ -60,18 +83,39 @@
 #            was never captured - emits a terminal outcome document instead of
 #            retrying silently, so firstmate is always woken with the evidence.
 #
+# REPEAT MODE
+#   A one-shot watch answers "do X as soon as Y is true". A repeat watch answers
+#   "ring X every time Y changes", which is what a worker waiting on its own
+#   pipeline needs: that state changes several times per run, and a watch that
+#   died on the first change left every later change to a model turn.
+#   Under --repeat, a successful fire releases the single-fire claim, appends one
+#   line to the watch's fire journal (state/when/<source-id>.fires), and emits a
+#   `repeat: continues` outcome. That outcome is silent and non-terminal, so the
+#   generic runner records it handled without a wake and restarts the poll; the
+#   deadline is then measured from the last fire rather than from arming, so it
+#   means "the condition stopped changing" instead of "the watch got old".
+#   Everything else is unchanged: a failed action, a condition error past its
+#   budget, a deadline, a mutated spec or action, and an uncaptured claimed fire
+#   are all still terminal and still wake firstmate with the evidence. The
+#   single-fire claim still makes one fire unrepeatable within its own poll, so
+#   only a fire whose outcome was emitted lets the next one happen. A repeat
+#   action must therefore be safe to run again, which is the standard the
+#   one-shot action already had to meet.
+#
 # Outcome document (the captured result named by the wake):
 #   when: <source-id>
 #   status: fired|action-failed|condition-error|never-true|ambiguous|rejected
 #   detail: <one line>
 #   condition_polls: <n>
 #   action_exit: <code>        (fired and action-failed only)
+#   repeat: continues          (a repeat watch's successful fire only)
 #   output:
 #   <bounded tail of the relevant command output>
 #
 # Ownership, durable capture, publication, restart recovery, and the handled
 # acknowledgement all belong to bin/fm-procevent.sh; this adapter owns only the
 # condition->action semantics above.
+
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -92,11 +136,19 @@ WHEN_DIR="$STATE/when"
 OUTPUT_TAIL_BYTES=${FM_WHEN_OUTPUT_TAIL_BYTES:-8192}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,72p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+# The header comment block runs from line 2 to the first blank line, so this
+# stays correct as the block grows.
+usage() { sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 spec_file()  { printf '%s/%s.spec\n' "$WHEN_DIR" "$1"; }
 trust_file() { printf '%s/%s.trust\n' "$WHEN_DIR" "$1"; }
 fired_file() { printf '%s/%s.fired\n' "$WHEN_DIR" "$1"; }
+fires_file() { printf '%s/%s.fires\n' "$WHEN_DIR" "$1"; }
+
+# A repeat watch keeps only the most recent fires; the journal is evidence for
+# the handler, not an audit log, and it must not grow without bound on a source
+# that legitimately fires for days.
+FIRES_JOURNAL_LINES=${FM_WHEN_FIRES_JOURNAL_LINES:-200}
 
 when_name_valid() {
   local name=${1-}
@@ -111,6 +163,18 @@ cmd_source_id() {
 }
 
 positive_int() { case "${1-}" in ''|*[!0-9]*) return 1 ;; 0) return 1 ;; *) return 0 ;; esac }
+
+env_assignment_valid() {  # <NAME=VALUE>
+  local LC_ALL=C
+  [[ "${1-}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || return 1
+  case "${1%%=*}" in
+    PATH|IFS|ENV|BASH_ENV|SHELLOPTS|BASHOPTS|GLOBIGNORE| \
+    LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH| \
+    PERL5LIB|PERL5OPT|PYTHONPATH|PYTHONHOME|NODE_OPTIONS|NODE_PATH|RUBYOPT|RUBYLIB| \
+    GCONV_PATH|LOCPATH|GIT_SSH|GIT_SSH_COMMAND)
+      return 1 ;;
+  esac
+}
 
 positive_number() {
   local n=${1-}
@@ -138,8 +202,8 @@ action_executable() {  # <argv-zero>: print the executable's absolute path
 
 cmd_arm() {
   local name=${1-} sid interval=60 stable=2 deadline=604800
-  local condition_timeout=60 action_timeout=1800 error_budget=3
-  local -a cond=() act=()
+  local condition_timeout=60 action_timeout=1800 error_budget=3 repeat=0
+  local -a cond=() act=() env_assignments=()
   [ -n "$name" ] || usage
   shift
   when_name_valid "$name" || die "name must be path-safe and at most 59 characters: $name"
@@ -152,6 +216,8 @@ cmd_arm() {
       --condition-timeout) positive_int "${2-}" || die "--condition-timeout needs a positive integer of seconds"; condition_timeout=$2; shift 2 ;;
       --action-timeout)    positive_int "${2-}" || die "--action-timeout needs a positive integer of seconds"; action_timeout=$2; shift 2 ;;
       --error-budget)      positive_int "${2-}" || die "--error-budget needs a positive integer"; error_budget=$2; shift 2 ;;
+      --action-env)        env_assignment_valid "${2-}" || die "--action-env needs NAME=VALUE with a shell-safe NAME: ${2-}"; env_assignments+=("$2"); shift 2 ;;
+      --repeat)            repeat=1; shift ;;
       --condition)
         shift
         while [ "$#" -gt 0 ] && [ "$1" != --action ]; do cond+=("$1"); shift; done
@@ -166,7 +232,7 @@ cmd_arm() {
   [ "${#cond[@]}" -ge 1 ] || die "arm needs at least one --condition argv element"
   [ "${#act[@]}" -ge 1 ] || die "arm needs at least one --action argv element"
   local arg
-  for arg in "${cond[@]}" "${act[@]}"; do
+  for arg in "${cond[@]}" "${act[@]}" ${env_assignments[@]+"${env_assignments[@]}"}; do
     case "$arg" in *$'\n'*) die "argv elements cannot contain newlines" ;; esac
   done
 
@@ -175,7 +241,7 @@ cmd_arm() {
   trap 'fm_procevent_source_lock_release "$sid"' EXIT
   local leftover
   for leftover in "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")" \
-    "$(fm_procevent_registry_dir "$STATE")/$sid.source"; do
+    "$(fires_file "$sid")" "$(fm_procevent_registry_dir "$STATE")/$sid.source"; do
     if [ -e "$leftover" ] || [ -L "$leftover" ]; then
       die "watch already exists or left state behind: $leftover (retire it first)"
     fi
@@ -201,12 +267,15 @@ cmd_arm() {
     printf 'condition_timeout=%s\n' "$condition_timeout"
     printf 'action_timeout=%s\n' "$action_timeout"
     printf 'error_budget=%s\n' "$error_budget"
+    printf 'repeat=%s\n' "$repeat"
     printf 'action_sha256=%s\n' "$action_hash"
     printf 'condition_argc=%s\n' "${#cond[@]}"
     printf 'action_argc=%s\n' "${#act[@]}"
+    printf 'env_argc=%s\n' "${#env_assignments[@]}"
     printf 'argv:\n'
     printf '%s\n' "${cond[@]}"
     printf '%s\n' "${act[@]}"
+    [ "${#env_assignments[@]}" -eq 0 ] || printf '%s\n' "${env_assignments[@]}"
   } > "$tmp" || { rm -f -- "$tmp"; die "cannot write the spec"; }
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; die "cannot secure the spec"; }
   hash=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp"; die "cannot hash the spec"; }
@@ -236,13 +305,16 @@ cmd_arm() {
 # --- spec load ---------------------------------------------------------------
 
 # spec_load <source-id>: validate the trust binding, then parse the spec into
-# SPEC_* variables plus COND_ARGV and ACT_ARGV. Any structural or trust failure
-# returns 1 with a reason in SPEC_ERROR; nothing from the spec is executed.
+# SPEC_* variables plus COND_ARGV, ACT_ARGV, and ENV_ARGV. Any structural or
+# trust failure returns 1 with a reason in SPEC_ERROR; nothing from the spec is
+# executed. `repeat` and `env_argc` are optional so a spec armed before those
+# fields existed still loads, as a one-shot watch with no action environment.
 spec_load() {
   local sid=$1 spec trust device hash want version line key value extra
   SPEC_ERROR=
   COND_ARGV=()
   ACT_ARGV=()
+  ENV_ARGV=()
   spec=$(spec_file "$sid")
   trust=$(trust_file "$sid")
   [ -d "$WHEN_DIR" ] && [ ! -L "$WHEN_DIR" ] || { SPEC_ERROR="watch directory is unavailable"; return 1; }
@@ -260,8 +332,8 @@ spec_load() {
 
   SPEC_ARMED='' SPEC_INTERVAL='' SPEC_STABLE='' SPEC_DEADLINE=''
   SPEC_CONDITION_TIMEOUT='' SPEC_ACTION_TIMEOUT='' SPEC_ERROR_BUDGET=''
-  SPEC_ACTION_SHA256=''
-  local cond_argc='' act_argc='' in_argv=0 read_cond=0 read_act=0
+  SPEC_ACTION_SHA256='' SPEC_REPEAT=0
+  local cond_argc='' act_argc='' env_argc=0 in_argv=0 read_cond=0 read_act=0 read_env=0
   {
     IFS= read -r version || { SPEC_ERROR="spec is empty"; return 1; }
     [ "$version" = fm-when-spec-v1 ] || { SPEC_ERROR="spec has an unknown version"; return 1; }
@@ -278,9 +350,11 @@ spec_load() {
           condition_timeout) SPEC_CONDITION_TIMEOUT=$value ;;
           action_timeout)    SPEC_ACTION_TIMEOUT=$value ;;
           error_budget)      SPEC_ERROR_BUDGET=$value ;;
+          repeat)            SPEC_REPEAT=$value ;;
           action_sha256)     SPEC_ACTION_SHA256=$value ;;
           condition_argc)    cond_argc=$value ;;
           action_argc)       act_argc=$value ;;
+          env_argc)          env_argc=$value ;;
           *) SPEC_ERROR="spec carries an unknown field: $key"; return 1 ;;
         esac
       elif [ "$read_cond" -lt "${cond_argc:-0}" ]; then
@@ -289,6 +363,9 @@ spec_load() {
       elif [ "$read_act" -lt "${act_argc:-0}" ]; then
         ACT_ARGV+=("$line")
         read_act=$((read_act + 1))
+      elif [ "$read_env" -lt "${env_argc:-0}" ]; then
+        ENV_ARGV+=("$line")
+        read_env=$((read_env + 1))
       else
         SPEC_ERROR="spec carries trailing content"
         return 1
@@ -303,11 +380,19 @@ spec_load() {
   positive_int "$SPEC_CONDITION_TIMEOUT" || { SPEC_ERROR="spec condition timeout is malformed"; return 1; }
   positive_int "$SPEC_ACTION_TIMEOUT" || { SPEC_ERROR="spec action timeout is malformed"; return 1; }
   positive_int "$SPEC_ERROR_BUDGET" || { SPEC_ERROR="spec error budget is malformed"; return 1; }
+  case "$SPEC_REPEAT" in 0|1) ;; *) SPEC_ERROR="spec repeat flag is malformed"; return 1 ;; esac
   [[ "$SPEC_ACTION_SHA256" =~ ^[0-9a-f]{64}$ ]] \
     || { SPEC_ERROR="spec action hash is malformed"; return 1; }
   positive_int "${cond_argc:-}" || { SPEC_ERROR="spec condition argc is malformed"; return 1; }
   positive_int "${act_argc:-}" || { SPEC_ERROR="spec action argc is malformed"; return 1; }
+  case "${env_argc:-}" in ''|*[!0-9]*) SPEC_ERROR="spec action environment argc is malformed"; return 1 ;; esac
+  local assignment
+  for assignment in ${ENV_ARGV[@]+"${ENV_ARGV[@]}"}; do
+    env_assignment_valid "$assignment" \
+      || { SPEC_ERROR="spec action environment is malformed"; return 1; }
+  done
   [ "$read_cond" -eq "$cond_argc" ] && [ "$read_act" -eq "$act_argc" ] \
+    && [ "$read_env" -eq "$env_argc" ] \
     || { SPEC_ERROR="spec argv is incomplete"; return 1; }
 }
 
@@ -326,6 +411,9 @@ bounded_run() {
 
 # emit_doc <source-id> <status> <detail> <polls> <action-exit-or-empty> <output-file-or-empty>
 # The single stdout writer of `run`: everything the generic runner captures.
+# EMIT_REPEAT carries the one field only a repeat watch's successful fire sets,
+# because that is what makes an outcome silent and non-terminal.
+EMIT_REPEAT=
 emit_doc() {
   local sid=$1 status=$2 detail=$3 polls=$4 action_exit=$5 outfile=$6
   printf 'when: %s\n' "$sid"
@@ -333,19 +421,55 @@ emit_doc() {
   printf 'detail: %s\n' "$detail"
   printf 'condition_polls: %s\n' "$polls"
   [ -z "$action_exit" ] || printf 'action_exit: %s\n' "$action_exit"
+  [ -z "$EMIT_REPEAT" ] || printf 'repeat: %s\n' "$EMIT_REPEAT"
   printf 'output:\n'
   if [ -n "$outfile" ] && [ -f "$outfile" ]; then
     tail -c "$OUTPUT_TAIL_BYTES" "$outfile" 2>/dev/null || true
   fi
 }
 
+# The epoch the deadline is measured from. For a repeat watch that is its last
+# recorded fire, so the deadline means "the condition stopped changing" rather
+# than "the watch got old"; with no fire yet it is the arming epoch, exactly as
+# a one-shot watch always measured it.
+deadline_base() {  # <source-id>
+  local last
+  if [ "$SPEC_REPEAT" = 1 ]; then
+    last=$(tail -n 1 "$(fires_file "$1")" 2>/dev/null | cut -d' ' -f1) || last=
+    case "$last" in ''|*[!0-9]*) ;; *) printf '%s\n' "$last"; return 0 ;; esac
+  fi
+  printf '%s\n' "$SPEC_ARMED"
+}
+
+# One line per successful repeat fire, kept bounded. A failed append costs the
+# handler evidence and the deadline its base, never the fire itself, so it is
+# reported through the outcome document rather than raised here.
+journal_fire() {  # <source-id> <epoch> <polls>
+  local journal tmp
+  journal=$(fires_file "$1")
+  printf '%s fired polls=%s\n' "$2" "$3" >> "$journal" 2>/dev/null || return 1
+  chmod 0600 "$journal" 2>/dev/null || true
+  [ "$(grep -c . "$journal" 2>/dev/null || echo 0)" -gt "$FIRES_JOURNAL_LINES" ] || return 0
+  tmp=$(umask 077; mktemp "$WHEN_DIR/.fires.XXXXXX") || return 0
+  if tail -n "$FIRES_JOURNAL_LINES" "$journal" > "$tmp" 2>/dev/null; then
+    mv -f -- "$tmp" "$journal" 2>/dev/null || rm -f -- "$tmp"
+  else
+    rm -f -- "$tmp"
+  fi
+  return 0
+}
+
 cmd_run() {
-  local sid=${1-} fired out rc polls=0 consecutive_true=0 consecutive_err=0 now
+  local sid=${1-} fired out rc polls=0 consecutive_true=0 consecutive_err=0 now base base_label
   fm_procevent_source_id_valid "$sid" || die "source id must be path-safe: $sid"
   fired=$(fired_file "$sid")
 
   if ! positive_int "$OUTPUT_TAIL_BYTES"; then
     emit_doc "$sid" rejected "FM_WHEN_OUTPUT_TAIL_BYTES must be a positive integer; nothing was executed" 0 '' ''
+    exit 0
+  fi
+  if ! positive_int "$FIRES_JOURNAL_LINES"; then
+    emit_doc "$sid" rejected "FM_WHEN_FIRES_JOURNAL_LINES must be a positive integer; nothing was executed" 0 '' ''
     exit 0
   fi
 
@@ -355,12 +479,21 @@ cmd_run() {
   fi
 
   # A fired marker with this runner not mid-action means an earlier run claimed
-  # the fire and died before its outcome was durably captured. Never run the
-  # action again; report the ambiguity for manual verification instead.
+  # the fire and died before its outcome was durably captured. For a one-shot
+  # watch that is unrecoverable: never run the action again, and report the
+  # ambiguity for manual verification instead. A repeat watch's action is
+  # already required to be safe to run again - that is what repeating means -
+  # so there the marker is simply released and the watch resumes, which is also
+  # what makes a fire whose capture was lost cost one extra ring rather than
+  # ending the watch.
   if [ -e "$fired" ] || [ -L "$fired" ]; then
-    emit_doc "$sid" ambiguous \
-      "the action was already claimed but its outcome was never captured; verify its effect manually before retiring" 0 '' ''
-    exit 0
+    if [ "$SPEC_REPEAT" = 1 ]; then
+      rm -f -- "$fired"
+    else
+      emit_doc "$sid" ambiguous \
+        "the action was already claimed but its outcome was never captured; verify its effect manually before retiring" 0 '' ''
+      exit 0
+    fi
   fi
 
   if ! out=$(umask 077; mktemp "$WHEN_DIR/.run-out.XXXXXX"); then
@@ -369,20 +502,23 @@ cmd_run() {
   fi
   trap 'rm -f -- "$out"' EXIT
 
+  base=$(deadline_base "$sid")
+  if [ "$base" = "$SPEC_ARMED" ]; then base_label=arming; else base_label="its last fire"; fi
+
   while :; do
     now=$(date +%s)
-    if [ $(( now - SPEC_ARMED )) -ge "$SPEC_DEADLINE" ]; then
+    if [ $(( now - base )) -ge "$SPEC_DEADLINE" ]; then
       emit_doc "$sid" never-true \
-        "the condition never held for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of arming" "$polls" '' ''
+        "the condition did not hold for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of $base_label" "$polls" '' ''
       exit 0
     fi
     bounded_run "$SPEC_CONDITION_TIMEOUT" "$out" "${COND_ARGV[@]}"
     rc=$?
     polls=$((polls + 1))
     now=$(date +%s)
-    if [ $(( now - SPEC_ARMED )) -ge "$SPEC_DEADLINE" ]; then
+    if [ $(( now - base )) -ge "$SPEC_DEADLINE" ]; then
       emit_doc "$sid" never-true \
-        "the condition never held for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of arming" "$polls" '' "$out"
+        "the condition did not hold for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of $base_label" "$polls" '' "$out"
       exit 0
     fi
     case "$rc" in
@@ -409,9 +545,9 @@ cmd_run() {
   done
 
   now=$(date +%s)
-  if [ $(( now - SPEC_ARMED )) -ge "$SPEC_DEADLINE" ]; then
+  if [ $(( now - base )) -ge "$SPEC_DEADLINE" ]; then
     emit_doc "$sid" never-true \
-      "the condition never held for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of arming" "$polls" '' "$out"
+      "the condition did not hold for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of $base_label" "$polls" '' "$out"
     exit 0
   fi
 
@@ -433,13 +569,36 @@ cmd_run() {
     exit 0
   fi
 
-  bounded_run "$SPEC_ACTION_TIMEOUT" "$out" "${ACT_ARGV[@]}"
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    emit_doc "$sid" fired "the condition held and the action exited 0" "$polls" "$rc" "$out"
+  # The assignments come from the hash-bound spec and ACT_ARGV[0] is the
+  # absolute path resolved at arming, so `env` cannot mistake the action for an
+  # option or an assignment, and the executable whose bytes were just
+  # revalidated is still the one that runs.
+  if [ "${#ENV_ARGV[@]}" -eq 0 ]; then
+    bounded_run "$SPEC_ACTION_TIMEOUT" "$out" "${ACT_ARGV[@]}"
   else
-    emit_doc "$sid" action-failed "the condition held but the action exited $rc" "$polls" "$rc" "$out"
+    bounded_run "$SPEC_ACTION_TIMEOUT" "$out" env "${ENV_ARGV[@]}" "${ACT_ARGV[@]}"
   fi
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    emit_doc "$sid" action-failed "the condition held but the action exited $rc" "$polls" "$rc" "$out"
+    exit 0
+  fi
+  if [ "$SPEC_REPEAT" = 1 ]; then
+    # Journal first, then release the claim: a crash between the two costs one
+    # duplicate ring on restart, while the reverse order could lose the fire's
+    # only record and reset the deadline base.
+    if journal_fire "$sid" "$(date +%s)" "$polls"; then
+      EMIT_REPEAT=continues
+      rm -f -- "$fired"
+      emit_doc "$sid" fired "the condition held and the action exited 0; the watch continues" "$polls" "$rc" "$out"
+    else
+      emit_doc "$sid" fired \
+        "the condition held and the action exited 0, but the fire journal could not be written; the watch stops here" \
+        "$polls" "$rc" "$out"
+    fi
+    exit 0
+  fi
+  emit_doc "$sid" fired "the condition held and the action exited 0" "$polls" "$rc" "$out"
   exit 0
 }
 
@@ -452,6 +611,20 @@ result_status() {  # <result-file>
     $0 == "output:" { exit }
     /^status: / { sub(/^status: /, ""); print; exit }
   ' "$1"
+}
+
+# True when the document is a repeat watch's successful fire: the one outcome
+# that is neither terminal nor worth a wake. Read from the same leading block as
+# the status, so captured command output can never forge it.
+result_repeat_continues() {  # <result-file>
+  local status repeat
+  status=$(result_status "$1")
+  [ "$status" = fired ] || return 1
+  repeat=$(awk '
+    $0 == "output:" { exit }
+    /^repeat: / { sub(/^repeat: /, ""); print; exit }
+  ' "$1")
+  [ "$repeat" = continues ]
 }
 
 cmd_classify() {
@@ -470,7 +643,15 @@ cmd_terminal() {
   local file=${1-}
   [ -n "$file" ] || usage
   [ -f "$file" ] || die "result file does not exist: $file"
-  [ "$(cmd_classify "$file")" != unknown ]
+  [ "$(cmd_classify "$file")" != unknown ] || return 1
+  ! result_repeat_continues "$file"
+}
+
+cmd_silent() {
+  local file=${1-}
+  [ -n "$file" ] || usage
+  [ -f "$file" ] || die "result file does not exist: $file"
+  result_repeat_continues "$file"
 }
 
 # --- retire ------------------------------------------------------------------
@@ -488,7 +669,7 @@ cmd_retire() {
     fi
   fi
   "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" || die "cannot retire the watch source: $sid"
-  rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")"
+  rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")" "$(fires_file "$sid")"
   printf 'retired: %s\n' "$sid"
 }
 
@@ -497,6 +678,7 @@ case "${1-}" in
   run)       shift; [ "$#" -eq 1 ] || usage; cmd_run "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
+  silent)    shift; cmd_silent "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;
