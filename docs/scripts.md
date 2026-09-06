@@ -96,7 +96,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, guard injection by the detected primary harness, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state or worker-liveness line for a crew             |
 | `fm-wait-premise.sh`      | Read only the latest status line and print one verdict when a check completes; an omitted premise is unbindable, an unreadable or unsupported owner check stays silent, and the instructed syntax is owned by `fm-brief.sh` |
-| `fm-pipeline.sh`          | Record shadow pipeline probe events in the append-only event log                       |
+| `fm-pipeline.sh`          | Own each task's pipeline record (`reconcile`, `retire`, `board-json`, `steps`) and the shadow probe event/arm/disarm cycle |
 | `fm-unadvanceable-work.sh` | Report in-flight tasks with no worker, hold, or dependency edge                    |
 | `fm-nm-run-lib.sh`       | Shared no-mistakes home selection and branch-and-code-identity attribution          |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |

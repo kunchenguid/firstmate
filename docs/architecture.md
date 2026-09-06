@@ -260,6 +260,17 @@ The pipeline's required-check wait during PR validation is owned by no-mistakes'
 This repo has no config key or code seam that reaches that upstream check reader, so the installed release's age and lost stderr can explain the broader endless check-read symptom and why existing logs cannot identify the non-required plain-command error, but they do not establish a required-only upstream defect.
 The separate audit of Firstmate-owned probes found that `bin/fm-pr-merge.sh`'s merge-time `CHECKS_GREEN` regex requires `[1-9][0-9]* total`, so it likewise treats a genuinely zero-total-check result as non-green; that unrelated merge-gate finding remains intentionally unfixed here, preserving its existing no-red-merge guard.
 
+## Task pipeline records
+
+`bin/fm-pipeline.sh` is the single writer for each task's lifecycle record (`state/<id>.pipeline`, schema `fm-pipeline.v3`) and for shadow probe events; `pipeline_record_append` and the `pipeline_record_*` readers define the record's fields, and `reconcile`/`retire` are its mutation verbs (the script's header still only documents the v2 shadow-event schema).
+`reconcile <id>` derives the current step from local artifacts, not agent testimony, and appends a new record line only when the derived step differs from what is already recorded; `retire <id>` removes a gone task's record.
+`board-json` (read-only) prints one JSON envelope with every task's current facts (current step, kind, generation), never a step history, and never invents a state for a task without a record line yet.
+`steps <kind>` (read-only) prints the ordered step chain a kind's tasks move through.
+Every step is derived from artifacts that already exist for an ordinary task: `dispatched` needs only a spawn-written generation in `state/<id>.meta`, `pr-registered` needs a PR identity already bound in that meta, and `merged` needs the existing `state/<id>.pr-poll-merge-notified` marker; no new data is invented to reach any step.
+`probe` (with no `--task`) already calls `reconcile` for every task that has a `state/<id>.meta` file, on the watcher's normal cadence, regardless of pause state, so a task's record already advances through `dispatched` -> `pr-registered` -> `merged` on its own as those artifacts appear; a freshly spawned task shows `uninitialized` only until its first probe cycle runs.
+Landed so far (PR 209): the record schema, migration from the legacy cache, `reconcile`, `retire`, and the `board-json`/`steps` read surfaces, plus the existing probe cycle calling `reconcile` automatically.
+Not yet landed: explicit `reconcile`/`retire` calls wired directly into `bin/fm-pr-check.sh`, `bin/fm-spawn.sh`, and `bin/fm-teardown.sh` (S2b/S2c), so a record's freshness depends on the next probe cycle rather than updating the instant a PR check, spawn, or teardown happens, and a torn-down task's record is not yet cleaned up automatically.
+
 ## Two task shapes
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
