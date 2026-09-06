@@ -323,9 +323,21 @@ test_refuses_an_em_or_en_dash_address() {
 test_refuses_a_root_qualified_work_document_path() {
   local out rc=0
 
+  # Both inline-code forms exited 0 before backticks entered the opening
+  # delimiter set, so these are regressions for the common prose form.
+  out=$(fm_voice_text "docs: retire \`/Users/alice/firstmate/data/task/report.md\` now") || rc=$?
+  expect_code 1 "$rc" "a backticked absolute private work-document path was not refused"
+  assert_contains "$out" "private-task-work-document" \
+    "backticked absolute work-document path named the wrong rule"
+
+  rc=0
+  out=$(fm_voice_text "docs: retire \`~/firstmate/data/alpha/report.md\` now") || rc=$?
+  expect_code 1 "$rc" "a backticked home-rooted private work-document path was not refused"
+
   # The prior root-qualified expression constrained ancestor characters instead
   # of distinguishing a local path from a URL, so this literal spaced path
   # exited 0 before the matcher correction.
+  rc=0
   out=$(fm_voice_text 'docs: retire /Users/A Person/firstmate/data/alpha/report.md') || rc=$?
   expect_code 1 "$rc" "a spaced root-qualified private work-document path was not refused"
   assert_contains "$out" "private-task-work-document" \
@@ -385,8 +397,10 @@ test_refuses_a_private_review_artifact() {
 test_passes_nonprivate_paths_and_work_document_words() {
   local out rc message
 
-  # Superseded root-qualified alternatives refused these public routes and URLs.
+  # Superseded root-qualified alternatives refused these public routes and URLs,
+  # while the backticked URL guards the delimiter addition against reopening it.
   for message in \
+    "docs: see \`https://example.com/data/api/schema.json\` in the guide" \
     'docs: describe /data/api/schema.json' \
     'docs: see https://gitlab.com/org/repo/-/blob/main/data/alpha/report.md' \
     'docs: point at https://example.com/data/api/schema.json for the schema' \
