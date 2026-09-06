@@ -1237,14 +1237,13 @@ run_check_capture() {
 }
 
 pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
-  local id=$1 url=$2 condition=$3 head=$4 state_line state mode spawn_gen observation message
-  local marker="$STATE/$id.pr-refresh-dispatched"
+  local id=$1 url=$2 condition=$3 head=$4 state_line state mode spawn_gen message
+  local marker="$STATE/$id.pr-refresh-dispatched" delivery_id known=0
   state_line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || state_line=
   state=${state_line#state: }
   state=${state%% *}
   case "$state" in
     working)
-      rm -f "$marker"
       printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=active-work\n' \
         "$url" "$head" "$condition"
       return 2
@@ -1260,40 +1259,37 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
     return 1
   fi
 
-  # A worker that keeps reporting done at the same head across separate
-  # watcher invocations already has this exact instruction queued; resending
-  # it would only stack duplicate, non-idempotent inbox work.
-  if [ "$(cat "$marker" 2>/dev/null)" = "$condition $head" ]; then
-    printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-pending\n' \
-      "$url" "$head" "$condition"
-    return 2
-  fi
-
   mode=$(fm_meta_get "$STATE/$id.meta" mode)
   case "$mode" in no-mistakes|direct-PR) ;; *)
     printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=unsupported-mode\n' \
       "$url" "$head" "$condition"
     return 1
   esac
+  case "$condition" in behind|conflict) ;; *) return 1 ;; esac
   spawn_gen=$(fm_meta_get "$STATE/$id.meta" spawn_gen)
-  case "$condition" in
-    behind) observation='is behind its base' ;;
-    conflict) observation='has a merge conflict with its base' ;;
-    *) return 1 ;;
-  esac
   if [ "$mode" = no-mistakes ]; then
-    message="FIRSTMATE_OP: v1 branch-currency: Your open pull request $url $observation at head $head. Re-run this brief's no-mistakes delivery contract with its exact serialized captain intent. Before any edit or branch movement, inspect no-mistakes axi status and do not act while an active run owns the branch. Let the pipeline's rebase step bring the branch current and re-establish every check on the resulting head. If rebase conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
+    message="FIRSTMATE_OP: v1 branch-currency: Your open pull request $url is not current with its base (behind or in conflict) at head $head. Re-run this brief's no-mistakes delivery contract with its exact serialized captain intent. Before any edit or branch movement, inspect no-mistakes axi status and do not act while an active run owns the branch. Let the pipeline's rebase step bring the branch current and re-establish every check on the resulting head. If rebase conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
   else
-    message="FIRSTMATE_OP: v1 branch-currency: Your open pull request $url $observation at head $head. Refresh it through this brief's direct-PR delivery path. Before any edit or branch movement, confirm no active validation run owns the branch. Fetch and merge the pull request's base without force, run the project checks on the resulting head, push normally, and wait for current-head checks. If the merge conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
+    message="FIRSTMATE_OP: v1 branch-currency: Your open pull request $url is not current with its base (behind or in conflict) at head $head. Refresh it through this brief's direct-PR delivery path. Before any edit or branch movement, confirm no active validation run owns the branch. Fetch and merge the pull request's base without force, run the project checks on the resulting head, push normally, and wait for current-head checks. If the merge conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
   fi
-  # Marked before send so a crash mid-dispatch skips a retry, never duplicates one.
-  printf '%s' "$condition $head" > "$marker"
+
+  # Identity is the head alone (a same-head condition relabel is the same
+  # queued work); fm-send's durable fire-and-forget dedup is authoritative,
+  # so the marker is only a wake-noise hint, never load-bearing for delivery.
+  delivery_id=$(printf '%s' "$head" | cut -c1-16)
+  [ "$(cat "$marker" 2>/dev/null)" = "$head" ] && known=1
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_EXPECTED_SPAWN_GEN="$spawn_gen" \
-    "$FM_PR_REFRESH_SEND_BIN" "$id" "$message" >/dev/null 2>&1; then
+    "$FM_PR_REFRESH_SEND_BIN" "$id" --fire-and-forget "$delivery_id" "$message" >/dev/null 2>&1; then
     rm -f "$marker"
     printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=worker-dispatch-failed\n' \
       "$url" "$head" "$condition"
     return 1
+  fi
+  printf '%s' "$head" > "$marker"
+  if [ "$known" -eq 1 ]; then
+    printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-pending\n' \
+      "$url" "$head" "$condition"
+    return 2
   fi
   printf 'branch-refresh-dispatched pr=%s head=%s condition=%s\n' "$url" "$head" "$condition"
 }

@@ -797,10 +797,22 @@ printf 'state: done \302\267 source: run-step \302\267 checks green: PR ready fo
 SH
   cat > "$dir/fakebin/fm-refresh-send.sh" <<'SH'
 #!/usr/bin/env bash
+delivery_id=
+prev=
+for arg in "$@"; do
+  [ "$prev" != --fire-and-forget ] || delivery_id=$arg
+  prev=$arg
+done
+ids_log="$FM_TEST_REFRESH_SEND_LOG.ids"
+if [ -n "$delivery_id" ] && [ -f "$ids_log" ] && grep -qxF "$delivery_id" "$ids_log"; then
+  exit 0
+fi
+[ -z "$delivery_id" ] || printf '%s\n' "$delivery_id" >> "$ids_log"
 printf '%s\n' "$*" >> "$FM_TEST_REFRESH_SEND_LOG"
 SH
   chmod +x "$dir/fakebin/fm-crew-state.sh" "$dir/fakebin/fm-refresh-send.sh"
   : > "$dir/refresh-send.log"
+  rm -f "$dir/refresh-send.log.ids"
   set +e
   FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=DIRTY FM_TEST_GH_MERGEABLE=CONFLICTING \
     FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
@@ -837,6 +849,64 @@ SH
     || fail "a stuck worker's repeated done report queued a duplicate refresh instruction"
   assert_grep 'branch-refresh-deferred pr=https://github.com/o/r/pull/2 head=0123456789abcdef0123456789abcdef01234567 condition=conflict reason=dispatch-pending' \
     "$state/.watch-triage.log" "repeated dispatch for an unchanged head was not deferred"
+
+  # GitHub relabeling the same unchanged head from conflict to behind must not
+  # queue a second copy of the already-dispatched refresh instruction.
+  ack_watcher_cycle "$state" || fail "branch-currency relabel acknowledgement failed"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/dispatch3.out" 2> "$dir/dispatch3.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "relabeled branch-currency watcher failed: $(cat "$dir/dispatch3.err")"
+  [ "$(wc -l < "$dir/refresh-send.log" | tr -d ' ')" -eq 1 ] \
+    || fail "a same-head condition relabel queued a duplicate refresh instruction"
+  assert_grep 'branch-refresh-deferred pr=https://github.com/o/r/pull/2 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=dispatch-pending' \
+    "$state/.watch-triage.log" "a same-head condition relabel was not deferred"
+
+  # A worker that transits working and back to done at the same still-stale
+  # head must not have its dispatch identity erased along the way.
+  ack_watcher_cycle "$state" || fail "branch-currency working-transit acknowledgement failed"
+  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: working \302\267 source: run-step \302\267 validating (running)\n'
+SH
+  chmod +x "$dir/fakebin/fm-crew-state.sh"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/dispatch4.out" 2> "$dir/dispatch4.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "working-transit branch-currency watcher failed: $(cat "$dir/dispatch4.err")"
+
+  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: done \302\267 source: run-step \302\267 checks green: PR ready for review\n'
+SH
+  chmod +x "$dir/fakebin/fm-crew-state.sh"
+  ack_watcher_cycle "$state" || fail "branch-currency post-working acknowledgement failed"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/dispatch5.out" 2> "$dir/dispatch5.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "post-working branch-currency watcher failed: $(cat "$dir/dispatch5.err")"
+  [ "$(wc -l < "$dir/refresh-send.log" | tr -d ' ')" -eq 1 ] \
+    || fail "a working-then-done transit at an unchanged head queued a duplicate refresh instruction"
+  assert_grep 'branch-refresh-deferred pr=https://github.com/o/r/pull/2 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=dispatch-pending' \
+    "$state/.watch-triage.log" "a working-then-done transit at an unchanged head was not deferred"
   pass "branch currency reactivates finished work, names conflicts, and refuses active validation"
 }
 
