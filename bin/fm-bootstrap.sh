@@ -1333,7 +1333,20 @@ tasks_config_setup() {
   # untouched; only a failed create is reported, because a home with no
   # .tasks.toml silently loses data/backlog.md addressing, its archive path, and
   # done_keep (see bin/fm-backlog-transition-lib.sh).
-  if [ -e "$FM_HOME/.tasks.toml" ] || [ -L "$FM_HOME/.tasks.toml" ]; then
+  # The file is materialized at the backlog's addressing root - the parent of
+  # the configured data directory (fm_backlog_root), not FM_HOME - because that
+  # is where tasks-axi resolves it from. The two coincide only for the default
+  # $FM_HOME/data layout; a data directory relocated by FM_DATA_OVERRIDE would
+  # otherwise run on tasks-axi's built-in defaults with the generated file
+  # sitting unread at FM_HOME. The example's relative data/backlog.md paths
+  # resolve from the root, so they reattach to the relocated data directory.
+  local check=$DATA root
+  while [ "$check" != / ] && [ "${check%/}" != "$check" ]; do check=${check%/}; done
+  case "$check" in
+    */*) root=${check%/*} ;;
+    *) root=. ;;
+  esac
+  if [ -e "$root/.tasks.toml" ] || [ -L "$root/.tasks.toml" ]; then
     return 0
   fi
   local example="$SCRIPT_DIR/../.tasks.toml.example"
@@ -1342,13 +1355,13 @@ tasks_config_setup() {
     return 0
   fi
   local tmp
-  tmp=$(mktemp "$FM_HOME/.tasks.toml.XXXXXX" 2>/dev/null) || {
-    echo "TASKS_CONFIG: could not create $FM_HOME/.tasks.toml from $example"
+  tmp=$(mktemp "$root/.tasks.toml.XXXXXX" 2>/dev/null) || {
+    echo "TASKS_CONFIG: could not create $root/.tasks.toml from $example"
     return 0
   }
   if ! cp "$example" "$tmp" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null
-    echo "TASKS_CONFIG: could not create $FM_HOME/.tasks.toml from $example"
+    echo "TASKS_CONFIG: could not create $root/.tasks.toml from $example"
     return 0
   fi
   # Publish with a hard link, not a rename: link creation fails atomically
@@ -1356,12 +1369,12 @@ tasks_config_setup() {
   # bootstrap or by the user after the existence check above is never
   # clobbered by the tracked defaults. The temp file sits beside the target,
   # so the link stays on one filesystem.
-  if ln "$tmp" "$FM_HOME/.tasks.toml" 2>/dev/null; then
+  if ln "$tmp" "$root/.tasks.toml" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null
   else
     rm -f "$tmp" 2>/dev/null
-    if [ ! -e "$FM_HOME/.tasks.toml" ] && [ ! -L "$FM_HOME/.tasks.toml" ]; then
-      echo "TASKS_CONFIG: could not create $FM_HOME/.tasks.toml from $example"
+    if [ ! -e "$root/.tasks.toml" ] && [ ! -L "$root/.tasks.toml" ]; then
+      echo "TASKS_CONFIG: could not create $root/.tasks.toml from $example"
     fi
   fi
 }

@@ -905,6 +905,35 @@ test_tasks_config_materializes_from_the_tracked_example() {
   pass "bootstrap materializes .tasks.toml from the tracked example"
 }
 
+# A home whose data directory is relocated off FM_HOME by FM_DATA_OVERRIDE keeps
+# its backlog and its archive together (bin/fm-backlog-transition-lib.sh
+# ADDRESSING): tasks-axi resolves the home's .tasks.toml from the data
+# directory's parent, so materializing the file at FM_HOME would leave it unread
+# and the relocated backlog would run on tasks-axi's built-in defaults.
+test_tasks_config_follows_a_relocated_data_directory() {
+  local case_dir fixture root home fakebin data out
+  case_dir="$TMP_ROOT/tasks-config-relocated"
+  fixture=$(make_routine_bootstrap_fixture "$case_dir")
+  root=${fixture%%|*}
+  fixture=${fixture#*|}
+  home=${fixture%%|*}
+  fakebin=${fixture#*|}
+  data="$case_dir/relocated/data"
+  mkdir -p "$data"
+  printf '%s\n' '# backlog' > "$data/backlog.md"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_DATA_OVERRIDE="$data" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "TASKS_CONFIG" \
+    "materializing a relocated home's .tasks.toml should stay silent"
+  [ ! -e "$home/.tasks.toml" ] \
+    || fail "bootstrap put the relocated home's .tasks.toml at FM_HOME, where tasks-axi never reads it"
+  cmp -s "$case_dir/relocated/.tasks.toml" "$ROOT/.tasks.toml.example" \
+    || fail "bootstrap did not materialize .tasks.toml beside the relocated data directory"
+  pass "bootstrap materializes .tasks.toml at a relocated data directory's parent"
+}
+
 # A home that customized its own backlog config owns it outright; the copy-if-absent
 # path must never read, repair, or rewrite it.
 test_tasks_config_leaves_an_existing_home_copy_untouched() {
@@ -1281,6 +1310,7 @@ test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_tasks_config_materializes_from_the_tracked_example
+test_tasks_config_follows_a_relocated_data_directory
 test_tasks_config_leaves_an_existing_home_copy_untouched
 test_tasks_config_never_clobbers_a_concurrent_home_copy
 test_tasks_config_failure_is_actionable
