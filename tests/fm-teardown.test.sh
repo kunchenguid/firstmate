@@ -39,9 +39,9 @@
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #   (q2) no-mistakes + squash-merged, local followed pipeline rebase -> ALLOW
-#   (q3) no-mistakes + squash-merged, local still on pre-rebase head -> ALLOW
+#   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged stale local plus extra commit   -> REFUSE
-#   (q5) gh down + squash-merged stale local, PR head on default     -> ALLOW
+#   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -950,10 +950,13 @@ test_squash_merged_rebased_branch_allows() {
   pass "squash-merged task whose local branch followed the pipeline rebase is torn down"
 }
 
-test_squash_merged_stale_pre_rebase_local_allows() {
+test_squash_merged_same_file_different_content_refuses() {
   local case_dir rc pr_head merge_commit
-  case_dir=$(make_case squash-stale-local)
+  case_dir=$(make_case squash-same-path-diverged)
   write_meta "$case_dir" no-mistakes ship
+  # Reviewer's exact sequence: pipeline rebase produced a different blob for
+  # shared.txt than the stale local still holds, then squash-merged. Same path
+  # is not proof the local content landed.
   read -r pr_head merge_commit < <(setup_squash_rebased_history "$case_dir" stale)
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
@@ -965,9 +968,9 @@ test_squash_merged_stale_pre_rebase_local_allows() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "squash-stale-local: teardown should succeed when local is a pre-rebase duplicate of a squash-merged PR"$'\n'"$(cat "$case_dir/stderr")"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-stale-local: teardown printed a REFUSED line"
-  pass "squash-merged task whose local branch stayed on the pre-rebase head is torn down"
+  expect_code 1 "$rc" "squash-same-path-diverged: teardown should refuse when the same file has different content"$'\n'"$(cat "$case_dir/stderr")"
+  grep -q REFUSED "$case_dir/stderr" || fail "squash-same-path-diverged: no REFUSED line in stderr"
+  pass "squash-merged same-path different content still refuses"
 }
 
 test_squash_merged_stale_local_with_unlanded_commit_refuses() {
@@ -990,8 +993,8 @@ test_squash_merged_stale_local_with_unlanded_commit_refuses() {
   pass "squash-merged stale local still refuses genuinely unlanded commits"
 }
 
-test_squash_merged_stale_local_allows_when_forge_unreachable() {
-  local case_dir rc pr_head merge_commit
+test_squash_merged_stale_local_refuses_when_forge_unreachable() {
+  local case_dir rc pr_head
   case_dir=$(make_case squash-stale-offline)
   write_meta "$case_dir" no-mistakes ship
   read -r pr_head _ < <(setup_squash_rebased_history "$case_dir" stale)
@@ -1005,9 +1008,9 @@ test_squash_merged_stale_local_allows_when_forge_unreachable() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "squash-stale-offline: teardown should succeed from PR-head content already on default"$'\n'"$(cat "$case_dir/stderr")"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "squash-stale-offline: teardown printed a REFUSED line"
-  pass "squash-merged stale local is torn down when the forge is unreachable"
+  expect_code 1 "$rc" "squash-stale-offline: teardown should refuse when the forge is down and trees conflict"$'\n'"$(cat "$case_dir/stderr")"
+  grep -q REFUSED "$case_dir/stderr" || fail "squash-stale-offline: no REFUSED line in stderr"
+  pass "squash-merged stale local still refuses when the forge is unreachable"
 }
 
 test_pr_check_does_not_refresh_stale_pr_head() {
@@ -3651,9 +3654,9 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows
-test_squash_merged_stale_pre_rebase_local_allows
+test_squash_merged_same_file_different_content_refuses
 test_squash_merged_stale_local_with_unlanded_commit_refuses
-test_squash_merged_stale_local_allows_when_forge_unreachable
+test_squash_merged_stale_local_refuses_when_forge_unreachable
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows

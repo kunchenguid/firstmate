@@ -39,14 +39,12 @@
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
-# no longer match, and a pipeline rebase can leave the local worktree on a pre-rebase
-# duplicate of the same work. When the forge reports that PR merged and its merge
-# commit is an ancestor of the default branch, a local branch that is behind or
-# diverged from the pipeline push (the live PR head, else recorded pr_head=) is
-# stale rather than unlanded, provided every locally changed path is also in that
-# landed ref. A path the PR never landed still refuses. When the forge cannot be
-# reached, the same path-coverage check runs against a PR head whose content is
-# already in the default branch (recorded pr_head= or refs/pull/<n>/head).
+# no longer match, and a pipeline rebase can leave the local worktree diverged from
+# the PR head. A diverged copy is not treated as landed: path-set coverage, git
+# cherry, and merge-tree containment each fail to prove content landed without also
+# accepting unlanded edits to the same paths. Teardown still accepts a merged PR
+# whose head contains the current local work (ancestor or equivalent patch ids),
+# or a clean content-in-default tree match. Anything else refuses.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -1181,16 +1179,6 @@ ensure_commit_object() {
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
-fetch_github_pull_head() {
-  local target=$1 n oid
-  n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  oid=$(git -C "$WT" rev-parse --verify FETCH_HEAD 2>/dev/null) || return 1
-  fm_pr_head_valid "$oid" || return 1
-  printf '%s\n' "$oid"
-}
-
 fetch_default_ref() {
   local name
   name=$(default_branch) || return 1
@@ -1211,28 +1199,6 @@ trees_merge_equal() {
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$landed" "$other" 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$landed_tree" ]
-}
-
-# True when every path HEAD changed since merge-base with <ref> is also changed
-# on <ref> since that same base. Local is then a stale or equivalent copy of
-# landed work (behind or diverged after a rebase), not extra unlanded files.
-# A path HEAD changed that <ref> did not still refuses.
-local_changes_covered_by_ref() {
-  local landed=$1 current base local_files landed_files path
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  git -C "$WT" cat-file -e "$landed^{commit}" 2>/dev/null || return 1
-  if git -C "$WT" merge-base --is-ancestor "$current" "$landed" 2>/dev/null; then
-    return 0
-  fi
-  base=$(git -C "$WT" merge-base "$current" "$landed" 2>/dev/null) || return 1
-  local_files=$(git -C "$WT" diff --name-only --no-renames "$base" "$current" -- 2>/dev/null) || return 1
-  landed_files=$(git -C "$WT" diff --name-only --no-renames "$base" "$landed" -- 2>/dev/null) || return 1
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    printf '%s\n' "$landed_files" | grep -qxF "$path" || return 1
-  done <<EOF
-$local_files
-EOF
 }
 
 patch_id_for_commit() {
@@ -1267,79 +1233,42 @@ $unpushed
 EOF
 }
 
-pr_view_merged() {
-  local target=$1 view
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url,mergeCommit \
-    -q '.state + "\t" + .headRefOid + "\t" + .url + "\t" + (.mergeCommit.oid // "")' \
-    2>/dev/null) && {
-    printf '%s\n' "$view"
-    return 0
-  }
-  (cd "$WT" && gh pr view "$target" --json state,headRefOid,url \
-    -q '.state + "\t" + .headRefOid + "\t" + .url') 2>/dev/null
-}
-
-# True when a merged PR's merge commit sits on the default branch and local
-# HEAD only repeats paths that landed in the pipeline push or that merge.
-merged_pr_covers_stale_local() {
-  local head=$1 merge_oid=$2 default_ref cover_head
-  fm_pr_head_valid "$merge_oid" || return 1
-  default_ref=$(fetch_default_ref) || return 1
-  git -C "$WT" cat-file -e "$merge_oid^{commit}" 2>/dev/null \
-    || return 1
-  git -C "$WT" merge-base --is-ancestor "$merge_oid" "$default_ref" 2>/dev/null \
-    || return 1
-  cover_head=$head
-  if ! git -C "$WT" cat-file -e "$cover_head^{commit}" 2>/dev/null; then
-    cover_head=$PR_HEAD
-  fi
-  if git -C "$WT" cat-file -e "$cover_head^{commit}" 2>/dev/null \
-     && local_changes_covered_by_ref "$cover_head"; then
-    return 0
-  fi
-  local_changes_covered_by_ref "$merge_oid"
-}
-
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for the PR state, head, and merge commit. Returns non-zero when the PR is not
-# merged, the current work is not contained in the PR head or covered as a stale
-# copy of that landed merge, no PR is found, or any gh error occurs - the caller
-# then falls back to the content check.
+# for both the PR state and head. Recorded pr_head= is used only when the live
+# head object cannot be fetched. Returns non-zero when the PR is not merged, the
+# current work is not contained in the PR head, no PR is found, or any gh error
+# occurs - the caller then falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state rest head resolved_url merge_oid current landed=0
+  local branch=$1 target view state remainder head resolved_url current cover_head landed=0
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(pr_view_merged "$target") || return 1
+  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
-  rest=${view#*$'\t'}
+  remainder=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
-  head=${rest%%$'\t'*}
-  rest=${rest#*$'\t'}
-  [ "$head" != "$rest" ] || return 1
-  resolved_url=${rest%%$'\t'*}
-  merge_oid=${rest#*$'\t'}
-  if [ "$merge_oid" = "$rest" ]; then
-    merge_oid=
-  fi
+  head=${remainder%%$'\t'*}
+  resolved_url=${remainder#*$'\t'}
+  [ "$head" != "$remainder" ] || return 1
   case "$state" in
     MERGED|merged) ;;
     *) return 1 ;;
   esac
   [ -n "$head" ] || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  if ensure_commit_object "$target" "$head"; then
-    if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
-      landed=1
-    elif unpushed_patches_are_in_pr_head "$head"; then
-      landed=1
-    fi
+  cover_head=$head
+  if ! ensure_commit_object "$target" "$cover_head"; then
+    cover_head=$PR_HEAD
+    [ -n "$cover_head" ] || return 1
+    ensure_commit_object "$target" "$cover_head" || return 1
   fi
-  if [ "$landed" != 1 ] && merged_pr_covers_stale_local "$head" "$merge_oid"; then
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  if git -C "$WT" merge-base --is-ancestor "$current" "$cover_head" 2>/dev/null; then
+    landed=1
+  elif unpushed_patches_are_in_pr_head "$cover_head"; then
     landed=1
   fi
   [ "$landed" = 1 ] || return 1
@@ -1350,46 +1279,24 @@ pr_is_merged() {
   return 0
 }
 
-pr_head_content_covers_local() {
-  local pr_head=$1 default_ref
-  [ -n "$pr_head" ] || return 1
-  git -C "$WT" cat-file -e "$pr_head^{commit}" 2>/dev/null || return 1
-  default_ref=$(fetch_default_ref) || return 1
-  trees_merge_equal "$default_ref" "$pr_head" || return 1
-  local_changes_covered_by_ref "$pr_head"
-}
-
 # Is the branch's content already present in the up-to-date default branch? Fetches
 # first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
 # the default branch does not already contain (e.g. its change landed via squash) the
 # merged tree equals the default branch's tree. This isolates branch-only changes, so
 # unrelated commits the default branch gained past the merge-base do not count as
-# "added". When that merge conflicts - typical of a pre-rebase local copy versus a
-# squash of the rebased PR - a PR head whose own content is already in default and
-# that covers every locally changed path still settles it. Returns non-zero when
-# inconclusive, so the caller refuses rather than guesses.
+# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
+# so the caller refuses rather than guesses.
 content_in_default() {
-  local ref oid
+  local ref
   ref=$(fetch_default_ref) || return 1
-  if trees_merge_equal "$ref" HEAD; then
-    return 0
-  fi
-  if [ -n "$PR_HEAD" ]; then
-    ensure_commit_object "${PR_URL:-}" "$PR_HEAD" || true
-    pr_head_content_covers_local "$PR_HEAD" && return 0
-  fi
-  if [ -n "$PR_URL" ] && oid=$(fetch_github_pull_head "$PR_URL"); then
-    pr_head_content_covers_local "$oid" && return 0
-  fi
-  return 1
+  trees_merge_equal "$ref" HEAD
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head or is a stale copy of that
-# landed squash, OR the content is already in the default branch (fallback, which
-# also covers the no-PR and gh-error paths). False only for genuinely unlanded
-# work.
+# current local work is contained in the PR head, OR the content is already in the
+# default branch (fallback, which also covers the no-PR and gh-error paths). False
+# only for genuinely unlanded work.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
