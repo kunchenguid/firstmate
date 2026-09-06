@@ -348,11 +348,13 @@ jobs:
           if-no-files-found: warn
 
   macos-stock-bash:
-    name: Stock macOS Bash snapshot compatibility
+    name: Stock macOS Bash and Fish compatibility
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      - name: Install Fish
+        run: brew install fish
       - name: Run snapshot consumers with stock Bash
         shell: /bin/bash {0}
         env:
@@ -406,6 +408,8 @@ jobs:
             echo "::error::expected 1 public-followup bash 3.2 register regression, got $pf_count"
             exit 1
           }
+
+          FM_TEST_REQUIRE_FISH=1 /bin/bash tests/fm-control-relaunch.test.sh
 
   invariants:
     name: Repo invariants

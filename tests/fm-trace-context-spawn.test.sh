@@ -325,7 +325,8 @@ test_failed_delivery_omits_metadata_and_still_launches() {
     || fail "failed traceparent delivery must not leave a traceparent= claim in meta"
   ! grep -q '^export TRACEPARENT=' "$LAUNCH_LOG" \
     || fail "the failed TRACEPARENT export must not be recorded as delivered"
-  grep -q 'claude' "$LAUNCH_LOG" || fail "the source task must still launch"
+  grep -q '^unset TRACEPARENT; .*claude' "$LAUNCH_LOG" \
+    || fail "failed TRACEPARENT delivery must preserve the fresh-spawn launch cleanup"
   pass "failed TRACEPARENT delivery omits metadata while the source task still launches"
 }
 

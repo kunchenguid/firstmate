@@ -123,6 +123,43 @@ SH
   chmod +x "$fb/sleep"
 }
 
+make_herdr_stub() {  # <dir>
+  local fb="$1/fakebin"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+case "${1:-} ${2:-}" in
+  "status --json")
+    printf '%s\n' '{"client":{"version":"0.8.2","protocol":19},"server":{"running":true}}'
+    ;;
+  "pane get")
+    printf '{"result":{"pane":{"pane_id":"w1:p1","foreground_cwd":"%s"}}}\n' "$(cat "$D/cwd")"
+    ;;
+  "agent get")
+    if [ -e "$D/launch-entered" ]; then
+      printf '%s\n' '{"result":{"agent":{"agent":"shell","agent_status":"idle"}}}'
+    else
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+    fi
+    ;;
+  "pane send-text")
+    printf '%s\n' "${4:-}" >> "$D/literal"
+    : > "$D/launch-pending"
+    ;;
+  "pane send-keys")
+    [ ! -e "$D/launch-pending" ] || : > "$D/launch-entered"
+    ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+  cat > "$fb/pi" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" != --help ] || printf '%s\n' 'Usage: pi'
+SH
+  chmod +x "$fb/pi"
+}
+
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
 new_case() {
   local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM"
@@ -461,7 +498,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
 }
 
 test_disabled_relaunch_clears_prior_trace_context() {
-  local dir out rc
+  local dir out rc launch
   dir=$(new_case trace-off rl33)
   add_ship_task "$dir" rl33 claude
   printf '%s\n' 'traceparent=00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01' \
@@ -473,11 +510,50 @@ test_disabled_relaunch_clears_prior_trace_context() {
   expect_code 0 "$rc" "disabled relaunch should succeed"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl33 traceparent)" ] \
     || fail "disabled relaunch must remove the prior trace carrier from metadata"
-  grep -q '^unset TRACEPARENT; .*claude' "$dir/fake/literal" \
-    || fail "disabled relaunch must clear the pane carrier before replacement launch"
+  launch=$(grep '^env -u TRACEPARENT .*claude' "$dir/fake/literal") \
+    || fail "disabled relaunch must clear the pane carrier in the replacement process environment"
   ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
     || fail "disabled relaunch must not export a replacement trace carrier"
-  pass "fm-control relaunch: disabling tracing clears metadata and pane context"
+  if command -v fish >/dev/null 2>&1; then
+    cat > "$dir/fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${TRACEPARENT-unset}" > "$FM_FAKE_DIR/fish-traceparent"
+SH
+    chmod +x "$dir/fakebin/claude"
+    PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" TRACEPARENT=stale \
+      fish -c "$launch" >/dev/null 2>&1 \
+      || fail "Fish rejected the trace-disabled replacement launch"
+    [ "$(cat "$dir/fake/fish-traceparent")" = unset ] \
+      || fail "the replacement process inherited TRACEPARENT under Fish"
+  elif [ "${FM_TEST_REQUIRE_FISH:-0}" = 1 ]; then
+    fail "Fish is required for the trace-disabled replacement launch regression"
+  fi
+  pass "fm-control relaunch: disabling tracing clears metadata and replacement process context"
+}
+
+test_herdr_pi_relaunch_rejects_a_surviving_shell() {
+  local dir out rc meta
+  dir=$(new_case herdr-pi-shell rl42)
+  add_ship_task "$dir" rl42 pi
+  make_herdr_stub "$dir"
+  meta="$dir/home/state/rl42.meta"
+  sed -i.bak 's|^window=.*|window=fake:w1:p1|' "$meta"
+  rm -f "$meta.bak"
+  {
+    printf '%s\n' 'backend=herdr'
+    printf '%s\n' 'herdr_session=fake'
+    printf '%s\n' 'herdr_workspace_id=w1'
+    printf '%s\n' 'herdr_tab_id=w1:t1'
+    printf '%s\n' 'herdr_pane_id=w1:p1'
+  } >> "$meta"
+
+  out=$(run_control "$dir" rl42 relaunch --note "retry the Pi worker") || rc=$?
+  expect_code 1 "${rc:-0}" "a surviving Herdr shell must not prove the replacement Pi agent started"$'\n'"$out"
+  assert_contains "$out" "replacement Pi agent" \
+    "the refusal should name the selected agent that never started"
+  assert_contains "$out" "Herdr reports 'shell'" \
+    "the refusal should identify the surviving shell that failed launch verification"
+  pass "fm-control relaunch: Herdr rejects a surviving shell when the selected Pi agent never starts"
 }
 
 test_relaunch_appends_the_progress_note_to_the_instructions() {
@@ -1537,6 +1613,7 @@ test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
+test_herdr_pi_relaunch_rejects_a_surviving_shell
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring

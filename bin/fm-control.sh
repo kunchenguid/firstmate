@@ -48,8 +48,10 @@
 #              standing charter is never rewritten.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. A failure before publication keeps
-#              the prior durable record in place and reports the concrete
+#              bin/fm-spawn.sh --relaunch. A Herdr relaunch onto Pi additionally
+#              requires Herdr's native agent identity to report Pi, so a
+#              surviving shell is not success. A failure before publication
+#              keeps the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
 #
@@ -784,7 +786,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line identity elapsed
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -841,9 +843,27 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
-  state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
-    die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
-  }
+  # Herdr can keep a shell registered after a rejected Fish command, so the
+  # observed Pi relaunch needs one native identity/state snapshot as its proof.
+  if [ "$BACKEND:$TARGET_HARNESS" = herdr:pi ]; then
+    fm_backend_source "$BACKEND" || die "the Herdr backend could not be loaded to verify the replacement Pi agent"
+    elapsed=0
+    while :; do
+      identity=$(fm_backend_herdr_composer_identity "$T" 2>/dev/null || true)
+      case "$identity" in
+        pi$'\t'working|pi$'\t'idle|pi$'\t'done|pi$'\t'blocked) break ;;
+      esac
+      awk -v e="$elapsed" -v t="$LAUNCH_WAIT" 'BEGIN{exit !(e < t)}' || {
+        die "the replacement Pi agent for $ID did not come up within ${LAUNCH_WAIT}s (Herdr reports '${identity%%$'\t'*}')"
+      }
+      sleep "$POLL"
+      elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+    done
+  else
+    state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
+      die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
+    }
+  fi
   RELAUNCH_AGENT_CONFIRMED=1
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"

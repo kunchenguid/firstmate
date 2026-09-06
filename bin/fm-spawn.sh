@@ -268,8 +268,9 @@
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
-# TRACEPARENT; the default-off path writes neither, leaving the generated meta
-# and launch environment unchanged.
+# TRACEPARENT. The default-off path writes and exports neither; on relaunch it
+# also clears any prior carrier only from the replacement process environment
+# with `env -u TRACEPARENT`, leaving the long-lived pane shell unchanged.
 #   --traceparent <carrier> delivers a carrier that a REMOTE parent already
 #   resolved and will record, instead of resolving one from this home's frozen
 #   decision. It is accepted only for --secondmate spawns, only as a strictly
@@ -3535,7 +3536,7 @@ if [ "$KIND" = secondmate ]; then
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
-  LAUNCH="unset TRACEPARENT; $LAUNCH"
+  LAUNCH="env -u TRACEPARENT $LAUNCH"
 fi
 
 spawn_record_traceparent() {
@@ -3574,7 +3575,11 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 if [ -n "$SPAWN_TRACEPARENT" ]; then
   if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! spawn_record_traceparent; then
-      LAUNCH="unset TRACEPARENT; $LAUNCH"
+      if [ "$RELAUNCH" -eq 1 ]; then
+        LAUNCH="env -u TRACEPARENT $LAUNCH"
+      else
+        LAUNCH="unset TRACEPARENT; $LAUNCH"
+      fi
     fi
   else
     TRACE_SEND_STATUS=$?
@@ -3582,7 +3587,11 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
       echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
       exit 1
     fi
-    LAUNCH="unset TRACEPARENT; $LAUNCH"
+    if [ "$RELAUNCH" -eq 1 ]; then
+      LAUNCH="env -u TRACEPARENT $LAUNCH"
+    else
+      LAUNCH="unset TRACEPARENT; $LAUNCH"
+    fi
   fi
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
