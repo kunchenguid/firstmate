@@ -189,6 +189,30 @@ mail_seen() {
   grep -Fqx "$1" "$CURSOR"
 }
 
+mail_seen_remove() {
+  # $1 = uid; remove it from the cursor. Used as a recovery fallback when a
+  # recovered-metadata wake could not be delivered and its retry record could
+  # not be restored: removing the cursor line lets the next poll re-surface
+  # the uid as new and re-fetch real metadata instead of stranding it.
+  local id=$1 tmp
+  [ -n "$id" ] || return 0
+  [ -f "$CURSOR" ] || return 0
+  if ! grep -Fqx "$id" "$CURSOR"; then
+    return 0
+  fi
+  tmp=$(mktemp "$CURSOR.rm.XXXXXX") || return 1
+  if ! grep -vx -e "$id" "$CURSOR" > "$tmp" 2>/dev/null; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  chmod 0600 "$tmp" 2>/dev/null || true
+  if ! mv -f -- "$tmp" "$CURSOR"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  return 0
+}
+
 mail_retry_add() {
   # $1 = uid; record that a degraded surfacing should be retried.
   local id=$1
@@ -538,7 +562,15 @@ mail_poll() {
           # stranded, while a fail-closed wake (code 2) already delivered its
           # row and must not be re-woken.
           if ! mail_retry_add "$uid"; then
-            echo "fm-mail: could not restore retry for recovered $uid" >&2
+            # The retry record could not be restored and the uid is already
+            # cursor-recorded from the earlier degraded wake. Remove the cursor
+            # line as a self-healing fallback so the next poll re-surfaces the
+            # mail as new and re-fetches real metadata. If even that fails, the
+            # poll still fails closed rather than silently stranding it.
+            echo "fm-mail: could not restore retry for recovered $uid; removing cursor record so next poll re-fetches" >&2
+            if ! mail_seen_remove "$uid"; then
+              echo "fm-mail: could not restore retry or remove cursor record for $uid; retried on next poll" >&2
+            fi
             fm_lock_release "$STATE_DIR/.mail-seen.lock"
             return 1
           fi
