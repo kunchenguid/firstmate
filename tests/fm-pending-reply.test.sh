@@ -1753,24 +1753,6 @@ test_pre_existing_archive_is_adopted_not_clobbered() {
   pass "an existing populated archive is adopted, not recreated or clobbered"
 }
 
-test_legacy_settled_record_in_hot_set_is_archived_by_the_tick() {
-  local home state corr hot
-  home=$(setup_parent retention-legacy-sweep)
-  state="$home/state"
-  export FM_PENDING_REPLY_NOW=7400
-  corr=$(fm_pending_reply_create "$home" "$state" hibit "legacy settled")
-  fm_pending_reply_mark_delivered "$state" "$corr"
-  hot=$(fm_pending_reply_path "$state" "$corr")
-  # A record that settled before retention existed, or whose archiving failed
-  # once: the tick must file it away rather than re-reading it forever.
-  fm_pending_reply_set "$hot" phase resolved
-  fm_pending_reply_tick "$state" || fail "tick should succeed"
-  [ ! -e "$hot" ] || fail "the tick must move a legacy settled record out of the hot set"
-  [ -f "$(fm_pending_reply_archive_dir "$state")/$corr" ] \
-    || fail "the tick must file the legacy settled record under archive/"
-  pass "a legacy settled record in the hot set is archived by the tick"
-}
-
 test_resolution_reports_archive_failure() {
   local home state corr hot original_archive first_rc=0
   home=$(setup_parent retention-archive-failure)
@@ -1888,26 +1870,23 @@ test_archived_wrong_home_lookup_is_inert() {
   pass "wrong-home lookup finds archived correlations as inert records"
 }
 
-test_settled_record_with_an_open_escalation_stays_hot() {
-  local home state corr hot
+test_settled_record_with_an_open_escalation_converges() {
+  local home state corr hot archive
   home=$(setup_parent retention-open-escalation)
   state="$home/state"
   export FM_PENDING_REPLY_NOW=7500
   corr=$(fm_pending_reply_create "$home" "$state" hibit "open escalation")
   fm_pending_reply_mark_delivered "$state" "$corr"
   hot=$(fm_pending_reply_path "$state" "$corr")
-  # Settled, but its escalation close has not landed: the retry that makes the
-  # close converge needs the record in the hot set, so retention must wait.
+  archive="$(fm_pending_reply_archive_dir "$state")/$corr"
   fm_pending_reply_set "$hot" phase resolved
   fm_pending_reply_set "$hot" escalated_epoch 7450
   fm_pending_reply_tick "$state" || fail "tick should succeed"
-  [ -f "$hot" ] \
-    || fail "a settled record with an unclosed escalation must stay in the hot set"
-  # Once the close is recorded, the next tick may file it away.
-  fm_pending_reply_set "$hot" escalation_closed_epoch 7460
-  fm_pending_reply_tick "$state" || fail "tick should succeed"
-  [ ! -e "$hot" ] || fail "a closed escalation must stop pinning the record to the hot set"
-  pass "retention waits for an open escalation to close before archiving"
+  [ ! -e "$hot" ] || fail "closing the escalation must remove the settled hot record"
+  [ -f "$archive" ] || fail "closing the escalation must archive the settled record"
+  [ -n "$(fm_pending_reply_get "$archive" escalation_closed_epoch)" ] \
+    || fail "the open escalation was not closed before archival"
+  pass "an open escalation converges before settled archival"
 }
 
 test_settled_record_leaves_the_hot_set
@@ -1915,12 +1894,11 @@ test_tick_scans_only_open_records
 test_archived_record_is_still_found_by_correlation_id
 test_create_regenerates_an_archived_correlation_collision
 test_pre_existing_archive_is_adopted_not_clobbered
-test_legacy_settled_record_in_hot_set_is_archived_by_the_tick
 test_resolution_reports_archive_failure
 test_archive_failure_does_not_reopen_resolved_reply
 test_partial_resolution_is_not_published_or_archived
 test_resolved_escalation_retry_archives_immediately
 test_archived_wrong_home_lookup_is_inert
-test_settled_record_with_an_open_escalation_stays_hot
+test_settled_record_with_an_open_escalation_converges
 
 printf 'ok - all pending-reply tests passed\n'
