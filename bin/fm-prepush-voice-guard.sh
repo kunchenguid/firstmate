@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# fm-prepush-voice-guard.sh - owner of the refusal that keeps firstmate's
-# internal voice and internal pointers out of anything published from this
-# machine. Unrelated to the bin/fm-voice-* audio relay family.
+# fm-prepush-voice-guard.sh - owner of the deterministic refusal that stops
+# accidental firstmate internal voice and internal pointers before publication.
+# Unrelated to the bin/fm-voice-* audio relay family.
 #
 # THE DEFECT THIS EXISTS FOR. AGENTS.md tells every agent to address the user as
 # "captain" in every response. An agent working INSIDE this repo reads AGENTS.md
@@ -11,6 +11,13 @@
 # it. An instruction-level guard against agents adopting the captain's identity
 # was already active while the leak happened anyway, so this is deterministic
 # enforcement instead of a second instruction.
+#
+# SCOPE: ACCIDENT PREVENTION, NOT A SECURITY BOUNDARY. This scanner and its
+# fm-lint.sh caller are both branch-controlled, so they stop the pipeline agent
+# accident that caused the real leaks but cannot stop a determined branch author
+# from removing the call or neutering the scanner. Trusted enforcement belongs
+# in no-mistakes or its trusted configuration and is tracked upstream as
+# nm-pr-body-scan-before-api.
 #
 # WHY BEFORE THE FIRST PUSH, not before merge. On a repository firstmate does not
 # own, a maintainer can merge at any moment, so a correction that waits for the
@@ -45,20 +52,20 @@
 # hold", "captain intent", "captain-gated", and "reaches the captain" all pass
 # untouched, while "…: Captain, fixed the…" and "…scans, captain" refuse.
 #
-# The same position-not-vocabulary test admits the two session-pointer rules. A
-# link to the working session is internal material leaving the machine exactly
+# A link to the working session is internal material leaving the machine exactly
 # as an address is, and three such trailers are already in merged history, so it
-# is refused here rather than by a second mechanism. A trailer key may contain a
-# session-bearing token surrounded by letters or hyphens, but its value must
-# still be a URL or opaque id. That token-shaped rule catches Codex-Session and
-# Session-Link without enumerating worker runtimes and has zero false positives
-# against Discussion, Regression, or prose-valued session configuration.
+# is refused here rather than by a second mechanism. A trailer key must contain
+# session, conversation, or transcript as an exact hyphen-separated token, and
+# its value must still be a URL or opaque id. That catches Codex-Session and
+# Session-Link without treating Thread-Safety-Docs as a session key. "thread"
+# and "chat" are deliberately absent because both are ordinary repository
+# vocabulary and neither appears in a real merged leak.
 #
-# The bare-link evidence is weaker because merged history contains only four
-# URLs. That rule therefore requires an http(s) URL with a path segment beginning
-# /session, optionally continued by slash, underscore, or hyphen, rather than
-# matching any URL that merely mentions the word. The 333 legitimate merged
-# lines using "session" in its ordinary technical sense still pass.
+# The bare-link rule requires an http(s) URL whose /session/ or /session_ marker
+# is followed by an opaque identifier of at least ten characters. The identifier
+# is the evidence of a working-session pointer, so /session-locking.html and
+# /sessions/list remain ordinary links. The 333 legitimate merged lines using
+# "session" in its ordinary technical sense still pass.
 #
 # The private work-document rules likewise key on a path shape, not a word. A
 # path with a subdirectory under data/, data/<id>/<file> or anything deeper, is
@@ -250,15 +257,15 @@ FM_VOICE_RULES+=("delivery-machinery-handoff${TAB}i${TAB}(^|[^[:alnum:]_])outer[
 # A pointer at the working session that produced the change, as a trailer whose
 # value is a URL or an opaque id. Three such trailers are already in merged
 # history, so this is a recurring leak rather than a hypothetical one. Requiring
-# both a session-bearing key token and the value shape separates a pointer from
-# ordinary prose or configuration.
-FM_VOICE_RULES+=("internal-session-pointer${TAB}i${TAB}^[[:space:]]*[[:alpha:]-]*(session|conversation|transcript|chat|thread)[[:alpha:]-]*[[:space:]]*:[[:space:]]*(https?://|[A-Za-z0-9_-]{16,})${TAB}Published history must not link the working session that produced the change. Delete the trailer.")
+# an exact hyphen-separated key token and the value shape separates a pointer
+# from ordinary prose, configuration, and compound technical terms.
+FM_VOICE_RULES+=("internal-session-pointer${TAB}i${TAB}^[[:space:]]*([[:alpha:]]+-)*(session|conversation|transcript)(-[[:alpha:]]+)*[[:space:]]*:[[:space:]]*(https?://|[A-Za-z0-9_-]{16,})${TAB}Published history must not link the working session that produced the change. Delete the trailer.")
 
 # The same pointer as a bare link, which survives being moved out of a trailer
-# and into a sentence in a pull request description. Matched on the session path
-# segment rather than on the host, so it does not become a list of vendors, and
-# URLs that mention session outside their path stay legitimate.
-FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}https?://[^[:space:]?#]*/session([/_-][^[:space:]?#]+)?([^[:alnum:]_-]|\$)${TAB}Published history must not link the working session that produced the change. Remove the link.")
+# and into a sentence in a pull request description. Matched on the opaque id
+# after a /session/ or /session_ marker rather than on the host or bare word, so
+# ordinary session documentation stays legitimate without a vendor list.
+FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}https?://[^[:space:]?#]*/session[_/][A-Za-z0-9][A-Za-z0-9_-]{9,}${TAB}Published history must not link the working session that produced the change. Remove the link.")
 
 # A private per-task work document is a path rooted at data/ with at least one
 # subdirectory: data/<id>/<file>, and anything deeper. Requiring a subdirectory
@@ -278,12 +285,13 @@ FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}https?://[^[:space:]?#]*/ses
 # the leak this guard is for is usually pasted absolute: the same private report
 # written as /Users/<user>/<home>/data/<id>/report.md has a slash before "data"
 # and so escaped the rule that refuses its relative spelling. The second
-# alternative admits exactly that shape - an absolute or "~"-rooted path, of any
-# depth, ending in the same data/<id>/<file> tail. Its leading delimiter excludes
-# both ":" and "/" so the match cannot begin inside a URL scheme, while each
-# ancestor component accepts spaces because a real home directory can contain
-# them. It matches no additional line in merged history.
-FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}((^|[^[:alnum:]_/.-])|(^|[^[:alnum:]_:/])~?(/[[:alnum:]_.-][[:alnum:]_. -]*)*/)data/[[:alnum:]_.-]+/[[:alnum:]_./-]+${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
+# alternative admits exactly that shape, at start of line or after whitespace,
+# an opening quote, or an opening bracket. A URL contains no whitespace, so this
+# structural anchor cannot begin in one regardless of its punctuation. An
+# optional "~", ".", or ".." root token keeps home-rooted and relative forms,
+# while ancestor components accept spaces because a real home directory can
+# contain them. It matches no additional line in merged history.
+FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}((^|[^[:alnum:]_/.-])data/[[:alnum:]_.-]+/[[:alnum:]_./-]+|(^|[[:space:]\"'([<])(~|\.\.?)?(/[[:alnum:]_.-][[:alnum:]_. -]*)*/data/[[:alnum:]_.-]+/[[:alnum:]_./-]+)${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
 
 # The local Lavish review artifact, which is the other private work-document
 # shape this repo produces. Keyed on the dot-prefixed directory path so the 59
