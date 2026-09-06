@@ -1016,7 +1016,7 @@ test_ship_teardown_refuses_orca_missing_worktree_path() {
 }
 
 test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
-  local proj wt data state config id out rc neutral
+  local proj wt data state config id orca_id out rc neutral
   id="orcashipmatchz2"
   proj="$TMP_ROOT/ship-match-project"
   wt="$TMP_ROOT/ship-match-wt"
@@ -1024,14 +1024,15 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
   state="$TMP_ROOT/ship-match-state"
   config="$TMP_ROOT/ship-match-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  orca_id="repo-ship-match::$wt"
   mkdir -p "$data/$id" "$state" "$config"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-ship-match" "worktree=$wt" "project=$proj" \
     "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
-    "backend=orca" "orca_worktree_id=wt-ship-match"
+    "backend=orca" "orca_worktree_id=$orca_id"
   orca_case ship-match
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-ship-match","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$orca_id" "$wt" > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1040,11 +1041,11 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
   rc=$?
   set -e
   expect_code 0 "$rc" "Orca ship teardown should succeed when the id path matches the inspected worktree"$'\n'"$out"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show'$'\x1f''--worktree'$'\x1f''id:wt-ship-match'$'\x1f''--json' \
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show'$'\x1f''--worktree'$'\x1f''id:'"$orca_id"$'\x1f''--json' \
     "teardown did not resolve the Orca worktree id before removal"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-ship-match'$'\x1f''--json' \
     "teardown did not close the matched Orca terminal"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-ship-match'$'\x1f''--force'$'\x1f''--json' \
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:'"$orca_id"$'\x1f''--force'$'\x1f''--json' \
     "teardown did not remove the matched Orca worktree"
   assert_absent "$state/$id.meta" "successful matched teardown should remove task metadata"
   pass "fm-teardown.sh backend=orca: ship teardown requires a matching Orca id path"
