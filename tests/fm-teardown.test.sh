@@ -57,6 +57,12 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+# fm-agy-trust.sh judges every directory on the way to the agy store, the
+# fixture's own ancestors included, so a suite run under the umask-002 default
+# would hand the agy cases a 0775 chain and fail on its own scaffolding rather
+# than on anything under test. 0755 is what a real installation looks like.
+umask 022
+
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
@@ -1596,8 +1602,9 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
 }
 
 # agy creates its own settings directory 0755 on first run, and fm-agy-trust.sh
-# refuses one anyone but its owner can write, so the fixtures below match that
-# rather than inheriting the 0775 a umask-002 default would give them.
+# refuses one anyone but its owner can write. The suite umask already gives that;
+# this states it at the point of use so a fixture keeps its permission even if it
+# is later built somewhere with a looser default.
 make_agy_store_dir() { mkdir -p "$1" && chmod go-w "$1"; }
 
 # The agy spawn's workspace-trust entry is the one task artifact written outside

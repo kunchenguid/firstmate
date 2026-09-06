@@ -547,6 +547,54 @@ test_store_symlink_chain_through_a_loose_directory_is_refused() {
   pass "fm-agy-trust.sh: refuses a store symlink chain through a directory others can write"
 }
 
+# The directory holding the store is not the only one that decides where the
+# store resolves: whoever can write an ANCESTOR of it renames it aside and plants
+# their own. ~/.gemini is not $HOME, and writing it does not own this login, so
+# the walk does not stop short of it.
+test_settings_directory_ancestor_writable_by_others_is_refused() {
+  local rec out store dir
+  rec=$(make_case settings-ancestor-writable)
+  read_case "$rec"
+  store=$(store_path "$AGY_HOME")
+  dir=$(dirname "$store")
+  mkdir -p "$dir"
+  chgrp "$(id -g)" "$(dirname "$dir")"
+  chmod g+w,o-w "$(dirname "$dir")"
+  out=$(run_trust "$AGY_HOME" "$WT" "$PROJ")
+  expect_code 1 $? "a settings directory reached through a loose ancestor must be refused: $out"
+  assert_contains "$out" "writable by other users" "the refusal did not name the directory permission"
+  pass "fm-agy-trust.sh: refuses a settings directory reached through an ancestor others can write"
+}
+
+# The same predicate has to reach the ancestors of every LATER hop too, not just
+# the settings directory's own. This is the ordinary stow layout: both ends of
+# the chain are tight and the dotfiles directory in the middle is not, which is
+# all an attacker needs to replant the hop and redirect the write.
+test_store_hop_ancestor_writable_by_others_is_refused() {
+  local rec out store dots priv victim before
+  rec=$(make_case hop-ancestor-writable)
+  read_case "$rec"
+  store=$(store_path "$AGY_HOME")
+  mkdir -p "$(dirname "$store")"
+  dots="$CASE_DIR/dotfiles"
+  priv="$CASE_DIR/private"
+  mkdir -p "$dots/gemini" "$priv"
+  chmod 700 "$priv"
+  victim="$priv/notes.json"
+  printf '%s\n' '{"unrelated":true}' > "$victim"
+  before=$(cat "$victim")
+  ln -s "$victim" "$dots/gemini/settings.json"
+  ln -s "$dots/gemini/settings.json" "$store"
+  chgrp "$(id -g)" "$dots"
+  chmod g+w,o-w "$dots"
+  out=$(run_trust "$AGY_HOME" "$WT" "$PROJ")
+  expect_code 1 $? "a hop reached through a loose ancestor must be refused: $out"
+  assert_contains "$out" "writable by other users" "the refusal did not name the directory permission"
+  [ "$(cat "$victim")" = "$before" ] || \
+    fail "an unrelated file this user owns was overwritten through a replantable hop"
+  pass "fm-agy-trust.sh: refuses a store hop reached through an ancestor others can write"
+}
+
 test_created_store_directory_is_not_group_writable() {
   local rec out dir mode
   rec=$(make_case created-dir-mode)
@@ -704,6 +752,39 @@ hook_registry() { printf '%s/.gemini/antigravity-cli/fm-turn-end.d\n' "$1"; }
 
 hook_payload() {  # <fully-idle> <workspace>
   printf '{"fullyIdle":%s,"workspacePaths":["%s"],"conversationId":"c1","terminationReason":"NO_TOOL_CALL"}' "$1" "$2"
+}
+
+# fm-turn-end.sh is what agy executes on every Stop, so a directory others can
+# write - or one they can rename aside by writing its ancestor - is local code
+# execution, not just an untidy permission. The installer asks the same shared
+# predicate the trust pre-registration asks.
+test_hook_install_refuses_a_directory_reached_through_a_loose_ancestor() {
+  local rec out
+  rec=$(make_case hook-loose-ancestor)
+  read_case "$rec"
+  chgrp "$(id -g)" "$AGY_HOME"
+  chmod g+w,o-w "$AGY_HOME"
+  out=$(run_hook_install "$AGY_HOME")
+  expect_code 1 $? "an install reached through a loose ancestor must be refused: $out"
+  assert_contains "$out" "writable by other users" "the refusal did not name the directory permission"
+  [ ! -e "$(hook_script "$AGY_HOME")" ] || fail "the hook script was written despite the refusal"
+  chmod go-w "$AGY_HOME"
+  pass "fm-agy-turnend-hook.sh: refuses an install reached through an ancestor others can write"
+}
+
+# And it must not create the loose directory it would then refuse: a plain mkdir
+# under the umask-002 default leaves all three at 0775.
+test_hook_install_creates_its_directories_tight() {
+  local rec out dir mode
+  rec=$(make_case hook-umask)
+  read_case "$rec"
+  out=$(umask 002; run_hook_install "$AGY_HOME")
+  expect_code 0 $? "a fresh home under a permissive umask must still install: $out"
+  for dir in .gemini .gemini/antigravity-cli .gemini/config; do
+    mode=$(stat -c %a "$AGY_HOME/$dir" 2>/dev/null || stat -f %Lp "$AGY_HOME/$dir")
+    [ "$mode" = 755 ] || fail "the installer created $dir as mode $mode, not 755"
+  done
+  pass "fm-agy-turnend-hook.sh: creates its directories 0755 under a permissive umask"
 }
 
 test_hook_install_preserves_operator_hooks_and_remove_restores_them() {
@@ -1269,12 +1350,16 @@ test_symlinked_store_to_an_owned_target_is_accepted
 test_store_directory_writable_by_others_is_refused
 test_store_directory_writable_by_the_primary_group_is_refused
 test_store_symlink_chain_through_a_loose_directory_is_refused
+test_settings_directory_ancestor_writable_by_others_is_refused
+test_store_hop_ancestor_writable_by_others_is_refused
 test_created_store_directory_is_not_group_writable
 test_corrupt_store_fails_closed
 test_non_array_trusted_workspaces_fails_closed
 test_missing_node_is_refused
 test_scope_refusal_stays_fail_closed_without_node
 test_concurrent_store_rewrite_is_refused_rather_than_clobbered
+test_hook_install_refuses_a_directory_reached_through_a_loose_ancestor
+test_hook_install_creates_its_directories_tight
 test_hook_install_preserves_operator_hooks_and_remove_restores_them
 test_hook_signals_only_a_fully_idle_turn
 test_hook_ignores_an_unregistered_token

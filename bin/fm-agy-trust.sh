@@ -100,6 +100,17 @@ fi
 
 real_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
 
+# The shared answer to "can anyone but this user write a directory on the way to
+# this path". One owner, called from here and from fm-agy-turnend-hook.sh, so a
+# second site cannot quietly disagree with the first about the range it walks or
+# the exceptions it makes.
+# ${0%/*} rather than `dirname`: this must resolve before the missing-node
+# refusal below, and it has to keep working on the deliberately minimal PATH the
+# suite uses to exercise that refusal.
+case $0 in */*) FM_BIN_SRC=${0%/*} ;; *) FM_BIN_SRC=. ;; esac
+PATH_TRUST=$(real_dir "$FM_BIN_SRC")/fm-path-trust.mjs
+[ -f "$PATH_TRUST" ] || refuse "the shared path-trust check is missing at '$PATH_TRUST'"
+
 # The caller's own spelling of a directory, symlink components intact. agy runs
 # in the pane's cwd, and Go's os.Getwd answers with $PWD when it names the same
 # directory, so the trust lookup can present this spelling rather than the
@@ -202,101 +213,23 @@ fi
 # tool belongs rather than as a stalled pane later.
 command -v node >/dev/null 2>&1 || refuse "node is required to record workspace trust and was not found on PATH"
 
-# Following the store symlink below is only safe while no other account can write
-# the directory that holds it. Anyone who can create or replace an entry there
-# repoints the store at an unrelated file THIS user owns, and every check on the
-# store itself still passes, because the file that would be rewritten is owned by
-# the very user this runs as - so ownership cannot catch it. Refusing a directory
-# other accounts can write removes the ability to plant the link, rather than
-# removing the symlink support a dotfile manager or synced folder legitimately
-# needs. Reported by Greptile on kunchenguid/firstmate#3858.
-#
 STORE="$CONFIG_DIR_REAL/settings.json"
 
 # A dotfile manager or a synced folder legitimately symlinks this store, so the
-# link is followed to its final target and every check below judges that target.
-# Ownership is the property that matters: another user's file is refused however
-# it is reached. Writing to the resolved path is what keeps the link itself in
-# place, since staging beside the link and renaming would replace it with a
-# regular file and break that layout.
+# link is FOLLOWED to its final target and every check below judges that target.
+# Ownership is the property that matters at the end: another user's file is
+# refused however it is reached. Writing to the resolved path is what keeps the
+# link itself in place, since staging beside the link and renaming would replace
+# it with a regular file and break that layout.
 #
-# Following that link is only safe while no other account can write ANY directory
-# the resolution passes through. Whoever can create or replace an entry in one of
-# them repoints the store at an unrelated file THIS user owns, and every check on
-# the resolved store still passes, because the file that would be rewritten is
-# owned by the very user this runs as - so ownership cannot catch it. The whole
-# walk is judged rather than its two ends: a chain whose middle hop sits in a
-# directory others can write is the same confused deputy as one whose first hop
-# does. Reported by Greptile on kunchenguid/firstmate#3858.
-#
-# Write for GROUP or for OTHER is refused, with no carve-out for the caller's own
-# primary group. An earlier version of this guard made exactly that carve-out - a
-# private user group has no members but its owner, so refusing it looked like
-# failing ordinary homes closed for no gain - and the carve-out WAS the hole:
-# where the primary group is itself shared, as macOS `staff` is, every other
-# member of it could still plant the link. The bits cannot distinguish a shared
-# group from a private one, and membership cannot be enumerated portably or
-# completely: `getent` does not exist on macOS, a group's primary members are not
-# listed in its group entry on any platform, and a directory service is free not
-# to enumerate at all. An unanswerable question is not guessed at here - mode
-# 0022 is the whole test, and the refusal names the chmod that fixes it. That
-# costs a one-time `chmod g-w` on a directory some other tool created
-# group-writable, which is the price of a guard that cannot be wrong in the
-# unsafe direction.
-#
-# The ancestor chain ABOVE the settings directory is walked too, up to but
-# excluding $HOME: a ~/.gemini (or any other parent short of the home) that
-# other accounts can write lets them rename the settings directory aside and
-# plant their own, repointing the resolution exactly as a writable hop on the
-# link chain does - writing it does not own this user's login. $HOME itself is
-# the stop, because an account that can write the home owns this user's login
-# long before it reaches agy, and refusing on a 0775 home would fail the
-# umask-002 default closed over an exposure this script cannot be the control
-# for.
-#
-# node, not stat: `stat -c` is GNU-only and `stat -f` is BSD-only, and node is
-# already required below as this script's JSON writer.
-STORE_VERDICT=$(node -e '
-  const fs = require("node:fs");
-  const path = require("node:path");
-  let p = process.argv[1];
-  const home = process.argv[2];
-  let followed = 0;
-  try {
-    let anc = path.dirname(fs.realpathSync(path.dirname(p)));
-    for (;;) {
-      if (anc === home || anc === path.dirname(anc)) break;
-      if ((fs.statSync(anc).mode & 0o022) !== 0) {
-        process.stdout.write("loose:" + anc);
-        process.exit(0);
-      }
-      anc = path.dirname(anc);
-    }
-  } catch (err) { /* the walk below reports what it cannot resolve */ }
-  for (;;) {
-    // The REAL directory the current name lives in, so a symlinked parent is
-    // judged where it actually resolves rather than where it is spelled.
-    let dir;
-    try { dir = fs.realpathSync(path.dirname(p)); } catch (err) { break; }
-    if ((fs.statSync(dir).mode & 0o022) !== 0) {
-      process.stdout.write("loose:" + dir);
-      process.exit(0);
-    }
-    p = path.join(dir, path.basename(p));
-    let st;
-    try { st = fs.lstatSync(p); } catch (err) { st = null; }
-    if (st === null) break;
-    if (!st.isSymbolicLink()) { process.stdout.write("store:" + p); process.exit(0); }
-    // A chain long enough to be a loop is a store this cannot resolve, and node
-    // would only report ELOOP further down anyway.
-    if (++followed > 40) break;
-    const target = fs.readlinkSync(p);
-    p = path.isAbsolute(target) ? target : path.join(dir, target);
-  }
-  // Nothing there yet: a store this run creates itself, unless a link pointed at
-  // it, which is the dangling store the caller must fix rather than have rewritten.
-  process.stdout.write(followed > 0 ? "dangling:" : "store:" + p);
-' "$STORE" "$HOME_REAL" 2>/dev/null) || STORE_VERDICT=
+# Following it is only safe because fm-path-trust.mjs judges every directory the
+# resolution passes through - the one holding each link, and every ancestor of
+# each of those, to the root. Ownership of the endpoint cannot stand in for that:
+# the file a confused deputy is pointed at is owned by the very user this runs
+# as. That whole predicate, its no-carve-out group-write rule and its sticky-bit
+# exception, lives in that one file and is documented there rather than restated
+# here. Reported by Greptile on kunchenguid/firstmate#3858.
+STORE_VERDICT=$(node "$PATH_TRUST" resolve "$STORE" 2>/dev/null) || STORE_VERDICT=
 
 case $STORE_VERDICT in
   store:*) STORE=${STORE_VERDICT#store:} ;;
@@ -304,6 +237,7 @@ case $STORE_VERDICT in
   dangling:) refuse "'$STORE' is a symlink whose target cannot be resolved" ;;
   *) refuse "the agy settings store at '$STORE' could not be resolved" ;;
 esac
+
 if [ -e "$STORE" ]; then
   [ -f "$STORE" ] || refuse "'$STORE' is not a regular file"
   [ -O "$STORE" ] || refuse "'$STORE' is not owned by this user"

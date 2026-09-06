@@ -49,12 +49,22 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-node - "$ACTION" "$HOME" <<'NODE'
+# The shared answer to "can anyone but this user write a directory on the way to
+# this path", owned by one file and called from here and from fm-agy-trust.sh.
+case $0 in */*) FM_BIN_SRC=${0%/*} ;; *) FM_BIN_SRC=. ;; esac
+PATH_TRUST=$(cd -P -- "$FM_BIN_SRC" && pwd -P)/fm-path-trust.mjs
+if [ ! -f "$PATH_TRUST" ]; then
+  printf 'fm-agy-turnend-hook: refused: the shared path-trust check is missing at %s.\n' "$PATH_TRUST" >&2
+  exit 1
+fi
+
+node - "$ACTION" "$HOME" "$PATH_TRUST" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { execFileSync } = require("node:child_process");
 
-const [action, home] = process.argv.slice(2);
+const [action, home, pathTrust] = process.argv.slice(2);
 const CONFIG_DIR = path.join(home, ".gemini", "config");
 const CONFIG = path.join(CONFIG_DIR, "hooks.json");
 // The hook script and the token registry live in agy's own CLI state directory
@@ -191,22 +201,30 @@ try {
   assertNoForeignReference(root);
 
   if (action === "install") {
-    // The hook script agy executes on every Stop and the hooks.json holding the
-    // command string live under these directories, so a directory other
-    // accounts can write lets one of them replace either with arbitrary code.
-    // Refuse exactly as the trust pre-registration refuses its settings
-    // directory, naming the chmod that fixes it. Symlinks are judged at their
-    // target, since a dotfile manager legitimately symlinks .gemini.
-    for (const [dir, label] of [
+    // The hook script agy executes on every Stop, and the hooks.json holding the
+    // command string, live under these directories, so a directory other
+    // accounts can write - or one whose ANCESTORS they can write, which lets
+    // them rename it aside and plant their own - lets one of them replace either
+    // with arbitrary code. The same predicate the trust pre-registration uses
+    // answers it, from the same file, so the two cannot drift: a directory that
+    // does not exist yet is judged where it would be created.
+    for (const [target, label] of [
       [path.join(home, ".gemini"), ".gemini directory"],
       [STATE_DIR, "agy state directory"],
       [CONFIG_DIR, "agy config directory"],
     ]) {
-      let st;
-      try { st = fs.statSync(dir); } catch (err) { continue; }
-      if (!st.isDirectory()) refuse(`${label} is not a directory at ${dir}.`);
-      if (st.mode & 0o022) {
-        refuse(`${label} is writable by other users at ${dir}; remove write access for others with: chmod go-w ${dir}`);
+      let verdict;
+      try {
+        verdict = execFileSync(process.execPath, [pathTrust, "check", target], { encoding: "utf8" });
+      } catch (err) {
+        refuse(`the shared path-trust check could not judge ${label} at ${target}.`);
+      }
+      if (verdict.startsWith("loose:")) {
+        const loose = verdict.slice(6);
+        refuse(`${label} at ${target} is reached through '${loose}', which is writable by other users; remove write access for others with: chmod go-w ${loose}`);
+      }
+      if (!verdict.startsWith("ok:")) {
+        refuse(`${label} at ${target} could not be resolved.`);
       }
     }
     // Created 0755 regardless of the caller's umask, so an install under the
