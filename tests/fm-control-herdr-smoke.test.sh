@@ -91,7 +91,7 @@ EOF
 
 run_control() {
   env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" \
-    FM_CONTROL_POLL=0.2 FM_CONTROL_EXIT_WAIT=2 \
+    FM_CONTROL_POLL=0.2 FM_CONTROL_EXIT_WAIT=2 FM_CONTROL_EXIT_CONFIRM_WAIT=0.5 \
     "$ROOT/bin/fm-control.sh" "$@" 2>&1
 }
 
@@ -134,16 +134,25 @@ herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
 [ -d "$WT" ] || fail "the control plane must never remove the task's local copy"
 pass "real herdr: no control verb removed the endpoint or the task's local copy"
 
-# Last, because it deliberately types a harness command into a pane that hosts
-# a plain shell: the registered agent cannot actually be stopped that way, and
-# the control plane must say so rather than report a stop it did not achieve.
-if OUT=$(run_control hsmoke exit 2>&1); then
-  fail "exit should fail closed when the agent does not stop: $OUT"
-fi
+# Last, because it deliberately types the harness's exit command into a pane
+# whose "agent" is only a registry entry with no process behind it. On real
+# herdr (verified 0.8.2) the submitted /exit closes the reaped seat's pane:
+# herdr drops both the agent registration and the pane, so the recorded
+# endpoint becomes authoritatively absent. That IS the stop - a seat that
+# closed itself on exit is a stronger stop than a classifier read, never a
+# failure. The old fixed-window check read exactly this shape as "the agent
+# did not stop within Ns" (the 2026-09-05 fleet failure pattern): it waited
+# for the classifier's `dead` while the endpoint was already gone, then
+# reported a succeeded exit as failed.
+OUT=$(run_control hsmoke exit) \
+  || fail "exit against a seat herdr closes on exit should succeed: $OUT"
 case "$OUT" in
-  *"did not stop"*) : ;;
-  *) fail "the exit failure should say the agent did not stop, got: $OUT" ;;
+  "stopped hsmoke"*) : ;;
+  *) fail "a seat whose pane herdr reaps on exit should report stopped, got: $OUT" ;;
 esac
-pass "real herdr: an agent that does not stop fails closed instead of being reported as stopped"
+if herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
+  fail "the exit scenario expected herdr to reap the closed seat's pane"
+fi
+pass "real herdr: a seat whose pane herdr reaps on exit is reported stopped, never 'did not stop'"
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true

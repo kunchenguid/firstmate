@@ -29,8 +29,22 @@
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
-#              the backend's recovery-grade classifier reports the agent gone.
+#              the backend's recovery-grade classifier reports the agent gone,
+#              or the recorded endpoint authoritatively absent (a seat that
+#              closed itself on exit is a stronger stop, never a failure).
 #              Already-stopped is success (idempotent).
+#
+#              Verification is keyed on that POSITIVE stop state with two
+#              bounded waits: the primary exit window, then a shorter confirm
+#              window that catches a stop landing just after the first window
+#              expires. A window's expiry is NOT evidence the action failed -
+#              it only means the stop state was not observed yet - so expiry
+#              reports exit=unconfirmed with the observed state and never a
+#              definite "did not stop" failure claim. Only a definite refusal
+#              before or during delivery reports the action as failed. Reading
+#              a succeeded action as failed is the dangerous direction for
+#              lifecycle control: it aims recovery at a seat that already did
+#              exactly what it was told.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
@@ -89,6 +103,8 @@
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
+#   FM_CONTROL_EXIT_CONFIRM_WAIT second bounded wait for the same positive stop
+#                                state after the exit window expires (10)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
 set -eu
@@ -140,6 +156,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
+EXIT_CONFIRM_WAIT=${FM_CONTROL_EXIT_CONFIRM_WAIT:-10}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
 
@@ -487,8 +504,17 @@ do_exit() {
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
-    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
+  # The postcondition is the POSITIVE stop state: the classifier confidently
+  # reads no agent (dead), or the recorded endpoint is authoritatively absent
+  # because the seat closed itself on exit (missing). Window expiry is a
+  # different thing entirely, so the waits are staged: the primary window,
+  # then a shorter confirm window for a stop that lands just late. Both key on
+  # the same positive state, and only their combined expiry reports unconfirmed
+  # - with the observed state, never a definite "did not stop" failure claim.
+  state=$(wait_agent_state "$EXIT_WAIT" dead missing) || {
+    state=$(wait_agent_state "$EXIT_CONFIRM_WAIT" dead missing) || {
+      die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the stop state was not observed within the ${EXIT_WAIT}s exit window and its ${EXIT_CONFIRM_WAIT}s confirm window - a window's expiry is not evidence the agent kept running, so this is unconfirmed rather than failed; read the seat's current state before any recovery action"
+    }
   }
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
