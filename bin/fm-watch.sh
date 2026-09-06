@@ -1286,13 +1286,15 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
   else
     message="FIRSTMATE_OP: v1 branch-currency: Your open pull request $url $observation at head $head. Refresh it through this brief's direct-PR delivery path. Before any edit or branch movement, confirm no active validation run owns the branch. Fetch and merge the pull request's base without force, run the project checks on the resulting head, push normally, and wait for current-head checks. If the merge conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
   fi
+  # Marked before send so a crash mid-dispatch skips a retry, never duplicates one.
+  printf '%s' "$condition $head" > "$marker"
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_EXPECTED_SPAWN_GEN="$spawn_gen" \
     "$FM_PR_REFRESH_SEND_BIN" "$id" "$message" >/dev/null 2>&1; then
+    rm -f "$marker"
     printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=worker-dispatch-failed\n' \
       "$url" "$head" "$condition"
     return 1
   fi
-  printf '%s' "$condition $head" > "$marker"
   printf 'branch-refresh-dispatched pr=%s head=%s condition=%s\n' "$url" "$head" "$condition"
 }
 
