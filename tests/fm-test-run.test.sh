@@ -329,8 +329,12 @@ test_changed_dependency_selection_and_unmapped_failure() {
   [ "$rc" -eq 2 ] || fail "unmapped changed source must fail with exit 2, got $rc"
   grep -Fq 'no changed-test mapping for source path: src/unmapped.ts' "$tmp/err" \
     || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
+
+  rm -f "$repo/src/unmapped.ts"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  [ -z "$listed" ] || fail "a retired unmapped source without consumers selected tests: $listed"
   rm -rf "$tmp"
-  pass "changed selection covers dependents and fails closed for unmapped source"
+  pass "changed selection covers dependents, fails closed for live unmapped source, and accepts retired unconsumed source"
 }
 
 # A direct test reference is per-script evidence. Widening it to the referencing

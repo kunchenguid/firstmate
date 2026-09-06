@@ -1412,8 +1412,15 @@ families_for_changed_path() {
     README.md|LICENSE|assets/*|docs/*|.gitignore)
       ;;
     *)
-      families_for_test_reference "$path" \
-        || printf '%s\n' "__unmapped__:$path"
+      if [ -e "$path" ]; then
+        families_for_test_reference "$path" \
+          || printf '%s\n' "__unmapped__:$path"
+      else
+        # A retired source path with no remaining test consumer cannot select
+        # a runnable suite. Known source paths above retain their mappings,
+        # and a still-referenced removal is found by the same reference scan.
+        families_for_test_reference "$path" || true
+      fi
       ;;
   esac
 }
