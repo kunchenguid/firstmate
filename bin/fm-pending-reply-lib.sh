@@ -1320,6 +1320,8 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   if _fm_pending_reply_try_resolve_locked "$state" "$corr"; then
     return 0
   fi
+  phase=$(fm_pending_reply_get "$rec" phase)
+  [ "$phase" != resolved ] || return 1
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   case "$phase" in
     delivery_unknown) kind=delivery-unknown ;;

@@ -1793,6 +1793,32 @@ test_resolution_reports_archive_failure() {
   pass "successful resolution guarantees resolve-time archival"
 }
 
+test_archive_failure_does_not_reopen_resolved_reply() {
+  local home state corr hot original_archive escalation_rc=0
+  home=$(setup_parent retention-archive-escalation-race)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=7473
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "late reply wins")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  hot=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$hot" phase recovery_failed
+  printf 'done [corr=%s]: late but resolved\n' "$corr" > "$state/hibit.status"
+  original_archive=$(declare -f _fm_pending_reply_archive_locked)
+  _fm_pending_reply_archive_locked() { return 1; }
+  fm_pending_reply_maybe_escalate "$state" "$corr" || escalation_rc=$?
+  unset -f _fm_pending_reply_archive_locked
+  eval "$original_archive"
+  [ "$escalation_rc" -ne 0 ] || fail "archive failure was hidden by escalation"
+  [ "$(fm_pending_reply_get "$hot" phase)" = resolved ] \
+    || fail "archive failure reopened the resolved reply"
+  ! grep -Fq "$(fm_pending_reply_escalation_key "$corr")" "$state/hibit.status" \
+    || fail "archive failure emitted a false escalation for the resolved reply"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "resolved retry should archive"
+  [ -f "$(fm_pending_reply_archive_dir "$state")/$corr" ] \
+    || fail "resolved retry did not archive after the transient failure"
+  pass "archive failure cannot reopen a resolved reply"
+}
+
 test_partial_resolution_is_not_published_or_archived() {
   local home state corr hot original_set first_rc=0
   home=$(setup_parent retention-partial-resolution)
@@ -1891,6 +1917,7 @@ test_create_regenerates_an_archived_correlation_collision
 test_pre_existing_archive_is_adopted_not_clobbered
 test_legacy_settled_record_in_hot_set_is_archived_by_the_tick
 test_resolution_reports_archive_failure
+test_archive_failure_does_not_reopen_resolved_reply
 test_partial_resolution_is_not_published_or_archived
 test_resolved_escalation_retry_archives_immediately
 test_archived_wrong_home_lookup_is_inert
