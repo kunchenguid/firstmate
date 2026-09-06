@@ -8,7 +8,7 @@ Launch shape: `grok --always-approve "$(cat <brief>)"`.
 
 | Fact | Value |
 |---|---|
-| Busy state | The last rendered-tail fallback, isolated to Grok pending a semantic source: ASCII mid-turn `Ctrl+c:cancel`, absent from idle bar `Shift+Tab:mode │ Ctrl+.:shortcuts`, never the locale-fragile braille spinner. |
+| Busy state | The last rendered-tail fallback, isolated to Grok pending a semantic source: ASCII mid-turn `Esc:cancel` (measured on 1.0.13) or the older `Ctrl+c:cancel`, both absent from the idle bar (`Shift+Tab:mode │ Ctrl+x:shortcuts` on 1.0.13), never the locale-fragile braille spinner. |
 | Exit | `/exit` prints `Resume this session with: grok --resume <session-id>`; fallback is `Ctrl+Q` twice within 1000ms, `Ctrl+D` quits in VS Code-family terminals, and `Ctrl+C` interrupts. |
 | Interrupt | Single `Ctrl+C`; Escape only focuses scrollback. |
 | Skill | `/<skill>`, for example `/no-mistakes`, with end-to-end user-skill discovery, invocation, and real `no-mistakes axi run` evidence; the popup may consume Enter and fill an argument placeholder, requiring a real second Enter. |

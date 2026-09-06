@@ -304,6 +304,42 @@ Ctrl+c:cancel')
   pass "the grok fallback is regex-scoped to grok and classifies only grok tasks"
 }
 
+# Grok's rendered-tail regex is its ONLY busy source, so a footer it misses
+# classifies a working Grok pane idle. These are the real captures recorded in
+# docs/verification/grok-queued-enter.md (grok 1.0.13, 2026-09-06). This file
+# sources bin/fm-busy-lib.sh without its canonical owner
+# bin/fm-composer-lib.sh, so the plain calls exercise the defensive literal
+# duplicate; the final arm sources the owner and must agree with it.
+test_grok_regex_active_turn_busy() {
+  local state out busy_tail idle_tail approval_tail
+  state=$(new_state_dir grok-active-turn)
+  busy_tail='    ⠧ Run sleep 30 and wait for completion… 9.8s
+  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+x:shortcuts'
+  approval_tail='    ⠹ Run sleep 30 and wait for completion… 10s
+  1/3:select  │  Ctrl+c:cancel  │  Esc:scrollback'
+  idle_tail='  Shift+Tab:mode  │  Ctrl+x:shortcuts'
+
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" "$busy_tail")
+  [ "$out" = "busy grok-regex" ] \
+    || fail "grok's measured active-turn footer must classify busy, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" "$approval_tail")
+  [ "$out" = "busy grok-regex" ] \
+    || fail "grok's older cancel footer must still classify busy, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" "$idle_tail")
+  [ "$out" = "idle grok-regex" ] \
+    || fail "grok's measured idle footer must classify idle, got '$out'"
+
+  out=$(. "$ROOT/bin/fm-composer-lib.sh"
+    fm_busy_classify tmux w1 grok t1 "$state" "$busy_tail")
+  [ "$out" = "busy grok-regex" ] \
+    || fail "the canonical grok signature must match the measured footer, got '$out'"
+  out=$(. "$ROOT/bin/fm-composer-lib.sh"
+    fm_busy_classify tmux w1 grok t1 "$state" "$idle_tail")
+  [ "$out" = "idle grok-regex" ] \
+    || fail "the canonical grok signature must not match the idle footer, got '$out'"
+  pass "grok classifies busy for its measured active-turn footer under both signature copies"
+}
+
 # --- kimi verification gate -----------------------------------------------------
 
 test_codex_unverified_gate() {
@@ -454,6 +490,7 @@ test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
+test_grok_regex_active_turn_busy
 test_codex_unverified_gate
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals

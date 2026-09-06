@@ -290,8 +290,14 @@ fm_composer_strip_ghost() {
 # Matching a footer to confirm a keystroke landed is a different question from
 # asking what a worker is doing, and the two must not be conflated.
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: legacy
-# "Ctrl+c:cancel" (1.0.13 instead rendered "Esc:cancel"; refresh is still owed).
+# interrupt"; opencode: "esc interrupt"; pi: "Working...". grok renders
+# "Esc:cancel" for the whole span a turn is active (measured live on grok
+# 1.0.13, 2026-09-06: docs/verification/grok-queued-enter.md); "Ctrl+c:cancel"
+# is the older recorded Grok footer and is kept so a build that still renders
+# it does not read idle mid-turn. Neither token appears in Grok's idle bar
+# ("Shift+Tab:mode  |  Ctrl+x:shortcuts"), and this regex is Grok's ONLY busy
+# source (bin/fm-busy-lib.sh has no semantic writer for grok), so a token this
+# signature misses classifies a working Grok pane idle.
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -312,16 +318,21 @@ fm_composer_strip_ghost() {
 # part of that union for the same reason the others are: without it a cursor
 # submit could never be acknowledged, because cursor parks its terminal cursor
 # outside its composer and the composer verdict is therefore always `unknown`.
-# Grok 1.0.13 queued and processed three mid-turn Enters, but its measured
-# footer was "Esc:cancel", not this union's interrupt spelling. Queue acceptance
-# does not verify a footer token or a pending-composer verdict; see
-# docs/verification/grok-queued-enter.md before refreshing the Grok signature.
+# Grok's "Esc:cancel" is DELIBERATELY absent from this union even though the
+# per-harness signature below carries it. fm_tmux_submit_core (bin/fm-tmux-lib.sh)
+# reads the pane with NO harness, so adding it here would also convert a
+# structurally proven-pending grok composer from the safe `pending` (exit 3,
+# unconfirmed) to `empty` (reported delivered). Grok 1.0.13 did queue and
+# process three mid-turn Enters, but that was measured through Grok's own
+# visible queue entry, not through this union or a composer verdict, and the
+# composer-classification matrix is separately recorded as stale for grok; see
+# docs/verification/grok-queued-enter.md before widening this union.
 FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
-FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
+FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Esc:cancel|Ctrl\+c:cancel'
 # cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
 # same version rendered both `Working` and `Running` beside its braille spinner
 # in two consecutive turns, while `ctrl+c to stop` was present for the whole

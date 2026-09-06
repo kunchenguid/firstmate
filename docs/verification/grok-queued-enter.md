@@ -205,13 +205,16 @@ However, this session moved queued text out of the composer; it did not exercise
 The shared policy's portable regressions remain in `tests/fm-composer-lib.test.sh` and `tests/fm-tmux-submit-busy.test.sh`.
 This manual real-CLI experiment establishes the vendor behavior those synthetic regressions cannot establish.
 
-The measured busy footer is **`Esc:cancel`**, including while the model was thinking, not `esc interrupt`, `esc to interrupt`, or `Ctrl+c:cancel`.
-The existing shared union already contains `esc (to )?interrupt` for other harnesses; the queueing result removes the specific dropped-Enter objection to Grok sharing that alternative if a separate real capture establishes it for Grok.
-It does not establish that Grok actually emits that alternative.
-No regex value is changed by this measurement-only update.
-The existing `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'` does not match the measured footer and must not be cited as verified for 1.0.13.
-Refreshing that delivery signature needs its own classifier regression and live guard, rather than substituting the unobserved `esc (to )?interrupt` spelling or silently generalizing this one rendering configuration.
-The footer mismatch does not retract the directly observed queueing result.
+The measured busy footer is **`Esc:cancel`**, not `esc interrupt`, `esc to interrupt`, or `Ctrl+c:cancel`.
+Every capture above shows it during a running tool turn, so this record establishes the token for an active tool turn; no thinking-only frame was captured and none is claimed.
+The pre-existing `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'` never matched that footer, and it is Grok's only busy source, so a Grok 1.0.13 worker rendering the captures above classified `idle grok-regex` while demonstrably mid-turn.
+This measurement therefore refreshes that per-harness signature to `Esc:cancel|Ctrl\+c:cancel`, keeping the older recorded token so a Grok build that still renders it does not read idle, and refreshes the defensive duplicate of that literal in `bin/fm-busy-lib.sh` with it.
+The refresh is pinned by `test_grok_regex_active_turn_busy` in `tests/fm-busy-state.test.sh`, which fails against the single-token regex, and by `test_grok_busy_signature_uses_measured_footer` in `tests/fm-tmux-submit-busy.test.sh`.
+
+The shared union `FM_DELIVERY_BUSY_REGEX_DEFAULT` deliberately does NOT gain `Esc:cancel`.
+`fm_tmux_submit_core` reads the pane with no harness, so widening the union would also convert a proven-pending grok composer from the safe `pending` (exit 3, unconfirmed) to `empty` (reported delivered).
+The queueing result above was observed through Grok's own visible queue entry, not through that union or a composer verdict, and the composer-classification matrix is separately recorded as stale for grok, so the delivery plane is left unchanged.
+The existing shared union already contains `esc (to )?interrupt` for other harnesses; this measurement establishes that Grok does not emit that alternative, so Grok gains nothing from it.
 
 ## Ancillary Escape observation
 
