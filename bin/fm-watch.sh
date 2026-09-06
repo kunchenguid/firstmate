@@ -1238,11 +1238,13 @@ run_check_capture() {
 
 pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
   local id=$1 url=$2 condition=$3 head=$4 state_line state mode spawn_gen observation message
+  local marker="$STATE/$id.pr-refresh-dispatched"
   state_line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || state_line=
   state=${state_line#state: }
   state=${state%% *}
   case "$state" in
     working)
+      rm -f "$marker"
       printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=active-work\n' \
         "$url" "$head" "$condition"
       return 2
@@ -1252,9 +1254,19 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
     *) state=unknown ;;
   esac
   if [ "$state" != "done" ]; then
+    rm -f "$marker"
     printf 'branch-refresh-refused pr=%s head=%s condition=%s task-state=%s\n' \
       "$url" "$head" "$condition" "$state"
     return 1
+  fi
+
+  # A worker that keeps reporting done at the same head across separate
+  # watcher invocations already has this exact instruction queued; resending
+  # it would only stack duplicate, non-idempotent inbox work.
+  if [ "$(cat "$marker" 2>/dev/null)" = "$condition $head" ]; then
+    printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-pending\n' \
+      "$url" "$head" "$condition"
+    return 2
   fi
 
   mode=$(fm_meta_get "$STATE/$id.meta" mode)
@@ -1280,6 +1292,7 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
       "$url" "$head" "$condition"
     return 1
   fi
+  printf '%s' "$condition $head" > "$marker"
   printf 'branch-refresh-dispatched pr=%s head=%s condition=%s\n' "$url" "$head" "$condition"
 }
 

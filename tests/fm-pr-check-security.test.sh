@@ -818,6 +818,25 @@ SH
     "refresh instruction lost the active-run ownership gate"
   assert_grep 'current-head checks are green' "$dir/refresh-send.log" \
     "refresh instruction allowed a stale ready report"
+
+  # A stuck worker keeps reporting done at the same head across separate
+  # watcher invocations (e.g. its own scheduled re-poll); the second
+  # invocation must not queue a second non-idempotent refresh instruction.
+  ack_watcher_cycle "$state" || fail "branch-currency dispatch acknowledgement failed"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=DIRTY FM_TEST_GH_MERGEABLE=CONFLICTING \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/dispatch2.out" 2> "$dir/dispatch2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "repeated branch-currency dispatch watcher failed: $(cat "$dir/dispatch2.err")"
+  [ "$(wc -l < "$dir/refresh-send.log" | tr -d ' ')" -eq 1 ] \
+    || fail "a stuck worker's repeated done report queued a duplicate refresh instruction"
+  assert_grep 'branch-refresh-deferred pr=https://github.com/o/r/pull/2 head=0123456789abcdef0123456789abcdef01234567 condition=conflict reason=dispatch-pending' \
+    "$state/.watch-triage.log" "repeated dispatch for an unchanged head was not deferred"
   pass "branch currency reactivates finished work, names conflicts, and refuses active validation"
 }
 
