@@ -89,6 +89,15 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${TRACEPARENT+x}" = x ]; then
+  printf 'set:%s\n' "$TRACEPARENT" > "$FM_FAKE_TRACE_ENV_LOG"
+else
+  printf 'unset\n' > "$FM_FAKE_TRACE_ENV_LOG"
+fi
+SH
+  chmod +x "$fakebin/claude"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -178,6 +187,32 @@ EOF
 
 meta_traceparent() { sed -n 's/^traceparent=//p' "$1"; }
 injected_traceparent() { sed -n 's/^export TRACEPARENT=//p' "$1"; }
+
+assert_launch_clears_traceparent() {
+  local launch=$1 fakebin=$2 env_log=$3 shell shell_output cmd
+  local -a shell_args
+  cmd="export PATH='$fakebin:$PATH'; $launch"
+  for shell in bash zsh fish; do
+    if ! command -v "$shell" >/dev/null 2>&1; then
+      printf 'skip: %s not installed, relaunch coverage for it not exercised\n' \
+        "$shell" >&2
+      continue
+    fi
+    case $shell in
+      bash) shell_args=(--noprofile --norc -c "$cmd") ;;
+      zsh) shell_args=(-f -c "$cmd") ;;
+      *) shell_args=(--no-config -c "$cmd") ;;
+    esac
+    : > "$env_log"
+    shell_output=$(env -u BASH_ENV -u ENV -u ZDOTDIR \
+      TRACEPARENT=ambient FM_FAKE_TRACE_ENV_LOG="$env_log" \
+      "$shell" "${shell_args[@]}" 2>&1) \
+      || fail "$shell could not execute the relaunch command"
+    [ -z "$shell_output" ] || fail "$shell printed a relaunch diagnostic: $shell_output"
+    [ "$(cat "$env_log")" = unset ] \
+      || fail "$shell relaunch inherited TRACEPARENT"
+  done
+}
 
 # Two-level primary -> secondmate -> worker regression for the FM_TRACE_CONTEXT
 # effective override. Drives bin/fm-spawn.sh TWICE against real homes and a real
@@ -348,7 +383,7 @@ test_unsafe_delivery_refuses_to_append_launch() {
 }
 
 test_failed_metadata_append_unsets_carrier_and_still_launches() {
-  local rec out status meta
+  local rec out status meta launch
   rec=$(make_spawn_case tc-metadata-failure)
   read_case_record "$rec"
   : > "$HOME_DIR/config/trace-context"
@@ -363,8 +398,11 @@ test_failed_metadata_append_unsets_carrier_and_still_launches() {
 
   ! grep -q '^traceparent=' "$meta" \
     || fail "failed metadata append must not leave a traceparent= claim in meta"
-  grep -q '^unset TRACEPARENT; .*claude' "$LAUNCH_LOG" \
+  grep -q '^env -u TRACEPARENT .*claude' "$LAUNCH_LOG" \
     || fail "failed metadata append must unset TRACEPARENT in the launch command"
+  launch=$(grep -F ' claude ' "$LAUNCH_LOG")
+  assert_launch_clears_traceparent "$launch" "$FAKEBIN_DIR" \
+    "$HOME_DIR/state/fake-trace-env"
   pass "failed traceparent metadata append removes the carrier from the launched task"
 }
 

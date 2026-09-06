@@ -3740,8 +3740,14 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
+# The pane shell is the operator's own login shell, which may be fish, where
+# `unset VAR;` is not a command at all (fish uses `set -e`) and prints an error
+# before the launch. `env -u` is the one portable prefix across bash, zsh, and
+# fish; it also scopes the removal to the replacement process rather than the
+# pane shell, which is all the child identity guarantee needs. Same reason at
+# the two carrier-failure sites below.
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
-  LAUNCH="unset TRACEPARENT; $LAUNCH"
+  LAUNCH="env -u TRACEPARENT $LAUNCH"
 fi
 
 spawn_record_traceparent() {
@@ -3780,7 +3786,7 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 if [ -n "$SPAWN_TRACEPARENT" ]; then
   if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! spawn_record_traceparent; then
-      LAUNCH="unset TRACEPARENT; $LAUNCH"
+      LAUNCH="env -u TRACEPARENT $LAUNCH"
     fi
   else
     TRACE_SEND_STATUS=$?
@@ -3788,7 +3794,7 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
       echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
       exit 1
     fi
-    LAUNCH="unset TRACEPARENT; $LAUNCH"
+    LAUNCH="env -u TRACEPARENT $LAUNCH"
   fi
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then

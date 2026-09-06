@@ -102,7 +102,7 @@ This is a deliberate, source-owned choice:
   Any entropy or self-validation failure that returns omits the carrier for that spawn without aborting source work; a corrupt recorded carrier is re-minted as a fresh root rather than propagated (it is not an omission).
   If the pre-launch carrier export fails, Firstmate omits the `traceparent=` metadata claim and still launches the task.
   If the backend reports that failed trace input could not be cleared, Firstmate refuses to append the launch command rather than risk launching with an unknown partial carrier.
-  If recording the carrier fails after export, Firstmate unsets `TRACEPARENT` in the launch command and still launches the task, so the child never receives an identity absent from its metadata.
+  If recording the carrier fails after export, Firstmate strips `TRACEPARENT` from the launch command's own environment (an `env -u` prefix, portable across the operator shells a pane can run, including fish) and still launches the task, so the child never receives an identity absent from its metadata.
 - **Metadata-only.**
   The value lives in the ephemeral pane shell and in `state/<id>.meta`; teardown removes state as before, so there is no new durable surface and no schema migration.
 
