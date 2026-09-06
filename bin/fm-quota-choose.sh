@@ -34,6 +34,15 @@
 # provider - is owned by AGENTS.md section 4 and the quota-array-dispatch skill,
 # not by this helper. Use this helper only when the brief already fixed the
 # candidate order and every candidate's provider is the harness's primary family.
+#
+# omp (Oh My Pi) has no single primary family, so its candidate model prefix
+# selects the family: openai-codex/<id> checks the codex row, claude-bridge/<id>
+# checks the claude row, and any other or absent prefix is the unmeasured
+# provider `omp`, which the snapshot never reports and which therefore reads as
+# unknown quota exactly like any provider quota-axi does not report. quota-axi
+# reports Codex quota unavailable on this host because omp carries its own
+# Codex login, so an openai-codex candidate's runway stays disclosed
+# uncertainty rather than measured headroom.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -298,13 +307,21 @@ fi
 
 printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi provider data"
 
-# provider_for_harness <harness>
+# provider_for_harness <harness> [<model>]
 # Map a firstmate harness name to its primary quota-axi provider family.
 # Multi-provider harnesses (Pi, OpenCode) map to their primary family only; see
-# the header limitation note. Authoritative multi-provider routing is owned by
-# AGENTS.md section 4 and the quota-array-dispatch skill, not this helper.
+# the header limitation note. omp is keyed on the candidate model prefix instead
+# (see the header). Authoritative multi-provider routing is owned by AGENTS.md
+# section 4 and the quota-array-dispatch skill, not this helper.
 provider_for_harness() {
   case "$1" in
+    omp)
+      case "${2:-}" in
+        openai-codex/*)  printf 'codex\n' ;;
+        claude-bridge/*) printf 'claude\n' ;;
+        *)               printf 'omp\n' ;;
+      esac
+      ;;
     claude)       printf 'claude\n' ;;
     codex)        printf 'codex\n' ;;
     opencode)     printf 'codex\n' ;;
@@ -352,7 +369,7 @@ for c in "${CANDIDATES[@]}"; do
   [ "$model" = "$c" ] && model="default"
   [ -n "$model" ] || die "invalid candidate: $c"
   fm_control_harness_supported "$harness" || die "unknown harness: $harness"
-  provider_for_harness "$harness" >/dev/null || die "unknown harness: $harness"
+  provider_for_harness "$harness" "$model" >/dev/null || die "unknown harness: $harness"
 done
 
 chosen="none"
@@ -360,7 +377,7 @@ for c in "${CANDIDATES[@]}"; do
   harness=${c%%:*}
   model=${c#*:}
   [ "$model" = "$c" ] && model="default"
-  provider=$(provider_for_harness "$harness")
+  provider=$(provider_for_harness "$harness" "$model")
   effective=$(effective_for_provider_model "$provider" "$model")
   if [ -z "$effective" ] || [ "$effective" = "null" ]; then
     continue

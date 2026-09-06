@@ -573,7 +573,6 @@ export default function (pi: ExtensionAPI) {
   async function deliverActionableWake(
     owner: SessionGeneration,
     message: string,
-    repairFailed: boolean,
     pending: PendingActionableClose,
     recovery?: { generation: string; watcherPid: string },
   ): Promise<boolean> {
@@ -589,7 +588,6 @@ export default function (pi: ExtensionAPI) {
       }
     }
     // No supervision branch on omp: every actionable wake goes to main.
-    void repairFailed;
     return await sendWake(owner, message, pending);
   }
 
@@ -705,7 +703,7 @@ export default function (pi: ExtensionAPI) {
             return;
           }
           const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
-          const delivered = await deliverActionableWake(owner, message, Boolean(restoration.failure), pending, restoration.recovery);
+          const delivered = await deliverActionableWake(owner, message, pending, restoration.recovery);
           if (!delivered) {
             settleClaim("failed");
             releaseClaim();
