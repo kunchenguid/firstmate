@@ -1088,6 +1088,17 @@ fm_task_set_lock_path() {  # <state-dir>
   printf '%s/.task-set.lock\n' "$state"
 }
 
+fm_treehouse_project_lock_path() {  # <project-dir>
+  local project=$1 common
+  [ -d "$project" ] || return 1
+  common=$(git -C "$project" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) common=$(CDPATH='' cd -- "$common" 2>/dev/null && pwd -P) || return 1 ;;
+    *) common=$(CDPATH='' cd -- "$project/$common" 2>/dev/null && pwd -P) || return 1 ;;
+  esac
+  printf '%s/.fm-treehouse-project.lock\n' "$common"
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
