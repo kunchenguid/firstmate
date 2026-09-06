@@ -138,7 +138,7 @@ Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](f
 
 At each locked session start, bootstrap runs a bounded cleanup of Compose projects whose labeled containers were left by vanished no-mistakes validation worktrees.
 It acts only when every currently labeled container in a project belongs beneath the exact local no-mistakes worktree root and every referenced worktree is gone, then revalidates that ownership immediately before removing the explicit containers and their Compose-labeled networks.
-It never prunes Docker broadly or removes volumes or images; live siblings and unsafe or unreadable ownership leave the entire project untouched, while inventory, timeout, and cleanup failures print `NO_MISTAKES_DOCKER` diagnostics.
+It never prunes Docker broadly or removes volumes or images; live siblings and unsafe or unreadable ownership leave the entire project untouched, while inventory, revalidation, timeout, and cleanup failures print `NO_MISTAKES_DOCKER` diagnostics.
 [`bin/fm-nm-compose-reap.sh`](../bin/fm-nm-compose-reap.sh)'s header owns the exact discovery, revalidation, output, and failure contracts.
 
 ## Fork-as-source update remote (config/update-remote, config/fork-feed-source, config/fork-feed-target)

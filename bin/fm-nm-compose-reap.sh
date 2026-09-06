@@ -18,8 +18,11 @@
 # It never runs a Docker prune and never removes volumes or images.
 # Silence means there was nothing eligible or this checkout has no local
 # no-mistakes worktree root.
+# A candidate that loses its last labeled container during revalidation is
+# reported as unclaimed because any remaining network can no longer be
+# rediscovered by this container-first sweep.
 # A successful repair prints one BOOTSTRAP_INFO line with project, container,
-# and network counts; every inventory or cleanup failure prints a
+# and network counts; every inventory, revalidation, or cleanup failure prints a
 # NO_MISTAKES_DOCKER diagnostic and returns nonzero.
 set -u
 
