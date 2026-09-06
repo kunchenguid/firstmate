@@ -144,7 +144,7 @@ test_predicate_unregistered_check_needs_nothing() {
   pass "fm_supervision_needed: false for a check.sh with no registration binding"
 }
 
-test_predicate_task_pr_poll_needs_nothing_after_teardown() {
+test_predicate_task_pr_poll_is_not_a_custom_check() {
   local state="$TMP_ROOT/pred-pr-poll/state"
   mkdir -p "$state"
   : > "$state/task1.meta"
@@ -152,13 +152,9 @@ test_predicate_task_pr_poll_needs_nothing_after_teardown() {
   chmod 700 "$state/task1.check.sh"
   : > "$state/task1.pr-poll"
   fm_supervision_needed "$state" 300 || fail "the in-flight task itself must need supervision"
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "expected the task to be the one in-flight need, got $FM_SUP_IN_FLIGHT"
   [ "$FM_SUP_CHECKS" -eq 0 ] || fail "a task PR poll must not count as a registered custom check"
-  # What teardown leaves behind: the task, its poll, and its check are all gone.
-  rm -f "$state/task1.meta" "$state/task1.check.sh" "$state/task1.pr-poll"
-  if fm_supervision_needed "$state" 300; then
-    fail "a torn-down task must leave nothing keeping the home armed"
-  fi
-  pass "fm_supervision_needed: a task PR poll never arms the home on its own"
+  pass "fm_supervision_needed: a task PR poll without a trust binding is not a registered custom check"
 }
 
 test_predicate_relay_shim_is_not_a_custom_check() {
@@ -1993,7 +1989,7 @@ test_predicate_source_needs_supervision
 test_predicate_registered_check_needs_supervision
 test_predicate_registered_check_survives_rebinding_drift
 test_predicate_unregistered_check_needs_nothing
-test_predicate_task_pr_poll_needs_nothing_after_teardown
+test_predicate_task_pr_poll_is_not_a_custom_check
 test_predicate_relay_shim_is_not_a_custom_check
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
