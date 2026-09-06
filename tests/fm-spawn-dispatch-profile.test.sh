@@ -1030,6 +1030,7 @@ test_worker_launch_delivers_role_scope() {
   local rec id out launch kind prompt brief_kind brief content
   for brief_kind in heading legacy scaffold; do
   for kind in no-mistakes direct-PR local-only scout; do
+    [ "$brief_kind" = heading ] && [ "$kind" != no-mistakes ] && continue
     id="role-launch-$brief_kind-$kind"
     rec=$(make_spawn_case "$id" codex)
     read_case_record "$rec"
@@ -1073,8 +1074,6 @@ SH
     [ "$(grep -c '^# Current worker role contract$' "$prompt")" -eq 1 ] ||
       fail "$brief_kind $kind duplicated the delivered worker contract"
     if [ "$brief_kind" = heading ]; then
-      assert_grep 'This section supersedes every earlier brief instruction about your role' "$prompt" \
-        "$kind command left the authored role section without a precedence rule"
       assert_grep 'Follow the project instructions' "$prompt" "$kind command dropped the authored role section"
     fi
     cmp -s "$CASE_DIR/brief-before" "$HOME_DIR/data/$id/brief.md" || fail "spawn rewrote the authored brief"

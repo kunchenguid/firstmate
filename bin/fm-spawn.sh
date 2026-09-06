@@ -2057,7 +2057,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   } > "$BRIEF_TMP" || { rm -f -- "$BRIEF_TMP"; echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2; exit 1; }
   if ! mv "$BRIEF_TMP" "$BRIEF"; then
     rm -f -- "$BRIEF_TMP"
-    echo "error: could not publish current intent contract for $SOURCE_BRIEF" >&2
+    echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
     exit 1
   fi
 fi
