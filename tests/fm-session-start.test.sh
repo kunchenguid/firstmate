@@ -37,8 +37,51 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
+# Exported so run_session_start still resolves it when fm_run_dir_readonly
+# runs the function as a child of setpriv's fresh `bash -c`, which only
+# inherits the environment, not this script's plain shell variables.
+export SESSION_START
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
+
+# node_free_base_path: BASE_PATH with `node` hidden from every directory that
+# would otherwise resolve it, while every other binary in that directory
+# stays reachable. Some hosts (e.g. the myoung34/github-runner self-hosted
+# image) ship a real node in /usr/bin, so a fixture that removes node from its
+# fake bin dir and falls back to plain "$fakebin:$BASE_PATH" would still find
+# that real binary and never trigger the MISSING diagnostic under test.
+# Dropping the whole directory instead of just `node` is not safe: on any
+# usr-merge host (Debian/Ubuntu, including that same runner image) /bin is a
+# symlink to /usr/bin, so both PATH entries resolve the same directory and a
+# blanket drop silently removes grep/sed/mkdir/etc. right along with node,
+# breaking the fixture's own test harness rather than isolating the
+# diagnostic under test.
+# The farm is built once per shadow dir and reused: BASE_PATH never changes
+# within a run, and rebuilding (rm -rf then repopulate) an already-built
+# shadow_root would race a still-running deferred background stage from an
+# earlier call that is mid-resolution of a PATH entry pointing at it.
+node_free_base_path() {
+  local dir out=
+  local shadow_root="$TMP_ROOT/node-free-bin"
+  local IFS=:
+  for dir in $BASE_PATH; do
+    if [ -x "$dir/node" ]; then
+      local shadow="$shadow_root${dir//\//_}"
+      if [ ! -d "$shadow" ]; then
+        local entry base
+        mkdir -p "$shadow"
+        for entry in "$dir"/*; do
+          base=${entry##*/}
+          [ "$base" = node ] && continue
+          ln -sf "$entry" "$shadow/$base" 2>/dev/null
+        done
+      fi
+      dir=$shadow
+    fi
+    out="${out:+$out:}$dir"
+  done
+  printf '%s\n' "$out"
+}
 SESSION_START_TEST_HARNESS_PID=$$
 SESSION_START_SECOND_MATE_ID="fmtest-sm-${TMP_ROOT##*.}"
 SESSION_START_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_SECOND_MATE_ID"
@@ -521,6 +564,9 @@ run_session_start() {
       "$SESSION_START"
   fi
 }
+# Exported so fm_run_without_dac_override's dropped-capability `bash -c` can
+# resolve it as a function rather than an external command.
+export -f run_session_start
 
 run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
   local home=$1 root=$2 path=$3
@@ -829,11 +875,9 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   append_wake "$home/state" signal task-a "done: must remain queued" || fail "seed wake failed"
-  chmod 0500 "$home/state"
 
   status=0
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
-  chmod 0700 "$home/state"
+  out=$(fm_run_dir_readonly "$home/state" run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
   expect_code 0 "$status" "fm-session-start.sh must exit 0 when lock publication fails"
   assert_contains "$out" "cannot write session lock" "lock publication failure was not surfaced"
@@ -973,7 +1017,7 @@ EOF
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$(node_free_base_path)")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -1377,7 +1421,7 @@ EOF
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$(node_free_base_path)")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"

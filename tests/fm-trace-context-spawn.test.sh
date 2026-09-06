@@ -9,7 +9,12 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
+# Exported so fm_run_without_dac_override's dropped-capability `bash -c` child
+# (a fresh bash process with no inherited unexported variables) can still
+# resolve it inside run_spawn, which is exported as a function but closes
+# over this variable rather than taking it as a parameter.
 SPAWN="$ROOT/bin/fm-spawn.sh"
+export SPAWN
 TMP_ROOT=$(fm_test_tmproot fm-trace-context-spawn)
 
 write_ship_brief() {  # <file> <id>
@@ -136,6 +141,9 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
 }
+# Exported so fm_run_without_dac_override's dropped-capability `bash -c` can
+# resolve it as a function rather than an external command.
+export -f run_spawn
 
 # Same, but with an explicit FM_TRACE_CONTEXT override, to prove the env decides.
 run_spawn_tc() {
@@ -354,8 +362,13 @@ test_failed_metadata_append_unsets_carrier_and_still_launches() {
   : > "$HOME_DIR/config/trace-context"
   start_trace_session "$HOME_DIR"
 
+  # The fake tmux chmod a-w's the meta file mid-run (FM_FAKE_TRACE_METADATA_
+  # APPEND_FAIL=1 above); a root writer (a CI runner running as root)
+  # walks straight past that via CAP_DAC_OVERRIDE, so fm-spawn.sh's later
+  # append would silently succeed instead of exercising the failure path this
+  # test targets. fm_run_without_dac_override drops it for the whole spawn.
   out=$(FM_FAKE_TRACE_METADATA_APPEND_FAIL=1 \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+    fm_run_without_dac_override run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "failed traceparent metadata append must not abort spawn"
   assert_contains "$out" "spawned $CASE_ID" "spawn should report success after failed metadata append"

@@ -61,7 +61,11 @@ assert_shared_readonly() {
 
 assert_secondmate_write_fails() {
   local path=$1
-  if ( printf '%s\n' "secondmate edit" >> "$path" ) 2>/dev/null; then
+  # A root writer (a CI runner running as root) walks straight past
+  # the file's read-only mode via CAP_DAC_OVERRIDE; fm_run_without_dac_override
+  # drops it so this write is checked against the mode bits like anyone else.
+  # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
+  if fm_run_without_dac_override bash -c 'printf "%s\n" "secondmate edit" >> "$1"' _ "$path" 2>/dev/null; then
     fail "ordinary write unexpectedly succeeded for read-only shared captain file"
   fi
 }

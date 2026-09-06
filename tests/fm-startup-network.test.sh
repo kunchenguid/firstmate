@@ -119,6 +119,9 @@ run_stage() {  # <home> <root> <args...>
   PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="${FM_FAKE_HARNESS_PID_OVERRIDE:-$$}" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-startup-network.sh" "$@"
 }
+# Exported so fm_run_dir_readonly's inner setpriv `bash -c` can resolve it
+# as a function rather than an external command.
+export -f run_stage
 
 wait_for_startup_network_wake() {  # <home> [tenths]
   local home=$1 limit=${2:-50} waited=0
@@ -249,13 +252,30 @@ test_a_report_publication_failure_is_failed_and_still_wakes() {
 $rec
 EOF
   mkdir "$home/state/.startup-network.report"
-  chmod 500 "$home/state/.startup-network.report"
   sleep 10 &
   claimant=$!
 
-  FM_SESSION_START_TIMEOUT=4 FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='unpublishable result' \
-    run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
-  run_stage "$home" "$root" wait 30 >/dev/null || fail "the report-publication failure never settled"
+  # The deferred worker `start` launches (via nohup ... &) is forked from
+  # inside fm_run_without_dac_override's dropped-capability process, so it
+  # inherits that same capability set and stays subject to the block below
+  # for its own lifetime - the whole reason this wraps `start` rather than
+  # the write itself. fm_run_dir_readonly cannot be used here: it restores
+  # write access the instant `start` returns, which is immediate by design,
+  # long before this worker gets to publish() moments later. The block must
+  # outlive this call and is lifted explicitly below, once `wait` proves the
+  # worker actually ran.
+  fm_dir_block_writes "$home/state/.startup-network.report" \
+    || fail "could not verify a write-block for root on the report directory"
+  # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
+  fm_run_without_dac_override bash -c '
+    FM_SESSION_START_TIMEOUT=4 FM_FAKE_BOOTSTRAP_LOG="$1" FM_FAKE_BOOTSTRAP_OUT="unpublishable result" \
+      run_stage "$2" "$3" start --locked 0 --harvest-pid "$4"
+  ' _ "$log" "$home" "$root" "$claimant"
+  if ! run_stage "$home" "$root" wait 30 >/dev/null; then
+    fm_dir_unblock_writes "$home/state/.startup-network.report"
+    fail "the report-publication failure never settled"
+  fi
+  fm_dir_unblock_writes "$home/state/.startup-network.report"
   state=$(sed -n 's/^state=//p' "$home/state/.startup-network.status")
   [ "$state" = failed ] || fail "a report-publication failure was published as $state"
 
@@ -273,7 +293,6 @@ EOF
 
   kill "$claimant" 2>/dev/null || true
   wait "$claimant" 2>/dev/null || true
-  chmod 700 "$home/state/.startup-network.report"
   pass "fm-startup-network: a report-publication failure is failed, diagnosed, and still wakes"
 }
 

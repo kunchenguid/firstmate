@@ -182,7 +182,10 @@ test_home_seed_refuses_unreadable_registry() {
   mkdir -p "$home/data" "$home/state" "$home/projects"
   printf '%s\n' '- design - design domain (home: /tmp/design; scope: design; projects: alpha; added 2026-07-30)' > "$registry"
   chmod 000 "$registry"
-  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
+  # A root reader (a CI runner running as root) walks straight past
+  # mode 000 via CAP_DAC_OVERRIDE; fm_run_without_dac_override drops it so
+  # fm-home-seed.sh's read is checked against the mode bits like anyone else.
+  if fm_run_without_dac_override env FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
     chmod 600 "$registry"
     fail "home-seed validation accepted an unreadable registry"
   fi
@@ -190,7 +193,7 @@ test_home_seed_refuses_unreadable_registry() {
     chmod 600 "$registry"
     fail "home-seed validation did not explain the unreadable registry"
   }
-  if FM_HOME="$home" FM_SECONDMATE_CHARTER='design domain' \
+  if fm_run_without_dac_override env FM_HOME="$home" FM_SECONDMATE_CHARTER='design domain' \
     "$ROOT/bin/fm-home-seed.sh" design "$sub" alpha >/dev/null 2>"$err"; then
     chmod 600 "$registry"
     fail "home seeding accepted an unreadable registry"
@@ -812,7 +815,11 @@ test_home_seed_refuses_projectless_home_with_uninspectable_registry() {
   registry_before=$(cat "$sub/data/projects.md")
   chmod 000 "$sub/data/projects.md"
 
-  if FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
+  # A root reader (a CI runner running as root) walks straight past
+  # mode 000 via CAP_DAC_OVERRIDE; fm_run_without_dac_override drops it so
+  # fm-home-seed.sh's inspection is checked against the mode bits like anyone
+  # else.
+  if fm_run_without_dac_override env FM_HOME="$home" FM_SECONDMATE_CHARTER='firstmate self-development' \
     FM_SECONDMATE_SCOPE='firstmate repo work' \
     "$ROOT/bin/fm-home-seed.sh" fdev "$sub" --no-projects >/dev/null 2>"$err"; then
     chmod 600 "$sub/data/projects.md"

@@ -2325,15 +2325,21 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   dir=$(make_wedge_case wedge-unwritable-marker)
   state="$dir/state"; log="$dir/alert.log"; daemon_log="$dir/daemon.log"
   escalate_add "$state" "needs-decision: pick A"
-  chmod u-w "$state"
-  WEDGE_ALARM_LAST_EPOCH=0
-  LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" FM_MAX_DEFER_SECS=600 \
-    FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
-    inject_wedge_alarm "$state" 30600
-  LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" FM_MAX_DEFER_SECS=600 \
-    FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
-    inject_wedge_alarm "$state" 30615
-  chmod u+w "$state"
+  # Both calls run inside one fm_run_dir_readonly child so WEDGE_ALARM_LAST_EPOCH
+  # (the throttle's in-memory state) stays shared between them exactly as it
+  # does when this runs unprotected; re-sourcing DAEMON gives that child the
+  # same inject_wedge_alarm this test file sourced at the top.
+  # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
+  fm_run_dir_readonly "$state" bash -c '
+    . "$1"
+    WEDGE_ALARM_LAST_EPOCH=0
+    LOG="$3" FM_WEDGE_ALARM_LOG="$4" FM_MAX_DEFER_SECS=600 \
+      FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
+      inject_wedge_alarm "$2" 30600
+    LOG="$3" FM_WEDGE_ALARM_LOG="$4" FM_MAX_DEFER_SECS=600 \
+      FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
+      inject_wedge_alarm "$2" 30615
+  ' _ "$DAEMON" "$state" "$daemon_log" "$log"
   [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge marker unexpectedly persisted in an unwritable state directory"
   alerts=$(grep -c 'osascript' "$log" 2>/dev/null || true)
   [ "$alerts" -eq 1 ] || fail "unwritable marker emitted $alerts active alerts instead of one"
