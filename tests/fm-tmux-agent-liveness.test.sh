@@ -48,12 +48,12 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in "harness" process names. The fixtures keep symlinked names around
-# for path-sensitive cases, while most windows drive the real long-running
-# binary via `exec -a` so the pane carries the exact argv[0] under test without
-# depending on the host's `sleep` implementation accepting arbitrary symlink
-# names. Cursor's own path is a bash symlink later because its matcher requires
-# the live command name itself.
+# Stand-in "harness" binaries and names. These symlinks preserve a stable kernel
+# executable identity on platforms where a copied binary would fail signing, and
+# most cases still drive them via `exec -a` when the test needs an exact argv[0]
+# rather than a filesystem path. The fixtures keep the symlinked names around
+# for path-sensitive cases too. Cursor's own path is a bash symlink later
+# because its matcher requires the live command name itself.
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
 ln -s "$SLEEP_BIN" "$LAB/bin/copilot"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"

@@ -116,6 +116,18 @@ detect_own() {
   # additionally clears foreign markers at rovo's launch boundary as defense in depth.
   [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && { echo rovo; return; }
   [ "${ROVODEV_CLI:-}" = "1" ] && { echo rovo; return; }
+  # omp (Oh My Pi) publishes NO harness-identity marker of its own: verified on
+  # omp 18.1.11 that PI_CODING_AGENT is absent from the binary and that the
+  # default profile sets neither PI_CODING_AGENT_DIR nor OMP_PROFILE in the
+  # process environment. FM_OMP_HARNESS=omp is therefore a Firstmate-OWNED
+  # launch marker, established by bin/fm-spawn.sh at the omp launch boundary
+  # (which also clears every foreign marker) and by the README's primary launch
+  # command. It is a PRECEDENCE override, never evidence on its own: it wins
+  # over an inherited CLAUDECODE only when an omp process is genuinely in the
+  # ancestry, so `FM_OMP_HARNESS=omp omp` started from a Claude pane identifies
+  # as omp, while the same variable leaking from an omp secondmate into that
+  # home's claude worker (whose ancestry holds no omp) changes nothing. The
+  # anchored ancestry arm below covers a plain hand-started `omp` by itself.
   if [ "${FM_OMP_HARNESS:-}" = omp ] && ancestry_names_omp; then
     echo omp
     return

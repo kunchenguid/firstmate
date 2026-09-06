@@ -124,6 +124,16 @@ Start `omp` with this checkout as its working directory: it auto-discovers the t
 copilot
 ```
 
+**Oh My Pi**
+
+```sh
+omp
+# or, when starting from inside a Claude Code pane
+FM_OMP_HARNESS=omp omp
+```
+
+Start `omp` with this checkout as its working directory: it auto-discovers the tracked `.omp/extensions/*.ts` files with no trust dialog, and naming them with `-e` as well would load each twice.
+
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For GitHub Copilot CLI, accept the repository trust prompt once per clone so `.github/hooks/fm-primary.json` and project instructions load.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.

@@ -45,6 +45,7 @@ fail() {
 pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
 
+
 OMP_VERSION=$(omp --version 2>/dev/null | head -1)
 MODEL=${FM_OMP_LIVE_MODEL:-openai-codex/gpt-6-astra}
 # The guard's beacon grace for this lab. The watcher beats every FM_POLL=1s, so
