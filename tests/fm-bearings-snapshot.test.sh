@@ -1617,7 +1617,7 @@ test_landed_includes_secondmate_home_merges() {
 # requests are recorded. Answered captain questions are the negative boundary.
 test_captain_approved_deliveries_stay_in_landed() {
   local home mate fakebin json main_pr mate_pr main_backlog mate_backlog report_path
-  local created_kind failures=''
+  local keyword_report shipping_report fleet_json created_kind failures=''
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the captain-approved delivery regression"
   home=$(make_home captain-approved-landed)
   write_fixture "$home"
@@ -1681,6 +1681,30 @@ test_captain_approved_deliveries_stay_in_landed() {
     --decision-file "$home/question-answer.txt" >/dev/null \
     || fail "could not close the legacy kindless captain question"
 
+  keyword_report="data/keyword-scout/report.md"
+  shipping_report="data/shipping-scout/report.md"
+  mkdir -p "$home/data/keyword-scout" "$home/data/shipping-scout"
+  printf '# Keyword scout\n' > "$home/$keyword_report"
+  printf '# Shipping scout\n' > "$home/$shipping_report"
+  "$TASKS_AXI_BIN" add keyword-scout "SCOUT parser keywords" --kind scout \
+    --repo firstmate --start --file "$main_backlog" >/dev/null \
+    || fail "could not create the canonical keyword scout"
+  "$TASKS_AXI_BIN" 'done' keyword-scout --report "$keyword_report" \
+    --file "$main_backlog" >/dev/null \
+    || fail "could not complete the canonical keyword scout"
+  "$TASKS_AXI_BIN" add keyword-local "SHIP keyword local main" --kind ship \
+    --repo firstmate --start --file "$main_backlog" >/dev/null \
+    || fail "could not create the canonical keyword local delivery"
+  "$TASKS_AXI_BIN" 'done' keyword-local --note "local main" \
+    --file "$main_backlog" >/dev/null \
+    || fail "could not complete the canonical keyword local delivery"
+  "$TASKS_AXI_BIN" add shipping-scout "SHIPPING parser boundary" --kind scout \
+    --repo firstmate --start --file "$main_backlog" >/dev/null \
+    || fail "could not create the longer-word scout"
+  "$TASKS_AXI_BIN" 'done' shipping-scout --report "$shipping_report" \
+    --file "$main_backlog" >/dev/null \
+    || fail "could not complete the longer-word scout"
+
   report_path="data/reported-scout/report.md"
   mkdir -p "$home/data/reported-scout"
   printf '# Reported scout\n' > "$home/$report_path"
@@ -1690,6 +1714,15 @@ test_captain_approved_deliveries_stay_in_landed() {
 EOF
 
   : > "$home/net.log"
+  fleet_json=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "Fleet snapshot failed for canonical kind keywords"
+  printf '%s' "$fleet_json" | jq -e '
+    (.backlog.records | any(.id == "keyword-scout" and .kind == "scout"))
+      and (.backlog.records | any(.id == "keyword-local" and .kind == "ship"))
+      and (.backlog.records | any(.id == "shipping-scout" and .kind == "scout"))
+  ' >/dev/null || failures="${failures}canonical or explicit task kind was lost; "
   json=$(run "$home" "$fakebin" --json --all-landed) \
     || fail "Bearings failed for captain-approved deliveries"
   [ "$created_kind" = captain ] \
@@ -1706,6 +1739,15 @@ EOF
   printf '%s' "$json" | jq -e \
     '.landed | any(.id == "local-delivery" and .artifact == "local main")' >/dev/null \
     || failures="${failures}local-only artifact was missing; "
+  printf '%s' "$json" | jq -e --arg report "$keyword_report" \
+    '.landed | any(.id == "keyword-scout" and .artifact == $report)' >/dev/null \
+    || failures="${failures}canonical keyword scout was missing; "
+  printf '%s' "$json" | jq -e \
+    '.landed | any(.id == "keyword-local" and .artifact == "local main")' >/dev/null \
+    || failures="${failures}canonical keyword local delivery was missing; "
+  printf '%s' "$json" | jq -e --arg report "$shipping_report" \
+    '.landed | any(.id == "shipping-scout" and .artifact == $report)' >/dev/null \
+    || failures="${failures}longer-word explicit scout kind was lost; "
   printf '%s' "$json" | jq -e --arg main_pr "$main_pr" --arg mate_pr "$mate_pr" '
     (.landed | any(.id == "approved-main" and .artifact == $main_pr))
       and (.landed | any(.id == "approved-mate" and .artifact == $mate_pr))
