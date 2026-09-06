@@ -76,13 +76,20 @@ fi
 mkdir -p "$DESTINATION"
 install -m 0755 "$TMP/$ASSET" "$DESTINATION/herdr"
 
-# Post-install version and protocol gates (no floating latest).
-installed_version=$("$DESTINATION/herdr" --version 2>/dev/null | awk '{print $2; exit}')
+# Post-install version and protocol gates (no floating latest). stderr is
+# captured to its own file rather than merged with 2>&1: merging would pollute
+# a successful call's parsed stdout (version_output/status) with any incidental
+# stderr text (a deprecation notice, update check, telemetry banner, etc.),
+# breaking the awk/jq parse below even on a healthy install.
+version_output=$("$DESTINATION/herdr" --version 2>"$TMP/herdr-version.err") || {
+  die "'$DESTINATION/herdr --version' exited $? with output: $(cat "$TMP/herdr-version.err" 2>/dev/null)"
+}
+installed_version=$(printf '%s' "$version_output" | awk '{print $2; exit}')
 [ "$installed_version" = "$FM_HERDR_CI_VERSION" ] \
   || die "installed herdr version is '${installed_version:-<empty>}', expected exact pin $FM_HERDR_CI_VERSION"
 
-status=$("$DESTINATION/herdr" status --json 2>/dev/null) \
-  || die "could not run 'herdr status --json' after install"
+status=$("$DESTINATION/herdr" status --json 2>"$TMP/herdr-status.err") \
+  || die "could not run 'herdr status --json' after install: $(cat "$TMP/herdr-status.err" 2>/dev/null)"
 protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null) \
   || die "jq is required to parse herdr status after install"
 case "$protocol" in

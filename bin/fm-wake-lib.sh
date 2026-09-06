@@ -963,23 +963,43 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
-fm_lock_acquire_wait() {
+fm_lock_acquire_wait() {  # <lockdir> [timeout-seconds]
+  # Bounded wait: the loop retries fm_lock_try_acquire every 0.1s until it
+  # succeeds or the timeout expires (default 30 s when no timeout is given).
+  # A timeout of 0 means "try once and return immediately".
+  # On timeout the function returns 1 so callers can detect and handle it.
+  # Many existing callers predate this bound and do not check the return
+  # value (this primitive previously could not fail); the diagnostic below
+  # ensures a timeout is at least visible in logs for those callers instead
+  # of silently letting them proceed as if the lock had been acquired.
   local lockdir=$1
+  local timeout=${2:-30}
+  local elapsed_hundredths=0
   while ! fm_lock_try_acquire "$lockdir"; do
     sleep 0.1
+    elapsed_hundredths=$((elapsed_hundredths + 1))
+    if [ "$elapsed_hundredths" -ge "$((timeout * 10))" ]; then
+      echo "fm_lock_acquire_wait: timed out after ${timeout}s waiting for $lockdir" >&2
+      return 1
+    fi
   done
+  return 0
 }
 
 # Acquire in the timed helper process, then transfer the lock record to the
 # waiting caller before exiting. The lock's ordinary stale-owner recovery makes
 # every interruption safe: before transfer the helper is the owner; after
 # transfer the still-live caller is the owner.
-_fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
-  local lockdir=$1 caller_pid=$2 ownerdir current back
+_fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid> <timeout-seconds>
+  local lockdir=$1 caller_pid=$2 timeout=$3 ownerdir current back
   case "$caller_pid" in ''|*[!0-9]*) return 1 ;; esac
   fm_pid_alive "$caller_pid" || return 1
   trap 'fm_lock_release "$lockdir"; exit 143' TERM INT
-  fm_lock_acquire_wait "$lockdir" || return 1
+  # Match the outer fm_run_timed budget so fm_lock_acquire_wait's own bound
+  # (default 30s) cannot fire first and shorten a caller-configured budget
+  # above that default; the outer timed wrapper stays the authoritative
+  # deadline, exactly as this handoff's own contract promises.
+  fm_lock_acquire_wait "$lockdir" "$timeout" || return 1
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || {
       fm_lock_release "$lockdir"
@@ -1022,8 +1042,8 @@ fm_lock_acquire_wait_bounded() {
     "FM_STATE_OVERRIDE=$STATE" \
     "FM_ROOT_OVERRIDE=$FM_ROOT" \
     "FM_LOCK_STALE_AFTER=$FM_LOCK_STALE_AFTER" \
-    bash -c '. "$1"; _fm_lock_acquire_wait_handoff "$2" "$3"' \
-      _ "$FM_WAKE_LIB_DIR/fm-wake-lib.sh" "$lockdir" "$caller_pid" \
+    bash -c '. "$1"; _fm_lock_acquire_wait_handoff "$2" "$3" "$4"' \
+      _ "$FM_WAKE_LIB_DIR/fm-wake-lib.sh" "$lockdir" "$caller_pid" "$seconds" \
       </dev/null >/dev/null 2>&1; then
     rc=0
   else
@@ -1583,7 +1603,7 @@ fm_wake_append() {
   recovery_marker="$STATE/.watcher-down"
   status=0
 
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
@@ -1612,7 +1632,7 @@ fm_wake_queued_keys() {
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_queued_keys: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   fm_wake_queued_keys_locked "$kind"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }

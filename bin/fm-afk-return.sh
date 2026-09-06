@@ -104,11 +104,12 @@ write_gate() {  # <evidence-file> <blockers-file>
 }
 
 print_evidence() {  # <file>
-  local file=$1 kind text
+  local file=$1 kind text status=0
   while IFS="$(printf '\t')" read -r tag kind text; do
     [ "$tag" = evidence ] || continue
-    printf 'catch-up %s: %s\n' "$kind" "$text"
+    printf 'catch-up %s: %s\n' "$kind" "$text" || status=1
   done < "$file"
+  return "$status"
 }
 
 print_blockers() {  # <file>

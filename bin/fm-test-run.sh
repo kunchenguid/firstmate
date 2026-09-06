@@ -983,7 +983,16 @@ skipped = 0
 total = 0
 wall_ms = 0
 for path in inputs:
-    doc = json.loads(path.read_text(encoding="utf-8"))
+    # A lane artifact can be truncated when its own job is killed mid-write
+    # (host memory pressure, a hang timeout). This aggregate step runs with
+    # if: always() precisely so per-lane failures still get reported here;
+    # skip an unreadable lane instead of taking the whole aggregate down
+    # with it.
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"fm-test-run.sh: skipping unreadable timing artifact {path}: {exc}", file=sys.stderr)
+        continue
     summary = doc.get("summary") or {}
     lane = {
         "path": str(path),
