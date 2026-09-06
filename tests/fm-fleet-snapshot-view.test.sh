@@ -975,7 +975,7 @@ EOF
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
   printf '%s' "$out" | jq -e '
-    .schema == "fm-secondmate-home-summary.v1"
+    .schema == "fm-secondmate-home-summary.v3"
       and .valid == true
       and .reason == null
       and .invalidity == {kind:null,ids:[]}

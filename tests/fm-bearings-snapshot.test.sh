@@ -14,6 +14,7 @@ set -u
 . "$ROOT/bin/fm-secondmate-registry-lib.sh"
 
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
+TASKS_AXI_BIN=$(command -v tasks-axi || true)
 TMP_ROOT=$(fm_test_tmproot fm-bearings)
 # Keep disposable homes outside the snapshot's fixture repo boundary even when
 # TMPDIR is inside an isolated source worktree.
@@ -212,11 +213,19 @@ run() {  # <home> <fakebin> <args...>
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
 }
 
+run_captain() {  # <home> <fakebin> <command args...>
+  local home=$1 fakebin=$2
+  shift 2
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
+}
+
 write_remote_home_summary() {  # <remote-home> <generated-epoch>
   local home=$1 epoch=$2
   mkdir -p "$home/state"
   jq -n --arg home "$home" --argjson epoch "$epoch" '{
-    schema:"fm-secondmate-home-summary.v1",
+    schema:"fm-secondmate-home-summary.v3",
     hold_classifier_schema:"fm-captain-hold-buckets.v1",
     generated:"2026-09-01T22:00:00Z",generated_epoch:$epoch,home:$home,
     valid:true,reason:null,invalidity:{kind:null,ids:[]},state:"captain_decision",
@@ -1131,8 +1140,8 @@ test_queued_item_prose_never_hides_it() {
 # The collapsed captain-call contract: any due, unblocked captain-held task is
 # Captain's Call whatever its kind; a date-deferred hold is a dated gate until
 # due; deferral wording in the reason changes nothing, because only structured
-# fields classify; and Recently Landed excludes only what closed while still
-# held for the captain.
+# fields classify; and Recently Landed applies the shared delivery selector to
+# Done rows.
 test_collapsed_captain_call_deferral_and_landed() {
   local home fakebin json
   home=$(make_home collapsed-call)
@@ -1602,6 +1611,139 @@ test_landed_includes_secondmate_home_merges() {
   # Still zero network on this default path.
   [ ! -s "$home/net.log" ] || fail "landed roll-up must make no gh/gh-axi call, got: $(cat "$home/net.log")"
   pass "landed includes secondmate-managed merges alongside main-home merges"
+}
+
+# Recently Landed accepts only the artifact owned by a row's task kind and
+# completion path. Answered captain questions are the negative boundary.
+test_landed_accepts_only_kind_owned_delivery_artifacts() {
+  local home fakebin json main_backlog report_path report_pr
+  local keyword_report shipping_report fleet_json created_kind failures=''
+  [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the landed-selector regression"
+  home=$(make_home kind-owned-landed)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  main_backlog="$home/data/backlog.md"
+
+  "$TASKS_AXI_BIN" add answered-question \
+    "Decide whether https://github.com/o/r/pull/7 may merge" --kind ship \
+    --repo firstmate --file "$main_backlog" >/dev/null \
+    || fail "could not create the answered captain question"
+  run_captain "$home" "$fakebin" hold answered-question \
+    --reason "captain route choice pending" >/dev/null \
+    || fail "could not hold the answered captain question"
+  printf 'Choose route north.\n' > "$home/question-answer.txt"
+  run_captain "$home" "$fakebin" answer answered-question \
+    --decision-file "$home/question-answer.txt" >/dev/null \
+    || fail "could not close the answered captain question"
+
+  run_captain "$home" "$fakebin" hold created-local-question \
+    --title "Choose local main" --reason "captain local route pending" >/dev/null \
+    || fail "could not create the local-only captain question"
+  created_kind=$("$TASKS_AXI_BIN" show created-local-question --full --file "$main_backlog" \
+    | sed -n 's/^  kind: *//p' | head -1)
+  run_captain "$home" "$fakebin" answer created-local-question \
+    --decision-file "$home/question-answer.txt" >/dev/null \
+    || fail "could not close the local-only captain question"
+
+  "$TASKS_AXI_BIN" add legacy-local-question "Choose local main" \
+    --repo firstmate --file "$main_backlog" >/dev/null \
+    || fail "could not create the legacy kindless captain question"
+  run_captain "$home" "$fakebin" hold legacy-local-question \
+    --reason "captain legacy local route pending" >/dev/null \
+    || fail "could not hold the legacy kindless captain question"
+  run_captain "$home" "$fakebin" answer legacy-local-question \
+    --decision-file "$home/question-answer.txt" >/dev/null \
+    || fail "could not close the legacy kindless captain question"
+
+  keyword_report="data/keyword-scout/report.md"
+  shipping_report="data/shipping-scout/report.md"
+  mkdir -p "$home/data/keyword-scout" "$home/data/shipping-scout"
+  printf '# Keyword scout\n' > "$home/$keyword_report"
+  printf '# Shipping scout\n' > "$home/$shipping_report"
+  "$TASKS_AXI_BIN" add keyword-scout "SCOUT parser keywords" --kind scout \
+    --repo firstmate --start --file "$main_backlog" >/dev/null \
+    || fail "could not create the canonical keyword scout"
+  "$TASKS_AXI_BIN" 'done' keyword-scout --report "$keyword_report" \
+    --file "$main_backlog" >/dev/null \
+    || fail "could not complete the canonical keyword scout"
+  "$TASKS_AXI_BIN" add keyword-local "SHIP keyword local main" --kind ship \
+    --repo firstmate --start --file "$main_backlog" >/dev/null \
+    || fail "could not create the canonical keyword local delivery"
+  "$TASKS_AXI_BIN" 'done' keyword-local --note "local main" \
+    --file "$main_backlog" >/dev/null \
+    || fail "could not complete the canonical keyword local delivery"
+  "$TASKS_AXI_BIN" add shipping-scout "SHIPPING parser boundary" --kind scout \
+    --repo firstmate --start --file "$main_backlog" >/dev/null \
+    || fail "could not create the longer-word scout"
+  "$TASKS_AXI_BIN" 'done' shipping-scout --report "$shipping_report" \
+    --file "$main_backlog" >/dev/null \
+    || fail "could not complete the longer-word scout"
+
+  report_path="data/reported-scout/report.md"
+  report_pr="https://github.com/o/r/pull/8"
+  mkdir -p "$home/data/reported-scout"
+  printf '# Reported scout\n' > "$home/$report_path"
+  cat >> "$main_backlog" <<EOF
+- [x] done-pr-nondelivery - Closed without merge https://github.com/o/r/pull/5 (repo: firstmate) (kind: ship) (done 2026-07-12)
+- [x] scout-pr-no-report - Scout without report https://github.com/o/r/pull/6 (repo: firstmate) (kind: scout) (merged 2026-07-12)
+- [x] ship-reported-path - Ship naming data/ship-reported-path/report.md (repo: firstmate) (kind: ship) (reported 2026-07-12)
+- [x] reported-scout - Report with $report_pr context $report_path (repo: firstmate) (kind: scout) (reported 2026-07-12)
+- [x] local-delivery - Local with https://github.com/o/r/pull/9 context local main (repo: firstmate) (kind: ship) (done 2026-07-12)
+EOF
+
+  : > "$home/net.log"
+  fleet_json=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "Fleet snapshot failed for canonical kind keywords"
+  printf '%s' "$fleet_json" | jq -e '
+    (.backlog.records | any(.id == "keyword-scout" and .kind == "scout"))
+      and (.backlog.records | any(.id == "keyword-local" and .kind == "ship"))
+      and (.backlog.records | any(.id == "shipping-scout" and .kind == "scout"))
+  ' >/dev/null || failures="${failures}canonical or explicit task kind was lost; "
+  json=$(run "$home" "$fakebin" --json --all-landed) \
+    || fail "Bearings failed for captain-approved deliveries"
+  [ "$created_kind" = captain ] \
+    || failures="${failures}wrapper-created call kind was ${created_kind:-absent}; "
+  printf '%s' "$json" | jq -e '.landed | any(.id == "answered-question") | not' >/dev/null \
+    || failures="${failures}PR-naming captain answer was listed; "
+  printf '%s' "$json" | jq -e '.landed | any(.id == "created-local-question") | not' >/dev/null \
+    || failures="${failures}wrapper-created local answer was listed; "
+  printf '%s' "$json" | jq -e '.landed | any(.id == "legacy-local-question") | not' >/dev/null \
+    || failures="${failures}legacy kindless local answer was listed; "
+  # At the base commit the generic Done-row selector publishes this PR-naming
+  # row, so this exclusion assertion fails when the selector fix is absent.
+  printf '%s' "$json" | jq -e '.landed | any(.id == "done-pr-nondelivery") | not' >/dev/null \
+    || failures="${failures}non-merged PR row was listed; "
+  # At the base commit a scout can fall through to its pull request, so this
+  # exclusion assertion fails when report ownership is not enforced.
+  printf '%s' "$json" | jq -e '.landed | any(.id == "scout-pr-no-report") | not' >/dev/null \
+    || failures="${failures}reportless scout PR was listed; "
+  # At the base commit a ship can fall through to a report path, so this
+  # exclusion assertion fails when artifact-kind ownership is not enforced.
+  printf '%s' "$json" | jq -e '.landed | any(.id == "ship-reported-path") | not' >/dev/null \
+    || failures="${failures}reported ship row was listed; "
+  # At the base commit pull-request links render ahead of report links, so this
+  # artifact assertion fails by receiving report_pr instead of report_path.
+  printf '%s' "$json" | jq -e --arg report_path "$report_path" \
+    '.landed | any(.id == "reported-scout" and .artifact == $report_path)' >/dev/null \
+    || failures="${failures}reported scout artifact was missing; "
+  printf '%s' "$json" | jq -e \
+    '.landed | any(.id == "local-delivery" and .artifact == "local main")' >/dev/null \
+    || failures="${failures}local-only artifact was missing; "
+  printf '%s' "$json" | jq -e --arg report "$keyword_report" \
+    '.landed | any(.id == "keyword-scout" and .artifact == $report)' >/dev/null \
+    || failures="${failures}canonical keyword scout was missing; "
+  printf '%s' "$json" | jq -e \
+    '.landed | any(.id == "keyword-local" and .artifact == "local main")' >/dev/null \
+    || failures="${failures}canonical keyword local delivery was missing; "
+  printf '%s' "$json" | jq -e --arg report "$shipping_report" \
+    '.landed | any(.id == "shipping-scout" and .artifact == $report)' >/dev/null \
+    || failures="${failures}longer-word explicit scout kind was lost; "
+  [ -z "$failures" ] || fail "$failures$json"
+  [ ! -s "$home/net.log" ] \
+    || fail "kind-owned landed selection made a network call: $(cat "$home/net.log")"
+  pass "landed accepts only kind-owned delivery artifacts while answered questions stay out"
 }
 
 test_landed_default_balances_dominant_and_sparse_homes() {
@@ -2760,7 +2902,7 @@ SH
 }
 
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
-  local parent fakebin json i remote_home pid collector_pid sleeper_pid duplicate_base cache_file candidate tmp
+  local parent fakebin json i remote_home pid collector_pid sleeper_pid duplicate_base cache_file candidate tmp approved_pr
   parent=$(make_home concurrent-remote-ledgers)
   make_remote_ledger_fleet "$parent" 5
   fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
@@ -2788,6 +2930,41 @@ test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
     fi
   done
   [ -n "$cache_file" ] || fail "healthy remote read did not populate its summary cache"
+  approved_pr="https://github.com/acme/remote/pull/1368"
+  mkdir -p "$remote_home/data"
+  cat > "$remote_home/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+
+## Done
+- [x] remote-approved - Captain-approved delivery $approved_pr (repo: firstmate) (kind: ship) (hold-kind: captain) (merged 2026-09-03)
+EOF
+  tmp="$cache_file.tmp"
+  jq '.schema = "fm-secondmate-home-summary.v2" | .landed = [] | .counts.landed = 0' \
+    "$cache_file" > "$tmp" && mv "$tmp" "$cache_file"
+  tmp="$remote_home/state/home-summary.json.tmp"
+  jq '.schema = "fm-secondmate-home-summary.v2" | .landed = [] | .counts.landed = 0' \
+    "$remote_home/state/home-summary.json" > "$tmp" && mv "$tmp" "$remote_home/state/home-summary.json"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e --arg pr "$approved_pr" '
+    (.landed | all(.artifact != $pr))
+      and (.secondmates | any(.id == "ledger-1" and .state == "unknown"
+        and .freshness == "stale" and .provenance == "unknown"
+        and (.reason | contains("schema is stale"))
+        and (.reason | contains("rerun the fleet update"))))
+      and all(.secondmates[] | select(.id != "ledger-1"); .freshness == "fresh")
+      and (.omitted | any(.surface == "secondmate ledger-1 home ledger schema is stale"
+        and .reveal == "rerun the fleet update"))
+  ' >/dev/null || fail "a pre-change landed ledger was accepted as healthy or rejected silently: $json"
+
+  write_remote_home_summary "$remote_home" 1000
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.id == "ledger-1" and .freshness == "fresh"))
+      and (.omitted | all(.surface != "secondmate ledger-1 home ledger schema is stale"))
+  ' >/dev/null || fail "a fleet update did not clear the stale home-ledger disclosure: $json"
+
   tmp="$cache_file.tmp"
   jq 'del(.hold_classifier_schema)' \
     "$cache_file" > "$tmp" && mv "$tmp" "$cache_file"
@@ -2943,6 +3120,7 @@ test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
+test_landed_accepts_only_kind_owned_delivery_artifacts
 test_landed_default_balances_dominant_and_sparse_homes
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
 test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap

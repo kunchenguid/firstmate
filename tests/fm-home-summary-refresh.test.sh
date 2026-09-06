@@ -124,7 +124,7 @@ wait_for_ledger_generation() {  # <generated> [tenths]
 
 run_writer "$NOW_ONE" "$EPOCH_ONE" || fail "initial home-summary publication failed"
 jq -e --arg home "$HOME_DIR" --arg now "$NOW_ONE" --argjson epoch "$EPOCH_ONE" '
-  .schema == "fm-secondmate-home-summary.v1"
+  .schema == "fm-secondmate-home-summary.v3"
   and .home == $home
   and .generated == $now
   and .generated_epoch == $epoch
@@ -193,12 +193,12 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
   FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
   "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/large-summary.json" \
   || fail "secondmate home-summary mode failed for a large backlog"
-jq -e '.schema == "fm-secondmate-home-summary.v1"' "$TMP_ROOT/large-summary.json" \
+jq -e '.schema == "fm-secondmate-home-summary.v3"' "$TMP_ROOT/large-summary.json" \
   >/dev/null || fail "large secondmate home-summary output was not valid"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
   FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
   "$WRITER" || fail "home-summary writer failed for a large backlog"
-jq -e '.schema == "fm-secondmate-home-summary.v1"' \
+jq -e '.schema == "fm-secondmate-home-summary.v3"' \
   "$LARGE_HOME/state/home-summary.json" >/dev/null \
   || fail "large secondmate home-summary was not published"
 pass "large backlog snapshots and home-summary publication stay within exec limits"
@@ -659,7 +659,7 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$COST_HOME" \
 [ -f "$COST_HOME/state/home-summary.json" ] \
   || fail "an accumulated home did not publish within a 30-second deadline: $(cat "$COST_HOME/state/.home-summary-refresh.log" 2>/dev/null)"
 jq -e --arg home "$COST_HOME" '
-  .schema == "fm-secondmate-home-summary.v1"
+  .schema == "fm-secondmate-home-summary.v3"
   and .home == $home
   and any(.decisions_open[]; .key == "cost-gate")
 ' "$COST_HOME/state/home-summary.json" >/dev/null \
@@ -721,7 +721,7 @@ elapsed=$(( $(date +%s) - started ))
 [ ! -e "$TMP_ROOT/stalled-ssh.called" ] \
   || fail "the producer issued a remote per-task state probe"
 jq -e '
-  .schema == "fm-secondmate-home-summary.v1"
+  .schema == "fm-secondmate-home-summary.v3"
   and .valid == false
   and .state == "unknown"
   and .invalidity.kind == "child_current_unavailable"

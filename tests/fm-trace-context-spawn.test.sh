@@ -268,7 +268,7 @@ test_enabled_records_and_injects_identical_carrier_before_launch() {
   assert_contains "$out" "spawned $CASE_ID" "enabled spawn should report success"
   meta="$HOME_DIR/state/$CASE_ID.meta"
   jq -e --arg id "$CASE_ID" '
-    .schema == "fm-secondmate-home-summary.v1"
+    .schema == "fm-secondmate-home-summary.v3"
     and any(.endpoints[]; .id == $id)
   ' "$HOME_DIR/state/home-summary.json" >/dev/null \
     || fail "successful task spawn did not publish the task in the home summary ledger"
