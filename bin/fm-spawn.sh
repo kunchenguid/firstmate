@@ -1180,6 +1180,8 @@ ARG3=
 FIRSTMATE_HOME=
 RAW_LAUNCH=0
 RAW_HARNESS_EXECUTABLE=
+RAW_HARNESS_PATH=
+RAW_HARNESS_PATH_SET=0
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -1477,6 +1479,7 @@ case "$ARG3" in
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in
+        PATH=*) RAW_HARNESS_PATH=${word#PATH=}; RAW_HARNESS_PATH_SET=1; continue ;;
         [A-Za-z_]*=*) continue ;;
         env|exec) continue ;;
         *) RAW_HARNESS_EXECUTABLE=$word; HARNESS=$(basename "$word"); break ;;
@@ -1529,6 +1532,14 @@ if [ "$HARNESS" = claude ]; then
         ;;
     esac
   else
+    if [ "$RAW_HARNESS_PATH_SET" -eq 1 ]; then
+      case "$RAW_HARNESS_PATH" in
+        *[!A-Za-z0-9_./:+@-]*)
+          echo "error: raw Claude leading PATH assignment is not a literal path list; executable identity cannot be established; refusing launch" >&2
+          exit 1
+          ;;
+      esac
+    fi
     CLAUDE_EXECUTABLE=$(command -v -- "$RAW_HARNESS_EXECUTABLE" 2>/dev/null || true)
     [ -n "$CLAUDE_EXECUTABLE" ] && [ -x "$CLAUDE_EXECUTABLE" ] || {
       echo "error: raw Claude executable '$RAW_HARNESS_EXECUTABLE' not found on Firstmate's PATH" >&2
@@ -3658,7 +3669,11 @@ if [ "$HARNESS" = claude ] && [ "$RAW_LAUNCH" -eq 1 ]; then
   CLAUDE_PROBE_STATUS="$CLAUDE_PROBE_BASE.status"
   CLAUDE_PROBE_READY="$CLAUDE_PROBE_BASE.ready"
   rm -f "$CLAUDE_PROBE_PATH" "$CLAUDE_PROBE_VERSION" "$CLAUDE_PROBE_STATUS" "$CLAUDE_PROBE_READY"
-  CLAUDE_PROBE_INNER="FM_RAW_CLAUDE_PROBE=1; resolved=\$(command -v -- $(shell_quote "$RAW_HARNESS_EXECUTABLE") 2>/dev/null || true); version=; status=127; if [ -n \"\$resolved\" ]; then version=\$(\"\$resolved\" --version 2>&1 || true); status=0; $(shell_quote "$FM_ROOT/bin/fm-claude-rc-off.sh") check-default \"\$resolved\" >/dev/null 2>&1 || status=\$?; fi; printf '%s' \"\$resolved\" > $(shell_quote "$CLAUDE_PROBE_PATH"); printf '%s' \"\$version\" > $(shell_quote "$CLAUDE_PROBE_VERSION"); printf '%s' \"\$status\" > $(shell_quote "$CLAUDE_PROBE_STATUS"); : > $(shell_quote "$CLAUDE_PROBE_READY")"
+  CLAUDE_PROBE_PATH_SETUP=
+  if [ "$RAW_HARNESS_PATH_SET" -eq 1 ]; then
+    CLAUDE_PROBE_PATH_SETUP="PATH=$(shell_quote "$RAW_HARNESS_PATH"); export PATH; "
+  fi
+  CLAUDE_PROBE_INNER="FM_RAW_CLAUDE_PROBE=1; $CLAUDE_PROBE_PATH_SETUP resolved=\$(command -v -- $(shell_quote "$RAW_HARNESS_EXECUTABLE") 2>/dev/null || true); version=; status=127; if [ -n \"\$resolved\" ]; then version=\$(\"\$resolved\" --version 2>&1 || true); status=0; $(shell_quote "$FM_ROOT/bin/fm-claude-rc-off.sh") check-default \"\$resolved\" >/dev/null 2>&1 || status=\$?; fi; printf '%s' \"\$resolved\" > $(shell_quote "$CLAUDE_PROBE_PATH"); printf '%s' \"\$version\" > $(shell_quote "$CLAUDE_PROBE_VERSION"); printf '%s' \"\$status\" > $(shell_quote "$CLAUDE_PROBE_STATUS"); : > $(shell_quote "$CLAUDE_PROBE_READY")"
   CLAUDE_PROBE_COMMAND=$CLAUDE_PROBE_INNER
   if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     CLAUDE_PROBE_COMMAND="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$CLAUDE_PROBE_INNER")"

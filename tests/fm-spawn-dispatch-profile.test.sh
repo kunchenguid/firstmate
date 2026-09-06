@@ -492,6 +492,33 @@ test_raw_claude_identical_backend_executable_launches_unchanged() {
   pass "raw Claude launches unchanged after matching launch-pane preflight"
 }
 
+test_raw_claude_path_assignment_uses_assigned_executable() {
+  local rec id out status raw assigned_bin caller
+  id="profile-raw-claude-path-assignment-${RANDOM}"
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  assigned_bin="$CASE_DIR/assigned-bin"
+  mkdir -p "$assigned_bin"
+  cat > "$assigned_bin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '2.1.127 (Claude Code)'
+fi
+SH
+  chmod +x "$assigned_bin/claude"
+  raw="PATH=$assigned_bin:$PATH claude --remote-control"
+  caller="$FAKEBIN_DIR/claude"
+
+  out=$(FM_TEST_PANE_EXEC_PATH="$FAKEBIN_DIR:$PATH" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  expect_code 1 "$status" "raw Claude launch should honor its leading PATH assignment during preflight"
+  assert_contains "$out" "Firstmate resolved '$caller' (2.1.263 (Claude Code))" "PATH-assignment divergence omitted the Firstmate executable identity"
+  assert_contains "$out" "launch pane resolved '$assigned_bin/claude' (2.1.127 (Claude Code))" "PATH-assignment divergence omitted the assigned executable identity"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw Claude PATH-assignment command reached the launch channel"
+  pass "raw Claude preflight honors leading PATH assignments"
+}
+
 test_claude_spawn_refuses_missing_managed_policy() {
   local rec id out status
   id="profile-claude-policy-missing-${RANDOM}"
@@ -1300,6 +1327,7 @@ test_raw_claude_launch_preserves_executable_and_managed_default
 test_managed_default_allows_raw_claude_forms_unchanged
 test_raw_claude_refuses_backend_executable_divergence
 test_raw_claude_identical_backend_executable_launches_unchanged
+test_raw_claude_path_assignment_uses_assigned_executable
 test_claude_spawn_refuses_missing_managed_policy
 test_prefixed_raw_claude_refuses_missing_managed_policy
 test_claude_spawn_refuses_unsupported_version
