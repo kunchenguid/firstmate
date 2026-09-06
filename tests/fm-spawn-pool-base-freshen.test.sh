@@ -11,7 +11,6 @@ set -u
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
-SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-pool-base-freshen)
 
@@ -710,8 +709,8 @@ test_unignored_copy_a_task_rewrote_after_seeding_is_kept() {
   status=$?
   expect_code 0 "$status" "the fixture's first acquisition should seed the slot"
   unignore_local_env_file
-  # The task's own edit lands on top of the seeded copy.
-  truncate -s 1 "$POOL_DIR/.env.local"
+  # The task replaces the seeded copy with byte-identical content.
+  cp "$PROJECT_DIR/.env.local" "$POOL_DIR/.env.local"
   prepare_second_acquisition "$second"
 
   out=$(run_spawn "$second" --mode no-mistakes --yolo off)
