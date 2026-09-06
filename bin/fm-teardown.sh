@@ -316,6 +316,7 @@ DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
+DESCENDANT_TREEHOUSE_LOCK_PATHS=()
 teardown_release_locks() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
@@ -2051,15 +2052,16 @@ teardown_live_slot_path() {
 
 # See "Worktree-slot ownership" in the header. Check 1: task records in every
 # home sharing this Treehouse project must not name the same live slot twice.
-require_exclusive_task_worktree_slot() {
+require_exclusive_worktree_slot_record() {
+  local record_meta=$1 record_id=$2 record_state=$3 project=$4 worktree=$5
   local slot listing line state_dir known other other_id field other_path other_slot
   local -a states
-  slot=$(teardown_live_slot_path) || return 0
-  listing=$(git -C "$PROJ" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || {
-    echo "REFUSED: cannot enumerate the homes sharing Treehouse project $PROJ; nothing was changed" >&2
+  slot=$(canonical_existing_dir "$worktree") || return 0
+  listing=$(git -C "$project" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || {
+    echo "REFUSED: cannot enumerate the homes sharing Treehouse project $project; nothing was changed" >&2
     return 1
   }
-  states=("$STATE")
+  states=("$record_state")
   while IFS= read -r line; do
     case "$line" in
       worktree\ *)
@@ -2075,53 +2077,66 @@ require_exclusive_task_worktree_slot() {
   for state_dir in "${states[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
-      [ "$other" != "$META" ] || continue
+      [ "$other" != "$record_meta" ] || continue
       other_id=$(basename "$other" .meta)
       for field in worktree home; do
         other_path=$(fm_meta_get "$other" "$field")
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
-        echo "REFUSED: task $ID's recorded worktree $slot is also task $other_id's recorded $field." >&2
+        echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
-        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $ID; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
+        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
         return 1
       done
     done
   done
 }
 
+require_exclusive_task_worktree_slot() {
+  local slot
+  slot=$(teardown_live_slot_path) || return 0
+  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$PROJ" "$slot"
+}
+
 # The live working directory the recorded endpoint reports, for the backends
 # whose read tracks the running process. Empty output (including from every
 # other backend) means "no evidence", never "contradicts".
 teardown_endpoint_live_path() {
-  case "$BACKEND" in
+  local backend=$1 target=$2
+  case "$backend" in
     tmux)
       fm_backend_source tmux >/dev/null 2>&1 || return 0
-      fm_backend_tmux_current_path "$T" 2>/dev/null || true
+      fm_backend_tmux_current_path "$target" 2>/dev/null || true
       ;;
     herdr)
       fm_backend_source herdr >/dev/null 2>&1 || return 0
-      fm_backend_herdr_current_path "$T" 2>/dev/null || true
+      fm_backend_herdr_current_path "$target" 2>/dev/null || true
       ;;
   esac
 }
 
 # See "Worktree-slot ownership" in the header. Check 2: a readable endpoint
 # working directory must resolve inside the recorded slot.
-require_task_endpoint_slot_agreement() {
-  local slot seen seen_path
-  slot=$(teardown_live_slot_path) || return 0
-  seen=$(teardown_endpoint_live_path)
+require_endpoint_slot_agreement() {
+  local task_id=$1 backend=$2 target=$3 worktree=$4 slot seen seen_path
+  slot=$(canonical_existing_dir "$worktree") || return 0
+  seen=$(teardown_endpoint_live_path "$backend" "$target")
   [ -n "$seen" ] || return 0
   seen_path=$(canonical_existing_dir "$seen") || return 0
   case "$seen_path" in
     "$slot"|"$slot"/*) return 0 ;;
   esac
-  echo "REFUSED: task $ID's endpoint $T is working in $seen_path, outside its recorded worktree $slot." >&2
+  echo "REFUSED: task $task_id's endpoint $target is working in $seen_path, outside its recorded worktree $slot." >&2
   echo "The recorded copy may already belong to another task, so nothing was changed - not even with --force." >&2
-  echo "Reconcile the endpoint against the record (bin/fm-crew-state.sh $ID), then re-run teardown: either the record names the wrong copy, or that endpoint is no longer this task's." >&2
+  echo "Reconcile the endpoint against the record (bin/fm-crew-state.sh $task_id), then re-run teardown: either the record names the wrong copy, or that endpoint is no longer this task's." >&2
   return 1
+}
+
+require_task_endpoint_slot_agreement() {
+  local slot
+  slot=$(teardown_live_slot_path) || return 0
+  require_endpoint_slot_agreement "$ID" "$BACKEND" "$T" "$slot"
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -2540,6 +2555,7 @@ preflight_descendant_task_locks() {
   DESCENDANT_TASK_IDS=()
   DESCENDANT_TASK_KINDS=()
   DESCENDANT_TASK_HOMES=()
+  DESCENDANT_TREEHOUSE_LOCK_PATHS=()
   collect_descendant_task_locks "$home" || return 1
   # Acquisition order, which every other holder of these locks must match so
   # they cannot cycle: each home's task-set lock first (parent home before child
@@ -2586,6 +2602,55 @@ preflight_descendant_task_locks() {
         return 1
       }
     fi
+  done
+}
+
+preflight_descendant_treehouse_slots() {
+  local i state task_id meta kind backend target worktree project lock_path held
+  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
+    state=${DESCENDANT_TASK_STATES[$i]}
+    task_id=${DESCENDANT_TASK_IDS[$i]}
+    meta="$state/$task_id.meta"
+    kind=$(meta_value "$meta" kind)
+    [ -n "$kind" ] || kind=ship
+    backend=$(fm_backend_of_meta "$meta")
+    worktree=$(meta_value "$meta" worktree)
+    [ "$kind" != secondmate ] && [ "$backend" != orca ] \
+      && [ -n "$worktree" ] && [ -d "$worktree" ] || continue
+    project=$(meta_value "$meta" project)
+    lock_path=$(fm_treehouse_project_lock_path "$project") || {
+      echo "REFUSED: cannot resolve the shared Treehouse project lock for child $task_id; forced teardown changed nothing" >&2
+      return 1
+    }
+    held=0
+    [ "$TREEHOUSE_PROJECT_LOCK_HELD" != 1 ] || [ "$TREEHOUSE_PROJECT_LOCK" != "$lock_path" ] || held=1
+    for target in "${DESCENDANT_TREEHOUSE_LOCK_PATHS[@]}"; do
+      [ "$target" != "$lock_path" ] || held=1
+    done
+    if [ "$held" = 0 ]; then
+      fm_lock_try_acquire "$lock_path" || {
+        echo "REFUSED: another Treehouse slot allocation or return is in progress for child $task_id; forced teardown changed nothing" >&2
+        return 1
+      }
+      DESCENDANT_TREEHOUSE_LOCK_PATHS+=("$lock_path")
+      DESCENDANT_LOCK_PATHS+=("$lock_path")
+    fi
+  done
+  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
+    state=${DESCENDANT_TASK_STATES[$i]}
+    task_id=${DESCENDANT_TASK_IDS[$i]}
+    meta="$state/$task_id.meta"
+    kind=$(meta_value "$meta" kind)
+    [ -n "$kind" ] || kind=ship
+    backend=$(fm_backend_of_meta "$meta")
+    worktree=$(meta_value "$meta" worktree)
+    [ "$kind" != secondmate ] && [ "$backend" != orca ] \
+      && [ -n "$worktree" ] && [ -d "$worktree" ] || continue
+    project=$(meta_value "$meta" project)
+    fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
+    target=$FM_BACKEND_VALIDATED_TARGET
+    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$project" "$worktree" || return 1
+    require_endpoint_slot_agreement "$task_id" "$backend" "$target" "$worktree" || return 1
   done
 }
 
@@ -2884,6 +2949,7 @@ if [ "$KIND" = secondmate ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+    preflight_descendant_treehouse_slots || exit 1
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi
