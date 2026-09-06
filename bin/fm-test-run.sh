@@ -537,9 +537,11 @@ list_portable_serial() {
 # Measured portable-serial script durations in milliseconds, from the CI timing
 # artifacts recorded in docs/fm-test-portable-shards.md. Each value is the
 # slowest of several green runs, so the balance holds on a slow runner rather
-# than only on the fastest one measured. These are balance hints only: the shard
-# partition stays complete and disjoint whatever they say, so a stale hint costs
-# balance rather than coverage. That doc owns the refresh procedure.
+# than only on the fastest one measured. The two agy entries are provisional:
+# they were measured locally, not from those artifacts, and the next refresh
+# replaces them. These are balance hints only: the shard partition stays
+# complete and disjoint whatever they say, so a stale hint costs balance rather
+# than coverage. That doc owns the refresh procedure.
 portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-afk-inject-e2e.test.sh 35792
