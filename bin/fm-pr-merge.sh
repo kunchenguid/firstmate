@@ -80,22 +80,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
-# Role partition: merging is MAIN-owned; the Pi supervision branch reports the
-# green PR and never merges (contract: bin/fm-lease-lib.sh; no-op in homes
-# without a branch actor).
-# shellcheck source=bin/fm-lease-lib.sh
-. "$SCRIPT_DIR/fm-lease-lib.sh"
-fm_lease_forbid_branch "PR merge (fm-pr-merge)"
-
-MERGE_CONTROL_LOCK=
-merge_control_cleanup() {
-  [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
-}
-trap merge_control_cleanup EXIT
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -203,12 +191,39 @@ reject_head_overrides() {
 reject_repo_overrides "$@" || exit 1
 [ "$PROVIDER" != gitlab ] || reject_head_overrides "$@" || exit 1
 
-# Task-derived paths are constructed only after the canonical ID validation.
+fm_backlog_directory_present "$STATE" "state directory" || {
+  echo "error: PR merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  exit 1
+}
+META="$STATE/$ID.meta"
+if ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
+  echo "error: PR merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  exit 1
+fi
+MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# Role partition: merging is MAIN-owned; the Pi supervision branch reports the
+# green PR and never merges (contract: bin/fm-lease-lib.sh; no-op in homes
+# without a branch actor).
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+fm_lease_forbid_branch "PR merge (fm-pr-merge)"
+
+MERGE_CONTROL_LOCK=
+merge_control_cleanup() {
+  [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
+}
+trap merge_control_cleanup EXIT
 MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
 fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
-META="$STATE/$ID.meta"
-if [ ! -f "$META" ] || [ -L "$META" ]; then
-  echo "error: task metadata is unavailable" >&2
+if ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
+  echo "error: task $ID changed while waiting to merge; refusing: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  exit 1
+fi
+if [ "$FM_BACKLOG_META_SPAWN_GEN" != "$MERGE_EXPECTED_SPAWN_GEN" ]; then
+  echo "error: task $ID changed incarnation while waiting to merge; refusing" >&2
   exit 1
 fi
 

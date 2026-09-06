@@ -21,16 +21,35 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
+  echo "error: invalid local merge request" >&2
+  exit 2
+fi
+ID=$1
+fm_backlog_directory_present "$STATE" "state directory" || {
+  echo "error: local merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  exit 1
+}
+META="$STATE/$ID.meta"
+if ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
+  echo "error: local merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  exit 1
+fi
+MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 # Role partition: landing local-only work is MAIN-owned; the Pi supervision
 # branch reports readiness and never lands (contract: bin/fm-lease-lib.sh;
 # no-op in homes without a branch actor).
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 fm_lease_forbid_branch "local-only landing (fm-merge-local)"
-ID=${1:?usage: fm-merge-local.sh <task-id>}
 
 MERGE_CONTROL_LOCK=
 merge_control_cleanup() {
@@ -39,9 +58,14 @@ merge_control_cleanup() {
 trap merge_control_cleanup EXIT
 MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
 fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
-
-META="$STATE/$ID.meta"
-[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+if ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
+  echo "error: task $ID changed while waiting to merge; refusing: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  exit 1
+fi
+if [ "$FM_BACKLOG_META_SPAWN_GEN" != "$MERGE_EXPECTED_SPAWN_GEN" ]; then
+  echo "error: task $ID changed incarnation while waiting to merge; refusing" >&2
+  exit 1
+fi
 
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)

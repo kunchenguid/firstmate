@@ -8,6 +8,8 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
@@ -114,6 +116,46 @@ run_pr_merge() {  # <home> <id> <url>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_TEST_GH_LOG="$home/gh.log" \
     FM_TEST_GH_AXI_LOG="$home/gh-axi.log" "$ROOT/bin/fm-pr-merge.sh" "$@"
+}
+
+wait_for_test_file() {  # <path> <pid>
+  local path=$1 pid=$2 i=0
+  while [ "$i" -lt 500 ]; do
+    [ -e "$path" ] && return 0
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.01
+    i=$((i + 1))
+  done
+  return 1
+}
+
+install_reused_task_barriers() {  # <home>
+  local home=$1
+  cat > "$home/fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_TEST_REUSE_TEARDOWN:-}" = 1 ] \
+    && [ ! -e "${FM_TEST_REUSE_TEARDOWN_ONCE:-}" ]; then
+  : > "$FM_TEST_REUSE_TEARDOWN_ONCE"
+  : > "$FM_TEST_REUSE_TEARDOWN_READY"
+  while [ ! -e "$FM_TEST_REUSE_TEARDOWN_RELEASE" ]; do
+    "$FM_TEST_REAL_SLEEP" 0.01
+  done
+fi
+exec "$FM_TEST_REAL_PERL" "$@"
+SH
+  cat > "$home/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_TEST_REUSE_MERGE:-}" = 1 ] && [ "${1:-}" = 0.1 ] \
+    && [ ! -e "${FM_TEST_REUSE_MERGE_ONCE:-}" ]; then
+  : > "$FM_TEST_REUSE_MERGE_ONCE"
+  : > "$FM_TEST_REUSE_MERGE_READY"
+  while [ ! -e "$FM_TEST_REUSE_MERGE_RELEASE" ]; do
+    "$FM_TEST_REAL_SLEEP" 0.01
+  done
+fi
+exec "$FM_TEST_REAL_SLEEP" "$@"
+SH
+  chmod +x "$home/fakebin/perl" "$home/fakebin/sleep"
 }
 
 # The retired command surface, kept for one release as a shim; in-flight
@@ -2477,11 +2519,12 @@ test_teardown_never_closes_a_captain_held_task() {
 
 test_retained_row_artifacts_survive_captain_answers() {
   local home retained_id precedence_id rejected_id rejected_local_id report_question_id
-  local approved_id released_id local_id answered_id legacy_id
+  local approved_id released_id local_id answered_id reportless_scout_id legacy_id
   local repo wt
   local local_repo local_wt
   local precedence_pr rejected_pr approved_pr released_pr json show
   home=$(make_home retained-row-artifacts)
+  perl -0pi -e 's/done_keep = 10/done_keep = 20/' "$home/.tasks.toml"
   retained_id=sample-retained-report
   mkdir -p "$home/data/$retained_id"
   tasks_in "$home" add "$retained_id" "Investigate retained report evidence" --kind scout \
@@ -2663,6 +2706,12 @@ test_retained_row_artifacts_survive_captain_answers() {
   tasks_in "$home" 'done' "$answered_id" >/dev/null \
     || fail "could not complete the released artifactless captain call"
 
+  reportless_scout_id=sample-reportless-scout
+  tasks_in "$home" add "$reportless_scout_id" "Investigate without a report" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the reportless scout"
+  tasks_in "$home" 'done' "$reportless_scout_id" >/dev/null \
+    || fail "could not complete the reportless scout"
+
   legacy_id=sample-kindless-legacy-delivery
   tasks_in "$home" add "$legacy_id" "Complete the legacy work" --repo sample --start \
     >/dev/null || fail "could not create the kindless legacy delivery"
@@ -2679,7 +2728,8 @@ test_retained_row_artifacts_survive_captain_answers() {
     --arg report_question_id "$report_question_id" \
     --arg approved_id "$approved_id" --arg local_id "$local_id" \
     --arg approved_pr "$approved_pr" --arg released_id "$released_id" \
-    --arg answered_id "$answered_id" --arg legacy_id "$legacy_id" \
+    --arg answered_id "$answered_id" --arg reportless_scout_id "$reportless_scout_id" \
+    --arg legacy_id "$legacy_id" \
     --arg released "data/$released_id/report.md" '
       (.landed | any(.id == $retained_id and .artifact == $retained))
         and (.landed | any(.id == $precedence_id and .artifact == $precedence))
@@ -2692,6 +2742,9 @@ test_retained_row_artifacts_survive_captain_answers() {
         # Without the explicit captain-kind boundary, the artifactless answered
         # call falls through the compatibility path and this assertion fails.
         and (.landed | any(.id == $answered_id) | not)
+        # Without the explicit scout-kind boundary, this row is rendered with
+        # an empty artifact even though a scout has no delivery without a report.
+        and (.landed | any(.id == $reportless_scout_id) | not)
         # Requiring a present non-captain kind would also remove this older
         # artifactless delivery, so the compatibility boundary stays observable.
         and (.landed | any(.id == $legacy_id))
@@ -3063,6 +3116,265 @@ test_local_merge_entrypoint_refuses_a_captain_held_task() {
   pass "the local merge entrypoint refuses a captain-held task before merging"
 }
 
+test_merge_entrypoints_validate_identity_and_state_before_locking() {
+  local home pr_state local_state bad_id rc
+  home=$(make_home invalid-merge-entrypoint-inputs)
+  configure_merged_github "$home"
+
+  pr_state="$home/missing-pr-state"
+  set +e
+  fm_run_timed 2 env PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$pr_state" \
+    "$ROOT/bin/fm-pr-merge.sh" sample-missing-pr-state \
+    https://github.com/sample/sample/pull/41 \
+    > "$home/missing-pr-state.out" 2> "$home/missing-pr-state.err"
+  rc=$?
+  set -e
+  # Without pre-lock state validation, the lock library creates the missing
+  # directory before the entrypoint discovers that no task record exists.
+  [ "$rc" -ne 124 ] || fail "the PR merge waited forever for a missing state directory"
+  [ "$rc" -ne 0 ] || fail "the PR merge accepted a missing state directory"
+  assert_absent "$pr_state" "the PR merge created a missing state directory while refusing"
+  assert_grep "state directory is not a real directory" "$home/missing-pr-state.err" \
+    "the PR merge did not identify its missing state directory"
+
+  local_state="$home/missing-local-state"
+  set +e
+  fm_run_timed 2 env PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$local_state" \
+    "$ROOT/bin/fm-merge-local.sh" sample-missing-local-state \
+    > "$home/missing-local-state.out" 2> "$home/missing-local-state.err"
+  rc=$?
+  set -e
+  # Without pre-lock state validation, the lock library creates the missing
+  # directory before the entrypoint discovers that no task record exists.
+  [ "$rc" -ne 124 ] || fail "the local merge waited forever for a missing state directory"
+  [ "$rc" -ne 0 ] || fail "the local merge accepted a missing state directory"
+  assert_absent "$local_state" "the local merge created a missing state directory while refusing"
+  assert_grep "state directory is not a real directory" "$home/missing-local-state.err" \
+    "the local merge did not identify its missing state directory"
+
+  bad_id=sample/bad-local-id
+  set +e
+  fm_run_timed 2 env PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-merge-local.sh" "$bad_id" \
+    > "$home/bad-local-id.out" 2> "$home/bad-local-id.err"
+  rc=$?
+  set -e
+  # Without canonical ID validation, the slash creates a nested lock path whose
+  # absent parent makes the blocking acquisition retry until the bound expires.
+  [ "$rc" -ne 124 ] || fail "the local merge waited forever on a slash-containing task id"
+  [ "$rc" -eq 2 ] || fail "the local merge returned $rc instead of rejecting the unsafe task id"
+  assert_grep "invalid local merge request" "$home/bad-local-id.err" \
+    "the local merge did not identify the unsafe task id"
+  assert_absent "$home/state/.control-sample" \
+    "the unsafe task id constructed a nested task control path"
+  pass "merge entrypoints reject unsafe identities and absent state before locking"
+}
+
+test_merge_entrypoints_refuse_a_reused_task_incarnation() {
+  local home id pr old_repo old_wt new_repo new_wt teardown_pid merge_pid
+  local teardown_ready teardown_release merge_ready merge_release teardown_rc merge_rc
+  local local_home local_id local_old_repo local_old_wt local_new_repo local_new_wt
+  local local_teardown_pid local_merge_pid local_teardown_ready local_teardown_release
+  local local_merge_ready local_merge_release local_teardown_rc local_merge_rc before after
+  local real_perl real_sleep
+  real_perl=$(command -v perl)
+  real_sleep=$(command -v sleep)
+
+  home=$(make_home reused-pr-incarnation)
+  configure_merged_github "$home"
+  install_reused_task_barriers "$home"
+  id=sample-reused-pr-incarnation
+  pr=https://github.com/sample/sample/pull/42
+  old_repo="$home/projects/sample-reused-pr-old"
+  old_wt="$home/projects/$id"
+  fm_git_worktree "$old_repo" "$old_wt" "fm/$id"
+  tasks_in "$home" add "$id" "Ship the original pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the original PR task"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$old_wt" \
+    "project=$old_repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "spawn_gen=original-$id"
+  printf 'done: merge ready\n' > "$home/state/$id.status"
+
+  teardown_ready="$home/reuse-teardown-ready"
+  teardown_release="$home/reuse-teardown-release"
+  merge_ready="$home/reuse-merge-ready"
+  merge_release="$home/reuse-merge-release"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_TEST_REUSE_TEARDOWN=1 \
+    FM_TEST_REUSE_TEARDOWN_ONCE="$home/reuse-teardown-once" \
+    FM_TEST_REUSE_TEARDOWN_READY="$teardown_ready" \
+    FM_TEST_REUSE_TEARDOWN_RELEASE="$teardown_release" \
+    FM_TEST_REAL_PERL="$real_perl" FM_TEST_REAL_SLEEP="$real_sleep" \
+    "$TEARDOWN" "$id" --force > "$home/reuse-teardown.out" \
+    2> "$home/reuse-teardown.err" &
+  teardown_pid=$!
+  if ! wait_for_test_file "$teardown_ready" "$teardown_pid"; then
+    : > "$teardown_release"
+    wait "$teardown_pid" 2>/dev/null || true
+    fail "forced PR cleanup did not reach its task-locked synchronization point"
+  fi
+
+  FM_TEST_REUSE_MERGE=1 FM_TEST_REUSE_MERGE_ONCE="$home/reuse-merge-once" \
+    FM_TEST_REUSE_MERGE_READY="$merge_ready" FM_TEST_REUSE_MERGE_RELEASE="$merge_release" \
+    FM_TEST_REAL_PERL="$real_perl" FM_TEST_REAL_SLEEP="$real_sleep" \
+    run_pr_merge "$home" "$id" "$pr" > "$home/reuse-merge.out" \
+    2> "$home/reuse-merge.err" &
+  merge_pid=$!
+  if ! wait_for_test_file "$merge_ready" "$merge_pid"; then
+    : > "$teardown_release"
+    : > "$merge_release"
+    wait "$teardown_pid" 2>/dev/null || true
+    wait "$merge_pid" 2>/dev/null || true
+    fail "the PR merge did not wait behind forced cleanup"
+  fi
+
+  : > "$teardown_release"
+  set +e
+  wait "$teardown_pid"
+  teardown_rc=$?
+  set -e
+  if [ "$teardown_rc" -ne 0 ]; then
+    : > "$merge_release"
+    wait "$merge_pid" 2>/dev/null || true
+    fail "forced PR cleanup failed before the task could be reused: $(cat "$home/reuse-teardown.err")"
+  fi
+
+  new_repo="$home/projects/sample-reused-pr-new"
+  new_wt="$home/projects/reused-$id"
+  fm_git_worktree "$new_repo" "$new_wt" "fm/$id"
+  tasks_in "$home" reopen "$id" >/dev/null || fail "could not reopen the reused PR task"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$new_wt" \
+    "project=$new_repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "spawn_gen=replacement-$id"
+  tasks_in "$home" start "$id" >/dev/null || fail "could not start the reused PR task"
+  : > "$merge_release"
+  set +e
+  wait "$merge_pid"
+  merge_rc=$?
+  set -e
+
+  # Without the pre-wait generation capture and locked comparison, the waiter
+  # records and merges pull request 42 against the replacement task record.
+  [ "$merge_rc" -ne 0 ] || fail "the PR merge accepted a replacement task incarnation"
+  assert_no_grep 'pr merge 42 ' "$home/gh-axi.log" \
+    "the PR merge reached the forge for a replacement task incarnation"
+  assert_grep "changed incarnation while waiting to merge" "$home/reuse-merge.err" \
+    "the PR merge did not identify the replacement task incarnation"
+  assert_grep "spawn_gen=replacement-$id" "$home/state/$id.meta" \
+    "the refused PR merge damaged the replacement task record"
+  assert_absent "$home/state/.control-$id.lock" \
+    "the reused-incarnation PR refusal left its task control lock held"
+
+  local_home=$(make_home reused-local-incarnation)
+  install_reused_task_barriers "$local_home"
+  local_id=sample-reused-local-incarnation
+  local_old_repo="$local_home/projects/sample-reused-local-old"
+  local_old_wt="$local_home/projects/$local_id"
+  fm_git_worktree "$local_old_repo" "$local_old_wt" "fm/$local_id"
+  printf 'original local delivery\n' > "$local_old_wt/original.txt"
+  git -C "$local_old_wt" add original.txt
+  git -C "$local_old_wt" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -qm 'original local delivery'
+  tasks_in "$local_home" add "$local_id" "Ship the original local change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the original local task"
+  fm_write_meta "$local_home/state/$local_id.meta" \
+    "window=firstmate:fm-$local_id" "endpoint_task_id=$local_id" \
+    "worktree=$local_old_wt" "project=$local_old_repo" "harness=codex" \
+    "kind=ship" "mode=local-only" "spawn_gen=original-$local_id"
+  printf 'done: local merge ready\n' > "$local_home/state/$local_id.status"
+
+  local_teardown_ready="$local_home/reuse-teardown-ready"
+  local_teardown_release="$local_home/reuse-teardown-release"
+  local_merge_ready="$local_home/reuse-merge-ready"
+  local_merge_release="$local_home/reuse-merge-release"
+  PATH="$local_home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$local_home" \
+    FM_STATE_OVERRIDE="$local_home/state" FM_DATA_OVERRIDE="$local_home/data" \
+    FM_CONFIG_OVERRIDE="$local_home/config" FM_TEST_REUSE_TEARDOWN=1 \
+    FM_TEST_REUSE_TEARDOWN_ONCE="$local_home/reuse-teardown-once" \
+    FM_TEST_REUSE_TEARDOWN_READY="$local_teardown_ready" \
+    FM_TEST_REUSE_TEARDOWN_RELEASE="$local_teardown_release" \
+    FM_TEST_REAL_PERL="$real_perl" FM_TEST_REAL_SLEEP="$real_sleep" \
+    "$TEARDOWN" "$local_id" --force > "$local_home/reuse-teardown.out" \
+    2> "$local_home/reuse-teardown.err" &
+  local_teardown_pid=$!
+  if ! wait_for_test_file "$local_teardown_ready" "$local_teardown_pid"; then
+    : > "$local_teardown_release"
+    wait "$local_teardown_pid" 2>/dev/null || true
+    fail "forced local cleanup did not reach its task-locked synchronization point"
+  fi
+
+  PATH="$local_home/fakebin:$PATH" FM_TEST_REUSE_MERGE=1 \
+    FM_TEST_REUSE_MERGE_ONCE="$local_home/reuse-merge-once" \
+    FM_TEST_REUSE_MERGE_READY="$local_merge_ready" \
+    FM_TEST_REUSE_MERGE_RELEASE="$local_merge_release" \
+    FM_TEST_REAL_PERL="$real_perl" FM_TEST_REAL_SLEEP="$real_sleep" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$local_home" \
+    FM_STATE_OVERRIDE="$local_home/state" FM_DATA_OVERRIDE="$local_home/data" \
+    FM_CONFIG_OVERRIDE="$local_home/config" \
+    "$ROOT/bin/fm-merge-local.sh" "$local_id" > "$local_home/reuse-merge.out" \
+    2> "$local_home/reuse-merge.err" &
+  local_merge_pid=$!
+  if ! wait_for_test_file "$local_merge_ready" "$local_merge_pid"; then
+    : > "$local_teardown_release"
+    : > "$local_merge_release"
+    wait "$local_teardown_pid" 2>/dev/null || true
+    wait "$local_merge_pid" 2>/dev/null || true
+    fail "the local merge did not wait behind forced cleanup"
+  fi
+
+  : > "$local_teardown_release"
+  set +e
+  wait "$local_teardown_pid"
+  local_teardown_rc=$?
+  set -e
+  if [ "$local_teardown_rc" -ne 0 ]; then
+    : > "$local_merge_release"
+    wait "$local_merge_pid" 2>/dev/null || true
+    fail "forced local cleanup failed before the task could be reused: $(cat "$local_home/reuse-teardown.err")"
+  fi
+
+  local_new_repo="$local_home/projects/sample-reused-local-new"
+  local_new_wt="$local_home/projects/reused-$local_id"
+  fm_git_worktree "$local_new_repo" "$local_new_wt" "fm/$local_id"
+  printf 'replacement local delivery\n' > "$local_new_wt/replacement.txt"
+  git -C "$local_new_wt" add replacement.txt
+  git -C "$local_new_wt" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -qm 'replacement local delivery'
+  before=$(git -C "$local_new_repo" rev-parse main)
+  tasks_in "$local_home" reopen "$local_id" >/dev/null \
+    || fail "could not reopen the reused local task"
+  fm_write_meta "$local_home/state/$local_id.meta" \
+    "window=firstmate:fm-$local_id" "endpoint_task_id=$local_id" \
+    "worktree=$local_new_wt" "project=$local_new_repo" "harness=codex" \
+    "kind=ship" "mode=local-only" "spawn_gen=replacement-$local_id"
+  tasks_in "$local_home" start "$local_id" >/dev/null \
+    || fail "could not start the reused local task"
+  : > "$local_merge_release"
+  set +e
+  wait "$local_merge_pid"
+  local_merge_rc=$?
+  set -e
+  after=$(git -C "$local_new_repo" rev-parse main)
+
+  # Without the pre-wait generation capture and locked comparison, the waiter
+  # fast-forwards the replacement task's branch despite never approving it.
+  [ "$local_merge_rc" -ne 0 ] || fail "the local merge accepted a replacement task incarnation"
+  [ "$after" = "$before" ] || fail "the local merge moved main for a replacement task incarnation"
+  assert_grep "changed incarnation while waiting to merge" "$local_home/reuse-merge.err" \
+    "the local merge did not identify the replacement task incarnation"
+  assert_grep "spawn_gen=replacement-$local_id" "$local_home/state/$local_id.meta" \
+    "the refused local merge damaged the replacement task record"
+  assert_absent "$local_home/state/.control-$local_id.lock" \
+    "the reused-incarnation local refusal left its task control lock held"
+  pass "merge entrypoints refuse a replacement incarnation after waiting for cleanup"
+}
+
 test_merge_entrypoints_serialize_forced_teardown_before_task_reads() {
   local home id pr repo wt ready release merge_pid teardown_rc merge_rc real_grep
   local local_home local_id local_repo local_wt local_ready local_release local_pid
@@ -3352,6 +3664,8 @@ test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task
 test_local_merge_entrypoint_refuses_a_captain_held_task
+test_merge_entrypoints_validate_identity_and_state_before_locking
+test_merge_entrypoints_refuse_a_reused_task_incarnation
 test_merge_entrypoints_serialize_forced_teardown_before_task_reads
 test_released_merge_passes_the_entrypoint_and_lands
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
