@@ -215,7 +215,7 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
     "spawn did not explain that the pane never reached an isolated worktree"
   assert_contains "$out" "$STALE_DIR" \
     "the refusal did not name the path the pane kept reporting"
-  assert_contains "$out" "it is the repository's primary checkout" \
+  assert_contains "$out" "repository's primary checkout" \
     "the refusal did not say why that path was rejected"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
   pass "a pane stuck on the primary checkout fails loudly at the deadline"

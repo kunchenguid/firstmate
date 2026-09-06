@@ -168,16 +168,25 @@ test_spawn_isolation_abort() {
   fm_test_fake_sleep_noop "$fakebin"
   # A genuine isolated linked worktree of the project, detached on the default.
   git -C "$proj" worktree add -q --detach "$TMP_ROOT/spawn-wt" >/dev/null 2>&1
-  mkdir -p "$TMP_ROOT/spawn-notgit" "$proj/sub"
+  # The non-git case must BE non-git wherever this suite runs. A directory under
+  # TMPDIR is not one when TMPDIR itself sits inside a git repository - git walks
+  # up and finds that repo, and the spawn reports the subdirectory cause instead.
+  # GIT_CEILING_DIRECTORIES stops that upward walk: git does not chdir up into a
+  # listed directory, though it never excludes the directory being searched, so
+  # the ceiling is the PARENT of the path handed to the spawn (git(1),
+  # "GIT_CEILING_DIRECTORIES").
+  mkdir -p "$TMP_ROOT/spawn-notgit-root/plain" "$proj/sub"
 
   # Abort: the pane resolves to a plain non-git directory (not a worktree at all).
   # The discovery poll screens every candidate with the isolation conditions, so
   # a path like this is never adopted and the refusal comes from the poll's own
-  # deadline, naming the path and why it was rejected.
-  out=$(run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin"); status=$?
+  # deadline, naming the path and why it was rejected. The assertions pin which
+  # cause fired, not the operator wording that explains it.
+  out=$(GIT_CEILING_DIRECTORIES="$TMP_ROOT/spawn-notgit-root" \
+    run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit-root/plain" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort"
   assert_contains "$out" "did not enter an isolated worktree" "non-worktree spawn lacked the isolation error"
-  assert_contains "$out" "it is not inside a git worktree" "non-worktree spawn did not say why the path was rejected"
+  assert_contains "$out" "not inside a git worktree" "non-worktree spawn did not say why the path was rejected"
   assert_absent "$home/state/abort-notgit-dd4.meta" "aborted spawn must not record meta"
 
   # Abort: the pane resolves INTO the primary checkout (a subdir of PROJ_ABS).
