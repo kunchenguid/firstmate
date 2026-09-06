@@ -1782,7 +1782,7 @@ EOF
 # every other read failure is a 2, printed to stderr, because a mechanical
 # closer must never read "cannot tell" as permission to close.
 command_open() {  # <task-id> [--identity] [--distinguish-absent]
-  local id='' identity=0 distinguish_absent=0 data state show shown_body
+  local id='' identity=0 distinguish_absent=0 data state root file show shown_body
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --identity) identity=1 ;;
@@ -1801,9 +1801,18 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
       exit 2
       ;;
   esac
-  fm_tasks_axi_compatible || { printf 'fm-captain-hold: compatible tasks-axi is required\n' >&2; exit 2; }
   data=$(fm_backlog_data_absolute "$DATA") \
     || { printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2; exit 2; }
+  root=$(fm_backlog_root "$data") \
+    || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
+  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+    file=$(fm_backlog_file "$data") \
+      || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
+    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+      return 1
+    fi
+  fi
+  fm_tasks_axi_compatible || { printf 'fm-captain-hold: compatible tasks-axi is required\n' >&2; exit 2; }
   if fm_backlog_row_probe "$data" "$id"; then
     state=${FM_BACKLOG_ROW_STATE%% *}
     if [ "$state" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
