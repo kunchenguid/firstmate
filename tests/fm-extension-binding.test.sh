@@ -6,6 +6,13 @@
 # records those commands publish. It never asserts implementation-source bytes.
 set -u
 
+# Firstmate creates a home's state root, registry, and package directories under
+# umask 077 and then refuses any of them that a later read finds group- or
+# world-writable. A fixture that inherits a permissive caller umask would spell
+# those same directories 775 and be refused for the fixture's own spelling, so
+# this suite builds them exactly the way the product does.
+umask 077
+
 # The aggregate runner reaps stale fixtures before launching its isolated
 # section children.  Repeating that global scan in each child can consume the
 # coordinator's bounded startup window before a child publishes readiness.

@@ -113,6 +113,11 @@ state/               runtime records and signals; gitignored
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire
   <id>.pr-poll-merge-notified  canonical PR identity of the last merge outcome delivered for this task; bin/fm-pr-lib.sh owns the marker format and identity mechanics, while bin/fm-merge-outcome-lib.sh owns locked publication, duplicate suppression, and replacement
+  <id>.pr-poll-dequeued  identity of the last merge-queue ejection the watcher already woke; bin/fm-pr-lib.sh owns the marker so the same ejection does not re-wake every poll
+  <id>.pr-poll-enqueued  the ejection last answered automatically, armed PR identity plus that ejection instant, and how many automatic enqueuePullRequest attempts that pull request has spent in all; bin/fm-pr-lib.sh owns the marker and bin/fm-pr-enqueue.sh is the only writer
+  <id>.pr-poll-preserve  durable set-aside receipt for a poll-program refresh interrupted mid-flight; bin/fm-pr-lib.sh owns the format and recovery
+  <id>.pr-poll-preserve-check <id>.pr-poll-preserve-registration <id>.pr-poll-preserve-data  the armed artifacts that receipt names; recovered or reported, never dropped in silence
+  .pr-poll-<id>.lock     per-task poll-publication lock shared by arming and refresh so a slow metadata wait cannot stall every other poll; bin/fm-pr-lib.sh owns the path
   branch-outcomes.jsonl .branch-outcomes-cursor .branch-outcomes-processed .<task>.branch-outcome-index .branch-outcome-index-ready  Pi supervision-branch durable outcome store, its read cursor, main's processed marker, bounded latest per-task status-coverage caches, and their recovery marker; bin/fm-branch-outcome.sh owns the formats
   branch-session/ .branch-session .branch-mirror-cursor  the branch's per-main-session conversations, the pointer to the current one, and the dialog-mirror cursor; extension-owned (docs/pi-supervision-branch.md)
   .branch-eligible-rows .branch-eligible-owner .main-eligible-rows  per-actor wake-row claims and branch-owner evidence; docs/watcher-continuity.md owns the acknowledgement contract
@@ -422,7 +427,12 @@ Handle actionable wakes as follows:
 
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
-3. For `check:`, act on the named poll result, including merges, Relay events, process-to-event source results, and captain inbox notes; a handled inbox note is also acknowledged with `bin/fm-inbox.sh drain --ack <id>`, or it stays counted as still waiting for firstmate.
+3. For `check:`, act on the named poll result, including merges, merge-queue ejections, Relay events, process-to-event source results, and captain inbox notes; a handled inbox note is also acknowledged with `bin/fm-inbox.sh drain --ack <id>`, or it stays counted as still waiting for firstmate.
+   A `dequeued:` poll line is handled by `bin/fm-pr-enqueue.sh <task-id> <reason>`: the task id is taken from the `<id>.check.sh` filename, and the reason is the middle field of `dequeued:<reason>:<timestamp>`.
+   The pull request is back in the queue when that script prints `queued:`; otherwise escalate the forge reason to the captain.
+   A `dequeued:unreported:` or `dequeued:unreadable:` line is a real ejection the forge left unlabelled or labelled unreadably, not a poll failure.
+   A run that prints `queued:` and then `escalate:` did re-queue the pull request but could not record its one-attempt bound: tell the captain and do not re-queue it again.
+   Re-queue is not a merge.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.

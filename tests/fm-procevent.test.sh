@@ -13,6 +13,13 @@
 # runner is stored before it is announced.
 set -u
 
+# Firstmate creates a home's state root, registry, and package directories under
+# umask 077 and then refuses any of them that a later read finds group- or
+# world-writable. A fixture that inherits a permissive caller umask would spell
+# those same directories 775 and be refused for the fixture's own spelling, so
+# this suite builds them exactly the way the product does.
+umask 077
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 

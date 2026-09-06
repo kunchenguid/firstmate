@@ -144,6 +144,7 @@ That is close to the family's ceiling rather than a scheduling loss: its longest
 The family's clock is two long scripts that do not contend: `fm-pr-check-security` (198.5s) and `fm-teardown` (194.1s) each own a worker for nearly the whole run, and `fm-pr-merge` (118.5s) plus `fm-x-mode` (79.4s) fill the other two.
 `bin/fm-test-isolation-proof.sh`'s own `--list-exclusions` keeps `fm-pr-check-security` and `fm-teardown` out of the mixed PORTABLE pool, where they would share a machine with unrelated lock and forge stress.
 Admitting them inside their own family is a different question and this proof answers it: the family's six scripts are safe with each other at four workers.
+`tests/fm-pr-enqueue.test.sh` joined `pr-forge` on 2026-09-04, after this proof, so the family now runs seven scripts and that one is not covered by the runs above.
 
 ### secondmate: admitted
 

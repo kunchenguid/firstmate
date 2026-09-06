@@ -65,6 +65,18 @@ export REAL_PS_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
 
+# Reaping a real leaked process is driven by an lsof cwd scan. Where a case
+# needs that scan to see a process this suite actually started, lsof is an
+# external prerequisite like tmux or perl: report it as skipped rather than as
+# a reap the product failed to perform. The absent-lsof fallback and the
+# erroring-lsof refusal have their own cases and stub lsof themselves, so they
+# stay covered here either way.
+require_real_lsof() {  # <case-name>
+  [ -n "$REAL_LSOF_FOR_TEST" ] && return 0
+  printf 'skip: %s needs lsof, which is not installed\n' "$1"
+  return 1
+}
+
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
 #   $CASE/fakebin/      - mocks for treehouse, tmux (PATH-prepended by caller)
@@ -3078,6 +3090,7 @@ test_own_autonomous_run_is_left_alone() {
 
 test_leaked_worktree_process_is_reaped() {
   local case_dir rc pid
+  require_real_lsof leaked-process-reap || return 0
   case_dir=$(make_case leaked-process-reap)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
@@ -3107,6 +3120,7 @@ test_leaked_worktree_process_is_reaped() {
 
 test_leaked_tasktmp_process_is_reaped() {
   local case_dir rc pid
+  require_real_lsof leaked-tasktmp-reap || return 0
   case_dir=$(make_case leaked-tasktmp-reap)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
@@ -3245,6 +3259,7 @@ SH
 
 test_exec_changed_process_is_still_reaped() {
   local case_dir rc pid marker done_flag survived=0
+  require_real_lsof exec-changed-process || return 0
   case_dir=$(make_case exec-changed-process)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
@@ -3307,6 +3322,7 @@ SH
 
 test_process_spawned_during_grace_is_reaped_on_later_pass() {
   local case_dir rc pid child_file child_pid="" parent_survived=0 child_survived=0
+  require_real_lsof grace-spawn-convergence || return 0
   case_dir=$(make_case grace-spawn-convergence)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
@@ -3424,6 +3440,7 @@ EOF
 
 test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   local case_dir rc head pid abort_log
+  require_real_lsof abort-then-reap-then-remove-order || return 0
   case_dir=$(make_case abort-then-reap-then-remove-order)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"

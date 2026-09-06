@@ -753,7 +753,7 @@ test_exclude_family() {
 }
 
 test_portable_shard_union_and_coverage_guard() {
-  local s1 s2 proven serial herdr all_count union_count overlap out first
+  local s1 s2 proven serial herdr all_count union_count overlap out first collating
   s1=$("$RUNNER" --list --lane portable-parallel-1)
   s2=$("$RUNNER" --list --lane portable-parallel-2)
   proven=$("$RUNNER" --list --proven-isolated)
@@ -774,6 +774,17 @@ test_portable_shard_union_and_coverage_guard() {
     || fail "herdr family must include smoke"
   out=$("$RUNNER" --check-coverage)
   assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker"
+  # The guard sorts every list under LC_ALL=C, so its set comparisons must
+  # collate the same way. A language locale ignores punctuation and orders
+  # tests/fm-backend-herdr.test.sh before tests/fm-backend.test.sh, which made
+  # comm reject the guard's own sorted input and fail the whole run.
+  collating=$(locale -a 2>/dev/null |
+    grep -m1 -E '^[a-z]{2}_[A-Z]{2}\.([Uu][Tt][Ff]-?8)$' || true)
+  if [ -n "$collating" ]; then
+    out=$(LC_ALL="$collating" "$RUNNER" --check-coverage) \
+      || fail "coverage guard failed under LC_ALL=$collating"
+    assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard under LC_ALL=$collating"
+  fi
   all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
   union_count=$(printf '%s\n' "$s1" "$s2" "$serial" "$herdr" | LC_ALL=C sort -u | wc -l | tr -d ' ')
   [ "$union_count" = "$all_count" ] \
@@ -1298,21 +1309,20 @@ test_herdr_ci_family_run_has_a_step_timeout() {
   # The required Herdr lane's hang tripwire is the family-run *step* bound, not
   # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
   # artifact keys cannot masquerade as the step contract.
-  command -v ruby >/dev/null 2>&1 \
-    || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
   local json job_timeout step_timeout
-  json=$(ruby -ryaml -rjson -e '
-doc = YAML.load_file(ARGV[0])
-job = doc.fetch("jobs").fetch("tests-herdr")
-step = job.fetch("steps").find { |s|
-  s.is_a?(Hash) && s["name"] == "Run real-Herdr family (serial, required)"
-}
-raise "missing family-run step" if step.nil?
-raise "family-run step has no timeout-minutes" unless step.key?("timeout-minutes")
-puts JSON.generate(
-  "job_timeout" => job.fetch("timeout-minutes"),
-  "step_timeout" => step.fetch("timeout-minutes")
-)
+  json=$(python3 -c '
+import json, sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+job = doc["jobs"]["tests-herdr"]
+steps = [s for s in job["steps"]
+         if isinstance(s, dict)
+         and s.get("name") == "Run real-Herdr family (serial, required)"]
+if not steps:
+    raise SystemExit("missing family-run step")
+if "timeout-minutes" not in steps[0]:
+    raise SystemExit("family-run step has no timeout-minutes")
+print(json.dumps({"job_timeout": job["timeout-minutes"],
+                  "step_timeout": steps[0]["timeout-minutes"]}))
 ' "$ROOT/.github/workflows/ci.yml") \
     || fail "could not parse tests-herdr timeouts from ci.yml"
   job_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job_timeout"])' <<<"$json") \

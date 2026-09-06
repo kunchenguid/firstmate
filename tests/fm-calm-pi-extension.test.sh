@@ -1818,11 +1818,23 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
-    pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+    # The session file records the assistant turn before Pi has repainted the
+    # pane, so capturing on that signal alone can read a pane on which the
+    # exchange is not drawn yet - a zero count that the exactly-once check below
+    # would report as a duplicate. MONITOR_HANDLED is the last row of the
+    # exchange, so waiting for it settles every row the assertions read.
+    i=0
+    while [ "$i" -lt 240 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE" && break
+      sleep 0.05
+      i=$((i + 1))
+    done
+    printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE" \
+      || fail "Pi follow-up $label case did not render the intended processing result"
     [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
       || fail "Pi follow-up $label case rendered a duplicate captain answer"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
-    assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
     if [ "$calm_state" = on ]; then
       assert_not_contains "$pane" "MONITOR_${label}_ONE" "Pi follow-up $label case rendered a Calm-hidden operational user row"
       if [ "$label" = exact_watcher ]; then
@@ -3527,37 +3539,40 @@ if (!serialized.includes("firstmate-synthetic-input") || !serialized.includes("/
 const synthetic = entries.find((entry) => entry.type === "custom_message" && entry.customType === "firstmate-synthetic-input");
 if (!synthetic || synthetic.display) process.exit(1);
 JS
-  chrome=$(find_chrome) || fail "Chrome or Chromium is required for rendered export DOM assertions"
-  "$chrome" \
-    --headless=new \
-    --disable-gpu \
-    --no-sandbox \
-    --user-data-dir="$TMP_ROOT/chrome-profile" \
-    --virtual-time-budget=2000 \
-    --dump-dom \
-    "file://$export_file" >"$export_dom" 2>/dev/null &
-  chrome_pid=$!
-  chrome_wait=0
-  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 100 ]; do
-    grep -Fq '</html>' "$export_dom" 2>/dev/null && break
-    sleep 0.1
-    chrome_wait=$((chrome_wait + 1))
-  done
-  kill "$chrome_pid" 2>/dev/null || true
-  # Chrome can retain --headless=new after --dump-dom completes and ignore TERM,
-  # so an unbounded wait can hang after the complete DOM has been captured.
-  chrome_reap_wait=0
-  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_reap_wait" -lt 20 ]; do
-    sleep 0.1
-    chrome_reap_wait=$((chrome_reap_wait + 1))
-  done
-  if kill -0 "$chrome_pid" 2>/dev/null; then
-    kill -9 "$chrome_pid" 2>/dev/null || true
-  fi
-  wait "$chrome_pid" 2>/dev/null || true
-  grep -Fq '</html>' "$export_dom" 2>/dev/null \
-    || fail "could not render calm-mode HTML export DOM"
-  node - "$export_dom" <<'JS' || fail "rendered export DOM violated the Calm conversation boundary"
+  # Chrome renders the exported HTML for the DOM assertions below. Like pi
+  # and tmux above it is an external prerequisite, so its absence skips those
+  # assertions instead of failing the rest of this E2E.
+  if chrome=$(find_chrome); then
+    "$chrome" \
+      --headless=new \
+      --disable-gpu \
+      --no-sandbox \
+      --user-data-dir="$TMP_ROOT/chrome-profile" \
+      --virtual-time-budget=2000 \
+      --dump-dom \
+      "file://$export_file" >"$export_dom" 2>/dev/null &
+    chrome_pid=$!
+    chrome_wait=0
+    while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 100 ]; do
+      grep -Fq '</html>' "$export_dom" 2>/dev/null && break
+      sleep 0.1
+      chrome_wait=$((chrome_wait + 1))
+    done
+    kill "$chrome_pid" 2>/dev/null || true
+    # Chrome can retain --headless=new after --dump-dom completes and ignore TERM,
+    # so an unbounded wait can hang after the complete DOM has been captured.
+    chrome_reap_wait=0
+    while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_reap_wait" -lt 20 ]; do
+      sleep 0.1
+      chrome_reap_wait=$((chrome_reap_wait + 1))
+    done
+    if kill -0 "$chrome_pid" 2>/dev/null; then
+      kill -9 "$chrome_pid" 2>/dev/null || true
+    fi
+    wait "$chrome_pid" 2>/dev/null || true
+    grep -Fq '</html>' "$export_dom" 2>/dev/null \
+      || fail "could not render calm-mode HTML export DOM"
+    node - "$export_dom" <<'JS' || fail "rendered export DOM violated the Calm conversation boundary"
 const dom = require("node:fs").readFileSync(process.argv[2], "utf8");
 const messages = dom.match(/<div id="messages">([\s\S]*?)<\/main>/)?.[1];
 const tree = dom.match(/<div[^>]*id="tree-container"[^>]*>([\s\S]*?)<div[^>]*id="tree-status"/)?.[1];
@@ -3571,6 +3586,9 @@ for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_A
 }
 if (!tree.includes("firstmate-synthetic-input") || !tree.includes("/tmp/probe.status")) process.exit(1);
 JS
+  else
+    echo "skip: Chrome or Chromium not found for rendered export DOM assertions"
+  fi
   # Calm returns the transcript to its own presentation once the export has been
   # rendered. That repaint runs on the macrotask right after Pi prints the export
   # confirmation, so it must not overwrite it: the captain has to keep seeing where

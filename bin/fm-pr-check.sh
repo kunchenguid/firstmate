@@ -83,9 +83,15 @@ fi
 META_TMP=
 META_LOCK=
 META_LOCK_HELD=0
+POLL_LOCK=
+POLL_LOCK_HELD=0
 pr_check_cleanup() {
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  if [ "$POLL_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$POLL_LOCK" || true
+    POLL_LOCK_HELD=0
+  fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
@@ -130,10 +136,27 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
+# The poll lock is taken only after the gh read and after the meta lock, so a
+# slow forge call or a contended metadata write can never stall the watcher's
+# check cycle behind this arm.
+POLL_LOCK=$(fm_pr_poll_lock_path "$STATE" "$ID") || exit 1
+fm_lock_acquire_wait "$POLL_LOCK"
+POLL_LOCK_HELD=1
+# A poll-program refresh interrupted mid-flight left its armed artifacts set
+# aside under a receipt. Put them back before publishing a replacement poll, so
+# a later recovery can never restore them over the poll armed here. The watcher
+# sets those same artifacts aside under this lock, so recovering them under it
+# is what keeps a half-finished set-aside from being recovered underneath it.
+fm_pr_poll_preserve_recover_one "$STATE" "$ID" || {
+  echo "error: pending PR poll preservation could not be validated" >&2
+  exit 1
+}
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+fm_lock_release "$POLL_LOCK"
+POLL_LOCK_HELD=0
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything

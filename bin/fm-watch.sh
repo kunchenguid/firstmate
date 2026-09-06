@@ -63,7 +63,12 @@
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
-#   check: <script>: <out> authenticated check output, always actionable
+#   check: <script>: <out> authenticated check output, always actionable.
+#                          A PR poll emits merged or dequeued:<reason>:<time>,
+#                          where reason is the forge's own token or the
+#                          unreported/unreadable sentinel for an ejection it
+#                          did not label usably; any other PR-poll output is
+#                          ignored rather than woken.
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -1665,7 +1670,16 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    # A poll-program refresh sets its armed artifacts aside under a receipt
+    # before replacing them, so a watcher that lost the process mid-refresh
+    # leaves that receipt rather than a task with no poll. Put those artifacts
+    # back before any check runs. A receipt that cannot be honoured is a
+    # supported persistent condition, so it joins the rejected-check report
+    # after the loop rather than exiting first and starving every other poll.
     rejected_checks=
+    if ! fm_pr_poll_preserve_recover_all "$STATE"; then
+      rejected_checks="$rejected_checks$FM_PR_POLL_PRESERVE_REJECTED"
+    fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
@@ -1680,7 +1694,39 @@ while :; do
         fi
       else
         id=$(basename "$c" .check.sh)
+        # A poll armed before the current bin/fm-pr-poll.sh shipped still holds
+        # the exact copy its registration recorded, so it is refreshed onto the
+        # current program instead of being reported as an unauthenticated check
+        # and left blind until a human re-arms it. A refusal falls through to
+        # the rejected-check wake below, so the poll is never quietly dropped.
+        pr_poll_armed=0
+        poll_lock=
+        poll_lock_held=0
+        if [ -f "$STATE/$id.pr-poll" ] || [ -f "$STATE/$id.pr-poll-registration" ]; then
+          poll_lock=$(fm_pr_poll_lock_path "$STATE" "$id") || {
+            rejected_checks="$rejected_checks $c"
+            continue
+          }
+          # Five seconds covers a local poll publication; a live holder past that
+          # is slow, not mid-write, and this cycle must still poll every other task.
+          if ! fm_lock_acquire_wait_bounded "$poll_lock" "${FM_PR_POLL_LOCK_TIMEOUT:-5}"; then
+            rejected_checks="$rejected_checks $c"
+            continue
+          fi
+          poll_lock_held=1
+        fi
         if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+          pr_poll_armed=1
+        elif fm_pr_poll_template_refresh "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+          && fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+          pr_poll_armed=1
+          triage_log "re-armed PR poll for $id onto the updated poll program"
+        fi
+        if [ "$poll_lock_held" = 1 ]; then
+          fm_lock_release "$poll_lock" || true
+          poll_lock_held=0
+        fi
+        if [ "$pr_poll_armed" -eq 1 ]; then
           is_pr_poll=1
           provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
           url=$FM_PR_POLL_SNAPSHOT_URL
@@ -1717,6 +1763,20 @@ while :; do
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
+          wake "$reason"
+        fi
+        if [ "$is_pr_poll" -eq 1 ] && fm_pr_poll_dequeued_line_parse "$out"; then
+          if fm_pr_poll_dequeued_already_notified "$STATE" "$id" \
+            "$provider" "$host" "$path" "$number" \
+            "$FM_PR_DEQUEUED_REASON" "$FM_PR_DEQUEUED_AT"; then
+            triage_log "absorbed duplicate dequeued PR poll result for $id"
+            continue
+          fi
+          fm_wake_append check "$c" "$reason" || exit 1
+          fm_pr_poll_dequeued_mark_notified "$STATE" "$id" \
+            "$provider" "$host" "$path" "$number" \
+            "$FM_PR_DEQUEUED_REASON" "$FM_PR_DEQUEUED_AT" || exit 1
+          touch "$STATE/.last-check"
           wake "$reason"
         fi
         fm_wake_append check "$c" "$reason" || exit 1

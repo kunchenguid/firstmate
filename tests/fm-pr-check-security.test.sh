@@ -137,6 +137,43 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "api graphql")
+    case " $* " in
+      *REMOVED_FROM_MERGE_QUEUE_EVENT*|*RemovedFromMergeQueueEvent*)
+        [ "${FM_TEST_GH_GRAPHQL_FAIL:-0}" = 0 ] || exit 1
+        # gh's -F converts JSON literals and integers, so a String! variable
+        # sent that way is rejected by the forge exactly as it is here.
+        prev=
+        for arg in "$@"; do
+          if [ "$prev" = -F ]; then
+            case "$arg" in
+              owner=true|owner=false|owner=null|name=true|name=false|name=null|owner=[0-9]*|name=[0-9]*)
+                exit 1
+                ;;
+            esac
+          fi
+          prev=$arg
+        done
+        if [ -n "${FM_TEST_GH_TIMELINE_JSON:-}" ]; then
+          # Reproduce gh's own -q handling, so a case that supplies a forge
+          # response exercises the poll's real filter instead of a fixture of
+          # what that filter was assumed to produce.
+          filter=
+          prev=
+          for arg in "$@"; do
+            if [ "$prev" = -q ]; then
+              filter=$arg
+              break
+            fi
+            prev=$arg
+          done
+          [ -n "$filter" ] || exit 1
+          printf '%s' "$FM_TEST_GH_TIMELINE_JSON" | jq -r "$filter" || exit 1
+          exit 0
+        fi
+        printf '%s\n' "${FM_TEST_GH_TIMELINE-}"
+        exit 0
+        ;;
+    esac
     printf '%s\n' \
       'state=MERGED' \
       'merged=true' \
@@ -619,6 +656,7 @@ run_watcher_bounded() {
   shift 2
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
+      FM_PR_POLL_LOCK_TIMEOUT="${FM_PR_POLL_LOCK_TIMEOUT:-1}" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
@@ -668,11 +706,17 @@ test_rejected_metacharacter_bytes_are_inert() {
 }
 
 make_poll_fixture() {
-  local dir=$1
+  local dir=$1 owner=${2:-o} repo=${3:-r} number=${4:-1}
   cp "$POLL" "$dir/home/state/task-a.check.sh"
   printf '%s\n%s\n%s\n%s\n%s\n' \
-    github https://github.com/o/r/pull/1 github.com o/r 1 > "$dir/home/state/task-a.pr-poll"
+    github "https://github.com/$owner/$repo/pull/$number" github.com "$owner/$repo" "$number" \
+    > "$dir/home/state/task-a.pr-poll"
   chmod 0600 "$dir/home/state/task-a.check.sh" "$dir/home/state/task-a.pr-poll"
+}
+
+# One current ejection as the forge returns it, with the removal event last.
+ejected_response() {  # <reason-json>
+  printf '{"data":{"repository":{"pullRequest":{"isInMergeQueue":false,"timelineItems":{"nodes":[{"__typename":"AddedToMergeQueueEvent","createdAt":"2026-09-04T09:00:00Z"},{"__typename":"RemovedFromMergeQueueEvent","createdAt":"2026-09-04T10:00:00Z","reason":%s}]}}}}}' "$1"
 }
 
 run_poll() {
@@ -680,6 +724,21 @@ run_poll() {
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
+}
+
+test_static_poll_reports_ejection_for_json_literal_names() {
+  local dir out
+  dir=$(make_case poll-json-literal-names)
+  # An owner and a repository name the forge allows and JSON reads as a literal
+  # or a number.
+  make_poll_fixture "$dir" true 2048
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_TIMELINE_JSON="$(ejected_response '"CI_FAILURE"')" \
+    run_poll "$dir")
+  [ "$out" = 'dequeued:CI_FAILURE:2026-09-04T10:00:00Z' ] \
+    || fail "an ejection went silent for a JSON-literal owner or repository name: $out"
+  rm -f "$dir/fakebin/jq"
+  pass "an ejection is reported for owner and repository names that read as JSON literals"
 }
 
 test_static_poll_contract() {
@@ -700,6 +759,36 @@ test_static_poll_contract() {
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted after gh failure"
+  out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_GRAPHQL_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "static poll emitted after graphql failure"
+  out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_TIMELINE='not-a-timeline' run_poll "$dir")
+  [ -z "$out" ] || fail "static poll emitted for unparseable timeline"
+  out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_TIMELINE=$'failed_checks\t2026-09-04T10:00:00Z' run_poll "$dir")
+  [ "$out" = 'dequeued:failed_checks:2026-09-04T10:00:00Z' ] \
+    || fail "static poll did not emit the ejection reason"
+
+  # The reason the forge returns is nullable and free-form, so these run the
+  # poll's own response filter over responses the forge can actually send.
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_TIMELINE_JSON="$(ejected_response '"CI_FAILURE"')" run_poll "$dir")
+  [ "$out" = 'dequeued:CI_FAILURE:2026-09-04T10:00:00Z' ] \
+    || fail "static poll dropped the forge's own ejection reason: $out"
+  out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_TIMELINE_JSON="$(ejected_response null)" run_poll "$dir")
+  [ "$out" = 'dequeued:unreported:2026-09-04T10:00:00Z' ] \
+    || fail "an ejection with no reason stayed silent: $out"
+  out=$(FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_TIMELINE_JSON="$(ejected_response '"Base branch was updated"')" run_poll "$dir")
+  [ "$out" = 'dequeued:unreadable:2026-09-04T10:00:00Z' ] \
+    || fail "an ejection with an unparsable reason stayed silent: $out"
+  out=$(FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_TIMELINE_JSON='{"data":{"repository":{"pullRequest":{"isInMergeQueue":true,"timelineItems":{"nodes":[{"__typename":"RemovedFromMergeQueueEvent","createdAt":"2026-09-04T10:00:00Z","reason":"CI_FAILURE"}]}}}}}' \
+    run_poll "$dir")
+  [ -z "$out" ] || fail "a pull request back in the queue reported an ejection: $out"
+  out=$(FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_TIMELINE_JSON='{"data":{"repository":{"pullRequest":{"isInMergeQueue":false,"timelineItems":{"nodes":[{"__typename":"AddedToMergeQueueEvent","createdAt":"2026-09-04T10:00:00Z"}]}}}}}' \
+    run_poll "$dir")
+  [ -z "$out" ] || fail "a pull request with no removal event reported an ejection: $out"
+  rm -f "$dir/fakebin/jq"
 
   mv "$dir/home/state/task-a.pr-poll" "$dir/home/state/task-a.pr-poll.missing"
   out=$(run_poll "$dir")
@@ -733,7 +822,7 @@ test_static_poll_contract() {
   set -e
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
-  pass "static poll is silent except for one merged line and remains watcher-bounded"
+  pass "static poll is silent except for merged or a parsed ejection, and remains watcher-bounded"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -1200,6 +1289,64 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
+
+  dir=$(make_case teardown-dequeued-enqueued)
+  fakebin="$dir/fakebin"
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/missing-worktree" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=local-only'
+  printf 'dequeued\n' > "$dir/home/state/task-a.pr-poll-dequeued"
+  printf 'enqueued\n' > "$dir/home/state/task-a.pr-poll-enqueued"
+  chmod 0600 "$dir/home/state/task-a.pr-poll-dequeued" "$dir/home/state/task-a.pr-poll-enqueued"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  touch "$dir/home/state/.last-watcher-beat"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force > "$dir/teardown-dq.out" 2> "$dir/teardown-dq.err" \
+    || fail "teardown of ejection markers failed: $(cat "$dir/teardown-dq.err")"
+  [ ! -e "$dir/home/state/task-a.pr-poll-dequeued" ] || fail "teardown left the dequeued marker"
+  [ ! -e "$dir/home/state/task-a.pr-poll-enqueued" ] || fail "teardown left the enqueued marker"
+
+  dir=$(make_case teardown-preserved-set-aside)
+  fakebin="$dir/fakebin"
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/missing-worktree" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=local-only'
+  for artifact in pr-poll-preserve pr-poll-preserve-check pr-poll-preserve-registration \
+    pr-poll-preserve-data; do
+    printf '%s\n' "$artifact" > "$dir/home/state/task-a.$artifact"
+    chmod 0600 "$dir/home/state/task-a.$artifact"
+  done
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  touch "$dir/home/state/.last-watcher-beat"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force > "$dir/teardown-preserve.out" 2> "$dir/teardown-preserve.err" \
+    || fail "teardown of an unfinished set-aside failed: $(cat "$dir/teardown-preserve.err")"
+  for artifact in pr-poll-preserve pr-poll-preserve-check pr-poll-preserve-registration \
+    pr-poll-preserve-data; do
+    [ ! -e "$dir/home/state/task-a.$artifact" ] \
+      || fail "teardown left task-a.$artifact"
+  done
+  # A later recovery cycle must have nothing left to re-arm a torn-down task with.
+  fm_pr_poll_preserve_recover_all "$dir/home/state" \
+    || fail "a torn-down task still carried a recoverable set-aside"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] \
+    || fail "recovery re-armed a check for a torn-down task"
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
@@ -2121,9 +2268,459 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_dequeued_poll_wakes_with_reason() {
+  local dir state rc
+  dir=$(make_case dequeued-wake)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  add_stop_custom_check "$dir"
+
+  set +e
+  FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_TIMELINE=$'failed_checks\t2026-09-04T10:00:00Z' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "dequeued watcher failed: $(cat "$dir/watch-1.err")"
+  case "$(cat "$dir/watch-1.out")" in
+    check:*task-a.check.sh:*dequeued:failed_checks:2026-09-04T10:00:00Z) ;;
+    *) fail "ejected PR did not wake with its forge reason: $(cat "$dir/watch-1.out")" ;;
+  esac
+  [ -f "$state/task-a.check.sh" ] || fail "ejection retired the still-open poll"
+  [ -f "$state/task-a.pr-poll-dequeued" ] || fail "ejection did not record its identity"
+  ack_watcher_cycle "$state" || fail "dequeued wake acknowledgement failed"
+
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_TIMELINE=$'failed_checks\t2026-09-04T10:00:00Z' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "duplicate ejection watcher failed: $(cat "$dir/watch-2.err")"
+  case "$(cat "$dir/watch-2.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "already handled ejection still woke: $(cat "$dir/watch-2.out")" ;;
+  esac
+  ! grep -F 'task-a.check.sh: dequeued:' "$dir/watch-2.out" >/dev/null \
+    || fail "already handled ejection was printed again"
+  ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "already handled ejection remained queued"
+  [ -f "$state/task-a.check.sh" ] || fail "duplicate absorption retired the poll"
+  pass "an ejected PR wakes once with its forge reason and stays silent after"
+}
+
+test_dequeued_poll_new_ejection_wakes_again() {
+  local dir state rc
+  dir=$(make_case dequeued-new-event)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  add_stop_custom_check "$dir"
+
+  set +e
+  FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_TIMELINE=$'checks_timed_out\t2026-09-04T10:00:00Z' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "first timeout ejection watcher failed: $(cat "$dir/watch-1.err")"
+  ack_watcher_cycle "$state" || fail "first timeout ejection acknowledgement failed"
+
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_TIMELINE=$'checks_timed_out\t2026-09-04T11:00:00Z' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "second timeout ejection watcher failed: $(cat "$dir/watch-2.err")"
+  case "$(cat "$dir/watch-2.out")" in
+    check:*task-a.check.sh:*dequeued:checks_timed_out:2026-09-04T11:00:00Z) ;;
+    *) fail "a later ejection did not wake: $(cat "$dir/watch-2.out")" ;;
+  esac
+  pass "a later ejection of the same PR is a new identity and wakes again"
+}
+
+test_updated_poll_program_keeps_armed_polls_working() {
+  local dir state rc old_template
+  dir=$(make_case poll-program-update)
+  state="$dir/home/state"
+  old_template="$dir/previous-fm-pr-poll.sh"
+  cp "$POLL" "$old_template"
+  printf '# bytes shipped by a previous release of this poll program\n' >> "$old_template"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$old_template"
+  add_stop_custom_check "$dir"
+  if cmp -s "$POLL" "$state/task-a.check.sh"; then
+    fail "the fixture did not arm an older poll program"
+  fi
+
+  set +e
+  FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_TIMELINE=$'failed_checks\t2026-09-04T10:00:00Z' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "poll-program update watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-a.check.sh:*dequeued:failed_checks:2026-09-04T10:00:00Z) ;;
+    *) fail "a poll armed before the update went blind: $(cat "$dir/watch.out")" ;;
+  esac
+  cmp -s "$POLL" "$state/task-a.check.sh" \
+    || fail "the armed poll was not refreshed onto the current poll program"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "the refreshed poll left its registration inconsistent"
+  pass "a poll armed before a poll-program update keeps polling across it"
+}
+
+# A transient publication fault: the first rename onto the faulted destination
+# lands wrong bytes, and every later rename onto it - including the restore of a
+# poll a failed refresh set aside - is clean, so a case can prove both the
+# refusal and the recovery that follows it.
+install_one_shot_publication_fault() {  # <dir>
+  local dir=$1
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+"${FM_TEST_REAL_MV:?}" "$@" || exit $?
+[ "$last" = "${FM_TEST_FAULT_PATH:?}" ] || exit 0
+[ ! -e "${FM_TEST_FAULT_GATE:?}" ] || exit 0
+: > "$FM_TEST_FAULT_GATE"
+printf 'faulted publication bytes\n' > "$last"
+SH
+  chmod +x "$dir/fakebin/mv"
+}
+
+poll_artifact_identity_snapshot() {  # <state> <id>
+  local state=$1 id=$2 suffix path
+  for suffix in check.sh pr-poll pr-poll-registration; do
+    path="$state/$id.$suffix"
+    if [ ! -f "$path" ] || [ -L "$path" ]; then
+      printf 'absent %s\n' "$suffix"
+      continue
+    fi
+    printf 'file %s %s %s ' "$suffix" "$(file_mode "$path")" "$(fm_pr_file_identity "$path")"
+    shasum -a 256 "$path" | awk '{print $1}'
+  done
+}
+
+test_failed_poll_refresh_keeps_the_armed_poll() {
+  local faulted dir state old_template fault_path before after rc
+  for faulted in data check; do
+    dir=$(make_case "poll-refresh-fault-$faulted")
+    state="$dir/home/state"
+    old_template="$dir/previous-fm-pr-poll.sh"
+    cp "$POLL" "$old_template"
+    printf '# bytes shipped by a previous release of this poll program\n' >> "$old_template"
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$old_template"
+    case "$faulted" in
+      data) fault_path="$state/task-a.pr-poll" ;;
+      check) fault_path="$state/task-a.check.sh" ;;
+    esac
+    before=$(poll_artifact_identity_snapshot "$state" task-a)
+    install_one_shot_publication_fault "$dir"
+
+    set +e
+    FM_TEST_FAULT_PATH="$fault_path" FM_TEST_FAULT_GATE="$dir/publication-fault" \
+      FM_TEST_REAL_MV="$REAL_MV" FM_TEST_GH_STATE=OPEN \
+      FM_TEST_GH_TIMELINE=$'failed_checks\t2026-09-04T10:00:00Z' \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "faulted $faulted refresh watcher failed: $(cat "$dir/watch-1.err")"
+    [ -e "$dir/publication-fault" ] || fail "the $faulted publication fault never fired"
+    case "$(cat "$dir/watch-1.out")" in
+      *"rejected unauthenticated state checks"*task-a.check.sh*) ;;
+      *) fail "a refused $faulted refresh went unreported: $(cat "$dir/watch-1.out")" ;;
+    esac
+    after=$(poll_artifact_identity_snapshot "$state" task-a)
+    [ "$before" = "$after" ] \
+      || fail "a refused $faulted refresh disarmed the poll: $before -> $after"
+    fm_pr_poll_artifacts_valid "$state" task-a "$old_template" \
+      || fail "a refused $faulted refresh left the poll inconsistent with its own program"
+
+    ack_watcher_cycle "$state" || fail "refused $faulted refresh acknowledgement failed"
+    rm -f "$state/.last-check"
+    set +e
+    FM_TEST_FAULT_PATH="$fault_path" FM_TEST_FAULT_GATE="$dir/publication-fault" \
+      FM_TEST_REAL_MV="$REAL_MV" FM_TEST_GH_STATE=OPEN \
+      FM_TEST_GH_TIMELINE=$'failed_checks\t2026-09-04T10:00:00Z' \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "recovery watcher after a faulted $faulted refresh failed: $(cat "$dir/watch-2.err")"
+    case "$(cat "$dir/watch-2.out")" in
+      check:*task-a.check.sh:*dequeued:failed_checks:2026-09-04T10:00:00Z) ;;
+      *) fail "the preserved poll stayed blind after a refused $faulted refresh: $(cat "$dir/watch-2.out")" ;;
+    esac
+    cmp -s "$POLL" "$state/task-a.check.sh" \
+      || fail "the preserved poll was not refreshed onto the current program on retry"
+  done
+  pass "a refused poll-program refresh keeps the poll armed, audible and refreshable"
+}
+
+seed_stale_poll() {  # <dir> <id> <url>
+  local dir=$1 id=$2 url=$3 old_template
+  old_template="$dir/previous-fm-pr-poll.sh"
+  cp "$POLL" "$old_template"
+  printf '# bytes shipped by a previous release of this poll program\n' >> "$old_template"
+  write_poll_meta "$dir/home/state" "$id" "$url"
+  seed_canonical_poll "$dir" "$id" "$url" "$old_template"
+  if cmp -s "$POLL" "$dir/home/state/$id.check.sh"; then
+    fail "the fixture did not arm an older poll program"
+  fi
+}
+
+# Reproduce the on-disk state a watcher leaves behind when it loses the process
+# between setting an armed poll aside and putting it back: the real set-aside
+# runs, and the process is then killed outright inside that window.
+interrupt_poll_refresh_after_set_aside() {  # <dir> <id> <url>
+  local dir=$1 id=$2 url=$3 state rc
+  state="$dir/home/state"
+  set +e
+  # The signal-death notice for the killed subshell is the fixture working, not
+  # a diagnostic this suite reports.
+  {
+    (
+      fm_pr_poll_template_stale "$state" "$id" "$POLL" || exit 3
+      fm_pr_url_parse "$url" || exit 3
+      fm_pr_poll_prepare "$state" "$id" "$FM_PR_PROVIDER" "$url" "$FM_PR_HOST" \
+        "$FM_PR_PATH" "$FM_PR_NUMBER" "$POLL" || exit 3
+      fm_pr_poll_preserve_save "$state" "$id" || exit 3
+      kill -9 "$BASHPID"
+    )
+  } 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -ne 3 ] || fail "the interrupted-refresh fixture could not set $id aside"
+  [ ! -e "$state/$id.check.sh" ] && [ ! -L "$state/$id.check.sh" ] \
+    || fail "the interrupted-refresh fixture left $id armed"
+  [ -f "$state/$id.pr-poll-preserve" ] \
+    || fail "an interrupted refresh left no durable trace for $id"
+}
+
+test_interrupted_poll_refresh_is_recovered_by_the_next_cycle() {
+  local dir state rc suffix
+  dir=$(make_case poll-refresh-interrupted)
+  state="$dir/home/state"
+  seed_stale_poll "$dir" task-a https://github.com/o/r/pull/1
+  interrupt_poll_refresh_after_set_aside "$dir" task-a https://github.com/o/r/pull/1
+
+  set +e
+  FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_TIMELINE=$'failed_checks\t2026-09-04T10:00:00Z' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "interrupted-refresh recovery watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-a.check.sh:*dequeued:failed_checks:2026-09-04T10:00:00Z) ;;
+    *) fail "a poll interrupted mid-refresh stayed silent: $(cat "$dir/watch.out")" ;;
+  esac
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "the recovered poll was not left armed on the current program"
+  for suffix in pr-poll-preserve pr-poll-preserve-check pr-poll-preserve-registration \
+    pr-poll-preserve-data; do
+    [ ! -e "$state/task-a.$suffix" ] && [ ! -L "$state/task-a.$suffix" ] \
+      || fail "a completed refresh left task-a.$suffix behind"
+  done
+  pass "a refresh interrupted after its set-aside is recovered and polls again"
+}
+
+test_unusable_set_aside_keeps_reporting_every_cycle() {
+  local dir state rc
+  dir=$(make_case poll-refresh-unusable-set-aside)
+  state="$dir/home/state"
+  seed_stale_poll "$dir" task-a https://github.com/o/r/pull/1
+  interrupt_poll_refresh_after_set_aside "$dir" task-a https://github.com/o/r/pull/1
+  # A set-aside copy that is no longer the artifact its receipt recorded cannot
+  # be put back, and must never be dropped in silence either.
+  printf 'tampered set-aside bytes\n' > "$state/task-a.pr-poll-preserve-check"
+  chmod 0600 "$state/task-a.pr-poll-preserve-check"
+
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "unusable set-aside watcher failed: $(cat "$dir/watch-1.err")"
+  case "$(cat "$dir/watch-1.out")" in
+    *"rejected unauthenticated state checks"*task-a.pr-poll-preserve*) ;;
+    *) fail "an unusable set-aside went unreported: $(cat "$dir/watch-1.out")" ;;
+  esac
+  [ -f "$state/task-a.pr-poll-preserve" ] \
+    || fail "an unusable set-aside was dropped instead of kept for repair"
+
+  ack_watcher_cycle "$state" || fail "unusable set-aside acknowledgement failed"
+  rm -f "$state/.last-check"
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "second unusable set-aside watcher failed: $(cat "$dir/watch-2.err")"
+  case "$(cat "$dir/watch-2.out")" in
+    *"rejected unauthenticated state checks"*task-a.pr-poll-preserve*) ;;
+    *) fail "an unusable set-aside fell silent on a later cycle: $(cat "$dir/watch-2.out")" ;;
+  esac
+  pass "a set-aside that cannot be put back is reported on every cycle, never dropped"
+}
+
+test_unusable_set_aside_does_not_starve_a_neighbor_poll() {
+  local dir state rc
+  dir=$(make_case poll-refresh-unusable-set-aside-neighbor)
+  state="$dir/home/state"
+  seed_stale_poll "$dir" task-a https://github.com/o/r/pull/1
+  interrupt_poll_refresh_after_set_aside "$dir" task-a https://github.com/o/r/pull/1
+  printf 'tampered set-aside bytes\n' > "$state/task-a.pr-poll-preserve-check"
+  chmod 0600 "$state/task-a.pr-poll-preserve-check"
+  write_poll_meta "$state" task-b https://github.com/o/r/pull/2
+  seed_canonical_poll "$dir" task-b https://github.com/o/r/pull/2
+
+  set +e
+  FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_TIMELINE=$'failed_checks\t2026-09-04T10:00:00Z' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "neighbor poll watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-b.check.sh:*dequeued:failed_checks:2026-09-04T10:00:00Z) ;;
+    *) fail "an unusable set-aside starved a neighbor poll: $(cat "$dir/watch.out")" ;;
+  esac
+  [ -f "$state/task-a.pr-poll-preserve" ] \
+    || fail "an unusable set-aside was dropped while the neighbor was polled"
+  pass "an unusable set-aside is kept for repair without starving a neighbor poll"
+}
+
+hold_poll_lock() {  # <state> <lock> <ready-file>
+  local state=$1 lock=$2 ready=$3
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+    printf ready > "$3"
+    while kill -0 "$PPID" 2>/dev/null; do sleep 0.05; done
+    fm_lock_release "$2" || true
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$ready" &
+}
+
+test_poll_lock_timeout_falls_through_to_rejected_checks() {
+  local dir state rc lock ready holder
+  dir=$(make_case poll-lock-timeout-neighbor)
+  state="$dir/home/state"
+  seed_stale_poll "$dir" task-a https://github.com/o/r/pull/1
+  write_poll_meta "$state" task-b https://github.com/o/r/pull/2
+  seed_canonical_poll "$dir" task-b https://github.com/o/r/pull/2
+  lock=$(fm_pr_poll_lock_path "$state" task-a) || fail "could not name task-a's poll lock"
+  ready="$dir/lock-ready"
+  hold_poll_lock "$state" "$lock" "$ready"
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ -f "$ready" ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$ready" ] || fail "the poll-lock holder never acquired"
+
+  set +e
+  FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_TIMELINE=$'failed_checks\t2026-09-04T10:00:00Z' \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "a contended poll lock wedged the watcher: rc=$rc $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-b.check.sh:*dequeued:failed_checks:2026-09-04T10:00:00Z) ;;
+    *) fail "a live poll-lock holder starved a neighbor poll: $(cat "$dir/watch.out")" ;;
+  esac
+  pass "a bounded poll-lock wait falls through so a neighbor poll still runs"
+}
+
+test_pr_check_writes_meta_before_waiting_on_poll_lock() {
+  local dir state lock ready holder meta_ok=0 i checker
+  dir=$(make_case pr-check-meta-before-poll-lock)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  lock=$(fm_pr_poll_lock_path "$state" task-a) || fail "could not name the poll lock"
+  ready="$dir/lock-ready"
+  hold_poll_lock "$state" "$lock" "$ready"
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ -f "$ready" ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$ready" ] || fail "the poll-lock holder never acquired"
+
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+    > "$dir/check.out" 2> "$dir/check.err" &
+  checker=$!
+  set -e
+  i=0
+  while [ "$i" -lt 50 ]; do
+    if grep -q '^pr=https://github.com/o/r/pull/1$' "$state/task-a.meta" 2>/dev/null; then
+      meta_ok=1
+      break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$meta_ok" = 1 ] || fail "metadata was not written while the poll lock was held"
+  [ ! -e "$state/task-a.check.sh" ] \
+    || fail "the poll was published while its lock was still held"
+  kill "$checker" 2>/dev/null || true
+  wait "$checker" 2>/dev/null || true
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "arming writes metadata before waiting on the poll lock"
+}
+
+test_edited_poll_program_is_never_refreshed() {
+  local dir state rc
+  dir=$(make_case poll-program-edited)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  # An edit in place keeps the registered inode, so only the recorded hash can
+  # tell an older release apart from a program somebody rewrote.
+  printf '#!/usr/bin/env bash\nprintf "merged\\n"\n' > "$state/task-a.check.sh"
+  chmod 0600 "$state/task-a.check.sh"
+
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "edited poll program watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    *"rejected unauthenticated state checks"*task-a.check.sh*) ;;
+    *) fail "an edited poll program was not reported: $(cat "$dir/watch.out")" ;;
+  esac
+  if cmp -s "$POLL" "$state/task-a.check.sh"; then
+    fail "an edited poll program was refreshed instead of rejected"
+  fi
+  pass "an edited poll program is rejected rather than refreshed"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
+test_static_poll_reports_ejection_for_json_literal_names
+test_dequeued_poll_wakes_with_reason
+test_dequeued_poll_new_ejection_wakes_again
+test_updated_poll_program_keeps_armed_polls_working
+test_failed_poll_refresh_keeps_the_armed_poll
+test_interrupted_poll_refresh_is_recovered_by_the_next_cycle
+test_unusable_set_aside_keeps_reporting_every_cycle
+test_unusable_set_aside_does_not_starve_a_neighbor_poll
+test_poll_lock_timeout_falls_through_to_rejected_checks
+test_pr_check_writes_meta_before_waiting_on_poll_lock
+test_edited_poll_program_is_never_refreshed
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome

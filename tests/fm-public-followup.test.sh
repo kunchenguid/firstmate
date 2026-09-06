@@ -45,7 +45,7 @@ EOF
 # command that staged its job. Stop it before the shared fixture cleanup runs,
 # and keep that cleanup (tests/lib.sh owns it) rather than replacing the trap.
 pf_test_cleanup() {
-  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid
+  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid waited=0
   if [ -n "$PF_TEST_LOCK_HOLDER" ]; then
     kill "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
     wait "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
@@ -54,6 +54,23 @@ pf_test_cleanup() {
   if [ -f "$pid_file" ]; then
     pid=$(cat "$pid_file" 2>/dev/null) || pid=
     [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    # The worker is detached, so `wait` cannot reap it and the signal above only
+    # requests the exit. It recreates its own job directories on every loop, so
+    # a removal that starts while it is still alive races it and leaves the
+    # fixture root non-empty. Wait for the pid to actually be gone - then force
+    # it - before the shared cleanup removes anything.
+    while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 100 ]; do
+      sleep 0.05
+      waited=$((waited + 1))
+    done
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+      waited=0
+      while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 100 ]; do
+        sleep 0.05
+        waited=$((waited + 1))
+      done
+    fi
   fi
   fm_test_cleanup
 }

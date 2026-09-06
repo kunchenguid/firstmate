@@ -57,7 +57,10 @@ make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
+  # A real Firstmate home creates its state root under umask 077, and
+  # bin/fm-procevent.sh refuses a group- or world-writable one; a fixture
+  # that inherits a permissive caller umask must not spell it differently.
+  (umask 077; mkdir -p "$dir/state" "$fakebin")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -159,7 +162,7 @@ make_supercase() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
+  (umask 077; mkdir -p "$dir/state" "$fakebin")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -238,7 +241,7 @@ SH
 make_bordered_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"; fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
+  (umask 077; mkdir -p "$dir/state" "$fakebin")
   printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash

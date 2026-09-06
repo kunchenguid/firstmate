@@ -15,7 +15,10 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
-  mkdir -p "$home/state" "$home/data"
+  # A real Firstmate home creates its state root under umask 077, and
+  # bin/fm-procevent.sh refuses a group- or world-writable one; a fixture
+  # that inherits a permissive caller umask must not spell it differently.
+  (umask 077; mkdir -p "$home/state" "$home/data")
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" lavish-axi
   printf '%s\n' "$home"
