@@ -1183,6 +1183,14 @@ procevent_surfaced_marker() {  # <queue-key>
   printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
 }
 
+procevent_source_registered() {
+  local source
+  for source in "$STATE/procevent"/*.source; do
+    [ -e "$source" ] && return 0
+  done
+  return 1
+}
+
 procevent_surface_after_output() {
   local output_status=$1 key marker tmp status=0
   if [ "$output_status" -eq 0 ]; then
@@ -1739,8 +1747,9 @@ while :; do
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
   # only republishes results already captured durably and restarts a source
-  # whose owner is gone. It is a no-op with nothing registered.
-  if [ -d "$STATE/procevent" ]; then
+  # whose owner is gone. Skip the bounded child entirely when no source is
+  # registered; an empty registry has no reconciliation work.
+  if procevent_source_registered; then
     fm_run_timed "$WATCHER_EXTERNAL_TIMEOUT" env FM_HOME="$FM_HOME" \
       "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
