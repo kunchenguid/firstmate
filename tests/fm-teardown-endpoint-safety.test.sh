@@ -14,6 +14,7 @@ make_case() {  # <name>
   mkdir -p "$TMP_ROOT/$dir/home/state" "$TMP_ROOT/$dir/home/data" \
     "$TMP_ROOT/$dir/home/config" "$TMP_ROOT/$dir/fakebin" \
     "$TMP_ROOT/$dir/worktree" "$TMP_ROOT/$dir/project"
+  git init -q "$TMP_ROOT/$dir/project"
   : > "$TMP_ROOT/$dir/worktree/sentinel"
   : > "$TMP_ROOT/$dir/runtime.log"
   cat > "$TMP_ROOT/$dir/fakebin/tmux" <<'SH'
@@ -137,12 +138,12 @@ test_control_lock_contention_refuses_before_mutation() {
   pass "fm-teardown: a concurrent lifecycle action refuses before mutation"
 }
 
-test_task_set_lock_contention_refuses_before_mutation() {
-  local dir id=publishing-task lock ready holder i=0 rc
-  dir=$(make_case task-set-lock)
+test_non_pool_teardown_ignores_task_set_lock() {
+  local dir id=non-pool-task lock ready holder i=0
+  dir=$(make_case non-pool-task-set-lock)
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=isolated:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    "worktree=$dir/missing-worktree" "project=$dir/project" "kind=scout"
   lock="$dir/home/state/.task-set.lock"
   ready="$dir/task-set-lock-ready"
   (
@@ -164,19 +165,13 @@ test_task_set_lock_contention_refuses_before_mutation() {
     fail "could not stage an in-progress task publication"
   }
 
-  set +e
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "teardown raced an in-progress task publication"
-  assert_present "$dir/home/state/$id.meta" "task-set contention removed task metadata"
-  assert_present "$dir/worktree/sentinel" "task-set contention changed the worktree"
-  assert_present "$lock" "task-set contention removed the publisher's lock"
-  [ ! -s "$dir/runtime.log" ] \
-    || fail "task-set contention reached the runtime: $(cat "$dir/runtime.log")"
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "non-pool teardown was blocked by an unrelated task publication: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "non-pool teardown left task metadata"
+  assert_present "$lock" "non-pool teardown removed the publisher's lock"
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
-  pass "fm-teardown: an in-progress task publication refuses before mutation"
+  pass "fm-teardown: non-pool cleanup ignores unrelated task publication locks"
 }
 
 test_metadata_lock_serializes_destructive_cleanup() {
@@ -465,6 +460,37 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
   pass "fm-teardown: a pool slot named by a second task record is never returned, killed, or reset"
 }
 
+test_cross_home_pool_slot_collision_refuses() {
+  local dir id=stale-task other=secondmate-task second_home rc
+  dir=$(make_case slot-reuse-cross-home)
+  printf 'fixture\n' > "$dir/project/tracked"
+  git -C "$dir/project" add tracked
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
+  second_home="$dir/secondmate-home"
+  git -C "$dir/project" worktree add -q -b secondmate-fixture "$second_home"
+  mkdir -p "$second_home/state"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$second_home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$second_home" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown returned a pool slot held by another firstmate home"
+  assert_present "$dir/home/state/$id.meta" "cross-home collision removed stale metadata"
+  assert_present "$second_home/state/$other.meta" "cross-home collision removed live metadata"
+  assert_present "$dir/worktree/sentinel" "cross-home collision reset the shared slot"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "cross-home collision reached the runtime: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "cross-home refusal should name the task holding the slot"
+  pass "fm-teardown: a pool slot held by another firstmate home is never returned"
+}
+
 test_sole_slot_record_still_tears_down() {
   local dir id=sole-task worker
 
@@ -553,12 +579,13 @@ SH
 
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
-test_task_set_lock_contention_refuses_before_mutation
+test_non_pool_teardown_ignores_task_set_lock
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup
 test_reused_pool_slot_refuses_before_touching_the_other_task
+test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_endpoint_outside_recorded_slot_refuses_before_mutation

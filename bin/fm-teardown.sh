@@ -283,11 +283,30 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
   exit "$FM_LEASE_REFUSE_EXIT"
 fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
-TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
-  echo "error: could not resolve the task-set lock for $STATE" >&2
-  exit 1
-}
-TASK_SET_LOCK_HELD=0
+META="$STATE/$ID.meta"
+TREEHOUSE_PROJECT_LOCK=
+TREEHOUSE_PROJECT_LOCK_HELD=0
+if [ -f "$META" ] && [ ! -L "$META" ]; then
+  TEARDOWN_LOCK_KIND=$(fm_meta_get "$META" kind)
+  [ -n "$TEARDOWN_LOCK_KIND" ] || TEARDOWN_LOCK_KIND=ship
+  TEARDOWN_LOCK_BACKEND=$(fm_meta_get "$META" backend)
+  [ -n "$TEARDOWN_LOCK_BACKEND" ] || TEARDOWN_LOCK_BACKEND=tmux
+  TEARDOWN_LOCK_WT=$(fm_meta_get "$META" worktree)
+  TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
+  if [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
+     && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
+     && [ -n "$TEARDOWN_LOCK_WT" ] && [ -d "$TEARDOWN_LOCK_WT" ]; then
+    TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$TEARDOWN_LOCK_PROJECT") || {
+      echo "REFUSED: cannot resolve the shared Treehouse project lock for ${TEARDOWN_LOCK_PROJECT:-<missing>}; nothing was changed" >&2
+      exit 1
+    }
+    fm_lock_try_acquire "$TREEHOUSE_PROJECT_LOCK" || {
+      echo "REFUSED: another Treehouse slot allocation or return is in progress for $TEARDOWN_LOCK_PROJECT; nothing was changed" >&2
+      exit 1
+    }
+    TREEHOUSE_PROJECT_LOCK_HELD=1
+  fi
+fi
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
@@ -326,19 +345,14 @@ teardown_release_locks() {
     fm_lock_release "$CONTROL_LOCK" || true
     CONTROL_LOCK_HELD=0
   fi
-  if [ "$TASK_SET_LOCK_HELD" = 1 ]; then
-    fm_lock_release "$TASK_SET_LOCK" || true
-    TASK_SET_LOCK_HELD=0
+  if [ "$TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$TREEHOUSE_PROJECT_LOCK" || true
+    TREEHOUSE_PROJECT_LOCK_HELD=0
   fi
   fm_lease_guard_release || true
   return "$status"
 }
 trap teardown_release_locks EXIT
-fm_lock_try_acquire "$TASK_SET_LOCK" || {
-  echo "error: this home's task set is locked by another operation; nothing was changed" >&2
-  exit 1
-}
-TASK_SET_LOCK_HELD=1
 fm_lock_try_acquire "$CONTROL_LOCK" || {
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
   exit 1
@@ -349,7 +363,6 @@ CONTROL_LOCK_HELD=1
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
-META="$STATE/$ID.meta"
 fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -877,6 +890,21 @@ ORCA_PATH_MATCH_VERIFIED=0
 CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 
 KIND=$TEARDOWN_META_KIND
+EXPECTED_TREEHOUSE_PROJECT_LOCK=
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -n "$WT" ] && [ -d "$WT" ]; then
+  EXPECTED_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ") || {
+    echo "REFUSED: cannot resolve the shared Treehouse project lock for ${PROJ:-<missing>}; nothing was changed" >&2
+    exit 1
+  }
+  if [ "$TREEHOUSE_PROJECT_LOCK_HELD" != 1 ] \
+     || [ "$TREEHOUSE_PROJECT_LOCK" != "$EXPECTED_TREEHOUSE_PROJECT_LOCK" ]; then
+    echo "REFUSED: task $ID's Treehouse project identity changed while teardown acquired its locks; nothing was changed" >&2
+    exit 1
+  fi
+elif [ "$TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+  echo "REFUSED: task $ID stopped naming a live Treehouse slot while teardown acquired its locks; nothing was changed" >&2
+  exit 1
+fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
@@ -2021,24 +2049,44 @@ teardown_live_slot_path() {
   canonical_existing_dir "$WT"
 }
 
-# See "Worktree-slot ownership" in the header. Check 1: this home's task records
-# must not name the same live slot twice.
+# See "Worktree-slot ownership" in the header. Check 1: task records in every
+# home sharing this Treehouse project must not name the same live slot twice.
 require_exclusive_task_worktree_slot() {
-  local slot other other_id field other_path other_slot
+  local slot listing line state_dir known other other_id field other_path other_slot
+  local -a states
   slot=$(teardown_live_slot_path) || return 0
-  for other in "$STATE"/*.meta; do
-    [ -f "$other" ] && [ ! -L "$other" ] || continue
-    other_id=$(basename "$other" .meta)
-    [ "$other_id" != "$ID" ] || continue
-    for field in worktree home; do
-      other_path=$(fm_meta_get "$other" "$field")
-      [ -n "$other_path" ] || continue
-      other_slot=$(canonical_existing_dir "$other_path") || continue
-      [ "$other_slot" = "$slot" ] || continue
-      echo "REFUSED: task $ID's recorded worktree $slot is also task $other_id's recorded $field." >&2
-      echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
-      echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $ID; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
-      return 1
+  listing=$(git -C "$PROJ" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || {
+    echo "REFUSED: cannot enumerate the homes sharing Treehouse project $PROJ; nothing was changed" >&2
+    return 1
+  }
+  states=("$STATE")
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        state_dir="${line#worktree }/state"
+        known=0
+        for other in "${states[@]}"; do
+          [ "$other" != "$state_dir" ] || known=1
+        done
+        [ "$known" = 1 ] || states+=("$state_dir")
+        ;;
+    esac
+  done <<< "$listing"
+  for state_dir in "${states[@]}"; do
+    for other in "$state_dir"/*.meta; do
+      [ -f "$other" ] && [ ! -L "$other" ] || continue
+      [ "$other" != "$META" ] || continue
+      other_id=$(basename "$other" .meta)
+      for field in worktree home; do
+        other_path=$(fm_meta_get "$other" "$field")
+        [ -n "$other_path" ] || continue
+        other_slot=$(canonical_existing_dir "$other_path") || continue
+        [ "$other_slot" = "$slot" ] || continue
+        echo "REFUSED: task $ID's recorded worktree $slot is also task $other_id's recorded $field." >&2
+        echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
+        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $ID; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
+        return 1
+      done
     done
   done
 }
