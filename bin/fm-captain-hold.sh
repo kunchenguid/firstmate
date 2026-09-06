@@ -161,17 +161,17 @@
 # nothing on these predicate results and mutates nothing. bin/fm-teardown.sh asks it before its automatic
 # backlog close and, on 0, returns the row to Queued with its deliverable
 # recorded instead (bin/fm-backlog-transition-lib.sh owns that transition), so
-# holding the very work item a question gates is safe; `answer` remains the
-# only act that closes a captain call.
+# holding the very work item a question gates is safe; only `answer` with the
+# captain's words or evidence-backed `reconcile close` closes the call.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
 #
 # Resolution records: the block written into the body names this script, the
-# decision digest, and a `Resolution mode:` of answered, released, or repaired.
-# Records written by the retired fm-decision-hold.sh (routed, declined,
-# answered, repaired) are recognized everywhere a record is read, so nothing
-# already closed needs rewriting.
+# decision digest, and a `Resolution mode:` of answered, released, repaired, or
+# reconciled. Records written by the retired fm-decision-hold.sh (routed,
+# declined, answered, repaired) are recognized everywhere a record is read, so
+# nothing already closed needs rewriting.
 #
 # Parent channel: inside a secondmate home a task held for the captain, and its
 # answer, are captain-facing facts the moment they are recorded, so `hold`

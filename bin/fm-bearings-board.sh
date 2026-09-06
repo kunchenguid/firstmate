@@ -51,9 +51,8 @@
 # rows, or when `bin/fm-captain-hold.sh open` reports the task is no longer an
 # open captain call. A newer published version also supersedes a version card.
 # A task whose state cannot be established is kept, because a call wrongly
-# hidden is worse than a card wrongly shown. The first post-landing rebuild
-# performs the authorized one-time cleanup of already-stale cards; there is no
-# committed migration or live-state mutation.
+# hidden is worse than a card wrongly shown. Cleanup is therefore a normal
+# rebuild effect rather than a committed migration or direct state mutation.
 #
 # THE RECONCILE CHOICE. Every decision card carries the standard `reconcile`
 # option, injected here so the guarantee does not depend on the composer's

@@ -405,7 +405,7 @@ cmd_silent() {
 # and the versioned `selection` and `note` fields inside its `Context data:` block
 # is skipped. A time-limited rollout branch accepts the old question/answer
 # shape only for ordinary answers and rejects its bare or annotated reconcile
-# values; old rows never create generationless reconcile requests.
+# values because old rows do not separate the selected option from its note.
 # The question cap is 128 so any task id fits, including the long legacy
 # `<origin>-decision-<key>` identities pre-collapse decks still carry; the
 # security property is the slug SHAPE, which is unchanged.

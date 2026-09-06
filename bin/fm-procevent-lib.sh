@@ -399,13 +399,9 @@ fm_procevent_claim_generation_gone_locked() {
 # fresh token, so a dead generation's leftovers can never collide with the
 # generation that replaces it. They are hygiene, not an ownership invariant -
 # the runner's own successful-capture path already tidies them best-effort.
-# Gating ownership on that tidying is what wedged a source forever whenever the
-# recorded state-root identity could no longer be revalidated: reconcile could
-# not clear the dead claim and retire refused with "cannot release source
-# ownership", while the pid and its whole process group were provably gone.
-#
-# So the cleanup is still attempted and still authoritative for a generation
-# that is not provably gone; it only stops being a veto once it is.
+# The cleanup is still attempted and remains authoritative for a generation
+# that is not provably gone; it stops being a veto only after the stale owner
+# and independent group check prove the whole generation gone.
 fm_procevent_claim_capture_reservation_reclaim_locked() {
   fm_procevent_claim_capture_reservation_remove_locked && return 0
   fm_procevent_claim_generation_gone_locked
