@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Launch Claude with Remote Control disabled, or verify that policy in a Herdr pane.
 # Usage: fm-claude-rc-off.sh launch [Claude arguments...]
+#        fm-claude-rc-off.sh config <source-config-dir> <runtime-dir>
 #        fm-claude-rc-off.sh verify <session> <pane>
 # Launch merges caller --settings JSON or files and forces disableRemoteControl=true.
 # It requires Claude Code >= 2.1.128, the vendor's documented support floor.
@@ -16,7 +17,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 die() { printf 'fm-claude-rc-off: %s\n' "$*" >&2; exit 1; }
-usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 check_version() {
   local version major minor patch
@@ -52,6 +53,33 @@ launch() {
   exec claude --settings "$settings" "${args[@]}"
 }
 
+config() {
+  [ "$#" -eq 2 ] || die 'config requires a source config directory and runtime directory'
+  local source=$1 runtime=$2 target item name settings
+  case "$source" in /*) ;; *) die 'source config directory must be absolute' ;; esac
+  case "$runtime" in /*) ;; *) die 'runtime directory must be absolute' ;; esac
+  [ ! -e "$source" ] || [ -d "$source" ] || die "source config is not a directory: $source"
+  mkdir -p "$runtime"
+  target=$(mktemp -d "$runtime/claude-config.XXXXXX")
+  chmod 700 "$target"
+  if [ -d "$source" ]; then
+    shopt -s dotglob nullglob
+    for item in "$source"/*; do
+      name=${item##*/}
+      [ "$name" = settings.json ] || ln -s "$item" "$target/$name"
+    done
+    shopt -u dotglob nullglob
+  fi
+  settings='{}'
+  if [ -f "$source/settings.json" ]; then
+    settings=$(jq -ce 'select(type == "object")' -- "$source/settings.json") \
+      || die "cannot read settings object: $source/settings.json"
+  fi
+  printf '%s\n' "$settings" | jq -c '.disableRemoteControl = true' > "$target/settings.json"
+  chmod 600 "$target/settings.json"
+  printf '%s\n' "$target"
+}
+
 verify() {
   [ "$#" -eq 2 ] || die 'verify requires an explicit session and pane'
   local session=$1 pane=$2 info pid
@@ -80,6 +108,7 @@ verify() {
 
 case "${1:-}" in
   launch) shift; launch "$@" ;;
+  config) shift; config "$@" ;;
   verify) shift; verify "$@" ;;
   --help|-h|help) usage ;;
   *) usage >&2; exit 2 ;;

@@ -209,6 +209,7 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __RCOFF__     quoted path to the Claude RC-off launch helper
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
@@ -1337,7 +1338,8 @@ launch_template() {
     # alone disables the feature; keep both so a managed override of one still
     # leaves the other in force. Both are per-launch, scoped to this invocation only,
     # and never touch the captain's global ~/.claude/settings.json.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # fm-claude-rc-off.sh owns per-launch Remote Control enforcement.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 __RCOFF__ launch --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -2957,6 +2959,11 @@ fi
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
+RAW_CLAUDE_CONFIG_DIR=
+if [ "$HARNESS" = claude ] && [ "$RAW_LAUNCH" -eq 1 ]; then
+  CLAUDE_CONFIG_SOURCE=${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}
+  RAW_CLAUDE_CONFIG_DIR=$("$FM_ROOT/bin/fm-claude-rc-off.sh" config "$CLAUDE_CONFIG_SOURCE" "$TASK_TMP") || exit 1
+fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -3494,14 +3501,7 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
-if [ "$HARNESS" = claude ]; then
-  if [[ "$LAUNCH" =~ ^([[:space:]]*([A-Za-z_][^[:space:]]*=[^[:space:]]*[[:space:]]+)*)(([^[:space:]]*/)?claude)([[:space:]].*)?$ ]]; then
-    LAUNCH="${BASH_REMATCH[1]}$(shell_quote "$FM_ROOT/bin/fm-claude-rc-off.sh") launch${BASH_REMATCH[5]}"
-  else
-    echo "error: Claude launch could not be wrapped with RC-off enforcement" >&2
-    exit 1
-  fi
-fi
+LAUNCH=${LAUNCH//__RCOFF__/"$(shell_quote "$FM_ROOT/bin/fm-claude-rc-off.sh")"}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
@@ -3520,7 +3520,7 @@ esac
 # Forward firstmate's own resolved store onto the claude launch so the crewmate
 # uses the same credential/config firstmate is authenticated with. Only when set;
 # an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+if [ "$HARNESS" = claude ] && [ "$RAW_LAUNCH" -eq 0 ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
@@ -3544,6 +3544,9 @@ if [ "$KIND" = secondmate ]; then
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
+fi
+if [ -n "$RAW_CLAUDE_CONFIG_DIR" ]; then
+  LAUNCH="export CLAUDE_CONFIG_DIR=$(shell_quote "$RAW_CLAUDE_CONFIG_DIR"); $LAUNCH"
 fi
 
 spawn_record_traceparent() {

@@ -385,42 +385,43 @@ test_active_dispatch_profile_allows_raw_launch_command() {
 }
 
 test_raw_claude_launch_enforces_verifiable_rc_off() {
-  local rec id out status launch args info
+  local rec id out status launch raw explicit source log
   id=profile-raw-claude-z15b
   rec=$(make_spawn_case profile-raw-claude claude "$id")
   read_case_record "$rec"
-  args="$CASE_DIR/claude-args.json"
-  info="$CASE_DIR/process-info.json"
-  cat > "$FAKEBIN_DIR/claude" <<'SH'
+  explicit="$CASE_DIR/explicit/claude"
+  source="$CASE_DIR/source-config"
+  log="$CASE_DIR/claude-invocations.jsonl"
+  mkdir -p "${explicit%/*}" "$source"
+  printf '%s\n' '{"feedbackDrafts":"off","disableRemoteControl":false}' > "$source/settings.json"
+  cat > "$explicit" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '2.1.263 (Claude Code)'
-else
-  printf '%s\0' "$@" | jq -Rs 'split("\u0000")[:-1]' > "$FM_RAW_CLAUDE_ARGS"
-fi
+rc_off=$(jq -e '.disableRemoteControl == true' "$CLAUDE_CONFIG_DIR/settings.json" >/dev/null && printf true || printf false)
+jq -nc --arg binary "$0" --argjson rc_off "$rc_off" --args '$ARGS.positional as $argv | {binary:$binary,rc_off:$rc_off,argv:$argv}' -- "$@" >> "$FM_RAW_CLAUDE_LOG"
+[ "${1:-}" != --fail ]
 SH
-  cat > "$FAKEBIN_DIR/herdr" <<'SH'
-#!/usr/bin/env bash
-cat "$FM_RAW_CLAUDE_INFO"
-SH
-  chmod +x "$FAKEBIN_DIR/claude" "$FAKEBIN_DIR/herdr"
+  cp "$explicit" "$FAKEBIN_DIR/claude"
+  chmod +x "$explicit" "$FAKEBIN_DIR/claude"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "claude --dangerously-skip-permissions")
+  raw="$explicit --fail || claude --fallback"
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$source" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$raw")
   status=$?
   expect_code 0 "$status" "raw Claude launch should succeed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  FM_RAW_CLAUDE_ARGS="$args" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" \
+  FM_RAW_CLAUDE_LOG="$log" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" \
     || fail "raw Claude launch command could not execute"
-  jq -e '.[0] == "--settings" and (.[1] | fromjson | .disableRemoteControl == true) and .[2:] == ["--dangerously-skip-permissions"]' "$args" >/dev/null \
-    || fail "raw Claude launch did not enforce RC-off while preserving arguments"
-  jq -n --slurpfile argv "$args" \
-    '{result:{process_info:{pane_id:"w1:p2",foreground_processes:[{pid:42,argv:(["claude"] + $argv[0])}]}}}' > "$info"
-  FM_RAW_CLAUDE_INFO="$info" PATH="$FAKEBIN_DIR:$PATH" \
-    "$ROOT/bin/fm-claude-rc-off.sh" verify named w1:p2 >/dev/null \
-    || fail "raw Claude launch did not produce verifiable RC-off process state"
+  jq -se --arg explicit "$explicit" '
+    length == 2
+    and .[0] == {binary:$explicit,rc_off:true,argv:["--fail"]}
+    and .[1].rc_off == true
+    and .[1].argv == ["--fallback"]
+    and (.[1].binary | split("/") | last) == "claude"
+  ' "$log" >/dev/null || fail "raw Claude paths or fallback invocations escaped RC-off"
+  assert_contains "$launch" "$raw" "raw Claude command bytes changed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
-  pass "raw Claude spawns enforce RC-off and remain verifiable"
+  pass "raw Claude paths and every shell fallback inherit RC-off unchanged"
 }
 
 test_claude_threads_model_and_effort() {
