@@ -2670,8 +2670,12 @@ preflight_descendant_treehouse_slots() {
     backend=$(fm_backend_of_meta "$meta")
     worktree=$(meta_value "$meta" worktree)
     project=$(meta_value "$meta" project)
-    [ "$kind" != secondmate ] && [ "$backend" != orca ] \
-      && is_treehouse_pool_slot "$project" "$worktree" || continue
+    if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
+      continue
+    fi
+    if ! is_treehouse_pool_slot "$project" "$worktree"; then
+      continue
+    fi
     lock_path=$(fm_treehouse_project_lock_path "$project") || {
       echo "REFUSED: cannot resolve the shared Treehouse project lock for child $task_id; forced teardown changed nothing" >&2
       return 1
@@ -2699,8 +2703,12 @@ preflight_descendant_treehouse_slots() {
     backend=$(fm_backend_of_meta "$meta")
     worktree=$(meta_value "$meta" worktree)
     project=$(meta_value "$meta" project)
-    [ "$kind" != secondmate ] && [ "$backend" != orca ] \
-      && is_treehouse_pool_slot "$project" "$worktree" || continue
+    if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
+      continue
+    fi
+    if ! is_treehouse_pool_slot "$project" "$worktree"; then
+      continue
+    fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
     target=$FM_BACKEND_VALIDATED_TARGET
     require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
