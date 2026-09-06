@@ -64,16 +64,21 @@
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
 # that path and hard-resets it before returning it, so releasing a slot that is
 # not genuinely this task's destroys another worker's live work. Before the first
-# cleanup step, teardown proves the slot is this task's on two independent
-# records, and refuses with both tasks and the slot untouched when either
-# contradicts:
-#   1. Record exclusivity - no OTHER task record in this home may name the same
-#      live path in its worktree= or home=. One live path with two task records
-#      is the reuse collision itself, whichever record is stale.
+# cleanup step, teardown evaluates two independent ownership sources and refuses
+# with both tasks and the slot untouched when either contradicts:
+#   1. Record exclusivity - no OTHER task record in this home or any Firstmate
+#      home discoverable as a linked worktree of the same project may name the
+#      same live path in its worktree= or home=. One live path with two task
+#      records is the reuse collision itself, whichever record is stale.
 #   2. Endpoint agreement - when the recorded endpoint answers with a live
 #      working directory, it must resolve inside the recorded slot. A pane that
 #      has been rebound to another slot contradicts the record even when this
 #      home holds only one task record for the path.
+# The scan and destructive return hold a lock in the project's git common
+# directory. Fresh Treehouse spawns for that project hold the same lock from
+# before slot allocation through metadata publication, closing the publication
+# gap; forced secondmate teardown takes it and runs the same checks for every
+# descendant Treehouse slot before touching any child.
 # Neither refusal is relaxed by --force: --force authorizes discarding THIS
 # task's unlanded work, never another task's live work. Reconcile whichever
 # record is wrong and re-run; both refusals name the inspection command.
