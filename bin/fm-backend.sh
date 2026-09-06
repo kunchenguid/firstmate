@@ -25,7 +25,12 @@
 # the documented macOS fallback signals when cmux's claude wrapper strips that
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
-# docs/cmux-backend.md for its empirical basis.
+# docs/cmux-backend.md for its empirical basis. P6 REGISTERS paseo as an
+# EXPERIMENTAL spawn-capable backend name and lands its safety boundary -
+# detection ordering, the --secondmate refusal, and endpoint-record validation -
+# BEFORE any lifecycle code exists. There is deliberately no bin/backends/paseo.sh
+# yet, so every runtime operation refuses through the unimplemented-backend arms
+# below rather than degrading.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -65,9 +70,12 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
+# paseo is EXPERIMENTAL and REGISTERED-ONLY for now: the name, its detection
+# ordering, its refusal, and its endpoint-record validation exist, but the
+# lifecycle adapter does not, so a paseo spawn refuses at endpoint creation.
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -132,9 +140,30 @@ fm_backend_is_known() {  # <name>
 #      scrubbed entirely (no bundle id to inherit); NOT usable from inside
 #      tmux, where the tmux server reparents to launchd and the chain never
 #      reaches cmux - which is fine, because $TMUX already won there.
+#
+# paseo injects one of two disjoint markers, one per Paseo runtime context: a
+# Paseo AGENT session sets PASEO_AGENT_ID, and a Paseo-created TERMINAL sets
+# PASEO_TERMINAL_ID. Either one alone selects paseo. PASEO_CLI is deliberately
+# NOT a marker even though both contexts carry it: the Paseo CLI shim exports
+# PASEO_CLI into everything it touches, so it survives arbitrarily far down a
+# process tree and cannot mean "running inside Paseo" - the same
+# marker-versus-binary-resolution distinction already drawn for cmux between
+# CMUX_WORKSPACE_ID and the user-settable CMUX_SOCKET_PATH. paseo is checked
+# LAST, after $TMUX, HERDR_ENV and both cmux signals, for the same
+# innermost-first reason: Paseo is a desktop app plus daemon that cannot run
+# nested inside tmux or herdr, while both can run inside a Paseo-provided
+# shell. Verified live: a tmux pane spawned by a Paseo-hosted firstmate carries
+# BOTH $TMUX and PASEO_AGENT_ID (the agent id leaks straight through the tmux
+# spawn), and only $TMUX names the layer actually executing - so checking paseo
+# any earlier would misroute every tmux task of a Paseo-hosted firstmate.
+# Ordering paseo after the cmux FALLBACK signals also keeps the unambiguous
+# check behind the heuristic one, which costs nothing (Paseo terminals carry no
+# CMUX_*/HERDR_*/TMUX markers and report __CFBundleIdentifier=sh.paseo.desktop,
+# not com.cmuxterm.app) and leaves cmux's ordering rationale true unamended.
 # Callers needing the winning signal read FM_BACKEND_DETECT_SIGNAL (set to
-# TMUX, HERDR_ENV, CMUX_WORKSPACE_ID, bundle-id, or ancestry) and
-# FM_BACKEND_DETECTED after a direct (non-command-substitution) call.
+# TMUX, HERDR_ENV, CMUX_WORKSPACE_ID, bundle-id, ancestry, PASEO_AGENT_ID, or
+# PASEO_TERMINAL_ID) and FM_BACKEND_DETECTED after a direct
+# (non-command-substitution) call.
 FM_BACKEND_CMUX_BUNDLE_ID="com.cmuxterm.app"
 
 fm_backend_detect() {
@@ -161,6 +190,18 @@ fm_backend_detect() {
   if fm_backend_detect_cmux_fallback; then
     FM_BACKEND_DETECTED=cmux
     printf 'cmux'
+    return 0
+  fi
+  if [ -n "${PASEO_AGENT_ID:-}" ]; then
+    FM_BACKEND_DETECTED=paseo
+    FM_BACKEND_DETECT_SIGNAL=PASEO_AGENT_ID
+    printf 'paseo'
+    return 0
+  fi
+  if [ -n "${PASEO_TERMINAL_ID:-}" ]; then
+    FM_BACKEND_DETECTED=paseo
+    FM_BACKEND_DETECT_SIGNAL=PASEO_TERMINAL_ID
+    printf 'paseo'
     return 0
   fi
   return 1
@@ -239,7 +280,8 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # today's default-path behavior and callers must see zero change. The cmux
 # notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
-# distinct from the primary-marker case.
+# distinct from the primary-marker case. paseo prints the same shape of notice
+# and names which of its two markers won.
 fm_backend_name() {
   local line v detected marker
   if [ -n "${FM_BACKEND:-}" ]; then
@@ -269,6 +311,9 @@ fm_backend_name() {
         *) marker="CMUX_WORKSPACE_ID" ;;
       esac
       echo "NOTICE: auto-detected cmux runtime ($marker) - spawning into the EXPERIMENTAL cmux backend. Set config/backend or pass --backend tmux to opt out." >&2
+    fi
+    if [ "$detected" = paseo ]; then
+      echo "NOTICE: auto-detected paseo runtime ($FM_BACKEND_DETECT_SIGNAL) - spawning into the EXPERIMENTAL paseo backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
     printf '%s' "$detected"
     return 0
@@ -304,8 +349,14 @@ fm_backend_validate_spawn() {  # <name>
 #     spawn/liveness paths parse the backend's JSON output (see each adapter's
 #     tool check, e.g. fm_backend_herdr_tool_check);
 #   - the treehouse worktree provider for every session-provider-only backend
-#     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
-#     so it drops both treehouse and any other backend's session CLI.
+#     (tmux, herdr, zellij, cmux, paseo); orca owns its own task worktree and
+#     terminal, so it drops both treehouse and any other backend's session CLI.
+# paseo declares treehouse ONLY. It is session-provider-only, so treehouse is a
+# genuine dependency, but its transport-specific tool delta is deliberately
+# absent until the lifecycle adapter exists and can name it: Paseo's CLI shim is
+# not installed on PATH (it lives inside the desktop app bundle and is reached
+# through $PASEO_CLI), so declaring a `paseo` PATH tool here would report a
+# spurious missing dependency on a machine where Paseo is installed and working.
 # Prints a single space-separated line and returns 0 for a known backend; returns
 # 1 and prints nothing for an unknown backend.
 fm_backend_required_tools() {  # <backend>
@@ -314,6 +365,7 @@ fm_backend_required_tools() {  # <backend>
     herdr)  printf '%s' 'herdr jq treehouse' ;;
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
+    paseo)  printf '%s' 'treehouse' ;;
     orca)   printf '%s' 'orca' ;;
     *) return 1 ;;
   esac
@@ -525,6 +577,29 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         || ! fm_backend_endpoint_atom_valid "$workspace" \
         || ! fm_backend_endpoint_atom_valid "$surface"; then
         echo "REFUSED: cmux endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
+        return 1
+      fi
+      ;;
+    paseo)
+      # No "legacy record" wording, unlike every other non-tmux arm: paseo is
+      # new, so no metadata predates the endpoint_task_id binding and the
+      # binding is simply required. Paseo terminal ids are opaque UUIDs that do
+      # not encode the task label, so the binding is the ONLY thing tying this
+      # record to this task. window= carries the composite <workspace>:<terminal>
+      # target and the two dedicated fields let it be cross-checked against its
+      # own parts, which is what catches a truncated or hand-edited record.
+      # Metadata-only, before any runtime command: a down Paseo daemon can never
+      # turn a valid cleanup record into a refusal, or the reverse.
+      [ "$binding" = "$id" ] || {
+        echo "REFUSED: paseo endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
+        return 1
+      }
+      workspace=$(fm_backend_meta_exact_value "$meta" paseo_workspace_id) || workspace=
+      terminal=$(fm_backend_meta_exact_value "$meta" paseo_terminal_id) || terminal=
+      if [ -z "$workspace" ] || [ -z "$terminal" ] || [ "$window" != "$workspace:$terminal" ] \
+        || ! fm_backend_endpoint_atom_valid "$workspace" \
+        || ! fm_backend_endpoint_atom_valid "$terminal"; then
+        echo "REFUSED: paseo endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
       ;;
