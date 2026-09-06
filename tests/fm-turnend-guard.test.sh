@@ -1681,6 +1681,27 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open() {
   pass "fm-turnend-guard --claude: away ownership excludes the Stop-autoarm fail-open"
 }
 
+# Leaving the budget spent is already the safe direction, so this is about what
+# the operator is told: a peer holding the reset lock releases it and the next
+# turn resets, while a state directory the filesystem refuses never will, and
+# the budget stays spent until someone fixes the volume.
+test_hook_claude_mode_reports_a_budget_reset_the_filesystem_refused() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget-unavailable")
+  seed_claude_budget "$dir" 2
+  chmod 0555 "$dir/state"
+  out=$(run_hook_claude "$dir" false); status=$?
+  chmod 0755 "$dir/state"
+  expect_code 0 "$status" "a home with nothing in flight must still allow its stop"
+  assert_contains "$out" "firstmate turn-end guard: cannot create" \
+    "a budget reset the filesystem refused must be reported by the guard itself"
+  assert_contains "$out" "was NOT reset" \
+    "the refusal must say the block budget is still spent"
+  assert_present "$dir/state/.turnend-claude-blocks" \
+    "a refused reset must leave the budget exactly as it found it"
+  pass "fm-turnend-guard --claude: a block-budget reset the filesystem refused is reported, not silent"
+}
+
 test_hook_claude_mode_allow_resets_budget() {
   local dir pid identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-reset")
@@ -1969,6 +1990,7 @@ test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
+test_hook_claude_mode_reports_a_budget_reset_the_filesystem_refused
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_away_daemon_allows_between_watcher_cycles

@@ -805,8 +805,115 @@ test_downtime_marker_does_not_follow_symlink() {
   pass "watch-arm: downtime marker publication does not follow symlinks"
 }
 
+# --- cycle ledger under a filesystem that refuses the lock -------------------
+#
+# The ledger lock lives in the state directory, so the only honest way to make it
+# uncreatable is to make that directory unwritable - which the arm cannot survive
+# if it is unwritable at startup. These stage the real sequence instead: a fixture
+# watcher, installed at the arm's own $WATCH path so the arm forks it exactly as
+# it would the real one, does its work and then makes the volume unwritable on
+# its way out, which is the shape of a disk filling up mid-cycle.
+install_arm_fixture() {  # <case-dir> <watcher-body>
+  local dir=$1 body=$2
+  mkdir -p "$dir/bin"
+  cp "$ROOT/bin/fm-watch-arm.sh" "$dir/bin/fm-watch-arm.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  printf '%s\n' "$body" > "$dir/bin/fm-watch.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh" "$dir/bin/fm-watch.sh"
+}
+
+test_cycle_exit_record_refusal_is_reported_without_failing_the_wake() {
+  local dir state out rc=0
+  dir=$(make_case arm-cycle-ledger-refused)
+  state="$dir/state"
+  # shellcheck disable=SC2016 # The fixture body is literal shell source; $FM_STATE_OVERRIDE must expand when it runs, not when it is written.
+  install_arm_fixture "$dir" '#!/usr/bin/env bash
+set -u
+printf "signal: fixture wake\n"
+chmod 0555 "$FM_STATE_OVERRIDE"
+exit 0'
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_ARM_ATTACH_POLL=0.1 "$dir/bin/fm-watch-arm.sh" 2>&1) || rc=$?
+  chmod 0755 "$state"
+  case "$out" in
+    *"signal: fixture wake"*) ;;
+    *) fail "the delivered wake was lost when the cycle ledger could not be written: $out" ;;
+  esac
+  case "$out" in
+    *"watcher: cannot create"*) ;;
+    *) fail "the arm itself never reported the refused cycle record: $out" ;;
+  esac
+  case "$out" in
+    *"cycle exit record was NOT recorded"*) ;;
+    *) fail "the refusal did not say which record was lost: $out" ;;
+  esac
+  case "$out" in
+    *"watcher: FAILED"*)
+      fail "a diagnostic ledger failure was reported as a failed watcher cycle: $out" ;;
+  esac
+  [ "$rc" -eq 0 ] \
+    || fail "a cycle that delivered its wake exited $rc because its ledger row was lost: $out"
+  pass "watch-arm: a cycle record the filesystem refused is reported without failing a delivered wake"
+}
+
+test_predecessor_link_refusal_is_reported() {
+  local dir state peer identity armout arm i home bin_dir
+  dir=$(make_case arm-predecessor-link-refused)
+  state="$dir/state"
+  armout="$dir/arm.out"
+  install_arm_fixture "$dir" '#!/usr/bin/env bash
+set -u
+exit 0'
+  # A verified peer already owns the singleton, so this arm attaches instead of
+  # starting a second watcher - the path that links the predecessor ledger row.
+  sleep 60 &
+  peer=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' \
+    _ "$dir/bin/fm-wake-lib.sh" "$peer") || {
+    kill "$peer" 2>/dev/null || true
+    fail "could not identify the peer watcher"
+  }
+  # The arm resolves its own script directory, so the lock has to record the
+  # resolved paths or the peer never reads as this home's verified watcher.
+  home=$(cd "$dir" && pwd)
+  bin_dir=$(cd "$dir/bin" && pwd)
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$bin_dir/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+  touch "$state/.last-watcher-beat"
+  printf 'arm_pid=4242\twatcher_pid=none\torigin=started\tsuccessor=none\n' \
+    > "$state/.watch-cycle-exits.log"
+  chmod 0555 "$state"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_ARM_ATTACH_POLL=0.1 FM_WATCH_PREDECESSOR_ARM_PID=4242 \
+    "$dir/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
+  arm=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q 'predecessor successor link was NOT recorded' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$arm" 2>/dev/null || true
+  wait "$arm" 2>/dev/null || true
+  chmod 0755 "$state"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  grep -q 'predecessor successor link was NOT recorded' "$armout" \
+    || fail "a predecessor link the filesystem refused was dropped silently: $(cat "$armout")"
+  grep -q 'watcher: cannot create' "$armout" \
+    || fail "the arm itself never reported the refused predecessor link: $(cat "$armout")"
+  grep -q 'successor=none' "$state/.watch-cycle-exits.log" \
+    || fail "a refused link rewrote the predecessor row it could not lock"
+  pass "watch-arm: a predecessor successor link the filesystem refused is reported, not silent"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
+test_cycle_exit_record_refusal_is_reported_without_failing_the_wake
+test_predecessor_link_refusal_is_reported
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_marker_publish_failure_retains_recovery_evidence

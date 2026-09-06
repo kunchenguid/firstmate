@@ -94,6 +94,18 @@ cycle_clean_field() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-512
 }
 
+# A ledger lock a peer holds is worth retrying: it will be released and the row
+# lands. A ledger lock the filesystem refused outright never will be, so retries
+# are wasted and the row is lost for good. Because the ledger is diagnostic and
+# not a supervision dependency, that loss must not turn a cycle that genuinely
+# delivered its wake into a reported failure, so this says what happened without
+# the "FAILED" token an adapter reads as the cycle's own outcome.
+cycle_ledger_refused() {  # <lock-path> <what-was-lost>
+  [ "${FM_LOCK_FAIL_REASON:-}" = unavailable ] || return 1
+  echo "watcher: cannot create $1 - the filesystem refused the operation (out of space, read-only, or not writable); the $2 was NOT recorded"
+  return 0
+}
+
 lock_snapshot() {
   local pid identity
   pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
@@ -147,6 +159,7 @@ cycle_log_append() {
 
   i=0
   while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
+    cycle_ledger_refused "$CYCLE_LOG_LOCK" "cycle exit record" && return 1
     [ "$i" -lt 20 ] || return 0
     sleep 0.02
     i=$((i + 1))
@@ -196,6 +209,7 @@ cycle_mark_predecessor_successor() {
   [ -f "$CYCLE_LOG" ] || return 0
   i=0
   while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
+    cycle_ledger_refused "$CYCLE_LOG_LOCK" "predecessor successor link" && return 1
     [ "$i" -lt 20 ] || return 0
     sleep 0.02
     i=$((i + 1))

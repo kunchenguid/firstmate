@@ -1102,6 +1102,639 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+
+# A lock parent that cannot be written stands in for the full filesystem the
+# runaway of issue #2787 was first hit on: mkdir, ln -s and stat all fail, which
+# is what left an absent lock path looking like a stale one to recover.
+make_unwritable_lock_parent() {  # <case-dir>
+  local parent=$1/blocked
+  mkdir -p "$parent"
+  chmod 500 "$parent"
+  printf '%s\n' "$parent"
+}
+
+test_lock_refuses_when_the_filesystem_cannot_create() {
+  local dir parent lock out rc errlines chains
+  dir=$(make_case lock-create-refused)
+  parent=$(make_unwritable_lock_parent "$dir")
+  lock="$parent/session.lock"
+  out=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s\n" "$rc" "${FM_LOCK_FAIL_REASON:-}"
+  ' _ "$LIB" "$lock" 2> "$dir/acquire.err")
+  rc=$?
+  chmod 700 "$parent"
+  [ "$rc" -eq 0 ] || fail "acquisition attempt did not survive an unwritable lock parent (exit $rc)"
+  case "$out" in
+    *"rc=1 reason=unavailable"*) ;;
+    *) fail "unwritable lock parent did not refuse as unavailable: $out" ;;
+  esac
+  errlines=$(awk 'END { print NR + 0 }' "$dir/acquire.err")
+  [ "$errlines" -le 2 ] || fail "refusal produced $errlines stderr lines, expected a bounded report"
+  grep -q 'refusing to acquire' "$dir/acquire.err" || fail "refusal did not explain itself to the operator"
+  chains=$(grep -c '\.steal\.steal' "$dir/acquire.err" 2>/dev/null || true)
+  [ "${chains:-0}" -eq 0 ] || fail "refusal walked into a nested .steal chain ($chains lines)"
+  [ -z "$(find "$parent" -name '*.steal*' 2>/dev/null)" ] || fail "refusal left .steal paths behind"
+  pass "a lock the filesystem cannot create is refused once, not retried into a longer path"
+}
+
+test_lock_failure_reason_separates_held_from_unavailable() {
+  local dir state parent lockdir live out
+  dir=$(make_case lock-failure-reason)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || printf "held-reason=%s\n" "${FM_LOCK_FAIL_REASON:-}"
+  ' _ "$LIB" "$lockdir" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"held-reason=held"*) ;;
+    *) fail "a live-held lock was not reported as held: $out" ;;
+  esac
+  parent=$(make_unwritable_lock_parent "$dir")
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || printf "blocked-reason=%s\n" "${FM_LOCK_FAIL_REASON:-}"
+  ' _ "$LIB" "$parent/other.lock" 2>/dev/null)
+  chmod 700 "$parent"
+  case "$out" in
+    *"blocked-reason=unavailable"*) ;;
+    *) fail "a filesystem refusal was not distinguishable from a held lock: $out" ;;
+  esac
+  # A steal mutex is acquired through its own leaf path, so its success has to
+  # clear the reason too: fm_autoarm_release_abandoned reads both.
+  rm -rf "$lockdir" "$lockdir.steal"
+  mkdir "$lockdir.steal"
+  printf '%s\n' "$(dead_pid)" > "$lockdir.steal/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2.steal"; then rc=0; else rc=1; fi
+    printf "steal-rc=%s steal-reason=%s\n" "$rc" "${FM_LOCK_FAIL_REASON:-none}"
+  ' _ "$LIB" "$lockdir" 2>/dev/null)
+  case "$out" in
+    *"steal-rc=0 steal-reason=none"*) ;;
+    *) fail "a successful steal-mutex reclaim reported a failure reason: $out" ;;
+  esac
+  pass "a failing filesystem primitive is distinguishable from a lock that is simply held"
+}
+
+# The pid write happens AFTER ln -s has already succeeded, so no unwritable
+# parent can reach it: a symlink needs no data blocks, which is exactly why a
+# full volume can admit the link and then refuse the write. Making the owner's
+# pid file unwritable once it exists injects that refusal at the one statement
+# it happens at, and leaves every other primitive working.
+test_lock_claim_pid_write_refusal_is_unavailable_not_held() {
+  local dir state lockdir out
+  dir=$(make_case lock-claim-write-refused)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_prepare_owner() {
+      printf "%s\n" "${BASHPID:-$$}" > "$1/pid" || return 1
+      chmod 0400 "$1/pid" 2>/dev/null || return 1
+      return 0
+    }
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s held=[%s]\n" \
+      "$rc" "${FM_LOCK_FAIL_REASON:-}" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir" 2> "$dir/acquire.err")
+  case "$out" in
+    *"rc=1 reason=unavailable held=[]"*) ;;
+    *) fail "a refused pid write was not reported as unavailable with no holder: $out" ;;
+  esac
+  grep -q 'refusing to acquire' "$dir/acquire.err" \
+    || fail "a refused pid write never told the operator the filesystem said no"
+  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+    fail "a refused claim left its own lock behind"
+  fi
+  pass "a claim whose pid write is refused reports unavailable, not a held lock"
+}
+
+# The same two statements fail when a racing reclaimer resolves this process's
+# fresh link and discards the owner directory under it, which is ordinary
+# contention on a perfectly healthy volume. Removing the directory the way
+# fm_lock_discard_owner does reproduces that state at the statement it happens
+# at, without racing two real processes through a window measured in syscalls.
+test_lock_claim_racer_removed_owner_is_contention_not_unavailable() {
+  local dir state lockdir out
+  dir=$(make_case lock-claim-racer-removed)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_prepare_owner() {
+      printf "%s\n" "${BASHPID:-$$}" > "$1/pid" || return 1
+      rm -rf "$1" 2>/dev/null || return 1
+      return 0
+    }
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s held=[%s]\n" \
+      "$rc" "${FM_LOCK_FAIL_REASON:-}" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir" 2> "$dir/acquire.err")
+  case "$out" in
+    *"rc=1 reason=unavailable"*)
+      fail "a racing reclaimer was blamed on the filesystem: $out" ;;
+    *"rc=1 reason=held"*) ;;
+    *) fail "a claim whose owner directory a racer removed was misreported: $out" ;;
+  esac
+  grep -q 'refusing to acquire' "$dir/acquire.err" \
+    && fail "a healthy filesystem was reported as refusing the operation"
+  pass "a claim whose owner directory a racer removed is contention, not a refusing filesystem"
+}
+
+# The lock path is no evidence of why ln refused it. A racer that put a link
+# there inside this process's owner-preparation window is free to take it away
+# again before this process looks, so reading the cause off the empty path
+# reports a perfectly healthy volume as out of space. The window is real: a
+# claimant whose pid write was refused discards its owner directory while its
+# own link is still published, leaving a dangling <lock> that ln rejects with
+# EEXIST, and unlinks it one statement later. Creating that dangling link from
+# inside fm_lock_prepare_owner and removing it the instant ln has failed
+# reproduces both halves at the statements they happen at, with no two real
+# processes and no timing to lose.
+test_lock_lost_eexist_race_is_contention_not_unavailable() {
+  local dir state lockdir out
+  dir=$(make_case lock-eexist-race)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    LOCKPATH=$2
+    WINNER="$LOCKPATH.winner-owner"
+    . "$1"
+    fm_lock_prepare_owner() {
+      printf "%s\n" "${BASHPID:-$$}" > "$1/pid" || return 1
+      command ln -s "$WINNER" "$LOCKPATH" 2>/dev/null || return 1
+      return 0
+    }
+    ln() {
+      local rc=0
+      command ln "$@" || rc=$?
+      [ "$rc" -eq 0 ] || rm -f "$LOCKPATH"
+      return "$rc"
+    }
+    if fm_lock_try_acquire "$LOCKPATH"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s\n" "$rc" "${FM_LOCK_FAIL_REASON:-none}"
+  ' _ "$LIB" "$lockdir" 2> "$dir/acquire.err")
+  case "$out" in
+    *"reason=unavailable"*)
+      fail "a lost EEXIST race was blamed on the filesystem: $out" ;;
+    *"reason=held"*) ;;
+    *) fail "a lost EEXIST race was misreported: $out" ;;
+  esac
+  grep -q 'refusing to acquire' "$dir/acquire.err" \
+    && fail "a healthy filesystem was reported as refusing the operation"
+  pass "an EEXIST race whose winner then releases is contention, not a refusing filesystem"
+}
+
+# A contended create whose lock is gone by the time the caller looks has no
+# holder to name: the winner released inside the loser's own cleanup window.
+# Reporting "held" with an empty FM_LOCK_HELD_PID there is what let a watcher
+# arm announce a supervisor that does not exist, so the next attempt has to run.
+# Releasing the winner's lock from inside fm_lock_discard_owner puts that
+# release exactly in the window the create's failure path spends forks in.
+test_lock_contended_then_vanished_is_acquired() {
+  local dir state lockdir live out
+  dir=$(make_case lock-vanished-contention)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    LOCKPATH=$2
+    RELEASED="$3"
+    . "$1"
+    eval "fm_lock_discard_owner_real() $(declare -f fm_lock_discard_owner | tail -n +2)"
+    fm_lock_discard_owner() {
+      if [ ! -e "$RELEASED" ]; then
+        : > "$RELEASED"
+        rm -rf "$LOCKPATH"
+      fi
+      fm_lock_discard_owner_real "$@"
+    }
+    if fm_lock_try_acquire "$LOCKPATH"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s held=[%s] pid=[%s]\n" \
+      "$rc" "${FM_LOCK_FAIL_REASON:-none}" "${FM_LOCK_HELD_PID:-}" \
+      "$(cat "$LOCKPATH/pid" 2>/dev/null || true)"
+  ' _ "$LIB" "$lockdir" "$dir/released" 2> "$dir/acquire.err")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=0 "*) ;;
+    *"held=[]"*)
+      fail "a lock whose contender vanished was reported as held by nobody: $out" ;;
+    *) fail "a lock whose contender vanished was not acquired: $out" ;;
+  esac
+  case "$out" in
+    *"pid=[]"*) fail "the acquired lock recorded no pid: $out" ;;
+  esac
+  grep -q 'refusing to acquire' "$dir/acquire.err" \
+    && fail "a healthy filesystem was reported as refusing the operation"
+  pass "a contended lock that vanished before the caller looked is acquired, not reported as held"
+}
+
+# A watcher whose lock the filesystem refuses has no lock, no recorded pid and
+# no peer process: reporting the ordinary singleton message and exiting 0 there
+# tells an operator a supervisor exists when none does.
+test_watch_refuses_when_lock_cannot_be_created() {
+  local dir state out rc=0
+  dir=$(make_case watch-unavailable)
+  state="$dir/state"
+  mark_pr_check_migration_complete "$state"
+  chmod 0555 "$state"
+  out=$(FM_STATE_OVERRIDE="$state" "$WATCH" 2>&1) || rc=$?
+  chmod 0755 "$state"
+  case "$out" in
+    *"already running"*)
+      fail "watcher claimed a watcher is already running when the filesystem refused the lock (rc=$rc): $out" ;;
+  esac
+  [ "$rc" -ne 0 ] \
+    || fail "watcher exited 0 (success) though it never acquired the lock and no watcher runs: $out"
+  case "$out" in
+    *"filesystem refused"*) ;;
+    *) fail "watcher did not name the filesystem refusal as the cause: $out" ;;
+  esac
+  pass "watcher refuses loudly when the lock cannot be created"
+}
+
+test_lock_steal_is_bounded_to_one_level() {
+  local dir state lockdir dead live rc newpid deeper
+  dir=$(make_case lock-steal-bounded)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  # Both the lock and its steal mutex are stale, so reclaim must run. A LIVE
+  # second-level lock sits where the recursive implementation would have looked
+  # for its own mutex: consulting it at all would block this reclaim forever.
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir" "$lockdir.steal" "$lockdir.steal.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  printf '%s\n' "$live" > "$lockdir.steal.steal/pid"
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then cat "$2/pid"; else exit 7; fi
+  ' _ "$LIB" "$lockdir" 2>/dev/null) || rc=$?
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "reclaim consulted a second .steal level and could not acquire (rc=$rc)"
+  [ "$newpid" != "$dead" ] || fail "stale lock was not replaced (still $dead)"
+  deeper=$(find "$state" -name '*.steal.steal.steal*' 2>/dev/null | head -1)
+  [ -z "$deeper" ] || fail "reclaim created a third steal level: $deeper"
+  pass "stale-owner reclaim never appends a second .steal level"
+}
+
+test_lock_clears_legacy_steal_chains() {
+  local dir state lockdir dead live
+  dir=$(make_case lock-legacy-chain)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir" "$lockdir.steal" "$lockdir.steal.steal" "$lockdir.steal.steal.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal.steal/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal.steal.steal/pid"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+  ' _ "$LIB" "$lockdir" >/dev/null 2>&1 || fail "reclaim failed with a legacy chain present"
+  [ ! -e "$lockdir.steal.steal" ] || fail "stale legacy .steal.steal was left on disk"
+  [ ! -e "$lockdir.steal.steal.steal" ] || fail "stale legacy .steal.steal.steal was left on disk"
+  # A live second-level holder is an older process mid-reclaim during a rolling
+  # update, and must survive the sweep.
+  rm -rf "$lockdir" "$lockdir.steal"
+  mkdir "$lockdir" "$lockdir.steal" "$lockdir.steal.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  printf '%s\n' "$live" > "$lockdir.steal.steal/pid"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+  ' _ "$LIB" "$lockdir" >/dev/null 2>&1 || fail "reclaim failed alongside a live legacy holder"
+  [ -e "$lockdir.steal.steal" ] || fail "a live legacy holder was swept away"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "legacy .steal chains are cleared without evicting a live holder"
+}
+
+test_lock_reclaims_orphan_steal_with_absent_primary() {
+  local dir state lockdir dead owner rc newpid
+  dir=$(make_case lock-orphan-steal)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  # A holder SIGKILLed between taking the steal mutex and publishing the
+  # primary lock leaves the mutex behind with NO primary lock beside it.
+  owner=$(mktemp -d "$state/steal-owner.XXXXXX")
+  printf '%s\n' "$dead" > "$owner/pid"
+  ln -s "$owner" "$lockdir.steal"
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then cat "$2/pid"; else exit 7; fi
+  ' _ "$LIB" "$lockdir" 2>/dev/null) || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "orphan steal mutex with an absent primary lock refused acquisition (rc=$rc); the lock is wedged with no self-healing"
+  [ -n "$newpid" ] || fail "acquired lock has no pid recorded"
+  pass "an orphan steal mutex beside an absent primary lock is reclaimed, not treated as held"
+}
+
+# Reclaiming an orphan mutex must not become a way past the two refusals the
+# absent-primary path exists to make: a live mutex owner, and a filesystem that
+# cannot create the lock at all (issue #2787).
+test_lock_absent_primary_still_refuses_live_mutex_and_unavailable() {
+  local dir state parent lockdir live owner out target
+  dir=$(make_case lock-orphan-steal-refusals)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  owner=$(mktemp -d "$state/steal-owner.XXXXXX")
+  printf '%s\n' "$live" > "$owner/pid"
+  ln -s "$owner" "$lockdir.steal"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s\n" "$rc" "${FM_LOCK_FAIL_REASON:-none}"
+  ' _ "$LIB" "$lockdir" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=1 reason=held"*) ;;
+    *) fail "a live steal-mutex owner did not hold off the primary lock: $out" ;;
+  esac
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "the primary lock was published while another process held the steal mutex"
+  target=$(readlink "$lockdir.steal" 2>/dev/null || true)
+  [ "$target" = "$owner" ] || fail "a live steal mutex was evicted"
+
+  parent=$(make_unwritable_lock_parent "$dir")
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s reason=%s\n" "$rc" "${FM_LOCK_FAIL_REASON:-none}"
+  ' _ "$LIB" "$parent/session.lock" 2>/dev/null)
+  chmod 700 "$parent"
+  case "$out" in
+    *"rc=1 reason=unavailable"*) ;;
+    *) fail "an uncreatable lock stopped reporting the filesystem refusal: $out" ;;
+  esac
+  [ -z "$(find "$parent" -name '*.steal*' 2>/dev/null)" ] \
+    || fail "an uncreatable lock entered reclaim and left .steal paths behind"
+  pass "an absent primary lock still refuses a live mutex owner and an uncreatable path"
+}
+
+test_lock_stale_steal_mutex_single_winner_under_concurrency() {
+  local dir state lockdir dead marker i pids pid wins
+  dir=$(make_case lock-stale-mutex-concurrency)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  marker="$dir/wins"
+  dead=$(dead_pid)
+  # Both the lock and its steal mutex are stale, so every racer reclaims the
+  # mutex directly rather than through a further mutex. Mutual exclusion on the
+  # primary lock has to survive that.
+  mkdir "$lockdir" "$lockdir.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  : > "$marker"
+  pids=
+  i=1
+  # A single round can legitimately end with NOBODY acquiring, so the racers
+  # retry the way real callers do. A racer descheduled between its staleness
+  # recheck of the stale mutex and its eviction of it wakes to a fresher mutex,
+  # refuses at the eviction, and the holder it displaced then refuses at its own
+  # ownership re-prove. Neither may proceed, which is the point - so what has to
+  # hold is AT MOST one acquirer per round, not one on the first try. Whoever
+  # acquires holds past every other racer's last attempt, so a second entry in
+  # the marker is a real double-publish and not a handoff.
+  while [ "$i" -le 40 ]; do
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      n=0
+      while [ "$n" -lt 10 ]; do
+        if fm_lock_try_acquire "$2"; then
+          printf "%s\n" "${BASHPID:-$$}" >> "$3"
+          sleep 5
+          break
+        fi
+        n=$((n + 1))
+        sleep 0.2
+      done
+    ' _ "$LIB" "$lockdir" "$marker" &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
+  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  [ "$wins" -le 1 ] || fail "two racers published through one stale steal mutex ($wins)"
+  [ "$wins" -eq 1 ] || fail "no racer ever reclaimed the stale steal mutex, so the test proves nothing"
+  pass "concurrent reclaim through a stale steal mutex yields exactly one winner"
+}
+
+# Two processes both publishing the primary lock through a stale steal mutex.
+#
+# Why the deliberate stalls, and why they must not be traded for a bigger
+# hammer: the racers above run the fast path, and no number of them reproduces
+# this - the two gaps that matter are each a handful of instructions wide, so
+# the scheduler essentially never lands a second process inside them. The window
+# has to be held open on purpose, in two places at once. The two racers are
+# named for the gap each one is parked in, not for who ends up with the lock:
+# which of them publishes depends on the implementation, and assuming an answer
+# is how the model this test exists to disprove got written down in the first
+# place.
+#   - mutex_recheck parks between its staleness recheck of the steal mutex and
+#     its reclaim of it, so it wakes to a mutex the other racer has since
+#     published and is holding live.
+#   - marker_publish parks between its staleness recheck of the primary lock and
+#     its publish of it, so it wakes holding a reading that is no longer true.
+# Both stalls are injected by redefining library functions inside the racer, so
+# bin/fm-wake-lib.sh carries no test-only hook. They are anchored on the recheck
+# and the marker publish rather than on whatever performs the reclaim, so the
+# same schedule is imposed on any implementation of the reclaim itself.
+#
+# Each racer retries the way every real caller does, and whichever one acquires
+# holds without releasing for the rest of the run. A second acquisition is then
+# a genuine double-publish rather than a legitimate handoff, and the retries
+# keep the run from passing vacuously on a round where nobody acquires.
+#
+# The lock must be $STATE/.watch.lock. That is the only path whose reclaim runs
+# _fm_recovery_marker_publish inside the second gap, and that multi-fork write
+# is what the gap is made of. On any other lock the recheck and the publish are
+# adjacent, there is nothing to stall, and the test goes vacuous.
+test_lock_stale_steal_mutex_reclaim_race_has_one_publisher() {
+  local dir state lockdir dead marker mutex_recheck marker_publish wins holder
+  dir=$(make_case lock-steal-reclaim-race)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  marker="$dir/wins"
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$lockdir.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  : > "$marker"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    eval "$(declare -f fm_lock_recheck_stale_owner \
+      | sed "1s/^fm_lock_recheck_stale_owner/fm_test_real_recheck/")"
+    fm_lock_recheck_stale_owner() {
+      local rc=0
+      fm_test_real_recheck "$@" || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        case "$1" in
+          *.steal) sleep 2 ;;
+        esac
+      fi
+      return "$rc"
+    }
+    i=0
+    while [ "$i" -lt 10 ]; do
+      if fm_lock_try_acquire "$2"; then
+        printf "%s\n" "${BASHPID:-$$}" >> "$3"
+        sleep 6
+        break
+      fi
+      i=$((i + 1))
+      sleep 0.2
+    done
+  ' _ "$LIB" "$lockdir" "$marker" >/dev/null 2>&1 &
+  mutex_recheck=$!
+  sleep 0.7
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    eval "$(declare -f _fm_recovery_marker_publish \
+      | sed "1s/^_fm_recovery_marker_publish/fm_test_real_publish/")"
+    _fm_recovery_marker_publish() {
+      sleep 4
+      fm_test_real_publish "$@"
+    }
+    i=0
+    while [ "$i" -lt 10 ]; do
+      if fm_lock_try_acquire "$2"; then
+        printf "%s\n" "${BASHPID:-$$}" >> "$3"
+        sleep 6
+        break
+      fi
+      i=$((i + 1))
+      sleep 0.2
+    done
+  ' _ "$LIB" "$lockdir" "$marker" >/dev/null 2>&1 &
+  marker_publish=$!
+  wait "$mutex_recheck" 2>/dev/null || true
+  wait "$marker_publish" 2>/dev/null || true
+
+  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  [ "$wins" -le 1 ] || fail "two processes published the primary lock through one steal mutex ($wins)"
+  [ "$wins" -eq 1 ] || fail "the stalled reclaim race published no lock at all, so it proves nothing"
+  holder=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$holder" = "$(awk 'NF { print; exit }' "$marker")" ] \
+    || fail "the publisher's lock was evicted by the racer that never held the mutex (now $holder)"
+  pass "a stalled reclaim race through one steal mutex yields at most one publisher"
+}
+
+# The abandoned-claim release removes a lock it did not itself publish, so the
+# only thing entitling it to do so is still owning the steal mutex. That mutex
+# is a leaf and is not exclusive on its own, so a racer reclaiming the same
+# stale mutex can take it away while the release is re-verifying abandonment.
+# The stall is injected by redefining the verification inside the releaser, so
+# bin/fm-wake-lib.sh carries no test-only hook.
+test_autoarm_release_refuses_after_losing_the_steal_mutex() {
+  local dir state lock dead live releaser ready holder i
+  dir=$(make_case autoarm-release-mutex-lost)
+  state="$dir/state"
+  lock="$state/.claude-autoarm.lock"
+  ready="$dir/reverifying"
+  dead=$(dead_pid)
+  # A stale steal mutex, so the releaser reclaims it and believes it holds it.
+  mkdir "$lock" "$lock.steal"
+  printf '%s\n' "$dead" > "$lock/pid"
+  printf '%s\n' "$dead" > "$lock.steal/pid"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_test_ready=$3
+    fm_test_calls=0
+    fm_autoarm_claim_abandoned() {
+      fm_test_calls=$((fm_test_calls + 1))
+      if [ "$fm_test_calls" -ge 2 ]; then
+        printf "reverifying\n" > "$fm_test_ready"
+        sleep 3
+      fi
+      return 0
+    }
+    fm_autoarm_release_abandoned "$2"
+  ' _ "$LIB" "$state" "$ready" >/dev/null 2>&1 &
+  releaser=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$ready" ] || fail "the releaser never reached its abandonment re-verification"
+  # Another reclaimer takes the mutex away, and a genuine new claimant then
+  # publishes the auto-arm lock the releaser is still about to remove.
+  sleep 300 &
+  live=$!
+  rm -rf "$lock.steal"
+  mkdir "$lock.steal"
+  printf '%s\n' "$live" > "$lock.steal/pid"
+  rm -rf "$lock"
+  mkdir "$lock"
+  printf '%s\n' "$live" > "$lock/pid"
+  wait "$releaser" 2>/dev/null || true
+  holder=$(cat "$lock/pid" 2>/dev/null || true)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -e "$lock" ] || fail "a genuine new auto-arm claim was removed by a releaser that had lost the steal mutex"
+  [ "$holder" = "$live" ] \
+    || fail "the auto-arm lock no longer records the genuine claimant (got '$holder', wanted $live)"
+  pass "an abandoned-claim release refuses to remove the lock once its steal mutex is gone"
+}
+
+test_lock_wait_never_proceeds_without_the_lock() {
+  local dir parent waiter i alive errlines
+  dir=$(make_case lock-wait-refuses)
+  parent=$(make_unwritable_lock_parent "$dir")
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    printf "acquired\n" > "$3"
+  ' _ "$LIB" "$parent/session.lock" "$dir/acquired" > /dev/null 2> "$dir/wait.err" &
+  waiter=$!
+  i=0
+  while [ "$i" -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  alive=0
+  kill -0 "$waiter" 2>/dev/null && alive=1
+  kill "$waiter" 2>/dev/null || true
+  wait "$waiter" 2>/dev/null || true
+  chmod 700 "$parent"
+  [ "$alive" -eq 1 ] || fail "the wait returned instead of holding out for a lock it never got"
+  [ ! -e "$dir/acquired" ] || fail "the wait reported success without holding the lock"
+  errlines=$(awk 'END { print NR + 0 }' "$dir/wait.err")
+  [ "$errlines" -ge 1 ] || fail "a stalled wait never told the operator why"
+  [ "$errlines" -le 10 ] || fail "a stalled wait produced $errlines stderr lines, expected a rate-limited report"
+  pass "a wait on an uncreatable lock keeps refusing, loudly and boundedly"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
@@ -1118,6 +1751,21 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_lock_refuses_when_the_filesystem_cannot_create
+test_lock_failure_reason_separates_held_from_unavailable
+test_lock_claim_pid_write_refusal_is_unavailable_not_held
+test_lock_claim_racer_removed_owner_is_contention_not_unavailable
+test_lock_lost_eexist_race_is_contention_not_unavailable
+test_lock_contended_then_vanished_is_acquired
+test_watch_refuses_when_lock_cannot_be_created
+test_lock_steal_is_bounded_to_one_level
+test_lock_clears_legacy_steal_chains
+test_lock_reclaims_orphan_steal_with_absent_primary
+test_lock_absent_primary_still_refuses_live_mutex_and_unavailable
+test_lock_stale_steal_mutex_single_winner_under_concurrency
+test_lock_stale_steal_mutex_reclaim_race_has_one_publisher
+test_autoarm_release_refuses_after_losing_the_steal_mutex
+test_lock_wait_never_proceeds_without_the_lock
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover

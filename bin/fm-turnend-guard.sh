@@ -161,9 +161,20 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+# Leaving the budget spent errs toward blocking, which is the safe direction, so
+# a lock the filesystem refused changes nothing here except what the operator is
+# told: a peer holding the lock will release it and the next turn resets, while
+# a refusing filesystem never will, and the budget stays spent until someone
+# fixes the volume.
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
-  fm_lock_try_acquire "$BUDGET_LOCK" || return 0
+  if ! fm_lock_try_acquire "$BUDGET_LOCK"; then
+    if [ "${FM_LOCK_FAIL_REASON:-}" = unavailable ]; then
+      printf 'firstmate turn-end guard: cannot create %s - the filesystem refused the operation (out of space, read-only, or not writable); the Claude block budget was NOT reset and stays spent until that is fixed.\n' \
+        "$BUDGET_LOCK" >&2
+    fi
+    return 0
+  fi
   rm -f "$BUDGET_FILE" 2>/dev/null || true
   fm_lock_release "$BUDGET_LOCK"
 }
