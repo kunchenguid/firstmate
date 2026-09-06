@@ -1337,7 +1337,18 @@ launch_template() {
     # alone disables the feature; keep both so a managed override of one still
     # leaves the other in force. Both are per-launch, scoped to this invocation only,
     # and never touch the captain's global ~/.claude/settings.json.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE clears the markers Claude Code
+    # stamps on its own process and that a multiplexer server started from inside a
+    # Claude session then hands down to every later pane: a worker inheriting either
+    # one treats itself as a nested child session and runs with transcripts off.
+    # docs/verification/runtime-backends.md "Claude Code" owns the versioned
+    # evidence. Scrubbing here makes every Claude worker launch clean regardless of
+    # what its server happened to inherit; fm_backend_herdr_server_ensure
+    # (bin/backends/herdr.sh) and fm_backend_tmux_container_ensure
+    # (bin/backends/tmux.sh) additionally scrub both markers at the point each
+    # backend starts its own server, so a freshly started server is clean at the
+    # source too.
+    claude) printf '%s' 'env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
