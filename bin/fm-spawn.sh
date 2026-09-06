@@ -14,13 +14,13 @@
 #   scaffolded before that line existed warns once and launches on the flag. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, or an incomplete pair of Task subsections.
-#   For a no-mistakes ship, spawn renders `launch-brief.md` with the current
-#   `--intent` contract and the extracted captain intent. A legacy mixed Task is
-#   accepted there only under bin/fm-dod-lib.sh's provenance-marking rules;
-#   unmarked legacy Tasks stop for migration rather than becoming intent. That
-#   library owns the parsing and intent rules. When the explicit mode carries
-#   less rigor than the project's standing posture, a loud one-line deviation
-#   notice is printed and the spawn continues.
+#   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
+#   it also carries the current `--intent` contract and the extracted captain
+#   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
+#   provenance-marking rules; unmarked legacy Tasks stop for migration rather
+#   than becoming intent. That library owns the parsing and intent rules. When
+#   the explicit mode carries less rigor than the project's standing posture, a
+#   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #   Ship/scout launches always supply fm-dod-lib.sh's current worker role scope
