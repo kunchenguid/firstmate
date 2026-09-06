@@ -3416,7 +3416,8 @@ def exact_unstarted_execute_view(view):
     )
 
 
-def exact_empty_execute_command(live):
+def exact_never_started_execute_command(live, action):
+    """Recognize only the initial stub or this exact submitted-but-unstarted update."""
     properties = live.get("properties") or {}
     source = properties.get("source")
     if source is None:
@@ -3425,18 +3426,47 @@ def exact_empty_execute_command(live):
         source = {}
     if not isinstance(source, dict):
         return False
-    return bool(
-        str(properties.get("provisioningState") or live.get("provisioningState", "")).lower()
-        == "succeeded"
-        and run_command_execution_binding(live) is None
+    provisioning_state = str(
+        properties.get("provisioningState") or live.get("provisioningState", "")
+    ).lower()
+    binding = run_command_execution_binding(live)
+    direct_fields_empty = all(properties.get(field) in (None, "") for field in (
+        "commandId", "script", "scriptUri", "scriptURI", "parameters",
+        "protectedParameters",
+    )) and all(live.get(field) in (None, "") for field in (
+        "commandId", "script", "scriptUri", "scriptURI", "parameters",
+        "protectedParameters",
+    ))
+    empty_stub = bool(
+        provisioning_state == "succeeded"
+        and binding is None
         and all(value in (None, "") for value in source.values())
-        and all(properties.get(field) in (None, "") for field in (
-            "commandId", "script", "scriptUri", "scriptURI",
-        ))
-        and all(live.get(field) in (None, "") for field in (
-            "commandId", "script", "scriptUri", "scriptURI",
-        ))
+        and direct_fields_empty
     )
+    expected_binding = (action.get("request_digest"), action.get("idempotency_key"))
+    expected_script = build_execute_script(action)
+    async_execution = properties.get(
+        "asyncExecution", live.get("asyncExecution")
+    )
+    timeout_seconds = properties.get(
+        "timeoutInSeconds", live.get("timeoutInSeconds")
+    )
+    expected_timeout = int(action["request"]["wall_seconds"]) + GUEST_RUN_SLACK_SECONDS
+    submitted_but_unstarted = bool(
+        provisioning_state == "updating"
+        and binding == expected_binding
+        and source.get("script") == expected_script
+        and all(
+            value in (None, "")
+            for key, value in source.items()
+            if key != "script"
+        )
+        and direct_fields_empty
+        and async_execution is False
+        and not isinstance(timeout_seconds, bool)
+        and timeout_seconds == expected_timeout
+    )
+    return empty_stub or submitted_but_unstarted
 
 
 def exact_dark_execute_power(resources):
@@ -3547,8 +3577,8 @@ def abandon_execute(controller, action):
         raise ProviderIdentityRefusal(
             "task-command provider view differs from the abandoned execute action"
         )
-    if not exact_empty_execute_command(live):
-        raise ProviderError("execute abandonment found a submitted or ambiguous task Run Command")
+    if not exact_never_started_execute_command(live, action):
+        raise ProviderError("execute abandonment found a started or ambiguous task Run Command")
     first_view = run_command_instance_view(
         controller, expected_names(controller, action["slot"])["vm"],
         expected_names(controller, action["slot"])["task-command"],
@@ -3569,7 +3599,7 @@ def abandon_execute(controller, action):
         raise ProviderIdentityRefusal(
             "task-command provider view changed from the abandoned execute action"
         )
-    if not exact_empty_execute_command(live):
+    if not exact_never_started_execute_command(live, action):
         raise ProviderError("execute abandonment changed while its marker was landing")
     second_view = run_command_instance_view(
         controller, expected_names(controller, action["slot"])["vm"],

@@ -9341,6 +9341,32 @@ def abandoned_refuses(label, expected, prepare, candidate=None, marker_may_land=
     assert state["marks"] == expected_marks and state["deletes"] == 0, (label, state)
 
 
+def submit_exact_but_unstarted():
+    state["live"].update({
+        "provisioningState": "Updating", "source": {
+            "script": provider.build_execute_script(action),
+        },
+        "asyncExecution": False,
+        "timeoutInSeconds": (
+            action["request"]["wall_seconds"] + provider.GUEST_RUN_SLACK_SECONDS
+        ),
+    })
+    state["live"]["properties"] = {}
+    state["live"]["tags"].update({
+        provider.EXECUTION_REQUEST_TAG: action["request_digest"],
+        provider.EXECUTION_IDEMPOTENCY_TAG: action["idempotency_key"],
+    })
+
+
+# Azure can durably accept the exact update while a deallocation leaves its
+# instance view Pending forever. The complete stable never-started proof may
+# retire that submitted command without ever powering the VM back on.
+reset_abandon_fixture()
+submit_exact_but_unstarted()
+submitted = provider.abandon_execute(controller, action)
+assert submitted["execution"]["disposition"] == "provider-never-started-retired"
+assert state["views"] == 2 and state["marks"] == 1 and state["deletes"] == 0, state
+
 # Every advertised negative keeps the claim fail-closed. These are scoped to
 # the abandonment proof so the sibling-readiness exception cannot become a
 # force-clear path.
@@ -9361,7 +9387,7 @@ abandoned_refuses(
     lambda: state["conflicts"].append({"slot": 6, "kind": "vm", "reason": "duplicate"}),
 )
 abandoned_refuses(
-    "substantive source", "submitted or ambiguous",
+    "foreign substantive source", "started or ambiguous",
     lambda: state["live"]["properties"].update({"source": {"script": "echo ran"}}),
 )
 def bind_execute():
@@ -9369,7 +9395,22 @@ def bind_execute():
         provider.EXECUTION_REQUEST_TAG: action["request_digest"],
         provider.EXECUTION_IDEMPOTENCY_TAG: action["idempotency_key"],
     })
-abandoned_refuses("execution binding", "submitted or ambiguous", bind_execute)
+abandoned_refuses("execution binding without exact update", "started or ambiguous", bind_execute)
+def wrong_submitted_timeout():
+    submit_exact_but_unstarted()
+    state["live"]["timeoutInSeconds"] += 1
+abandoned_refuses("submitted timeout", "started or ambiguous", wrong_submitted_timeout)
+def wrong_submitted_script():
+    submit_exact_but_unstarted()
+    state["live"]["source"]["script"] += "\necho foreign"
+abandoned_refuses("submitted script", "started or ambiguous", wrong_submitted_script)
+def synchronous_state_without_pending_update():
+    submit_exact_but_unstarted()
+    state["live"]["provisioningState"] = "Succeeded"
+abandoned_refuses(
+    "submitted provisioning state", "started or ambiguous",
+    synchronous_state_without_pending_update,
+)
 def add_result_marker():
     state["live"]["properties"]["source"] = None
     provider.run_command_instance_view = lambda *_args, **_kwargs: {
