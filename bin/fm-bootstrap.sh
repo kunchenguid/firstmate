@@ -10,6 +10,7 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
+#                 "CREW_DISPATCH: codex home unavailable: <path> - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
@@ -1187,6 +1188,15 @@ crew_dispatch_validate() {
   # jq answers everything readable from the file itself; each configured Codex
   # home then needs the two filesystem facts jq cannot see. auth.json is only
   # ever tested for presence - its contents are never read.
+  #
+  # The two classes of home problem are deliberately reported differently. A home
+  # the FILE gets wrong (non-codex harness, empty, relative, control bytes) is a
+  # malformed schema and invalidates the whole file, like any other schema fault.
+  # A home the file states correctly but that this MACHINE cannot use right now
+  # (never created, or logged out) is one candidate's eligibility fact:
+  # `codex logout` on one of two accounts must not disable the other account's
+  # candidates or rules that name no home at all, so it is reported per home and
+  # never as file-wide invalidity.
   while IFS= read -r line; do
     case "$line" in
       error:*)
@@ -1196,12 +1206,12 @@ crew_dispatch_validate() {
       home:*)
         value=${line#home:}
         if [ ! -d "$value" ]; then
-          echo "CREW_DISPATCH: invalid config/crew-dispatch.json - codex home directory not found: $value"
-          return 0
+          echo "CREW_DISPATCH: codex home unavailable: $value - directory not found; candidates naming this home are ineligible, every other profile still dispatches"
+          continue
         fi
         if [ ! -f "$value/auth.json" ]; then
-          echo "CREW_DISPATCH: invalid config/crew-dispatch.json - codex home has no auth.json: $value (log that account in with CODEX_HOME=$value codex login)"
-          return 0
+          echo "CREW_DISPATCH: codex home unavailable: $value - no auth.json (log that account in with CODEX_HOME=$value codex login); candidates naming this home are ineligible, every other profile still dispatches"
+          continue
         fi
         ;;
     esac
