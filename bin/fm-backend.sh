@@ -712,15 +712,14 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 }
 
 fm_backend_capture_bounded() {  # <seconds> <backend> <target> <lines> [expected-label]
-  local timeout=$1
+  local timeout=$1 backend=$2
   shift
-  # shellcheck source=bin/fm-timeout-lib.sh
-  . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
-  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
-  fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
-    FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" bash -c \
-    '. "$1"; shift; fm_backend_capture "$@"' _ \
-    "$FM_BACKEND_LIB_DIR/fm-backend.sh" "$@"
+  fm_backend_source "$backend" || return 1
+  if ! command -v fm_run_function_timed >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  fi
+  fm_run_function_timed "$timeout" fm_backend_capture "$@"
 }
 
 # fm_backend_send_key: one backend-supported named special key.
@@ -811,15 +810,18 @@ fm_backend_busy_state() {  # <backend> <target>
 }
 
 fm_backend_busy_state_bounded() {  # <seconds> <backend> <target>
-  local timeout=$1
+  local timeout=$1 backend=$2
   shift
-  # shellcheck source=bin/fm-timeout-lib.sh
-  . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
-  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
-  fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
-    FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" bash -c \
-    '. "$1"; shift; fm_backend_busy_state "$@"' _ \
-    "$FM_BACKEND_LIB_DIR/fm-backend.sh" "$@"
+  case "$backend" in
+    herdr) ;;
+    *) fm_backend_busy_state "$@"; return $? ;;
+  esac
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  if ! command -v fm_run_function_timed >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  fi
+  fm_run_function_timed "$timeout" fm_backend_busy_state "$@"
 }
 
 # fm_backend_composer_state: classify the composer/input area of <target> as
@@ -936,15 +938,18 @@ fm_backend_agent_alive() {  # <backend> <target>
 }
 
 fm_backend_agent_alive_bounded() {  # <seconds> <backend> <target>
-  local timeout=$1
+  local timeout=$1 backend=$2
   shift
-  # shellcheck source=bin/fm-timeout-lib.sh
-  . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
-  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
-  fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
-    FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" bash -c \
-    '. "$1"; shift; fm_backend_agent_alive "$@"' _ \
-    "$FM_BACKEND_LIB_DIR/fm-backend.sh" "$@"
+  case "$backend" in
+    tmux|herdr) ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  if ! command -v fm_run_function_timed >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  fi
+  fm_run_function_timed "$timeout" fm_backend_agent_alive "$@"
 }
 
 # --- native event push (backend-extensible) ---------------------------------
@@ -983,15 +988,15 @@ fm_backend_events_capable() {  # <backend> <session>
 }
 
 fm_backend_events_capable_bounded() {  # <seconds> <backend> <session>
-  local timeout=$1
+  local timeout=$1 backend=$2
   shift
-  # shellcheck source=bin/fm-timeout-lib.sh
-  . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
-  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
-  fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
-    FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" bash -c \
-    '. "$1"; shift; fm_backend_events_capable "$@"' _ \
-    "$FM_BACKEND_LIB_DIR/fm-backend.sh" "$@"
+  fm_backend_has_push "$backend" || return 1
+  fm_backend_source "$backend" || return 1
+  if ! command -v fm_run_function_timed >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  fi
+  fm_run_function_timed "$timeout" fm_backend_events_capable "$@"
 }
 
 # fm_backend_wait_transition: bounded wait for a fresh actionable (blocked)

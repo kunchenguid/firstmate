@@ -393,11 +393,11 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 task_inbox_ring_bounded() {  # <backend> <target> <record-path> [expected-label]
-  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
-  fm_run_timed "$WATCHER_EXTERNAL_TIMEOUT" env FM_ROOT_OVERRIDE="$FM_ROOT" \
-    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" bash -c \
-    '. "$1"; shift; fm_task_inbox_ring "$@"' _ \
-    "$SCRIPT_DIR/fm-task-inbox-lib.sh" "$@"
+  local backend=$1
+  # Load the selected adapter once in the watcher. The bounded child inherits
+  # the complete ring implementation instead of re-sourcing its library graph.
+  fm_backend_source "$backend" || return 2
+  fm_run_function_timed "$WATCHER_EXTERNAL_TIMEOUT" fm_task_inbox_ring "$@"
 }
 
 inbox_steer_check() {  # <window> <task>
