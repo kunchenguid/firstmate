@@ -356,6 +356,12 @@ cmd_sync() {
   ff_target "$TARGET_HOME" "remote home" "$commit" yes yes > "$report" 2>&1
   out=$(cat "$report")
   rm -f "$report"
+  # The report is captured so FF_STATUS can drive the protocol line below, which
+  # would otherwise silently eat a home that just lost its .tasks.toml. The
+  # parent reads this command's STDOUT as a protocol, so the diagnostic goes to
+  # stderr, where both parents pick it out by prefix.
+  tasks_config_report_lines "$out" >&2
+  out=$(tasks_config_strip_report_lines "$out")
   case "$FF_STATUS" in
     # instr= names the watched instruction paths this advance changed, with no
     # spaces so the whole result stays one parseable line. The parent needs it to
@@ -377,6 +383,7 @@ cmd_update() {
     [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
     die "remote code root update failed"
   fi
+  tasks_config_report_lines "$update_out" >&2
   root_status=$(printf '%s\n' "$update_out" | grep '^firstmate:' | tail -1)
   case "$root_status" in
     'firstmate: updated '*|'firstmate: already current'*) ;;
