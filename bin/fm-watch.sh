@@ -144,6 +144,7 @@ case "$WATCHER_EXTERNAL_TIMEOUT" in ''|*[!0-9]*|0) WATCHER_EXTERNAL_TIMEOUT=300 
 WATCHER_EXTERNAL_TIMEOUT=$((WATCHER_EXTERNAL_TIMEOUT / 2))
 [ "$WATCHER_EXTERNAL_TIMEOUT" -ge 1 ] || WATCHER_EXTERNAL_TIMEOUT=1
 [ "$WATCHER_EXTERNAL_TIMEOUT" -le 30 ] || WATCHER_EXTERNAL_TIMEOUT=30
+FM_CREW_STATE_TIMEOUT=$WATCHER_EXTERNAL_TIMEOUT
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
