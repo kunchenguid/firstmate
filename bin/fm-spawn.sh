@@ -2998,7 +2998,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       echo "error: this home needs its own Treehouse pool root, but the installed treehouse has no --root option; upgrade treehouse to v2.2.0 or newer and rerun" >&2
       exit 1
     fi
-    TREEHOUSE_GET_COMMAND="treehouse get --root $(printf '%q' "$TREEHOUSE_HOME_ROOT")"
+    TREEHOUSE_GET_COMMAND="treehouse get --root $(shell_quote "$TREEHOUSE_HOME_ROOT")"
   else
     TREEHOUSE_GET_COMMAND='treehouse get'
   fi
