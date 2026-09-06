@@ -846,6 +846,7 @@ SH
         enabled) expected=$(printf '%s\n' unset "$value" '' unset) ;;
         empty) expected=$(printf '%s\n' unset unset unset unset) ;;
       esac
+      # shellcheck disable=SC2016
       operational=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
         TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
         "$pane_shell" -c 'printf '\''%s\n'\'' "$HOME" "$PATH" "$TERM" "$TMUX" "$GOTMPDIR"') \
