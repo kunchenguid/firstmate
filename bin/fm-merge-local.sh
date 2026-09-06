@@ -9,6 +9,11 @@
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
+# The task's existing per-task control lock serializes the captain-hold check
+# through that fast-forward. A still-held or unreadable row refuses before the
+# merge, so a captain approval must be recorded as an `answer --release` before
+# this entrypoint is invoked. The lock ends when the fast-forward returns;
+# docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 

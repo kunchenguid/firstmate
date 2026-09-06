@@ -53,6 +53,13 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
+# Before either forge merge, the task's existing per-task control lock
+# serializes the captain-hold check through the forge command. A still-held or
+# unreadable row refuses before that command, so a captain approval must be
+# recorded as an `answer --release` before this entrypoint is invoked. The lock
+# ends when the local forge command returns; docs/captain-hold-lifecycle.md owns
+# the accepted asynchronous-landing and merge-to-cleanup residuals.
+#
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha on GitLab because the head comes only from the live read.
