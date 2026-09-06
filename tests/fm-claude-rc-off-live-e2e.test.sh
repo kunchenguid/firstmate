@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Opt-in real Claude/Herdr guard for the RC-off launch policy.
+# Opt-in real Claude/Herdr observation for the best-effort RC-off default.
 # Run from an already trusted worktree with the target CLAUDE_CONFIG_DIR.
 # This creates only a named lab session and verifies the default-session tripwire on exit.
-# It deliberately tries to override the managed policy and spends one tool-free model turn.
+# It deliberately tries to override the managed default and spends one tool-free model turn.
 # Other harnesses are not applicable because disableRemoteControl is a Claude setting.
 set -euo pipefail
 if [ "${FM_CLAUDE_RC_OFF_LIVE_E2E:-0}" != 1 ]; then
-  echo 'skip: set FM_CLAUDE_RC_OFF_LIVE_E2E=1 to run real Claude/Herdr RC enforcement'
+  echo 'skip: set FM_CLAUDE_RC_OFF_LIVE_E2E=1 to observe the real Claude/Herdr RC default'
   exit 0
 fi
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -14,7 +14,7 @@ for tool in claude herdr jq; do
   command -v "$tool" >/dev/null || { echo "not ok - required installed harness/tool absent: $tool" >&2; exit 1; }
 done
 VERSION=$(claude --version)
-"$ROOT/bin/fm-claude-rc-off.sh" verify-policy
+"$ROOT/bin/fm-claude-rc-off.sh" check-default claude
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name claude-rc-off)
 cleanup() {
@@ -53,13 +53,13 @@ COMMON="--tools '' --strict-mcp-config --mcp-config '{\"mcpServers\":{}}' --sett
 OFF=$(run workspace create --cwd "$ROOT" --label rc-enforced | jq -er '.result.root_pane.pane_id')
 run pane run "$OFF" "$PREFIX claude --remote-control $COMMON"
 wait_for "$OFF" '❯' enforced-start.txt
-"$ROOT/bin/fm-claude-rc-off.sh" verify-policy | tee "$EVIDENCE/enforced-verify.txt"
+"$ROOT/bin/fm-claude-rc-off.sh" check-default claude | tee "$EVIDENCE/default-preflight.txt"
 submit "$OFF" /remote-control
 wait_for "$OFF" 'Unknown command: /remote-control' enforced-off.txt
 submit "$OFF" 'Reply with exactly RC_OFF_GUARD_OK and do not use any tools.'
 wait_for "$OFF" '● RC_OFF_GUARD_OK' completed-turn.txt
 submit "$OFF" /rc
 wait_for "$OFF" 'Unknown command: /rc' still-off.txt
-"$ROOT/bin/fm-claude-rc-off.sh" verify-policy | tee "$EVIDENCE/still-off-verify.txt"
+"$ROOT/bin/fm-claude-rc-off.sh" check-default claude | tee "$EVIDENCE/still-off-preflight.txt"
 run pane process-info --pane "$OFF" > "$EVIDENCE/guard-process.json"
-echo "ok - $VERSION: managed policy beat CLI and settings overrides and retained RC-off after a model turn"
+echo "ok - $VERSION: observed the managed default beat CLI and settings overrides for this lab turn"

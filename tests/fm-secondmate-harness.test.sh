@@ -425,7 +425,13 @@ make_noop_tmux() {
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_TEST_CLAUDE_VERSION:-2.1.263 (Claude Code)}"
+fi
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/claude"
   printf '%s\n' "$fakebin"
 }
 
@@ -665,6 +671,13 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" pi
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_TEST_CLAUDE_VERSION:-2.1.263 (Claude Code)}"
+fi
+SH
+  chmod +x "$fakebin/claude"
   printf '%s\n' "$fakebin"
 }
 

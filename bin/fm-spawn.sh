@@ -1178,6 +1178,7 @@ PROJ=
 ARG3=
 FIRSTMATE_HOME=
 RAW_LAUNCH=0
+RAW_HARNESS_EXECUTABLE=
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -1474,7 +1475,11 @@ case "$ARG3" in
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      case "$word" in
+        [A-Za-z_]*=*) continue ;;
+        env|exec) continue ;;
+        *) RAW_HARNESS_EXECUTABLE=$word; HARNESS=$(basename "$word"); break ;;
+      esac
     done
     ;;
   '')
@@ -1505,9 +1510,10 @@ case "$ARG3" in
     ;;
 esac
 
-if [ "$RAW_LAUNCH" -eq 1 ] || [ "$HARNESS" = claude ]; then
-  "$FM_ROOT/bin/fm-claude-rc-off.sh" verify-policy >/dev/null || {
-    echo "error: Claude managed RC-off policy is not verified; refusing launch. Run '$FM_ROOT/bin/fm-claude-rc-off.sh install-policy' with system privileges." >&2
+if [ "$HARNESS" = claude ]; then
+  CLAUDE_EXECUTABLE=${RAW_HARNESS_EXECUTABLE:-claude}
+  "$FM_ROOT/bin/fm-claude-rc-off.sh" check-default "$CLAUDE_EXECUTABLE" >/dev/null || {
+    echo "error: Claude best-effort managed RC-off default preflight failed; refusing launch. Run '$FM_ROOT/bin/fm-claude-rc-off.sh install-policy' with system privileges." >&2
     exit 1
   }
 fi

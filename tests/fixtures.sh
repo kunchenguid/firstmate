@@ -259,6 +259,13 @@ fm_test_make_spawn_fakebin() {
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse "$@"
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_TEST_CLAUDE_VERSION:-2.1.263 (Claude Code)}"
+fi
+SH
+  chmod +x "$fakebin/claude"
   printf '%s\n' "$fakebin"
 }
 

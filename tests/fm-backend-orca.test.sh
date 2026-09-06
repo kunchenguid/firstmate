@@ -57,7 +57,13 @@ fi
 [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
-  chmod +x "$fb/orca"
+  cat > "$fb/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_TEST_CLAUDE_VERSION:-2.1.263 (Claude Code)}"
+fi
+SH
+  chmod +x "$fb/orca" "$fb/claude"
   printf '%s\n' "$fb"
 }
 

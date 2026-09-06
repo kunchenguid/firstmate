@@ -374,18 +374,19 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+  out=$(FM_TEST_CLAUDE_MANAGED_POLICY_MODE=missing \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "custom-agent --flag")
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
   [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  pass "non-Claude raw launch works without the Claude managed default"
 }
 
-test_raw_claude_launch_enforces_verifiable_rc_off() {
+test_raw_claude_launch_preserves_executable_and_managed_default() {
   local rec id out status launch raw explicit log
   id=profile-raw-claude-z15b
   rec=$(make_spawn_case profile-raw-claude claude "$id")
@@ -395,8 +396,12 @@ test_raw_claude_launch_enforces_verifiable_rc_off() {
   mkdir -p "${explicit%/*}"
   cat > "$explicit" <<'SH'
 #!/usr/bin/env bash
-rc_off=$(jq -e '.disableRemoteControl == true' "$FM_TEST_CLAUDE_MANAGED_SETTINGS_DIR/50-firstmate-remote-control.json" >/dev/null && printf true || printf false)
-jq -nc --arg binary "$0" --argjson rc_off "$rc_off" --args '$ARGS.positional as $argv | {binary:$binary,rc_off:$rc_off,argv:$argv}' -- "$@" >> "$FM_RAW_CLAUDE_LOG"
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_TEST_CLAUDE_VERSION:-2.1.263 (Claude Code)}"
+  exit 0
+fi
+default_present=$(jq -e '.disableRemoteControl == true' "$FM_TEST_CLAUDE_MANAGED_SETTINGS_DIR/50-firstmate-remote-control.json" >/dev/null && printf true || printf false)
+jq -nc --arg binary "$0" --argjson default_present "$default_present" --args '$ARGS.positional as $argv | {binary:$binary,default_present:$default_present,argv:$argv}' -- "$@" >> "$FM_RAW_CLAUDE_LOG"
 [ "${1:-}" != --fail ]
 SH
   cp "$explicit" "$FAKEBIN_DIR/claude"
@@ -413,17 +418,17 @@ SH
     || fail "raw Claude launch command could not execute"
   jq -se --arg explicit "$explicit" '
     length == 2
-    and .[0] == {binary:$explicit,rc_off:true,argv:["--fail"]}
-    and .[1].rc_off == true
+    and .[0] == {binary:$explicit,default_present:true,argv:["--fail"]}
+    and .[1].default_present == true
     and .[1].argv == ["--fallback"]
     and (.[1].binary | split("/") | last) == "claude"
-  ' "$log" >/dev/null || fail "raw Claude paths or fallback invocations escaped RC-off"
+  ' "$log" >/dev/null || fail "raw Claude paths or fallback invocations missed the managed default"
   assert_contains "$launch" "$raw" "raw Claude command bytes changed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
-  pass "raw Claude paths and every shell fallback inherit RC-off unchanged"
+  pass "identified raw Claude keeps its executable and managed default unchanged"
 }
 
-test_managed_policy_allows_raw_claude_forms_unchanged() {
+test_managed_default_allows_raw_claude_forms_unchanged() {
   local rec id out status raw launch
   for raw in \
     'claude --remote-control' \
@@ -440,7 +445,7 @@ test_managed_policy_allows_raw_claude_forms_unchanged() {
     launch=$(cat "$LAUNCH_LOG")
     assert_contains "$launch" "$raw" "managed policy changed raw command: $raw"
   done
-  pass "managed policy covers raw Claude forms without rewriting commands"
+  pass "managed default leaves raw Claude forms unchanged"
 }
 
 test_claude_spawn_refuses_missing_managed_policy() {
@@ -453,10 +458,42 @@ test_claude_spawn_refuses_missing_managed_policy() {
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Claude spawn without managed policy must fail closed: $out"
-  assert_contains "$out" "managed RC-off policy is not verified" "missing-policy refusal was not actionable"
+  assert_contains "$out" "best-effort managed RC-off default preflight failed" "missing-default refusal was not actionable"
   [ ! -s "$LAUNCH_LOG" ] || fail 'missing-policy Claude launch reached the pane'
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail 'missing-policy Claude launch published metadata'
-  pass "Claude spawn refuses before launch when managed policy is missing"
+  pass "identified Claude spawn refuses when its managed default is missing"
+}
+
+test_prefixed_raw_claude_refuses_missing_managed_policy() {
+  local rec id out status raw
+  for raw in 'exec claude --safe' 'env FOO=1 claude --safe'; do
+    id="profile-prefixed-claude-missing-${RANDOM}"
+    rec=$(make_spawn_case "$id" claude "$id")
+    read_case_record "$rec"
+    rm -f "$HOME_DIR/managed-settings.d/50-firstmate-remote-control.json"
+    out=$(FM_TEST_CLAUDE_MANAGED_POLICY_MODE=missing \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    expect_code 1 "$status" "prefixed raw Claude without managed default must be refused: $raw: $out"
+    assert_contains "$out" "best-effort managed RC-off default preflight failed" "prefixed raw Claude bypassed default preflight"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail 'prefixed raw Claude launch published metadata'
+  done
+  pass "prefixed raw Claude forms cannot bypass managed-default preflight"
+}
+
+test_claude_spawn_refuses_unsupported_version() {
+  local rec id out status
+  id="profile-claude-version-old-${RANDOM}"
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  out=$(FM_TEST_CLAUDE_VERSION='2.1.127 (Claude Code)' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "unsupported Claude version must be refused: $out"
+  assert_contains "$out" 'does not honor disableRemoteControl' "old-version refusal was not actionable"
+  [ ! -s "$LAUNCH_LOG" ] || fail 'unsupported Claude version reached the pane'
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail 'unsupported Claude version published metadata'
+  pass "identified Claude spawn refuses unsupported versions before launch"
 }
 
 test_claude_threads_model_and_effort() {
@@ -1179,9 +1216,11 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
-test_raw_claude_launch_enforces_verifiable_rc_off
-test_managed_policy_allows_raw_claude_forms_unchanged
+test_raw_claude_launch_preserves_executable_and_managed_default
+test_managed_default_allows_raw_claude_forms_unchanged
 test_claude_spawn_refuses_missing_managed_policy
+test_prefixed_raw_claude_refuses_missing_managed_policy
+test_claude_spawn_refuses_unsupported_version
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

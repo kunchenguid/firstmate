@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Install or verify Firstmate's machine-managed Claude Remote Control policy.
+# Install or check Firstmate's best-effort managed Claude Remote Control default.
 # Usage: fm-claude-rc-off.sh install-policy
-#        fm-claude-rc-off.sh verify-policy
-# Claude's managed settings outrank command-line, project, and user settings.
-# Production policy is root-owned and must not be group- or world-writable.
+#        fm-claude-rc-off.sh check-default [claude-executable]
+# The check confirms a supported Claude version and Firstmate's managed fragment.
+# It cannot prove the effective value after later drop-ins or higher managed tiers.
 # Tests may redirect the managed directory only under FM_SPAWN_NO_GUARD=1.
 set -euo pipefail
 
@@ -28,22 +28,42 @@ policy_path() {
   printf '%s/50-firstmate-remote-control.json\n' "$(managed_dir)"
 }
 
-verify_policy() {
+check_version() {
+  local executable=$1 version major minor patch
+  version=$("$executable" --version) || die "cannot read Claude version from $executable"
+  [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)[[:space:]]+\(Claude\ Code\)$ ]] \
+    || die "unrecognized Claude version from $executable: $version"
+  major=${BASH_REMATCH[1]}
+  minor=${BASH_REMATCH[2]}
+  patch=${BASH_REMATCH[3]}
+  (( major > 2 || (major == 2 && (minor > 1 || (minor == 1 && patch >= 128))) )) \
+    || die "Claude $version does not honor disableRemoteControl"
+}
+
+check_policy_fragment() {
   local target uid mode
   target=$(policy_path)
-  [ -f "$target" ] && [ ! -L "$target" ] || die "managed RC-off policy missing or unsafe: $target; run this helper's install-policy command with system privileges"
+  [ -f "$target" ] && [ ! -L "$target" ] || die "managed RC-off default missing or unsafe: $target; run this helper's install-policy command with system privileges"
   jq -e 'type == "object" and .disableRemoteControl == true' "$target" >/dev/null 2>&1 \
-    || die "managed RC-off policy is invalid: $target"
+    || die "managed RC-off default is invalid: $target"
   if [ -z "${FM_TEST_CLAUDE_MANAGED_SETTINGS_DIR:-}" ]; then
     case "$(uname -s)" in
       Linux) read -r uid mode < <(stat -c '%u %a' "$target") ;;
       Darwin) read -r uid mode < <(stat -f '%u %Lp' "$target") ;;
       *) die "unsupported platform: $(uname -s)" ;;
     esac
-    [ "$uid" = 0 ] || die "managed RC-off policy is not root-owned: $target"
-    (( (8#$mode & 8#022) == 0 )) || die "managed RC-off policy is group- or world-writable: $target"
+    [ "$uid" = 0 ] || die "managed RC-off default is not root-owned: $target"
+    (( (8#$mode & 8#022) == 0 )) || die "managed RC-off default is group- or world-writable: $target"
   fi
-  printf 'Claude managed RC-off policy verified: %s\n' "$target"
+  printf '%s\n' "$target"
+}
+
+check_default() {
+  [ "$#" -le 1 ] || die 'check-default accepts at most one Claude executable'
+  local executable=${1:-claude} target
+  check_version "$executable"
+  target=$(check_policy_fragment)
+  printf 'Claude best-effort managed RC-off default present; effective state unverified: %s\n' "$target"
 }
 
 install_policy() {
@@ -57,13 +77,13 @@ install_policy() {
   chmod 644 "$tmp"
   mv -f "$tmp" "$target"
   trap - RETURN
-  verify_policy
-  printf 'Claude managed RC-off policy installed: %s\n' "$target"
+  target=$(check_policy_fragment)
+  printf 'Claude best-effort managed RC-off default installed; effective state unverified: %s\n' "$target"
 }
 
 case "${1:-}" in
   install-policy) [ "$#" -eq 1 ] || die 'install-policy takes no arguments'; install_policy ;;
-  verify-policy) [ "$#" -eq 1 ] || die 'verify-policy takes no arguments'; verify_policy ;;
+  check-default) shift; check_default "$@" ;;
   --help|-h|help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
