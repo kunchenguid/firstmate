@@ -1495,6 +1495,63 @@ $snapshot
 EOF
 }
 
+pipeline_status_key() {  # <line> -> tagged key identity
+  local line=$1 key prefix
+  if _fm_key_before_colon "$line"; then
+    prefix=${line%%:*}
+    key=${prefix#*\[key=}
+    key=${key%%\]*}
+    _fm_decision_slug_ok "$key" || return 1
+    printf 'key:%s\n' "$key"
+    return 0
+  fi
+  if key=$(_fm_key_at_note_head "$line"); then
+    _fm_decision_slug_ok "$key" || return 1
+    printf 'key:%s\n' "$key"
+  else
+    printf '%s\n' unkeyed
+  fi
+}
+
+status_resume_line() {  # <status-file> <tagged-key> <pause-line> -> later fold transition line
+  local file=$1 key=$2 pause_line=$3 line_no=0 line verb line_key pause resolve held cached
+  case "$pause_line" in ''|0*|*[!0-9]*) return 1 ;; esac
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_no=$((line_no + 1))
+    if [ "$line_no" -eq "$pause_line" ]; then
+      status_is_paused "$line" || return 1
+      cached=$(pipeline_status_key "$line") || return 1
+      [ "$cached" = "$key" ] || return 1
+      continue
+    fi
+    [ "$line_no" -gt "$pause_line" ] || continue
+    verb=$(status_line_verb "$line")
+    line_key=$(pipeline_status_key "$line") || continue
+    [ "$line_key" = "$key" ] || continue
+    # This is the existing status_open_activities_with_key fold: working or
+    # paused replaces the keyed phase; terminal verbs remove it. A note is
+    # intentionally ignored, so this accessor cannot invent a pause closure.
+    case "$verb" in
+      working)
+        printf '%s\n' "$line_no"
+        return 0
+        ;;
+      "$pause")
+        return 1
+        ;;
+      done|failed|needs-decision|blocked|"$resolve"|"$held")
+        printf '%s\n' "$line_no"
+        return 0
+        ;;
+    esac
+  done < "$file"
+  return 1
+}
+
 # Fold material routed-work phases in the same keyed event stream.
 # A working or declared-pause event opens or replaces one phase for its key.
 # A later done, failed, needs-decision, blocked, or resolved event carrying that

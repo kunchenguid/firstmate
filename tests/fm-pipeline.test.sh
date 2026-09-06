@@ -475,17 +475,27 @@ EOF
 }
 
 test_resumed_wait_is_not_reprobed() {
-  local root output rc=0
+  local root output rc=0 events
   root=$(new_state resumed)
-  printf '%s\n' \
-    'paused: [key=vendor-release] waiting on vendor' \
-    '' \
-    'working: [key=vendor-release] resumed after vendor release' > "$root/state/task.status"
+  printf '%s\n' 'paused: [key=vendor-release] waiting on vendor' > "$root/state/task.status"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
   output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
     "$SCRIPT" probe 2>&1) || rc=$?
-  expect_code 0 "$rc" "a resumed wait should not be reprobed"
-  [ ! -e "$root/state/pipeline-events.log" ] || fail "a later working transition was ignored"
-  pass "fm-pipeline.sh: resumed waits are not selected from stale history"
+  expect_code 0 "$rc" "the initial paused wait should be observed"
+  printf '%s\n' 'working: [key=vendor-release] resumed after vendor release' >> "$root/state/task.status"
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
+    "$SCRIPT" probe 2>&1) || rc=$?
+  expect_code 0 "$rc" "the resumed wait should close"
+  events=$(wc -l < "$root/state/pipeline-events.log" | tr -d ' ')
+  [ "$events" -eq 2 ] || fail "the resumed wait did not emit exactly one closure"
+  [ "$(rg -c 'probe=ok.*evidence=state/task.status:2' "$root/state/pipeline-events.log")" -eq 1 ] \
+    || fail "the closure did not cite the resume line"
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
+    "$SCRIPT" probe 2>&1) || rc=$?
+  expect_code 0 "$rc" "a closed wait should remain closed"
+  [ "$(wc -l < "$root/state/pipeline-events.log" | tr -d ' ')" -eq 2 ] \
+    || fail "a closed wait was re-probed"
+  pass "fm-pipeline.sh: resumed waits close once and are not re-probed"
 }
 
 test_note_preserves_active_wait() {
@@ -1060,6 +1070,297 @@ EOF
   assert_contains "$output" 'tsv=dispatched ingress working validating pr-registered checks merge-wait merged|dispatched>ingress ingress>working working>validating validating>pr-registered pr-registered>checks checks>merge-wait merge-wait>merged' "TSV step graph unit did not preserve both fields"
   assert_contains "$output" 'tab_rc=2' "scalar parser unit did not reject a tab"
   pass "fm-pipeline.sh: pure record, derivation, header, and scalar units pass"
+}
+
+s6_write_task() {
+  local root=$1 id=$2 gen=$3
+  printf 'kind=ship\nspawn_gen=%s\n' "$gen" > "$root/state/$id.meta"
+  printf 'paused: [key=x] waiting on the fixture\n' > "$root/state/$id.status"
+}
+
+s6_rewrite_record_ts() {
+  local file=$1 ts=$2
+  awk -v ts="$ts" 'NR == 2 { sub(/ts=[^ ]+/, "ts=" ts) } { print }' \
+    "$file" > "$file.next" || fail "could not rewrite the record timestamp fixture"
+  mv -- "$file.next" "$file" || fail "could not install the record timestamp fixture"
+}
+
+s6_probe() {
+  local root=$1 output rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" probe 2>&1) || rc=$?
+  expect_code 0 "$rc" "the S6 probe fixture should succeed"
+}
+
+test_s6_pure_since_unit() {
+  local root output
+  root=$(new_state s6-pure)
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" FM_PIPELINE_SOURCE_ONLY=1 \
+    bash -c '
+      set -u
+      source "$1"
+      valid_rc=0
+      valid=$(pipeline_since_from_ts 1970-01-01T00:15:00Z 1000) || valid_rc=$?
+      invalid_rc=0
+      invalid=$(pipeline_since_from_ts 2026-99-99T00:00:00Z 2000) || invalid_rc=$?
+      future_rc=0
+      future=$(pipeline_since_from_ts 2099-01-01T00:00:00Z 2000) || future_rc=$?
+      printf "valid=%s/%s invalid=%s/%s future=%s/%s\\n" \
+        "$valid" "$valid_rc" "$invalid" "$invalid_rc" "$future" "$future_rc"
+    ' _ "$SCRIPT")
+  assert_contains "$output" 'valid=100/0 invalid=0/1 future=0/1' \
+    "since conversion did not distinguish valid, invalid, and future timestamps"
+  pass "fm-pipeline.sh: since conversion handles valid, invalid, and future timestamps"
+}
+
+test_s6_since_uses_record_step_timestamp() {
+  local root now old_ts output line since cache_now fakebin real_date
+  root=$(new_state s6-since)
+  s6_write_task "$root" task gen-1
+  s6_probe "$root"
+  now=$(date +%s)
+  old_ts=$(node -e 'process.stdout.write(new Date((Number(process.argv[1]) - 100) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z"))' "$now")
+  s6_rewrite_record_ts "$root/state/task.pipeline" "$old_ts"
+  cache_now=$((now - 10))
+  printf 'wait=ext:x step=dispatched gen=gen-1 evidence=state/task.status:1 observed_at=%s\n' \
+    "$cache_now" > "$root/state/task.pipeline-seen"
+  fakebin="$root/fakebin"
+  real_date=$(command -v date) || fail "no date command for the clock fixture"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/date" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = +%s ]; then
+  printf '%s\n' "${FM_PIPELINE_TEST_NOW:?}"
+else
+  exec "${FM_PIPELINE_REAL_DATE:?}" "$@"
+fi
+EOF
+  chmod +x "$fakebin/date"
+  output=$(PATH="$fakebin:$PATH" FM_PIPELINE_TEST_NOW="$now" FM_PIPELINE_REAL_DATE="$real_date" \
+    FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" probe 2>&1) || \
+    fail "the fixed-clock probe failed: $output"
+  line=$(tail -1 "$root/state/pipeline-events.log")
+  since=$(printf '%s\n' "$line" | awk '{for (i=1; i<=NF; i++) if ($i ~ /^since=/) { sub(/^since=/, "", $i); print $i; exit }}')
+  [ "$since" = 100 ] || fail "since was not exactly now minus the record step timestamp: $line"
+  [ "$since" -ne 10 ] || fail "since still used the observation cache age"
+  pass "fm-pipeline.sh: since follows the current record step timestamp"
+}
+
+test_s6_invalid_future_and_uninitialized_timestamps() {
+  local root line output events
+  root=$(new_state s6-uninitialized)
+  printf '%s\n' 'paused: [key=x] waiting' > "$root/state/task.status"
+  s6_probe "$root"
+  line=$(tail -1 "$root/state/pipeline-events.log")
+  assert_contains "$line" 'since=0' "an uninitialized task needs zero duration"
+  assert_contains "$line" 'probe=unknown' "an uninitialized task needs an unknown probe"
+  printf '%s\n' 'working [key=x]: resumed' >> "$root/state/task.status"
+  s6_probe "$root"
+  line=$(tail -1 "$root/state/pipeline-events.log")
+  assert_contains "$line" 'probe=unknown' "an uninitialized closure must remain unknown"
+  assert_not_contains "$line" 'probe=ok' "an uninitialized closure must not claim a resume"
+  assert_not_contains "$(cat "$root/state/task.pipeline-seen")" 'closed_at=' \
+    "an uninitialized closure must leave the cache open"
+
+  root=$(new_state s6-future)
+  s6_write_task "$root" task gen-1
+  s6_probe "$root"
+  s6_rewrite_record_ts "$root/state/task.pipeline" 2099-01-01T00:00:00Z
+  events=$(wc -l < "$root/state/pipeline-events.log" | tr -d ' ')
+  s6_probe "$root"
+  [ "$(wc -l < "$root/state/pipeline-events.log" | tr -d ' ')" -eq $((events + 1)) ] \
+    || fail "an invalid active clock emitted a duplicate unknown row"
+  line=$(tail -1 "$root/state/pipeline-events.log")
+  assert_contains "$line" 'since=0' "a future record timestamp must have zero duration"
+  assert_contains "$line" 'probe=unknown' "a future record timestamp must remain unknown"
+  assert_contains "$line" 'evidence=state/task.pipeline:2' "future-clock evidence must cite the record line"
+  printf '%s\n' 'working [key=x]: resumed' >> "$root/state/task.status"
+  s6_probe "$root"
+  line=$(tail -1 "$root/state/pipeline-events.log")
+  assert_contains "$line" 'since=0' "a future-clock closure must have zero duration"
+  assert_contains "$line" 'probe=unknown' "a future-clock closure must remain unknown"
+  assert_not_contains "$line" 'probe=ok' "a future-clock closure must not claim a resume"
+  now=$(date +%s)
+  old_ts=$(node -e 'process.stdout.write(new Date((Number(process.argv[1]) - 100) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z"))' "$now")
+  s6_rewrite_record_ts "$root/state/task.pipeline" "$old_ts"
+  s6_probe "$root"
+  line=$(tail -1 "$root/state/pipeline-events.log")
+  assert_contains "$line" 'probe=ok' "a later valid clock must close the retained occurrence"
+  assert_contains "$(cat "$root/state/task.pipeline-seen")" 'closed_at=' \
+    "a later valid clock must mark the occurrence closed"
+
+  root=$(new_state s6-invalid)
+  s6_write_task "$root" task gen-1
+  s6_probe "$root"
+  s6_rewrite_record_ts "$root/state/task.pipeline" 2026-99-99T00:00:00Z
+  s6_probe "$root"
+  line=$(tail -1 "$root/state/pipeline-events.log")
+  assert_contains "$line" 'since=0' "an unparseable record timestamp must have zero duration"
+  assert_contains "$line" 'probe=unknown' "an unparseable record timestamp must remain unknown"
+  assert_contains "$line" 'evidence=state/task.pipeline:2' "invalid-clock evidence must cite the record line"
+
+  root=$(new_state s6-header-evidence)
+  s6_write_task "$root" task gen-1
+  s6_probe "$root"
+  rm -f "$root/state/task.meta"
+  s6_probe "$root"
+  assert_contains "$(tail -2 "$root/state/pipeline-events.log")" 'evidence=state/task.pipeline:1' \
+    "a record without a step line must cite the header, not line zero"
+  rm -f "$root/state/task.pipeline"
+  s6_probe "$root"
+  assert_not_contains "$(tail -2 "$root/state/pipeline-events.log")" 'state/task.pipeline:1' \
+    "an absent record must not cite a nonexistent header"
+  assert_contains "$(tail -2 "$root/state/pipeline-events.log")" 'evidence=state/task.status:1' \
+    "an absent record must cite the cached pause evidence"
+  pass "fm-pipeline.sh: invalid, future, and uninitialized clocks remain unknown"
+}
+
+test_s6_occurrence_closures() {
+  local root line events cache ok_count bad_evidence
+  root=$(new_state s6-closure)
+  s6_write_task "$root" task gen-1
+  s6_probe "$root"
+  printf '%s\n' 'working [key=x]: resumed' >> "$root/state/task.status"
+  s6_probe "$root"
+  line=$(tail -1 "$root/state/pipeline-events.log")
+  assert_contains "$line" 'probe=ok' "a later working line must close the cached pause"
+  assert_contains "$line" 'evidence=state/task.status:2' "closure must cite its resume line"
+  cache="$root/state/task.pipeline-seen"
+  assert_contains "$(cat "$cache")" 'closed_at=2' "closure did not mark the cache occurrence"
+  events=$(wc -l < "$root/state/pipeline-events.log" | tr -d ' ')
+  s6_probe "$root"
+  [ "$(wc -l < "$root/state/pipeline-events.log" | tr -d ' ')" -eq "$events" ] \
+    || fail "a marked occurrence emitted a duplicate closure"
+
+  root=$(new_state s6-replaced-pause)
+  s6_write_task "$root" task gen-1
+  s6_probe "$root"
+  printf '%s\n' 'paused [key=x]: refreshed pause' >> "$root/state/task.status"
+  s6_probe "$root"
+  printf '%s\n' 'working [key=x]: resumed after refresh' >> "$root/state/task.status"
+  s6_probe "$root"
+  [ "$(rg -c 'probe=ok.*evidence=state/task.status:3.*wait=ext:x' "$root/state/pipeline-events.log")" -eq 1 ] \
+    || fail "the newest pause did not close exactly once at the working line"
+  [ "$(rg -c 'probe=unknown.*evidence=state/task.status:1.*wait=ext:x' "$root/state/pipeline-events.log")" -eq 2 ] \
+    || fail "the replaced pause did not remain unknown"
+  [ "$(rg -c 'closed_at=3' "$root/state/task.pipeline-seen")" -eq 1 ] \
+    || fail "the replaced pause row was incorrectly closed"
+
+  for bad_evidence in 00 junk:1; do
+    root=$(new_state "s6-corrupt-${bad_evidence//:/-}")
+    s6_write_task "$root" task gen-1
+    s6_probe "$root"
+    if [ "$bad_evidence" = 00 ]; then
+      printf '%s\n' 'working [key=x]: resumed' > "$root/state/task.status"
+    else
+      printf '%s\n' 'paused [key=x]: waiting' 'working [key=x]: resumed' > "$root/state/task.status"
+    fi
+    printf 'wait=ext:x step=dispatched gen=gen-1 evidence=state/task.status:%s observed_at=0\n' \
+      "$bad_evidence" > "$root/state/task.pipeline-seen"
+    s6_probe "$root"
+    ok_count=$(rg -c 'probe=ok' "$root/state/pipeline-events.log" || true)
+    [ "${ok_count:-0}" -eq 0 ] || fail "corrupt cache evidence $bad_evidence invented a closure"
+    [ "$(rg -c "probe=unknown.*evidence=state/task.status:$bad_evidence" "$root/state/pipeline-events.log")" -eq 1 ] \
+      || fail "corrupt cache evidence $bad_evidence did not remain unknown"
+    assert_not_contains "$(cat "$root/state/task.pipeline-seen")" 'closed_at=' \
+      "corrupt cache evidence $bad_evidence was marked closed"
+  done
+
+  root=$(new_state s6-observer-stopped)
+  s6_write_task "$root" task gen-1
+  s6_probe "$root"
+  [ "$(wc -l < "$root/state/pipeline-events.log" | tr -d ' ')" -eq 1 ] \
+    || fail "the stopped observer did not leave one observation"
+
+  root=$(new_state s6-sibling)
+  printf '%s\n' 'paused [key=x]: waiting' 'paused [key=y]: waiting' > "$root/state/task.status"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  s6_probe "$root"
+  printf '%s\n' 'working [key=x]: resumed' >> "$root/state/task.status"
+  s6_probe "$root"
+  [ "$(rg -c 'probe=ok.*wait=ext:x' "$root/state/pipeline-events.log")" -eq 1 ] \
+    || fail "the resumed sibling did not close"
+  [ "$(rg -c 'probe=ok.*wait=ext:y' "$root/state/pipeline-events.log" 2>/dev/null || printf 0)" -eq 0 ] \
+    || fail "the still-paused sibling was closed"
+
+  root=$(new_state s6-note)
+  s6_write_task "$root" task gen-1
+  s6_probe "$root"
+  printf '%s\n' 'note [key=x]: progress' >> "$root/state/task.status"
+  s6_probe "$root"
+  [ "$(rg -c 'probe=ok' "$root/state/pipeline-events.log" 2>/dev/null || printf 0)" -eq 0 ] \
+    || fail "a keyed note closed the active pause"
+  assert_not_contains "$(cat "$root/state/task.pipeline-seen")" 'closed_at=' \
+    "a keyed note marked the active occurrence closed"
+
+  root=$(new_state s6-step-change)
+  s6_write_task "$root" task gen-1
+  s6_probe "$root"
+  printf '%s\n' 'pr=https://github.com/example/project/pull/7' >> "$root/state/task.meta"
+  s6_probe "$root"
+  printf '%s\n' 'working [key=x]: resumed' >> "$root/state/task.status"
+  s6_probe "$root"
+  [ "$(rg -c 'probe=ok' "$root/state/pipeline-events.log")" -eq 1 ] \
+    || fail "a step change emitted more than one closure"
+  [ "$(rg -c '^wait=ext:x .*evidence=state/task.status:1 .*closed_at=2' "$root/state/task.pipeline-seen")" -eq 2 ] \
+    || fail "all cache rows for one occurrence were not marked closed"
+
+  root=$(new_state s6-missed-intermediate)
+  s6_write_task "$root" task gen-1
+  s6_probe "$root"
+  printf '%s\n' 'working [key=x]: resumed' 'paused [key=x]: waiting again' >> "$root/state/task.status"
+  s6_probe "$root"
+  [ "$(rg -c 'probe=ok.*evidence=state/task.status:2' "$root/state/pipeline-events.log")" -eq 1 ] \
+    || fail "the missed intermediate resume was not cited"
+  assert_not_contains "$(rg '^wait=ext:x .*evidence=state/task.status:3' "$root/state/task.pipeline-seen")" 'closed_at=' \
+    "the new occurrence was closed by the old resume"
+  printf '%s\n' 'working [key=x]: resumed again' >> "$root/state/task.status"
+  s6_probe "$root"
+  [ "$(rg -c 'probe=ok.*evidence=state/task.status:4' "$root/state/pipeline-events.log")" -eq 1 ] \
+    || fail "the second occurrence did not close at its own resume"
+  [ "$(rg -c 'probe=ok' "$root/state/pipeline-events.log")" -eq 2 ] \
+    || fail "missed intermediate emitted the wrong number of closures"
+
+  root=$(new_state s6-repeated)
+  s6_write_task "$root" task gen-1
+  s6_probe "$root"
+  printf '%s\n' 'working [key=x]: first' >> "$root/state/task.status"
+  s6_probe "$root"
+  printf '%s\n' 'paused [key=x]: second' >> "$root/state/task.status"
+  s6_probe "$root"
+  printf '%s\n' 'working [key=x]: second resume' >> "$root/state/task.status"
+  s6_probe "$root"
+  [ "$(rg -c 'probe=ok.*wait=ext:x' "$root/state/pipeline-events.log")" -eq 2 ] \
+    || fail "repeated pause/resume did not produce two closures"
+  [ "$(rg -c 'probe=ok.*evidence=state/task.status:2' "$root/state/pipeline-events.log")" -eq 1 ] \
+    || fail "first repeated closure cited the wrong line"
+  [ "$(rg -c 'probe=ok.*evidence=state/task.status:4' "$root/state/pipeline-events.log")" -eq 1 ] \
+    || fail "second repeated closure cited the wrong line"
+
+  root=$(new_state s6-truncated)
+  s6_write_task "$root" task gen-1
+  s6_probe "$root"
+  printf '%s\n' 'note: rewritten without the pause' > "$root/state/task.status"
+  s6_probe "$root"
+  [ "$(rg -c 'probe=ok' "$root/state/pipeline-events.log" 2>/dev/null || printf 0)" -eq 0 ] \
+    || fail "a truncated log produced a false closure"
+  assert_contains "$(tail -1 "$root/state/pipeline-events.log")" 'probe=unknown' \
+    "a truncated log did not remain unknown"
+  assert_contains "$(tail -1 "$root/state/pipeline-events.log")" 'evidence=state/task.status:1' \
+    "a truncated log did not cite the cached pause line"
+  assert_not_contains "$(cat "$root/state/task.pipeline-seen")" 'closed_at=' \
+    "a truncated log closed its cache row"
+
+  root=$(new_state s6-stale-gen)
+  s6_write_task "$root" task gen-new
+  s6_probe "$root"
+  printf 'wait=ext:x step=dispatched gen=gen-old evidence=state/task.status:1 observed_at=1\n' \
+    > "$root/state/task.pipeline-seen"
+  s6_probe "$root"
+  assert_contains "$(tail -2 "$root/state/pipeline-events.log")" 'evidence=state/task.pipeline:2' \
+    "a stale generation did not cite the current record line"
+  assert_not_contains "$(tail -2 "$root/state/pipeline-events.log")" 'probe=ok' \
+    "a stale generation produced a closure"
+  pass "fm-pipeline.sh: closures are occurrence-bound, idempotent, and conservative"
 }
 
 test_pipeline_lock_timeout_validation() {
@@ -1875,6 +2176,10 @@ test_reconcile_ignores_status_testimony
  test_quiet_registered_probe_and_refusal_projection
  test_retire_owner_records
  test_pipeline_pure_function_units
+test_s6_pure_since_unit
+test_s6_since_uses_record_step_timestamp
+test_s6_invalid_future_and_uninitialized_timestamps
+test_s6_occurrence_closures
  test_pipeline_lock_timeout_validation
  test_pipeline_restart_recovery
  test_reconcile_serializes_owner_transaction

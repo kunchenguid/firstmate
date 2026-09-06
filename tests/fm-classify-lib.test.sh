@@ -40,5 +40,27 @@ open_decisions=$(status_open_decisions "$STATUS_FILE")
 assert_contains "$open_decisions" $'release\tblocked\trelease dependency' \
   'decision fold should preserve unresolved keyed decisions'
 
-pass 'fm-classify-lib classifies status grammar and folds keyed decisions'
+printf '%s\n' \
+  'paused [key=x]: waiting' \
+  'note [key=x]: progress' \
+  'working [key=x]: resumed' > "$STATUS_FILE"
+resume_line=$(status_resume_line "$STATUS_FILE" key:x 1)
+[ "$resume_line" = 3 ] || fail 'phase transition accessor should find the later working line'
+printf '%s\n' 'paused [key=x]: waiting' 'note [key=x]: progress' > "$STATUS_FILE"
+if status_resume_line "$STATUS_FILE" key:x 1 >/dev/null; then
+  fail 'phase transition accessor should ignore keyed notes'
+fi
+printf '%s\n' 'paused [key=x]: waiting' 'paused [key=x]: refreshed' 'working [key=x]: resumed' > "$STATUS_FILE"
+if status_resume_line "$STATUS_FILE" key:x 1 >/dev/null; then
+  fail 'a replaced keyed pause must not borrow a later resume'
+fi
+resume_line=$(status_resume_line "$STATUS_FILE" key:x 2)
+[ "$resume_line" = 3 ] || fail 'the newest keyed pause should close at the later working line'
+for bad_line in 0 00 junk:1; do
+  if status_resume_line "$STATUS_FILE" key:x "$bad_line" >/dev/null; then
+    fail "malformed cache line $bad_line must not prove a pause transition"
+  fi
+done
+
+pass 'fm-classify-lib owns the keyed phase transition accessor'
 echo '# fm-classify-lib.test.sh: all assertions passed'

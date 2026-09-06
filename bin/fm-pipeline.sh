@@ -46,6 +46,7 @@ PIPELINE_RECORD_HEAD=
 PIPELINE_RECORD_EVIDENCE=
 PIPELINE_RECORD_ATTEMPT=-
 PIPELINE_RECORD_LINE=
+PIPELINE_RECORD_LINE_NUMBER=0
 PIPELINE_RECORD_HAS_LINE=0
 PIPELINE_META_FILE=
 PIPELINE_META_KIND=
@@ -463,24 +464,6 @@ pipeline_meta_identity_load() {  # <meta-file>
   return 1
 }
 
-pipeline_status_key() {  # <line> -> tagged key identity
-  local line=$1 key prefix
-  if _fm_key_before_colon "$line"; then
-    prefix=${line%%:*}
-    key=${prefix#*\[key=}
-    key=${key%%\]*}
-    _fm_decision_slug_ok "$key" || return 1
-    printf 'key:%s\n' "$key"
-    return 0
-  fi
-  if key=$(_fm_key_at_note_head "$line"); then
-    _fm_decision_slug_ok "$key" || return 1
-    printf 'key:%s\n' "$key"
-  else
-    printf '%s\n' unkeyed
-  fi
-}
-
 wait_identity() {  # <tagged-key>
   case "$1" in
     unkeyed) printf '%s\n' 'ext:-' ;;
@@ -539,6 +522,72 @@ pipeline_seen_prepare() {  # <task-id>
         "$pipeline" "$seen" >&2
       ;;
   esac
+}
+
+pipeline_iso_epoch() {  # <UTC ISO timestamp>
+  case "$1" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+    *) return 1 ;;
+  esac
+  node -e 'const value = new Date(process.argv[1]); if (Number.isNaN(value.getTime())) process.exit(1); process.stdout.write(String(Math.floor(value.getTime() / 1000)));' "$1" 2>/dev/null
+}
+
+pipeline_since_from_ts() {  # <record-ts> <now> -> seconds; invalid/future returns 0 and rc 1
+  local ts=$1 now=$2 epoch
+  case "$now" in ''|*[!0-9]*) printf '%s\n' 0; return 1 ;; esac
+  epoch=$(pipeline_iso_epoch "$ts") || { printf '%s\n' 0; return 1; }
+  case "$epoch" in ''|*[!0-9]*) printf '%s\n' 0; return 1 ;; esac
+  [ "$epoch" -le "$now" ] 2>/dev/null || { printf '%s\n' 0; return 1; }
+  printf '%s\n' "$((now - epoch))"
+}
+
+pipeline_key_from_wait() {  # <external-wait-identity> -> tagged status key
+  case "$1" in
+    ext:-) printf '%s\n' unkeyed ;;
+    ext:%2D) printf '%s\n' 'key:-' ;;
+    ext:%64efault) printf '%s\n' 'key:default' ;;
+    ext:*) printf 'key:%s\n' "${1#ext:}" ;;
+    *) return 1 ;;
+  esac
+}
+
+pipeline_pause_key_active() {  # <active-pauses> <tagged-key>
+  local pauses=$1 wanted=$2 line_no active_key line
+  while IFS=$'\t' read -r line_no active_key line; do
+    [ "$active_key" = "$wanted" ] && return 0
+  done <<EOF
+$pauses
+EOF
+  return 1
+}
+
+pipeline_seen_close_rows() {  # <cache> <wait<TAB>gen<TAB>evidence<TAB>resume-line file>
+  local cache=$1 closed=$2 tmp device
+  [ -s "$closed" ] || return 0
+  pipeline_state_file_valid "$cache" || return 1
+  device=$(fm_pr_file_device "$STATE") || return 1
+  tmp=$(umask 077; mktemp "$STATE/.fm-pipeline-seen.XXXXXX") || return 1
+  awk -v closed_file="$closed" '
+    BEGIN {
+      while ((getline row < closed_file) > 0) {
+        count=split(row, values, "\t")
+        if (count == 4) closed[values[1] SUBSEP values[2] SUBSEP values[3]]=values[4]
+      }
+      close(closed_file)
+    }
+    {
+      identity=$1 SUBSEP $3 SUBSEP $4
+      if (NF < 6 && identity in closed) print $0, "closed_at=" closed[identity]
+      else print
+    }
+  ' "$cache" > "$tmp" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  fm_pr_private_file_valid "$tmp" 600 "$device" || { rm -f -- "$tmp"; return 1; }
+  fm_pr_regular_destination_on_device_or_absent "$cache" "$device" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$cache" || { rm -f -- "$tmp"; return 1; }
 }
 
 observation_elapsed_since() {  # <task-id> <wait> <step> <generation> <evidence> <now>
@@ -759,6 +808,7 @@ pipeline_record_reset() {
   PIPELINE_RECORD_EVIDENCE=
   PIPELINE_RECORD_ATTEMPT=-
   PIPELINE_RECORD_LINE=
+  PIPELINE_RECORD_LINE_NUMBER=0
   PIPELINE_RECORD_HAS_LINE=0
 }
 
@@ -810,6 +860,7 @@ EOF
   esac
   case "$attempt" in ''|*[[:space:]=]*) return 1 ;; esac
   PIPELINE_RECORD_LINE=$line
+  PIPELINE_RECORD_LINE_NUMBER=$number
   PIPELINE_RECORD_REV=$rev
   PIPELINE_RECORD_TS=$ts
   PIPELINE_RECORD_STEP=$step
@@ -967,6 +1018,7 @@ pipeline_record_append() {  # <id> <kind> <gen> <step> <evidence> <head> <attemp
     printf 'schema=%s task=%s kind=%s gen=%s\n' "$PIPELINE_SCHEMA" "$id" "$kind" "$gen" > "$tmp" || {
       rm -f -- "$tmp"; return 1;
     }
+    PIPELINE_RECORD_LINE_NUMBER=1
   else
     cat "$pipeline" > "$tmp" || { rm -f -- "$tmp"; return 1; }
   fi
@@ -985,6 +1037,7 @@ pipeline_record_append() {  # <id> <kind> <gen> <step> <evidence> <head> <attemp
   PIPELINE_RECORD_GEN=$gen
   PIPELINE_RECORD_STEP=$step
   PIPELINE_RECORD_REV=$rev
+  PIPELINE_RECORD_LINE_NUMBER=$((PIPELINE_RECORD_LINE_NUMBER + 1))
   PIPELINE_RECORD_TS=$ts
   PIPELINE_RECORD_HEAD=$head
   PIPELINE_RECORD_EVIDENCE=$evidence
@@ -1396,9 +1449,106 @@ pipeline_scan_unknown_row() {  # <task> <scan-reason>
   trap - EXIT
 }
 
+pipeline_close_observations() {  # <id> <status> <active-pauses> <gen> <kind> <step> <attempt> <since> <ts> <record-evidence> <record-has-line> <clock-valid>
+  local id=$1 status_file=$2 pauses=$3 current_gen=$4 kind=$5 step=$6 attempt=$7 since=$8 ts=$9 record_evidence=${10} record_has_line=${11} clock_valid=${12}
+
+  local cache="$STATE/$id.pipeline-seen" closed_file cached_line cached_wait cached_step cached_gen
+  local cached_evidence cached_closed key pause_line resume_line identity processed=''
+  local active_evidence cache_evidence_valid status_prefix
+  pipeline_seen_prepare "$id" || return 1
+  [ -f "$cache" ] && [ ! -L "$cache" ] || return 0
+  closed_file=$(umask 077; mktemp "$STATE/.fm-pipeline-closed.XXXXXX") || return 1
+  while IFS= read -r cached_line || [ -n "$cached_line" ]; do
+    cached_wait=; cached_step=; cached_gen=; cached_evidence=; cached_closed=
+    IFS=' ' read -r cached_wait cached_step cached_gen cached_evidence _ cached_closed _ <<EOF
+$cached_line
+EOF
+    case "$cached_wait:$cached_step:$cached_gen:$cached_evidence" in
+      wait=*:*:*:evidence=*) ;;
+      *) continue ;;
+    esac
+    case "$cached_closed" in
+      closed_at=*) continue ;;
+    esac
+    cached_wait=${cached_wait#wait=}
+    cached_gen=${cached_gen#gen=}
+    cached_evidence=${cached_evidence#evidence=}
+    cache_evidence_valid=0
+    status_prefix="state/$id.status:"
+    case "$cached_evidence" in
+      "$status_prefix"*)
+        pause_line=${cached_evidence#"$status_prefix"}
+        case "$pause_line" in ''|0*|*[!0-9]*) ;; *) cache_evidence_valid=1 ;; esac
+        ;;
+    esac
+    identity="$cached_wait|$cached_gen|$cached_evidence"
+    case "$processed" in *"$identity"$'\n'*) continue ;; esac
+    processed="${processed}${identity}"$'\n'
+
+    if [ "$cache_evidence_valid" -eq 0 ]; then
+      append_event_locked "ts=$ts task=$id kind=$kind step=$step since=$since probe=unknown rule=- action=none mode=shadow evidence=$cached_evidence gen=$current_gen attempt=$attempt wait=$cached_wait snap=-" || {
+        rm -f -- "$closed_file"
+        return 1
+      }
+      continue
+    fi
+    if [ "$cached_gen" != "$current_gen" ]; then
+      active_evidence=$record_evidence
+      if [ ! -f "$STATE/$id.pipeline" ] || [ -L "$STATE/$id.pipeline" ]; then
+        active_evidence=$cached_evidence
+      fi
+      append_event_locked "ts=$ts task=$id kind=$kind step=$step since=$since probe=unknown rule=- action=none mode=shadow evidence=$active_evidence gen=$current_gen attempt=$attempt wait=$cached_wait snap=-" || {
+        rm -f -- "$closed_file"
+        return 1
+      }
+      continue
+    fi
+    if [ "$clock_valid" -eq 0 ]; then
+      key=$(pipeline_key_from_wait "$cached_wait") || continue
+      if pipeline_pause_key_active "$pauses" "$key"; then
+        continue
+      fi
+      active_evidence=$record_evidence
+      [ "$record_has_line" -eq 1 ] || active_evidence=$cached_evidence
+      append_event_locked "ts=$ts task=$id kind=$kind step=$step since=$since probe=unknown rule=- action=none mode=shadow evidence=$active_evidence gen=$current_gen attempt=$attempt wait=$cached_wait snap=-" || {
+        rm -f -- "$closed_file"
+        return 1
+      }
+      continue
+    fi
+    key=$(pipeline_key_from_wait "$cached_wait") || continue
+    pause_line=${cached_evidence##*:}
+    resume_line=
+    if resume_line=$(status_resume_line "$status_file" "$key" "$pause_line" 2>/dev/null); then
+      append_event_locked "ts=$ts task=$id kind=$kind step=$step since=$since probe=ok rule=- action=none mode=shadow evidence=state/$id.status:$resume_line gen=$current_gen attempt=$attempt wait=$cached_wait snap=-" || {
+        rm -f -- "$closed_file"
+        return 1
+      }
+      printf 'wait=%s\tgen=%s\tevidence=%s\t%s\n' "$cached_wait" "$cached_gen" "$cached_evidence" "$resume_line" >> "$closed_file" || {
+        rm -f -- "$closed_file"
+        return 1
+      }
+      continue
+    fi
+    if ! pipeline_pause_key_active "$pauses" "$key"; then
+      active_evidence=$cached_evidence
+      append_event_locked "ts=$ts task=$id kind=$kind step=$step since=$since probe=unknown rule=- action=none mode=shadow evidence=$active_evidence gen=$current_gen attempt=$attempt wait=$cached_wait snap=-" || {
+        rm -f -- "$closed_file"
+        return 1
+      }
+    fi
+  done < "$cache"
+  if ! pipeline_seen_close_rows "$cache" "$closed_file"; then
+    rm -f -- "$closed_file"
+    return 1
+  fi
+  rm -f -- "$closed_file"
+}
+
 probe_task() {  # <id> [quiet]
-  local id=$1 quiet=${2:-} status_file meta activity_read_failed=0
+  local id=$1 quiet=${2:-} status_file meta cache activity_read_failed=0
   local pauses line_no key line now ts since kind step gen attempt wait rule action probe evidence
+  local record_evidence record_clock_valid=0 record_has_line=0
   fm_task_id_path_safe "$id" || die "invalid task id: $id"
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
   status_file="$STATE/$id.status"
@@ -1434,7 +1584,9 @@ probe_task() {  # <id> [quiet]
     trap - EXIT
     return 0
   fi
-  [ -n "$pauses" ] || return 0
+  pipeline_seen_prepare "$id" || die "cannot prepare pipeline observation cache"
+  cache="$STATE/$id.pipeline-seen"
+  [ -n "$pauses" ] || [ -f "$cache" ] || return 0
   now=$(date +%s)
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   kind=${PIPELINE_RECORD_KIND:--}
@@ -1445,18 +1597,31 @@ probe_task() {  # <id> [quiet]
   [ -n "$step" ] || step=-
   [ -n "$gen" ] || gen=-
   [ -n "$attempt" ] || attempt=-
+  record_evidence="state/$id.pipeline:1"
+  since=0
+  if [ "$PIPELINE_RECORD_HAS_LINE" -eq 1 ]; then
+    record_has_line=1
+    record_evidence="state/$id.pipeline:${PIPELINE_RECORD_LINE_NUMBER:-1}"
+    if since=$(pipeline_since_from_ts "$PIPELINE_RECORD_TS" "$now"); then
+      record_clock_valid=1
+    fi
+  fi
   lock_log
-  while IFS=$'\t' read -r line_no key line; do
-    wait=$(wait_identity "$key")
-    evidence="state/$id.status:$line_no"
-    probe=unknown
-    rule=-
-    action=none
-    since=$(observation_elapsed_since "$id" "$wait" "$step" "$gen" "$evidence" "$now") || die "cannot record pipeline observation"
-    append_event_locked "$(pipeline_probe_row "$ts" "$id" "$kind" "$step" "$since" "$probe" "$rule" "$action" "$evidence" "$gen" "$attempt" "$wait")" || die "cannot append event log"
-  done <<EOF
+  pipeline_close_observations "$id" "$status_file" "$pauses" "$gen" "$kind" "$step" "$attempt" "$since" "$ts" "$record_evidence" "$record_has_line" "$record_clock_valid" || die "cannot close pipeline observations"
+  if [ -n "$pauses" ]; then
+    while IFS=$'\t' read -r line_no key line; do
+      wait=$(wait_identity "$key")
+      evidence="state/$id.status:$line_no"
+      [ "$record_clock_valid" -eq 1 ] || [ "$record_has_line" -eq 0 ] || evidence=$record_evidence
+      probe=unknown
+      rule=-
+      action=none
+      observation_elapsed_since "$id" "$wait" "$step" "$gen" "state/$id.status:$line_no" "$now" >/dev/null || die "cannot record pipeline observation"
+      append_event_locked "$(pipeline_probe_row "$ts" "$id" "$kind" "$step" "$since" "$probe" "$rule" "$action" "$evidence" "$gen" "$attempt" "$wait")" || die "cannot append event log"
+    done <<EOF
 $pauses
 EOF
+  fi
   fm_lock_release "$PIPELINE_LOCK_DIR" || die "cannot release event log lock"
   trap - EXIT
 }
