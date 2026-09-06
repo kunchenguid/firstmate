@@ -934,6 +934,55 @@ test_tasks_config_follows_a_relocated_data_directory() {
   pass "bootstrap materializes .tasks.toml at a relocated data directory's parent"
 }
 
+# A data directory relocated under a name other than "data" must keep its
+# archive beside its backlog: tasks-axi resolves the generated .tasks.toml's
+# data-relative path values against the addressing root, so the template's
+# hardcoded data/ prefix would send archived rows to a sibling data directory
+# instead of the configured one. The generated file is the serialized config
+# tasks-axi consumes, and the real CLI is driven against it to prove where the
+# archive actually lands.
+test_tasks_config_readdresses_a_renamed_data_directory() {
+  local case_dir fixture root home fakebin data out config
+  case_dir="$TMP_ROOT/tasks-config-renamed"
+  fixture=$(make_routine_bootstrap_fixture "$case_dir")
+  root=${fixture%%|*}
+  fixture=${fixture#*|}
+  home=${fixture%%|*}
+  fakebin=${fixture#*|}
+  data="$case_dir/backlog-store"
+  mkdir -p "$data"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_DATA_OVERRIDE="$data" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "TASKS_CONFIG" \
+    "materializing a renamed home's .tasks.toml should stay silent"
+  [ ! -e "$home/.tasks.toml" ] \
+    || fail "bootstrap put the renamed home's .tasks.toml at FM_HOME"
+  config="$case_dir/.tasks.toml"
+  [ -f "$config" ] || fail "bootstrap did not materialize .tasks.toml beside the renamed data directory"
+  assert_contains "$(cat "$config")" 'path = "backlog-store/backlog.md"' \
+    "generated .tasks.toml must address the configured data directory, not data/"
+  assert_contains "$(cat "$config")" 'archive = "backlog-store/done-archive.md"' \
+    "generated .tasks.toml must archive inside the configured data directory"
+
+  if command -v tasks-axi >/dev/null 2>&1; then
+    local i
+    printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$data/backlog.md"
+    for i in 1 2 3 4 5 6 7 8 9 10 11; do
+      (cd "$case_dir" && tasks-axi add "fm-arch-$i" "row $i" --file "$data/backlog.md") >/dev/null
+      (cd "$case_dir" && tasks-axi start "fm-arch-$i" --file "$data/backlog.md") >/dev/null
+      # "done" is quoted so ShellCheck's SC1010 does not read it as the loop keyword.
+      (cd "$case_dir" && tasks-axi "done" "fm-arch-$i" --file "$data/backlog.md") >/dev/null
+    done
+    [ -f "$data/done-archive.md" ] \
+      || fail "tasks-axi archived Done rows outside the configured data directory"
+    [ ! -e "$case_dir/data" ] \
+      || fail "tasks-axi sent the archive to a sibling data directory"
+  fi
+  pass "bootstrap readdresses .tasks.toml to a data directory under another name"
+}
+
 # A home that customized its own backlog config owns it outright; the copy-if-absent
 # path must never read, repair, or rewrite it.
 test_tasks_config_leaves_an_existing_home_copy_untouched() {
@@ -1311,6 +1360,7 @@ test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_tasks_config_materializes_from_the_tracked_example
 test_tasks_config_follows_a_relocated_data_directory
+test_tasks_config_readdresses_a_renamed_data_directory
 test_tasks_config_leaves_an_existing_home_copy_untouched
 test_tasks_config_never_clobbers_a_concurrent_home_copy
 test_tasks_config_failure_is_actionable

@@ -1335,16 +1335,18 @@ tasks_config_setup() {
   # done_keep (see bin/fm-backlog-transition-lib.sh).
   # The file is materialized at the backlog's addressing root - the parent of
   # the configured data directory (fm_backlog_root), not FM_HOME - because that
-  # is where tasks-axi resolves it from. The two coincide only for the default
-  # $FM_HOME/data layout; a data directory relocated by FM_DATA_OVERRIDE would
-  # otherwise run on tasks-axi's built-in defaults with the generated file
-  # sitting unread at FM_HOME. The example's relative data/backlog.md paths
-  # resolve from the root, so they reattach to the relocated data directory.
-  local check=$DATA root
+  # is where tasks-axi resolves it from, and it resolves the example's
+  # data-relative path values against that root. The two coincide only for the
+  # default $FM_HOME/data layout; a data directory relocated by FM_DATA_OVERRIDE
+  # would otherwise run on tasks-axi's built-in defaults with the generated file
+  # sitting unread at FM_HOME. The example's paths assume the data directory is
+  # named data under the root, so a relocation under another name readdresses
+  # them to the configured directory and the archive stays beside the backlog.
+  local check=$DATA root rel_data
   while [ "$check" != / ] && [ "${check%/}" != "$check" ]; do check=${check%/}; done
   case "$check" in
-    */*) root=${check%/*} ;;
-    *) root=. ;;
+    */*) root=${check%/*} rel_data=${check##*/} ;;
+    *) root=. rel_data=$check ;;
   esac
   if [ -e "$root/.tasks.toml" ] || [ -L "$root/.tasks.toml" ]; then
     return 0
@@ -1359,10 +1361,27 @@ tasks_config_setup() {
     echo "TASKS_CONFIG: could not create $root/.tasks.toml from $example"
     return 0
   }
-  if ! cp "$example" "$tmp" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null
-    echo "TASKS_CONFIG: could not create $root/.tasks.toml from $example"
-    return 0
+  if [ "$rel_data" = data ]; then
+    if ! cp "$example" "$tmp" 2>/dev/null; then
+      rm -f "$tmp" 2>/dev/null
+      echo "TASKS_CONFIG: could not create $root/.tasks.toml from $example"
+      return 0
+    fi
+  else
+    # tasks-axi resolves the example's data-relative path values against the
+    # root (its working directory), so a data directory under another name
+    # would otherwise send pruned rows and archived bodies to a sibling data
+    # directory. Escape the value for sed's replacement side first.
+    local esc
+    esc=$(printf '%s' "$rel_data" | sed 's/[&/\\]/\\&/g') \
+      && sed -e "s|\"data/backlog.md\"|\"$esc/backlog.md\"|" \
+             -e "s|\"data/done-archive.md\"|\"$esc/done-archive.md\"|" \
+             "$example" > "$tmp" 2>/dev/null
+    if [ ! -s "$tmp" ]; then
+      rm -f "$tmp" 2>/dev/null
+      echo "TASKS_CONFIG: could not create $root/.tasks.toml from $example"
+      return 0
+    fi
   fi
   # Publish with a hard link, not a rename: link creation fails atomically
   # when the target already exists, so a .tasks.toml created by an overlapping
