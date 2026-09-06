@@ -191,7 +191,7 @@ test_metadata_lock_serializes_destructive_cleanup() {
 }
 
 test_supported_backend_endpoint_records_validate() {
-  local dir id backend target
+  local dir id backend target worktree_id
   dir=$(make_case valid-backends)
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
@@ -220,12 +220,16 @@ test_supported_backend_endpoint_records_validate() {
     "backend=zellij" "zellij_session=lab" "zellij_tab_id=3" "zellij_pane_id=7"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Zellij endpoint refused"
 
-  id=orca-task
+  id=orca-composite-task
+  worktree_id="worktree-10::$dir/work tree"
   fm_write_meta "$dir/home/state/$id.meta" \
-    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
-    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=worktree-9"
-  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Orca endpoint refused"
-  [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] || fail "Orca validation did not select its terminal"
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-8" \
+    "worktree=$dir/work tree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=$worktree_id"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+    || fail "valid composite Orca endpoint refused"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = term-8 ] \
+    || fail "composite Orca validation did not select its terminal"
 
   id=cmux-task
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -241,6 +245,50 @@ test_supported_backend_endpoint_records_validate() {
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
   pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
+}
+
+assert_invalid_orca_worktree_id_refused() {  # <name> <worktree-id>
+  local name=$1 worktree_id=$2 dir id=orca-invalid
+  dir=$(make_case "orca-$name")
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-invalid" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=$worktree_id"
+  assert_refused_without_mutation "$dir" "$id" "invalid Orca worktree id $name"
+  assert_contains "$(cat "$dir/stderr")" "Orca endpoint metadata" \
+    "invalid Orca worktree id $name did not reach the endpoint-identity refusal"
+}
+
+test_invalid_orca_composite_worktree_ids_refuse_before_mutation() {
+  assert_invalid_orca_worktree_id_refused left-metachar \
+    'worktree;touch-bad::/safe/worktree'
+  assert_invalid_orca_worktree_id_refused path-metachar \
+    'worktree-1::/safe/worktree;touch-bad'
+  assert_invalid_orca_worktree_id_refused extra-separator \
+    'worktree-1::/safe/worktree::/extra'
+  assert_invalid_orca_worktree_id_refused empty-id '::/safe/worktree'
+  assert_invalid_orca_worktree_id_refused empty-path 'worktree-1::'
+  assert_invalid_orca_worktree_id_refused relative-path \
+    'worktree-1::relative/worktree'
+  assert_invalid_orca_worktree_id_refused bare-atom 'worktree-9'
+  pass "fm-teardown: malformed and hostile Orca composite worktree ids refuse before mutation"
+}
+
+test_endpoint_atom_safety_boundary_is_unchanged() {
+  local value
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  for value in atom-1 atom_2 atom.3 'atom@4' 'atom%5' 'atom+6'; do
+    fm_backend_endpoint_atom_valid "$value" \
+      || fail "endpoint atom validator refused unchanged safe input '$value'"
+  done
+  for value in 'atom:value' '/absolute/path' 'two words' \
+      'atom&touch-bad' 'atom;touch-bad'; do
+    if fm_backend_endpoint_atom_valid "$value"; then
+      fail "endpoint atom validator accepted unchanged unsafe input '$value'"
+    fi
+  done
+  pass "fm_backend_endpoint_atom_valid: the single-atom shell-safety boundary is unchanged"
 }
 
 test_tmux_empty_target_refuses_without_invocation() {
@@ -369,6 +417,8 @@ test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
+test_invalid_orca_composite_worktree_ids_refuse_before_mutation
+test_endpoint_atom_safety_boundary_is_unchanged
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup

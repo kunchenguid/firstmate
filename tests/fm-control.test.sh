@@ -148,6 +148,32 @@ SH
   printf '%s\n' "$fb"
 }
 
+make_orca_stub() {  # <dir>
+  local dir=$1
+  cat > "$dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'orca' >> "$FM_FAKE_DIR/orca"
+printf ' <%s>' "$@" >> "$FM_FAKE_DIR/orca"
+printf '\n' >> "$FM_FAKE_DIR/orca"
+case "${1:-} ${2:-}" in
+  'status --json')
+    printf '%s\n' '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}'
+    ;;
+  'terminal send')
+    printf '%s\n' '{"ok":true,"result":{"accepted":true}}'
+    ;;
+  'terminal read')
+    printf '%s\n' '{"ok":true,"result":{"terminal":{"tail":["ready"]}}}'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/orca"
+}
+
 # new_case <name> -> echoes a case dir holding home/, fake/, and fakebin.
 new_case() {
   local dir="$TMP_ROOT/$1-$RANDOM"
@@ -392,13 +418,51 @@ test_orca_refuses_an_escape_harness_interrupt() {
   {
     cat "$dir/home/state/t1.meta"
     echo "terminal=term-1"
-    echo "orca_worktree_id=wt-1"
+    echo "orca_worktree_id=wt-1::$dir/wt-t1"
   } > "$dir/home/state/t1.meta.new"
   sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
   out=$(run_control "$dir" t1 interrupt); rc=$?
   expect_code 1 "$rc" "an Escape harness on orca should refuse"
   assert_contains "$out" "cannot deliver" "refusal should name the undeliverable key"
   pass "fm-control interrupt: a backend that cannot deliver the harness's key refuses instead of sending another"
+}
+
+test_orca_composite_worktree_id_reaches_each_control_verb() {
+  local dir out rc verb id=t1 worktree_id
+  dir=$(new_case orca-composite-control)
+  add_task "$dir" "$id" grok ship orca term-composite
+  worktree_id="worktree-10::$dir/wt $id"
+  {
+    cat "$dir/home/state/$id.meta"
+    echo "terminal=term-composite"
+    echo "orca_worktree_id=$worktree_id"
+  } > "$dir/home/state/$id.meta.new"
+  sed "s|^window=.*|window=fm-$id|" \
+    "$dir/home/state/$id.meta.new" > "$dir/home/state/$id.meta"
+  make_orca_stub "$dir"
+  : > "$dir/fake/orca"
+
+  out=$(run_control "$dir" "$id" interrupt); rc=$?
+  expect_code 0 "$rc" "Orca interrupt should accept a composite worktree id"$'\n'"$out"
+  assert_contains "$out" "interrupt-delivered $id" \
+    "Orca interrupt did not reach its executable lifecycle path"
+  assert_contains "$(cat "$dir/fake/orca")" \
+    'orca <terminal> <send> <--terminal> <term-composite> <--interrupt> <--json>' \
+    "Orca interrupt did not target the recorded terminal"
+
+  for verb in exit relaunch; do
+    if [ "$verb" = relaunch ]; then
+      out=$(run_control "$dir" "$id" "$verb" --note preserve); rc=$?
+    else
+      out=$(run_control "$dir" "$id" "$verb"); rc=$?
+    fi
+    expect_code 1 "$rc" "Orca $verb should reach its independent state-proof refusal"$'\n'"$out"
+    assert_contains "$out" "no recovery-grade agent-state classifier" \
+      "Orca $verb did not pass composite endpoint validation"
+    assert_not_contains "$out" "malformed or inconsistent" \
+      "Orca $verb was still refused by composite endpoint validation"
+  done
+  pass "fm-control: Orca composite worktree ids reach interrupt, exit, and relaunch behavior"
 }
 
 test_unverified_state_backends_refuse_stop_verbs() {
@@ -882,6 +946,7 @@ test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
+test_orca_composite_worktree_id_reaches_each_control_verb
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr
 test_window_label_is_refused_with_the_exact_id
