@@ -1260,6 +1260,124 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
+## agy (Antigravity CLI)
+
+The crewmate/scout-only agy adapter was verified on 2026-09-03 against tmux on Linux x86-64, starting at Antigravity CLI 1.1.24 and finishing at 1.1.25 after the binary self-updated mid-session.
+Record agy behavior rather than an agy version: it updates itself without being asked, its hooks facility is absent from `--help`, and its own changelog shows recent changes to hook ordering.
+Refresh this record with `FM_AGY_SIGNALS_LIVE_E2E=1 tests/fm-agy-signals-live-e2e.test.sh`, which fails naming the harness and version.
+
+### Workspace trust is not covered by the permission flag
+
+`--dangerously-skip-permissions` governs tool permissions only.
+Launching with that flag in two separate brand-new git repositories still rendered the workspace-trust dialog:
+
+```text
+Accessing workspace:
+<worktree>
+Do you trust the contents of this project?
+Antigravity CLI requires permission to read, edit, and execute files here.
+> Yes, I trust this folder
+  No, exit
+  ↑/↓ Navigate · enter Confirm
+```
+
+The dialog draws no status-bar text, so a pane parked on it renders neither a spinner nor `esc to cancel`.
+Adding the worktree path to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json` and relaunching reached the ordinary banner and idle prompt with no dialog.
+Trust is not inherited by a nested repository: with `/tmp/claude-1000` already trusted, launching in the git repository at `/tmp/claude-1000/agylab` still prompted.
+That is why `bin/fm-agy-trust.sh` registers each task worktree by its own resolved path.
+
+### Turn-end hook and the fullyIdle gate
+
+Hook loading is reported by agy itself in `~/.gemini/antigravity-cli/cli.log`:
+
+```text
+# only <worktree>/.agents/hooks.json present, print mode:
+hooks_manager.go:53] loaded 0 named hooks from 0 hooks.json file(s)
+# only ~/.gemini/config/hooks.json present, print mode:
+hooks_manager.go:53] loaded 1 named hooks from 1 hooks.json file(s)
+# both present, interactive:
+hooks_manager.go:53] loaded 1 named hooks from 1 hooks.json file(s)
+hooks_manager.go:53] loaded 2 named hooks from 2 hooks.json file(s)
+```
+
+Interactive sessions load hooks twice, global first and then again once the workspace is known; print mode never performs the second load, so a workspace-local `.agents/hooks.json` is interactive-only.
+
+A `Stop` payload carries `workspacePaths` in an interactive pane and an empty array in print mode:
+
+```json
+{
+  "conversationId": "32dfe8f7-51b5-4e24-aa6e-28a7648efe15",
+  "fullyIdle": true,
+  "modelName": "gemini-3.8-flash-high",
+  "terminationReason": "NO_TOOL_CALL",
+  "workspacePaths": ["<worktree>"]
+}
+```
+
+A turn whose shell command outruns agy's own wait produces TWO `Stop` events, and only the second one means the work is finished.
+Asking for `sleep 40; echo bg-finished` and recording every payload gave:
+
+```text
+1: fullyIdle=False terminationReason=NO_TOOL_CALL
+2: fullyIdle=True  terminationReason=NO_TOOL_CALL
+```
+
+Between them the pane showed `? for shortcuts` with a `· 1 task(s) · /tasks` suffix while the command ran.
+Any turn-end signal must therefore require `fullyIdle` true.
+
+### Where the turn-end signal is silent
+
+A declined tool call ends the turn with no `Stop` event: choosing `4. No` at a permission prompt returned the pane to idle with `⎿ User declined the tool call` and produced no payload, reproduced twice, with a plain turn in the same session producing one normally as a positive control.
+An Escape interrupt also produces no `Stop` event.
+`Stop` correctly does not fire while the pane is parked at a permission prompt, so there is no false completion.
+`terminationReason` values beyond `NO_TOOL_CALL` are unverified; the payload documents `model_stop`, `max_steps_exceeded`, and `error`, and forcing each would settle whether `Stop` fires on those paths.
+
+### Rendered identity, control, and launch
+
+| Fact | Observed |
+| --- | --- |
+| Idle status bar | `? for shortcuts` |
+| Busy, parked on a permission prompt, or slash menu open | `esc to cancel` |
+| Background work outstanding | idle bar plus `· N task(s) · /tasks` |
+| Interrupt | single Escape; renders `⎿ Interrupted · What should Antigravity CLI do instead?` and leaves the composer empty |
+| Exit | `/exit`, or `Ctrl+D` twice with `press ctrl+d again to exit` after the first |
+| Resume | `agy --conversation=<id>`, printed at exit |
+| Environment marker | `ANTIGRAVITY_CONVERSATION_ID`, equal to the payload `conversationId` |
+
+`CLAUDECODE=1 agy -p` with the agent printing its own environment returned both `CLAUDECODE=1` and `ANTIGRAVITY_CONVERSATION_ID`, so agy does not clear an inherited primary marker and detection must test agy's marker first.
+
+Resuming by id from a different working directory restored the conversation and real model context - a question answerable only from the previous turn's tool output was answered correctly - but the banner showed the new working directory and that directory triggered its own trust prompt, so resume must be launched from the original worktree.
+
+Typing a prompt and sending `Enter` as a separate step submitted it and the agent acted, writing the requested file; a three-line message delivered by bracketed paste landed intact with no premature submit and was answered from all three lines.
+`-i` and `-p` consume the next argument, so `agy -p --dangerously-skip-permissions "<prompt>"` reports that it took the flag as its prompt and ignored the real one; every flag must precede the prompt.
+
+### Typed-submit confirmation is a tmux-only boundary
+
+agy's composer is a bare `>` between two horizontal rules rather than a bordered container.
+`>` is a shell-prompt glyph, and the composer classifier's safety rule reads a bare shell glyph outside a bordered container as a dead-shell prompt, so an agy pane's composer verdict is always `unknown` - never `empty`:
+
+```sh
+. bin/fm-composer-lib.sh
+printf '%s\n' '─────' '> ' '─────' '? for shortcuts      Gemini 3.8 Flash · high' |
+  { read -r a; read -r b; read -r c; read -r d;
+    fm_composer_classify_screen "" "$(printf '%s\n' "$a" "$b" "$c" "$d")" "" agy; }
+```
+
+```text
+unknown
+```
+
+On tmux that costs nothing: the rich submit core promotes `unknown` to `empty` when a pane that read idle before typing reads busy after Enter, and agy's two status bars supply exactly that transition (`? for shortcuts` idle, `esc to cancel` busy).
+
+**Every other backend, Herdr included, reports a typed agy send as unconfirmed.**
+On Zellij, cmux, and Orca the shared submit core returns any non-pending verdict as-is.
+Herdr does consult its rendered footer, but that rescue is gated on `pending` alone, and an `unknown` verdict is returned unchanged by both its native-busy and native-idle branches.
+So a typed-plane agy send lands on all four and `fm-send` still reports delivery unconfirmed and exits non-zero.
+
+This is NOT the same boundary Cursor has, and the difference is the verdict rather than the backend: Cursor's cursorless composer reads `pending` with typed text (§"Cursor Agent CLI"), which is exactly what Herdr's footer rescue promotes, so Cursor is verified on tmux AND Herdr.
+agy's bare `>` can never read `pending`, so the one branch that would rescue it never fires.
+It does not bound the spawn: the brief rides the launch command's `-i "<prompt>"`, not `fm-send`.
+
 ## Pi supervision branch
 
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.

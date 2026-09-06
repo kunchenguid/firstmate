@@ -172,6 +172,12 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
     # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
+    # agy is anchored for the same reason muse is: `agy` is a short fragment that
+    # a glob would find inside ordinary names like legacy or agyneja, and its
+    # launch execs the bare binary through `env`, so the live process name and
+    # argv[0] are both exactly `agy`. bin/fm-harness.sh applies the same exact
+    # anchoring to it.
+    agy) printf 'agent' ;;
     *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)

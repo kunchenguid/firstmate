@@ -60,6 +60,10 @@ ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # back on (~/.local/bin/muse-bin-<version>), so the executable name is the ONLY
 # signal, and `muse` alone is a common English fragment that must not widen into
 # a substring match. The last two names are the decoys that would be misread.
+ln -s "$SLEEP_BIN" "$LAB/bin/agy"
+ln -s "$SLEEP_BIN" "$LAB/bin/legacy"
+ln -s "$SLEEP_BIN" "$LAB/bin/agyneja"
+ln -s "$SLEEP_BIN" "$LAB/bin/magy"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
 ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
 ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
@@ -171,6 +175,24 @@ for decoy in musescore amuse muse-binary muse-bind; do
     || fail "'$decoy' merely contains 'muse' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
+
+# --- agy's bare binary name --------------------------------------------------
+# agy launches through `env`, which execs, so the pane's process name is exactly
+# `agy`. Misclassified, a healthy agy crewmate reads ambiguous and every control
+# verb refuses to touch it. `agy` is short enough to appear inside ordinary
+# words, so the decoys keep the fix from widening into a substring match.
+
+new_window agy "$LAB/bin/agy" 900
+wait_for_state "$SESSION:agy" alive \
+  || fail "agy's bare binary name must classify alive"
+pass "tmux liveness: agy's bare binary name classifies alive"
+
+for decoy in legacy agyneja magy; do
+  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  wait_for_state "$SESSION:decoy-$decoy" ambiguous \
+    || fail "'$decoy' merely contains 'agy' and must not classify as a live agent pane"
+done
+pass "tmux liveness: unrelated agy-containing command names stay ambiguous"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that
