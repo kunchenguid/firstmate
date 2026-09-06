@@ -3058,10 +3058,11 @@ EOF
 }
 
 test_pi_replacement_tokens_are_process_unique() {
-  local repo home plugin count out status
+  local repo home plugin count late out status
   repo="$TMP_ROOT/pi-replacement-token-uniqueness-root"
   home="$TMP_ROOT/pi-replacement-token-uniqueness-home"
   count="$TMP_ROOT/pi-replacement-token-uniqueness.count"
+  late="$TMP_ROOT/pi-replacement-token-uniqueness.late-sentinel"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
@@ -3072,7 +3073,19 @@ count=0
 count=$((count + 1))
 printf '%s\n' "$count" > "$FM_ARM_COUNT"
 late_close() {
-  sleep 0.08
+  # Hold each late outcome until the test says both fresh modules have armed
+  # and shut down, then stagger the releases. An outcome that beats the next
+  # module's activation is loaded and presented by that activation, and
+  # accept-once retires it instead of riding the handoff; two simultaneous
+  # outcomes could also interleave the handoff file's read-merge-write.
+  # Ordering them keeps this test measuring token uniqueness, not the
+  # scheduler.
+  local waited=0
+  while [ ! -f "$FM_LATE_SENTINEL" ] && [ "$waited" -lt 300 ]; do
+    sleep 0.01
+    waited=$((waited + 1))
+  done
+  sleep "0.${count}"
   printf 'signal: module-%s late actionable outcome\n' "$count"
   exit 0
 }
@@ -3081,7 +3094,8 @@ printf 'watcher: started pid=%s\n' "$$"
 while :; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=10 node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" \
+    FM_LATE_SENTINEL="$late" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=10 node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -3125,6 +3139,7 @@ for (let moduleIndex = 1; moduleIndex <= 2; moduleIndex += 1) {
   );
   await instance.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 }
+writeFileSync(process.env.FM_LATE_SENTINEL, "release the late outcomes\n");
 const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
 await waitFor(() => existsSync(handoffPath), "replacement handoff");
 await waitFor(() => JSON.parse(readFileSync(handoffPath, "utf8")).pending.length === 2, "two distinct handoff outcomes");
