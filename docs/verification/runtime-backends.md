@@ -22,7 +22,13 @@ For launches identified as Claude, `fm-spawn.sh` checks that fragment and refuse
 Raw launches identified as another harness remain independent of Claude policy setup.
 This preflight does not prove Claude's effective resolved setting.
 A later alphabetic file-managed fragment can override Firstmate's fragment, and a higher server-managed or MDM tier can replace the file-managed tier entirely.
-The managed fragment is therefore a best-effort default, not a proven fleet-safety guarantee, pending captain authorization of that boundary.
+
+### Security boundary
+
+The captain authorized this best-effort boundary on 2026-09-06 so normal fleet launches can use the metromotion account with machine-managed RC-off as their effective default.
+The accepted threat model excludes a deliberately added later fragment, a higher server-managed or MDM override, and an adversarial raw-shell wrapper intended to evade the version preflight.
+The system-managed fragment still applies to wrapped commands, but arbitrary shell syntax cannot be classified reliably enough to guarantee that every wrapper receives the Claude 2.1.128 version check.
+The mechanism therefore does not claim a provable effective-state or adversarial fleet-safety guarantee.
 
 The opt-in drift observation deliberately requests `--remote-control` while passing `--settings '{"disableRemoteControl":false}'`, then checks whether both Remote Control commands remain unavailable after a completed turn.
 Its result describes only that concrete Claude version, account, host policy stack, and lab turn.

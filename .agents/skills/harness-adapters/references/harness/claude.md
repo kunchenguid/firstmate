@@ -51,7 +51,7 @@ Firstmate must run `sudo bin/fm-claude-rc-off.sh install-policy` once on each ho
 Every launch identified as Claude checks that fragment and the selected Claude executable's supported version before creating task state or launching a pane.
 The helper explicitly does not claim effective-state verification because later file-managed fragments and higher server-managed or MDM tiers can override the fragment.
 Non-Claude raw launches do not depend on Claude policy setup.
-The [runtime verification record](../../../../../docs/verification/runtime-backends.md#claude-remote-control-best-effort-default) owns the limitation and opt-in real-harness observation.
+The [runtime verification record](../../../../../docs/verification/runtime-backends.md#claude-remote-control-best-effort-default) owns the captain-authorized security boundary and opt-in real-harness observation.
 
 ## Primary integration
 
