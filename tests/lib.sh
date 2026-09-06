@@ -466,6 +466,63 @@ fm_touch_epoch() {
     || fail "fm_touch_epoch: touch -t $stamp failed for $*"
 }
 
+# fm_cygwin_fakebin <dir> -> fakebin dir with a `uname` reporting MINGW and a
+# `ps` that behaves like Cygwin's: it rejects -o outright (Cygwin's ps has no
+# -o option at all), and every local pid it reports has its parent link
+# severed at 1, exactly as the real Windows process-boundary bridge sees it.
+# Reproduced here rather than assumed, so callers run identically on Linux and
+# macOS CI. `ps -p`/`ps -f -p <pid>` answer from a small built-in Cygwin-side
+# table: pid 700 is a local MSYS-native harness (ppid overridable through
+# FM_TEST_CYG_PPID for a caller that parents its own process off it), and every
+# other pid is an ordinary non-harness shell. `ps -W` answers the Windows-side
+# table from FM_TEST_WIN_TABLE (set by the caller per case, in the same column
+# order the real `ps -W` prints), which is how a tagged win:<pid> is confirmed.
+fm_cygwin_fakebin() {  # <dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'MINGW64_NT-10.0-26200'
+SH
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+for a in "$@"; do
+  # Cygwin's ps has no -o option at all; it fails the whole invocation.
+  [ "$a" = "-o" ] && { echo "ps: unknown option -- o" >&2; exit 1; }
+done
+mode=p full=0 pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -W) mode=W; shift ;;
+    -f) full=1; shift ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$mode" = W ]; then
+  printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+  [ -n "${FM_TEST_WIN_TABLE:-}" ] && printf '%s\n' "$FM_TEST_WIN_TABLE"
+  exit 0
+fi
+# The Cygwin-side table. 700 is an MSYS-native harness; everything else is an
+# ordinary shell whose parent link is severed exactly as the real ps reports it.
+case "$pid" in
+  700) comm='/opt/claude/versions/2.1.220'; ppid=1 ;;
+  *)   comm='/usr/bin/bash'; ppid=${FM_TEST_CYG_PPID:-1} ;;
+esac
+if [ "$full" = 1 ]; then
+  printf '%s\n' '     UID     PID    PPID  TTY        STIME COMMAND'
+  printf 'u %s %s ? 00:00:00 %s\n' "$pid" "$ppid" "$comm"
+else
+  printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+  printf '%s %s %s 9999 ? 0 00:00:00 %s\n' "$pid" "$ppid" "$pid" "$comm"
+fi
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
