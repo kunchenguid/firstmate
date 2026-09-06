@@ -74,6 +74,18 @@
 #                   interrupt a running script; per-script hangs are
 #                   bounded by --per-script-timeout-secs. Pathological output
 #                   sinks that block finalization are explicitly out of scope.
+#   --resource-accounting
+#                   off by default, observability only, no new gate. After the
+#                   run, for each family, sample the aggregate RSS of the run's
+#                   own child processes (ps -o rss= --ppid, summed; falls back
+#                   to a cgroup memory.peak read when the ps sum is zero and a
+#                   cgroup memory.peak file is present) and du -sh of this
+#                   run's own temp/work root, and print an FM_TEST_RESOURCE
+#                   line next to that family's FM_TEST_SUMMARY_FAMILY line.
+#                   With --json, the same numbers are added under each
+#                   family's new "resource" key; every other key is unchanged.
+#                   With the flag off, output is byte-identical to before it
+#                   existed.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -83,6 +95,9 @@
 # After all scripts (stdout):
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
+#   FM_TEST_RESOURCE family=<name> rss_kb=<n> work_root_du=<human>
+#                   (only with --resource-accounting, one per family, printed
+#                   immediately after that family's FM_TEST_SUMMARY_FAMILY line)
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
 #   FM_TEST_BUDGET max_wall_ms=<n> duration_ms=<n>   (only with --max-wall-ms)
 #
@@ -143,6 +158,7 @@ JOBS_EXPLICIT=0
 JOBS_MAX=8
 MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
+RESOURCE_ACCOUNTING=0
 # Bound applied automatically on the automatic --changed path, derived from
 # measured healthy runtimes with margin rather than picked: the slowest measured
 # behavior test is the 341s Herdr presentation E2E, and the slowest script in a
@@ -1495,15 +1511,16 @@ write_json_artifact() {
   local selection=$9
   local records_file=${10}
   local families_file=${11}
+  local resource_file=${12:-}
 
   if ! command -v python3 >/dev/null 2>&1; then
     die "--json requires python3 to emit a valid timing artifact"
   fi
 
-  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$skipped" "$duration" "$selection" "$records_file" "$families_file" <<'PY'
+  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$skipped" "$duration" "$selection" "$records_file" "$families_file" "$resource_file" <<'PY'
 import json, sys
 
-out, started, finished, run_id, total, failed, skipped, duration, selection, records_file, families_file = sys.argv[1:]
+out, started, finished, run_id, total, failed, skipped, duration, selection, records_file, families_file, resource_file = sys.argv[1:]
 
 scripts = []
 with open(records_file, encoding="utf-8") as fh:
@@ -1521,6 +1538,19 @@ with open(records_file, encoding="utf-8") as fh:
             "gate_skip": gate == "true",
         })
 
+resource_by_family = {}
+if resource_file:
+    with open(resource_file, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            name, rss_kb_s, work_root_du = line.split("\t")
+            resource_by_family[name] = {
+                "rss_kb": int(rss_kb_s),
+                "work_root_du": work_root_du,
+            }
+
 families = []
 with open(families_file, encoding="utf-8") as fh:
     for line in fh:
@@ -1528,12 +1558,15 @@ with open(families_file, encoding="utf-8") as fh:
         if not line:
             continue
         name, count_s, dur_s, failed_s = line.split("\t")
-        families.append({
+        family = {
             "name": name,
             "count": int(count_s),
             "duration_ms": int(dur_s),
             "failed": int(failed_s),
-        })
+        }
+        if name in resource_by_family:
+            family["resource"] = resource_by_family[name]
+        families.append(family)
 
 doc = {
     "run_id": run_id,
@@ -1614,6 +1647,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --json=*)
       JSON_PATH=${1#--json=}
+      shift
+      ;;
+    --resource-accounting)
+      RESOURCE_ACCOUNTING=1
       shift
       ;;
     --jobs)
@@ -1972,7 +2009,57 @@ fi
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
+RESOURCE_TSV="$RUN_TMP/resource.tsv"
 : >"$RECORDS"
+: >"$RESOURCE_TSV"
+
+# --resource-accounting helpers (observability only; never affect exit status).
+# fm_test_resource_cgroup_peak_kb reads this process's cgroup v2 memory.peak
+# (the high-water mark, which - unlike a live ps sample - survives children
+# that already exited), converted from bytes to whole KB. Prints 0 when no
+# such file is readable.
+fm_test_resource_cgroup_peak_kb() {
+  local path=/sys/fs/cgroup/memory.peak rel
+  if [ ! -r "$path" ] && [ -r /proc/self/cgroup ]; then
+    rel=$(awk -F: '{print $3}' /proc/self/cgroup 2>/dev/null | head -n 1)
+    if [ -n "$rel" ] && [ -r "/sys/fs/cgroup${rel}/memory.peak" ]; then
+      path="/sys/fs/cgroup${rel}/memory.peak"
+    fi
+  fi
+  [ -r "$path" ] || { printf '%s\n' 0; return; }
+  awk '{v = $1 + 0; printf "%d", v / 1024}' "$path" 2>/dev/null || printf '%s\n' 0
+}
+
+# fm_test_resource_children_rss_kb sums the RSS (KB) of this run's own direct
+# child processes still alive at sample time (ps -o rss= --ppid $$). Falls
+# back to the cgroup peak above when that sum is zero, since a live sample
+# taken after the run finishes cannot see children that already exited.
+fm_test_resource_children_rss_kb() {
+  local sum peak
+  sum=$(ps -o rss= --ppid "$$" 2>/dev/null | awk '{s += $1} END{print s + 0}')
+  case "$sum" in
+    ''|*[!0-9]*) sum=0 ;;
+  esac
+  if [ "$sum" -eq 0 ]; then
+    peak=$(fm_test_resource_cgroup_peak_kb)
+    case "$peak" in
+      ''|*[!0-9]*) peak=0 ;;
+    esac
+    [ "$peak" -le 0 ] || sum=$peak
+  fi
+  printf '%s\n' "$sum"
+}
+
+# fm_test_resource_work_root_du prints du -sh of this run's own temp/work
+# root (RUN_TMP, which also contains every concurrent worker's own TMPDIR).
+fm_test_resource_work_root_du() {
+  if [ -d "$RUN_TMP" ]; then
+    du -sh "$RUN_TMP" 2>/dev/null | awk '{print $1}'
+  else
+    printf '%s\n' 0
+  fi
+}
+
 declare -a WORKER_PIDS=()
 declare -a WORKER_IDX=()
 declare -a WORKER_SCRIPTS=()
@@ -2261,6 +2348,13 @@ if [ -s "$FAMILIES_TSV" ]; then
   sort -t$'\t' -k1,1 "$FAMILIES_TSV" | while IFS=$'\t' read -r name count duration failed_count; do
     printf 'FM_TEST_SUMMARY_FAMILY family=%s count=%s duration_ms=%s failed=%s\n' \
       "$name" "$count" "$duration" "$failed_count"
+    if [ "$RESOURCE_ACCOUNTING" -eq 1 ]; then
+      resource_rss_kb=$(fm_test_resource_children_rss_kb)
+      resource_work_root_du=$(fm_test_resource_work_root_du)
+      printf 'FM_TEST_RESOURCE family=%s rss_kb=%s work_root_du=%s\n' \
+        "$name" "$resource_rss_kb" "$resource_work_root_du"
+      printf '%s\t%s\t%s\n' "$name" "$resource_rss_kb" "$resource_work_root_du" >>"$RESOURCE_TSV"
+    fi
   done
 fi
 
@@ -2282,11 +2376,15 @@ if [ -n "$JSON_PATH" ]; then
   else
     : >"$FAMILIES_TSV"
   fi
+  resource_json_arg=""
+  if [ "$RESOURCE_ACCOUNTING" -eq 1 ] && [ -s "$RESOURCE_TSV" ]; then
+    resource_json_arg=$RESOURCE_TSV
+  fi
   set +e
   write_json_artifact "$JSON_PATH" \
     "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
     "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" \
-    "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV"
+    "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV" "$resource_json_arg"
   json_rc=$?
   set -e
   if [ "$json_rc" -eq 0 ]; then

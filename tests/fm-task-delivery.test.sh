@@ -228,6 +228,133 @@ EOF
   pass "fm-spawn: the Prep line must name a real tier, not the unfilled Tier 1 placeholder or no tier at all"
 }
 
+# The Resource line refusal only fires when BOTH conditions hold: the brief
+# carries a "# Proof bar" section AND its Task text mentions running tests,
+# builds, a lint battery, or a browser suite. A brief with no Proof bar
+# section (every fixture and legacy brief in this suite, plus any brief
+# scaffolded before this check existed) must keep spawning unchanged even
+# when its Task text happens to mention testing.
+test_ship_spawn_validates_the_resource_line() {
+  local rec home proj fakebin id out status
+  rec=$(make_home resource)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  id=resource-missing
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Run only the touched tests, one process at a time, never the whole battery.
+
+## Firstmate spec
+Verify the selected delivery behavior.
+
+# Proof bar
+Prep: Tier 0 - test fixture, not a real change
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a Proof-bar ship brief with a test-executing task and no Resource line should be refused"
+  assert_contains "$out" 'has no "Resource:" line' \
+    "a missing Resource line was not refused with the expected error"
+  assert_absent "$home/state/$id.meta" "missing-Resource spawn wrote task metadata"
+
+  id=resource-unfilled-placeholder
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Run only the touched tests, one process at a time, never the whole battery.
+
+## Firstmate spec
+Verify the selected delivery behavior.
+
+# Proof bar
+Prep: Tier 0 - test fixture, not a real change
+Resource: {RESOURCE}
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the unfilled \"Resource: {RESOURCE}\" placeholder should be refused"
+  assert_contains "$out" "unfilled placeholder" \
+    "the unfilled Resource placeholder was not named as unfilled"
+  assert_absent "$home/state/$id.meta" "unfilled-Resource-placeholder spawn wrote task metadata"
+
+  id=resource-na-accepted
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Run only the touched tests, one process at a time, never the whole battery.
+
+## Firstmate spec
+Verify the selected delivery behavior.
+
+# Proof bar
+Prep: Tier 0 - test fixture, not a real change
+Resource: N/A
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" 'has no "Resource:" line' \
+    "a filled \"Resource: N/A\" line was rejected as missing"
+  assert_not_contains "$out" "unfilled placeholder" \
+    "a filled \"Resource: N/A\" line was rejected as the unfilled placeholder"
+
+  id=resource-no-test-mention
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix a typo in a comment.
+
+## Firstmate spec
+Edit the comment text.
+
+# Proof bar
+Prep: Tier 0 - test fixture, not a real change
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" 'has no "Resource:" line' \
+    "a Proof-bar brief whose task never mentions tests/builds was refused for a missing Resource line"
+
+  id=resource-legacy-no-proof-bar
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Run only the touched tests, one process at a time, never the whole battery.
+
+## Firstmate spec
+Verify the selected delivery behavior.
+
+Prep: Tier 0 - test fixture, not a real change
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" 'has no "Resource:" line' \
+    "a legacy brief with no Proof bar section was refused for a missing Resource line"
+  assert_not_contains "$out" "unfilled placeholder" \
+    "a legacy brief with no Proof bar section was refused as an unfilled Resource placeholder"
+
+  pass "fm-spawn: the Resource line is required only for a Proof-bar brief whose task mentions tests/builds/lint/browser, and legacy briefs keep spawning"
+}
+
 # A scout has no merge to govern and a secondmate's posture is fixed, so the flags
 # are refused rather than accepted and quietly ignored.
 test_scout_and_secondmate_refuse_delivery_flags() {
@@ -1043,6 +1170,7 @@ EOF
 
 test_ship_spawn_requires_a_valid_delivery_contract
 test_ship_spawn_validates_the_prep_line
+test_ship_spawn_validates_the_resource_line
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry

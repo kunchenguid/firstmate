@@ -1066,6 +1066,44 @@ test_ship_briefs_batch_findings_before_resubmitting() {
   pass "fm-brief.sh: ship briefs require batching findings before repair or resubmission"
 }
 
+# The Proof bar's "Prep: {PREP}" placeholder has a sibling "Resource: {RESOURCE}"
+# placeholder directly under it (the RAM/disk envelope Firstmate fills at
+# intake, AGENTS.md section 11), and its two-sentence definition sits beside
+# the tier definitions. Filling it at intake (the same way {PREP} is filled)
+# must leave a real, non-placeholder line.
+test_ship_brief_carries_the_resource_line() {
+  local home id brief content
+  home="$TMP_ROOT/resource-home"
+  mkdir -p "$home/data"
+  id="brief-resource-a1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  grep -Fqx 'Resource: {RESOURCE}' "$brief" \
+    || fail "ship brief must scaffold the unfilled \"Resource: {RESOURCE}\" placeholder"
+  # It must sit directly under the Prep line, not floating elsewhere in the section.
+  awk '
+    $0 == "Prep: {PREP}" { got_prep = 1; next }
+    got_prep { if ($0 == "Resource: {RESOURCE}") found = 1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$brief" || fail "the Resource placeholder must sit directly under the Prep placeholder"
+  assert_grep "Resource, the RAM/disk envelope this task may use for tests and builds" "$brief" \
+    "ship brief must carry the Resource tier definition beside the Prep tier definitions"
+  assert_grep 'or "N/A" when the task executes no tests or builds' "$brief" \
+    "the Resource definition must state the N/A escape hatch for no-test/no-build tasks"
+
+  # Firstmate fills {RESOURCE} at intake exactly like {PREP}; the filled line
+  # must be a real, non-placeholder value.
+  content=$(cat "$brief")
+  content=${content//'Prep: {PREP}'/'Prep: Tier 0 - test fixture, not a real change'}
+  content=${content//'Resource: {RESOURCE}'/'Resource: one test process at a time, no whole-repo lint or battery locally'}
+  printf '%s\n' "$content" > "$brief"
+  assert_no_grep '{RESOURCE}' "$brief" "a filled Resource line must leave no leftover placeholder token"
+  grep -Fqx 'Resource: one test process at a time, no whole-repo lint or battery locally' "$brief" \
+    || fail "the filled Resource line did not carry the real value through"
+  pass "fm-brief.sh: the ship scaffold carries a fillable Resource line beside Prep"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -1091,3 +1129,4 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_task_briefs_carry_project_authority_reconciliation
 test_ship_briefs_batch_findings_before_resubmitting
+test_ship_brief_carries_the_resource_line

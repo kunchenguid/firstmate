@@ -652,6 +652,112 @@ assert "family" in doc["scripts"][0]
   pass "timing markers and JSON artifact are valid"
 }
 
+test_resource_accounting_off_is_byte_identical() {
+  local tmp fixture out_without out_with json_without json_with
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-resource-off.XXXXXX")
+  fixture="$tmp/ok.test.sh"
+  out_without="$tmp/without.txt"
+  out_with="$tmp/with.txt"
+  # Same JSON path for both runs (overwritten sequentially) so the trailing
+  # "wrote timing artifact: <path>" log line is identical too, not just its
+  # content - the flag being off must leave literally nothing different.
+  json_without="$tmp/timing.json"
+  json_with="$tmp/timing.json"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixture"
+exit 0
+SH
+  chmod +x "$fixture"
+  "$RUNNER" --json "$json_without" "$fixture" >"$out_without" 2>&1 \
+    || { rm -rf "$tmp"; fail "runner should pass on a green fixture without the flag"; }
+  cp "$json_without" "$tmp/without-saved.json"
+  "$RUNNER" --json "$json_with" "$fixture" >"$out_with" 2>&1 \
+    || { rm -rf "$tmp"; fail "runner should pass on a green fixture with --resource-accounting omitted"; }
+  json_without="$tmp/without-saved.json"
+  # Neither invocation passes --resource-accounting; the flag defaults off, so
+  # both runs must be identical modulo the run-specific timestamp/duration.
+  if ! diff \
+    <(sed -E 's/duration_ms=[0-9]+/duration_ms=X/g; s/^(FM_TEST_(BEGIN|END)) [0-9T:Z-]+/\1 X/' "$out_without") \
+    <(sed -E 's/duration_ms=[0-9]+/duration_ms=X/g; s/^(FM_TEST_(BEGIN|END)) [0-9T:Z-]+/\1 X/' "$out_with") \
+    >"$tmp/diff.txt"; then
+    cat "$tmp/diff.txt"
+    rm -rf "$tmp"
+    fail "stdout must be identical with --resource-accounting off across repeated invocations"
+  fi
+  assert_no_grep "FM_TEST_RESOURCE" "$out_without" \
+    "no FM_TEST_RESOURCE line must print when --resource-accounting is not passed"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+for fam in doc["families"]:
+    assert "resource" not in fam, fam
+' "$json_without" || { rm -rf "$tmp"; fail "JSON must carry no \"resource\" key when --resource-accounting is not passed"; }
+  rm -rf "$tmp"
+  pass "fm-test-run: --resource-accounting off leaves stdout and JSON byte-identical to before it existed"
+}
+
+test_resource_accounting_on_reports_per_family() {
+  local tmp fixture_a fixture_b out json
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-resource-on.XXXXXX")
+  # Distinct basenames landing in two different families (fm-ask-user-authority.test.sh
+  # maps to "pure-contract-unit"; the unmapped name falls into the "unclassified"
+  # catch-all), so the per-family pairing below is exercised for real.
+  fixture_a="$tmp/fm-ask-user-authority.test.sh"
+  fixture_b="$tmp/resource-accounting-fixture-b.test.sh"
+  out="$tmp/out.txt"
+  json="$tmp/timing.json"
+  cat >"$fixture_a" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixture a"
+exit 0
+SH
+  cat >"$fixture_b" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixture b"
+exit 0
+SH
+  chmod +x "$fixture_a" "$fixture_b"
+  "$RUNNER" --resource-accounting --json "$json" "$fixture_a" "$fixture_b" >"$out" 2>&1 \
+    || { rm -rf "$tmp"; fail "runner should pass on green fixtures with --resource-accounting"; }
+  # One FM_TEST_RESOURCE line per family, each immediately after that family's
+  # FM_TEST_SUMMARY_FAMILY line, and every FM_TEST_SUMMARY_FAMILY line must be followed
+  # by exactly one FM_TEST_RESOURCE line for the same family.
+  awk '
+    /^FM_TEST_SUMMARY_FAMILY / {
+      match($0, /family=[^ ]+/); fam = substr($0, RSTART + 7, RLENGTH - 7)
+      getline nextline
+      if (nextline !~ ("^FM_TEST_RESOURCE family=" fam " ")) {
+        print "missing or mismatched FM_TEST_RESOURCE after family " fam ": " nextline
+        exit 1
+      }
+      next
+    }
+  ' "$out" >"$tmp/pairing-error.txt"
+  [ ! -s "$tmp/pairing-error.txt" ] || { cat "$tmp/pairing-error.txt"; rm -rf "$tmp"; fail "each FM_TEST_SUMMARY_FAMILY line must be paired with its own FM_TEST_RESOURCE line"; }
+  grep -Eq '^FM_TEST_RESOURCE family=[^ ]+ rss_kb=[0-9]+ work_root_du=[^ ]+$' "$out" \
+    || fail "FM_TEST_RESOURCE line missing rss_kb/work_root_du: $(grep '^FM_TEST_RESOURCE' "$out")"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["families"], "no families in JSON"
+for fam in doc["families"]:
+    assert "resource" in fam, fam
+    assert "rss_kb" in fam["resource"], fam
+    assert "work_root_du" in fam["resource"], fam
+    assert isinstance(fam["resource"]["rss_kb"], int), fam
+' "$json" || { rm -rf "$tmp"; fail "JSON must carry a \"resource\" key with rss_kb/work_root_du per family"; }
+  # Every pre-existing key must survive unchanged alongside the new one.
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+for fam in doc["families"]:
+    assert set(["name", "count", "duration_ms", "failed", "resource"]) == set(fam.keys()), fam
+' "$json" || { rm -rf "$tmp"; fail "the resource key must be additive, not a replacement for existing family keys"; }
+  rm -rf "$tmp"
+  pass "fm-test-run: --resource-accounting prints one FM_TEST_RESOURCE line per family and adds a per-family JSON resource key"
+}
+
 test_aggregate_exit_behavior() {
   local tmp pass_f fail_f rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-agg.XXXXXX")
@@ -1382,6 +1488,8 @@ test_script_list_uses_bounded_automatic_concurrency
 test_family_proofs_run_in_separate_concurrent_phases
 test_empty_selection_emits_summary
 test_timing_markers_and_json
+test_resource_accounting_off_is_byte_identical
+test_resource_accounting_on_reports_per_family
 test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_fail_on_gate_skip_token

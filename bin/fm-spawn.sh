@@ -15,7 +15,11 @@
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, or an incomplete pair of Task subsections. A
 #   ship spawn additionally refuses a brief with no "Prep:" line at all (the
-#   scaffold's Proof bar section, bin/fm-brief.sh).
+#   scaffold's Proof bar section, bin/fm-brief.sh). When that Proof bar
+#   section is present and the brief's Task text mentions running tests,
+#   builds, a lint battery, or a browser suite, the spawn also refuses a
+#   missing or unfilled "Resource:" line; a brief with no Proof bar section
+#   (a legacy brief) is never checked for one.
 #   For a no-mistakes ship, spawn renders `launch-brief.md` with the current
 #   `--intent` contract and the extracted captain intent. A legacy mixed Task is
 #   accepted there only under bin/fm-dod-lib.sh's provenance-marking rules;
@@ -1926,6 +1930,30 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         exit 1
         ;;
     esac
+    # The Resource line is only ever required when this brief carries the
+    # "# Proof bar" section (bin/fm-dod-lib.sh's fm_proof_bar_section) AND its
+    # own Task text mentions running tests, builds, a lint battery, or a
+    # browser suite. Scanning only the Task body (not the whole brief) avoids
+    # the universal "chrome-devtools-axi for browser operations" boilerplate
+    # in every ship brief's # Rules section, which would otherwise force a
+    # Resource line onto every ship brief regardless of its actual task. A
+    # brief with no Proof bar section at all (a legacy brief, or a test
+    # fixture that never carried one) keeps spawning unchanged.
+    if fm_brief_heading_present "$BRIEF" "# Proof bar"; then
+      RESOURCE_TASK_BODY=$(fm_brief_heading_body "$BRIEF" "# Task")
+      if printf '%s\n' "$RESOURCE_TASK_BODY" | grep -qiE '\b(tests?|testing|builds?|building|batter(y|ies)|lints?|linting|browser)\b'; then
+        RESOURCE_LINE=$(grep '^Resource: ' "$BRIEF" | head -n 1)
+        if [ -z "$RESOURCE_LINE" ]; then
+          echo "error: $BRIEF has no \"Resource:\" line; state the RAM/disk envelope at intake (AGENTS.md section 11) before spawn" >&2
+          exit 1
+        fi
+        RESOURCE_BODY=${RESOURCE_LINE#Resource: }
+        if [ "$RESOURCE_BODY" = "{RESOURCE}" ]; then
+          echo "error: $BRIEF's Resource line is the unfilled placeholder \"Resource: {RESOURCE}\"; state the actual RAM/disk envelope, or \"N/A\" when the task runs no tests or builds, before spawn" >&2
+          exit 1
+        fi
+      fi
+    fi
   fi
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
     if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then

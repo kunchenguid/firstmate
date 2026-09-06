@@ -80,9 +80,12 @@
 # self-governance section when a touched project AGENTS.md lacks it.
 # Every ship scaffold also carries a "Proof bar" section: the prep tier
 # definitions and evidence contract copied inline, plus a "Prep: {PREP}"
-# placeholder Firstmate fills at intake the same way it fills delivery mode and
+# placeholder and a sibling "Resource: {RESOURCE}" RAM/disk-envelope placeholder
+# Firstmate fills at intake the same way it fills delivery mode and
 # test scope (AGENTS.md section 11). bin/fm-spawn.sh refuses a ship spawn whose
-# brief has no "Prep:" line at all. bin/fm-dod-lib.sh's fm_ship_batch_rule_block
+# brief has no "Prep:" line at all, and, when the brief carries a Proof bar
+# section and its task text mentions test/build/battery/lint/browser execution,
+# a brief with no filled "Resource:" line either. bin/fm-dod-lib.sh's fm_ship_batch_rule_block
 # renders the matching rule 8 (pre-run mechanism sweep, batch-findings
 # response), rule 9 (never re-run a failed CI job), and rule 10 (test quality:
 # name the behavior a new/changed test proves, justify any deletion or
@@ -388,10 +391,14 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 # Proof bar (ship only): the prep tier plus tier definitions and evidence
 # contract, rendered from bin/fm-dod-lib.sh's fm_proof_bar_section (the single
 # owner, shared with bin/fm-promote.sh) so it survives with no other file
-# loaded. Firstmate fills the {PREP} placeholder at intake, on the same line
-# as delivery mode and test scope (AGENTS.md section 11); bin/fm-spawn.sh
-# refuses a ship spawn whose brief carries no "Prep:" line, whose Prep line
-# is the unfilled "Tier 1" placeholder, or whose Prep line names no tier.
+# loaded. Firstmate fills the {PREP} and {RESOURCE} placeholders at intake, on
+# the same footing as delivery mode and test scope (AGENTS.md section 11);
+# bin/fm-spawn.sh refuses a ship spawn whose brief carries no "Prep:" line,
+# whose Prep line is the unfilled "Tier 1" placeholder, or whose Prep line
+# names no tier. It applies the same refusal to a missing or unfilled
+# "Resource:" line, but only when the brief carries this Proof bar section and
+# its task text mentions running tests, builds, a lint battery, or a browser
+# suite - a legacy brief with no Proof bar section keeps spawning unchanged.
 PROOF_BAR_SECTION=$(fm_proof_bar_section)
 
 if [ "$KIND" = scout ]; then
