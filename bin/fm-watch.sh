@@ -1337,6 +1337,24 @@ heartbeat_scan_finds_actionable() {
   return "$found"
 }
 
+# interruptible_sleep: a foreground `sleep` that the HUP/INT/TERM trap can cut
+# short at once. Bash does not run a trap set for a signal while a foreground
+# command is executing; it defers it until that command returns. So a watcher
+# blocked in a plain `sleep "$POLL"` ignores the TERM its arm layer sends to
+# evict a wedged watcher until the sleep elapses, which is why evicting one used
+# to require a SIGKILL. Backgrounding the sleep and `wait`ing on that one child
+# lets the trap fire immediately - `wait` returns >128 on a trapped signal and
+# the `exit 1` trap then runs - so a normal poll-blocked watcher exits promptly
+# on TERM. The child sleep is reaped normally and, on the signal path, orphaned
+# harmlessly for at most its remaining POLL seconds. Waiting on the specific pid
+# (never a bare `wait`) leaves the watcher's other detached children untouched.
+interruptible_sleep() {  # <seconds>
+  local _sleep_pid
+  sleep "$1" &
+  _sleep_pid=$!
+  wait "$_sleep_pid" 2>/dev/null
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -1371,7 +1389,7 @@ event_wait_or_sleep() {
   done < <(recorded_windows)
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    sleep "$POLL"
+    interruptible_sleep "$POLL"
     return
   fi
 
@@ -1387,7 +1405,7 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
-    sleep "$POLL"
+    interruptible_sleep "$POLL"
     return
   fi
 
@@ -1404,7 +1422,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
-      sleep "$POLL"
+      interruptible_sleep "$POLL"
       ;;
     *)
       # 1: a clean full-budget wait with no actionable edge - the reader already

@@ -1504,6 +1504,60 @@ test_failed_send_discards_undelivered_expectation() {
   pass "failed transport discards undelivered expectation only"
 }
 
+# fm_pending_reply_tick runs inside the watcher's own poll cycle, between two
+# liveness-beacon touches. Its remote-secondmate `observe` is a synchronous ssh
+# round trip; a reachable host whose observe command stalls would otherwise
+# freeze that poll and let the watcher's beacon go stale past grace, taking
+# supervision - and every secondmate-outcome surfacing path - down with it. The
+# observe is hard-bounded (FM_PENDING_REPLY_OBSERVE_TIMEOUT), so a stalled remote
+# observe degrades to "unknown" and the tick returns promptly instead of hanging.
+# This drives a real remote record through fm-on.sh with a stalled ssh transport
+# (the FM_SSH_BIN seam) and proves the tick returns well under the stall.
+test_remote_observe_is_bounded_so_the_poll_loop_cannot_freeze() {
+  local dir home state corr sshbin started elapsed
+  dir="$TMP_ROOT/remote-observe-bound-$RANDOM"
+  home="$dir/home"
+  state="$home/state"
+  mkdir -p "$state" "$home/data" "$dir/sshbin"
+  # A registry the real fm-on.sh accepts as a single remote route for this mate.
+  cat > "$home/data/secondmates.md" <<'REG'
+# Secondmates
+
+- ios - iOS build mate (host: remote-mac; root: /remote/root; home: /remote/home; scope: ios; projects: none; added 2026-09-06)
+REG
+  fm_write_meta "$state/ios.meta" \
+    "window=fm-remote:w1:p1" "harness=claude" "kind=secondmate" "mode=secondmate" \
+    "home=/remote/home" "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
+  corr=$(fm_pending_reply_create "$home" "$state" "ios" "status of the iOS build")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+
+  # A transport that answers, then stalls far longer than the bound. fm-on.sh
+  # exec's this as ssh; the whole process group is torn down on the bound.
+  sshbin="$dir/sshbin/stalled-ssh"
+  cat > "$sshbin" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_TEST_SSH_CALLED"
+cat > /dev/null
+sleep 30
+SH
+  chmod +x "$sshbin"
+
+  started=$(date +%s)
+  (
+    export FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+      FM_SSH_BIN="$sshbin" FM_TEST_SSH_CALLED="$dir/ssh.called" \
+      FM_PENDING_REPLY_OBSERVE_TIMEOUT=2
+    fm_pending_reply_tick "$state"
+  ) || fail "the tick must not fail merely because a remote observe was bounded"
+  elapsed=$(( $(date +%s) - started ))
+
+  [ -e "$dir/ssh.called" ] \
+    || fail "the tick never reached the remote observe, so this proves nothing"
+  [ "$elapsed" -lt 15 ] \
+    || fail "the tick waited ${elapsed}s on a stalled remote observe instead of bounding it"
+  pass "pending-reply: a stalled remote observe is bounded and cannot freeze the watcher poll"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1544,5 +1598,6 @@ test_child_status_wrong_home_is_not_copied
 test_mechanical_helper_writes_parent_channel
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
+test_remote_observe_is_bounded_so_the_poll_loop_cannot_freeze
 
 printf 'ok - all pending-reply tests passed\n'

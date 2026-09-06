@@ -799,6 +799,185 @@ test_downtime_marker_does_not_follow_symlink() {
   pass "watch-arm: downtime marker publication does not follow symlinks"
 }
 
+# Backdate this home's liveness beacon so it reads as stale past any small grace,
+# without waiting real time. Portable across BSD (date -v) and GNU (date -d).
+age_beacon_past_grace() {  # <state>
+  local state=$1 ts
+  ts=$(date -v-1000S +%Y%m%d%H%M.%S 2>/dev/null || date -d '-1000 seconds' +%Y%m%d%H%M.%S)
+  touch -t "$ts" "$state/.last-watcher-beat"
+}
+
+# Start a real watcher that beats once and then blocks in its poll (a long POLL,
+# so it will not refresh its beacon during the case), then age its beacon past a
+# small grace. The result presents EXACTLY as a wedged watcher: alive, holding
+# this home's own lock, with a stale beacon - the state fm-guard.sh reports as
+# "WATCHER DOWN - SUPERVISION IS OFF". Sets SEED_PID.
+start_wedged_seed_watcher() {  # <home> <state> <fakebin>
+  local home=$1 state=$2 fakebin=$3 i
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=3 \
+    FM_POLL=600 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" >/dev/null 2>&1 &
+  SEED_PID=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$SEED_PID" ] \
+      && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$SEED_PID" ] \
+    || fail "wedged seed watcher did not take the lock"
+  age_beacon_past_grace "$state"
+}
+
+# Run arm in the SAME mode the Claude Stop-hook auto-arm uses (plain `arm`), in
+# the background, and wait until it has produced a terminal outcome line.
+start_recovery_arm() {  # <home> <state> <fakebin> <arm-out>
+  local home=$1 state=$2 fakebin=$3 armout=$4 i
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=3 \
+    FM_WATCH_EVICT_TERM_GRACE=2 FM_ARM_CONFIRM_TIMEOUT=8 \
+    FM_POLL=600 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" 2>&1 &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 250 ]; do
+    grep -Eq '^(watcher: started|watcher: FAILED|check:|signal:|stale:|heartbeat)' "$armout" 2>/dev/null && return 0
+    is_live_non_zombie "$ARM_PID" || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# The reproduction of the reported failure: a wedged watcher takes supervision
+# down, and today's arm layer REFUSES to recover it (the fresh child prints
+# "inspect or stop that watcher before re-arming" and arm reports FAILED),
+# leaving the wedged watcher holding the lock until a manual restart. The fix
+# makes arm evict it home-scoped and bring up a fresh cycle, so the Claude
+# Stop-hook auto-arm self-heals it. While the watcher is wedged NOTHING surfaces,
+# including a second mate's unsolicited decision, so this is the core regression.
+test_arm_recovers_a_wedged_watcher() {
+  local dir state fakebin armout wedged
+  dir=$(make_case arm-recovers-wedged)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  start_wedged_seed_watcher "$dir" "$state" "$fakebin"
+  wedged=$SEED_PID
+  start_recovery_arm "$dir" "$state" "$fakebin" "$armout"
+
+  wait_for_exit "$wedged" 60
+  is_live_non_zombie "$wedged" \
+    && fail "the wedged watcher was not evicted; it still holds the lock: $(cat "$armout")"
+  ! grep -qi 'inspect or stop that watcher' "$armout" \
+    || fail "arm refused the wedged watcher instead of evicting it: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "arm reported failure instead of recovering the wedged watcher: $(cat "$armout")"
+  grep -Eq '^(watcher: started|check:|signal:|stale:|heartbeat)' "$armout" \
+    || fail "arm did not bring up a fresh supervision cycle after eviction: $(cat "$armout")"
+
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  wait "$wedged" 2>/dev/null || true
+  pass "watch-arm: a wedged watcher (live pid, stale beacon) is evicted home-scoped and re-armed"
+}
+
+# A watcher wedged in a foreground syscall defers its TERM trap, so SIGTERM alone
+# cannot evict it (this is why the reported wedge could not be recovered without
+# a manual kill). A SIGSTOP'd watcher models that exactly: alive, unresponsive to
+# SIGTERM. The fix escalates to SIGKILL after a bounded grace, still strictly
+# home-scoped to this home's own recorded pid, so recovery cannot stall.
+test_arm_recovers_a_wedged_watcher_via_sigkill() {
+  local dir state fakebin armout wedged
+  dir=$(make_case arm-recovers-wedged-sigkill)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  start_wedged_seed_watcher "$dir" "$state" "$fakebin"
+  wedged=$SEED_PID
+  # Freeze it so it cannot honor SIGTERM, forcing the SIGKILL escalation.
+  kill -STOP "$wedged" 2>/dev/null || fail "could not freeze the wedged watcher"
+  start_recovery_arm "$dir" "$state" "$fakebin" "$armout"
+
+  wait_for_exit "$wedged" 60
+  if is_live_non_zombie "$wedged"; then
+    kill -CONT "$wedged" 2>/dev/null || true
+    kill -KILL "$wedged" 2>/dev/null || true
+    fail "the frozen wedged watcher was not evicted via SIGKILL: $(cat "$armout")"
+  fi
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "arm reported failure instead of SIGKILL-recovering a frozen wedged watcher: $(cat "$armout")"
+  grep -Eq '^(watcher: started|check:|signal:|stale:|heartbeat)' "$armout" \
+    || fail "arm did not bring up a fresh supervision cycle after SIGKILL eviction: $(cat "$armout")"
+
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  wait "$wedged" 2>/dev/null || true
+  pass "watch-arm: a frozen wedged watcher is evicted via bounded SIGKILL escalation and re-armed"
+}
+
+# The eviction must be surgical: a genuinely healthy watcher (live, own lock,
+# fresh beacon) is NEVER killed - arm attaches to it, exactly as before. This
+# guards the auto-recovery from ever tearing down a working supervisor.
+test_arm_attaches_to_a_healthy_watcher_without_evicting() {
+  local dir state fakebin out armout
+  dir=$(make_case arm-healthy-not-evicted)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  local healthy=$SEED_PID
+  start_attached_arm "$state" "$fakebin" "$armout" 3
+
+  # The healthy watcher must still be the live holder: not evicted, not replaced.
+  is_live_non_zombie "$healthy" \
+    || fail "arm evicted a healthy watcher instead of attaching to it: $(cat "$armout")"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$healthy" ] \
+    || fail "the healthy watcher lost its lock to the arm layer: $(cat "$armout")"
+  grep -qF "watcher: attached pid=$healthy" "$armout" \
+    || fail "arm did not attach to the healthy watcher: $(cat "$armout")"
+
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  kill "$healthy" 2>/dev/null || true
+  wait "$healthy" 2>/dev/null || true
+  pass "watch-arm: a healthy watcher is attached to, never evicted"
+}
+
+# The interruptible poll sleep (fm-watch.sh): a watcher blocked in its terminal
+# poll sleep must honor SIGTERM at once, instead of deferring it for the whole
+# POLL interval. Without it, evicting a poll-blocked watcher would always need a
+# SIGKILL. This drives the watcher into a long poll sleep and asserts SIGTERM
+# takes it down promptly.
+test_poll_blocked_watcher_is_term_interruptible() {
+  local dir state fakebin i
+  dir=$(make_case poll-sleep-interruptible)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=600 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" >/dev/null 2>&1 &
+  local wpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] \
+      && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] \
+    || fail "poll-sleep fixture watcher did not take the lock"
+  # Give it a moment to settle into the terminal poll sleep, then TERM it.
+  sleep 1
+  kill -TERM "$wpid" 2>/dev/null || fail "could not signal the poll-blocked watcher"
+  wait_for_exit "$wpid" 40
+  is_live_non_zombie "$wpid" \
+    && { kill -KILL "$wpid" 2>/dev/null || true; fail "the watcher did not honor SIGTERM while blocked in its poll sleep"; }
+  wait "$wpid" 2>/dev/null || true
+  pass "watch: a poll-blocked watcher honors SIGTERM promptly (interruptible sleep)"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
@@ -813,3 +992,7 @@ test_markerless_legacy_queue_is_recovered_on_arm
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
+test_arm_recovers_a_wedged_watcher
+test_arm_recovers_a_wedged_watcher_via_sigkill
+test_arm_attaches_to_a_healthy_watcher_without_evicting
+test_poll_blocked_watcher_is_term_interruptible

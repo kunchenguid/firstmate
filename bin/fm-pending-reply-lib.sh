@@ -96,6 +96,21 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-timeout-lib.sh"
+
+# Hard bound (seconds) on the synchronous remote-secondmate observe below. The
+# tick runs inside the watcher's own poll cycle (bin/fm-watch.sh calls
+# fm_pending_reply_tick between two liveness-beacon touches), so a remote observe
+# that hangs - a reachable host whose observe command stalls, or an ssh connect
+# with no answer - would freeze the poll loop and let the beacon go stale past
+# the guard grace, taking supervision (and every secondmate-outcome surfacing
+# path) down with it. fm-on.sh's ServerAlive keepalive only bounds a vanished
+# peer; a live-but-stalled command is unbounded without this. On the bound a
+# missed observe degrades to "unknown", which the busy-state logic already
+# tolerates and the next poll retries.
+FM_PENDING_REPLY_OBSERVE_TIMEOUT=${FM_PENDING_REPLY_OBSERVE_TIMEOUT:-30}
+case "$FM_PENDING_REPLY_OBSERVE_TIMEOUT" in ''|*[!0-9]*|0) FM_PENDING_REPLY_OBSERVE_TIMEOUT=30 ;; esac
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
@@ -1506,7 +1521,11 @@ fm_pending_reply_tick() {  # <state-dir>
         done
         if [ "$found" = 0 ]; then
           if [ -n "$remote_host" ]; then
-            observation=$("$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
+            # Hard-bounded so a hung remote observe cannot freeze the watcher
+            # poll loop (see FM_PENDING_REPLY_OBSERVE_TIMEOUT above). A timeout
+            # (fm_run_timed exit 124) or any failure degrades to "unknown".
+            observation=$(fm_run_timed "$FM_PENDING_REPLY_OBSERVE_TIMEOUT" \
+              "$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
               fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
             case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
           else
