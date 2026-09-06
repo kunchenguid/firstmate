@@ -252,6 +252,26 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
+# window_busy_verdict: the raw fm_busy_classify(_meta) verdict string
+# (bin/fm-busy-lib.sh) for <window>, via the meta-file contract when the
+# window resolves to a task with a meta file, else the harness/backend
+# fallback. <task> may be passed by a caller that already resolved it
+# (sparing a redundant window_to_task lookup); otherwise it is resolved here.
+# Shared by window_is_busy and pause_live_agent_blocks_absorb so the same
+# window/tail40 is classified only once per call rather than reimplementing
+# this resolution twice.
+window_busy_verdict() {  # <window> <tail40> [task]
+  local w=$1 tail40=$2 task=${3-} meta
+  [ -n "$task" ] || task=$(window_to_task "$w" "$STATE")
+  meta="$STATE/$task.meta"
+  if [ -n "$task" ] && [ -f "$meta" ]; then
+    fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40"
+  else
+    fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
+      "${task:-unknown}" "$STATE" "$tail40"
+  fi
+}
+
 # window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through
 # the semantic busy-state contract (bin/fm-busy-lib.sh). Only an exact busy
 # verdict returns 0: idle, unknown, and dead all return 1, so a converted
@@ -260,15 +280,8 @@ hash_pane() {
 # <tail40> is the same bounded capture already read for hashing and is
 # consumed only by the Grok-scoped fallback inside the contract.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 task meta verdict
-  task=$(window_to_task "$w" "$STATE")
-  meta="$STATE/$task.meta"
-  if [ -n "$task" ] && [ -f "$meta" ]; then
-    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
-  else
-    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
-      "${task:-unknown}" "$STATE" "$tail40")
-  fi
+  local w=$1 tail40=$2 verdict
+  verdict=$(window_busy_verdict "$w" "$tail40")
   [ "${verdict%% *}" = busy ]
 }
 
@@ -965,16 +978,10 @@ clear_pause_tracking() {  # <window-key>
 # busy or idle verdict must still surface, so a worker at a live decision gate
 # is not silenced. 1 when the agent is dead, or when busy state is unknown.
 pause_live_agent_blocks_absorb() {  # <window> <task> [tail40]
-  local win=$1 task=$2 tail40=${3-} agent_alive busy_state meta verdict
+  local win=$1 task=$2 tail40=${3-} agent_alive busy_state verdict
   agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
   [ "$agent_alive" != dead ] || return 1
-  meta="$STATE/$task.meta"
-  if [ -n "$task" ] && [ -f "$meta" ]; then
-    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
-  else
-    verdict=$(fm_busy_classify "$(window_backend "$win")" "$win" "$(window_harness "$win")" \
-      "${task:-unknown}" "$STATE" "$tail40")
-  fi
+  verdict=$(window_busy_verdict "$win" "$tail40" "$task")
   busy_state=${verdict%% *}
   [ "$busy_state" != unknown ]
 }
