@@ -146,6 +146,13 @@
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from both the spawning project and its repository's
 #   primary checkout, including when the spawning project is a linked worktree.
+#   On the backends that discover that path by reading the task pane's own cwd,
+#   the same isolation test screens every read: a pane still showing the project
+#   or the repository primary while `treehouse get` prepares the slot is waited
+#   out as a transient rather than adopted and then refused, so a home that is
+#   itself a linked worktree of the project repository still launches. A pane
+#   that never reaches an isolated worktree refuses at the end of that wait,
+#   naming the last path seen and why it was rejected.
 #   Only after this isolation check, a fresh ship or scout's clean task worktree
 #   fetches origin, resolves the current remote default branch, and resets to its tip.
 #   Relaunch reuses the recorded worktree without fetching or resetting its base.
@@ -2128,30 +2135,78 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
-validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  local wt_git_dir proj_common
+
+# True when <path> is an isolated worktree of the spawning project: a real
+# directory that is its own worktree root, is not the spawning project itself,
+# and does not share the project repository's common git dir. SPAWN_WT_TOP is
+# left holding the worktree root the check read, and SPAWN_WT_REASON a short
+# phrase naming why a rejected path failed, both for the refusal messages.
+#
+# The worktree-discovery poll below reads this same predicate, so it can never
+# adopt a path the guard would then refuse. That matters because a pane's cwd
+# read is a snapshot of whatever process is in the foreground: while `treehouse
+# get` is still fetching and checking a slot out, it reports the REPOSITORY's
+# primary checkout as its own cwd. That path differs from a linked spawning
+# project, so a poll comparing only against the project accepted it, and the
+# guard then refused a launch whose slot treehouse went on to create normally.
+# A read like that is a transient, not a destination: the poll keeps waiting.
+SPAWN_WT_TOP=
+SPAWN_WT_REASON=
+spawn_worktree_isolated() {  # <path>
+  local path=$1 wt_real wt_top_real wt_git_dir proj_common
+  SPAWN_WT_TOP=
+  SPAWN_WT_REASON=
   wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
+  if ! wt_real=$(cd "$path" 2>/dev/null && pwd -P); then
     wt_real=
   fi
-  proj_real=$PROJ_ABS_REAL
-  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
+  if [ -z "$wt_real" ]; then
+    SPAWN_WT_REASON="it is not a readable directory"
+    return 1
+  fi
+  SPAWN_WT_TOP=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)
+  # A path in no repository leaves the toplevel empty, and that empty value must
+  # never reach `cd`: bash before 5.3 accepts `cd ""` as a successful no-op, so
+  # it would resolve to fm-spawn's OWN cwd and report the path as a subdirectory
+  # of whatever checkout firstmate happens to be running from.
   wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
+  if [ -n "$SPAWN_WT_TOP" ] && ! wt_top_real=$(cd "$SPAWN_WT_TOP" 2>/dev/null && pwd -P); then
     wt_top_real=
+  fi
+  if [ -z "$wt_top_real" ]; then
+    SPAWN_WT_REASON="it is not inside a git worktree"
+    return 1
+  fi
+  if [ "$wt_real" != "$wt_top_real" ]; then
+    SPAWN_WT_REASON="it is a subdirectory of worktree root '$wt_top_real', not a worktree root"
+    return 1
+  fi
+  if [ "$wt_real" = "$PROJ_ABS_REAL" ]; then
+    SPAWN_WT_REASON="it is the spawning project itself"
+    return 1
   fi
   # The primary checkout uses the repository's common git dir as its own git
   # dir. A linked spawning home has a different top-level, but the same common
   # dir, so comparing only the two working directories cannot protect primary.
-  wt_git_dir=$(git -C "$WT" rev-parse --absolute-git-dir 2>/dev/null) \
+  wt_git_dir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null) \
     && wt_git_dir=$(cd "$wt_git_dir" 2>/dev/null && pwd -P) || wt_git_dir=
   proj_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
     && proj_common=$(cd "$proj_common" 2>/dev/null && pwd -P) || proj_common=
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] \
-     || [ "$wt_real" = "$proj_real" ] || [ -z "$wt_git_dir" ] || [ -z "$proj_common" ] \
-     || [ "$wt_git_dir" = "$proj_common" ]; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+  if [ -z "$wt_git_dir" ] || [ -z "$proj_common" ]; then
+    SPAWN_WT_REASON="its git directory could not be resolved"
+    return 1
+  fi
+  if [ "$wt_git_dir" = "$proj_common" ]; then
+    SPAWN_WT_REASON="it is the repository's primary checkout (its git dir is the spawning project's common git dir)"
+    return 1
+  fi
+  return 0
+}
+
+validate_spawn_worktree() {  # <source> <inspect-target>
+  local source=$1 inspect_target=$2
+  if ! spawn_worktree_isolated "$WT"; then
+    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
 }
@@ -2815,42 +2870,55 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
+  # The project comparison is physical: spawn_worktree_isolated screens each
+  # read against PROJ_ABS_REAL, not PROJ_ABS, because a symlinked project prefix
+  # would otherwise make the pane's OS-level cwd read differ from PROJ_ABS on
+  # the very first poll, before the pane has actually moved.
   #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
+  # A single read that already looks isolated is not proof the pane settled
+  # there: on some tmux/WSL setups a brand-new window's pane_current_path
   # transiently reports an unrelated stale path (seen live as another real git
   # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
+  # stale path passes spawn_worktree_isolated too (it resolves to a real,
+  # distinct worktree top-level), so accepting it on one read alone silently
+  # records the wrong worktree= in state/<id>.meta. Require two consecutive
+  # reads to agree on the same isolated path before accepting it; a mismatch
+  # just becomes the new candidate rather than resetting the wait, so a pane
+  # that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  #
+  # Every candidate is screened with the isolation guard's own predicate, so a
+  # read of the project itself or of the repository primary checkout is treated
+  # as the transient it is and the wait continues, instead of being adopted and
+  # then refused by the guard.
+  # A candidate the screen rejects is never adopted, so a host where the pane
+  # never reaches an isolated worktree spends the whole window before refusing.
+  # That wait is deliberate - telling a transient apart from a terminal
+  # misconfiguration would need machinery this path does not want - so the
+  # refusal has to be self-explaining instead: carry the last path seen and the
+  # reason it was rejected, and report both at the deadline.
   candidate=""
+  last_seen=""
+  last_reason="the pane reported no path"
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ]; then
+    [ -z "$p" ] || last_seen="$p"
+    if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
-      else
-        candidate=""
+      last_reason="it is an isolated worktree, but no second read agreed with it"
+      if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+        WT="$p"
+        break
       fi
+      candidate="$p_real"
     else
       candidate=""
+      [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
     fi
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi
 
