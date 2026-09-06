@@ -163,9 +163,8 @@ fm_pending_reply_locate() {  # <state-dir> <corr_id>
   return 1
 }
 
-# Move a settled record out of the hot set. Best effort by design: a record that
-# cannot be archived stays where it is and is simply scanned again next tick,
-# which is correct but slower - never a lost record. Returns 0 when the record is
+# Move a settled record out of the hot set. A record that cannot be archived
+# stays available for an explicit resolution retry. Returns 0 when the record is
 # no longer in the hot directory.
 _fm_pending_reply_archive_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 hot archive_dir
@@ -1442,8 +1441,8 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   local rec phase delivered
   rec=$(fm_pending_reply_path "$state" "$corr")
   if [ ! -f "$rec" ]; then
-    # A settled record has been filed under archive/ by the retention in
-    # fm_pending_reply_archive. There is nothing left to observe or escalate for
+    # A settled record has been filed under archive/ during resolution. There is
+    # nothing left to observe or escalate for
     # it, so this is inert success rather than a missing record - reporting it as
     # missing would turn every settled correlation into a tick failure.
     [ -f "$(fm_pending_reply_archive_dir "$state")/$corr" ] && return 0
@@ -1549,18 +1548,9 @@ fm_pending_reply_tick() {  # <state-dir>
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
     if [ "$phase" = resolved ]; then
-      # A settled record that reached the hot set at all is either a legacy
-      # record from before retention or one whose archiving failed. Decide with
-      # two field reads, BEFORE taking the per-correlation lock and re-sourcing
-      # fm-wake-lib.sh, because that lock-and-source was the per-record cost that
-      # made this tick grow without bound (2026-09-04 investigation).
       if [ -n "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
         && [ -z "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ]; then
-        # An escalation is still open: this is the retry that makes the close
-        # converge after a transient write failure. Only here is the lock worth it.
-        fm_pending_reply_close_escalation "$state" "$corr" || true
-      else
-        fm_pending_reply_archive "$state" "$corr" || true
+        fm_pending_reply_try_resolve "$state" "$corr" || true
       fi
       continue
     fi
