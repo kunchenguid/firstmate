@@ -1659,7 +1659,7 @@ fm_pending_reply_tick() {  # <state-dir>
           break
         done
         if [ "$found" = 0 ]; then
-          observation_grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+          observation_grace=${FM_GUARD_GRACE:-300}
           case "$observation_grace" in ''|*[!0-9]*|0) observation_grace=300 ;; esac
           observation_timeout=$(( observation_grace / 2 ))
           [ "$observation_timeout" -ge 1 ] || observation_timeout=1

@@ -1223,7 +1223,7 @@ SH
     "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
   corr=$(fm_pending_reply_create "$home" "$state" ios "bound remote observation")
   fm_pending_reply_mark_delivered "$state" "$corr"
-  PATH="$fakebin:$PATH" FM_TIMEOUT_LOG="$timeout_log" FM_WATCHER_STALE_GRACE=10 \
+  PATH="$fakebin:$PATH" FM_TIMEOUT_LOG="$timeout_log" FM_GUARD_GRACE=10 \
     fm_pending_reply_tick "$state" || fail "bounded remote observation tick failed"
   [ "$(cat "$timeout_log" 2>/dev/null)" = 5 ] \
     || fail "remote observation was not bounded below the 10s beacon grace"

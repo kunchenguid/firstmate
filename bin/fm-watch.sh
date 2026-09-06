@@ -138,8 +138,8 @@ mkdir -p "$STATE"
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
-WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
-WATCHER_EXTERNAL_TIMEOUT=$WATCHER_STALE_GRACE
+GUARD_GRACE=${FM_GUARD_GRACE:-300}
+WATCHER_EXTERNAL_TIMEOUT=$GUARD_GRACE
 case "$WATCHER_EXTERNAL_TIMEOUT" in ''|*[!0-9]*|0) WATCHER_EXTERNAL_TIMEOUT=300 ;; esac
 WATCHER_EXTERNAL_TIMEOUT=$((WATCHER_EXTERNAL_TIMEOUT / 2))
 [ "$WATCHER_EXTERNAL_TIMEOUT" -ge 1 ] || WATCHER_EXTERNAL_TIMEOUT=1
@@ -1529,17 +1529,17 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
     # is not a busy watcher - it is an unconfirmable lock, and the honest answer
     # for that is still a loud failure. Without this gate the arm would wait on,
     # and then quietly excuse, a lock no watcher can ever be confirmed behind.
-    if fm_watcher_busy_holder "$STATE" "$WATCH_PATH" "$WATCHER_STALE_GRACE" "$FM_HOME"; then
-      echo "watcher: busy holder pid=$FM_WATCHER_BUSY_PID beacon=${FM_WATCHER_BUSY_BEACON_AGE}s (grace ${WATCHER_STALE_GRACE}s)"
+    if fm_watcher_busy_holder "$STATE" "$WATCH_PATH" "$GUARD_GRACE" "$FM_HOME"; then
+      echo "watcher: busy holder pid=$FM_WATCHER_BUSY_PID ${FM_WATCHER_BUSY_AGE_SOURCE}=${FM_WATCHER_BUSY_AGE}s (grace ${GUARD_GRACE}s)"
       exit "$FM_WATCHER_BUSY_HOLDER_STATUS"
     fi
     if [ -e "$BEAT" ]; then
       beat_age=$(fm_path_age "$BEAT")
-      if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
-        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
+      if [ "$beat_age" -ge "$GUARD_GRACE" ]; then
+        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${GUARD_GRACE}s); inspect or stop that watcher before re-arming." >&2
         exit 1
       fi
-    elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
+    elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$GUARD_GRACE" ]; then
       echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
       exit 1
     fi
@@ -1625,8 +1625,8 @@ reconcile_requests_detached() {
   RECONCILE_REQUEST_PID=$!
 }
 
-# A signal inside recovery-marker publication abandons that frame before EXIT
-# cleanup re-enters it, so release only that tracked lock before exiting.
+# A signal inside a recovery-marker critical section abandons that frame before
+# EXIT cleanup re-enters it, so release only that tracked lock before exiting.
 watcher_interrupt() {
   fm_recovery_marker_interrupt_release
   exit 1

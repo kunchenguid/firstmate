@@ -4031,7 +4031,7 @@ test_signal_coalescing_wait_keeps_beacon_fresh() {
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_POLL=1 FM_SIGNAL_GRACE=3 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_WATCHER_STALE_GRACE=2 FM_GUARD_GRACE=2 "$WATCH" > "$out" 2>&1 &
+    FM_GUARD_GRACE=2 "$WATCH" > "$out" 2>&1 &
   pid=$!
   # The seen marker is committed immediately after coalescing. Stop sampling
   # there: later poll work is unrelated to whether this watcher-owned wait beat.
@@ -4091,7 +4091,7 @@ test_beacon_tracks_phase_progress_across_a_long_iteration() {
     FM_FAKE_TMUX_CAPTURE_SLEEP="$slow" \
     FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$count_file" \
     FM_POLL=0.1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_WATCHER_STALE_GRACE="$grace" FM_GUARD_GRACE="$grace" \
+    FM_GUARD_GRACE="$grace" \
     "$WATCH" > "$out" 2>&1 &
   pid=$!
   # Three 0.75s reads make one iteration exceed the 2s grace. The fourth read

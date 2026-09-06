@@ -1145,7 +1145,7 @@ test_bounded_backend_reads_use_requested_deadline() {
     return 124
   }
   FM_TIMEOUT_LOG="$log" \
-    fm_backend_capture_bounded 5 tmux session:window 40 >/dev/null 2>&1 || status=$?
+    fm_backend_capture_bounded 5 herdr pane-1 40 >/dev/null 2>&1 || status=$?
   [ "$status" -eq 124 ] || fail "bounded backend capture returned $status instead of timeout"
   [ "$(cat "$log" 2>/dev/null)" = 5 ] \
     || fail "backend capture did not use its requested five-second deadline"
@@ -1159,7 +1159,7 @@ test_bounded_backend_reads_use_requested_deadline() {
   status=0
   rm -f "$log"
   FM_TIMEOUT_LOG="$log" \
-    fm_backend_agent_alive_bounded 3 tmux session:window >/dev/null 2>&1 || status=$?
+    fm_backend_agent_alive_bounded 3 herdr pane-1 >/dev/null 2>&1 || status=$?
   [ "$status" -eq 124 ] || fail "bounded agent probe returned $status instead of timeout"
   [ "$(cat "$log" 2>/dev/null)" = 3 ] \
     || fail "agent probe did not use its requested three-second deadline"
@@ -1170,6 +1170,11 @@ test_bounded_backend_reads_use_requested_deadline() {
   [ "$status" -eq 124 ] || fail "bounded event capability probe returned $status instead of timeout"
   [ "$(cat "$log" 2>/dev/null)" = 2 ] \
     || fail "event capability probe did not use its requested two-second deadline"
+  [ "$(fm_backend_agent_alive_bounded 3 tmux session:window)" = unknown ] \
+    || fail "bounded liveness accepted a local backend"
+  status=0
+  fm_backend_capture_bounded 5 tmux session:window 40 >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "bounded capture accepted a local backend"
 
   unset -f fm_run_function_timed
   # shellcheck source=bin/fm-timeout-lib.sh

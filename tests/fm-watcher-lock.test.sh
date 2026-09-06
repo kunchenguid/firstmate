@@ -119,9 +119,8 @@ test_live_missing_beacon_lock_is_actionable() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-  sleep 2
   status=0
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_WATCHER_STALE_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=30 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
   [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
   # This case used to leave through a bare exit 1 with "heartbeat is stale" on
   # stderr, which reached the arm layer as "FAILED - exited 1 without an
@@ -137,8 +136,8 @@ test_live_missing_beacon_lock_is_actionable() {
     || fail "watcher did not name the busy holder: $(cat "$out" "$err" 2>/dev/null)"
   grep -F "pid=$live" "$out" >/dev/null \
     || fail "the typed busy-holder outcome did not name the holding pid"
-  grep -E 'beacon=[0-9]+s' "$out" >/dev/null \
-    || fail "a missing beacon did not preserve the computed lock age: $(cat "$out")"
+  grep -E 'lock=[0-9]+s' "$out" >/dev/null \
+    || fail "a missing beacon did not label its computed lock age truthfully: $(cat "$out")"
   is_live_non_zombie "$live" || fail "the identified holder was not left alone"
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
@@ -163,7 +162,7 @@ test_unidentified_live_lock_holder_still_fails_loudly() {
   printf '%s\n' "$live" > "$state/.watch.lock/pid"
   touch -t 200001010000 "$state/.last-watcher-beat"
   status=0
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_WATCHER_STALE_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
   typed_status=$(FM_STATE_OVERRIDE="$state" bash -c \
     '. "$1"; printf %s "$FM_WATCHER_BUSY_HOLDER_STATUS"' _ "$LIB")
   [ "$status" -ne 0 ] || fail "an unidentifiable live lock holder was treated as healthy"
@@ -1019,7 +1018,7 @@ reap() {  # <pid>
 # wait. The SIGSTOP fixture is the strongest stalled holder available, and is
 # used here precisely because even that one must survive.
 
-test_stale_beacon_holder_is_not_reported_as_a_failure() {
+test_young_missing_beacon_holder_is_not_reported_as_a_failure() {
   local dir state fakebin armout armpid watcher_pid i out second secondpid held blocked=0
   dir=$(make_case busy-holder-typed)
   state="$dir/state"
@@ -1039,20 +1038,20 @@ test_stale_beacon_holder_is_not_reported_as_a_failure() {
     reap "$armpid"
     fail "no watcher started for the busy-holder fixture"
   fi
-  # Stall it and age its beacon: the exact 2026-09-04 reading. Then retire the
+  # Stall it before its first beacon is observable. Then retire the
   # arm that started it, so what follows observes ONE arm meeting one stalled
   # holder. The first arm is a fixture, not a participant; left alive it reacts
   # to its own stopped child and muddies the observation.
   kill -STOP "$watcher_pid" 2>/dev/null || true
-  touch -t 200001010000 "$state/.last-watcher-beat"
+  rm -f "$state/.last-watcher-beat"
   kill -KILL "$armpid" 2>/dev/null || true
   wait "$armpid" 2>/dev/null || true
 
-  # A second arm now meets a live holder with an aged beacon. Run it in the
+  # A second arm now meets a live holder with a young lock and no beacon. Run it in the
   # BACKGROUND behind a bounded wait: blocking on the stalled holder is itself a
   # failure, and a foreground call would hang the whole suite.
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
-    FM_GUARD_GRACE=2 FM_WATCHER_STALE_GRACE=2 FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_GUARD_GRACE=2 FM_POLL=5 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$second" 2>&1 &
   secondpid=$!
   i=0
@@ -1085,9 +1084,13 @@ test_stale_beacon_holder_is_not_reported_as_a_failure() {
   esac
   case "$out" in
     *"busy holder"*) ;;
-    *) fail "a live holder with an aged beacon produced no typed outcome: $out" ;;
+    *) fail "a live holder with no beacon produced no typed outcome: $out" ;;
   esac
-  pass "a live holder with an aged beacon is left alone: not stopped, not replaced, not reported failed"
+  case "$out" in
+    *"lock="*) ;;
+    *) fail "a missing beacon was not reported truthfully as lock age: $out" ;;
+  esac
+  pass "a young live holder without a beacon is left alone and not reported failed"
 }
 
 test_busy_holder_replacement_stays_a_loud_failure() {
@@ -1142,7 +1145,7 @@ SH
   pass "a replacement holder must be reverified before a busy wait can close quietly"
 }
 
-test_busy_holder_uses_watcher_stale_threshold() {
+test_busy_holder_uses_shared_guard_grace() {
   local dir state arm holder identity refresher armpid i out early_attach=0 attached=0
   dir=$(make_case busy-holder-threshold)
   state="$dir/state"
@@ -1179,7 +1182,7 @@ SH
   refresher=$!
   arm="$dir/bin/fm-watch-arm.sh"
   FM_TEST_HOLDER="$holder" FM_TEST_IDENTITY="$identity" FM_HOME="$dir" \
-    FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=30 FM_WATCHER_STALE_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 \
     FM_ARM_CONFIRM_TIMEOUT=2 "$arm" > "$dir/arm.out" 2>&1 &
   armpid=$!
   i=0
@@ -1208,10 +1211,10 @@ SH
   [ "$early_attach" -eq 0 ] || fail "the arm attached while the watcher still classified its holder as stale: $out"
   [ "$attached" -eq 1 ] || fail "the arm did not attach after the unchanged holder beat again: $out"
   case "$out" in *"watcher: FAILED"*) fail "the unchanged holder was failed loudly: $out" ;; esac
-  pass "busy-holder validation and attachment use the watcher stale threshold"
+  pass "busy-holder validation and attachment use the shared guard grace"
 }
 
-test_initial_attachment_uses_watcher_stale_threshold() {
+test_initial_attachment_uses_shared_guard_grace() {
   local dir state holder identity armpid i out held holder_alive=0 attached=0
   dir=$(make_case initial-threshold-attach)
   state="$dir/state"
@@ -1245,11 +1248,12 @@ test_initial_attachment_uses_watcher_stale_threshold() {
   is_live_non_zombie "$holder" && holder_alive=1
   reap "$armpid"
   reap "$holder"
-  [ "$attached" -eq 1 ] || fail "the arm rejected a holder fresh under the watcher threshold: $out"
-  case "$out" in *"watcher: FAILED"*) fail "the initial threshold holder failed loudly: $out" ;; esac
+  [ "$attached" -eq 0 ] || fail "a removed stale-grace override displaced the shared guard grace: $out"
+  case "$out" in *"watcher: FAILED"*) fail "the live holder failed loudly under the shared grace: $out" ;; esac
+  case "$out" in *"busy holder"*) ;; *) fail "the shared grace did not classify the stale holder: $out" ;; esac
   [ "$held" = "$holder" ] && [ "$holder_alive" -eq 1 ] \
     || fail "the initial threshold holder was signalled or replaced"
-  pass "initial attachment uses the watcher stale threshold"
+  pass "initial attachment uses only the shared guard grace"
 }
 
 test_recovering_holder_is_attached_to_not_replaced() {
@@ -1281,7 +1285,7 @@ test_recovering_holder_is_attached_to_not_replaced() {
   ( sleep 2; touch "$state/.last-watcher-beat" ) >/dev/null 2>&1 &
 
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
-    FM_GUARD_GRACE=8 FM_WATCHER_STALE_GRACE=8 FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_GUARD_GRACE=8 FM_POLL=5 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$second" 2>&1 &
   secondpid=$!
   i=0
@@ -1467,10 +1471,10 @@ test_msys_pid_identity_uses_proc() {
 }
 
 test_singleton_start
-test_stale_beacon_holder_is_not_reported_as_a_failure
+test_young_missing_beacon_holder_is_not_reported_as_a_failure
 test_busy_holder_replacement_stays_a_loud_failure
-test_busy_holder_uses_watcher_stale_threshold
-test_initial_attachment_uses_watcher_stale_threshold
+test_busy_holder_uses_shared_guard_grace
+test_initial_attachment_uses_shared_guard_grace
 test_recovering_holder_is_attached_to_not_replaced
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
