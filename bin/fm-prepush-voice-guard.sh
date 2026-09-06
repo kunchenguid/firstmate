@@ -12,12 +12,8 @@
 # was already active while the leak happened anyway, so this is deterministic
 # enforcement instead of a second instruction.
 #
-# SCOPE: ACCIDENT PREVENTION, NOT A SECURITY BOUNDARY. This scanner and its
-# fm-lint.sh caller are both branch-controlled, so they stop the pipeline agent
-# accident that caused the real leaks but cannot stop a determined branch author
-# from removing the call or neutering the scanner. Trusted enforcement belongs
-# in no-mistakes or its trusted configuration and is tracked upstream as
-# nm-pr-body-scan-before-api.
+# The "Internal-voice refusal before the first push" section of
+# docs/architecture.md owns this branch-controlled check's scope and trust limit.
 #
 # WHY BEFORE THE FIRST PUSH, not before merge. On a repository firstmate does not
 # own, a maintainer can merge at any moment, so a correction that waits for the

@@ -226,9 +226,11 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 The same identity that the authority boundary above contains also leaks in the other direction, as text rather than as capability.
 An agent working inside this repo reads `AGENTS.md`'s "address the user as captain" rule as an ordinary repo file and applies it to commit messages, which it treats as responses; the messages that leaked came from the gate's own review, test, and document agents, so no crewmate brief could have prevented them.
 `bin/fm-prepush-voice-guard.sh` is deterministic commit-message prevention, paired with the scoping sentence at that instruction in `AGENTS.md`.
-It prevents the accidental pipeline-agent leak this change targets, but it is not a security boundary against a determined branch author.
-Both the lint call and scanner are branch-controlled, so such an author can remove the call or neuter the scanner.
-Closing that gap requires a trusted scan in no-mistakes or its trusted configuration and is tracked upstream as `nm-pr-body-scan-before-api` rather than attempted here.
+This check catches the accident in which a pipeline agent writes internal voice into a commit message or pull request description without meaning to, the same failure that put two such messages permanently into public history under the repository owner's name.
+It is not a trust boundary.
+It does not stop an author who deliberately disables it, because the lint entry point, the scanner, and the workflow file all travel with the branch being judged.
+Enforcement that binds a determined author has to live somewhere the branch cannot edit, which is the separate upstream item already filed as `nm-pr-body-scan-before-api`.
+Reading this check as a security control exceeds its stated scope.
 
 It runs before the first push rather than before merge, because on a repository firstmate does not own a maintainer can merge at any moment.
 The enforcement point is `bin/fm-lint.sh`'s default path: `.no-mistakes.yaml` pins `commands.lint` to that script and the gate runs lint after its review, test, and document steps, so it is the last firstmate-owned code to see every commit the branch would contribute, including the ones the gate's own agents wrote.
