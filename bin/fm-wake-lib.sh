@@ -1117,9 +1117,8 @@ fm_treehouse_project_lock_path() {  # <project-dir>
   if [ -n "$origin" ]; then
     case "$origin" in
       /*) [ ! -d "$origin" ] || origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 1 ;;
-      ./*|../*) [ ! -d "$project/$origin" ] || origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 1 ;;
       *://*|*:* ) ;;
-      *) [ ! -d "$(dirname "$project")/$origin" ] || origin=$(CDPATH='' cd -- "$(dirname "$project")/$origin" 2>/dev/null && pwd -P) || return 1 ;;
+      *) [ ! -d "$project/$origin" ] || origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 1 ;;
     esac
     identity=$origin
   else

@@ -420,9 +420,11 @@ test_bare_relative_origin_shares_project_lock_with_clone() {
   dir=$(make_case bare-relative-origin-lock)
   git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
     commit --allow-empty -qm lock-fixture
-  git -C "$dir/project" remote add origin project
+  mkdir -p "$dir/project/remotes"
+  git clone -q --bare "$dir/project" "$dir/project/remotes/origin.git"
+  git -C "$dir/project" remote add origin remotes/origin.git
   second_project="$dir/second-project"
-  git clone -q "$dir/project" "$second_project"
+  git clone -q "$dir/project/remotes/origin.git" "$second_project"
 
   primary_lock=$(FM_HOME="$dir/home" bash -c \
     '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
@@ -435,7 +437,7 @@ test_bare_relative_origin_shares_project_lock_with_clone() {
   [ "$primary_lock" = "$clone_lock" ] \
     || fail "bare and absolute forms of the same local origin resolved different project locks"
 
-  pass "Treehouse locking gives a bare local origin and its absolute clone one project identity"
+  pass "Treehouse locking resolves a bare local origin against its source project, matching the provisioned clone"
 }
 
 test_reused_pool_slot_refuses_before_touching_the_other_task() {
