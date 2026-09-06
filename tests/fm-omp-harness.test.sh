@@ -169,7 +169,7 @@ test_spawn_launch_line_and_worker_wiring() {
     "omp launch did not carry the tracked posture overlay, --auto-approve, and the pinned working directory"
   assert_contains "$launch" "--model 'openai-codex/gpt-6-astra' --thinking 'medium' -e '$state/$id.omp-ext.ts'" \
     "omp launch did not pass the model, thinking level, and the state-resident worker extension"
-  assert_contains "$launch" "encode launch-brief < '$HOME_DIR/data/$id/brief.md'" "omp launch lost the canonical typed launch-brief envelope"
+  assert_contains "$launch" "encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md'" "omp launch lost the canonical typed launch-brief envelope"
   case "$launch" in
     *"-e '$state/$id.omp-ext.ts' \"\$("*) ;;
     *) fail "omp launch must keep exactly one positional brief after the extension flag: $launch" ;;
@@ -209,23 +209,41 @@ test_spawn_model_validation_scoped_to_listed_providers() {
 }
 
 test_secondmate_launch_relies_on_discovery() {
-  local dir launch
-  dir="$TMP_ROOT/secondmate-template"
-  mkdir -p "$dir"
-  # launch_template is internal to fm-spawn; read the rendered template text
-  # for the secondmate kind through a sourced copy of the function body.
-  launch=$(bash -c '
-    eval "$(sed -n "/^launch_template() /,/^}/p" "$1")"
-    launch_template omp secondmate' _ "$ROOT/bin/fm-spawn.sh")
+  # A seeded secondmate home, launched for real through fm-spawn on omp: the
+  # launch must carry the posture overlay and pin --cwd to the home, and must
+  # name NO -e, because omp auto-discovers the home's tracked .omp/extensions
+  # and a file named both ways loads twice.
+  local world home fakebin launchlog out status launch
+  world="$TMP_ROOT/secondmate"
+  home="$world/sm"
+  mkdir -p "$world/home/state" "$world/home/data" "$world/home/config" "$home/bin" "$home/data"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'sm\n' > "$home/.fm-secondmate-home"
+  printf 'charter\n' > "$home/data/charter.md"
+  fakebin=$(make_spawn_fakebin "$world/fake" claude)
+  make_fake_omp "$fakebin"
+  launchlog="$world/launch.log"
+  : > "$launchlog"
+  # FM_BACKEND=tmux pins the fake tmux even where the developer shell carries a
+  # live Herdr environment; without it auto-detection would spawn a real pane.
+  out=$(PATH="$fakebin:$PATH" TMUX='fake,1,0' FM_BACKEND=tmux CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE='' FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    "$ROOT/bin/fm-spawn.sh" sm "$home" omp --secondmate 2>&1)
+  status=$?
+  expect_code 0 "$status" "omp secondmate spawn should succeed: $out"
+  assert_grep "harness=omp" "$world/home/state/sm.meta" "secondmate meta missing harness=omp"
+  launch=$(cat "$launchlog")
   case "$launch" in
-    *" -e "*) fail "an omp secondmate launch must name no -e: omp auto-discovers .omp/extensions and a file named both ways loads twice" ;;
+    *" -e "*) fail "an omp secondmate launch must name no -e: omp auto-discovers .omp/extensions and a file named both ways loads twice: $launch" ;;
   esac
-  assert_contains "$launch" "--config __OMPWORKERCFG__ --auto-approve --cwd __WORKTREE__" "secondmate launch lost the posture overlay"
-  launch=$(bash -c '
-    eval "$(sed -n "/^launch_template() /,/^}/p" "$1")"
-    launch_template omp ship' _ "$ROOT/bin/fm-spawn.sh")
-  assert_contains "$launch" "-e __OMPEXT__" "crewmate launch must load the state-resident extension"
-  pass "fm-spawn: the omp secondmate template relies on auto-discovery while crewmates load one -e"
+  assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$home'" "secondmate launch lost the posture overlay or the pinned home directory: $launch"
+  assert_contains "$launch" "FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '$fakebin/omp'" "secondmate launch lost the omp marker or executable"
+  assert_contains "$launch" "FM_SUPERVISION_MODEL=extension" "an omp secondmate must run the extension supervision model"
+  assert_absent "$world/home/state/sm.omp-ext.ts" "a secondmate must not receive a per-task worker extension"
+  pass "fm-spawn: a real omp secondmate launch relies on auto-discovery while crewmates load one -e"
 }
 
 # --- 3. Busy state -------------------------------------------------------------
@@ -236,8 +254,11 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
 mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+// ctx.isIdle() reads false at a natural TUI agent_end on omp; the extension
+// must go idle on a plain agent_end regardless of it.
 const ctx = { isIdle: () => false };
 switch (process.env.MODE) {
+  case "handlers": console.log(Object.keys(handlers).sort().join(" ")); break;
   case "agent-start": await handlers["agent_start"]({ type: "agent_start" }, ctx); break;
   case "end-continuing": await handlers["agent_end"]({ type: "agent_end", willContinue: true }, ctx); break;
   case "end-final": await handlers["agent_end"]({ type: "agent_end" }, ctx); break;
@@ -259,8 +280,16 @@ test_busy_extension_lifecycle() {
   state="$HOME_DIR/state"
   ext="$state/$id.omp-ext.ts"
   assert_present "$ext" "omp spawn did not write the per-task extension"
-  grep -q 'pi.on("agent_settled"' "$ext" && fail "the omp extension must not listen for agent_settled (omp has no such event)"
-  grep -v '^//' "$ext" | grep -q 'isIdle()' && fail "the omp extension must not gate idle on ctx.isIdle()"
+  out=$(drive_omp_ext "$ext" handlers) || fail "handler listing failed: $out"
+  case " $out " in
+    *" agent_settled "*) fail "the omp extension must not listen for agent_settled (omp has no such event)" ;;
+  esac
+  for handler in agent_start agent_end turn_end; do
+    case " $out " in
+      *" $handler "*) ;;
+      *) fail "the omp extension must register $handler, got '$out'" ;;
+    esac
+  done
 
   rm -f "$state/$id.turn-ended"
   out=$(drive_omp_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
