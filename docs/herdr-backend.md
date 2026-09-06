@@ -1,7 +1,6 @@
 # Herdr runtime backend
 
 Herdr is an agent-native terminal backend with native per-pane agent state and push events, and it is Firstmate's most heavily covered non-default backend: a required Linux CI lane installs a pinned build, asserts its version and protocol floor, and hard-fails rather than skipping when Herdr is missing.
-Windows support remains an experimental preview measured only by an on-demand, manually triggered spike workflow, not the required CI lane.
 Firstmate requires Herdr protocol 14 or newer; broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0, while protocol-16 features remain gated by availability.
 Default-on presentation spaces have a higher floor of Herdr 0.8.0 for the reason given under [Presentation spaces](#presentation-spaces).
 Herdr provides the terminal session while Treehouse continues to provide task worktrees.
