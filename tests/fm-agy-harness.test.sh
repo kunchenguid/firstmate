@@ -442,6 +442,35 @@ test_symlinked_store_to_a_foreign_owned_target_is_refused() {
   pass "fm-agy-trust.sh: refuses a store symlinked to another user's file"
 }
 
+# The store path is followed through symlinks so a dotfile manager or synced
+# folder keeps working (test_symlinked_store_to_an_owned_target_is_accepted).
+# That follow is only safe while nobody else can write the directory holding the
+# link: an account that can create or replace an entry there points the store at
+# an unrelated file THIS user owns, and every check on the store itself passes,
+# because the file that would be clobbered is owned by the very user this runs
+# as. World-writable is the portable spelling of "another account can write
+# here": it needs no shared group to exist on the machine running the test.
+# Reported by Greptile on kunchenguid/firstmate#3858.
+test_store_directory_writable_by_others_is_refused() {
+  local rec out store dir victim before
+  rec=$(make_case store-dir-writable)
+  read_case "$rec"
+  store=$(store_path "$AGY_HOME")
+  dir=$(dirname "$store")
+  mkdir -p "$dir"
+  victim="$CASE_DIR/unrelated.json"
+  printf '%s\n' '{"unrelated":true}' > "$victim"
+  before=$(cat "$victim")
+  ln -s "$victim" "$store"
+  chmod o+w "$dir"
+  out=$(run_trust "$AGY_HOME" "$WT" "$PROJ")
+  expect_code 1 $? "a store directory other accounts can write must be refused: $out"
+  assert_contains "$out" "writable by other users" "the refusal did not name the directory permission"
+  [ "$(cat "$victim")" = "$before" ] || \
+    fail "an unrelated file this user owns was overwritten through the store symlink"
+  pass "fm-agy-trust.sh: refuses a store directory other accounts can write"
+}
+
 test_symlinked_store_to_an_owned_target_is_accepted() {
   local rec out target store
   rec=$(make_case symlink-owned)
@@ -1148,6 +1177,7 @@ test_foreign_project_worktree_is_refused
 test_worktree_subdirectory_is_refused
 test_symlinked_store_to_a_foreign_owned_target_is_refused
 test_symlinked_store_to_an_owned_target_is_accepted
+test_store_directory_writable_by_others_is_refused
 test_corrupt_store_fails_closed
 test_non_array_trusted_workspaces_fails_closed
 test_missing_node_is_refused

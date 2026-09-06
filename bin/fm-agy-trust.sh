@@ -201,6 +201,44 @@ fi
 # tool belongs rather than as a stalled pane later.
 command -v node >/dev/null 2>&1 || refuse "node is required to record workspace trust and was not found on PATH"
 
+# Following the store symlink below is only safe while no other account can write
+# the directory that holds it. Anyone who can create or replace an entry there
+# repoints the store at an unrelated file THIS user owns, and every check on the
+# store itself still passes, because the file that would be rewritten is owned by
+# the very user this runs as - so ownership cannot catch it. Refusing a directory
+# other accounts can write removes the ability to plant the link, rather than
+# removing the symlink support a dotfile manager or synced folder legitimately
+# needs. Reported by Greptile on kunchenguid/firstmate#3858.
+#
+# World-writable is unsafe everywhere. Group-writable is judged against the
+# user's OWN primary group, because a private user group (the umask-002 default
+# that leaves a home directory 0775 user:user) has no other members and refusing
+# it would fail ordinary homes closed for no gain. A group that is NOT this
+# user's primary group is a shared one and is refused.
+# Known boundary: where the primary group is itself shared - macOS `staff` - a
+# deliberately group-writable directory is not caught by this test. World-write
+# and every foreign group are.
+#
+# node, not stat: `stat -c` is GNU-only and `stat -f` is BSD-only, and node is
+# already required below as this script's JSON writer.
+dir_writable_by_others() {  # <dir>
+  node -e '
+    const fs = require("node:fs");
+    const st = fs.statSync(process.argv[1]);
+    const worldWritable = (st.mode & 0o002) !== 0;
+    const groupWritable = (st.mode & 0o020) !== 0;
+    const foreignGroup = st.gid !== process.getgid();
+    process.exit(worldWritable || (groupWritable && foreignGroup) ? 0 : 1);
+  ' "$1" 2>/dev/null
+}
+
+refuse_loose_dir() {  # <dir> <label>
+  ! dir_writable_by_others "$1" || refuse \
+    "$2 '$1' is writable by other users, so the settings path it holds cannot be trusted; remove write access for others with: chmod go-w '$1'"
+}
+
+refuse_loose_dir "$CONFIG_DIR_REAL" "agy settings directory"
+
 STORE="$CONFIG_DIR_REAL/settings.json"
 # A dotfile manager or a synced folder legitimately symlinks this store, so the
 # link is followed to its final target and every check below judges that target.
@@ -212,6 +250,7 @@ if [ -L "$STORE" ]; then
   STORE_REAL=$(real_file "$STORE") || true
   [ -n "$STORE_REAL" ] || refuse "'$STORE' is a symlink whose target cannot be resolved"
   STORE=$STORE_REAL
+  refuse_loose_dir "$(dirname "$STORE")" "the directory holding the resolved agy settings store"
 fi
 if [ -e "$STORE" ]; then
   [ -f "$STORE" ] || refuse "'$STORE' is not a regular file"
