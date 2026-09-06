@@ -189,30 +189,6 @@ mail_seen() {
   grep -Fqx "$1" "$CURSOR"
 }
 
-mail_seen_remove() {
-  # $1 = uid; remove it from the cursor. Used as a recovery fallback when a
-  # recovered-metadata wake could not be delivered and its retry record could
-  # not be restored: removing the cursor line lets the next poll re-surface
-  # the uid as new and re-fetch real metadata instead of stranding it.
-  local id=$1 tmp
-  [ -n "$id" ] || return 0
-  [ -f "$CURSOR" ] || return 0
-  if ! grep -Fqx "$id" "$CURSOR"; then
-    return 0
-  fi
-  tmp=$(mktemp "$CURSOR.rm.XXXXXX") || return 1
-  if ! grep -vx -e "$id" "$CURSOR" > "$tmp" 2>/dev/null; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  chmod 0600 "$tmp" 2>/dev/null || true
-  if ! mv -f -- "$tmp" "$CURSOR"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  return 0
-}
-
 mail_retry_add() {
   # $1 = uid; record that a degraded surfacing should be retried.
   local id=$1
@@ -338,7 +314,8 @@ wake_for() {
   #   2 - the wake row survived with no durable record (fail-closed); the drain
   #       delivers it and the next poll's heal records the uid.
   #   3 - the wake row was never appended; nothing was delivered.
-  local generation=$1 id=$2 summary=$3 lib="$SCRIPT_DIR/fm-wake-lib.sh" status=0
+  #   4 - the wake was delivered but the optional retry-id cleanup failed.
+  local generation=$1 id=$2 summary=$3 retry_id=${4:-} lib="$SCRIPT_DIR/fm-wake-lib.sh" status=0
   local wake_key="mail:$id"
   if [ -n "$generation" ]; then
     wake_key="mail:$generation/$id"
@@ -366,6 +343,18 @@ wake_for() {
   else
     echo "fm-mail: wake append failed for $id; retried on next poll" >&2
     status=3
+  fi
+  # A recovered uid must stay retry-eligible until the wake is durably
+  # published, so the retry record is cleared only after a successful append.
+  # This removes the kill-window between "retry removed" and "wake published"
+  # that could strand recovered metadata: the uid would be cursor-recorded from
+  # the earlier degraded wake but no longer in the retry set, so later polls
+  # would never re-fetch it.
+  if { [ "$status" -eq 0 ] || [ "$status" -eq 2 ]; } && [ -n "$retry_id" ]; then
+    if ! mail_retry_remove "$retry_id"; then
+      echo "fm-mail: could not clear retry for recovered $retry_id after publish; retried on next poll" >&2
+      status=4
+    fi
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
@@ -507,10 +496,11 @@ mail_poll() {
         ;;
     esac
     if [ "$need_wake" -eq 1 ]; then
-      # Wake first, then record: the wake append, journal, and cursor commit
-      # together under the wake-queue lock inside wake_for (so no drain ack can
-      # split them), and a failure stops the poll so the next run retries. A
-      # kill before the append leaves nothing and the next poll retries; a kill
+      # Wake first, then record, then clear retry eligibility: the wake append,
+      # journal, cursor commit, and retry-record removal all happen together
+      # under the wake-queue lock inside wake_for (so no drain ack can split
+      # them), and a failure stops the poll so the next run retries. A kill
+      # before the append leaves nothing and the next poll retries; a kill
       # after the append is healed above without re-waking.
       # Reaching the per-poll wake cap stops the loop: the remaining unseen
       # mail stays out of the cursor and surfaces on the next poll, so a flood
@@ -529,52 +519,23 @@ mail_poll() {
           return 1
         fi
       fi
-      if [ "$status" = retry ]; then
-        # Clear the retry BEFORE the wake so a recovered uid can never be
-        # woken again by a stale retry record; a failed clear fails the poll
-        # so the next poll retries instead of duplicating the recovery wake.
-        if ! mail_retry_remove "$uid"; then
-          echo "fm-mail: could not clear retry for recovered $uid; retried on next poll" >&2
-          fm_lock_release "$STATE_DIR/.mail-seen.lock"
-          return 1
-        fi
-      fi
       wake_rc=0
-      wake_for "$generation" "$uid" "mail from $fr - ${subj:-no subject}" || wake_rc=$?
+      # Clear the retry record as part of the wake publish transaction. For a
+      # recovered uid this removes the dangerous gap where the retry was cleared
+      # but the wake had not yet published; a kill in that gap would leave the
+      # uid cursor-recorded from the degraded wake but no longer retry-eligible,
+      # so its recovered metadata could never surface. For normal (ok) mail it
+      # also clears any stale retry entry left by a rolled-back earlier wake.
+      # Degraded mail keeps its retry entry so the next poll retries the fetch.
+      retry_arg=""
+      if [ "$status" = retry ] || [ "$status" = ok ]; then
+        retry_arg="$uid"
+      fi
+      wake_for "$generation" "$uid" "mail from $fr - ${subj:-no subject}" "$retry_arg" || wake_rc=$?
       if [ "$wake_rc" -eq 0 ]; then
         echo "fm-mail: woke for $uid"
         woke=$((woke + 1))
-        if [ "$status" != degraded ]; then
-          # Newly surfaced (ok) or recovered (retry) mail carries real
-          # metadata: no retry record may remain, and a stale entry left by a
-          # rolled-back earlier wake is cleaned here. Fail closed so a stale
-          # entry cannot silently remain eligible for a duplicate wake.
-          if ! mail_retry_remove "$uid"; then
-            echo "fm-mail: could not clear stale retry for $uid; retried on next poll" >&2
-            fm_lock_release "$STATE_DIR/.mail-seen.lock"
-            return 1
-          fi
-        fi
       else
-        if [ "$status" = retry ] && [ "$wake_rc" -ne 2 ]; then
-          # Nothing was delivered (append failed or rolled back): restore the
-          # retry record so the recovered metadata is re-fetched instead of
-          # stranded, while a fail-closed wake (code 2) already delivered its
-          # row and must not be re-woken.
-          if ! mail_retry_add "$uid"; then
-            # The retry record could not be restored and the uid is already
-            # cursor-recorded from the earlier degraded wake. Remove the cursor
-            # line as a self-healing fallback so the next poll re-surfaces the
-            # mail as new and re-fetches real metadata. If even that fails, the
-            # poll still fails closed rather than silently stranding it.
-            echo "fm-mail: could not restore retry for recovered $uid; removing cursor record so next poll re-fetches" >&2
-            if ! mail_seen_remove "$uid"; then
-              echo "fm-mail: could not restore retry or remove cursor record for $uid; retried on next poll" >&2
-            fi
-            fm_lock_release "$STATE_DIR/.mail-seen.lock"
-            return 1
-          fi
-        fi
         echo "fm-mail: wake failed for $uid; retried on next poll" >&2
         fm_lock_release "$STATE_DIR/.mail-seen.lock"
         return 1

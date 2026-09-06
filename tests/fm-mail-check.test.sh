@@ -242,9 +242,9 @@ printf "77\\t2026-09-05T00:00:00Z\\tfrom@x\\tHello\\tok\\n"'
   out="$home/out.txt"
   run_check "$home" "$out" "$CHECK"
   chmod 0600 "$home/state/.mail-retry"
-  assert_contains "$(cat "$out")" "mail: could not clear stale retry for 77" "a fail-closed poll after a wake reports the failure"
+  assert_contains "$(cat "$out")" "mail: could not clear retry for recovered 77 after publish" "a fail-closed poll after a wake reports the failure"
   assert_not_contains "$(cat "$out")" "woke for 77" "the standing check must not treat the success-wake line as the failure"
-  assert_contains "$(cat "$home/state/.mail-check")" "reported=could not clear stale retry for 77" "the news key is the failure, not the wake"
+  assert_contains "$(cat "$home/state/.mail-check")" "reported=could not clear retry for recovered 77 after publish" "the news key is the failure, not the wake"
   pass "fm-mail-check: a fail-closed poll after a wake reports the failure, not the wake"
 }
 
