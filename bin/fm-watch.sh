@@ -185,8 +185,10 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
 # Liveness beacon for the arm layer: a fresh mtime here means this watcher made
-# PROGRESS, not merely that time passed. It is touched at every phase boundary of
-# the poll loop, and only ever by the watcher process itself.
+# PROGRESS or remains inside an explicitly bounded wait, not merely that an
+# unbounded phase is still running. It is touched at poll phase boundaries,
+# between units of long scans, and during bounded waits, only by this watcher
+# process.
 #
 # Before the 2026-09-04 supervision investigation this was a single touch per
 # iteration, so the beacon measured a whole iteration rather than the current
@@ -1707,8 +1709,9 @@ while :; do
     exit 0
   fi
 
-  # Start of an iteration is itself a phase boundary. Every phase below ends
-  # with its own beat, so the beacon's age is the age of the CURRENT phase.
+  # Start of an iteration is itself a progress boundary. Major phases below end
+  # with their own beat, and long scans or bounded waits publish intermediate
+  # progress, so the beacon ages only when watcher-owned progress stops.
   beat
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
