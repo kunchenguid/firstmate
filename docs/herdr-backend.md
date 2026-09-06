@@ -217,13 +217,14 @@ Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the sha
 Typed-plane text is typed once; only Enter is retried.
 
 On an idle or done native baseline, submit confirmation first waits for `working` or `blocked` across a bounded polling window.
-If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer is delivery, and proven pending text retries Enter.
+If native status stays idle, the shared composer verdict is the next positive signal: Pi first requires the same native Pi identity, while other harnesses use the general composer fallback; a cleared composer is delivery, and proven pending text retries Enter.
+A pending or unreadable Pi composer remains unconfirmed and retains the buffer.
 After the retry budget, `fm_composer_queued_enter_verdict` treats proven pending text plus a generating busy signal as a queued delivered Enter, and keeps an idle pending composer as a genuine swallow.
 On an already active or unreadable baseline, the adapter falls back to conservative composer clearance, with a pre-Enter rendered-footer transition when that baseline is unavailable.
 A fully unreadable target stops retrying and reports unknown.
 blocked is not treated as a queued-Enter busy signal, so a Cursor pane that reports blocked in every state does not receive that conversion.
 
-Some harnesses never present a legibly idle native baseline at all, so the composer fallback is their only path.
+Some harnesses never present a legibly idle native baseline at all, so these fallback signals are their only path.
 Herdr reports a Cursor pane `blocked` in every state, and Cursor's mid-turn composer renders its placeholder beside a right-aligned busy token, which is composer content and therefore `pending` on a composer that holds no user text.
 That fallback alone reported every delivered steer as unconfirmed, so it is paired with a rendered-footer transition: the pane's verified busy footer is read once before the first Enter, and an idle-to-busy transition across that Enter confirms the submit.
 It is the same semantic signal the native path uses and the same one the tmux submit core reads.
@@ -343,6 +344,7 @@ tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
+tests/fm-afk-pi-herdr-ack-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 

@@ -313,6 +313,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/demo-afk-pi-herdr-ack/demo.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
     },

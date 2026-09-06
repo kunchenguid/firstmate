@@ -2670,6 +2670,22 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   printf '%s' "$verdict"
 }
 
+# Confirm the Pi-specific idle path from the same native identity and a
+# structurally empty composer. A non-Pi target stays on native confirmation.
+fm_backend_herdr_pi_idle_composer_state() {  # <target> -> empty|pending|unknown|not-pi
+  local target=$1 identity agent agent_status
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+  IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+  [ "$agent" = pi ] || { printf 'not-pi'; return 0; }
+  case "$agent_status" in
+    idle|done|blocked) fm_backend_herdr_composer_state "$target" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_herdr_rendered_busy_state: busy|idle|unknown from the pane's
 # RENDERED busy footer, the same delivery-only signal bin/fm-tmux-lib.sh's
 # fm_pane_busy_state reads, scanning the same 40-line tail folded to its last
@@ -2693,31 +2709,31 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
-# (Enter only, never retyped) until native agent-state, a cleared composer, or
-# fm_composer_queued_enter_verdict confirms delivery. Verified hazard
-# (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
-# `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
-# claude/codex popups, so the caller's <settle> before the first Enter matters
-# here the same way it does for tmux.
+# (Enter only, never retyped) until native agent-state, the Pi-specific or
+# general cleared-composer path, or fm_composer_queued_enter_verdict confirms
+# delivery. Verified hazard (herdr-verification-p2.md "slash/$ autocomplete
+# popup"): a `/`- or `$`-prefixed send opens a completion popup within ~0.1s,
+# exactly like tmux's claude/codex popups, so the caller's <settle> before the
+# first Enter matters here the same way it does for tmux.
 #
 # Confirmation signal: when the target is legibly idle before Enter,
 # submission is confirmed by fm_backend_herdr_wait_for_working observing a
-# submit-active agent_status after Enter. Live Claude on Herdr 0.8.0 can
-# keep agent_status idle for a whole landed turn, so an idle native result
-# falls through to the shared composer verdict: empty is positive delivery,
-# proven pending retries Enter, and retries-exhausted pending plus a
-# generating busy signal is a queued Enter via
-# fm_composer_queued_enter_verdict (bin/fm-composer-lib.sh).
+# submit-active agent_status after Enter. Pi and live Claude on Herdr can keep
+# agent_status idle for a landed turn, so an idle native result falls through
+# to composer confirmation. Pi first requires the same native Pi identity and
+# then a structurally empty composer; other harnesses use the general shared
+# composer verdict. Empty is positive delivery, proven pending retries Enter,
+# and retries-exhausted pending plus a generating busy signal is a queued Enter
+# via fm_composer_queued_enter_verdict (bin/fm-composer-lib.sh).
 #
-# Incident (2026-07-07, followed up on 2026-07-08): a redelivery loop in the
-# away-mode daemon. Root cause: composer-content submit confirmation was too
-# sensitive to harness rendering details. Real claude/codex use bare prompt
-# rows, and real codex adds dynamic idle suggestions after `›`; the later
-# ANSI-aware composer classifier now handles that Codex shape, and idle-baseline
-# submit confirmation still prefers native agent-state so a faint idle tip
-# cannot block a landed send. Composer content is consulted only after native
-# state stays idle, as the empty/pending owner, and for submit attempts whose
-# pre-Enter agent-state baseline is not legibly idle.
+# Incident (2026-07-07, followed up on 2026-08-09): a redelivery loop in the
+# away-mode daemon. Native agent-state confirmation fixed composer-rendering
+# false negatives for Claude and Codex, but Pi's Herdr state can remain idle
+# after Pi consumes a user message, and later live Claude was also observed
+# staying idle for a whole landed turn. The ANSI-aware composer classifier
+# remains the pre-injection guard and is consulted only after native state stays
+# idle, as the identity-corroborated Pi or general empty/pending owner, and for
+# submit attempts whose pre-Enter agent-state baseline is not legibly idle.
 #
 # This also still correctly handles the earlier 2026-07-03 incident (a
 # slash-command popup selection/placeholder-fill on the FIRST Enter is not a
@@ -2766,7 +2782,10 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # supplies the busy primitive.
 # Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
 # submit vocabulary. Empty means confirmed submitted for every backend; how
-# each backend confirms it is an internal decision.
+# each backend confirms it is an internal decision. Herdr prefers native
+# agent-state, uses an identity-corroborated structural composer verdict for Pi
+# or the general composer fallback for other idle-native harnesses, and uses
+# the rendered busy-footer and queued-Enter paths described above.
 #
 # fm_backend_herdr_queued_enter_busy: delivery-busy for the shared queued-Enter
 # conversion. Native agent_status=working is generating; blocked is not (a
@@ -2786,6 +2805,7 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
     printf 'idle'
   fi
 }
+
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
@@ -2822,9 +2842,10 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         busy) printf 'empty'; return 0 ;;
         unknown) printf 'unknown'; return 0 ;;
       esac
-      # Native stayed idle. Composer empty is positive delivery (a landed
-      # Claude turn that never flipped agent_status). Proven pending retries.
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      # Native stayed idle. Pi requires identity corroboration before the
+      # structural composer verdict; other harnesses use the general fallback.
+      verdict=$(fm_backend_herdr_pi_idle_composer_state "$target")
+      [ "$verdict" = not-pi ] && verdict=$(fm_backend_herdr_composer_state "$target")
       case "$verdict" in
         empty) printf 'empty'; return 0 ;;
         pending|pending-unproven) ;;

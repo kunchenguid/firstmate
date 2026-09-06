@@ -123,7 +123,8 @@ Enter is retried (Enter only, never a retype) until the backend confirms the
 submit landed.
 For tmux that confirmation is normally a proven cleared composer from the shared classifier; an idle baseline transitioning to busy across this submit's own Enter also confirms that the turn started when a working harness hides its composer.
 Without that baseline, busy state never converts an `unknown` composer into confirmation.
-For herdr, idle-baseline submits first seek native agent-state showing a real turn started, then use the shared classifier when native state remains idle: a cleared composer confirms delivery, while pending text retries Enter and reaches the shared busy-queue verdict only after the retry budget.
+For herdr, idle-baseline submits first seek native agent-state showing a real turn started, then use the shared classifier when native state remains idle: Pi takes an identity-corroborated structural-composer path, while other harnesses use the general composer fallback; cleared content confirms delivery, while pending text retries Enter and reaches the shared busy-queue verdict only after the retry budget.
+[`docs/herdr-backend.md`](../../../docs/herdr-backend.md#current-transport-behavior) owns the backend-specific native-state, rendered-footer, Pi, and queued-Enter confirmation paths.
 A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
 `fm-send.sh` uses the same primitive only on its typed plane and exits non-zero when that plane's Enter is positively swallowed; ordinary local text steers use the durable inbox and do not treat doorbell submission as delivery proof.
 
@@ -192,7 +193,8 @@ the operational prefix lets firstmate distinguish it from a real captain message
   Enter is retried, Enter only and never a retype, until the backend submit
   primitive reports `empty` as its caller-facing success verdict.
   For tmux that verdict normally means the shared classifier proved the composer cleared; a baseline-gated idle-to-busy transition may instead prove this Enter started the turn.
-  For herdr's idle-baseline path it means native agent-state observed a turn start, the shared classifier proved the composer cleared, or the shared queued-Enter verdict proved delivery while busy.
+  For herdr's idle-baseline path it means native agent-state observed a turn start, the identity-corroborated Pi path or general composer fallback proved the composer cleared, or the shared queued-Enter verdict proved delivery while busy.
+  The backend-specific paths are owned by [`docs/herdr-backend.md`](../../../docs/herdr-backend.md#current-transport-behavior).
   This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
 - **Marker strip** - `strip_injection_marker` removes the current operational
   prefix or legacy bare marker before classification or relay, so the digest
