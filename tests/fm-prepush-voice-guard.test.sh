@@ -270,6 +270,75 @@ test_refuses_a_private_per_task_work_document() {
   pass "refuses a private per-task work-document path at any depth"
 }
 
+# --- the two shapes the sixth review round measured as still reachable --------
+#
+# Both are counterfactual-checked: each case was run against the expressions as
+# they stood before this pair of corrections and exited 0, so each test fails
+# without the correction it pins rather than passing vacuously alongside it.
+
+test_refuses_an_em_or_en_dash_address() {
+  local out rc dash
+
+  # The spaced ASCII form was already refused. These two are the same vocative
+  # in the same syntactic slot, and the earlier expression let them through.
+  for dash in '—' '–'; do
+    rc=0
+    out=$(fm_voice_text "fix(ci): Captain $dash the stale-throttle inheritance now reads the parent value") || rc=$?
+    expect_code 1 "$rc" "a spaced $dash address was not refused"
+    assert_contains "$out" "captain-address-opening" \
+      "spaced $dash address named the wrong rule"
+
+    # Unspaced, which is how an em dash is conventionally set.
+    rc=0
+    out=$(fm_voice_text "fix(ci): Captain${dash}the stale-throttle inheritance now reads the parent value") || rc=$?
+    expect_code 1 "$rc" "an unspaced $dash address was not refused"
+
+    # The same dash opening a body line of its own, which the opening rule's
+    # commit-prefix anchor cannot reach.
+    rc=0
+    out=$(fm_voice_text "Captain $dash the watcher now reads the parent value") || rc=$?
+    expect_code 1 "$rc" "a line-initial $dash address was not refused"
+    assert_contains "$out" "captain-address-line" \
+      "line-initial $dash address named the wrong rule"
+  done
+  pass "refuses an em-dash or en-dash address"
+}
+
+test_refuses_a_root_qualified_work_document_path() {
+  local out rc=0
+
+  # The leak arrives pasted absolute far more often than relative, and the
+  # slash that makes it absolute is exactly what the relative rule's leading
+  # boundary excluded.
+  out=$(fm_voice_text 'docs: retire /Users/someone/firstmate/data/alpha/report.md after completion') || rc=$?
+  expect_code 1 "$rc" "a root-qualified private work-document path was not refused"
+  assert_contains "$out" "private-task-work-document" \
+    "root-qualified work-document path named the wrong rule"
+  assert_contains "$out" "/Users/someone/firstmate/data/alpha/report.md" \
+    "refusal did not name the root-qualified path that matched"
+
+  # Home-rooted and parent-relative spellings of the same private document.
+  rc=0
+  out=$(fm_voice_text 'docs: retire ~/firstmate/data/alpha/report.md after completion') || rc=$?
+  expect_code 1 "$rc" "a home-rooted private work-document path was not refused"
+
+  rc=0
+  out=$(fm_voice_text 'docs: retire ../data/alpha/report.md after completion') || rc=$?
+  expect_code 1 "$rc" "a parent-relative private work-document path was not refused"
+
+  # The bound that makes the above safe: a relative path whose own directory is
+  # merely named "data" still passes, at any depth. This is the case the earlier
+  # round measured, and widening to absolute paths must not cost it.
+  rc=0
+  out=$(fm_voice_text 'docs: touch tests/data/fixtures/x.txt') || rc=$?
+  expect_code 0 "$rc" "a relative tests/data path was wrongly refused"$'\n'"$out"
+
+  rc=0
+  out=$(fm_voice_text 'docs: touch src/testdata/fixtures/deep/x.txt') || rc=$?
+  expect_code 0 "$rc" "an unrelated data-named directory was wrongly refused"$'\n'"$out"
+  pass "refuses a root-qualified private work-document path"
+}
+
 test_refuses_a_private_review_artifact() {
   local out rc=0
 
@@ -642,6 +711,8 @@ test_refuses_a_pointer_to_the_working_session
 test_passes_ordinary_uses_of_the_word_session
 test_refuses_a_private_per_task_work_document
 test_refuses_a_private_review_artifact
+test_refuses_an_em_or_en_dash_address
+test_refuses_a_root_qualified_work_document_path
 test_passes_nonprivate_paths_and_work_document_words
 test_refusal_names_what_matched_and_how_to_fix_it
 test_scans_only_commits_off_the_default_branch
