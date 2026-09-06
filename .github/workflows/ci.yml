@@ -427,8 +427,8 @@ jobs:
           teardown_output=$(/bin/bash tests/fm-teardown.test.sh)
           printf '%s\n' "$teardown_output"
           teardown_count=$(printf '%s\n' "$teardown_output" | grep -c '^ok - ')
-          [ "$teardown_count" -eq 58 ] || {
-            echo "::error::expected 58 teardown tests, got $teardown_count"
+          [ "$teardown_count" -eq 84 ] || {
+            echo "::error::expected 84 teardown tests, got $teardown_count"
             exit 1
           }
 
