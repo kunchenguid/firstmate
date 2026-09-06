@@ -61,6 +61,12 @@ fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+# fm-agy-trust.sh judges every directory on the way to the agy store, the
+# fixture's own ancestors included, so a suite run under the umask-002 default
+# would hand the agy cases a 0775 chain and fail on its own scaffolding rather
+# than on anything under test. 0755 is what a real installation looks like.
+umask 022
+
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
@@ -1777,6 +1783,154 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
   assert_not_contains "$(cat "$case_dir/stderr")" "syntax error" \
     "fractional-legacy-retry-wait: teardown hit an arithmetic error"
   pass "fractional legacy retry wait remains supported without arithmetic"
+}
+
+# agy creates its own settings directory 0755 on first run, and fm-agy-trust.sh
+# refuses one anyone but its owner can write. The suite umask already gives that;
+# this states it at the point of use so a fixture keeps its permission even if it
+# is later built somewhere with a looser default.
+make_agy_store_dir() { mkdir -p "$1" && chmod go-w "$1"; }
+
+# The agy spawn's workspace-trust entry is the one task artifact written outside
+# this home, into the operator's own vendor settings file, so teardown has to
+# take it back or every task leaves a dead absolute path there forever.
+test_teardown_retires_the_agy_workspace_trust_entry() {
+  local case_dir agyhome store rc
+  case_dir=$(make_case agy-trust-retire)
+  write_meta "$case_dir" local-only ship
+  agyhome="$case_dir/agyhome"
+  store="$agyhome/.gemini/antigravity-cli/settings.json"
+  make_agy_store_dir "$(dirname "$store")"
+  printf '%s\n' '{"enableTelemetry":false,"trustedWorkspaces":["/already/trusted"]}' > "$store"
+  HOME="$agyhome" "$ROOT/bin/fm-agy-trust.sh" "$case_dir/wt" "$case_dir/project" >/dev/null \
+    || fail "agy-trust-retire: the fixture could not register workspace trust"
+  printf '%s\n' "$case_dir/wt" > "$case_dir/state/task-x1.agy-trust"
+  grep -Fq "$case_dir/wt" "$store" \
+    || fail "agy-trust-retire: the fixture registration did not reach the store"
+  rc=0
+  HOME="$agyhome" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "agy-trust-retire: teardown should succeed: $(cat "$case_dir/stderr")"
+  ! grep -Fq "$case_dir/wt" "$store" \
+    || fail "agy-trust-retire: teardown left the workspace-trust entry behind"
+  grep -Fq "/already/trusted" "$store" \
+    || fail "agy-trust-retire: teardown dropped an unrelated operator entry"
+  pass "teardown retires the agy workspace-trust entry the spawn registered"
+}
+
+# The entry is keyed by the recorded absolute path, not by the directory, so a
+# worktree already removed out of band - a reclaimed orca worktree, a pruned pool
+# worktree, a captain's rm -rf - is the case that would otherwise strand it with
+# no supported command left to withdraw it.
+test_teardown_retires_the_agy_trust_entry_when_the_worktree_is_gone() {
+  local case_dir agyhome store rc
+  case_dir=$(make_case agy-trust-retire-gone)
+  write_meta "$case_dir" local-only ship
+  agyhome="$case_dir/agyhome"
+  store="$agyhome/.gemini/antigravity-cli/settings.json"
+  make_agy_store_dir "$(dirname "$store")"
+  printf '%s\n' '{"enableTelemetry":false,"trustedWorkspaces":["/already/trusted"]}' > "$store"
+  HOME="$agyhome" "$ROOT/bin/fm-agy-trust.sh" "$case_dir/wt" "$case_dir/project" >/dev/null \
+    || fail "agy-trust-retire-gone: the fixture could not register workspace trust"
+  printf '%s\n' "$case_dir/wt" > "$case_dir/state/task-x1.agy-trust"
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt" >/dev/null 2>&1 \
+    || rm -rf "$case_dir/wt"
+  [ ! -d "$case_dir/wt" ] || fail "agy-trust-retire-gone: the fixture did not remove the worktree"
+  rc=0
+  HOME="$agyhome" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "agy-trust-retire-gone: teardown should succeed: $(cat "$case_dir/stderr")"
+  ! grep -Fq "$case_dir/wt" "$store" \
+    || fail "agy-trust-retire-gone: teardown left the workspace-trust entry behind"
+  grep -Fq "/already/trusted" "$store" \
+    || fail "agy-trust-retire-gone: teardown dropped an unrelated operator entry"
+  pass "teardown retires the agy workspace-trust entry even when the worktree is already gone"
+}
+
+# A pool worktree is handed to the NEXT task at the SAME path, so the store as it
+# stands when the worktree is returned is the store that task inherits. Withdraw
+# after the return and this teardown can revoke trust the next task just
+# registered, wedging its worker on a dialog that draws no status text.
+test_teardown_retires_the_agy_trust_before_releasing_the_worktree() {
+  local case_dir agyhome store observed rc
+  case_dir=$(make_case agy-trust-before-release)
+  write_meta "$case_dir" local-only ship
+  agyhome="$case_dir/agyhome"
+  store="$agyhome/.gemini/antigravity-cli/settings.json"
+  observed="$case_dir/store-at-return.json"
+  make_agy_store_dir "$(dirname "$store")"
+  printf '%s\n' '{"enableTelemetry":false,"trustedWorkspaces":["/already/trusted"]}' > "$store"
+  HOME="$agyhome" "$ROOT/bin/fm-agy-trust.sh" "$case_dir/wt" "$case_dir/project" >/dev/null \
+    || fail "agy-trust-before-release: the fixture could not register workspace trust"
+  printf '%s\n' "$case_dir/wt" > "$case_dir/state/task-x1.agy-trust"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = return ]; then cp "$store" "$observed"; fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  rc=0
+  HOME="$agyhome" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "agy-trust-before-release: teardown should succeed: $(cat "$case_dir/stderr")"
+  [ -f "$observed" ] || fail "agy-trust-before-release: the fixture never observed a worktree return"
+  ! grep -Fq "$case_dir/wt" "$observed" \
+    || fail "agy-trust-before-release: the worktree was released to the pool while this task still held its trust entry"
+  grep -Fq "/already/trusted" "$observed" \
+    || fail "agy-trust-before-release: the withdrawal dropped an unrelated operator entry"
+  pass "teardown withdraws the agy trust entry before releasing the worktree to the pool"
+}
+
+# The store also holds workspaces the operator trusted BY HAND, and the removal
+# runs no scope test, so a withdrawal keyed on the task's worktree path alone
+# would take one of theirs whenever a task shares that path - a pool worktree is
+# reused across tasks and harnesses, and a secondmate's worktree IS the firstmate
+# home, which agy can never even run in.
+test_teardown_leaves_an_operator_trust_entry_this_task_never_registered() {
+  local case_dir agyhome store rc
+  case_dir=$(make_case agy-trust-operator-entry)
+  write_meta "$case_dir" local-only ship
+  agyhome="$case_dir/agyhome"
+  store="$agyhome/.gemini/antigravity-cli/settings.json"
+  make_agy_store_dir "$(dirname "$store")"
+  # The operator trusted this very path themselves; no firstmate spawn registered
+  # it, so there is no state/<id>.agy-trust record beside the task.
+  HOME="$agyhome" "$ROOT/bin/fm-agy-trust.sh" "$case_dir/wt" "$case_dir/project" >/dev/null \
+    || fail "agy-trust-operator-entry: the fixture could not register workspace trust"
+  grep -Fq "$case_dir/wt" "$store" \
+    || fail "agy-trust-operator-entry: the fixture registration did not reach the store"
+  [ ! -e "$case_dir/state/task-x1.agy-trust" ] \
+    || fail "agy-trust-operator-entry: the fixture must not claim the task registered it"
+  rc=0
+  HOME="$agyhome" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "agy-trust-operator-entry: teardown should succeed: $(cat "$case_dir/stderr")"
+  grep -Fq "$case_dir/wt" "$store" \
+    || fail "agy-trust-operator-entry: teardown revoked a trust entry the operator made and no task registered"
+  pass "teardown leaves an operator's own trust entry alone when the task never registered one"
+}
+
+# The withdrawal is best effort and the record is dropped either way, so a refusal
+# is the one path where an entry outlives everything that could name it. It has to
+# say which path was stranded and how to finish the job, or the operator learns
+# about it the next time agy asks them to trust a directory they already trusted.
+test_teardown_names_a_trust_entry_it_could_not_withdraw() {
+  local case_dir agyhome store rc
+  case_dir=$(make_case agy-trust-refused)
+  write_meta "$case_dir" local-only ship
+  agyhome="$case_dir/agyhome"
+  store="$agyhome/.gemini/antigravity-cli/settings.json"
+  make_agy_store_dir "$(dirname "$store")"
+  # A non-array trustedWorkspaces is one of the store shapes the trust script
+  # refuses outright rather than rewriting.
+  printf '%s\n' '{"enableTelemetry":false,"trustedWorkspaces":"not-an-array"}' > "$store"
+  printf '%s\n' "$case_dir/wt" > "$case_dir/state/task-x1.agy-trust"
+  rc=0
+  HOME="$agyhome" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "agy-trust-refused: a refused withdrawal must not strand the teardown: $(cat "$case_dir/stderr")"
+  assert_grep "$case_dir/wt" "$case_dir/stderr" \
+    "agy-trust-refused: the refusal did not name the stranded workspace path"
+  assert_grep "fm-agy-trust.sh --remove" "$case_dir/stderr" \
+    "agy-trust-refused: the refusal did not name the command that finishes the job"
+  [ "$(node -e 'process.stdout.write(JSON.stringify(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).trustedWorkspaces))' "$store")" = '"not-an-array"' ] \
+    || fail "agy-trust-refused: the refused withdrawal rewrote the store anyway"
+  pass "teardown names the agy trust entry it could not withdraw, and the command to finish it"
 }
 
 test_local_only_force_overrides_unpushed() {
@@ -3656,6 +3810,11 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_teardown_retires_the_agy_workspace_trust_entry
+test_teardown_retires_the_agy_trust_entry_when_the_worktree_is_gone
+test_teardown_retires_the_agy_trust_before_releasing_the_worktree
+test_teardown_leaves_an_operator_trust_entry_this_task_never_registered
+test_teardown_names_a_trust_entry_it_could_not_withdraw
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes

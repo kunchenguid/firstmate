@@ -1151,26 +1151,66 @@ fi
 # Where a harness's firstmate-owned global turn-end registry entry lives is
 # owned by bin/fm-control-lib.sh, so teardown and the control plane's relaunch
 # retire the same artifact rather than each carrying its own copy of the path.
-remove_grok_turnend_auth() {
-  local state_dir=$1 id=$2 token_path token='' path
-  token_path=$(fm_control_harness_turnend_token_path grok "$state_dir" "$id") || return 1
+# grok, kimi and agy each mint one registry entry per task; the harness is the
+# only thing that differs, so they share this retirement rather than carrying a
+# copy each. A harness that mints none resolves to an empty path and is a no-op.
+remove_turnend_auth() {  # <harness> <state-dir> <id>
+  local harness=$1 state_dir=$2 id=$3 token_path token='' path
+  token_path=$(fm_control_harness_turnend_token_path "$harness" "$state_dir" "$id") || return 1
   if [ -n "$token_path" ] && [ -f "$token_path" ]; then
     IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
   fi
-  path=$(fm_control_harness_turnend_auth_path grok "$token") || return 1
+  path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || return 1
   [ -n "$path" ] || return 0
   rm -f -- "$path"
 }
 
-remove_kimi_turnend_auth() {
-  local state_dir=$1 id=$2 token_path token='' path
-  token_path=$(fm_control_harness_turnend_token_path kimi "$state_dir" "$id") || return 1
-  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
-    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
-  fi
-  path=$(fm_control_harness_turnend_auth_path kimi "$token") || return 1
-  [ -n "$path" ] || return 0
-  rm -f -- "$path"
+# The agy spawn's workspace-trust entry lives in the operator's own vendor
+# settings file rather than under this home, so it is the one task artifact with
+# no in-tree path to remove. What is withdrawn is exactly what state/<id>.agy-trust
+# records this task's spawn as having registered - never the task's worktree path
+# on its own word. The same store holds workspaces the operator trusted BY HAND,
+# and the removal runs no scope test by design, so a path-keyed withdrawal would
+# silently revoke one of theirs whenever a task shares the path: a secondmate's
+# worktree IS the firstmate home, and a pool worktree is reused across tasks and
+# harnesses. No record means this task registered nothing and nothing is touched.
+#
+# Placement is load-bearing too: this runs BEFORE the worktree is released,
+# because a returned pool worktree is handed to the next spawn at the SAME path,
+# and withdrawing after the return can revoke trust that task just registered,
+# wedging its worker on a dialog that draws no status text.
+#
+# Best effort: a store the vendor moved under it, or one this user does not own,
+# refuses rather than clobbering, and that must not strand an otherwise finished
+# teardown. The record is dropped either way, because nothing reads it after this
+# teardown and retaining it would only be state with no reader - so a refusal
+# NAMES the path it could not withdraw and the exact command that finishes the
+# job, rather than leaving a dead path in the operator's settings unannounced.
+retire_agy_workspace_trust() {  # <state-dir> <id>
+  local state_dir=${1:-} id=${2:-} record path
+  [ -n "$state_dir" ] && [ -n "$id" ] || return 0
+  record="$state_dir/$id.agy-trust"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 0
+  while IFS= read -r path; do
+    case "$path" in
+      /*)
+        "$SCRIPT_DIR/fm-agy-trust.sh" --remove "$path" >/dev/null || {
+          echo "warning: agy workspace trust for '$path' could not be withdrawn; this task's record is gone, so withdraw it by hand: $SCRIPT_DIR/fm-agy-trust.sh --remove '$path'" >&2
+        }
+        ;;
+    esac
+  done < "$record"
+  rm -f -- "$record"
+  return 0
+}
+
+# Every harness that mints a global turn-end registry entry, retired together so
+# a task torn down after a relaunch that changed harness leaves nothing behind.
+remove_all_turnend_auth() {  # <state-dir> <id>
+  local harness
+  for harness in grok kimi agy; do
+    remove_turnend_auth "$harness" "$1" "$2" || return 1
+  done
 }
 
 retire_busy_state() {
@@ -1646,7 +1686,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi|agy)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2883,6 +2923,7 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
+    retire_agy_workspace_trust "$sub_state" "$child_id"
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -2894,14 +2935,16 @@ cleanup_firstmate_home_children() {
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
-          "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+          "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend" \
+          "$child_wt/.fm-agy-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
-        "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend" \
+        "$child_wt/.fm-agy-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
@@ -2916,8 +2959,7 @@ cleanup_firstmate_home_children() {
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
-    remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
-    remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
+    remove_all_turnend_auth "$sub_state" "$child_id" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     child_busy_gen=$(meta_value "$child_meta" busy_gen)
     if [ -z "$child_busy_gen" ]; then
@@ -2929,6 +2971,7 @@ cleanup_firstmate_home_children() {
     rm -f "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
+      "$sub_state/$child_id.agy-turnend-token" "$sub_state/$child_id.agy-trust" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
       "$sub_state/.$child_id.branch-outcome-index"
@@ -3182,6 +3225,8 @@ fi
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
+retire_agy_workspace_trust "$STATE" "$ID"
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -3197,7 +3242,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
-      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.fm-agy-turnend"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -3210,7 +3255,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend" "$WT/.fm-agy-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -3322,8 +3367,7 @@ if [ "$KIND" = secondmate ]; then
     || { echo "error: receiver wake cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
   remove_secondmate_registry_entry "$ID"
 fi
-remove_grok_turnend_auth "$STATE" "$ID" || exit 1
-remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
+remove_all_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
@@ -3333,7 +3377,9 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
+  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.agy-turnend-token" \
+  "$STATE/$ID.agy-trust" \
+  "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \

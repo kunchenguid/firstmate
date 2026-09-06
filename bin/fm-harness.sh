@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|agy|omp|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -35,7 +35,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
+  # Claude, Pi, Grok, Cursor, and agy set verified markers of their own; codex,
   # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
@@ -52,6 +52,27 @@ detect_own() {
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  # agy is checked BEFORE claude for the same reason cursor is: agy does NOT
+  # clear an inherited CLAUDECODE, so an agy worker launched from a claude
+  # primary carries BOTH markers and whichever is tested first wins. Verified
+  # live on agy 1.1.25 by running `CLAUDECODE=1 agy -p` and having the agent
+  # print its own environment: CLAUDECODE=1 and ANTIGRAVITY_CONVERSATION_ID were
+  # both present. ANTIGRAVITY_CONVERSATION_ID is agy's own unambiguous marker -
+  # it carries the conversation id, is exported to every tool subprocess, and its
+  # value matches the conversationId in agy's Stop hook payload - so ordering it
+  # first is what makes the verdict correct. bin/fm-spawn.sh additionally clears
+  # the foreign markers at the launch boundary; both are kept, because the launch
+  # sanitization only covers sessions fm-spawn started while this ordering also
+  # covers an agy session a human started by hand.
+  #
+  # agy is also ordered BEFORE gemini below. agy is Google Antigravity and is
+  # built on the same gemini_coder tree, and the string GEMINI_CLI is present in
+  # the agy binary; whether an agy session also EXPORTS GEMINI_CLI=1 is
+  # UNVERIFIED. Testing agy's own unambiguous marker first makes the verdict
+  # correct under both possibilities, and it cannot change gemini's verdict
+  # because a real gemini session carries no ANTIGRAVITY_CONVERSATION_ID.
+  [ -n "${ANTIGRAVITY_CONVERSATION_ID:-}" ] && { echo agy; return; }
+
   # Gemini is checked BEFORE claude for exactly cursor's reason above: the
   # Gemini CLI does NOT clear an inherited CLAUDECODE, so a gemini worker
   # launched from a claude primary carries BOTH markers and whichever is
@@ -144,6 +165,9 @@ detect_own() {
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
       rovo) echo rovo; return ;;
+      # agy is Antigravity CLI's installed command name. Anchored exactly rather
+      # than *agy*, so unrelated commands (legacy, agyneja) cannot be misread.
+      agy) echo agy; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
       # name carries the version and CHANGES on every auto-update. Match the stable

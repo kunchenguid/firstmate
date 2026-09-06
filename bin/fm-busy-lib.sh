@@ -66,6 +66,22 @@
 # acknowledgement and away-mode supervisor injection only; neither is a
 # recorded worker state source.
 #
+# agy is deliberately UNARMED and has no semantic source here, so it classifies
+# `unknown missing` and firstmate supervises it on its turn-end wake instead
+# (bin/fm-agy-turnend-hook.sh). agy's rendered status bar is unambiguous - `?
+# for shortcuts` when it accepts a prompt, `esc to cancel` when it does not -
+# but a second rendered-text worker-state classifier is exactly what the rule
+# above forbids, so that signature stays a delivery guard in
+# bin/fm-composer-lib.sh and never a recorded state. The upgrade path is
+# semantic and already verified to exist: agy fires PreInvocation before each
+# model call and Stop when the loop terminates, which is the same open/close
+# shape claude-hook uses. Wire that pair - and only then arm agy in
+# fm_busy_sources_for_harness and in bin/fm-spawn.sh - rather than promoting the
+# status bar. A Stop event is NOT on its own a closed turn: agy backgrounds a
+# command that outruns its own wait and fires Stop with fullyIdle false while
+# that command still runs, so any close written from Stop must require
+# fullyIdle true, exactly as the turn-end hook does.
+#
 # The muse pull source is semantic, not rendered: it folds muse's own durable
 # session event log. It has no writer, no arm, and no gen, because
 # muse's default build ships no hook or plugin surface that could push events

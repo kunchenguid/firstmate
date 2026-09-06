@@ -111,6 +111,33 @@ There is no `projectionBasis` field; its absence means `cycle_average`.
 Projection confidence is not present on every known runway, so selection must preserve that absence as uncertainty rather than fabricate it.
 The older-schema fallback contract is owned by `quota-array-dispatch`; this evidence does not reinterpret an absent runway, pace, or selection field.
 
+## The provider family a harness maps to is the producer's own name
+
+Verified 2026-09-03 against quota-axi 0.1.35.
+
+```sh
+quota-axi --help | grep -o -- '--provider <[^>]*>'
+quota-axi --json --no-credential-refresh | jq -r '[.providers[]?.provider] | @csv'
+```
+
+```text
+--provider <claude,codex,cursor,copilot,grok,kimi,zai,agy,alibaba,opencode-go>
+"claude","codex","cursor","copilot","grok","kimi","zai","agy","alibaba","opencode-go"
+```
+
+The producer declares its family names in both surfaces and they agree, so a harness maps to the name that appears here rather than to its vendor's brand.
+`agy` is one of them: Antigravity is its own family, not a `google`/`gemini` alias, which is what `provider_for_harness` in `bin/fm-quota-choose.sh` maps `agy` onto.
+
+```sh
+quota-axi --json --no-credential-refresh | jq -c '.providers[] | select(.provider=="agy") | {provider, status: .quotaSemantics.status}'
+```
+
+```text
+{"provider":"agy","status":"unknown"}
+```
+
+A family present with `status: unknown` is missing evidence, not a wrong family name - the same shape §"Quota granularity the judgment depends on" already records for `cursor` and `copilot`.
+
 ## Provider-family counterfactual that this producer schema supports
 
 Verified 2026-07-30 on Pi 0.82.0 and quota-axi 0.1.16.

@@ -332,6 +332,7 @@ provider_for_harness() {
     kimi)         printf 'kimi\n' ;;
     cursor)       printf 'cursor\n' ;;
     muse)         printf 'meta\n' ;;
+    agy)          printf 'agy\n' ;;
     *)            return 1 ;;
   esac
 }

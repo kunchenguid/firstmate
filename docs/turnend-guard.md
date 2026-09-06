@@ -166,6 +166,15 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
+- agy (Antigravity CLI) exposes no hooks subcommand at all, but does read a global `hooks.json` whose top-level keys are named hooks, including a `Stop` event with camelCase payload fields `conversationId`, `workspacePaths`, `fullyIdle`, and `terminationReason`.
+- agy has no primary supervision protocol and remains outside the primary guard integrations above; it is a crewmate/scout adapter only.
+- agy crew wake support uses `bin/fm-agy-turnend-hook.sh` to own exactly one `firstmate-turn-end` key in `~/.gemini/config/hooks.json` and install a silent always-zero hook, preserving every operator hook in that file.
+- The hook remains inert unless a payload `workspacePaths` entry contains a per-task token pointer that resolves through Firstmate's private registry to one `state/<id>.turn-ended` marker.
+- The hook fires only when the payload reports `fullyIdle` true: agy backgrounds a command that outruns its own wait, yields the composer, and fires `Stop` with `fullyIdle` false while that command still runs, with a second `fullyIdle` true `Stop` once it finishes.
+- Two paths end an agy turn with NO `Stop` event and therefore no wake: a declined tool call, and an Escape interrupt.
+- A crewmate launches with `--dangerously-skip-permissions` so it never reaches the first, and firstmate initiates its own interrupts; the watcher's staleness check is the backstop for both.
+- `terminationReason` values beyond `NO_TOOL_CALL` are unverified.
+- Installation refuses before writing unless `node` is available, and the installed hook exits 0 with `{}` on any unreadable input.
 - No harness adapter uses a shell ampersand to manufacture supervision.
 
 ## Regression coverage
@@ -176,6 +185,8 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, Pi-host stand-down without Cursor identity and continued parking when `PI_CODING_AGENT` leaks alongside `CURSOR_AGENT` or `CURSOR_INVOKED_AS`, child-worktree exclusion, and that the adapter never exits 2.
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed cursor-agent and fails naming the harness and version.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
+`tests/fm-agy-harness.test.sh` covers the agy crew hook's operator-hook preservation, the `fullyIdle` gate, the unregistered-token guard, the always-zero answer, the live-token removal refusal, and the malformed-config refusal, alongside the trust registration's accepted path and every one of its refusals.
+`FM_AGY_SIGNALS_LIVE_E2E=1 tests/fm-agy-signals-live-e2e.test.sh` is the opt-in guard that proves the trust dialog, both status bars, typed submission, and the `Stop` hook against the installed agy and fails naming the harness and version.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
 `tests/fm-omp-harness.test.sh` covers the omp extension pair over a fake omp API (forced continuation on exit 2, the `stop_hook_active` bound, the seatbelt block, the ownership proof), and `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` is the opt-in isolated omp path.

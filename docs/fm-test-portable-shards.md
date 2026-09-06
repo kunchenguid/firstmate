@@ -74,6 +74,9 @@ That is not hypothetical: by 2026-09-01 the lane had grown from 116 to 139 scrip
 `bin/fm-test-run.sh --check-coverage` now reports the unmeasured share as `serial_unhinted=` and refuses past `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT`, so hint drift fails the coverage guard instead of silently pushing one shard into its job cap.
 Refresh the hints whenever the serial lane gains scripts, rather than waiting for that bound to trip.
 
+The snapshot above is not current: the serial lane has since gained `tests/fm-agy-harness.test.sh` and `tests/fm-agy-signals-live-e2e.test.sh` with the agy adapter, whose entries in `bin/fm-test-run.sh` were measured locally rather than from the recorded CI artifacts.
+The totals and shard table in this section therefore predate those scripts and refresh wholesale at the next CI refresh, which also replaces the provisional agy hints.
+
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
 | `portable-serial-1of5` | 29 | 798443 ms (~13.31 min) |
