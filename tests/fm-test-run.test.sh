@@ -157,10 +157,40 @@ init_changed_fixture_repo() {
   : >"$repo/.pi/extensions/lib/fm-operational-input.ts"
   : >"$repo/docs/fm-test-isolation-proof.md"
   : >"$repo/CONTRIBUTING.md"
+  : >"$repo/GROK_BOT.md"
+  : >"$repo/UNMAPPED.md"
   : >"$repo/src/unmapped.ts"
   git -C "$repo" init -q
   git -C "$repo" add .
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
+}
+
+test_changed_grok_instructions_select_validation_and_unknown_markdown_fails() {
+  local tmp repo listed expected rc
+  tmp=$(fm_test_tmproot fm-test-run-grok-instructions)
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/GROK_BOT.md"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) \
+    || fail "GROK_BOT.md change must select instruction validation"
+  expected=$(cd "$repo" && bin/fm-test-run.sh --list --family pure-contract-unit)
+  [ "$listed" = "$expected" ] \
+    || fail "GROK_BOT.md must select exactly the instruction validation family: $listed"
+  assert_contains "$listed" 'tests/fm-documentation-audiences.test.sh' \
+    "GROK_BOT.md selection must include documentation validation"
+
+  # A known instruction path must not hide an unknown Markdown path.
+  printf '\n' >>"$repo/UNMAPPED.md"
+  rc=0
+  (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) \
+    >"$tmp/out" 2>"$tmp/err" || rc=$?
+  [ "$rc" -eq 2 ] || fail "unmapped Markdown must fail with exit 2, got $rc"
+  assert_contains "$(cat "$tmp/err")" \
+    'no changed-test mapping for source path: UNMAPPED.md' \
+    "unmapped Markdown failure must name the unsupported path"
+  [ ! -s "$tmp/out" ] || fail "unmapped Markdown must not emit a partial selection"
+  pass "GROK_BOT.md selects instruction validation while unknown Markdown fails closed"
 }
 
 test_changed_runner_surfaces_select_their_family() {
@@ -1447,6 +1477,7 @@ test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
+test_changed_grok_instructions_select_validation_and_unknown_markdown_fails
 test_changed_runner_surfaces_select_their_family
 test_shell_line_ending_policy_selects_runner_contract
 test_changed_dependency_selection_and_unmapped_failure
