@@ -693,7 +693,7 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
   local dir state fakebin task win pane key reason i escalations
   dir=$(make_supercase enriched-wedge-declared-wait)
   state="$dir/state"; fakebin="$dir/fakebin"
-  task=paused-wedge-w1; win="sess:fm-$task"; pane="$dir/pane.txt"
+  task="paused-wedge-w1"; win="sess:fm-$task"; pane="$dir/pane.txt"
   key=$(printf '%s' "$task" | tr ':/.' '___')
   fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
   printf 'working: dispatching the long audit\npaused: the audit engine is running to completion\n' \
@@ -2615,6 +2615,295 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+test_file_age_fails_closed_on_unreadable_mtime() {
+  # The 2026-09-02 incident: the housekeeping gate at fm-supervise-daemon.sh's
+  # main loop read an empty _file_age and errored with
+  # "[: : integer expression expected", silently skipping that tick's batch
+  # flushes, stale rechecks, and catch-all scan. _file_age must fail closed to
+  # 999999 (never empty) whenever _stat_file_mtime yields nothing or a
+  # non-numeric token, so the gate RUNS instead of erroring.
+  local age tmp
+  tmp=$(mktemp "$TMP_ROOT/file-age.XXXXXX"); : > "$tmp"
+  age=$(_file_age "$tmp")
+  case "$age" in ''|*[!0-9]*) fail "a real file's age must be a non-negative integer, got: [$age]" ;; esac
+  [ "$(_file_age "$TMP_ROOT/definitely-absent-$$")" = 999999 ] \
+    || fail "a missing file must read as 999999"
+  age=$( _stat_file_mtime() { return 0; }; _file_age "$tmp" )
+  [ "$age" = 999999 ] || fail "an empty mtime read (exit 0, no output) must fail closed to 999999, got: [$age]"
+  age=$( _stat_file_mtime() { printf 'abc'; }; _file_age "$tmp" )
+  [ "$age" = 999999 ] || fail "a non-numeric mtime read must fail closed to 999999, got: [$age]"
+  age=$( _stat_file_mtime() { printf '12x'; }; _file_age "$tmp" )
+  [ "$age" = 999999 ] || fail "a part-numeric mtime read must fail closed to 999999, got: [$age]"
+  # The fail-closed value must satisfy the housekeeping gate as a plain integer.
+  age=$( _stat_file_mtime() { return 0; }; _file_age "$tmp" )
+  [ "$age" -ge 15 ] 2>/dev/null \
+    || fail "the fail-closed age must be an integer the housekeeping gate can compare, got: [$age]"
+  rm -f "$tmp"
+  pass "_file_age fails closed to 999999 on an empty or non-numeric mtime read"
+}
+
+test_age_helpers_read_leading_zero_tokens_as_decimal() {
+  # A digit run can still carry a leading zero, which bash reads as octal: "08"
+  # and "09" abort the arithmetic inside the command substitution exactly as a
+  # non-numeric token does, so the helper printed NOTHING and its caller raised
+  # the same "[: : integer expression expected" this branch exists to remove;
+  # "0123" is quieter and worse, silently yielding 83 instead of 123. Both
+  # operands must be read as base 10, so assert the exact decimal age rather than
+  # merely the absence of an error.
+  # _stub_* names deliberately: _file_age and _epoch_age declare their own `now`
+  # and `stamp` locals, which would dynamically shadow any stub variable sharing
+  # those names and make the stub read empty.
+  local tmp buf age _stub_token _stub_clock
+  tmp=$(mktemp "$TMP_ROOT/leading-zero.XXXXXX"); : > "$tmp"
+  buf=$(mktemp "$TMP_ROOT/leading-zero-buf.XXXXXX"); printf 'one escalation\n' > "$buf"
+  for _stub_token in 08 09 0123 000; do
+    _stub_clock=$(( 10#$_stub_token + 500 ))
+    age=$( _stat_file_mtime() { printf '%s' "$_stub_token"; }; _now() { printf '%s' "$_stub_clock"; }; _file_age "$tmp" )
+    [ "$age" = 500 ] \
+      || fail "_file_age misread a leading-zero mtime [$_stub_token] as base 8 or aborted, got: [$age]"
+    printf '%s' "$_stub_token" > "$tmp"
+    age=$( _now() { printf '%s' "$_stub_clock"; }; _epoch_age "$tmp" )
+    [ "$age" = 500 ] \
+      || fail "_epoch_age misread a leading-zero stamp [$_stub_token] as base 8 or aborted, got: [$age]"
+    printf '%s' "$_stub_token" > "${buf}.since"
+    age=$( _now() { printf '%s' "$_stub_clock"; }; _oldest_line_age "$buf" )
+    [ "$age" = 500 ] \
+      || fail "_oldest_line_age misread a leading-zero sidecar [$_stub_token] as base 8 or aborted, got: [$age]"
+  done
+  # A leading-zero CLOCK is the same hazard on the other operand.
+  printf '100' > "$tmp"
+  age=$( _now() { printf '0900'; }; _epoch_age "$tmp" )
+  [ "$age" = 800 ] \
+    || fail "_epoch_age misread a leading-zero clock as base 8 or aborted, got: [$age]"
+  age=$( _stat_file_mtime() { printf '100'; }; _now() { printf '0900'; }; _file_age "$tmp" )
+  [ "$age" = 800 ] \
+    || fail "_file_age misread a leading-zero clock as base 8 or aborted, got: [$age]"
+  rm -f "$tmp" "$buf" "${buf}.since"
+  pass "the age helpers read leading-zero tokens as decimal instead of octal"
+}
+
+test_oldest_line_age_fails_closed_on_unreadable_sidecar() {
+  # escalate_add truncates the .since sidecar before `date` writes into it, so a
+  # reap or a full disk in that window leaves it empty or partial. `cat` still
+  # exits 0 there, so the old `|| echo 0` fallback never fired and the arithmetic
+  # aborted inside the substitution, printing nothing: both the batch-flush gate
+  # and the max-defer/wedge-alarm gate then errored with
+  # "[: : integer expression expected" and took the false branch, stranding every
+  # buffered away-mode escalation. Fail closed to 999999 so both gates RUN.
+  local age buf
+  buf=$(mktemp "$TMP_ROOT/escalations.XXXXXX")
+  printf 'one escalation\n' > "$buf"
+  [ "$(_oldest_line_age "$buf")" = 999999 ] \
+    || fail "a buffer with no .since sidecar must read as 999999"
+  printf '%s\n' "$(( $(_now) - 42 ))" > "${buf}.since"
+  age=$(_oldest_line_age "$buf")
+  case "$age" in ''|*[!0-9]*) fail "a valid sidecar must yield a non-negative integer, got: [$age]" ;; esac
+  [ "$age" -ge 42 ] || fail "a 42s-old sidecar must read as at least 42s, got: [$age]"
+  : > "${buf}.since"
+  age=$(_oldest_line_age "$buf")
+  [ "$age" = 999999 ] || fail "an empty .since sidecar must fail closed to 999999, got: [$age]"
+  printf 'abc\n' > "${buf}.since"
+  age=$(_oldest_line_age "$buf")
+  [ "$age" = 999999 ] || fail "a non-numeric .since sidecar must fail closed to 999999, got: [$age]"
+  printf '17x\n' > "${buf}.since"
+  age=$(_oldest_line_age "$buf")
+  [ "$age" = 999999 ] || fail "a part-numeric .since sidecar must fail closed to 999999, got: [$age]"
+  # The fail-closed value must clear both gates as a plain integer comparison.
+  : > "${buf}.since"
+  age=$(_oldest_line_age "$buf")
+  { [ "$age" -ge "$ESCALATE_BATCH_SECS_DEFAULT" ] && [ "$age" -ge "$MAX_DEFER_SECS_DEFAULT" ]; } 2>/dev/null \
+    || fail "the fail-closed age must trip the batch-flush and max-defer gates, got: [$age]"
+  # An empty buffer still short-circuits, whatever the sidecar says.
+  : > "$buf"
+  [ "$(_oldest_line_age "$buf")" = 999999 ] || fail "an empty buffer must read as 999999"
+  rm -f "$buf" "${buf}.since"
+  pass "_oldest_line_age fails closed to 999999 on an empty or non-numeric .since sidecar"
+}
+
+# stale_marker_record and the pause-marker writer both stamp with `_now > marker`,
+# which truncates before `date` produces output: a SIGTERM in that window (the reap
+# this branch establishes as recurring) or a full disk leaves the marker empty.
+# Reading its content back as `$(( now - $(cat marker) ))` is then a syntax error
+# that ABORTS housekeeping outright, and because both writers only create a marker
+# that does not already exist, the truncated marker is never repaired - housekeeping
+# stays dead for the rest of the daemon's life, so the pause re-surface and the
+# catch-all heartbeat scan never run again. Assert the whole function still succeeds
+# AND that a later section still executed.
+_run_housekeeping_over_marker() {  # <state> <fakebin> <window> -> status
+  PATH="$2:$PATH" FM_FAKE_TMUX_WINDOW="$3" FM_FAKE_TMUX_CAPTURE="$1/pane.txt" \
+    FM_STATE_OVERRIDE="$1" FM_ESCALATE_BATCH_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 \
+    housekeeping "$1"
+}
+
+test_age_helpers_fail_closed_on_a_stamp_newer_than_the_clock() {
+  # A backwards clock step - an NTP correction after a long sleep, a VM snapshot
+  # restore, a captain fixing a wrong clock - leaves a stamp NEWER than the clock.
+  # Both operands are still plain digit runs, so operand validation passes them and
+  # the subtraction yields a negative age that every caller feeds straight into an
+  # integer comparison, takes the false branch on, and silently skips the guarded
+  # work: the same silent-skip outcome the 2026-09-02 defect had, but with no error
+  # printed at all. The contract is that a nonsensical age fails closed to the
+  # sentinel so the work RUNS and the escalation FIRES, so assert the observable
+  # behaviour and not only the returned number.
+  local tmp buf age dir state fakebin task win key
+  tmp=$(mktemp "$TMP_ROOT/future-stamp.XXXXXX"); : > "$tmp"
+  buf=$(mktemp "$TMP_ROOT/future-stamp-buf.XXXXXX"); printf 'one escalation\n' > "$buf"
+  age=$( _stat_file_mtime() { printf '1757001800'; }; _now() { printf '1757000000'; }; _file_age "$tmp" )
+  [ "$age" = 999999 ] \
+    || fail "_file_age returned a negative age for a future mtime instead of failing closed, got: [$age]"
+  printf '1757001800' > "$tmp"
+  age=$( _now() { printf '1757000000'; }; _epoch_age "$tmp" )
+  [ "$age" = 999999 ] \
+    || fail "_epoch_age returned a negative age for a future stamp instead of failing closed, got: [$age]"
+  printf '1757001800' > "${buf}.since"
+  age=$( _now() { printf '1757000000'; }; _oldest_line_age "$buf" )
+  [ "$age" = 999999 ] \
+    || fail "_oldest_line_age returned a negative age for a future sidecar instead of failing closed, got: [$age]"
+  # An operand long enough to overflow wraps negative rather than erroring, so the
+  # same result gate must catch it without its own special case.
+  age=$( _stat_file_mtime() { printf '99999999999999999999'; }; _now() { printf '1757000000'; }; _file_age "$tmp" )
+  [ "$age" = 999999 ] \
+    || fail "_file_age let an overflowed operand escape as a negative age, got: [$age]"
+  rm -f "$tmp" "$buf" "${buf}.since"
+
+  # Observable behaviour: a stale marker stamped in the future must still mature
+  # into its wedge escalation rather than being deferred forever.
+  dir=$(make_supercase housekeeping-future-stale-marker)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task="future-marker-w1"; win="sess:fm-$task"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+  printf 'working: still going\n' > "$state/$task.status"
+  printf 'idle prompt $\n' > "$dir/pane.txt"
+  echo $(( $(date +%s) + 3600 )) > "$state/.subsuper-stale-$key"
+  _run_housekeeping_over_marker "$state" "$fakebin" "$win" \
+    || fail "housekeeping failed over a future-dated stale marker"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a future-dated stale marker silently skipped its wedge escalation: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  grep -F "timestamp could not be read" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the escalation reported an unmeasurable age as a real duration: $(cat "$state/.subsuper-escalations")"
+
+  # Observable behaviour at the housekeeping gate itself: a future-dated tick
+  # marker must not switch housekeeping off, so a later section still runs.
+  dir=$(make_supercase housekeeping-future-pause-marker)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task="future-marker-w2"; win="sess:fm-$task"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+  printf 'working: dispatching the long audit\npaused: the audit engine is running to completion\n' \
+    > "$state/$task.status"
+  printf 'idle prompt $\n' > "$dir/pane.txt"
+  echo $(( $(date +%s) + 3600 )) > "$state/.subsuper-paused-$key"
+  _run_housekeeping_over_marker "$state" "$fakebin" "$win" \
+    || fail "housekeeping failed over a future-dated pause marker"
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a future-dated pause marker silently skipped its recheck: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ -e "$state/.subsuper-last-scan" ] \
+    || fail "the heartbeat scan never ran over a future-dated marker"
+  pass "the age helpers fail closed when a stamp is newer than the clock, so the guarded work still runs"
+}
+
+test_housekeeping_survives_a_truncated_marker() {
+  local dir state fakebin task win key marker paused status label content spec
+  # Each label names its own case directory. make_supercase is a deterministic
+  # mkdir -p under TMP_ROOT rather than a mktemp, so two iterations sharing a
+  # name would share one state directory and the later one would start on the
+  # earlier one's leftover markers and already-consumed status line.
+  for spec in 'empty:' 'alpha:abc' 'partial:17x'; do
+    label=${spec%%:*}; content=${spec#*:}
+    dir=$(make_supercase "housekeeping-truncated-marker-$label")
+    state="$dir/state"; fakebin="$dir/fakebin"
+    [ ! -e "$state/.subsuper-last-scan" ] \
+      || fail "case $label did not start from a clean state directory"
+    task="truncated-marker-w1"; win="sess:fm-$task"
+    key=$(printf '%s' "$task" | tr ':/.' '___')
+    marker="$state/.subsuper-stale-$key"
+    paused="$state/.subsuper-paused-$key"
+    fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+    printf 'working: still going\n' > "$state/$task.status"
+    printf 'idle prompt $\n' > "$dir/pane.txt"
+    printf '%s' "$content" > "$marker"
+
+    rm -f "$state/.subsuper-last-scan"
+    status=0
+    _run_housekeeping_over_marker "$state" "$fakebin" "$win" || status=$?
+    [ "$status" -eq 0 ] \
+      || fail "housekeeping aborted on a $label stale marker holding [$content], status $status"
+    [ -e "$state/.subsuper-last-scan" ] \
+      || fail "the heartbeat scan never ran, so housekeeping died before it on a $label stale marker holding [$content]"
+
+    # The same hazard on the pause marker, which section (2b) reads after (2).
+    rm -f "$marker" "$state/.subsuper-last-scan"
+    printf 'paused: waiting on the vendor\n' >> "$state/$task.status"
+    printf '%s' "$content" > "$paused"
+    status=0
+    _run_housekeeping_over_marker "$state" "$fakebin" "$win" || status=$?
+    [ "$status" -eq 0 ] \
+      || fail "housekeeping aborted on a $label pause marker holding [$content], status $status"
+    [ -e "$state/.subsuper-last-scan" ] \
+      || fail "the heartbeat scan never ran, so housekeeping died before it on a $label pause marker holding [$content]"
+  done
+  # A truncated marker must age as very old, so the guarded work RUNS: the stale
+  # window matures into its escalation instead of being skipped forever.
+  dir=$(make_supercase housekeeping-truncated-marker-escalates)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task="truncated-marker-w2"; win="sess:fm-$task"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+  printf 'working: still going\n' > "$state/$task.status"
+  printf 'idle prompt $\n' > "$dir/pane.txt"
+  : > "$state/.subsuper-stale-$key"
+  _run_housekeeping_over_marker "$state" "$fakebin" "$win" \
+    || fail "housekeeping aborted while maturing a truncated stale marker"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a truncated stale marker did not fail closed to very old, so the wedge never escalated"
+  # The escalation still fires, but it must not report the fail-closed sentinel to
+  # the captain as an observed duration: nothing measured 999999 seconds here.
+  ! grep -F "999999" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the escalation reported the fail-closed sentinel as a real elapsed time: $(cat "$state/.subsuper-escalations")"
+  grep -F "timestamp could not be read" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the escalation did not say the elapsed time was unreadable: $(cat "$state/.subsuper-escalations")"
+
+  # Section (2b)'s pause re-surface interpolates the same age, so it must not
+  # print the sentinel either.
+  dir=$(make_supercase housekeeping-truncated-pause-marker-escalates)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task="truncated-marker-w3"; win="sess:fm-$task"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+  printf 'working: dispatching the long audit\npaused: the audit engine is running to completion\n' \
+    > "$state/$task.status"
+  printf 'idle prompt $\n' > "$dir/pane.txt"
+  : > "$state/.subsuper-paused-$key"
+  _run_housekeeping_over_marker "$state" "$fakebin" "$win" \
+    || fail "housekeeping aborted while maturing a truncated pause marker"
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a truncated pause marker did not fail closed to very old, so the recheck never escalated"
+  ! grep -F "999999" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the pause recheck reported the fail-closed sentinel as a real elapsed time: $(cat "$state/.subsuper-escalations")"
+  grep -F "timestamp could not be read" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "the pause recheck did not say the elapsed time was unreadable: $(cat "$state/.subsuper-escalations")"
+
+  # A genuinely measured age must still read as a plain duration, so the
+  # unreadable wording cannot quietly replace real measurements.
+  dir=$(make_supercase housekeeping-measured-marker-escalates)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task="measured-marker-w4"; win="sess:fm-$task"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+  printf 'working: still going\n' > "$state/$task.status"
+  printf 'idle prompt $\n' > "$dir/pane.txt"
+  echo $(( $(date +%s) - 900 )) > "$state/.subsuper-stale-$key"
+  _run_housekeeping_over_marker "$state" "$fakebin" "$win" \
+    || fail "housekeeping aborted on a readable stale marker"
+  grep -E "stale persisted 9[0-9][0-9]s" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a readable stale marker did not report its measured age: $(cat "$state/.subsuper-escalations")"
+  ! grep -F "timestamp could not be read" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a readable stale marker was reported as unreadable: $(cat "$state/.subsuper-escalations")"
+  pass "housekeeping completes and fails closed over an empty or non-numeric stale/pause marker"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -2738,3 +3027,8 @@ test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
+test_file_age_fails_closed_on_unreadable_mtime
+test_age_helpers_read_leading_zero_tokens_as_decimal
+test_oldest_line_age_fails_closed_on_unreadable_sidecar
+test_housekeeping_survives_a_truncated_marker
+test_age_helpers_fail_closed_on_a_stamp_newer_than_the_clock

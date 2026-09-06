@@ -746,7 +746,21 @@ fi
 # --- 4. supervision operating instructions ----------------------------------
 stage supervision-instructions
 AFK_PRESENT=0
-[ -e "$STATE/.afk" ] && AFK_PRESENT=1
+# Away mode flagged with no live identity-matched daemon is the half-state where
+# the flag claims supervision nothing is providing. fm_afk_flag_without_live_daemon
+# in bin/fm-wake-lib.sh is the single owner of that question; answer it once here,
+# beside the raw flag, so every surface below this point tells the same story.
+AFK_DAEMON_DOWN=0
+# Absence and unverifiable ownership are different facts. Only the first earns a
+# flat "nothing is supervising"; the second earns "supervision could not be
+# confirmed", because a daemon that could not record its own process identity is
+# still supervising and would read as absent for its whole life.
+AFK_ABSENCE_PROVEN=0
+if [ -e "$STATE/.afk" ]; then
+  AFK_PRESENT=1
+  ! fm_afk_flag_without_live_daemon "$STATE" || AFK_DAEMON_DOWN=1
+  [ "$AFK_DAEMON_DOWN" -eq 0 ] || ! fm_afk_daemon_absence_is_proven "$STATE" || AFK_ABSENCE_PROVEN=1
+fi
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
 
@@ -769,6 +783,8 @@ fi
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
   --afk "$AFK_PRESENT" \
+  --afk-daemon-down "$AFK_DAEMON_DOWN" \
+  --afk-absence-proven "$AFK_ABSENCE_PROVEN" \
   --x-mode "$X_MODE_PRESENT"
 
 # --- 5. read-once contract -------------------------------------------------
@@ -854,7 +870,28 @@ done
 
 subsection "AFK"
 if [ -e "$STATE/.afk" ]; then
-  printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
+  if [ "$AFK_DAEMON_DOWN" -eq 1 ]; then
+    # The flag is set but no live away-mode supervisor owns it - away mode is
+    # claiming supervision it is not providing. Never report this as active:
+    # say the danger plainly so a returning session repairs it. The read-only
+    # guard above raises the bordered alarm when work is in flight; this line
+    # catches the idle-fleet case the guard skips.
+    if [ "$AFK_ABSENCE_PROVEN" -eq 1 ]; then
+      printf 'present, BUT NO SUPERVISOR IS RUNNING - away mode is flagged and no away-mode daemon is running, so nothing is supervising.\n'
+    else
+      printf 'present, BUT SUPERVISION CANNOT BE CONFIRMED - a daemon is running but cannot be confirmed as owning this home, so supervision is unproven.\n'
+    fi
+    if [ "$READ_ONLY" -eq 1 ]; then
+      # Naming the danger is the whole point, so a read-only session still gets
+      # it in full. Relaunching contends for the daemon lock, which is fleet-state
+      # repair this session must not perform, so it reports instead.
+      printf 'Do not trust away-mode notifications until it is running. Repairing this needs the fleet lock, so report it to the session holding the lock.\n'
+    else
+      printf 'Load /afk and relaunch the daemon, or exit away mode properly; do not trust away-mode notifications until it is running.\n'
+    fi
+  else
+    printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
+  fi
 else
   printf 'absent\n'
 fi
@@ -917,6 +954,22 @@ if [ "$READ_ONLY" -eq 1 ]; then
 This session did not acquire the fleet lock. Stay read-only: do not arm,
 drain, spawn, steer, merge, or repair fleet state from here. Only a session
 with verified fleet-lock ownership may perform mutable follow-up.
+
+EOF
+elif [ "$AFK_PRESENT" -eq 1 ] && [ "$AFK_DAEMON_DOWN" -eq 1 ] && [ "$AFK_ABSENCE_PROVEN" -eq 1 ]; then
+  cat <<'EOF'
+Away mode is flagged, BUT NO SUPERVISOR IS RUNNING: no away-mode daemon is
+running for this home, so nothing is supervising the fleet. Repair that first.
+Load /afk and relaunch the daemon, or exit away mode properly, and do not trust
+away-mode notifications until a daemon is running.
+
+EOF
+elif [ "$AFK_PRESENT" -eq 1 ] && [ "$AFK_DAEMON_DOWN" -eq 1 ]; then
+  cat <<'EOF'
+Away mode is flagged, BUT SUPERVISION CANNOT BE CONFIRMED: a daemon is running,
+but it cannot be confirmed as owning this home, so supervision is unproven.
+Resolve that first. Load /afk and confirm the daemon is supervising; do not
+trust away-mode notifications until supervision is confirmed.
 
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ]; then

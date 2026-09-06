@@ -248,11 +248,37 @@ case "$*" in
     [ -n "${FM_FAKE_HARNESS_PID:-}" ] || exit 1
     /bin/ps -o ppid= -p "$pid"
     ;;
+  *"lstart="*)
+    # fm_pid_identity ps-fallback probe (macOS has no /proc). Only a test that
+    # opts in by exporting FM_FAKE_DAEMON_PID gets a stable identity for that
+    # pid, so a live away-mode daemon can be modeled; every other pid stays
+    # unidentifiable exactly as before.
+    if [ -n "${FM_FAKE_DAEMON_PID:-}" ] && [ "$pid" = "${FM_FAKE_DAEMON_PID}" ]; then
+      printf 'Wed Sep  2 12:00:00 2026 away-mode-daemon\n'
+      exit 0
+    fi
+    exit 1
+    ;;
 esac
 exit 1
 SH
   chmod +x "$fakebin/ps"
   printf '%s\n' "$harness" > "$fakebin/.harness-name"
+}
+
+# record_live_daemon_lock <home> <fakebin> <pid>: model a live away-mode daemon
+# holding this home. The daemon's singleton lock names its pid plus the process
+# identity it computed for itself; compute that identity here in the same env
+# fm-session-start.sh runs under (FM_FAKE_DAEMON_PID + the fake PATH) so it
+# matches on read across macOS (fake ps) and Linux CI (/proc).
+record_live_daemon_lock() {  # <home> <fakebin> <pid>
+  local home=$1 fakebin=$2 pid=$3 identity
+  identity=$(FM_FAKE_DAEMON_PID="$pid" PATH="$fakebin:$BASE_PATH" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid") || return 1
+  [ -n "$identity" ] || return 1
+  mkdir -p "$home/state/.supervise-daemon.lock"
+  printf '%s\n' "$pid" > "$home/state/.supervise-daemon.lock/pid"
+  printf '%s\n' "$identity" > "$home/state/.supervise-daemon.lock/pid-identity"
 }
 
 make_fake_ps_pi_holder() {
@@ -2389,7 +2415,7 @@ EOF
 }
 
 test_next_step_afk_delegates_to_daemon() {
-  local rec root home fakebin out
+  local rec root home fakebin out daemon_pid
   rec=$(new_world next-step-afk)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -2397,8 +2423,15 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   : > "$home/state/.afk"
+  # Model a healthy away mode: a live identity-matched daemon owns the home.
+  sleep 300 &
+  daemon_pid=$!
+  record_live_daemon_lock "$home" "$fakebin" "$daemon_pid" \
+    || { kill "$daemon_pid" 2>/dev/null; fail "could not record a live away-mode daemon lock"; }
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_FAKE_DAEMON_PID="$daemon_pid" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
 
   assert_contains "$out" "away-mode supervision is active" "AFK digest did not report away mode"
   assert_contains "$out" "Away mode is active" "next step did not switch to AFK guidance"
@@ -2407,6 +2440,77 @@ EOF
   assert_not_contains "$out" "  bin/fm-watch-arm.sh" "AFK next step still told the agent to arm the watcher directly"
 
   pass "next step delegates watcher ownership to the AFK daemon"
+}
+
+test_afk_subsection_alarms_when_flag_has_no_live_daemon() {
+  local rec root home fakebin out
+  rec=$(new_world afk-no-daemon)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  # Away mode is flagged but NO live daemon owns it - the dangerous half-state
+  # from the 2026-09-02 incident, where the host reaped the daemon's background
+  # job and its clean shutdown left the flag set. The digest must never call
+  # this active; it must say plainly that nothing is supervising.
+  : > "$home/state/.afk"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "NO SUPERVISOR IS RUNNING" "AFK digest did not surface the flag-without-daemon danger"
+  assert_not_contains "$out" "away-mode supervision is active" "AFK digest wrongly reported supervision active with no live daemon"
+  # Every later surface must tell the same story. A loud alarm mid-digest followed
+  # by a calm "away mode is active, keep supervision paused" at the close is the
+  # mixed message this half-state cannot afford: the closing next step is the most
+  # steering line in the digest.
+  assert_not_contains "$out" "Away mode is active" \
+    "the closing next step still claimed away mode is active with no live daemon"
+  assert_not_contains "$out" "- Away mode: active" \
+    "the supervision block still claimed away mode is active with no live daemon"
+  assert_contains "$out" "- Away mode: FLAGGED, BUT NO SUPERVISOR IS RUNNING" \
+    "the supervision block did not name the flag-without-daemon half-state"
+  assert_contains "$out" "Away mode is flagged, BUT NO SUPERVISOR IS RUNNING" \
+    "the closing next step did not name the flag-without-daemon half-state"
+  # This session DOES hold the lock, so it is the one that can repair: the
+  # relaunch instruction must survive, and the read-only advisory must not appear.
+  assert_contains "$out" "relaunch the daemon, or exit away mode properly" \
+    "the lock-holding digest lost the repair instruction"
+  # The lock names no pid at all, so absence really is proven here.
+  assert_contains "$out" "no away-mode daemon is running" \
+    "the digest did not report proven absence for a home with no daemon lock"
+  assert_not_contains "$out" "report it to the session holding the lock" \
+    "the lock-holding digest deferred repair to some other session"
+  pass "every away-mode surface reports no supervisor when the flag has no live daemon"
+}
+
+test_afk_half_state_respects_the_read_only_contract() {
+  local rec root home fakebin out holder_pid
+  rec=$(new_world afk-no-daemon-read-only)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  # Away mode flagged with no live daemon, in a session that did NOT acquire the
+  # fleet lock. The danger must still be named in full - detecting and surfacing
+  # it is the entire point - but relaunching the daemon contends for the daemon
+  # lock, which is fleet-state repair this session must not perform. The same
+  # digest tells it not to repair, so it must not also tell it to relaunch.
+  : > "$home/state/.afk"
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "READ-ONLY SESSION" "the case did not actually reach the read-only path"
+  assert_contains "$out" "NO SUPERVISOR IS RUNNING"     "the read-only digest stopped naming the away-mode half-state"
+  assert_contains "$out" "report it to the session holding the lock"     "the read-only digest did not point repair at the lock holder"
+  assert_not_contains "$out" "relaunch the daemon, or exit away mode properly"     "the read-only digest still told a non-lock-holding session to relaunch the daemon"
+  pass "the away-mode half-state names the danger read-only without prescribing repair"
 }
 
 test_supervision_block_exactly_one_and_pi_diagnostic() {
@@ -2597,6 +2701,8 @@ test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
+test_afk_subsection_alarms_when_flag_has_no_live_daemon
+test_afk_half_state_respects_the_read_only_contract
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker

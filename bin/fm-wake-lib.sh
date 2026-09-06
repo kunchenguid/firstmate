@@ -98,10 +98,48 @@ fm_path_mtime() {
   fi
 }
 
+# _fm_age_result <computed> -> the measured age, or 999999 if it is not one.
+# THE CONTRACT fm_path_age guarantees, enforced here at its single return
+# boundary rather than input class by input class: what escapes is ALWAYS either
+# a plain non-negative base-10 number of seconds that was really measured, or
+# 999999. Never empty, never negative, never a non-numeric token. Operand
+# validation rejects the unusable inputs we know about; this gate rejects
+# whatever the arithmetic actually produced, so an input class no one has thought
+# of yet - a file stamped in the future after a backwards clock step, a digit run
+# so long it overflows and wraps negative - fails closed to the sentinel instead
+# of needing its own special case. Extend the guarantee here; do not append
+# another per-input check.
+_fm_age_result() {
+  case "${1-}" in
+    ''|*[!0-9]*) printf '999999\n' ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+# fm_path_age <path> -> seconds since mtime, or 999999 when that cannot be read.
+# Fail closed to "very old" unless both the mtime and the clock are plain runs
+# of digits. A stat that exits 0 while printing a non-numeric token would abort
+# the arithmetic inside the command substitution and make this print nothing,
+# and callers feed the result straight into `[ "$age" -ge N ]`, which would then
+# error with "integer expression expected" and silently take the false branch.
+# 999999 keeps every such caller on its age-exceeded branch instead.
+# Both operands are then forced to base 10, because a validated digit run may
+# still carry a leading zero, which bash would read as octal: "08" aborts the
+# arithmetic exactly as a non-numeric token does, and "0123" silently yields 83.
+# _fm_age_result then enforces the contract above on the way out, so a negative
+# age can never reach a caller: the turn-end guard reads one as FRESH and allows
+# a blind turn end, and the task inbox reads one as quiet.
 fm_path_age() {
-  local path=$1 m
+  local path=$1 m now
   m=$(fm_path_mtime "$path") || { echo 999999; return; }
-  echo $(( $(date +%s) - m ))
+  case "$m" in
+    ''|*[!0-9]*) echo 999999; return ;;
+  esac
+  now=$(date +%s)
+  case "$now" in
+    ''|*[!0-9]*) echo 999999; return ;;
+  esac
+  _fm_age_result "$(( 10#$now - 10#$m ))"
 }
 
 # fm_watcher_lock_unheld <state>
@@ -281,6 +319,69 @@ fm_afk_daemon_owns_supervision() {
   [ "$current" = "$recorded" ]
 }
 
+# fm_afk_flag_without_live_daemon <state>
+# True when away mode is FLAGGED but no live identity-matched daemon owns it:
+# state/.afk exists yet fm_afk_daemon_owns_supervision is false. This is the
+# dangerous half-state the away-mode contract must never present silently - the
+# flag claims supervision is owned while nothing owns it. It happens whenever the
+# daemon goes away without the flag going with it: the host harness reaping the
+# tracked background job that hosts the daemon (a SIGTERM its own cleanup handles
+# by flushing and exiting WITHOUT clearing the flag, since only the launcher's
+# stop path clears it), a crash, or a lost pid. The observed reap, the two signals
+# that identify it, the disconfirmed system-sleep hypothesis, and what is
+# deliberately left unestablished are recorded in
+# docs/watcher-continuity.md#away-mode-daemon-reap. Callers surface it loudly.
+fm_afk_flag_without_live_daemon() {  # <state>
+  local state=$1
+  [ -e "$state/.afk" ] || return 1
+  fm_afk_daemon_owns_supervision "$state" && return 1
+  return 0
+}
+
+# fm_afk_daemon_absence_is_proven <state>
+# True only when away mode is flagged and NO daemon process is running at all:
+# the singleton lock is absent, records no pid, or records a pid that is not
+# alive. False when a live daemon pid IS present but its ownership could not be
+# verified, which fm_afk_daemon_owns_supervision reports identically to absence
+# even though the two are very different things to tell a captain.
+# That second case is reachable by design, not by accident:
+# bin/fm-supervise-daemon.sh lets a daemon start and keep supervising when it
+# cannot record its own process identity, because a supervisor must not refuse to
+# run over an unreadable `ps`, and the lock then carries no pid-identity for that
+# daemon's whole life. Identity can also drift on a host where fm_pid_identity
+# falls back to `ps -o lstart=`.
+# Callers use this to choose the strength of their claim. Proven absence earns a
+# flat "no supervisor is running"; an unverifiable live daemon earns "supervision
+# could not be confirmed", because a detector built because away mode asserted
+# supervision it did not have must not itself assert an absence it has not
+# proven. Both stay loud and both keep their repair instruction.
+# Provability is decided by what the evidence establishes, NEVER by pid liveness
+# alone. A live process at the recorded pid is not evidence a daemon is running:
+# a daemon killed without releasing its lock leaves the pid behind and the OS
+# recycles the number, and reading that collision as "a supervisor is running"
+# would soften a genuine dead-daemon alarm on nothing but a number - the same
+# unearned claim, in the opposite direction, that this detector exists to stop.
+# A recorded identity that demonstrably does not match the process now at that
+# pid is POSITIVE proof the recorded daemon is gone, so a recycled pid is proven
+# absence. Only genuine two-way uncertainty is unconfirmed: a live pid with no
+# recorded identity (the deliberate case where the daemon could not read its own
+# `ps` at startup and kept supervising), or one whose current identity cannot be
+# read at all.
+fm_afk_daemon_absence_is_proven() {  # <state>
+  local state=$1 lockdir pid recorded current
+  [ -e "$state/.afk" ] || return 1
+  lockdir="$state/.supervise-daemon.lock"
+  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 0
+  [ -n "$pid" ] || return 0
+  fm_pid_alive "$pid" || return 0
+  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null) || return 1
+  [ -n "$recorded" ] || return 1
+  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$current" ] || return 1
+  [ "$current" = "$recorded" ] && return 1
+  return 0
+}
+
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
@@ -291,6 +392,13 @@ fm_afk_daemon_owns_supervision() {
 #                                             the lock (the beacon is still fresh)
 #                              stale-beacon - the beacon is stale beyond grace or
 #                                             absent (a genuine supervision lapse)
+#                              no-afk-daemon - away mode is flagged but no live
+#                                             identity-matched daemon owns this
+#                                             home, at any beacon age
+# away mode (state/.afk present) short-circuits ahead of the model dispatch
+# below, because in away mode the daemon owns the watcher whatever the harness
+# is: no live daemon is no-afk-daemon regardless of freshness, and only a daemon
+# that still owns the home can then fail on a stale beacon alone.
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
 # because the watcher only runs between turns; only a stale beacon is a lapse.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
@@ -319,6 +427,31 @@ fm_watcher_supervision_verdict() {
     ''|*[!0-9]*) ;;
     *) [ "$age" -lt "$grace" ] && fresh=true ;;
   esac
+  # Away mode changes who the supervisor is: the away-mode daemon owns the
+  # watcher and runs it one-shot, so a fresh beacon can linger for up to grace
+  # seconds after the daemon itself is reaped (its watcher child touched the
+  # beacon just before dying with it). A fresh beacon alone therefore cannot
+  # prove supervision here - require a live identity-matched daemon that still
+  # owns this home, the same test the turn-end guard applies
+  # (fm_afk_daemon_owns_supervision). Ownership is tested BEFORE freshness so
+  # the verdict names the real failing condition at every beacon age: a reaped
+  # daemon reads as no-afk-daemon both inside the fresh-beacon blind window and
+  # long after the beacon decayed, which is the dominant case because the
+  # captain usually returns well after the reap. Only a daemon that still owns
+  # the home can fail on freshness alone.
+  if [ -e "$state/.afk" ]; then
+    if ! fm_afk_daemon_owns_supervision "$state"; then
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_REASON=no-afk-daemon
+    elif [ "$fresh" = true ]; then
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_OK=true
+    else
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_REASON=stale-beacon
+    fi
+    return 0
+  fi
   model=$(fm_supervision_model)
   if [ "$model" = autoarm ]; then
     [ "$fresh" = true ] && FM_WATCHER_VERDICT_OK=true

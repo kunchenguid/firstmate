@@ -199,17 +199,32 @@ if [ "$FM_SUP_WATCHER_FRESH" = true ] && fm_afk_daemon_owns_supervision "$STATE"
 fi
 
 block_stop() {
-  local afk x_mode reason rule
+  local afk afk_daemon_down afk_absence_proven x_mode reason rule
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
+  # Derived exactly as bin/fm-guard.sh derives it, so this banner's repair line
+  # cannot say away mode owns watcher supervision three lines under a header
+  # saying supervision is off.
+  afk_daemon_down=0
+  [ "$afk" -eq 1 ] && fm_afk_flag_without_live_daemon "$STATE" && afk_daemon_down=1
+  afk_absence_proven=0
+  [ "$afk_daemon_down" -eq 1 ] && fm_afk_daemon_absence_is_proven "$STATE" && afk_absence_proven=1
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-  reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+  reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" \
+    --afk-daemon-down "$afk_daemon_down" --afk-absence-proven "$afk_absence_proven" \
+    --x-mode "$x_mode" --repair-line 2>/dev/null \
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
-    printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
+    if [ "$afk_daemon_down" -eq 1 ] && [ "$afk_absence_proven" -eq 1 ]; then
+      printf '●  TURN WOULD END BLIND - AWAY MODE FLAGGED, BUT NO SUPERVISOR IS RUNNING\n'
+    elif [ "$afk_daemon_down" -eq 1 ]; then
+      printf '●  TURN WOULD END BLIND - AWAY MODE FLAGGED, BUT SUPERVISION CANNOT BE CONFIRMED\n'
+    else
+      printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
+    fi
     if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
       printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
     elif [ "$FM_SUP_SOURCES" -gt 0 ]; then

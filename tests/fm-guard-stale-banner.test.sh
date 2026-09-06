@@ -41,6 +41,21 @@ record_live_watcher() {
   printf '%s\n' "$identity" > "$home/state/.watch.lock/pid-identity"
 }
 
+# Record an away-mode daemon holding this home, the way the daemon does at
+# startup: its singleton lock names the daemon pid plus the process identity it
+# computed for itself. With no identity arg a live identity is computed for the
+# given pid; passing one lets a test model a dead or pid-reused daemon.
+record_daemon_lock() {  # <dir> <pid> [identity]
+  local dir=$1 pid=$2 identity=${3:-} home
+  home=$(case_home "$dir")
+  if [ -z "$identity" ]; then
+    identity=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid") || return 1
+  fi
+  mkdir -p "$home/state/.supervise-daemon.lock"
+  printf '%s\n' "$pid" > "$home/state/.supervise-daemon.lock/pid"
+  printf '%s\n' "$identity" > "$home/state/.supervise-daemon.lock/pid-identity"
+}
+
 # These cases exercise the persistent-watcher model (a live pid is the real
 # liveness signal), so pin the model rather than letting the host test runner's
 # ambient harness ancestry pick it.
@@ -725,6 +740,202 @@ test_pi_harness_routes_itself_to_the_extension_model() {
   pass "fm-guard stale banner: Pi and pi-signed primaries route themselves to the extension model"
 }
 
+test_fm_path_age_reads_leading_zero_tokens_as_decimal() {
+  # fm_path_age feeds the guard verdict's beacon freshness test. A digit run with
+  # a leading zero is read as octal by bash: "08" aborts the arithmetic inside the
+  # command substitution so the function prints nothing and its `[ "$age" -lt N ]`
+  # callers raise "integer expression expected" and take the false branch, while
+  # "0123" silently yields 83 instead of 123. Assert the exact decimal age, since
+  # checking only for the absence of an error would pass against the silent half.
+  local out stamp expected
+  for stamp in 08 09 0123 000 123; do
+    expected=$(( 10#$stamp ))
+    out=$(FM_STATE_OVERRIDE="$TMP_ROOT" bash -c '
+      . "$1"
+      _stub_mtime=$2; _stub_clock=$3
+      fm_path_mtime() { printf "%s" "$_stub_mtime"; }
+      date() { printf "%s" "$_stub_clock"; }
+      fm_path_age /nonexistent-path
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$stamp" "$(( 10#$stamp + 700 ))" 2>&1)
+    [ "$out" = 700 ] \
+      || fail "fm_path_age misread a leading-zero mtime [$stamp] (decimal $expected) as base 8 or aborted, got: [$out]"
+  done
+  # The clock operand carries the same hazard.
+  out=$(FM_STATE_OVERRIDE="$TMP_ROOT" bash -c '
+    . "$1"
+    fm_path_mtime() { printf "200"; }
+    date() { printf "0900"; }
+    fm_path_age /nonexistent-path
+  ' _ "$ROOT/bin/fm-wake-lib.sh" 2>&1)
+  [ "$out" = 700 ] \
+    || fail "fm_path_age misread a leading-zero clock as base 8 or aborted, got: [$out]"
+
+  # A stamp NEWER than the clock passes both operand validators and subtracts to a
+  # negative age, which callers read as "fresh"/"quiet" and silently skip on. The
+  # contract is a real non-negative age or the sentinel, nothing else.
+  out=$(FM_STATE_OVERRIDE="$TMP_ROOT" bash -c '
+    . "$1"
+    fm_path_mtime() { printf "1757001800"; }
+    date() { printf "1757000000"; }
+    fm_path_age /nonexistent-path
+  ' _ "$ROOT/bin/fm-wake-lib.sh" 2>&1)
+  [ "$out" = 999999 ] \
+    || fail "fm_path_age returned a negative age for a future mtime instead of failing closed, got: [$out]"
+  # An operand long enough to overflow wraps negative rather than erroring, so the
+  # same result gate must catch it without its own special case.
+  out=$(FM_STATE_OVERRIDE="$TMP_ROOT" bash -c '
+    . "$1"
+    fm_path_mtime() { printf "99999999999999999999"; }
+    date() { printf "1757000000"; }
+    fm_path_age /nonexistent-path
+  ' _ "$ROOT/bin/fm-wake-lib.sh" 2>&1)
+  [ "$out" = 999999 ] \
+    || fail "fm_path_age let an overflowed operand escape as a negative age, got: [$out]"
+  pass "fm-wake-lib: fm_path_age returns a real non-negative age or the sentinel, never a negative one"
+}
+
+test_away_flag_without_live_daemon_alarms() {
+  local dir out home
+  dir=$(make_guard_case away-flag-no-daemon)
+  home=$(case_home "$dir")
+  # Away mode is FLAGGED, the beacon is still fresh (the daemon's watcher child
+  # touched it just before the daemon was reaped), but the daemon lock names a
+  # dead pid: away mode is claiming supervision nothing is providing. This is the
+  # fresh-beacon blind window - a beacon-only check would call it healthy.
+  : > "$home/state/.afk"
+  touch "$home/state/.last-watcher-beat"
+  record_daemon_lock "$dir" 999999 "dead daemon identity"
+  out=$(run_guard_case_autoarm "$dir")
+  [ "$(count_text "$out" "AWAY MODE FLAGGED, BUT NO SUPERVISOR IS RUNNING")" -eq 1 ] \
+    || fail "a fresh beacon with a dead away-mode daemon must raise the away-mode alarm, got: $out"
+  assert_contains "$out" "no away-mode daemon is running for this home" \
+    "away-mode banner must name the proven-absence cause"
+  # The banner's own repair line must not contradict the header it sits under.
+  assert_not_contains "$out" "Away mode owns watcher supervision" \
+    "the banner's repair line still claimed away mode owns supervision under a no-supervisor header"
+  assert_contains "$out" "ensure the daemon is running" \
+    "the banner's repair line lost the instruction to get the daemon running"
+  pass "fm-guard stale banner: away flag with a dead daemon alarms even while the beacon is fresh"
+}
+
+test_away_flag_without_live_daemon_alarms_on_a_long_stale_beacon() {
+  local dir out home
+  dir=$(make_guard_case away-flag-no-daemon-stale)
+  home=$(case_home "$dir")
+  # The dominant real case: the captain returns long after the reap, so the
+  # beacon the daemon's watcher child left has decayed well past grace. The
+  # verdict must still name the away-mode cause - the daemon is why nothing is
+  # supervising - rather than degrading to the generic stale-beacon banner once
+  # the beacon ages out of the blind window.
+  : > "$home/state/.afk"
+  touch -t 202601010000 "$home/state/.last-watcher-beat"
+  record_daemon_lock "$dir" 999999 "dead daemon identity"
+  out=$(run_guard_case_autoarm "$dir")
+  [ "$(count_text "$out" "AWAY MODE FLAGGED, BUT NO SUPERVISOR IS RUNNING")" -eq 1 ] \
+    || fail "a long-stale beacon with a dead away-mode daemon must still raise the away-mode alarm, got: $out"
+  assert_contains "$out" "no away-mode daemon is running for this home" \
+    "away-mode banner must name the proven-absence cause at any beacon age"
+  assert_not_contains "$out" "no watcher has a fresh beacon" \
+    "a reaped away-mode daemon must not be reported as a generic stale beacon"
+  pass "fm-guard stale banner: away flag with a dead daemon alarms as away-mode even when the beacon is long stale"
+}
+
+test_away_flag_with_unverifiable_daemon_says_unconfirmed_not_absent() {
+  local dir out home pid
+  dir=$(make_guard_case away-flag-unverifiable-daemon)
+  home=$(case_home "$dir")
+  # A LIVE daemon whose ownership cannot be verified: the lock names a running pid
+  # but carries no recorded identity, which is exactly what the daemon leaves
+  # behind when it could not read its own `ps` at startup and kept supervising
+  # anyway. Absence is NOT proven here, so the banner must not assert that nothing
+  # is supervising - the detector must not repeat away mode's own sin of claiming
+  # something it has not established. It must still be loud and still say what to do.
+  sleep 300 &
+  pid=$!
+  : > "$home/state/.afk"
+  touch "$home/state/.last-watcher-beat"
+  mkdir -p "$home/state/.supervise-daemon.lock"
+  printf '%s\n' "$pid" > "$home/state/.supervise-daemon.lock/pid"
+  out=$(run_guard_case_autoarm "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$(count_text "$out" "AWAY MODE FLAGGED, BUT SUPERVISION CANNOT BE CONFIRMED")" -eq 1 ] \
+    || fail "an unverifiable live daemon must alarm as unconfirmed, got: $out"
+  assert_not_contains "$out" "NO SUPERVISOR IS RUNNING" \
+    "the banner asserted proven absence for a live daemon it merely could not verify"
+  assert_contains "$out" "cannot be confirmed as owning this home" \
+    "the banner did not name the unverifiable-ownership cause"
+  assert_not_contains "$out" "Away mode owns watcher supervision" \
+    "the repair line still claimed away mode owns supervision under an unconfirmed header"
+  pass "fm-guard stale banner: a live but unverifiable daemon reads as unconfirmed, not as absent"
+}
+
+test_away_flag_with_recycled_pid_reports_proven_absence() {
+  local dir out home pid
+  dir=$(make_guard_case away-flag-recycled-pid)
+  home=$(case_home "$dir")
+  # The daemon died without releasing its lock and the OS recycled its pid to an
+  # unrelated process. The recorded identity is readable and does NOT match the
+  # process now at that pid, which is positive proof the recorded daemon is gone.
+  # A live pid alone must never soften this into "a supervisor is running but
+  # cannot be confirmed" - that would assert a presence on a number collision.
+  sleep 300 &
+  pid=$!
+  : > "$home/state/.afk"
+  touch "$home/state/.last-watcher-beat"
+  record_daemon_lock "$dir" "$pid" "identity of the daemon that actually died"
+  out=$(run_guard_case_autoarm "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$(count_text "$out" "AWAY MODE FLAGGED, BUT NO SUPERVISOR IS RUNNING")" -eq 1 ] \
+    || fail "a recycled pid must report proven absence, got: $out"
+  assert_not_contains "$out" "SUPERVISION CANNOT BE CONFIRMED" \
+    "a verified identity mismatch was reported as two-way uncertainty"
+  pass "fm-guard stale banner: a recycled pid reports proven absence, not unconfirmed supervision"
+}
+
+test_away_flag_with_live_daemon_stale_beacon_alarms_as_stale() {
+  local dir out home pid
+  dir=$(make_guard_case away-flag-live-daemon-stale)
+  home=$(case_home "$dir")
+  # A daemon that still owns the home but stopped restarting its watcher is a
+  # genuine beacon lapse, not a missing supervisor: freshness is still the
+  # deciding test once ownership holds.
+  sleep 300 &
+  pid=$!
+  : > "$home/state/.afk"
+  touch -t 202601010000 "$home/state/.last-watcher-beat"
+  record_daemon_lock "$dir" "$pid" || { kill "$pid" 2>/dev/null; fail "could not record a live away-mode daemon lock"; }
+  out=$(run_guard_case_autoarm "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "a live away-mode daemon with a stale beacon must alarm as a beacon lapse, got: $out"
+  assert_contains "$out" "no watcher has a fresh beacon" \
+    "a live daemon with a stale beacon must name the stale-beacon reason"
+  pass "fm-guard stale banner: a live away-mode daemon with a stale beacon still alarms as stale-beacon"
+}
+
+test_away_flag_with_live_daemon_is_healthy() {
+  local dir out home pid
+  dir=$(make_guard_case away-flag-live-daemon)
+  home=$(case_home "$dir")
+  # Healthy away mode: flag set, beacon fresh, and a live identity-matched daemon
+  # owns the home. The daemon holds its lock across every watcher-restart cycle,
+  # so this must stay silent and never false-alarm on a hand-off.
+  sleep 300 &
+  pid=$!
+  : > "$home/state/.afk"
+  touch "$home/state/.last-watcher-beat"
+  record_daemon_lock "$dir" "$pid" || { kill "$pid" 2>/dev/null; fail "could not record a live away-mode daemon lock"; }
+  out=$(run_guard_case_autoarm "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ -z "$out" ] \
+    || fail "away mode with a live identity-matched daemon must stay silent, got: $out"
+  pass "fm-guard stale banner: away flag with a live daemon is healthy"
+}
+
 test_first_stale_call_prints_full_banner
 test_repeated_same_episode_prints_reminder_only
 test_pi_harness_routes_itself_to_the_extension_model
@@ -753,3 +964,10 @@ test_read_only_before_writable_does_not_consume_full_banner
 test_read_only_during_episode_observes_without_mutating_marker
 test_healthy_read_only_does_not_clear_marker
 test_read_only_never_mutates_stale_banner_state_files
+test_fm_path_age_reads_leading_zero_tokens_as_decimal
+test_away_flag_without_live_daemon_alarms
+test_away_flag_without_live_daemon_alarms_on_a_long_stale_beacon
+test_away_flag_with_unverifiable_daemon_says_unconfirmed_not_absent
+test_away_flag_with_recycled_pid_reports_proven_absence
+test_away_flag_with_live_daemon_stale_beacon_alarms_as_stale
+test_away_flag_with_live_daemon_is_healthy

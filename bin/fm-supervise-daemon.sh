@@ -241,10 +241,85 @@ else
   _stat_file_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi
 _now() { date +%s; }
-_file_age() {  # seconds since mtime; very large if missing
-  local f=$1 m
-  m=$(_stat_file_mtime "$f") || { echo 999999; return; }
-  echo $(( $(_now) - m ))
+# The reserved "could not measure this age" value shared by every age helper
+# below. It is deliberately far past every gate threshold so an unreadable
+# timestamp fails closed toward running the guarded work, and it is reserved
+# rather than measured: _age_text renders it as an explicit statement that the
+# elapsed time is unknown, so no captain-facing message ever reports it as a
+# duration that was actually observed.
+UNREADABLE_AGE=999999
+# THE CONTRACT every age helper below guarantees, enforced here at their single
+# return boundary rather than input class by input class: what escapes is ALWAYS
+# either a plain non-negative base-10 number of seconds that was really measured,
+# or UNREADABLE_AGE. Never empty, never negative, never a non-numeric token.
+# Operand validation rejects the unusable inputs each helper knows about; this
+# gate rejects whatever the arithmetic actually produced, so an input class no
+# one has thought of yet - a stamp newer than the clock after a backwards clock
+# step, a digit run so long it overflows and wraps negative - fails closed to the
+# sentinel instead of needing its own special case. Extend the guarantee here;
+# do not append another per-input check.
+_age_result() {  # <computed> -> the measured age, or UNREADABLE_AGE if it is not one
+  case "${1-}" in
+    ''|*[!0-9]*) printf '%s\n' "$UNREADABLE_AGE" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+_age_text() {  # <age> -> the elapsed time for captain-facing text
+  case "$1" in
+    "$UNREADABLE_AGE") printf 'an unreadable length of time (its timestamp could not be read)' ;;
+    *) printf '%ss' "$1" ;;
+  esac
+}
+_file_age() {  # seconds since mtime; very large if missing or unreadable
+  local f=$1 m now
+  m=$(_stat_file_mtime "$f") || { echo "$UNREADABLE_AGE"; return; }
+  # Fail closed to "very old" unless the mtime is a plain run of digits. A stat
+  # that exits 0 while printing a non-empty non-numeric token (say "abc" or
+  # "12x") aborts the arithmetic below inside the command substitution, so this
+  # printed nothing and the housekeeping gate that reads the age errored with
+  # "[: : integer expression expected" and silently skipped that tick - the tick
+  # that drives batch flushes, stale rechecks, and the catch-all scan. An empty
+  # token does not abort (the shell evaluates it as 0) but is just as untrue an
+  # age, so both are rejected here. 999999 makes the gate RUN instead of skip,
+  # which is the safe direction. Both operands are then forced to base 10, because
+  # a validated digit run may still carry a leading zero, which bash would read as
+  # octal: "08" aborts the arithmetic exactly as a non-numeric token does, and
+  # "0123" silently yields 83 instead of 123. _age_result then enforces the
+  # contract on the way out.
+  case "$m" in
+    ''|*[!0-9]*) echo "$UNREADABLE_AGE"; return ;;
+  esac
+  now=$(_now)
+  case "$now" in
+    ''|*[!0-9]*) echo "$UNREADABLE_AGE"; return ;;
+  esac
+  _age_result "$(( 10#$now - 10#$m ))"
+}
+_epoch_age() {  # <file> -> seconds since the epoch stamp written inside it; very large if unreadable
+  local f=$1 stamp now
+  [ -r "$f" ] || { echo "$UNREADABLE_AGE"; return; }
+  # The marker/sidecar twin of _file_age, for files whose CONTENT is the epoch.
+  # Every writer here stamps with `_now > "$file"`, which truncates before `date`
+  # produces output, so a SIGTERM or a full disk in that window leaves the file
+  # empty or partial. `cat` still exits 0 on an empty file, so an inline
+  # `|| echo "$now"` fallback never fires: the arithmetic becomes a syntax error
+  # that aborts the whole enclosing function, and a non-numeric stamp trips
+  # `set -u`. Callers that never rewrite an existing marker would then be dead
+  # for the rest of the daemon's life. Validate both operands as plain digit
+  # runs, force base 10 the same way _file_age does so a leading-zero stamp can
+  # neither abort the arithmetic nor be misread as octal, and return through
+  # _age_result so the contract holds here too: a marker stamped in the future
+  # fails closed to "very old" rather than yielding a negative age that would
+  # silently defer the wedge escalation and the matured pause recheck.
+  stamp=$(cat "$f" 2>/dev/null)
+  case "$stamp" in
+    ''|*[!0-9]*) echo "$UNREADABLE_AGE"; return ;;
+  esac
+  now=$(_now)
+  case "$now" in
+    ''|*[!0-9]*) echo "$UNREADABLE_AGE"; return ;;
+  esac
+  _age_result "$(( 10#$now - 10#$stamp ))"
 }
 
 _hash_text() {
@@ -957,10 +1032,10 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+    log "ERROR: away-mode escalation undelivered $(_age_text "$age"); inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
   fi
   {
-    printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'fm away-mode inject WEDGED: %s undelivered as of %s\n' "$(_age_text "$age")" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
   } 2>/dev/null > "$marker" || true
@@ -971,7 +1046,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # the primary, backend-independent signal, so a non-tmux backend just skips
   # this cosmetic extra rather than attempting an unsupported call.
   if [ "$backend" = tmux ]; then
-    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
+    tmux display-message -t "$target" "fm: away-mode escalations WEDGED $(_age_text "$age") — see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
   # every non-tmux backend), this can reach the captain even when every pane and
@@ -979,19 +1054,20 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+    wedge_alarm_notify "away-mode escalations WEDGED $(_age_text "$age") undelivered - see $marker" "$marker"
   fi
 }
 
 _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
-  local f=$1 since
-  [ -s "$f" ] || { echo 999999; return; }
-  since="${f}.since"
-  if [ -r "$since" ]; then
-    echo $(( $(_now) - $(cat "$since" 2>/dev/null || echo 0) ))
-  else
-    echo 999999
-  fi
+  local f=$1
+  [ -s "$f" ] || { echo "$UNREADABLE_AGE"; return; }
+  # Both callers below feed this straight into `[ "$age" -ge N ]`, so an
+  # unreadable sidecar must not strand the buffered away-mode escalations: with
+  # batching on the only other flush is the shutdown trap, and the wedge alarm
+  # exists to notice exactly that. Delegating to _epoch_age inherits the same
+  # contract - a real non-negative age or 999999, nothing else - so this flushes
+  # and alarms rather than silently deferring.
+  _epoch_age "${f}.since"
 }
 
 # --- housekeeping (runs every tick while the watcher is mid-cycle) ----------
@@ -1010,8 +1086,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
-  now=$(_now)
+  local state=$1 due f key task win marker age last max_defer oldest pause_secs
   migrate_watcher_pause_markers "$state"
 
   # (1) batch flush
@@ -1036,7 +1111,7 @@ housekeeping() {  # <state>
     if [ "$oldest" -ge "$max_defer" ] \
        && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
       if escalate_flush "$state"; then
-        log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
+        log "inject recovered: max-defer flush succeeded after $(_age_text "$oldest") undelivered"
         rm -f "$state/.subsuper-inject-wedged"
       else
         inject_wedge_alarm "$state" "$oldest"
@@ -1061,13 +1136,13 @@ housekeeping() {  # <state>
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    age=$(_epoch_age "$marker")
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
+      *) if escalate_add "$state" "stale persisted $(_age_text "$age") (possible wedge): $win"; then
            stale_marker_remove "$win" "$state"
          fi ;;
     esac
@@ -1102,7 +1177,7 @@ housekeeping() {  # <state>
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
-    age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
+    age=$(_epoch_age "$marker")
     [ "$age" -ge "$pause_secs" ] || continue
     # Endpoint-readability probe only: exit code 2 means the capture failed, so the
     # endpoint is gone and there is nothing left to re-surface. The busy/idle verdict
@@ -1116,11 +1191,11 @@ housekeeping() {  # <state>
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_captain_held "$last"; then
-          if escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"; then
+          if escalate_add "$state" "captain-held $(_age_text "$age") (awaiting the captain, answer the held decision or release the hold): $win"; then
             _now > "$marker"
           fi
         elif [ -n "$last" ] && status_is_paused "$last"; then
-          if escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"; then
+          if escalate_add "$state" "paused $(_age_text "$age") (awaiting external, recheck whether the wait still holds): $win"; then
             _now > "$marker"
           fi
         else

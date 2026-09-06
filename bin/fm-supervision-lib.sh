@@ -12,13 +12,30 @@
 # live watcher process means per supervision model. The status fields here retain
 # the beacon-age details used in their messages.
 
-# Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
-fm_sup_stat_mtime() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
-  else
-    stat -c %Y "$1" 2>/dev/null
-  fi
+_FM_SUP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ONE owner for "how old is this file": fm_path_age in bin/fm-wake-lib.sh, which
+# carries the contract that its result is always either a real non-negative
+# base-10 age or the 999999 sentinel - never empty, negative, or non-numeric.
+# This library is independently sourceable (tests source it alone), so it pulls
+# that owner into scope rather than keeping a second copy of the same arithmetic
+# that would have to be extended in lockstep.
+#
+# Loaded on first use rather than at source time, following the same deferred
+# pattern bin/fm-wake-lib.sh uses for its own optional dependencies:
+# bin/fm-wake-lib.sh runs `mkdir -p "$STATE"` when it is sourced, and
+# bin/fm-turnend-guard.sh sources this library at its top but reads its hook
+# payload, degrades without jq, stands down on a foreign host, and checks
+# fm_primary_scope_matches - whose last arm is `[ -d "$state" ]` - before it ever
+# calls fm_supervision_status.
+#
+# The ordering constraint that remains, stated rather than assumed away: a
+# consumer that calls fm_supervision_status without bin/fm-wake-lib.sh already in
+# scope loads it at that point, and takes that mkdir with it.
+_fm_sup_require_age() {
+  command -v fm_path_age >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_SUP_LIB_DIR/fm-wake-lib.sh"
 }
 
 # fm_supervision_status <state-dir> [grace-seconds]
@@ -34,7 +51,8 @@ fm_sup_stat_mtime() {
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age
+  _fm_sup_require_age
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
@@ -58,14 +76,21 @@ fm_supervision_status() {
 
   beat="$state/.last-watcher-beat"
   if [ -e "$beat" ]; then
-    m=$(fm_sup_stat_mtime "$beat")
-    if [ -n "$m" ]; then
-      age=$(( $(date +%s) - m ))
-      FM_SUP_BEACON_DESC="${age}s ago"
-      [ "$age" -lt "$grace" ] && FM_SUP_WATCHER_FRESH=true
-    else
+    # Both the freshness verdict and the banner text come from the one contracted
+    # read, so an unmeasurable beacon can neither pass as fresh nor be printed to
+    # the captain as a duration that was actually observed. A beacon stamped in
+    # the future is the case that matters: a raw subtraction made it read as
+    # FRESH, and FM_SUP_WATCHER_FRESH gates the away-mode allow path in
+    # bin/fm-turnend-guard.sh, so a blind turn end was allowed on an age that was
+    # never measurable.
+    age=$(fm_path_age "$beat")
+    if [ "$age" = 999999 ]; then
       # shellcheck disable=SC2034 # Read by callers (fm-guard.sh) after sourcing.
       FM_SUP_BEACON_DESC=unknown
+    else
+      # shellcheck disable=SC2034 # Read by callers (fm-guard.sh) after sourcing.
+      FM_SUP_BEACON_DESC="${age}s ago"
+      [ "$age" -lt "$grace" ] && FM_SUP_WATCHER_FRESH=true
     fi
   fi
 
