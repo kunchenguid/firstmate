@@ -108,10 +108,11 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
-#   A fresh Treehouse-backed spawn also takes the shared lock in the project's
-#   git common directory before slot allocation and holds it through task metadata
-#   publication. Teardown holds that same lock while proving and returning a slot,
-#   so allocation cannot reuse a slot across an unpublished ownership record;
+#   A fresh Treehouse-backed spawn also takes the project-identity lock in the root
+#   Firstmate home's state directory before slot allocation and holds it through
+#   task metadata publication. Teardown holds that same lock while proving and
+#   returning a slot, so allocation cannot reuse a slot before its owner record
+#   is published;
 #   contention refuses rather than waits.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
