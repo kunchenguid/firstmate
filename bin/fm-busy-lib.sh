@@ -829,9 +829,10 @@ fm_busy_cursor_turn_state() {  # <transcript>
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches:
-# "Esc:cancel" for the span a turn is active (measured live on grok 1.0.13,
-# 2026-09-06: docs/verification/grok-queued-enter.md) or the older recorded
-# "Ctrl+c:cancel". bin/fm-composer-lib.sh's FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT
+# "Esc:cancel" during an active TOOL turn (measured live on grok 1.0.13,
+# 2026-09-06: docs/verification/grok-queued-enter.md; no thinking-only frame
+# was captured, so that sub-state is still owed a measurement) or the older
+# recorded "Ctrl+c:cancel". bin/fm-composer-lib.sh's FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT
 # is the canonical owner; the literal below is a defensive duplicate for
 # callers that source this file without that one, and must be refreshed with
 # it. FM_BUSY_REGEX still globally overrides the signature, mirroring the

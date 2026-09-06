@@ -291,10 +291,11 @@ fm_composer_strip_ghost() {
 # asking what a worker is doing, and the two must not be conflated.
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working...". grok renders
-# "Esc:cancel" for the whole span a turn is active (measured live on grok
-# 1.0.13, 2026-09-06: docs/verification/grok-queued-enter.md); "Ctrl+c:cancel"
-# is the older recorded Grok footer and is kept so a build that still renders
-# it does not read idle mid-turn. Neither token appears in Grok's idle bar
+# "Esc:cancel" during an active TOOL turn (measured live on grok 1.0.13,
+# 2026-09-06: docs/verification/grok-queued-enter.md, which captured no
+# thinking-only frame and claims none, so that sub-state is still owed a
+# measurement); "Ctrl+c:cancel" is the older recorded Grok footer and is kept
+# so a build that still renders it does not read idle mid-turn. Neither token appears in Grok's idle bar
 # ("Shift+Tab:mode  |  Ctrl+x:shortcuts"), and this regex is Grok's ONLY busy
 # source (bin/fm-busy-lib.sh has no semantic writer for grok), so a token this
 # signature misses classifies a working Grok pane idle.

@@ -305,26 +305,27 @@ Ctrl+c:cancel')
 }
 
 # Grok's rendered-tail regex is its ONLY busy source, so a footer it misses
-# classifies a working Grok pane idle. These are the real captures recorded in
-# docs/verification/grok-queued-enter.md (grok 1.0.13, 2026-09-06). This file
-# sources bin/fm-busy-lib.sh without its canonical owner
-# bin/fm-composer-lib.sh, so the plain calls exercise the defensive literal
-# duplicate; the final arm sources the owner and must agree with it.
+# classifies a working Grok pane idle. busy_tail and idle_tail are verbatim
+# captures from docs/verification/grok-queued-enter.md (grok 1.0.13,
+# 2026-09-06); legacy_tail is the older recorded Ctrl+c:cancel token, which
+# that session never observed. This file sources bin/fm-busy-lib.sh without
+# its canonical owner bin/fm-composer-lib.sh, so the plain calls exercise the
+# defensive literal duplicate; the final arm sources the owner and must agree
+# with it.
 test_grok_regex_active_turn_busy() {
-  local state out busy_tail idle_tail approval_tail
+  local state out busy_tail idle_tail legacy_tail
   state=$(new_state_dir grok-active-turn)
   busy_tail='    ⠧ Run sleep 30 and wait for completion… 9.8s
   Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+x:shortcuts'
-  approval_tail='    ⠹ Run sleep 30 and wait for completion… 10s
-  1/3:select  │  Ctrl+c:cancel  │  Esc:scrollback'
+  legacy_tail='Ctrl+c:cancel'
   idle_tail='  Shift+Tab:mode  │  Ctrl+x:shortcuts'
 
   out=$(fm_busy_classify tmux w1 grok t1 "$state" "$busy_tail")
   [ "$out" = "busy grok-regex" ] \
     || fail "grok's measured active-turn footer must classify busy, got '$out'"
-  out=$(fm_busy_classify tmux w1 grok t1 "$state" "$approval_tail")
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" "$legacy_tail")
   [ "$out" = "busy grok-regex" ] \
-    || fail "grok's older cancel footer must still classify busy, got '$out'"
+    || fail "grok's older recorded cancel footer must still classify busy, got '$out'"
   out=$(fm_busy_classify tmux w1 grok t1 "$state" "$idle_tail")
   [ "$out" = "idle grok-regex" ] \
     || fail "grok's measured idle footer must classify idle, got '$out'"

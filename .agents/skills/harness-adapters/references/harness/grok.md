@@ -10,7 +10,7 @@ Launch shape: `grok --always-approve "$(cat <brief>)"`.
 |---|---|
 | Busy state | The last rendered-tail fallback, isolated to Grok pending a semantic source: ASCII mid-turn `Esc:cancel` (measured on 1.0.13) or the older `Ctrl+c:cancel`, both absent from the idle bar (`Shift+Tab:mode │ Ctrl+x:shortcuts` on 1.0.13), never the locale-fragile braille spinner. |
 | Exit | `/exit` prints `Resume this session with: grok --resume <session-id>`; fallback is `Ctrl+Q` twice within 1000ms, `Ctrl+D` quits in VS Code-family terminals, and `Ctrl+C` interrupts. |
-| Interrupt | Single `Ctrl+C`; Escape only focuses scrollback. |
+| Interrupt | Single `Ctrl+C`; Escape only focuses scrollback. A single-trial Escape on 1.0.13 cancelled an active tool turn (`docs/verification/grok-queued-enter.md`), contradicting the Escape half; that one trial is not a verification, so keep `Ctrl+C` until a dedicated repeat interrupt verification runs. |
 | Skill | `/<skill>`, for example `/no-mistakes`, with end-to-end user-skill discovery, invocation, and real `no-mistakes axi run` evidence; the popup may consume Enter and fill an argument placeholder, requiring a real second Enter. |
 | Autonomy | `--always-approve`, footer `· always-approve`, verified unattended; `--permission-mode bypassPermissions` is stronger equivalent. |
 | Marker | `GROK_AGENT=1` on child or tool processes in 0.2.73 and no `CLAUDECODE`; a 1.0.0 hook instead had `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`, and `GROK_WORKSPACE_ROOT` without `GROK_AGENT`, so ancestry guarantees identity. |
