@@ -94,6 +94,432 @@ write_origin_meta() {  # <home> <id> [kind]
     "spawn_gen=fixture-$id"
 }
 
+# --- markdown-to-beads migration resolution ----------------------------------
+#
+# A home on the Beads backend no longer carries the legacy markdown ids a scout
+# report attested: fm-hold-migration rehomed each held row under a prefixed fm-
+# id and recorded its markdown identity in the row's notes as the exact line
+# "migrated from data/backlog.md id <legacy id>". The fixture graph is driven
+# through bd directly where possible because the npm-published tasks-axi ships
+# the markdown backend only; the hold itself needs a beads-capable tasks-axi,
+# so that family probes once and skips itself with an explicit reason on
+# markdown-only installs, mirroring tests/fm-control-relaunch.test.sh.
+
+# Build a fixture home whose configured backend is a scratch Beads graph.
+# Echoes "<home>|<graph-beads-dir>". The graph repo dir is named "fm" because
+# bd derives the row-id prefix from the repo directory name.
+make_beads_home() {  # <name>
+  local name=$1 case_dir home graph fb
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  graph="$case_dir/fm"
+  mkdir -p "$home/data" "$home/config" "$home/projects" "$graph"
+  (umask 077; mkdir -p "$home/state")
+  git -C "$graph" init -q
+  if ! (cd "$graph" && bd init >"$case_dir/bd-init.log" 2>&1); then
+    cat "$case_dir/bd-init.log" >&2
+    fail "fixture bd init failed on $graph"
+  fi
+  cat > "$home/.tasks.toml" <<EOF
+backend = "beads"
+
+[beads]
+path = "$graph/.beads"
+binary = "bd"
+prefix = "fm"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 10
+EOF
+  fb=$(fm_fakebin "$home")
+  fm_fake_exit0 "$fb" tmux treehouse no-mistakes gh gh-axi
+  printf '%s\n' "$home|$graph/.beads"
+}
+
+bdrow() {  # <beads-dir> <args...>
+  BEADS_DIR="$1" bd "${@:2}"
+}
+
+# One capability probe for the migration family: can the installed tasks-axi
+# operate on a beads-backed home? The npm-published tasks-axi cannot, and the
+# hold fixture needs its beads backend; those installs skip with this reason.
+probe_tasks_axi_beads() {
+  local probe_home="$TMP_ROOT/.probe" probe_graph="$TMP_ROOT/.probe-fm"
+  rm -rf "$probe_home" "$probe_graph"
+  mkdir -p "$probe_home/data" "$probe_graph"
+  git -C "$probe_graph" init -q
+  (cd "$probe_graph" && bd init >/dev/null 2>&1) || return 1
+  cat > "$probe_home/.tasks.toml" <<PROBEEOF
+backend = "beads"
+
+[beads]
+path = "$probe_graph/.beads"
+binary = "bd"
+prefix = "fm"
+PROBEEOF
+  (cd "$probe_home" && tasks-axi list) >/dev/null 2>&1
+}
+TASKS_AXI_BEADS_OK=0
+if bd --version >/dev/null 2>&1 && jq --version >/dev/null 2>&1 \
+   && probe_tasks_axi_beads; then
+  TASKS_AXI_BEADS_OK=1
+fi
+
+require_tasks_axi_beads() {  # <what>
+  [ "$TASKS_AXI_BEADS_OK" = 1 ] && return 0
+  pass "skipped on markdown-only tasks-axi: $1"
+  return 1
+}
+
+write_scout_with_attested_inventory() {  # <home> <scout-id> <keys>
+  local home=$1 scout=$2 keys=$3
+  mkdir -p "$home/data/$scout"
+  fm_write_meta "$home/state/$scout.meta" \
+    "window=firstmate:fm-$scout" \
+    "worktree=$home/projects/missing-$scout" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=scout" \
+    "spawn_gen=fixture-$scout" \
+    "decisions_reviewed=1" \
+    "decision_keys=$keys"
+  printf 'done: report complete\n' > "$home/state/$scout.status"
+  printf '# Report\n\nThe investigation finished.\n' > "$home/data/$scout/report.md"
+}
+
+test_verify_resolves_a_hold_migrated_to_beads_notes() {
+  local fixture home beads scout
+  require_tasks_axi_beads "verify against a beads-migrated hold" || return 0
+  fixture=$(make_beads_home migrated-notes)
+  home=${fixture%%|*}
+  beads=${fixture##*|}
+  scout=sample-beads-scout
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add fm-herald-github-delete \
+    "Delete the herald repo" --repo herald) >/dev/null 2>&1 \
+    || fail "could not create the migrated hold fixture"
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold fm-herald-github-delete \
+    --kind captain --reason "captain must confirm the delete") >/dev/null 2>&1 \
+    || fail "could not hold the migrated fixture row"
+  bdrow "$beads" note fm-herald-github-delete \
+    "Origin: herald-retire
+Decision key: github-delete
+State: awaiting captain decision.
+
+migrated from data/backlog.md id herald-retire-decision-github-delete on 2026-09-04" \
+    >/dev/null 2>&1 || fail "could not record the migration marker note"
+  write_scout_with_attested_inventory "$home" "$scout" \
+    herald-retire-decision-github-delete
+
+  run_captain "$home" verify "$scout" >/dev/null \
+    || fail "verify did not resolve the attested legacy id through its migrated beads row"
+  pass "verify resolves a captain hold migrated to a beads row with a marker note"
+}
+
+# A tasks-axi stub that knows ONLY the row ids it is given. The real
+# beads-capable tasks-axi resolves a bare legacy id onto its prefixed row
+# itself, answering before any migration lookup runs; against this stub the
+# migrated-hold resolution order is what has to answer.
+write_known_rows_stub() {  # <fakebin> <row-id...>
+  local fb=$1 known
+  shift
+  known=$(printf '%s|' "$@")
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '%s\n' '0.2.5' ;;
+  update)
+    [ "${2:-}" = --help ] || exit 1
+    printf '%s\n' '--archive-body'
+    ;;
+  mv)
+    [ "${2:-}" = --help ] || exit 1
+    printf '%s\n' 'usage: tasks-axi mv [<id>...]'
+    ;;
+  hold)
+    [ "${2:-}" = --help ] || exit 1
+    printf '%s\n' '  --kind captain'
+    ;;
+  show)
+    case "${2:-}" in
+      @KNOWN@) ;;
+      *) printf 'error: no task %s in this backlog\n' "${2:-}" >&2; exit 1 ;;
+    esac
+    printf '%s\n' 'task:'
+    printf '  id: %s\n' "$2"
+    printf '%s\n' '  state: queued' '  held: yes' '  blocked: no' \
+      '  hold_kind: captain' '  body: ""'
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  sed -i.bak "s%@KNOWN@%${known%|}%" "$fb/tasks-axi"
+  rm -f "$fb/tasks-axi.bak"
+  chmod +x "$fb/tasks-axi"
+}
+
+test_verify_resolves_a_hold_migrated_under_the_configured_prefix() {
+  local fixture home scout out
+  require_tasks_axi_beads "verify against a prefix-migrated hold" || return 0
+  fixture=$(make_beads_home migrated-prefix)
+  home=${fixture%%|*}
+  scout=sample-prefix-scout
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add fm-other-legacy-row \
+    "Second migrated hold" --repo sample) >/dev/null 2>&1 \
+    || fail "could not create the prefix-migrated fixture row"
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold fm-other-legacy-row \
+    --kind captain --reason "captain must decide") >/dev/null 2>&1 \
+    || fail "could not hold the prefix-migrated fixture row"
+  # No row in this graph carries a marker note, so the narrowed prefix guess is
+  # the only resolution left for the attested legacy id.
+  write_known_rows_stub "$(fm_fakebin "$home")" fm-other-legacy-row
+  write_scout_with_attested_inventory "$home" "$scout" other-legacy-row
+
+  run_captain "$home" verify "$scout" >/dev/null \
+    || fail "verify did not resolve the legacy id under the configured prefix"
+  out=$(run_captain "$home" complete "$scout" other-legacy-row) \
+    || fail "the completion gate refused the prefix-resolved hold"
+  assert_contains "$out" "other-legacy-row=fm-other-legacy-row" \
+    "completion did not name the row the prefix guess attested against"
+  pass "verify resolves a captain hold whose id is the legacy id under the configured prefix"
+}
+
+# The prefix guess is a name, not evidence: when a row actually carries the
+# migration marker, that row is the one attested even though an unrelated
+# captain-held task occupies the <prefix>-<legacy id> name.
+test_marker_noted_row_wins_over_a_prefix_namesake() {
+  local fixture home beads scout row out
+  require_tasks_axi_beads "prefer a marker-noted row over a prefix namesake" || return 0
+  fixture=$(make_beads_home migrated-marker-wins)
+  home=${fixture%%|*}
+  beads=${fixture##*|}
+  scout=sample-marker-wins-scout
+  for row in fm-dual-row fm-marked-dual-row fm-solo-row; do
+    (cd "$home" && BEADS_ACTOR=fixture tasks-axi add "$row" "Captain call $row" \
+      --repo sample) >/dev/null 2>&1 || fail "could not create the fixture row $row"
+    (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold "$row" --kind captain \
+      --reason "captain must decide") >/dev/null 2>&1 \
+      || fail "could not hold the fixture row $row"
+  done
+  bdrow "$beads" note fm-marked-dual-row \
+    "migrated from data/backlog.md id dual-row on 2026-09-04" \
+    >/dev/null 2>&1 || fail "could not record the migration marker note"
+  write_known_rows_stub "$(fm_fakebin "$home")" \
+    fm-dual-row fm-marked-dual-row fm-solo-row
+  write_scout_with_attested_inventory "$home" "$scout" "dual-row,solo-row"
+
+  out=$(run_captain "$home" complete "$scout" dual-row solo-row) \
+    || fail "the completion gate refused an inventory carrying both migrated shapes"
+  assert_not_contains "$out" "dual-row=fm-dual-row" \
+    "the bare prefix namesake shadowed the row carrying the migration marker"
+  assert_contains "$out" "solo-row=fm-solo-row" \
+    "completion did not name the row the prefix guess attested against"
+  run_captain "$home" verify "$scout" >/dev/null \
+    || fail "verify did not re-resolve both migrated shapes after completion"
+  pass "the marker-noted row wins over an unrelated row holding the prefix namesake"
+}
+
+test_complete_accepts_a_migrated_inventory_on_beads() {
+  local fixture home scout
+  require_tasks_axi_beads "complete against a beads-migrated hold" || return 0
+  fixture=$(make_beads_home migrated-complete)
+  home=${fixture%%|*}
+  beads=${fixture##*|}
+  scout=sample-complete-scout
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add fm-herald-github-delete \
+    "Delete the herald repo" --repo herald) >/dev/null 2>&1 \
+    || fail "could not create the migrated hold fixture"
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold fm-herald-github-delete \
+    --kind captain --reason "captain must confirm the delete") >/dev/null 2>&1 \
+    || fail "could not hold the migrated fixture row"
+  bdrow "$beads" note fm-herald-github-delete \
+    "migrated from data/backlog.md id herald-retire-decision-github-delete on 2026-09-04" \
+    >/dev/null 2>&1 || fail "could not record the migration marker note"
+  fm_write_meta "$home/state/$scout.meta" \
+    "window=firstmate:fm-$scout" \
+    "worktree=$home/projects/missing-$scout" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=scout" \
+    "spawn_gen=fixture-$scout"
+  printf 'done: report complete\n' > "$home/state/$scout.status"
+  mkdir -p "$home/data/$scout"
+  printf '# Report\n\nThe investigation finished.\n' > "$home/data/$scout/report.md"
+
+  run_captain "$home" complete "$scout" herald-retire-decision-github-delete >/dev/null \
+    || fail "the completion gate refused an inventory resolved through a migrated beads row"
+  assert_grep "decision_keys=herald-retire-decision-github-delete" \
+    "$home/state/$scout.meta" \
+    "the attestation did not record the attested legacy id"
+  run_captain "$home" verify "$scout" >/dev/null \
+    || fail "verify did not re-resolve the attested legacy id after completion"
+  pass "the completion gate attests an inventory resolved through a migrated beads row"
+}
+
+test_verify_names_the_unresolvable_legacy_id_once() {
+  local fixture home scout err rc
+  require_tasks_axi_beads "verify an unresolvable beads legacy id" || return 0
+  fixture=$(make_beads_home migrated-absent)
+  home=${fixture%%|*}
+  scout=sample-absent-scout
+  write_scout_with_attested_inventory "$home" "$scout" ghost-legacy-id
+
+  rc=0
+  err=$(run_captain "$home" verify "$scout" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "verify accepted an attested id that resolves to nothing"
+  assert_contains "$err" "ghost-legacy-id" \
+    "the refusal did not name the id it could not resolve"
+  [ "$(printf '%s\n' "$err" | grep -c '^fm-captain-hold:')" = 1 ] \
+    || fail "the refusal emitted more than one line: $err"
+  pass "an unresolvable legacy id is refused once, naming the id"
+}
+
+test_verify_resolves_a_pre_collapse_key_through_its_derived_marker() {
+  local fixture home beads scout
+  require_tasks_axi_beads "verify a derived pre-collapse key" || return 0
+  fixture=$(make_beads_home migrated-derived)
+  home=${fixture%%|*}
+  beads=${fixture##*|}
+  scout=sample-derived-scout
+  # The row was migrated under the DERIVED pre-collapse identity, keyed by a
+  # bare decision key the origin's old metadata attests.
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add fm-dec-call \
+    "Migrated pre-collapse call" --repo sample) >/dev/null 2>&1 \
+    || fail "could not create the derived-marker fixture row"
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold fm-dec-call \
+    --kind captain --reason "captain must decide") >/dev/null 2>&1 \
+    || fail "could not hold the derived-marker fixture row"
+  bdrow "$beads" note fm-dec-call \
+    "migrated from data/backlog.md id $scout-decision-github-delete on 2026-09-04" \
+    >/dev/null 2>&1 || fail "could not record the derived-id marker note"
+  write_scout_with_attested_inventory "$home" "$scout" github-delete
+
+  run_captain "$home" verify "$scout" >/dev/null \
+    || fail "verify did not probe the derived pre-collapse identity for its migrated row"
+  pass "a pre-collapse key resolves through its derived identity's migration marker"
+}
+
+# The captain-hold mutation wrapper must address the configured backend like
+# the transition library does: on a beads-configured home its hold/answer/done
+# calls reach tasks-axi with no markdown file override. Fully portable - the
+# stubbed tasks-axi fakes the beads backend, so no bd or beads-capable install
+# is needed.
+test_captain_hold_mutations_address_the_beads_backend() {
+  local home id fb log
+  home="$TMP_ROOT/captain-stub-beads/home"
+  mkdir -p "$home/data" "$home/config" "$home/projects" "$home/state"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "beads"
+
+[beads]
+path = "graph/.beads"
+binary = "bd"
+prefix = "fm"
+EOF
+  id=fm-stub-held-row
+  fb=$(fm_fakebin "$home")
+  log="$home/tasks-axi-calls"
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "@LOG@"
+case "${1:-}" in
+  --version) printf '%s\n' '0.2.5' ;;
+  update)
+    if [ "${2:-}" = --help ]; then
+      printf '%s\n' '--archive-body'
+      exit 0
+    fi
+    case " $* " in
+      *" --file "*)
+        printf '%s\n' 'error: beads update received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    stub_prev=
+    stub_path=
+    for stub_arg in "$@"; do
+      if [ "$stub_prev" = --body-file ]; then stub_path=$stub_arg; fi
+      stub_prev=$stub_arg
+    done
+    [ -n "$stub_path" ] && cp -- "$stub_path" "@HOME@/last-body"
+    printf 'ok: update %s\n' "${2:-}"
+    ;;
+  mv)
+    [ "${2:-}" = --help ] || exit 1
+    printf '%s\n' 'usage: tasks-axi mv [<id>...]'
+    ;;
+  hold)
+    case " $* " in
+      *" --help "*) printf '%s\n' '  --kind captain' ; exit 0 ;;
+      *" --file "*)
+        printf '%s\n' 'error: beads hold received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    printf 'ok: hold %s\n' "${2:-}"
+    ;;
+  done)
+    [ "${2:-}" = "@ID@" ] || exit 1
+    case " $* " in
+      *" --file "*)
+        printf '%s\n' 'error: beads done received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    printf 'ok: done %s\n' "${2:-}"
+    ;;
+  show)
+    [ "${2:-}" = "@ID@" ] || exit 1
+    case " $* " in
+      *" --file "*)
+        printf '%s\n' 'error: beads show received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    printf '%s\n' 'task:'
+    printf '  id: %s\n' "@ID@"
+    printf '%s\n' '  state: queued' '  held: yes' '  blocked: no' \
+      '  hold_kind: captain'
+    if [ -f "@HOME@/last-body" ]; then
+      printf '%s' '  body: '
+      perl -MJSON::PP -e 'local $/; print encode_json(<STDIN>)' < "@HOME@/last-body"
+      printf '\n'
+    else
+      printf '%s\n' '  body: ""'
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  sed -i.bak "s|@HOME@|$home|g; s|@ID@|$id|g; s|@LOG@|$log|g" "$fb/tasks-axi"
+  rm -f "$fb/tasks-axi.bak"
+  chmod +x "$fb/tasks-axi"
+
+  PATH="$fb:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason "captain must decide" >/dev/null \
+    || fail "holding on a beads-configured home failed without a markdown backlog"
+  assert_grep "hold $id" "$log" \
+    "the captain-hold mutation never reached the configured backend"
+
+  decision="$home/captain-decision.txt"
+  printf 'Ship the gold-only plan.\n' > "$decision"
+  PATH="$fb:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" answer "$id" --decision-file "$decision" >/dev/null \
+    || fail "answering on a beads-configured home failed without a markdown backlog"
+  assert_grep "update $id --body-file" "$log" \
+    "the captain answer never reached the configured backend"
+  assert_grep "done $id" "$log" \
+    "the captain answer close never reached the configured backend"
+  assert_no_grep " --file " "$log" \
+    "a captain-hold mutation passed a markdown file override to a beads home"
+  pass "captain-hold mutations address the beads backend without a markdown override"
+}
+
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
 # and visual review have ended, the only genuine unresolved captain call is report
 # prose, no held backlog item or open status exists, and the authoritative
@@ -304,24 +730,31 @@ test_answer_records_and_closes() {
 # --release lifts the hold instead of closing, preserving the work item's own
 # body under the record; a re-held task later accepts a new answer.
 test_release_frees_held_work() {
-  local home show out
+  local home show out snap
   home=$(make_home release-work)
+  cat > "$home/widget-body.txt" <<'EOF'
+The widget plan body. Literal escape: \n. Unicode: café.
+Captain hold set: 2025-01-02T03:04:05Z
+EOF
   tasks_in "$home" add sample-widget "Ship the sample widget" --kind ship --repo sample \
-    --body 'The widget plan body. Literal escape: \n. Unicode: café.' >/dev/null \
+    --body-file "$home/widget-body.txt" >/dev/null \
     || fail "could not create the held work item"
-  run_captain "$home" hold sample-widget --reason "captain go needed before shipping" >/dev/null \
+  FM_CAPTAIN_HOLD_NOW=2026-06-01T12:00:00Z run_captain "$home" hold sample-widget \
+    --reason "captain go needed before shipping" >/dev/null \
     || fail "could not hold the work item for the captain"
-  printf 'Go: ship it as planned.\n' > "$home/go.txt"
+  printf 'Not urgent; ship it as planned.\n' > "$home/go.txt"
   run_captain "$home" answer sample-widget --decision-file "$home/go.txt" --release >/dev/null \
     || fail "answer --release failed on the held work item"
   show=$(tasks_in "$home" show sample-widget --full)
   assert_contains "$show" "state: queued" "a released work item did not stay queued"
   assert_contains "$show" "held: no" "a released work item kept its hold"
   assert_contains "$show" "Resolution mode: released" "the release did not record its close path"
-  assert_contains "$show" "Go: ship it as planned." "the release lost the captain's words"
+  assert_contains "$show" "Not urgent; ship it as planned." "the release lost the captain's words"
   assert_contains "$show" "The widget plan body." "the release destroyed the work item body"
   assert_contains "$show" 'Literal escape: \\n. Unicode: café.' \
     "the release corrupted escaped or Unicode body text"
+  assert_contains "$show" "Captain hold set: 2025-01-02T03:04:05Z" \
+    "hold stamping deleted matching user content outside the leading stamp"
   run_captain "$home" answer sample-widget --decision-file "$home/go.txt" --release >/dev/null \
     || fail "identical release retry was not idempotent"
   if run_captain "$home" answer sample-widget --decision-file "$home/go.txt" \
@@ -349,14 +782,25 @@ test_release_frees_held_work() {
     "an empty-label release recorded the wrong close mode"
 
   # A NEW captain gate on the same task later takes a NEW answer.
-  run_captain "$home" hold sample-widget --reason "captain pricing call needed" >/dev/null \
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-widget \
+    --reason "captain pricing call needed" >/dev/null \
     || fail "could not re-hold the released work item"
+  snap=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_SNAPSHOT_NOW=2026-07-14T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed after re-hold"
+  printf '%s' "$snap" | jq -e '
+    .backlog.records[] | select(.id == "sample-widget")
+    | .hold_set == "2026-07-14T12:00:00Z"
+      and .hold_age_days == 0
+      and .hold_bucket == "live"
+  ' >/dev/null || fail "a new hold lifecycle reused historical timestamp or answer text: $snap"
   printf 'Price it at nine dollars.\n' > "$home/price.txt"
   run_captain "$home" answer sample-widget --decision-file "$home/price.txt" --release >/dev/null \
     || fail "a re-held task refused a new answer"
   show=$(tasks_in "$home" show sample-widget --full)
   assert_contains "$show" "Price it at nine dollars." "the new answer was not recorded"
-  assert_contains "$show" "Go: ship it as planned." "the new answer erased the earlier record"
+  assert_contains "$show" "Not urgent; ship it as planned." "the new answer erased the earlier record"
 
   tasks_in "$home" "done" sample-widget >/dev/null \
     || fail "could not complete the released work item normally"
@@ -371,12 +815,147 @@ test_release_frees_held_work() {
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
+# The hold-set stamp must be durable before the captain hold becomes visible.
+# A wrapper observes the real tasks-axi hold boundary, and a forced stamp-write
+# failure proves the command never publishes the hold without its timestamp.
+test_hold_stamp_precedes_hold_visibility() {
+  local home show
+  home=$(make_home hold-stamp-order)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-old-call - Existing old task (repo: sample) (kind: ship) (since 2026-01-01)
+- [ ] sample-stamp-failure - Existing task whose stamp fails (repo: sample) (kind: ship) (since 2026-01-01)
+
+## Done
+EOF
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = update ] && [ "${2:-}" = sample-stamp-failure ]; then
+  exit 92
+fi
+if [ "${1:-}" = hold ] && [ "${2:-}" = sample-old-call ]; then
+  show=$("$REAL_TASKS_AXI" show "$2" --full) || exit 93
+  printf '%s\n' "$show" | grep -F 'Captain hold set: 2026-07-14T12:00:00Z' >/dev/null || exit 94
+  : > "$FM_HOME/hold-observed-after-stamp"
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-old-call \
+    --reason "captain route choice pending" >/dev/null \
+    || fail "hold was published before its hold-set stamp"
+  assert_present "$home/hold-observed-after-stamp" \
+    "the tasks-axi hold boundary was not observed"
+  show=$(tasks_in "$home" show sample-old-call --full)
+  assert_contains "$show" "hold_kind: captain" "the stamped task was not captain-held"
+  assert_contains "$show" "Captain hold set: 2026-07-14T12:00:00Z" \
+    "the visible captain hold lost its timestamp"
+
+  if FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-stamp-failure \
+    --reason "captain route choice pending" > "$home/stamp-failure.out" 2> "$home/stamp-failure.err"; then
+    fail "hold succeeded after its timestamp update failed"
+  fi
+  show=$(tasks_in "$home" show sample-stamp-failure --full)
+  assert_contains "$show" "held: no" "a failed timestamp update still published the hold"
+  assert_contains "$show" 'hold_kind: "-"' "a failed timestamp update retained captain-hold provenance"
+  pass "captain holds become visible only after their hold-set timestamp is durable"
+}
+
+test_interrupted_answer_preserves_hold_age() {
+  local home snap show
+  home=$(make_home interrupted-answer-age)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-interrupted-call - Existing old task (repo: sample) (kind: ship) (since 2026-01-01)
+
+## Done
+EOF
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-interrupted-call \
+    --reason "captain route choice pending" >/dev/null \
+    || fail "could not hold the interrupted-answer fixture"
+  printf 'Not urgent in the historical answer.\n' > "$home/interrupted-answer.txt"
+  mkdir -p "$home/at-close"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = sample-interrupted-call ] \
+  && [ ! -e "$FM_HOME/close-failed-once" ]; then
+  cp "$FM_HOME/data/backlog.md" "$FM_HOME/at-close/backlog.md" || exit 93
+  : > "$FM_HOME/close-failed-once"
+  exit 92
+fi
+if [ "${1:-}" = update ] && [ "${2:-}" = sample-interrupted-call ] \
+  && [ ! -e "$FM_HOME/normalize-failed-once" ]; then
+  state=$("$REAL_TASKS_AXI" show "$2" --full | sed -n 's/^  state: //p' | head -1)
+  if [ "$state" = done ]; then
+    : > "$FM_HOME/normalize-failed-once"
+    exit 94
+  fi
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  if run_captain "$home" answer sample-interrupted-call \
+    --decision-file "$home/interrupted-answer.txt" > "$home/answer.out" 2> "$home/answer.err"; then
+    fail "the forced answer close failure reported success"
+  fi
+  snap=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/at-close" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_SNAPSHOT_NOW=2026-07-14T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed at interrupted close boundary"
+  printf '%s' "$snap" | jq -e '
+    .backlog.records[] | select(.id == "sample-interrupted-call")
+    | .captain_actionable == true
+      and .hold_set == "2026-07-14T12:00:00Z"
+      and .hold_age_days == 0
+      and .hold_bucket == "live"
+  ' >/dev/null || fail "an interrupted answer lost the fresh hold age basis: $snap"
+
+  if run_captain "$home" answer sample-interrupted-call \
+    --decision-file "$home/interrupted-answer.txt" > "$home/normalize.out" 2> "$home/normalize.err"; then
+    fail "the forced post-close normalization failure reported success"
+  fi
+  show=$(tasks_in "$home" show sample-interrupted-call --full)
+  assert_contains "$show" "state: done" "the normalization failure undid the successful close"
+  run_captain "$home" answer sample-interrupted-call \
+    --decision-file "$home/interrupted-answer.txt" >/dev/null \
+    || fail "the closed answer could not normalize on retry"
+  show=$(tasks_in "$home" show sample-interrupted-call --full)
+  assert_contains "$show" 'body: "Resolution recorded by fm-captain-hold.' \
+    "the matching done retry did not restore resolution-first body ordering"
+  pass "an interrupted answer preserves its hold age until close retry"
+}
+
 # Deferral is a date, not a live card: hold --until keeps the task out of
 # captain_actionable until due, tasks-axi's own date-gate expiry keeps the task
 # answerable, and Bearings renders the wait as a dated gate.
 test_deferral_leaves_captains_call_until_due() {
   local home json snap show
   home=$(make_home deferral)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-existing-call - Decide an existing sample task (repo: sample) (kind: captain) (since 2026-06-01)
+- [ ] sample-near-marker - Decide a deferred sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: choose the sample route) (hold-kind: captain)
+  Captain hold set: 2026-07-14T12:00:00Z
+  abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij DEFERRED
+- [ ] sample-late-marker - Decide a documented sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: choose the sample route) (hold-kind: captain)
+  This deliberately long decision context fills the bounded display excerpt without changing the durable classification contract. Additional synthetic context keeps extending the body beyond that display boundary while remaining ordinary task prose. More synthetic context places the presentation marker after the excerpt cutoff. DEFERRED
+
+## Done
+EOF
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-existing-call \
+    --reason "captain choice on existing work" >/dev/null \
+    || fail "could not hold the existing task"
+  FM_CAPTAIN_HOLD_NOW=2026-07-20T12:00:00Z run_captain "$home" hold sample-existing-call \
+    --reason "captain choice on existing work" >/dev/null \
+    || fail "could not repeat the existing task hold"
   run_captain "$home" hold sample-later-call --title "Revisit the sample plan" \
     --reason "captain deferred revisit later" --repo sample --until 2026-08-01 >/dev/null \
     || fail "could not register the deferred captain call"
@@ -395,14 +974,20 @@ test_deferral_leaves_captains_call_until_due() {
   printf '%s' "$snap" | jq -e '
     ([.backlog.records[] | select(.id == "sample-later-call")][0]) as $later
     | ([.backlog.records[] | select(.id == "sample-now-call")][0]) as $now
+    | ([.backlog.records[] | select(.id == "sample-existing-call")][0]) as $existing
     | $later.captain_actionable == false and $later.hold_until == "2026-08-01"
       and $now.captain_actionable == true and $now.hold_until == null
+      and $existing.since == "2026-06-01" and $existing.hold_set == "2026-07-14T12:00:00Z"
+      and $existing.hold_age_days == 0 and $existing.hold_bucket == "live"
+      and ([.backlog.records[] | select(.id == "sample-near-marker")][0].hold_bucket == "live")
+      and ([.backlog.records[] | select(.id == "sample-late-marker")][0].hold_bucket == "live")
       and ($later.title | contains("hold-until") | not)
-  ' >/dev/null || fail "the due gate or hold-until parsing is wrong: $snap"
+  ' >/dev/null || fail "the due gate, hold-set age, or hold-until parsing is wrong: $snap"
 
   json=$(run_bearings "$home") || fail "Bearings failed with a deferred call"
   printf '%s' "$json" | jq -e '
     (.decisions_open | any(.id == "sample-now-call"))
+      and (.decisions_open | any(.id == "sample-existing-call"))
       and (.decisions_open | any(.id == "sample-later-call") | not)
       and (.gates | any(.id == "sample-later-call" and (.reason | startswith("until 2026-08-01"))))
   ' >/dev/null || fail "the deferred call did not render as a dated gate: $json"
@@ -414,8 +999,11 @@ test_deferral_leaves_captains_call_until_due() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_SNAPSHOT_NOW=2026-08-01T12:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed at the due date"
   printf '%s' "$snap" | jq -e '
-    [.backlog.records[] | select(.id == "sample-later-call")][0].captain_actionable == true
-  ' >/dev/null || fail "a due deferral did not resurface as captain-actionable"
+    ([.backlog.records[] | select(.id == "sample-later-call")][0]) as $later
+    | ([.backlog.records[] | select(.id == "sample-existing-call")][0]) as $existing
+    | $later.captain_actionable == true
+      and $existing.hold_age_days == 18 and $existing.hold_bucket == "aged"
+  ' >/dev/null || fail "a due deferral did not resurface or a stamped hold did not age from its hold date"
   show=$(tasks_in "$home" show sample-later-call --full)
   assert_contains "$show" "hold_kind: captain" "the expired deferral lost its captain-hold annotations"
   printf 'Answered on the due date.\n' > "$home/due.txt"
@@ -1527,6 +2115,8 @@ test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
+test_hold_stamp_precedes_hold_visibility
+test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
@@ -1545,3 +2135,10 @@ test_teardown_never_closes_a_captain_held_task
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
+test_verify_resolves_a_hold_migrated_to_beads_notes
+test_verify_resolves_a_hold_migrated_under_the_configured_prefix
+test_marker_noted_row_wins_over_a_prefix_namesake
+test_complete_accepts_a_migrated_inventory_on_beads
+test_verify_names_the_unresolvable_legacy_id_once
+test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
+test_captain_hold_mutations_address_the_beads_backend

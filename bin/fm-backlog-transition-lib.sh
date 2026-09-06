@@ -22,20 +22,22 @@
 #
 # SCOPE. fm_backlog_transition_applies is the single gate. It excludes
 # secondmates (persistent agents are never backlog items, AGENTS.md section 10),
-# homes whose configured backlog backend is manual and homes that keep no
-# backlog file at all. Those return-1 exemptions are never errors; an
-# unresolvable configured data directory or incompatible tasks-axi instead
-# returns 2 so callers refuse before mutation.
+# and homes whose configured backlog backend is manual. Markdown homes that
+# keep no backlog file at all are likewise exempt. Those return-1 exemptions
+# are never errors; a home on any other configured backend has no markdown
+# file requirement at all. An unresolvable configured data directory or
+# incompatible tasks-axi instead returns 2 so callers refuse before mutation.
 #
-# ADDRESSING. Every mutation call passes `--file <data>/backlog.md` so the
-# change lands in the home that owns the task regardless of the caller's
-# working directory, and runs from that data directory's parent so the same
-# home's `.tasks.toml` supplies done_keep and the archive path. Row probes pass
-# `--file` only for the markdown backend and otherwise run from the addressing
-# root so backend-owned state remains discoverable. The parent of the data
-# directory is the addressing root rather than FM_HOME, so a home whose data
-# directory is relocated keeps its backlog and its archive together. A root
-# with no `.tasks.toml` gets tasks-axi's built-in defaults.
+# ADDRESSING. The markdown backend owns the explicit `--file <data>/backlog.md`
+# on every mutation and row probe so the change lands in the home that owns
+# the task regardless of the caller's working directory. Every other
+# configured backend is addressed from that data directory's parent - the
+# addressing root - with no markdown file override, so the same home's
+# `.tasks.toml` supplies its backend, done_keep, and the archive path and
+# backend-owned state remains discoverable. The parent of the data directory
+# is the addressing root rather than FM_HOME, so a home whose data directory
+# is relocated keeps its backlog and its archive together. A root with no
+# `.tasks.toml` gets tasks-axi's built-in defaults.
 #
 # CRASH RECOVERY. Only teardown needs a durable record: it removes the meta and
 # with it the completion links, so a process killed between the two halves would
@@ -175,7 +177,7 @@ fm_backlog_data_relative() {  # <data-dir>
 }
 
 fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
-  local config=$1 data authorized_data=$2 kind=$3 file
+  local config=$1 data authorized_data=$2 kind=$3 file root
   FM_BACKLOG_TRANSITION_SKIP=
   if [ "$kind" = secondmate ]; then
     FM_BACKLOG_TRANSITION_SKIP="secondmates are not backlog items"
@@ -189,13 +191,16 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $2"
     return 2
   fi
-  file=$(fm_backlog_file "$data")
-  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-    FM_BACKLOG_TRANSITION_SKIP="this home keeps no backlog at $file"
-    return 1
-  fi
-  if ! fm_backlog_record_present "$file" "backlog file" "$authorized_data"; then
-    return 2
+  root=$(fm_backlog_root "$data") || return 2
+  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+    file=$(fm_backlog_file "$data")
+    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+      FM_BACKLOG_TRANSITION_SKIP="this home keeps no backlog at $file"
+      return 1
+    fi
+    if ! fm_backlog_record_present "$file" "backlog file" "$authorized_data"; then
+      return 2
+    fi
   fi
   if ! fm_tasks_axi_compatible; then
     FM_BACKLOG_TRANSITION_ERROR="automatic backlog transitions require tasks-axi $FM_TASKS_AXI_MIN or newer with the required update and mv features"
@@ -232,7 +237,7 @@ fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
 }
 
 fm_backlog_row_probe() {  # <data-dir> <id>
-  local data authorized_data=$1 file id=$2 out state held blocked hold_kind command_status
+  local data authorized_data=$1 file id=$2 out state held blocked hold_kind command_status root
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
@@ -243,18 +248,20 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   FM_BACKLOG_ROW_STATE=
   FM_BACKLOG_ROW_HOLD_KIND=
   FM_BACKLOG_ROW_ERROR=
-  file=$(fm_backlog_file "$data") || {
+  root=$(fm_backlog_root "$data") || {
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
     return 1
   }
-  if ! fm_backlog_record_present "$file" "backlog file" "$authorized_data"; then
-    FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
-    return 1
+  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+    file=$(fm_backlog_file "$data") || {
+      FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
+      return 1
+    }
+    if ! fm_backlog_record_present "$file" "backlog file" "$authorized_data"; then
+      FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
+      return 1
+    fi
   fi
-  fm_backlog_root "$data" >/dev/null || {
-    FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
-    return 1
-  }
   out=$(fm_backlog_row_show "$data" "$id")
   command_status=$?
   if [ "$command_status" -ne 0 ]; then
@@ -285,20 +292,29 @@ fm_backlog_row_probe() {  # <data-dir> <id>
 }
 
 # Run one tasks-axi mutation against <home>'s backlog, capturing its first
-# output line in FM_BACKLOG_TRANSITION_ERROR on failure.
+# output line in FM_BACKLOG_TRANSITION_ERROR on failure. The markdown backend
+# keeps its explicit <data>/backlog.md file and presence requirement; every
+# other configured backend is addressed by the root's own tasks-axi
+# configuration, so passing the markdown-era path would write the wrong store.
 fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
-  local data authorized_data=$1 file verb=$2 id=$3 out command_status
+  local data authorized_data=$1 file verb=$2 id=$3 out command_status root
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
   fi
   shift 3
   FM_BACKLOG_TRANSITION_ERROR=
-  file=$(fm_backlog_file "$data") || return 1
-  fm_backlog_record_present "$file" "backlog file" "$authorized_data" || return 1
-  out=$(cd "$(fm_backlog_root "$data")" 2>/dev/null && tasks-axi "$verb" "$id" \
-      --file "$file" "$@" 2>&1)
-  command_status=$?
+  root=$(fm_backlog_root "$data") || return 1
+  if [ "$(fm_tasks_axi_backend "$root")" != markdown ]; then
+    out=$(cd "$root" 2>/dev/null && tasks-axi "$verb" "$id" "$@" 2>&1)
+    command_status=$?
+  else
+    file=$(fm_backlog_file "$data") || return 1
+    fm_backlog_record_present "$file" "backlog file" "$authorized_data" || return 1
+    out=$(cd "$root" 2>/dev/null && tasks-axi "$verb" "$id" \
+        --file "$file" "$@" 2>&1)
+    command_status=$?
+  fi
   [ "$command_status" -ne 0 ] || return 0
   FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
   [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
@@ -319,9 +335,9 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
 # Keep a captain-held row open across the removal of the work record that
 # discovered it: record the finished work's deliverable as one line at the end
 # of the task body (a line already present is left alone) and return the row to
-# Queued, which is the shape every other captain call has and what
-# bin/fm-fleet-snapshot.sh's captain_actionable requires. The hold itself is
-# untouched; only bin/fm-captain-hold.sh answer closes the call. The links are
+# Queued, the conventional post-cleanup shape for an open captain call.
+# bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
+# fields; only bin/fm-captain-hold.sh answer closes the call. The links are
 # written into the body rather than through `tasks-axi update --report`,
 # because that flag rewrites the title of a row that is not Done.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]

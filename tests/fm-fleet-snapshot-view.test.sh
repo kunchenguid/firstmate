@@ -199,6 +199,63 @@ test_fixture_snapshot_json() {
 
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
 # current rows without inventing task rows.
+test_hold_buckets_are_total_and_text_blind() {
+  local home fakebin out
+  home=$(make_home hold-buckets)
+  mkdir -p "$home/data"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] working-held - Held while working (repo: sample) (kind: captain) (hold: choose a route) (hold-kind: captain)
+  Captain hold set: 2026-07-20T00:00:00Z
+
+## Queued
+- [ ] blocked-hold - Blocked call blocked-by: upstream-work (repo: sample) (kind: captain) (hold: choose a route) (hold-kind: captain)
+  Captain hold set: 2026-07-20T00:00:00Z
+- [ ] dated-hold - Dated call (repo: sample) (kind: captain) (hold: revisit later) (hold-kind: captain) (hold-until: 2026-12-01)
+  Captain hold set: 2026-07-20T00:00:00Z
+- [ ] aged-hold - Aged call (repo: sample) (kind: captain) (hold: choose a route) (hold-kind: captain)
+  Captain hold set: 2026-06-01T00:00:00Z
+- [ ] live-hold - Live call (repo: sample) (kind: captain) (hold: choose a route) (hold-kind: captain)
+  Captain hold set: 2026-07-20T00:00:00Z
+- [ ] opposite-word - Opposite wording (repo: sample) (kind: captain) (hold: non-deferred release choice) (hold-kind: captain)
+  Captain hold set: 2026-07-20T00:00:00Z
+- [ ] marker-prose - Marker prose (repo: sample) (kind: captain) (hold: choose a route) (hold-kind: captain)
+  Captain hold set: 2026-07-20T00:00:00Z
+  SUPERSEDED - kept only to prove prose never classifies.
+- [ ] upstream-work - Land the upstream change (repo: sample) (kind: ship)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data"     FM_SNAPSHOT_NOW=2026-07-25T00:00:00Z "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    [.backlog.records[] | select(.structured and .hold_kind == "captain")]
+    | length == 7
+      and all(.hold_bucket as $bucket
+              | ["live", "blocked", "dated", "aged"] | index($bucket) != null)
+  ' >/dev/null || fail "every captain hold must land in exactly one structured bucket: $out"
+  printf '%s' "$out" | jq -e '
+    ([.backlog.records[] | select(.id == "blocked-hold")][0].hold_bucket == "blocked")
+      and ([.backlog.records[] | select(.id == "dated-hold")][0].hold_bucket == "dated")
+      and ([.backlog.records[] | select(.id == "aged-hold")][0].hold_bucket == "aged")
+      and ([.backlog.records[] | select(.id == "live-hold")][0].hold_bucket == "live")
+  ' >/dev/null || fail "structured fields did not drive the bucket assignment: $out"
+  printf '%s' "$out" | jq -e '
+    ([.backlog.records[] | select(.id == "opposite-word")][0]) as $opposite
+    | ([.backlog.records[] | select(.id == "marker-prose")][0]) as $prose
+    | $opposite.hold_bucket == "live" and $opposite.captain_actionable == true
+      and $prose.hold_bucket == "live" and $prose.captain_actionable == true
+  ' >/dev/null || fail "hold reason or body prose must never reclassify a live decision: $out"
+  printf '%s' "$out" | jq -e '
+    ([.backlog.records[] | select(.id == "working-held")][0])
+    | .hold_bucket == "live" and .captain_actionable == true
+  ' >/dev/null || fail "a captain hold on a working task must still be bucketed: $out"
+  printf '%s' "$out" | jq -e '
+    ([.backlog.records[] | select(.id == "upstream-work")][0].hold_bucket) == null
+  ' >/dev/null || fail "a row that is not a captain hold must carry no bucket: $out"
+  pass "captain-hold buckets are total, mutually exclusive, and never decided by prose"
+}
+
 test_main_inventory_orphan_and_unstructured_disclosure() {
   local home fakebin out
   home=$(make_home main-inventory)
@@ -525,16 +582,16 @@ EOF
     | .title == "Deferred sample route"
       and .hold_until == "2026-09-01"
       and .captain_actionable == false
-      and .deferred_marker == false
+      and .hold_bucket == "dated"
   ' >/dev/null || fail "a dated captain hold did not defer or strip its hold-until from the title"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "captain-gated-work")
-    | .kind == "ship" and .captain_actionable == true and .deferred_marker == false
+    | .kind == "ship" and .captain_actionable == true and .hold_bucket == "live"
   ' >/dev/null || fail "captain actionability must not depend on the row kind"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "parked-prose")
-    | .captain_actionable == true and .deferred_marker == true
-  ' >/dev/null || fail "a prose-deferred captain hold did not carry the presentation marker"
+    | .captain_actionable == true and .hold_bucket == "live"
+  ' >/dev/null || fail "hold prose must never classify a captain hold"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-comma")
     | .repo == "gamma"
@@ -580,6 +637,98 @@ EOF
   assert_contains "$view" "| done-note | Done Note | delta | ship | - | local main |" \
     "view should render local-only done artifact outside the title"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
+}
+
+test_undated_captain_hold_phrasing_and_aging() {
+  local home fakebin out
+  home=$(make_home undated-aging)
+  mkdir -p "$home/data"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] parked-hold - Parked style call (repo: sample) (kind: ship) (hold: parked) (hold-kind: captain)
+- [ ] awaiting-go - Awaiting go call (repo: sample) (kind: ship) (hold: awaiting captain go) (hold-kind: captain)
+- [ ] no-dispatch - No dispatch call (repo: sample) (kind: ship) (hold: do not dispatch) (hold-kind: captain)
+- [ ] no-auto - No auto-dispatch call (repo: sample) (kind: ship) (hold: do not auto-dispatch) (hold-kind: captain)
+- [ ] not-urgent - Not urgent call (repo: sample) (kind: ship) (hold: not urgent) (hold-kind: captain)
+- [ ] deprior - Deprioritized call (repo: sample) (kind: ship) (hold: de-prioritized) (hold-kind: captain)
+- [ ] queued-opp - Queued opportunity call (repo: sample) (kind: ship) (hold: queued opportunity) (hold-kind: captain)
+- [ ] gated-hold - Captain-gated phrasing (repo: sample) (kind: ship) (hold: captain-gated) (hold-kind: captain)
+- [ ] aged-call - Aged genuine call (repo: sample) (kind: captain) (since 2026-07-01) (hold: choose a sample route) (hold-kind: captain)
+  Captain hold set: 2026-07-01T00:00:00Z
+- [ ] recent-call - Recent genuine call (repo: sample) (kind: captain) (since 2026-06-01) (hold: choose a sample route) (hold-kind: captain)
+  Captain hold set: 2026-07-20T00:00:00Z
+- [ ] legacy-old-hold - Legacy unstamped hold (repo: sample) (kind: ship) (since 2026-06-01) (hold: choose a sample route) (hold-kind: captain)
+  Historical notes remain ordinary task content.
+  Captain hold set: 2026-07-24T00:00:00Z
+- [ ] boundary-call - Almost aged genuine call (repo: sample) (kind: captain) (since 2026-06-01) (hold: choose a sample route) (hold-kind: captain)
+  Captain hold set: 2026-07-11T00:01:00Z
+- [ ] live-gated - Live captain-gated work (repo: sample) (kind: ship) (hold: captain go pending) (hold-kind: captain)
+- [ ] unparked-call - Newly unparked decision (repo: sample) (kind: captain) (hold: unparked; choose a sample route) (hold-kind: captain)
+- [ ] contextual-call - Context is not a deferral (repo: sample) (kind: captain) (hold: choose whether to pursue this queued opportunity) (hold-kind: captain)
+  This is not urgent context, but the captain decision is current.
+- [ ] contextual-not-urgent - Leading context is not a deferral (repo: sample) (kind: captain) (hold: not urgent but choose the route now) (hold-kind: captain)
+- [ ] contextual-comma - Comma context is not a deferral (repo: sample) (kind: captain) (hold: not urgent, choose the launch route now) (hold-kind: captain)
+- [ ] metadata-context - Metadata-like context is not a deferral (repo: sample) (kind: captain) (hold: not urgent, priority: decide P1 or P2) (hold-kind: captain)
+- [ ] contextual-opportunity - Leading opportunity is not a deferral (repo: sample) (kind: captain) (hold: queued opportunity: choose whether to proceed) (hold-kind: captain)
+- [ ] contextual-gated - Leading gate is not a deferral (repo: sample) (kind: captain) (hold: captain-gated decision needs current approval) (hold-kind: captain)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_SNAPSHOT_NOW=2026-07-25T00:00:00Z "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    ([.backlog.records[] | select(.id == "parked-hold" or .id == "awaiting-go" or .id == "no-dispatch"
+        or .id == "no-auto" or .id == "not-urgent" or .id == "deprior" or .id == "queued-opp"
+        or .id == "gated-hold")]
+     | all(.captain_actionable == true and .hold_bucket == "live"))
+  ' >/dev/null || fail "parked-style wording must never classify a fresh undated hold: $out"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "aged-call")
+    | .captain_actionable == false
+      and .hold_bucket == "aged"
+      and .hold_age_days == 24
+  ' >/dev/null || fail "an undated captain hold older than the default 14-day threshold must age: $out"
+  printf '%s' "$out" | jq -e '
+    ([.backlog.records[] | select(.id == "recent-call")][0]) as $recent
+    | ([.backlog.records[] | select(.id == "legacy-old-hold")][0]) as $legacy
+    | $recent.captain_actionable == true
+      and $recent.hold_bucket == "live"
+      and $recent.hold_age_days == 5
+      and $legacy.captain_actionable == false
+      and $legacy.hold_set == null
+      and $legacy.hold_bucket == "aged"
+      and $legacy.hold_age_days == 54
+  ' >/dev/null || fail "recent stamped and legacy unstamped hold ages are wrong: $out"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "boundary-call")
+    | .hold_set == "2026-07-11T00:01:00Z"
+      and .hold_age_days == 13 and .hold_bucket == "live"
+  ' >/dev/null || fail "a hold one minute short of 14 days must not age early: $out"
+  printf '%s' "$out" | jq -e '
+    [.backlog.records[] | select(.id == "live-gated" or .id == "unparked-call" or .id == "contextual-call"
+        or .id == "contextual-not-urgent" or .id == "contextual-comma" or .id == "metadata-context"
+        or .id == "contextual-opportunity" or .id == "contextual-gated")]
+    | length == 8
+      and all(.captain_actionable == true and .hold_bucket == "live")
+      and (map(select(.id == "contextual-comma" and .hold_reason == "not urgent, choose the launch route now")) | length == 1)
+      and (map(select(.id == "metadata-context" and .hold_reason == "not urgent, priority: decide P1 or P2")) | length == 1)
+  ' >/dev/null || fail "contextual parked-style wording must not hide current decisions: $out"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_SNAPSHOT_NOW=2026-07-25T00:00:00Z FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=30 "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "aged-call")
+    | .hold_bucket == "live" and .hold_age_days == 24
+  ' >/dev/null || fail "raising the age threshold must leave a 24-day hold unaged: $out"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    FM_SNAPSHOT_NOW=2026-07-25T00:00:00Z FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=5 "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "recent-call")
+    | .hold_bucket == "aged" and .hold_age_days == 5
+  ' >/dev/null || fail "lowering the age threshold to 5 must age a 5-day hold: $out"
+  pass "undated captain holds age after a configurable threshold, decided only from structured fields"
 }
 
 test_view_renders_snapshot() {
@@ -899,6 +1048,8 @@ EOF
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
+test_undated_captain_hold_phrasing_and_aging
+test_hold_buckets_are_total_and_text_blind
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state

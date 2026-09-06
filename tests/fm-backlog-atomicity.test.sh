@@ -394,7 +394,11 @@ write_task_meta() {  # <case-dir> <id> <kind> <mode> [extra-line...]
 run_spawn() {  # <case-dir> <args...>
   local case_dir=$1
   shift
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
+  # A claude spawn pre-registers workspace trust in the launching user's own
+  # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
+  # without it this suite would write the developer's real ~/.claude.json.
+  mkdir -p "$case_dir/user-home"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" HOME="$case_dir/user-home" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
@@ -462,6 +466,73 @@ test_dispatch_omits_the_file_for_a_beads_show() {
   assert_no_grep "show $id --file" "$case_dir/tasks-axi-calls" \
     "Beads dispatch passed the markdown file to show"
   pass "dispatch omits the markdown file when probing a Beads backlog"
+}
+
+test_completion_omits_the_file_for_a_beads_done() {
+  local case_dir home id out
+  id=atomic-completion-beads-b1
+  case_dir=$(make_home completion-beads "$id")
+  home=$(home_of "$case_dir")
+  printf '%s\n' 'backend = "beads"' '[beads]' 'path = ".beads"' \
+    'prefix = "atomic"' > "$home/.tasks.toml"
+  # A Beads home keeps no markdown backlog at all: the transition gate, the
+  # row probe, and the close must all address the configured backend without
+  # requiring or overriding a markdown file.
+  rm -f "$home/data/backlog.md"
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tasks-axi-calls"
+case "\${1:-}" in
+  --version) printf '%s\n' '0.2.5' ;;
+  update)
+    [ "\${2:-}" = --help ] || exit 1
+    printf '%s\n' '--archive-body'
+    ;;
+  mv)
+    [ "\${2:-}" = --help ] || exit 1
+    printf '%s\n' 'usage: tasks-axi mv [<id>...]'
+    ;;
+  show)
+    [ "\${2:-}" = "$id" ] || exit 1
+    case " \$* " in
+      *" --file "*)
+        printf '%s\n' 'error: beads show received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    printf '%s\n' 'task:'
+    printf '  id: %s\n' "$id"
+    printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no'
+    ;;
+  done)
+    [ "\${2:-}" = "$id" ] || exit 1
+    case " \$* " in
+      *" --file "*)
+        printf '%s\n' 'error: beads done received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    printf 'ok: done %s\n' "$id"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-beads-done"
+
+  out=$(run_teardown "$case_dir" "$id") \
+    || fail "Beads completion teardown failed without a markdown backlog: $out"
+  assert_grep "done $id" "$case_dir/tasks-axi-calls" \
+    "the Beads close never ran"
+  assert_no_grep "done $id --file" "$case_dir/tasks-axi-calls" \
+    "the Beads close passed the markdown file to done"
+  assert_absent "$home/state/$id.meta" \
+    "the Beads completion teardown left the task record behind"
+  assert_absent "$home/state/$id.backlog-close" \
+    "the Beads completion teardown left its pending-close record behind"
+  assert_not_contains "$out" "backlog.md" \
+    "the Beads teardown reported the close against a markdown file this home has not got"
+  pass "completion applies and closes a Beads backlog without any markdown file"
 }
 
 test_dispatch_refuses_a_pending_authoritative_close() {
@@ -2308,6 +2379,7 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
 
 test_dispatch_moves_the_item_in_flight_in_the_same_run
 test_dispatch_omits_the_file_for_a_beads_show
+test_completion_omits_the_file_for_a_beads_done
 test_dispatch_refuses_a_pending_authoritative_close
 test_dispatch_refuses_a_held_row_before_creating_resources
 test_dispatch_refuses_a_blocked_row_before_creating_resources

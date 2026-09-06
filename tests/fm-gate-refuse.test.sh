@@ -206,6 +206,7 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf '%%1\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  list-windows) printf 'fm-lane-ok\n'; exit 0 ;;
 esac
 exit 0
 SH
@@ -256,7 +257,7 @@ test_send_refuses_and_admits() {
     || fail "send: normal steer was not durably enqueued"
   assert_not_contains "$(cat "$log")" "literal=1 arg=hello captain" \
     "send: normal steer payload must not be typed"
-  assert_contains "$(cat "$log")" "target=sess:fm-lane-ok literal=1 arg=Firstmate instruction waiting" \
+  assert_contains "$(cat "$log")" "target=sess:fm-lane-ok literal=1 arg=: Firstmate instruction waiting" \
     "send: normal steer should ring the durable inbox doorbell"
   pass "fm-send: refuses on marker and gate-worktree backstop; a normal steer uses the inbox"
 }
