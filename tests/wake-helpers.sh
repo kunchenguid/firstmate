@@ -113,12 +113,20 @@ SH
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.
+# FM_FAKE_CREW_STATE_COUNT_FILE, when set, counts the reads, the way
+# FM_FAKE_TMUX_CAPTURE_COUNT_FILE counts pane captures: this read is the expensive
+# one the watcher's cheap paths exist to avoid, so a suite asserting that a path
+# stays cheap can count it rather than infer it.
 make_fake_crew_state() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
 id=${1:-}
+if [ -n "${FM_FAKE_CREW_STATE_COUNT_FILE:-}" ]; then
+  _reads=$(cat "$FM_FAKE_CREW_STATE_COUNT_FILE" 2>/dev/null || echo 0)
+  printf '%s\n' "$((_reads + 1))" > "$FM_FAKE_CREW_STATE_COUNT_FILE"
+fi
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
