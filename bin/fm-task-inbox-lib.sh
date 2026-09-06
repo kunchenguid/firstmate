@@ -13,12 +13,14 @@
 #
 # Design (captain-adopted, data/fm-send-reliability-reframe-s1/report.md): the
 # payload moves to the filesystem, which is reliable; the terminal carries only
-# a short constant doorbell line, which does not need to be reliable because
-# ringing it again is free. A duplicated doorbell is a no-op by construction
-# (the worker finds the inbox empty or already handled), a swallowed doorbell
-# is detected by the absence of the worker's acknowledgement and re-rung on a
-# bounded schedule, and a worker that never acknowledges surfaces through the
-# ordinary stale wake into stuck-crewmate-recovery.
+# a short constant doorbell line. While the endpoint remains available, that
+# line does not need to be reliable because ringing it again is free. A
+# duplicated doorbell is a no-op by construction (the worker finds the inbox
+# empty or already handled), and a swallowed doorbell is detected by the
+# absence of the worker's acknowledgement and re-rung on a bounded schedule.
+# A positively dead or missing endpoint bypasses that schedule without being
+# typed into, and its unhandled record surfaces through the ordinary stale wake
+# into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
@@ -46,14 +48,15 @@
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect proven pending composer text. After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
-# caller owns the busy check (a busy pane just waits - the record is durable and
-# the worker reaches a turn boundary) and the wake emission; this library owns
-# only the schedule. If attempt bookkeeping cannot be persisted while the record
-# remains unhandled, the caller surfaces that failure instead of retrying
-# silently; a concurrently removed inbox is a quiet no-op. Escalation
-# deliberately queues the wake before writing the
-# deduplication marker: normal polls surface a message once, while a crash or
-# marker failure may produce a rare duplicate rather than silently lose a wake.
+# caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
+# while a positively dead or missing endpoint skips delivery and the ladder and
+# escalates directly. This library owns only the schedule and escalation marker.
+# If attempt bookkeeping cannot be persisted while the record remains unhandled,
+# the caller surfaces that failure instead of retrying silently; a concurrently
+# removed inbox is a quiet no-op. Escalation deliberately queues the wake before
+# writing the deduplication marker: normal polls surface a message once, while a
+# crash or marker failure may produce a rare duplicate rather than silently lose
+# a wake.
 #
 # Inbox paths containing bytes outside printable ASCII are unsupported. The
 # doorbell refuses them rather than sending terminal control bytes to a pane.
@@ -391,10 +394,11 @@ EOF
 
 # Advance the ladder after a delivery attempt. A failed ring or a composer-
 # protected skip still consumes budget so neither an unreadable pane nor a
-# permanently blocked composer can retry silently forever (a positively dead
-# pane never enters the ladder: the watcher escalates it directly). A concurrently removed inbox is
-# a successful no-op; otherwise failure means the caller must surface the
-# unwritable ladder while the record remains unhandled.
+# permanently blocked composer can retry silently forever. A positively dead or
+# missing endpoint never enters the ladder: the watcher escalates it directly.
+# A concurrently removed inbox is a successful no-op; otherwise failure means
+# the caller must surface the unwritable ladder while the record remains
+# unhandled.
 fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path>
   local dir base ladder rec_base count last
   dir=$(fm_task_inbox_dir "$1" "$2")
