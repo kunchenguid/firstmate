@@ -8,28 +8,8 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 ## Claude Remote Control best-effort default
 
-Firstmate installs `disableRemoteControl=true` as a machine-managed Claude settings fragment.
-Install the idempotent fragment once per host before spawning Claude.
-
-```sh
-sudo bin/fm-claude-rc-off.sh install-policy
-```
-
-Linux installs `/etc/claude-code/managed-settings.d/50-firstmate-remote-control.json`.
-macOS installs `/Library/Application Support/ClaudeCode/managed-settings.d/50-firstmate-remote-control.json`.
-The helper requires the production file to be regular, root-owned, and not writable by group or others.
-For canonical Claude launches, `fm-spawn.sh` resolves Claude to an absolute executable, checks that fragment and the executable's 2.1.128 version floor before creating task state, and launches that same path in the backend pane.
-Identified raw Claude launches retain their authored command while receiving the applicable best-effort preflight.
-Raw launches identified as another harness remain independent of Claude policy setup.
-This preflight does not prove Claude's effective resolved setting.
-A later alphabetic file-managed fragment can override Firstmate's fragment, and a higher server-managed or MDM tier can replace the file-managed tier entirely.
-
-### Security boundary
-
-The captain authorized this best-effort boundary on 2026-09-06 so normal fleet launches can use the metromotion account with machine-managed RC-off as their effective default.
-The accepted threat model excludes a deliberately added later fragment, a higher server-managed or MDM override, and an adversarial raw-shell wrapper intended to evade the version preflight.
-The system-managed fragment still applies to wrapped commands, but arbitrary shell syntax cannot be classified reliably enough to guarantee that every wrapper receives the Claude 2.1.128 version check.
-The mechanism therefore does not claim a provable effective-state or adversarial fleet-safety guarantee.
+[`configuration.md`](../configuration.md#claude-remote-control-best-effort-default) owns current setup, launch behavior, limits, and the captain-authorized security boundary.
+The captain authorized that best-effort boundary on 2026-09-06 so normal fleet launches can use the metromotion account with machine-managed RC-off as their effective default.
 
 The opt-in drift observation deliberately requests `--remote-control` while passing `--settings '{"disableRemoteControl":false}'`, then checks whether both Remote Control commands remain unavailable after a completed turn.
 Its result describes only that concrete Claude version, account, host policy stack, and lab turn.
