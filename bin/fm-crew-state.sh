@@ -540,7 +540,11 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
+        # `passed` is a claim about the pipeline's own nine steps completing.
+        # It establishes nothing about the forge: the PR may still be open,
+        # already merged, or not exist. Only teardown's own pr_is_merged
+        # check establishes landing, so this detail stays neutral about it.
+        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: pipeline complete" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
