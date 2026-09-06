@@ -72,6 +72,40 @@ run_captain() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
+configure_merged_github() {  # <home>
+  local home=$1
+  cat > "$home/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+case "${1:-} ${2:-}" in
+  "pr view") printf '%s\n' 1111111111111111111111111111111111111111 ;;
+  "api graphql")
+    printf '%s\n' 'state=MERGED' 'merged=true' 'queued=false' 'base=main'
+    ;;
+esac
+SH
+  cat > "$home/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
+  "pr view") printf 'pull_request:\n  number: %s\n  state: merged\n' "${3:-}" ;;
+esac
+SH
+  chmod +x "$home/fakebin/gh" "$home/fakebin/gh-axi"
+  : > "$home/gh.log"
+  : > "$home/gh-axi.log"
+}
+
+run_pr_merge() {  # <home> <id> <url>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_TEST_GH_LOG="$home/gh.log" \
+    FM_TEST_GH_AXI_LOG="$home/gh-axi.log" "$ROOT/bin/fm-pr-merge.sh" "$@"
+}
+
 # The retired command surface, kept for one release as a shim; in-flight
 # pre-collapse work still drives the lifecycle through these spellings.
 run_shim() {  # <home> <command args...>
@@ -2436,6 +2470,135 @@ test_merge_approval_releases_before_zero_done_retention() {
   pass "merge approval releases before zero-retention cleanup records completion"
 }
 
+test_pr_merge_entrypoint_refuses_a_captain_held_task() {
+  local home pr_id pr repo wt rc
+  home=$(make_home held-merge-entrypoints)
+  configure_merged_github "$home"
+
+  pr_id=sample-held-pr-entrypoint
+  pr=https://github.com/sample/sample/pull/31
+  repo="$home/projects/sample-pr"
+  wt="$home/projects/$pr_id"
+  fm_git_worktree "$repo" "$wt" "fm/$pr_id"
+  tasks_in "$home" add "$pr_id" "Ship the held pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the held PR fixture"
+  fm_write_meta "$home/state/$pr_id.meta" \
+    "window=firstmate:fm-$pr_id" "endpoint_task_id=$pr_id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$pr" "spawn_gen=fixture-$pr_id"
+  run_captain "$home" hold "$pr_id" --reason "captain merge approval pending" >/dev/null \
+    || fail "could not hold the PR entrypoint fixture"
+
+  # Without the entrypoint guard, this run reaches gh-axi and returns success
+  # even though the task is still held for the captain.
+  set +e
+  run_pr_merge "$home" "$pr_id" "$pr" > "$home/pr.out" 2> "$home/pr.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the PR merge entrypoint accepted a still-held task"
+  assert_no_grep 'pr merge 31 ' "$home/gh-axi.log" \
+    "the PR merge entrypoint reached the irreversible forge call for a held task"
+  assert_grep "$pr_id is still held for the captain" "$home/pr.err" \
+    "the PR merge refusal did not name the held task"
+  pass "the PR merge entrypoint refuses a captain-held task before merging"
+}
+
+test_local_merge_entrypoint_refuses_a_captain_held_task() {
+  local home local_id local_repo local_wt before after rc
+  home=$(make_home held-local-merge-entrypoint)
+  local_id=sample-held-local-entrypoint
+  local_repo="$home/projects/sample-local"
+  local_wt="$home/projects/$local_id"
+  fm_git_worktree "$local_repo" "$local_wt" "fm/$local_id"
+  printf 'held local delivery\n' > "$local_wt/local.txt"
+  git -C "$local_wt" add local.txt
+  git -C "$local_wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'held local delivery'
+  tasks_in "$home" add "$local_id" "Ship the held local change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the held local fixture"
+  fm_write_meta "$home/state/$local_id.meta" \
+    "window=firstmate:fm-$local_id" "endpoint_task_id=$local_id" "worktree=$local_wt" \
+    "project=$local_repo" "harness=codex" "kind=ship" "mode=local-only" \
+    "spawn_gen=fixture-$local_id"
+  run_captain "$home" hold "$local_id" --reason "captain local merge approval pending" \
+    >/dev/null || fail "could not hold the local entrypoint fixture"
+  before=$(git -C "$local_repo" rev-parse main)
+
+  # Without the entrypoint guard, this run fast-forwards main while the task
+  # still carries the captain hold.
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$local_id" \
+    > "$home/local.out" 2> "$home/local.err"
+  rc=$?
+  set -e
+  after=$(git -C "$local_repo" rev-parse main)
+  [ "$rc" -ne 0 ] || fail "the local merge entrypoint accepted a still-held task"
+  [ "$after" = "$before" ] || fail "the local merge entrypoint moved main for a held task"
+  assert_grep "$local_id is still held for the captain" "$home/local.err" \
+    "the local merge refusal did not name the held task"
+  pass "the local merge entrypoint refuses a captain-held task before merging"
+}
+
+test_board_merge_answer_releases_before_entrypoint_and_lands() {
+  local home id pr repo wt capture answer_line key answer show json
+  home=$(make_home board-merge-release)
+  configure_merged_github "$home"
+  id=sample-board-approved-merge
+  pr=https://github.com/sample/sample/pull/32
+  repo="$home/projects/sample-board"
+  wt="$home/projects/$id"
+  capture="$home/board-answer.toon"
+  fm_git_worktree "$repo" "$wt" "fm/$id"
+  tasks_in "$home" add "$id" "Ship the board-approved pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the board merge fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$pr" "spawn_gen=fixture-$id"
+  printf 'done: merge ready\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain merge approval pending" >/dev/null \
+    || fail "could not hold the board merge fixture"
+  cat > "$capture" <<EOF
+session:
+  file: $home/.lavish/bearings-board.html
+  status: feedback
+prompts[1]{uid,prompt,selector,tag,text}:
+  "merge-answer","Context data: {\"question\":\"merge.$id\",\"answer\":\"merge\"}","section#merge","choice","Merge now"
+EOF
+
+  answer_line=$(run_lavish "$home" answers "$capture") \
+    || fail "the Lavish adapter could not read the board merge answer"
+  key=${answer_line%%$'\t'*}
+  answer=${answer_line#*$'\t'}
+  answer=${answer%%$'\t'*}
+  [ "$key" = "merge.$id" ] && [ "$answer" = merge ] \
+    || fail "the board merge answer lost its task or exact authorization: $answer_line"
+  printf '%s\n' "$answer" > "$home/board-merge-answer.txt"
+
+  # Without the handler's release-before-merge transition, the guarded
+  # entrypoint refuses this real merge-card answer and the delivery vanishes.
+  run_captain "$home" answer "$id" --release \
+    --decision-file "$home/board-merge-answer.txt" >/dev/null \
+    || fail "the board merge handler did not release the held task"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the released board task disappeared"
+  assert_not_contains "$show" "hold_kind: captain" \
+    "the board merge handler invoked the entrypoint before releasing the hold"
+  run_pr_merge "$home" "$id" "$pr" > "$home/merge.out" 2> "$home/merge.err" \
+    || fail "the released board merge was refused: $(cat "$home/merge.err")"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "the board merge cleanup failed: $(cat "$home/teardown.err")"
+  json=$(run_bearings "$home") || fail "Bearings failed after the board merge lifecycle"
+  printf '%s' "$json" | jq -e --arg id "$id" --arg pr "$pr" \
+    '.landed | any(.id == $id and .artifact == $pr)' >/dev/null \
+    || fail "the board-approved merge was absent from Recently Landed: $json"
+  pass "board merge approval releases before merging and remains recently landed"
+}
+
 # "Cannot tell" is not permission to close. A ship row has no separate
 # inventory gate ahead of the close, so the predicate itself must refuse before
 # any destructive step when the hold cannot be read.
@@ -2509,6 +2672,9 @@ test_answer_before_cleanup_replay_preserves_the_retained_report
 test_relocated_report_does_not_wedge_an_answer_before_replay
 test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention
+test_pr_merge_entrypoint_refuses_a_captain_held_task
+test_local_merge_entrypoint_refuses_a_captain_held_task
+test_board_merge_answer_releases_before_entrypoint_and_lands
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
 test_verify_resolves_a_hold_migrated_to_beads_notes
 test_verify_resolves_a_hold_migrated_under_the_configured_prefix

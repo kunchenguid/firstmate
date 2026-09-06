@@ -502,6 +502,23 @@ record_pr_metadata() {
   }
 }
 
+require_released_captain_hold() {
+  local hold_status=0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" || hold_status=$?
+  case "$hold_status" in
+    0)
+      echo "error: task $ID is still held for the captain; release it before merging" >&2
+      return 1
+      ;;
+    1) return 0 ;;
+    *)
+      echo "error: could not determine whether task $ID is still held for the captain; refusing to merge" >&2
+      return 1
+      ;;
+  esac
+}
+
 FM_PR_GITHUB_AUTO_REQUESTED=false
 FM_PR_GITHUB_MERGE_ACCEPTED=false
 FM_PR_GITHUB_CALLER_METHOD=
@@ -639,6 +656,7 @@ case "$PROVIDER" in
       FM_PR_GITHUB_AUTO_REQUESTED=true
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
+    require_released_captain_hold || exit 1
     if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
@@ -678,6 +696,7 @@ case "$PROVIDER" in
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;
     # the conditions above are what authorize the merge.
+    require_released_captain_hold || exit 1
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@"
     gitlab_confirm_rc=0
