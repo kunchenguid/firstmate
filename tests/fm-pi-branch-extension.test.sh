@@ -4030,6 +4030,66 @@ EOF
   pass "scopeForUnreadWake excludes every main-only class without vetoing eligible task-local rows, and writes the eligible snapshot"
 }
 
+# Cross-implementation consistency: the shell's authoritative decision fold
+# (bin/fm-classify-lib.sh's status_open_decisions) and the Pi dispatcher's own
+# fold (fm-branch-dispatch.ts's scopeForUnreadWake, via hasOpenNeedsDecision)
+# read the identical durable status format and must agree on which keys a
+# two-key line leaves open. A divergence here would mean one surface trusts a
+# decision as closed while the other still treats it as open.
+test_branch_dispatch_agrees_with_shell_classifier_on_multi_key_lines() {
+  local repo home status_file shell_open out status
+  repo="$TMP_ROOT/multi-key-agreement-root"
+  home="$TMP_ROOT/multi-key-agreement-home"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  status_file="$home/state/task-a.status"
+  printf 'needs-decision [key=alpha] [key=beta]: choose an approach and a rollout window\nresolved [key=alpha]: went with approach a\n' \
+    > "$status_file"
+
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$ROOT/bin/fm-classify-lib.sh"
+  shell_open=$(status_open_decisions "$status_file")
+  case "$shell_open" in
+    *beta*needs-decision*) ;;
+    *) fail "the shell classifier did not leave 'beta' open for the two-key line: $shell_open" ;;
+  esac
+  case "$shell_open" in
+    *alpha*) fail "the shell classifier incorrectly still shows 'alpha' open: $shell_open" ;;
+  esac
+
+  LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
+
+const { scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
+const state = `${process.env.FM_HOME}/state`;
+
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\tstale\tfm-window\tstale: fm-window (routine reminder)",
+    "1\t2\tsignal\ttask-a.status\tsignal: routine follow-up",
+  ].join("\n"),
+);
+const scope = scopeForUnreadWake(state, false);
+if (!scope.eligible || scope.eligibleSeqs.join(",") !== "2") {
+  throw new Error(`the dispatcher offered the still-open second key to the branch: ${JSON.stringify(scope)}`);
+}
+if (scope.needsDecisionKeys.join(",") !== "fm-window") {
+  throw new Error(`the dispatcher did not mark the still-open decision main-owned: ${JSON.stringify(scope)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the dispatcher must agree with the shell classifier on the two-key line: $out"
+  pass "the Pi dispatcher and the shell classifier agree that a two-key line's unresolved second key stays open"
+}
+
 # The model picker's bounded scrolling and its search ranking are Pi's own
 # SelectList and fuzzyFilter, so the guarantee only holds while the installed
 # Pi still exports them and still bounds what it renders. Stubs cannot answer
@@ -4758,6 +4818,7 @@ test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
+test_branch_dispatch_agrees_with_shell_classifier_on_multi_key_lines
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
