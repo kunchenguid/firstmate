@@ -493,13 +493,15 @@ _fm_status_kind() {
 
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> <kind>
   local open=$1 line=$2 resolve=$3 held=$4 kind=$5 verb key note
-  # Blank-line guard. A `case` glob answers "does this line hold any non-space
-  # character" in one pattern match; the equivalent ${line//[[:space:]]/} costs
-  # tens of milliseconds per line under bash 3.2's global bracket-class
-  # substitution, which is the whole per-line cost of both folds on a status log
-  # of ordinary width. Same verdict, bounded cost.
+  # Declaration guard. A transition's verb ends at a colon, or - in the colonless
+  # form _fm_decision_key still accepts below - at a complete "[key=...]" token.
+  # A line holding neither is continuation prose, a bare word, or blank, and can
+  # never move the set. A `case` glob answers that in one pattern match; the
+  # equivalent parameter expansion costs tens of milliseconds per line under bash
+  # 3.2's global bracket-class substitution, which is the whole per-line cost of
+  # both folds on a status log of ordinary width. Same verdict, bounded cost.
   case "$line" in
-    *[![:space:]]*) ;;
+    *:*|*\[key=*\]*) ;;
     *) printf '%s' "$open"; return 0 ;;
   esac
   status_line_verb "$line" verb
@@ -738,10 +740,13 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # terminal rule are discarded.
 # 7: that terminal rule now fires only for a line carrying a colon, so a cursor
 # folded when bare prose could close every open decision is discarded.
+# 8: a colonless line without a complete "[key=...]" token is no longer a
+# transition at all, so a cursor holding a phantom decision that bare prose
+# opened - which no later line could close - is discarded.
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=7
+FM_OPEN_DECISIONS_FOLD_VERSION=8
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
