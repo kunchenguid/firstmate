@@ -334,10 +334,16 @@ test_ship_base_branch_shapes_the_whole_contract() {
   done
 
   # local-only additionally lands through the guarded merge, so its closing line
-  # must name the same branch rather than main.
+  # must name the same branch rather than main. Rule 1 names the same landing
+  # branch too: one brief must never state two landing targets.
   assert_grep "merges it into local \`$base\`" "$home/data/brief-base-lo-c3/brief.md" \
     "local-only brief still promised a merge into main while targeting $base"
-  pass "fm-brief.sh: --base shapes the branch step, the fast-forward rule, and the contract line"
+  assert_grep "firstmate handles the merge into local \`$base\`" "$home/data/brief-base-lo-c3/brief.md" \
+    "local-only rule 1 did not name the delivery target branch"
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
+  assert_no_grep 'into local `main`' "$home/data/brief-base-lo-c3/brief.md" \
+    "local-only brief named two different landing targets"
+  pass "fm-brief.sh: --base shapes the branch step, rule 1, the fast-forward rule, and the contract line"
 }
 
 # Omitting --base must leave every scaffold exactly as it was before the flag
@@ -361,6 +367,9 @@ test_omitted_base_keeps_the_default_branch_wording() {
   # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
   assert_grep 'merges it into local `main`' "$brief" \
     "an omitted --base changed the local merge target"
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
+  assert_grep 'firstmate handles the merge into local `main`' "$brief" \
+    "an omitted --base changed rule 1's local merge target"
   pass "fm-brief.sh: an omitted --base keeps today's default-branch wording"
 }
 

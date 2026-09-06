@@ -2,7 +2,10 @@
 # Tests for bin/fm-review-diff.sh: when a task has an open PR recorded in meta,
 # the review diff must compare the authoritative base against a freshly fetched
 # PR head, not a stale local branch or a stale recorded pr_head= left behind
-# after no-mistakes fix rounds push to the PR.
+# after no-mistakes fix rounds push to the PR. The base side is equally
+# authoritative: it is the task's recorded delivery target branch when it has
+# one, so a task stacked on a feature branch is not reviewed against a
+# merge-base that predates it.
 #
 # Matrix:
 #   (a) pr= + reachable pr_head=, no remote pull ref -> offline fallback to recorded SHA
@@ -11,6 +14,8 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
+#   (f) base= recorded -> diff against that branch, not the repo default branch
+#   (g) base= recorded but unresolvable -> refuse, naming the branch and its source
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -169,8 +174,63 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+# A task's delivery target branch is part of its contract. Reviewing a task
+# stacked on a long-lived feature branch against the repo default branch drags
+# every commit that branch carries beyond the default into the diff, so the
+# review that gates the merge describes work the crewmate never did.
+test_recorded_base_is_the_review_base() {
+  local case_dir out
+  case_dir=$(make_case recorded-base)
+
+  git -C "$case_dir/wt" checkout -q -b feat/stack
+  printf 'feature-branch-only\n' > "$case_dir/wt/stack.txt"
+  git -C "$case_dir/wt" add stack.txt
+  git -C "$case_dir/wt" commit -qm "commit that only feat/stack carries"
+  git -C "$case_dir/wt" push -q origin feat/stack
+  git -C "$case_dir/wt" checkout -q -B fm/task-x1 feat/stack
+  printf 'task-change\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "the task's own change"
+
+  write_task_meta "$case_dir" "base=feat/stack"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/feat/stack' \
+    "recorded-base: review must resolve the recorded delivery target branch"
+  assert_contains "$out" '+task-change' \
+    "recorded-base: the task's own change must be in the diff"
+  assert_not_contains "$out" 'feature-branch-only' \
+    "recorded-base: commits feat/stack already carries must not read as the task's work"
+  pass "fm-review-diff reviews against the recorded delivery target branch"
+}
+
+# An unresolvable base is refused rather than quietly downgraded to a possibly
+# stale local ref: a review against the wrong base is the failure this resolution
+# exists to prevent, and the refusal must say which branch it could not resolve.
+test_unresolvable_recorded_base_is_refused() {
+  local case_dir status err
+  case_dir=$(make_case missing-base)
+  write_task_meta "$case_dir" "base=feat/never-pushed"
+
+  set +e
+  run_review_diff "$case_dir" task-x1 >/dev/null 2> "$case_dir/stderr"
+  status=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 1 "$status" "missing-base: an unresolvable delivery target branch must refuse"
+  assert_contains "$err" 'cannot fetch feat/never-pushed from origin' \
+    "missing-base: the refusal must name the branch it could not resolve"
+  assert_contains "$err" "this task's recorded delivery target branch" \
+    "missing-base: the refusal must say where the measured branch came from"
+  pass "fm-review-diff refuses when the recorded delivery target branch cannot be resolved"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_recorded_base_is_the_review_base
+test_unresolvable_recorded_base_is_refused

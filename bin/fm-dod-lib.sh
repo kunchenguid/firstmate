@@ -18,6 +18,9 @@
 # fast-forward and merge-target wording. Omitting it renders today's
 # default-branch wording byte-for-byte, so a task that genuinely lands on the
 # default branch is unchanged.
+# fm_delivery_target_label is this file's single owner of that landing branch's
+# NAME in worker-facing prose, so bin/fm-brief.sh's Rule 1 and this block can
+# never name two different landing targets in one brief.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -227,6 +230,15 @@ fm_delivery_base_validate() {  # <branch>
   return 0
 }
 
+# fm_delivery_target_label <base-branch>: the branch a ship task lands on, as
+# worker-facing prose names it - the recorded delivery target branch when the
+# task has one, the repo default branch otherwise. Single owner, so a brief can
+# never state two landing targets in one document: bin/fm-brief.sh's Rule 1 and
+# the Definition of done below both resolve the name from here.
+fm_delivery_target_label() {  # <base-branch>
+  printf '`%s`' "${1:-main}"
+}
+
 fm_dod_block() {  # <mode> <task-id> [<base-branch>]
   local mode=$1 id=$2 base=${3:-}
   # The recorded base rides the contract line as a second `key=value` token, and
@@ -234,15 +246,14 @@ fm_dod_block() {  # <mode> <task-id> [<base-branch>]
   # sentence carries its own leading newline so an absent base collapses the
   # whole line away rather than leaving a blank one.
   local contract_suffix='' pr_base_note='' ff_target merge_target
+  merge_target=$(fm_delivery_target_label "$base")
   if [ -n "$base" ]; then
     contract_suffix=" base=$base"
     pr_base_note="
 This task delivers onto \`$base\`, not the repo default branch: keep your branch a clean fast-forward onto \`$base\` and make sure the PR targets \`$base\`."
     ff_target="\`$base\`, this task's delivery target branch - if \`$base\` has advanced"
-    merge_target="\`$base\`"
   else
     ff_target="the current default branch - if \`main\` has advanced"
-    merge_target="\`main\`"
   fi
   case "$mode" in
     direct-PR)

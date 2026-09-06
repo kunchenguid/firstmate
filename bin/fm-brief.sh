@@ -457,6 +457,9 @@ fi
 # which bin/fm-promote.sh renders too so a promoted scout receives the same contract.
 # The block opens with the fixed "Delivery contract: mode=<mode>" line that
 # bin/fm-spawn.sh checks against its own explicit --mode before launching.
+# Rule 1's local-only landing branch comes from fm_delivery_target_label, the same
+# owner the Definition of done resolves it from, so one brief never states two
+# landing targets.
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -464,7 +467,7 @@ case "$MODE" in
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local $(fm_delivery_target_label "$BASE")."
     ;;
   *)  # no-mistakes
     SETUP2="

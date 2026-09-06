@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 # Review a crewmate branch against the authoritative base.
 #
-# Pooled project clones do not keep their local default branch current, so this
-# helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# That base is the task's DELIVERY TARGET BRANCH: the `base=` recorded in
+# state/<id>.meta at intake when the task has one, and the repo default branch
+# otherwise. A task that ships onto a long-lived feature branch is therefore
+# reviewed against that branch, not against a merge-base that predates it and
+# drags every commit the feature branch carries beyond the default into the diff.
+# The target is never inferred from a merge-base, a reflog, or the branch's shape:
+# an absent base= means the default branch, exactly as before. bin/fm-spawn.sh
+# owns recording it, and bin/fm-teardown.sh and bin/fm-merge-local.sh read it the
+# same way.
+# Pooled project clones do not keep their local branches current, so this helper
+# compares remote-backed projects against origin/<target> after fetching that
+# branch, and projects with no remote against the local branch.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -65,7 +74,17 @@ default_branch() {
   return 1
 }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+# The branch this task was dispatched to land on, resolved exactly as
+# bin/fm-teardown.sh and bin/fm-merge-local.sh resolve it, plus a description of
+# where it came from so an unresolvable base explains itself.
+RECORDED_BASE=$(grep '^base=' "$META" | tail -1 | cut -d= -f2-)
+if [ -n "$RECORDED_BASE" ]; then
+  TARGET=$RECORDED_BASE
+  TARGET_DESC="this task's recorded delivery target branch"
+else
+  TARGET=$(default_branch) || { echo "error: cannot determine the delivery target branch for $PROJ; the task records none and origin/HEAD, main, and master are all absent" >&2; exit 1; }
+  TARGET_DESC="this project's default branch, because the task records no delivery target branch"
+fi
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
@@ -135,14 +154,18 @@ fi
 
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
-  # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  # origin/<target> stale on some Git versions and only refresh FETCH_HEAD.
+  # A target the remote does not carry is refused rather than quietly downgraded
+  # to a possibly stale local ref: a review against the wrong base is the failure
+  # this whole resolution exists to prevent.
+  git -C "$WT" fetch origin "+refs/heads/$TARGET:refs/remotes/origin/$TARGET" --quiet \
+    || { echo "error: cannot fetch $TARGET from origin for $PROJ ($TARGET_DESC); the review has no authoritative base" >&2; exit 1; }
+  BASE="origin/$TARGET"
 else
-  BASE="$DEFAULT"
+  BASE="$TARGET"
 fi
 
-git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
+git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT ($TARGET_DESC)" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
 echo "diff base: $BASE"
