@@ -1917,7 +1917,7 @@ EOF
             wake "stale: $w"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
-          # The log's last line is captain-relevant - but that alone is not
+          # The log's latest status event is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no
           # new entry once firstmate hands it to a no-mistakes validation
           # (AGENTS.md's sparse status-reporting contract), so the log can
