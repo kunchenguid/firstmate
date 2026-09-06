@@ -939,8 +939,8 @@ test_terminal_cleanup_decisions_agree_across_snapshot_modes() {
   done
   for phase in terminal reopened resolved; do
     case "$phase" in
-      terminal) single='[]'; mate='["access","choice"]'; single_state=unknown; mate_state=blocked ;;
-      reopened) single='["access","new-choice"]'; mate='["access","choice","new-choice"]'; single_state=blocked; mate_state=blocked ;;
+      terminal) single='[]'; mate='["access","choice"]'; single_state=unknown; mate_state=parked ;;
+      reopened) single='["access","new-choice"]'; mate='["access","choice","new-choice"]'; single_state=parked; mate_state=parked ;;
       resolved) single='[]'; mate='["choice"]'; single_state=unknown; mate_state=parked ;;
     esac
     for kind in ship scout secondmate; do
