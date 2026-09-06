@@ -995,6 +995,45 @@ SH
   pass "an unacknowledged fire-and-forget branch-refresh escalates once instead of deferring forever"
 }
 
+test_branch_currency_generation_race_defers() {
+  local dir state rc
+
+  dir=$(make_case branch-currency-generation-race)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'spawn_gen=1\n' >> "$state/task-a.meta"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/5 >/dev/null \
+    || fail "could not arm generation-race branch-currency fixture"
+
+  # Simulate a replacement bumping spawn_gen before its own state flips away from "done".
+  cat > "$dir/fakebin/fm-crew-state.sh" <<SH
+#!/usr/bin/env bash
+printf 'spawn_gen=2\n' >> "$state/\$1.meta"
+printf 'state: done \\302\\267 source: run-step \\302\\267 checks green: PR ready for review\n'
+SH
+  cat > "$dir/fakebin/fm-refresh-send.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_REFRESH_SEND_LOG"
+SH
+  chmod +x "$dir/fakebin/fm-crew-state.sh" "$dir/fakebin/fm-refresh-send.sh"
+  : > "$dir/refresh-send.log"
+
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/race.out" 2> "$dir/race.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "generation-race watcher failed: $(cat "$dir/race.err")"
+  [ ! -s "$dir/refresh-send.log" ] \
+    || fail "a done verdict paired with a spawn_gen that moved reached an actively launching replacement"
+  assert_grep 'branch-refresh-deferred pr=https://github.com/o/r/pull/5 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=active-work' \
+    "$state/.watch-triage.log" "a spawn_gen bumped between reads did not defer as active work"
+  pass "a spawn_gen that moves between reads defers rather than pairing a done verdict with a replacement's generation"
+}
+
 test_atomic_interruption_leaves_no_partial_artifact() {
   local dir rc
   dir=$(make_case interrupted-write)
@@ -2382,6 +2421,7 @@ test_gitlab_merged_poll_retires() {
 
 test_branch_currency_dispatch_and_active_refusal
 test_branch_currency_stale_dispatch_escalates
+test_branch_currency_generation_race_defers
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once

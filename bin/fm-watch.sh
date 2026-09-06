@@ -1251,7 +1251,14 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
         "$url" "$head" "$condition"
       return 2
       ;;
-    done) ;;
+    done)
+      # A done verdict paired with a spawn_gen that moved since our first read belongs to an incoming replacement, not the incarnation that earned it.
+      if [ "$(fm_meta_get "$STATE/$id.meta" spawn_gen)" != "$spawn_gen" ]; then
+        printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=active-work\n' \
+          "$url" "$head" "$condition"
+        return 2
+      fi
+      ;;
     failed|blocked|paused|parked|unknown) ;;
     *) state=unknown ;;
   esac
