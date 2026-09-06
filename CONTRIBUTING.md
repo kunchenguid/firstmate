@@ -31,26 +31,10 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
-## Running a fleet from your own fork (fork-as-source)
+## Contributing from a fork-as-source fleet
 
-The workflow above contributes back to this upstream repo.
-If instead you run a whole firstmate fleet and want it to land its own changes where you can merge them - without waiting on an outside maintainer - run it from your fork and treat this repo as a feed of improvements.
-The convention is the standard git one: `origin` is your fork (the source of truth your fleet runs from and opens PRs against), and `upstream` is the original you forked (the feed).
-
-- **The gate follows origin.**
-  `no-mistakes` derives its PR base from `origin`, so pointing `origin` at your fork and re-initializing (`no-mistakes init`) is what makes its PRs open against your fork, which you can merge.
-- **Self-update follows origin too.**
-  `bin/fm-update.sh` fetches each home from `origin` (your fork) with no extra config; `config/update-remote` can point a single home at a differently-named remote without renaming `origin`, and reverting is deleting that one file (see [`docs/configuration.md`](docs/configuration.md), "Fork-as-source update remote").
-- **Feed the fork from the original on demand.**
-  `bin/fm-fork-sync.sh` fast-forwards your fork's branch to the original's tip when that is a clean fast-forward, and otherwise publishes an integration branch for a reviewed merge - it never forces and never discards your fork's own commits.
-- **Re-point homes one at a time, reversibly.**
-  `bin/fm-repoint-home.sh status|to-fork|to-origin <home>` inspects a home and moves it between the `original-as-origin` and `fork-as-source` layouts.
-  With no flag it is a dry run that prints the exact commands, `--apply` performs them, and `to-origin` is the exact reverse.
-  It only renames git remotes, never touching the working tree or unlanded work; run each of `--help` for the exact mechanics.
-
-**Contributing general improvements back to the original.**
-Running from your fork does not cut you off from this project.
-Anything general enough to help everyone can still come back here as an ordinary contribution through the [Workflow](#workflow) above (push through `no-mistakes` with `--fork-url` set to your fork, opening a PR against this repo), independent of whether or when it is merged - your fleet keeps running from your fork the whole time, and `bin/fm-fork-sync.sh` pulls this repo's merged work back into your fork when it lands.
+[`docs/configuration.md`](docs/configuration.md#fork-as-source-update-remote-configupdate-remote-configfork-feed-source-configfork-feed-target) owns the operator model for running a fleet from your fork and feeding it from this repository.
+General improvements can still come back here through the [Workflow](#workflow) above: initialize no-mistakes with your fork as the push target and open the resulting PR against this repository.
 
 ## Repo conventions
 

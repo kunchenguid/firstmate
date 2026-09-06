@@ -136,6 +136,11 @@ It does not set `commands.test` to a complete `tests/*.test.sh` walk.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
 
+At each locked session start, bootstrap runs a bounded cleanup of Compose projects whose labeled containers were left by vanished no-mistakes validation worktrees.
+It acts only when every currently labeled container in a project belongs beneath the exact local no-mistakes worktree root and every referenced worktree is gone, then revalidates that ownership immediately before removing the explicit containers and their Compose-labeled networks.
+It never prunes Docker broadly or removes volumes or images; live siblings and unsafe or unreadable ownership leave the entire project untouched, while inventory, timeout, and cleanup failures print `NO_MISTAKES_DOCKER` diagnostics.
+[`bin/fm-nm-compose-reap.sh`](../bin/fm-nm-compose-reap.sh)'s header owns the exact discovery, revalidation, output, and failure contracts.
+
 ## Fork-as-source update remote (config/update-remote, config/fork-feed-source, config/fork-feed-target)
 
 A fleet can run from the captain's own fork instead of the repo it was forked from, so its PRs land where the captain can merge them and it never waits on an outside maintainer.
@@ -149,7 +154,7 @@ The value is read from the checkout's own `config/` dir (each home's config), or
 [`bin/fm-ff-lib.sh`](../bin/fm-ff-lib.sh)'s `resolve_update_remote` owns the exact resolution and safety rules; every existing fast-forward guard (ff-only, never force/stash, skip a dirty/diverged/wrong-branch/offline home) is unchanged and applies to the configured remote.
 
 `config/fork-feed-source` (default `upstream`) and `config/fork-feed-target` (default `origin`) are the per-home defaults for [`bin/fm-fork-sync.sh`](../bin/fm-fork-sync.sh), the on-demand step that feeds the fork from the original: it fast-forwards the fork's branch to the original's tip when that is clean, and otherwise publishes an integration branch for a reviewed merge, never forcing and never discarding the fork's own commits.
-`bin/fm-fork-sync.sh --help` and `bin/fm-repoint-home.sh --help` own the exact flags and the reversible per-home re-pointing procedure; the overall model lives in [CONTRIBUTING.md](../CONTRIBUTING.md) ("Running a fleet from your own fork").
+`bin/fm-fork-sync.sh --help` and `bin/fm-repoint-home.sh --help` own the exact flags and the reversible per-home re-pointing procedure.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 

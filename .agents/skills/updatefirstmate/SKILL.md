@@ -28,7 +28,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```sh
    bin/fm-update.sh
    ```
-   It fast-forwards this firstmate repo's default branch from each home's configured update source - `origin` by default, which is the fork itself when running fork-as-source (see [CONTRIBUTING.md](../../../CONTRIBUTING.md), "Running a fleet from your own fork") - then updates every registered local or remote secondmate home through its placement-specific guarded path.
+   It fast-forwards this firstmate repo's default branch from each home's configured update source - `origin` by default, which is the fork itself when running fork-as-source (see [`docs/configuration.md`](../../../docs/configuration.md#fork-as-source-update-remote-configupdate-remote-configfork-feed-source-configfork-feed-target)) - then updates every registered local or remote secondmate home through its placement-specific guarded path.
    It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`
