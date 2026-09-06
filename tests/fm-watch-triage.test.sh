@@ -534,6 +534,190 @@ test_crew_worktree_written_since_classifier() {
   pass "crew_worktree_written_since: real writes are evidence; no worktree, no anchor, quiet trees, .git churn and a mate's own home are not"
 }
 
+# The wedge detector's FOURTH liveness input, and the only one that reaches a crew
+# parked on a validation run: the run's own active step. Both directions matter
+# equally here - a measured advance must defer, and a step that is supposedly
+# executing with nothing moving must still escalate - so every case below asserts
+# one or the other on the same fixture shape.
+nm_status_fixture() {  # <file> <status> <step> <pid> [branch]
+  cat > "$1" <<EOF
+run:
+  id: "01RUN"
+  branch: ${5:-fm/probe}
+  status: $2
+  head: "abc1234"
+  pr: ""
+  findings: none
+  active_steps[1]{step,active_for,last_activity,agent_pid,round}:
+    $3,12m3s,8s,$4,"auto-fix 1/3"
+EOF
+}
+
+# A task worktree the probe will accept: the run record it measures must name
+# this worktree's OWN branch, so the fixture has to be a real repository sitting
+# on that branch rather than a bare directory.
+make_task_worktree() {  # <dir> <branch>
+  mkdir -p "$1"
+  git -C "$1" init -q -b "$2" 2>/dev/null || {
+    git -C "$1" init -q
+    git -C "$1" checkout -q -b "$2" 2>/dev/null || git -C "$1" symbolic-ref HEAD "refs/heads/$2"
+  }
+}
+
+# Backdate a step-progress sample's own timestamp so a case can present a window
+# the probe reads as mature without waiting one out in real time. Only the
+# leading epoch field moves; the measurement it recorded is left untouched,
+# because that is exactly what the probe compares.
+age_progress_sample() {  # <sample-file> <seconds-ago>
+  local sample=$1 back=$2 body
+  body=$(cut -f2- "$sample")
+  printf '%s\t%s\n' "$(( $(date +%s) - back ))" "$body" > "$sample"
+}
+
+test_crew_run_step_advanced_classifier() {
+  local dir state fakebin sample toon steplog wt saved_path young_sample
+  dir=$(make_case classify-step-progress); state="$dir/state"; fakebin="$dir/fakebin"
+  sample="$state/.pipeline-sample-probe"; toon="$dir/status.toon"; steplog="$dir/step.log"
+  wt="$dir/wt"
+  make_task_worktree "$wt" fm/probe
+  printf 'window=test:fm-probe\nkind=ship\nworktree=%s\n' "$wt" > "$state/probe.meta"
+  # The probe shells out to no-mistakes, so this case's hermetic stub has to be
+  # first on PATH for its whole run - and only for its own run.
+  saved_path=$PATH
+  export PATH="$fakebin:$PATH"
+
+  # No run at all (the stub's default): absence of evidence, never a deferral.
+  ! crew_run_step_advanced probe "$state" "$sample" >/dev/null \
+    || fail "a crew with no validation run reported step-progress evidence"
+  [ ! -e "$sample" ] || fail "a crew with no validation run recorded a progress sample"
+
+  export FM_FAKE_NM_STATUS="$toon" FM_FAKE_NM_LOG="$steplog"
+  nm_status_fixture "$toon" fixing review 44121
+  printf 'aaaa' > "$steplog"
+
+  # First measurement of a window is a baseline, not a verdict.
+  ! crew_run_step_advanced probe "$state" "$sample" >/dev/null \
+    || fail "the first measurement of an idle window was reported as progress"
+  [ -s "$sample" ] || fail "the first measurement recorded no baseline to compare against"
+
+  # Identical measurement, but the window is younger than FM_NM_PROGRESS_WINDOW_SECS:
+  # a flat reading over a short sample means nothing, so it must not escalate - and
+  # it must NOT rewrite the sample, or the window could never mature and the alarm
+  # could never fire again.
+  young_sample=$(cat "$sample")
+  crew_run_step_advanced probe "$state" "$sample" >/dev/null \
+    || fail "a flat reading over a window shorter than the configured one escalated"
+  [ "$(cat "$sample")" = "$young_sample" ] \
+    || fail "an immature window rewrote its own baseline, so the window could never mature"
+
+  # The same measurement over a MATURE window is the stall the alarm exists for.
+  age_progress_sample "$sample" 400
+  ! crew_run_step_advanced probe "$state" "$sample" >/dev/null \
+    || fail "an active step with nothing moving over a full window was reported as progress"
+
+  # A step log that grew is the ordinary healthy-run signal.
+  age_progress_sample "$sample" 400
+  printf 'aaaabbbbbbbb' > "$steplog"
+  crew_run_step_advanced probe "$state" "$sample" >/dev/null \
+    || fail "a step log that grew was not reported as progress"
+
+  # Refinement measured in the field: the run moving to the NEXT step leaves the
+  # previous step's log permanently flat and its agent gone. Resolving the step
+  # from the run record on every measurement is what stops that healthy run from
+  # reading as wedged forever.
+  age_progress_sample "$sample" 400
+  nm_status_fixture "$toon" running test ''
+  : > "$steplog"
+  crew_run_step_advanced probe "$state" "$sample" >/dev/null \
+    || fail "the run advancing to its next step was not reported as progress"
+
+  # The other half of the pairing: a gap between log writes that outlasts the
+  # window is survivable because the step agent's own CPU time still advances.
+  age_progress_sample "$sample" 400
+  nm_status_fixture "$toon" running test "$$"
+  crew_run_step_advanced probe "$state" "$sample" >/dev/null \
+    || fail "the active step's agent process appearing was not reported as progress"
+  age_progress_sample "$sample" 400
+  ! crew_run_step_advanced probe "$state" "$sample" >/dev/null \
+    || fail "an unchanged log and an unchanged agent over a full window read as progress"
+
+  # A run parked at a gate emits no active_steps table at all, so there is no step
+  # to measure and no sample worth keeping.
+  age_progress_sample "$sample" 400
+  cat > "$toon" <<'EOF'
+run:
+  id: "01RUN"
+  branch: fm/probe
+  status: awaiting_approval
+  head: "abc1234"
+gate: review
+EOF
+  ! crew_run_step_advanced probe "$state" "$sample" >/dev/null \
+    || fail "a run parked at a gate reported step-progress evidence"
+  [ ! -e "$sample" ] || fail "a run with no active step left its stale sample behind"
+
+  # Under concurrent load `axi status` routinely answers a DIFFERENT branch's run.
+  # Measuring that one would let another crew's progress defer this crew's wedge
+  # escalation, so a run that does not name this worktree's own branch is no
+  # evidence at all.
+  nm_status_fixture "$toon" fixing review 44121 fm/someone-else
+  printf 'aaaa' > "$steplog"
+  ! crew_run_step_advanced probe "$state" "$sample" >/dev/null \
+    || fail "another branch's run was measured as this crew's step progress"
+
+  # A secondmate records a provisioned firstmate home, not a code tree under
+  # validation, exactly as the worktree write probe excludes it.
+  nm_status_fixture "$toon" fixing review 44121
+  printf 'window=test:fm-smp\nkind=secondmate\nworktree=%s\n' "$wt" > "$state/smp.meta"
+  ! crew_run_step_advanced smp "$state" "$state/.pipeline-sample-smp" >/dev/null \
+    || fail "a secondmate home was probed for validation-run progress"
+
+  # No recorded worktree, and a recorded-but-torn-down one, are both no evidence.
+  printf 'window=test:fm-nowt\nkind=ship\n' > "$state/nowt.meta"
+  ! crew_run_step_advanced nowt "$state" "$state/.pipeline-sample-nowt" >/dev/null \
+    || fail "a task with no recorded worktree reported step-progress evidence"
+  printf 'window=test:fm-gone\nkind=ship\nworktree=%s\n' "$dir/missing" > "$state/gone.meta"
+  ! crew_run_step_advanced gone "$state" "$state/.pipeline-sample-gone" >/dev/null \
+    || fail "a torn-down worktree reported step-progress evidence"
+
+  unset FM_FAKE_NM_STATUS FM_FAKE_NM_LOG
+  export PATH="$saved_path"
+  pass "crew_run_step_advanced: a growing log, an advancing step and an advancing agent are progress; a flat mature window, a gate, and a missing worktree are not"
+}
+
+# The window is a real bound, not a decoration: a home that widens it must get a
+# longer measurement, and one that narrows it must be able to reach a verdict
+# sooner. Asserting both ends on one fixture is what keeps the knob from becoming
+# a constant nobody reads.
+test_step_progress_window_is_configurable_and_bounded() {
+  local dir state fakebin sample toon steplog wt saved saved_path
+  dir=$(make_case classify-step-progress-window); state="$dir/state"; fakebin="$dir/fakebin"
+  sample="$state/.pipeline-sample-win"; toon="$dir/status.toon"; steplog="$dir/step.log"
+  wt="$dir/wt"
+  make_task_worktree "$wt" fm/probe
+  printf 'window=test:fm-win\nkind=ship\nworktree=%s\n' "$wt" > "$state/win.meta"
+  saved_path=$PATH
+  export PATH="$fakebin:$PATH" FM_FAKE_NM_STATUS="$toon" FM_FAKE_NM_LOG="$steplog"
+  nm_status_fixture "$toon" fixing review 44121
+  printf 'aaaa' > "$steplog"
+  crew_run_step_advanced win "$state" "$sample" >/dev/null || true
+  age_progress_sample "$sample" 200
+
+  saved=$FM_NM_PROGRESS_WINDOW_SECS
+  # 200s of flat reading is not yet a verdict for a home that asked for 600s.
+  FM_NM_PROGRESS_WINDOW_SECS=600
+  crew_run_step_advanced win "$state" "$sample" >/dev/null \
+    || fail "a widened window still judged a 200s flat reading as a stall"
+  # The same 200s IS a verdict for a home that asked for 60s.
+  FM_NM_PROGRESS_WINDOW_SECS=60
+  ! crew_run_step_advanced win "$state" "$sample" >/dev/null \
+    || fail "a narrowed window refused to judge a 200s flat reading"
+  FM_NM_PROGRESS_WINDOW_SECS=$saved
+  unset FM_FAKE_NM_STATUS FM_FAKE_NM_LOG
+  export PATH="$saved_path"
+  pass "FM_NM_PROGRESS_WINDOW_SECS really governs how long a flat reading must hold before it counts as a stall"
+}
+
 # FM_WORKTREE_WRITE_PRUNE is a skip list, so clearing it skips nothing and is the
 # obvious way to widen the probe to the whole depth-bounded tree. An empty list must
 # therefore widen the walk rather than report no evidence at all, which would
@@ -3376,6 +3560,142 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
   pass "a quiet pane writing its own worktree is deferred, while one writing nothing still wedge-escalates on the unchanged schedule"
 }
 
+# --- quiet pane, validation run still advancing: deferred, never wedge-escalated
+# The live 2026-09-05 case: one crew parked on a no-mistakes validation run
+# produced eight consecutive possible-wedge escalations, each demanding a manual
+# deep inspection that found the work perfectly healthy. A crew parked on a
+# pipeline call defeats all three older liveness inputs at once - the pipeline
+# takes the turns, so the pane renders nothing; the run record says `running`
+# however stalled it is; and the pipeline commits in its own checkout, so the
+# worktree probe sees nothing either - and firstmate's prescribed remedy (steer it
+# to declare a pause) is unreachable there, because a crew parked on a pipeline
+# call cannot acknowledge a steer either.
+# Both halves of the contract are asserted on the SAME fixture, because the whole
+# point is that only the step measurement differs: an advancing run defers, a step
+# that is supposedly executing with nothing moving escalates on the unchanged
+# schedule. A fix that only stopped the false alarms would be the dangerous half.
+test_wedge_escalation_deferred_while_the_validation_run_advances() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid wt back toon steplog
+  dir=$(make_case wedge-run-progress); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-validating"; wt="$dir/wt"; toon="$dir/status.toon"; steplog="$dir/step.log"
+  make_task_worktree "$wt" fm/probe
+  printf 'no-mistakes axi run: waiting for the pipeline' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/validating.meta"
+  printf 'working: handed off to validation\n' > "$state/validating.status"
+  sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "no-mistakes axi run: waiting for the pipeline")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Already-classified hash with an idle window that opened 500s ago, so the very
+  # first stale poll lands straight on the at-threshold wedge branch. The worktree
+  # deliberately holds no files at all, so the write probe reports no evidence and
+  # the step measurement is the only input that can change the outcome.
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  nm_status_fixture "$toon" fixing review ''
+  printf '%s' 'aaaabbbbbbbb' > "$steplog"
+
+  # Phase A: the baseline recorded when this idle window opened saw a smaller step
+  # log than the run has now. The run is working; defer.
+  printf '%s\t01RUN\treview\t4\t\t\n' "$back" > "$state/.pipeline-sample-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_NM_STATUS="$toon" FM_FAKE_NM_LOG="$steplog" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher wedge-escalated a quiet pane whose validation run was advancing: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a run-progress deferral printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a run-progress deferral enqueued a wake"; }
+  [ -e "$state/.pipeline-since-$key" ] || { reap "$pid"; fail "the run-progress deferral chain marker was not recorded"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "a deferral advanced the wedge escalation counter"; }
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || echo 0)" -gt "$back" ] \
+    || { reap "$pid"; fail "a deferral did not restart the idle timer, so the next window cannot re-probe"; }
+  grep -F 'review' "$state/.pipeline-sample-$key" >/dev/null \
+    || { reap "$pid"; fail "the deferral did not record a fresh baseline for the next window"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+
+  # Phase B: same fixture, same quiet pane, same run record still claiming an
+  # actively fixing `review` step - but the step log has not moved a byte since a
+  # baseline that is now well past the window, and the step has no agent process
+  # advancing either. That is the real stall the alarm exists for.
+  rm -f "$state/.pipeline-since-$key" "$state/.pipeline-resurfaced-$key"
+  printf '%s\t01RUN\treview\t12\t\t\n' "$back" > "$state/.pipeline-sample-$key"
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_NM_STATUS="$toon" FM_FAKE_NM_LOG="$steplog" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a validation run frozen on one step did not wedge-escalate on the existing schedule"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the frozen-run escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the frozen-run escalation did not flag a possible wedge"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the frozen-run escalation was not counted"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the idle timer was not cleared after a real escalation"
+  [ ! -e "$state/.pipeline-since-$key" ] || fail "the run-progress deferral chain outlived a real escalation"
+  [ ! -e "$state/.pipeline-sample-$key" ] || fail "the step-progress baseline outlived a real escalation"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the frozen-run escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the frozen-run escalation was not queued"
+  pass "a quiet pane whose validation run is advancing is deferred, while one frozen on a single step still wedge-escalates on the unchanged schedule"
+}
+
+# A run-progress deferral is not silence either. A step can emit output without the
+# run getting anywhere (a retry loop, a chattering tool), so the whole deferral
+# chain ages and re-surfaces once per PAUSE_RESURFACE_SECS on the same bounded
+# cadence a declared pause uses, labeled as a recheck rather than a wedge.
+test_run_progress_deferral_resurfaces_on_the_bounded_cadence() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid wt back toon steplog
+  dir=$(make_case wedge-run-progress-resurface); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-chatty"; wt="$dir/wt"; toon="$dir/status.toon"; steplog="$dir/step.log"
+  make_task_worktree "$wt" fm/probe
+  printf 'no-mistakes axi run: waiting for the pipeline' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/chatty.meta"
+  printf 'working: handed off to validation\n' > "$state/chatty.status"
+  sig=$(seen_sig "$state/chatty.status"); printf '%s' "$sig" > "$state/.seen-chatty_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "no-mistakes axi run: waiting for the pipeline")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  nm_status_fixture "$toon" fixing review ''
+  printf '%s' 'aaaabbbbbbbb' > "$steplog"
+  printf '%s\t01RUN\treview\t4\t\t\n' "$back" > "$state/.pipeline-sample-$key"
+  # This pane has been deferring on step-progress evidence for 500s already.
+  : > "$state/.pipeline-since-$key"
+  set_mtime "$back" "$state/.pipeline-since-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_NM_STATUS="$toon" FM_FAKE_NM_LOG="$steplog" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a long-running run-progress deferral never re-surfaced on the bounded cadence"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the run-progress recheck did not print a stale wake"
+  grep -F "validation run advanced on step review" "$out" >/dev/null \
+    || fail "the run-progress recheck did not name the step it measured"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a run-progress recheck was mislabeled a possible wedge"
+  [ -e "$state/.pipeline-resurfaced-$key" ] || fail "the run-progress re-surface throttle marker was not recorded"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a run-progress recheck advanced the wedge escalation counter"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the run-progress recheck failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the run-progress recheck was not queued"
+  pass "a run-progress deferral re-surfaces once on the bounded pause cadence, so a chattering step cannot stay invisible"
+}
+
 # A deferral is not silence. A worktree can churn without real progress (a
 # rewritten log, a build touching the same file), so the whole deferral chain ages
 # and re-surfaces once per PAUSE_RESURFACE_SECS - the same bounded cadence a
@@ -4186,6 +4506,10 @@ test_write_deferral_resurfaces_on_the_bounded_cadence
 test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain
+test_crew_run_step_advanced_classifier
+test_step_progress_window_is_configurable_and_bounded
+test_wedge_escalation_deferred_while_the_validation_run_advances
+test_run_progress_deferral_resurfaces_on_the_bounded_cadence
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled

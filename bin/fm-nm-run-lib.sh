@@ -214,3 +214,153 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
   done <<< "$list"
   return 0
 }
+
+# --- active-step progress evidence ------------------------------------------
+#
+# The supervisor's wedge detector has three liveness inputs that a crew parked on
+# a validation run defeats all three of: its pane renders nothing (the pipeline,
+# not the crew, is taking the turns), its run record says `running` for as long as
+# the run lasts however stalled it is, and the pipeline commits its fix rounds in
+# its own checkout, so the task worktree is never written. The evidence that does
+# separate a progressing run from a stalled one is the run's own ACTIVE STEP: its
+# log grows and its agent process burns CPU. The primitives below measure exactly
+# that, and fm-classify-lib.sh's crew_run_step_advanced turns two measurements
+# into the supervisor's verdict.
+#
+# Data rows of the `active_steps[N]{...}:` table in captured `axi status` TOON $1,
+# which the pipeline emits only while a step is actually running or fixing - so an
+# empty result is itself the fact that no step is executing. Column order is
+# deliberately not assumed: the header's own indentation bounds the block, and
+# fm_nm_active_step_field below resolves names to positions.
+fm_nm_active_steps_rows() {  # <toon-output>
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*active_steps\[[0-9]+\]\{/ { hdr = index($0, "active_steps"); inblock = 1; next }
+    inblock {
+      if ($0 ~ /^[[:space:]]*$/) { inblock = 0; next }
+      match($0, /[^ \t]/)
+      if (RSTART <= hdr) { inblock = 0; next }
+      print
+    }
+  '
+}
+
+# Value of column <2> in the FIRST active-step row of captured `axi status` TOON
+# $1, resolved through that table's own `{...}` header names rather than a fixed
+# position, so a column added or reordered upstream cannot silently shift the
+# reading. Values are comma-separated with TOON double quoting, so a quoted value
+# may itself contain a comma; the split honors the quotes. Empty when the table,
+# the column, or the row is absent - every caller treats that as no evidence.
+fm_nm_active_step_field() {  # <toon-output> <column>
+  printf '%s\n' "$1" | awk -v want="$2" '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function split_toon(line, arr,   n, i, c, cur, inq) {
+      n = 0; cur = ""; inq = 0
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (c == "\"") { inq = !inq; continue }
+        if (c == "," && !inq) { arr[++n] = trim(cur); cur = ""; continue }
+        cur = cur c
+      }
+      arr[++n] = trim(cur)
+      return n
+    }
+    !col && match($0, /active_steps\[[0-9]+\]\{[^}]*\}/) {
+      hdr = index($0, "active_steps")
+      names = substr($0, RSTART, RLENGTH)
+      sub(/^[^{]*\{/, "", names); sub(/\}$/, "", names)
+      n = split_toon(names, name_at)
+      for (i = 1; i <= n; i++) if (name_at[i] == want) col = i
+      inblock = 1
+      next
+    }
+    inblock {
+      if ($0 ~ /^[[:space:]]*$/) exit
+      match($0, /[^ \t]/)
+      if (RSTART <= hdr) exit
+      if (!col) exit
+      split_toon($0, value_at)
+      print value_at[col]
+      exit
+    }
+  '
+}
+
+# Whole seconds of CPU time process $1 has consumed, or nothing when the pid is
+# absent, unreadable, or not a pid at all. The caller must pass a pid the RUN
+# RECORD names, never one found by walking a pane's process tree: measured
+# 2026-09-06 while diagnosing this very defect, a probe aimed at a pane's own
+# child read 00:00:00 for a worker that was healthy and burning CPU further down
+# the tree, and a measurement pointed at the wrong process answers confidently and
+# wrongly instead of erroring.
+# `ps -o time=` is the portable spelling
+# and renders [[DD-]HH:]MM:SS with an optional fractional part on some platforms,
+# so the parse folds every leading component and truncates the fraction rather
+# than assuming one shape. A crew's step agent that is genuinely working advances
+# this even across a gap between step-log writes, which is the whole reason it is
+# read alongside the log.
+fm_nm_pid_cpu_seconds() {  # <pid>
+  local pid=$1 raw
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  raw=$(ps -o time= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$raw" ] || return 1
+  printf '%s' "$raw" | awk '
+    { days = 0; rest = $0
+      if (index(rest, "-")) { days = substr(rest, 1, index(rest, "-") - 1) + 0
+                              rest = substr(rest, index(rest, "-") + 1) }
+      n = split(rest, part, ":")
+      total = 0
+      for (i = 1; i <= n; i++) { v = part[i]; sub(/\..*$/, "", v); total = total * 60 + v + 0 }
+      print days * 86400 + total }'
+}
+
+# One measurement of worktree $1's current validation run, printed as a single
+# tab-separated record:
+#
+#   <run-id>\t<step>\t<step-log-bytes>\t<agent-pid>\t<agent-cpu-seconds>
+#
+# Every field is something that only moves when work happens. The step's own
+# `active_for` is deliberately NOT among them: an elapsed-time counter advances
+# whether or not anything is running, so a sample containing one could never read
+# as stalled. The pid comes from the run record's `agent_pid`, which is the whole
+# reason the CPU reading can be trusted (see fm_nm_pid_cpu_seconds).
+#
+# Prints NOTHING - and the caller reads that as no evidence, never as a stall -
+# when no run is attributed to the branch, when the run carries no active step,
+# or when either bounded call fails. The step is resolved from the run record on
+# every measurement rather than pinned once, because a step that FINISHES leaves
+# its log permanently flat and its agent gone while the run advances happily to
+# the next step; a checker pinned to one step's log would report that healthy run
+# as wedged forever. The run id is pinned across the two calls so the log read
+# cannot land on a different run than the one just measured.
+# The answered run must be THIS worktree's own: under concurrent load `axi status`
+# routinely answers a different branch's run, and measuring that one would let one
+# crew's progress defer another crew's wedge escalation. Branch equality is the
+# right strength here - the strict head rule fm_nm_head_matches_worktree applies
+# would reject exactly the pipeline-owned fix round whose head this copy never
+# fetched, and a stale run on a reused branch cannot answer anyway, because the
+# active_steps table exists only while a step is really executing.
+# Two bounded no-mistakes calls: callers must reach this once per idle window,
+# never per poll.
+fm_nm_step_progress_probe() {  # <worktree> <timeout_secs>
+  local wt=$1 timeout_secs=$2 status_out run_id step bytes pid cpu branch run_branch
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=''
+  [ -n "$branch" ] || return 1
+  status_out=$(fm_nm_run "$wt" "$timeout_secs" axi status)
+  [ -n "$status_out" ] || return 1
+  run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$status_out" branch)")
+  [ "$run_branch" = "$branch" ] || return 1
+  step=$(fm_nm_strip_quotes "$(fm_nm_active_step_field "$status_out" step)")
+  [ -n "$step" ] || return 1
+  run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$status_out" id)")
+  pid=$(fm_nm_strip_quotes "$(fm_nm_active_step_field "$status_out" agent_pid)")
+  case "$pid" in *[!0-9]*) pid='' ;; esac
+  cpu=$(fm_nm_pid_cpu_seconds "$pid" 2>/dev/null || true)
+  if [ -n "$run_id" ]; then
+    bytes=$(fm_nm_run "$wt" "$timeout_secs" axi logs --run "$run_id" --step "$step" --full | wc -c | tr -d '[:space:]')
+  else
+    bytes=$(fm_nm_run "$wt" "$timeout_secs" axi logs --step "$step" --full | wc -c | tr -d '[:space:]')
+  fi
+  case "$bytes" in ''|*[!0-9]*) bytes='' ;; esac
+  printf '%s\t%s\t%s\t%s\t%s\n' "$run_id" "$step" "$bytes" "$pid" "${cpu:-}"
+}

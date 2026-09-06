@@ -64,6 +64,13 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
+# The no-mistakes run primitives the step-progress probe below measures through.
+# That library is pure function definitions with no side effects, so sourcing it
+# here costs consumers nothing until they call the probe.
+# shellcheck source=bin/fm-nm-run-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_CLASSIFY_LIB_DIR/fm-nm-run-lib.sh"
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
@@ -1882,6 +1889,117 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
       -type f -newer "$anchor" -print -quit 2>/dev/null || true)
   fi
   [ -n "$hit" ]
+}
+
+# --- validation-run step progress -------------------------------------------
+#
+# The wedge detector's FOURTH liveness input, and the only one that can see a crew
+# parked on a no-mistakes validation run. Such a crew defeats the other three at
+# once: the pipeline takes the turns, so the pane renders nothing; the run record
+# says `running` for the run's whole duration however stalled it is; and the
+# pipeline commits its fix rounds in its own checkout, so the task worktree is
+# never written. The 2026-09-05 case was eight consecutive possible-wedge
+# escalations against one healthy validating crew, each one demanding a manual deep
+# inspection that found nothing wrong - and firstmate's prescribed remedy (steer
+# the crew to declare a pause) is unreachable precisely there, because a crew
+# parked on a pipeline call cannot acknowledge a steer either.
+#
+# The evidence that separates a progressing run from a stalled one is its ACTIVE
+# STEP: the step's log grows and its agent process burns CPU. Two measured facts
+# make that usable, both learned by nearly getting this wrong:
+#
+#   1. The window must outlast the natural gap between step-log writes. Measured on
+#      a healthy run: byte-identical over 40s, then 15484 -> 15673 bytes over 90s
+#      with its agent's CPU time advancing 6s -> 7s. A short sample lands inside
+#      that gap and reads a working run as frozen - trading a check that stays
+#      quiet for one that cries wolf, which is worse, because people learn to
+#      ignore it. Hence FM_NM_PROGRESS_WINDOW_SECS below, and the CPU reading
+#      alongside the log so a long write gap is not the only thing being watched.
+#   2. The step must be re-resolved from the run record on every measurement.
+#      Measured on that same run: the review step's log went permanently flat and
+#      its agent vanished, because the step had FINISHED and the run had moved on
+#      to test. A checker pinned to one step's log reports that healthy run as
+#      wedged forever. fm_nm_step_progress_probe resolves the current step first.
+#
+# 0 (defer the escalation) when there is positive evidence the run advanced since
+# the recorded sample, or when a step IS executing but the sample is younger than
+# the window, so no flat reading yet means anything. 1 (escalate on the caller's
+# unchanged schedule) for every other outcome, including no run, no active step, a
+# failed or bounded-out probe, and - the case the alarm exists for - a mature
+# window over which nothing moved at all.
+#
+# The deferral for a young sample is self-limiting rather than open-ended, and that
+# is load-bearing: an immature window deliberately does NOT rewrite the sample, so
+# its age only grows and maturity always arrives. Total added delay before a real
+# stall escalates is therefore bounded by FM_NM_PROGRESS_WINDOW_SECS no matter how
+# a home has tuned its escalation threshold. Rewriting the sample there would build
+# exactly the thing this repo keeps removing: a check that cannot fail.
+#
+# Prints a short evidence label for the caller's wake reason on a deferral.
+# NOT a pure read: two bounded no-mistakes calls per invocation, so callers must
+# reach it only at the moment they would otherwise escalate, never per poll.
+
+# Seconds a step-progress sample must have aged before a measurement identical to
+# it is read as a stall rather than as one quiet stretch between log writes. Set
+# comfortably above the ~90s write gap measured on a healthy run; the sampling
+# schedule itself is wider still (a sample is seeded when the idle timer starts and
+# read when it expires), so this bound is a floor the schedule normally clears, not
+# the cadence.
+FM_NM_PROGRESS_WINDOW_SECS=${FM_NM_PROGRESS_WINDOW_SECS:-180}
+# Wall-clock bound on each of the probe's two no-mistakes calls. The probe runs
+# synchronously inside the poll that was about to escalate, so an unresponsive
+# pipeline daemon must cost the escalation the bound and nothing more: a timed-out
+# call yields no record, which reads as no evidence like every other negative.
+FM_NM_PROGRESS_TIMEOUT=${FM_NM_PROGRESS_TIMEOUT:-10}
+
+crew_run_step_advanced() {  # <id> <state> <sample-file>
+  local id=$1 state=$2 sample=$3 wt kind now current prior
+  local prior_epoch prior_body current_body
+  [ -n "$id" ] && [ -n "$sample" ] || return 1
+  # A kind=secondmate task records a provisioned firstmate home, not a code tree
+  # under validation, exactly as the worktree write probe excludes it.
+  kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ "$kind" != secondmate ] || return 1
+  wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+
+  current=$(fm_nm_step_progress_probe "$wt" "$FM_NM_PROGRESS_TIMEOUT" 2>/dev/null || true)
+  if [ -z "$current" ]; then
+    # No run, no executing step, or an unusable probe: nothing here may defer, and
+    # a stale sample must not outlive the run it described.
+    rm -f "$sample"
+    return 1
+  fi
+  now=$(date +%s)
+  prior=$(head -1 "$sample" 2>/dev/null || true)
+  prior_epoch=${prior%%$'\t'*}
+  prior_body=${prior#*$'\t'}
+  current_body=$current
+  case "$prior_epoch" in
+    ''|*[!0-9]*)
+      # First measurement of this idle window: a baseline, never a verdict.
+      printf '%s\t%s\n' "$now" "$current_body" > "$sample"
+      return 1
+      ;;
+  esac
+  if [ "$prior_body" != "$current_body" ]; then
+    # The run id, the active step, the step's log size, its agent pid, or that
+    # agent's CPU time moved. Any one of those is the run doing something.
+    printf '%s\t%s\n' "$now" "$current_body" > "$sample"
+    printf 'its validation run advanced on step %s' "$(printf '%s' "$current_body" | cut -f2)"
+    return 0
+  fi
+  if [ "$(( now - prior_epoch ))" -lt "$FM_NM_PROGRESS_WINDOW_SECS" ]; then
+    # Identical, but not yet over a window long enough to mean anything. Keep the
+    # sample so the window matures instead of restarting.
+    printf 'its validation run is on step %s with no measurable change yet' \
+      "$(printf '%s' "$current_body" | cut -f2)"
+    return 0
+  fi
+  # A step that is supposedly executing, measured twice across a sufficient
+  # window, with nothing moved: the stall the alarm exists for.
+  printf '%s\t%s\n' "$now" "$current_body" > "$sample"
+  return 1
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
