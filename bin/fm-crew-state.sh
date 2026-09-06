@@ -49,8 +49,13 @@
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating. And a
+#      a ci-step log-tail check overrides working -> done ONLY on a positive
+#      green reading, so a green PR is never silently read as still-validating.
+#      Every other reading - checks not green yet, a PR with no CI checks
+#      configured at all (no-checks), or an unreadable ci log (unknown) - stays
+#      working, because "nothing verified this PR" and "everything verified this
+#      PR" must never share a verdict: "checks green" is the exact condition
+#      that unlocks an autonomous merge under a project's yolo posture. And a
 #      terminal FAILED run whose only failure is the ci monitor step, after
 #      every substantive step completed and the ci log's last marker reads
 #      checks green, also reads done (held-for-merge), never failed: a monitor
@@ -504,6 +509,13 @@ nm_effective_ci_step_status() {
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
+#
+# The two "no CI checks" phrasings are the SAME underlying condition - the repo
+# has no workflows, so nothing will ever report - and both get `no-checks`,
+# never `green`. Until 2026-08 the "still monitoring" phrasing shared the green
+# alternation, so a PR on a freshly created repo read as "checks green: PR ready
+# for review" here while the forge reported no CI checks configured at all.
+# Callers must treat `no-checks` and `unknown` as neither green nor done.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
@@ -514,7 +526,8 @@ nm_ci_checks_state() {
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    *"checks passed"*) printf 'green' ;;
+    *"no CI checks reported - still monitoring"*) printf 'no-checks' ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
@@ -683,6 +696,8 @@ if [ "$HAVE_RUN" = 1 ]; then
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+            elif [ "$CI_LOG_STATE" = no-checks ]; then
+              RUN_DETAIL="PR has no CI checks configured: nothing verified it, so the ci step cannot complete on its own"
             fi
             ;;
           fixing)
@@ -705,7 +720,12 @@ if [ "$HAVE_RUN" = 1 ]; then
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
+    # POSITIVE test, deliberately: the crew's own "checks green" report is
+    # promoted only on a green ci log, or when the run has no ci step at all to
+    # consult it against. Every other reading - not-ready, no-checks, unknown,
+    # and any verdict added to nm_ci_checks_state later - stays working, so a
+    # new verdict fails closed here instead of falling through to done.
+    if [ "$CI_LOG_STATE" = green ] || [ -z "$CI_STEP_STATUS" ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi
