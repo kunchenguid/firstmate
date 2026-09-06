@@ -163,6 +163,9 @@
 # recorded instead (bin/fm-backlog-transition-lib.sh owns that transition), so
 # holding the very work item a question gates is safe; only `answer` with the
 # captain's words or evidence-backed `reconcile close` closes the call.
+# bin/fm-watch.sh asks it for the same
+# reason a closer does - the hold is a fact no status line carries - and bounds
+# a stale alarm on a 0 rather than re-alarming for the length of the decision.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
