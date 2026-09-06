@@ -655,8 +655,23 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
 # The path is never under any one home's state/ and secondmates never write the
 # primary home. Returns non-zero when the named session's socket cannot be
 # resolved unambiguously.
+# fm_backend_herdr_presentation_lock_namespace: per-user namespace, never a
+# fixed shared path. On a multi-user host a fixed /tmp path is created and
+# owned by whichever user gets there first, permanently locking every other
+# user out (mode 700, foreign uid). Always resolves the deterministic
+# uid-suffixed /tmp path - never $XDG_RUNTIME_DIR, whose presence and value
+# can differ between two processes of the SAME user (a systemd user session
+# vs. a cron/sudo/detached invocation, or two different session ids), which
+# would split one user's own lock identity across two different directories
+# and silently defeat the mutual exclusion the lock exists for. A
+# foreign-owned legacy /tmp/firstmate-herdr-presentation (no uid suffix) is
+# never read, chowned, chmodded, or migrated - it is simply not this
+# function's return value anymore, and the locks themselves are ephemeral.
 fm_backend_herdr_presentation_lock_namespace() {
-  printf '%s' '/tmp/firstmate-herdr-presentation'
+  local uid
+  uid=$(id -u 2>/dev/null) || return 1
+  [ -n "$uid" ] || return 1
+  printf '/tmp/firstmate-herdr-presentation-%s' "$uid"
 }
 
 fm_backend_herdr_presentation_lock_namespace_mode() {

@@ -2569,9 +2569,10 @@ SH
 }
 
 test_presentation_session_lock_path_is_shared_across_homes() {
-  local dir log resp fb path_a path_b path_other path_tmp path_private
+  local dir log resp fb path_a path_b path_other path_tmp path_private uid
   dir="$TMP_ROOT/presentation-session-lock"; mkdir -p "$dir/responses" "$dir/sockdir"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
+  uid=$(id -u) || fail "could not resolve current uid"
   : > "$dir/sockdir/fmtest.sock"
   printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/1.out"
   printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$dir/sockdir/fmtest.sock\"}]}" > "$resp/2.out"
@@ -2586,8 +2587,8 @@ test_presentation_session_lock_path_is_shared_across_homes() {
     || fail "session lock path resolution failed for home B"
   [ "$path_a" = "$path_b" ] || fail "same session/socket must resolve one shared lock path"
   case "$path_a" in
-    /tmp/firstmate-herdr-presentation/order-*.lock) ;;
-    *) fail "session lock path must use the shared machine namespace: $path_a" ;;
+    /tmp/firstmate-herdr-presentation-"$uid"/order-*.lock) ;;
+    *) fail "session lock path must use the per-user machine namespace: $path_a" ;;
   esac
   case "$path_a" in
     */state/*) fail "session lock path must not live under a home state directory: $path_a" ;;
@@ -2612,6 +2613,85 @@ test_presentation_session_lock_path_is_shared_across_homes() {
       || fail "symlink parent socket paths must resolve one lock: $path_tmp vs $path_private"
   fi
   pass "herdr presentation lock: one path per session/socket across homes"
+}
+
+test_presentation_lock_namespace_is_deterministic_per_uid() {
+  local dir uid expected
+  uid=$(id -u) || fail "could not resolve current uid"
+  expected="/tmp/firstmate-herdr-presentation-$uid"
+  dir=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT") \
+    || fail "namespace resolution failed"
+  [ "$dir" = "$expected" ] || fail "expected $expected, got $dir"
+  pass "herdr presentation lock namespace: resolves the deterministic uid-suffixed /tmp path"
+}
+
+test_presentation_lock_namespace_ignores_ambient_xdg_runtime_dir() {
+  local uid runtime_dir with_xdg without_xdg expected
+  uid=$(id -u) || fail "could not resolve current uid"
+  expected="/tmp/firstmate-herdr-presentation-$uid"
+  runtime_dir="$TMP_ROOT/xdg-runtime-ambient"; mkdir -p "$runtime_dir"
+  # Two processes of the SAME user must resolve the identical namespace
+  # regardless of whether XDG_RUNTIME_DIR happens to be set in one of them
+  # (a systemd user session vs. a cron/sudo/detached invocation, say) -
+  # otherwise the two would split one user's own lock identity across two
+  # different directories and silently defeat the mutual exclusion the lock
+  # exists for.
+  with_xdg=$(XDG_RUNTIME_DIR="$runtime_dir" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT") \
+    || fail "namespace resolution failed with XDG_RUNTIME_DIR set"
+  without_xdg=$(bash -c 'unset XDG_RUNTIME_DIR; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT") \
+    || fail "namespace resolution failed with XDG_RUNTIME_DIR unset"
+  [ "$with_xdg" = "$without_xdg" ] \
+    || fail "XDG_RUNTIME_DIR must not split one user's lock identity: $with_xdg vs $without_xdg"
+  [ "$with_xdg" = "$expected" ] || fail "expected $expected, got $with_xdg"
+  pass "herdr presentation lock namespace: ignores ambient XDG_RUNTIME_DIR, same uid always resolves the same path"
+}
+
+test_presentation_lock_namespace_ignores_foreign_legacy_path() {
+  local legacy="/tmp/firstmate-herdr-presentation" created=0 dir uid
+  uid=$(id -u) || fail "could not resolve current uid"
+  if [ ! -e "$legacy" ]; then
+    mkdir -m 755 "$legacy" 2>/dev/null && created=1
+  fi
+  # A foreign-owned (or, here, merely wrong-mode) legacy path must never be
+  # read, chowned, chmodded, or migrated; only assert the resolver's return
+  # value ignores it, and never mutate a pre-existing entry this test did not
+  # create itself.
+  dir=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT")
+  if [ "$created" -eq 1 ]; then rmdir "$legacy" 2>/dev/null || true; fi
+  [ "$dir" = "/tmp/firstmate-herdr-presentation-$uid" ] \
+    || fail "resolver must ignore the legacy shared path: $dir"
+  pass "herdr presentation lock namespace: ignores a foreign-owned legacy shared path"
+}
+
+test_presentation_lock_namespace_valid_rejects_symlink() {
+  local dir target link
+  dir="$TMP_ROOT/namespace-valid-symlink"; mkdir -p "$dir"
+  target="$dir/target"; mkdir -m 700 "$target"
+  link="$dir/link"; ln -s "$target" "$link"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace_valid "$1"' "$ROOT" "$link"; then
+    fail "a symlinked namespace must not validate"
+  fi
+  pass "herdr presentation lock namespace: validation refuses a symlink"
+}
+
+test_presentation_lock_namespace_valid_rejects_wrong_mode() {
+  local dir target
+  dir="$TMP_ROOT/namespace-valid-wrong-mode"; mkdir -p "$dir"
+  target="$dir/target"; mkdir -m 755 "$target"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace_valid "$1"' "$ROOT" "$target"; then
+    fail "a mode-755 namespace must not validate"
+  fi
+  pass "herdr presentation lock namespace: validation refuses a wrong-mode directory"
+}
+
+test_presentation_lock_namespace_valid_accepts_own_700() {
+  local dir target
+  dir="$TMP_ROOT/namespace-valid-ok"; mkdir -p "$dir"
+  target="$dir/target"; mkdir -m 700 "$target"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace_valid "$1"' "$ROOT" "$target" \
+    || fail "an own-uid mode-700 directory must validate"
+  pass "herdr presentation lock namespace: validation accepts an own-uid mode-700 directory"
 }
 
 test_presentation_session_lock_path_rejects_malformed_socket() {
@@ -4580,6 +4660,12 @@ test_projection_order_anchors_the_parent_by_exact_id
 test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
+test_presentation_lock_namespace_is_deterministic_per_uid
+test_presentation_lock_namespace_ignores_ambient_xdg_runtime_dir
+test_presentation_lock_namespace_ignores_foreign_legacy_path
+test_presentation_lock_namespace_valid_rejects_symlink
+test_presentation_lock_namespace_valid_rejects_wrong_mode
+test_presentation_lock_namespace_valid_accepts_own_700
 test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
