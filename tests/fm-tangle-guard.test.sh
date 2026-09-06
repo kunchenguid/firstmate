@@ -164,6 +164,8 @@ test_spawn_isolation_abort() {
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-proj")
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake")
+  # The assertions concern identity, not how long an unchanged cwd is polled.
+  fm_test_fake_sleep_noop "$fakebin"
   # A genuine isolated linked worktree of the project, detached on the default.
   git -C "$proj" worktree add -q --detach "$TMP_ROOT/spawn-wt" >/dev/null 2>&1
   mkdir -p "$TMP_ROOT/spawn-notgit" "$proj/sub"
