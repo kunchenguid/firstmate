@@ -1178,6 +1178,7 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_HERDR_PANE_STATE=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1211,7 +1212,24 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  # herdr's stale-idle registration needs its own branch here: it is provably
+  # agent-free right now, but the proof is a point-in-time process read rather
+  # than the hard, permanent fact no-agent is, so fm_backend_agent_state's
+  # generic dead cannot absorb it without losing the ability to require a
+  # fresh proof again immediately before the first launch input (the recheck
+  # right before send below).
+  if [ "$BACKEND" = herdr ]; then
+    fm_backend_herdr_parse_target "$RELAUNCH_TARGET" || exit 1
+    RELAUNCH_HERDR_PANE_STATE=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+    case "$RELAUNCH_HERDR_PANE_STATE" in
+      no-agent|stale-idle) RELAUNCH_STATE=dead ;;
+      dead) RELAUNCH_STATE=missing ;;
+      live) RELAUNCH_STATE=alive ;;
+      *) RELAUNCH_STATE=unreadable ;;
+    esac
+  else
+    RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  fi
   [ "$RELAUNCH_STATE" = dead ] || {
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
@@ -3496,6 +3514,21 @@ spawn_record_traceparent() {
   return "$status"
 }
 
+# A herdr relaunch's classified pane state may be minutes old by this point
+# (worktree checks, traceparent resolution, and everything else above run in
+# between), so require the exact same proof again right before the first
+# input reaches the pane rather than trusting the earlier snapshot.
+if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = herdr ]; then
+  fm_backend_herdr_parse_target "$T" || {
+    echo "error: task $ID's herdr endpoint became malformed before replacement input; refusing relaunch" >&2
+    exit 1
+  }
+  RELAUNCH_RECHECK_STATE=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  if [ "$RELAUNCH_RECHECK_STATE" != "$RELAUNCH_HERDR_PANE_STATE" ]; then
+    echo "error: task $ID's herdr endpoint changed from '$RELAUNCH_HERDR_PANE_STATE' to '$RELAUNCH_RECHECK_STATE' before replacement input; refusing relaunch" >&2
+    exit 1
+  fi
+fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.

@@ -800,6 +800,180 @@ test_create_task_refuses_when_agent_state_ambiguous() {
   pass "fm_backend_herdr_create_task: refuses (fail-safe) rather than guessing when the duplicate's agent state cannot be classified confidently"
 }
 
+# A registered `idle` status alone is not enough to treat a pane as
+# agent-free: a real pi process sitting idle between turns reports the exact
+# same status. Only the shared strict idle-shell proof (already used for
+# session-start projection cleanup and pane-death close), plus a second
+# registry read still reporting idle, can promote it to stale-idle. This
+# models the husk a pi process leaves behind when it exits without emitting
+# its end-of-session hook (reproduced on real herdr 0.8.2).
+test_pane_agent_state_classifies_a_stale_idle_registration() {
+  local dir log resp fb out status pid=4242
+  dir="$TMP_ROOT/stale-idle-pane-state"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/2.out"
+  death_process_info_fixture w2:p2 "$pid" > "$resp/3.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/4.out"
+  make_death_lab "$dir" "$pid"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w2:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] && [ "$out" = stale-idle ] \
+    || fail "a stale idle registration over a proved bare shell should classify stale-idle, got '$out'"
+  [ "$(grep -c $'agent\x1fget\x1fw2:p2' "$log")" -eq 2 ] \
+    || fail "stale idle recovery did not re-read the agent registration after proving the shell"
+  assert_contains "$(cat "$log")" $'pane\x1fprocess-info\x1f--pane\x1fw2:p2' \
+    "stale idle recovery did not prove the pane had returned to its bare shell"
+  pass "fm_backend_herdr_pane_agent_state: a proven stale idle registration classifies distinctly from live"
+}
+
+test_pane_agent_state_keeps_idle_live_with_active_process() {
+  local dir log resp fb out status pid=4242
+  dir="$TMP_ROOT/idle-active-process"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"},{"pid":4243,"name":"pi","argv0":"pi"}]}}}\n' \
+    "$pid" "$pid" "$pid" > "$resp/3.out"
+  make_death_lab "$dir" "$pid"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w2:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] && [ "$out" = live ] \
+    || fail "an idle registration with a real foreground process must remain live, got '$out'"
+  [ "$(grep -c $'agent\x1fget\x1fw2:p2' "$log")" -eq 1 ] \
+    || fail "a genuinely busy idle pane should not be reclassified after its shell proof failed"
+  pass "fm_backend_herdr_pane_agent_state: idle with an active foreground process remains live, not stale-idle or unknown"
+}
+
+test_pane_agent_state_keeps_idle_live_on_unreadable_process_info() {
+  # Conservatism is mandatory: unreadable process evidence must never promote
+  # an idle registration to stale-idle, only ever leave it live.
+  local dir log resp fb out status
+  dir="$TMP_ROOT/idle-unreadable-process-info"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/2.out"
+  printf '%s\n' '{"error":{"code":"internal_error","message":"transient failure"}}' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w2:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] && [ "$out" = live ] \
+    || fail "an unreadable process-info read for an idle pane must remain live, got '$out'"
+  [ "$(grep -c $'agent\x1fget\x1fw2:p2' "$log")" -eq 1 ] \
+    || fail "an unreadable process-info read should never reach a second agent-registration recheck"
+  pass "fm_backend_herdr_pane_agent_state: an unreadable process-info read for an idle pane stays live, never stale-idle"
+}
+
+test_pane_agent_state_keeps_idle_live_when_registration_changes_before_recheck() {
+  # The shell can prove bare-idle a moment after the agent itself resumed
+  # (a genuinely busy pi about to redraw its prompt). Refuse to trust the
+  # first read alone; the second agent get must still agree.
+  local dir log resp fb out status pid=4242
+  dir="$TMP_ROOT/idle-changed-before-recheck"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/2.out"
+  death_process_info_fixture w2:p2 "$pid" > "$resp/3.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/4.out"
+  make_death_lab "$dir" "$pid"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w2:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] && [ "$out" = live ] \
+    || fail "an idle registration that changed to working before the recheck must remain live, got '$out'"
+  pass "fm_backend_herdr_pane_agent_state: an idle registration that changes before its recheck stays live, never falsely stale-idle"
+}
+
+test_tab_is_husk_refuses_a_stale_idle_pane() {
+  # A proven stale-idle pane deliberately stays out of the husk set this
+  # function grants close authority for: relaunch has its own revalidated
+  # replacement flow, while this duplicate-tab close path has no revalidation
+  # immediately before the close.
+  local dir log resp fb pid=4242
+  dir="$TMP_ROOT/husk-stale-idle-refuses"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/2.out"
+  death_process_info_fixture w2:p2 "$pid" > "$resp/3.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/4.out"
+  make_death_lab "$dir" "$pid"
+  fb=$(make_herdr_fakebin "$dir")
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_tab_is_husk fmtest w2:p2' "$ROOT"; then
+    fail "tab_is_husk must not grant close authority for a stale-idle pane; that has its own revalidated relaunch path"
+  fi
+  pass "fm_backend_herdr_tab_is_husk: a proven stale-idle pane still refuses (1), deliberately out of the duplicate-tab close path"
+}
+
+test_agent_state_reports_stale_idle_for_a_proven_bare_shell() {
+  local dir log resp fb out status pid=4242
+  dir="$TMP_ROOT/stale-idle-agent-state"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/2.out"
+  death_process_info_fixture w2:p2 "$pid" > "$resp/3.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/4.out"
+  make_death_lab "$dir" "$pid"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] && [ "$out" = stale-idle ] \
+    || fail "task-level agent_state should report stale-idle for a proven bare-shell idle registration, got '$out'"
+  pass "fm_backend_herdr_agent_state: a strictly proved stale idle registration reports stale-idle, distinct from dead"
+}
+
+test_agent_state_keeps_a_healthy_idle_registration_alive() {
+  local dir log resp fb out status pid=4242
+  dir="$TMP_ROOT/healthy-idle-agent-state"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"},{"pid":4243,"name":"pi","argv0":"pi"}]}}}\n' \
+    "$pid" "$pid" "$pid" > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] && [ "$out" = alive ] \
+    || fail "task-level agent_state should keep a healthy idle registration alive, got '$out'"
+  pass "fm_backend_herdr_agent_state: a healthy idle registration with a live process remains alive"
+}
+
+test_agent_state_keeps_working_done_and_blocked_alive_without_proof() {
+  # working/done/blocked never enter the process-proof path at all - only a
+  # candidate idle registration does.
+  local candidate dir log resp fb out status
+  for candidate in working "done" blocked; do
+    dir="$TMP_ROOT/agent-state-$candidate"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+    printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$candidate" > "$resp/2.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
+    status=$?
+    [ "$status" -eq 0 ] && [ "$out" = alive ] \
+      || fail "registered agent_status=$candidate must remain alive with no proof attempt, got '$out'"
+    assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' \
+      "registered agent_status=$candidate should never enter stale-idle recovery"
+  done
+  pass "fm_backend_herdr_agent_state: working, done, and blocked registrations remain alive without a process proof"
+}
+
 test_create_task_husk_replacement_creates_before_closing() {
   # Safety-critical ordering: the replacement tab must be created BEFORE the
   # husk tab is closed, never the reverse - closing a workspace's LAST
@@ -4524,6 +4698,14 @@ test_create_task_closes_and_replaces_no_agent_husk
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
+test_pane_agent_state_classifies_a_stale_idle_registration
+test_pane_agent_state_keeps_idle_live_with_active_process
+test_pane_agent_state_keeps_idle_live_on_unreadable_process_info
+test_pane_agent_state_keeps_idle_live_when_registration_changes_before_recheck
+test_tab_is_husk_refuses_a_stale_idle_pane
+test_agent_state_reports_stale_idle_for_a_proven_bare_shell
+test_agent_state_keeps_a_healthy_idle_registration_alive
+test_agent_state_keeps_working_done_and_blocked_alive_without_proof
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
