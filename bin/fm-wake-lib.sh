@@ -388,7 +388,7 @@ FM_WATCHER_VERDICT_REASON=stale-beacon
 FM_WATCHER_BUSY_HOLDER_STATUS=64
 
 # The one lock state that is neither healthy nor free: a LIVE, identity-matched
-# watcher for THIS home holds the lock while its beacon has gone stale.
+# watcher for THIS home holds the lock while its beacon is stale or absent.
 # Sets FM_WATCHER_BUSY_PID, FM_WATCHER_BUSY_AGE, and
 # FM_WATCHER_BUSY_AGE_SOURCE on success.
 #
@@ -415,9 +415,10 @@ fm_watcher_busy_holder() {  # <state-dir> <watch-path> [grace] [home]
     source=beacon
     [ "$age" -ge "$grace" ] || return 1
   else
+    # With no beacon there is no healthy reading to defer to, even while the
+    # lock itself is young. Report its age honestly while preserving the holder.
     age=$(fm_path_age "$lockdir")
     source=lock
-    [ "$age" -ge "$grace" ] || return 1
   fi
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_busy_holder returns.
   FM_WATCHER_BUSY_PID=$pid

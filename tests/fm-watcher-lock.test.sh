@@ -851,16 +851,18 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
   armpid=$!
   # Synchronize on the owned child declining the live peer lock before making
-  # the peer healthy. Sleeping for the same budget the arm spends made this
-  # regression fixture race the confirmation deadline under full-suite load,
-  # rather than testing the intended successor-handshake boundary.
+  # the peer healthy. A peer without its first beacon is the typed busy-holder
+  # state, so this also proves startup stand-down does not become a generic clean
+  # exit. Sleeping for the same budget the arm spends made this regression
+  # fixture race the confirmation deadline under full-suite load, rather than
+  # testing the intended successor-handshake boundary.
   i=0
   while [ "$i" -lt 80 ]; do
-    grep -qF "watcher: already running pid $peer" "$state"/.watch-arm-output.* 2>/dev/null && break
+    grep -qF "watcher: busy holder pid=$peer" "$state"/.watch-arm-output.* 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "watcher: already running pid $peer" "$state"/.watch-arm-output.* 2>/dev/null \
+  grep -qF "watcher: busy holder pid=$peer" "$state"/.watch-arm-output.* 2>/dev/null \
     || fail "arm child did not stand down behind the peer watcher"
   touch "$state/.last-watcher-beat"
   i=0
