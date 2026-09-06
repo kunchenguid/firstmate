@@ -1470,6 +1470,44 @@ launch_template() {
   esac
 }
 
+raw_launch_mentions_claude() {
+  local scan=$1 word
+  local -a words=()
+  scan=${scan//$'\n'/ }
+  scan=${scan//|/ }
+  scan=${scan//;/ }
+  scan=${scan//&/ }
+  scan=${scan//\(/ }
+  scan=${scan//\)/ }
+  read -r -a words <<< "$scan"
+  for word in "${words[@]}"; do
+    word=${word//\"/}
+    word=${word//\'/}
+    [ "${word##*/}" = claude ] && return 0
+  done
+  return 1
+}
+
+raw_claude_launch_is_safe() {
+  local scan=$1 word
+  local -a words=()
+  scan=${scan//$'\n'/ }
+  scan=${scan//|/ }
+  scan=${scan//;/ }
+  scan=${scan//&/ }
+  scan=${scan//\(/ }
+  scan=${scan//\)/ }
+  read -r -a words <<< "$scan"
+  for word in "${words[@]}"; do
+    word=${word//\"/}
+    word=${word//\'/}
+    case "$word" in
+      --remote-control|--remote-control=*|--rc|--rc=*|remote-control|--settings|--settings=*|CLAUDE_CONFIG_DIR=*) return 1 ;;
+    esac
+  done
+  return 0
+}
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     RAW_LAUNCH=1
@@ -1478,6 +1516,19 @@ case "$ARG3" in
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
+    if raw_launch_mentions_claude "$LAUNCH"; then
+      case "$HARNESS" in
+        claude|env) HARNESS=claude ;;
+        *)
+          echo "error: raw command contains a Claude invocation that cannot be safely classified; use the managed Claude harness template" >&2
+          exit 1
+          ;;
+      esac
+      if ! raw_claude_launch_is_safe "$LAUNCH"; then
+        echo "error: raw Claude commands cannot override RC policy, Claude settings, or CLAUDE_CONFIG_DIR; use the managed Claude harness template" >&2
+        exit 1
+      fi
+    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -3060,7 +3111,7 @@ if [ "$KIND" != secondmate ]; then
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"disableRemoteControl":true,"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;

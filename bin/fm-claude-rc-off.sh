@@ -6,8 +6,8 @@
 # Launch merges caller --settings JSON or files and forces disableRemoteControl=true.
 # It requires Claude Code >= 2.1.128, the vendor's documented support floor.
 # Settings are passed inline so the account's global settings remain unchanged.
-# Verify reads the live foreground process arguments, never terminal history.
-# It requires exactly one Claude process with one inline enforced settings object.
+# Verify reads the live foreground process arguments and environment, never terminal history.
+# It requires exactly one Claude process with inline enforcement or an enforced runtime config.
 # Success verifies the launch policy, not an independent network-connection measurement.
 # An existing unprotected session must be relaunched through launch; verify never types keys.
 # Lab sessions are routed through fm-herdr-lab.sh, including read-only verification.
@@ -82,27 +82,50 @@ config() {
 
 verify() {
   [ "$#" -eq 2 ] || die 'verify requires an explicit session and pane'
-  local session=$1 pane=$2 info pid
+  local session=$1 pane=$2 info process pid config_dir settings_count verified=0
   [ -n "$session" ] && [ -n "$pane" ] || die 'session and pane must not be empty'
   case "$session" in
     fm-lab-*) info=$("$ROOT/bin/fm-herdr-lab.sh" run "$session" pane process-info --pane "$pane") ;;
     *) info=$(herdr pane process-info --pane "$pane" --session "$session") ;;
   esac
-  pid=$(printf '%s' "$info" | jq -er --arg pane "$pane" '
+  process=$(printf '%s' "$info" | jq -cer --arg pane "$pane" '
     .result.process_info | select(.pane_id == $pane)
     | [.foreground_processes[]? | select(.argv | type == "array")
        | select(.argv[0] | type == "string")
        | select((.argv[0] | split("/") | last) == "claude")]
-    | select(length == 1) | .[0] as $process
-    | $process.argv as $all
+    | select(length == 1) | .[0]
+    | select(.pid | type == "number" and . > 0)
+  ') || die "RC-off policy NOT verified for $session/$pane; relaunch Claude through this helper"
+  pid=$(printf '%s' "$process" | jq -er '.pid')
+  settings_count=$(printf '%s' "$process" | jq '
+    .argv as $all
+    | ($all | index("--")) as $end
+    | ($all[:($end // ($all | length))])
+    | [.[] | select(. == "--settings" or startswith("--settings="))]
+    | length
+  ')
+  if printf '%s' "$process" | jq -e '
+    .argv as $all
     | ($all | index("--")) as $end
     | ($all[:($end // ($all | length))]) as $args
     | [$args | to_entries[] | select(.value == "--settings" or (.value | startswith("--settings=")))
        | if .value == "--settings" then $args[.key + 1] else .value[11:] end]
     | select(length == 1) | .[0] | fromjson
     | select(type == "object" and .disableRemoteControl == true)
-    | $process.pid | select(type == "number" and . > 0)
-  ') || die "RC-off policy NOT verified for $session/$pane; relaunch Claude through this helper"
+  ' >/dev/null 2>&1; then
+    verified=1
+  elif [ "$settings_count" -gt 0 ]; then
+    verified=0
+  elif [ -r "/proc/$pid/environ" ]; then
+    config_dir=$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | tail -n 1)
+  else
+    config_dir=$(ps eww -p "$pid" -o command= 2>/dev/null | tr ' ' '\n' | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | tail -n 1)
+  fi
+  if [ "$verified" -eq 0 ] && [ "$settings_count" -eq 0 ] && [ -n "${config_dir:-}" ] && [ -f "$config_dir/settings.json" ] \
+     && jq -e '.disableRemoteControl == true' "$config_dir/settings.json" >/dev/null 2>&1; then
+    verified=1
+  fi
+  [ "$verified" -eq 1 ] || die "RC-off policy NOT verified for $session/$pane; relaunch Claude through this helper"
   printf 'RC-off launch policy verified: session=%s pane=%s pid=%s disableRemoteControl=true\n' "$session" "$pane" "$pid"
 }
 

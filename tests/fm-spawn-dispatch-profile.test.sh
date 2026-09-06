@@ -424,6 +424,41 @@ SH
   pass "raw Claude paths and every shell fallback inherit RC-off unchanged"
 }
 
+test_raw_claude_refuses_rc_overrides_and_routes_prefixes() {
+  local rec id out status raw
+  for raw in \
+    'claude --remote-control' \
+    'claude --rc' \
+    'claude remote-control' \
+    'claude --settings {"disableRemoteControl":false}' \
+    'CLAUDE_CONFIG_DIR=/tmp/other claude'; do
+    id="profile-raw-unsafe-${RANDOM}"
+    rec=$(make_spawn_case "$id" claude "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    expect_code 1 "$status" "unsafe raw Claude form must be refused: $raw: $out"
+    assert_contains "$out" "cannot override RC policy" "unsafe raw Claude refusal was not actionable"
+  done
+  id="profile-raw-exec-${RANDOM}"
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 'exec claude --safe')
+  status=$?
+  expect_code 1 "$status" "exec-prefixed raw Claude form must fail closed: $out"
+  assert_contains "$out" "cannot be safely classified" "exec-prefixed Claude refusal was not actionable"
+  for raw in 'env FOO=1 claude --safe'; do
+    id="profile-raw-prefixed-${RANDOM}"
+    rec=$(make_spawn_case "$id" claude "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    expect_code 0 "$status" "prefixed raw Claude form should route into enforcement: $raw: $out"
+    assert_contains "$out" "spawned $id harness=claude" "prefixed raw Claude form escaped classification"
+  done
+  pass "raw Claude overrides fail closed and prefixes route into enforcement"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -1145,6 +1180,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_claude_launch_enforces_verifiable_rc_off
+test_raw_claude_refuses_rc_overrides_and_routes_prefixes
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

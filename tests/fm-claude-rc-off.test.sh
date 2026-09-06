@@ -47,6 +47,21 @@ jq '.result.process_info.foreground_processes += [{pid:43,argv:[]},{pid:44}]' "$
 mv "$LAB/extra.json" "$RC_INFO"
 "$HELPER" verify named w1:p2 | grep -q 'RC-off launch policy verified' || fail 'enforced live policy not verified'
 jq -e '. == ["pane","process-info","--pane","w1:p2","--session","named"]' "$RC_CALL" >/dev/null || fail 'session scope lost'
+mkdir -p "$LAB/runtime-config" "$LAB/hold"
+printf '%s\n' '{"disableRemoteControl":true}' > "$LAB/runtime-config/settings.json"
+cat > "$LAB/hold/claude" <<'SH'
+#!/usr/bin/env bash
+while :; do sleep 1; done
+SH
+chmod +x "$LAB/hold/claude"
+CLAUDE_CONFIG_DIR="$LAB/runtime-config" "$LAB/hold/claude" &
+hold_pid=$!
+jq -n --argjson pid "$hold_pid" --arg executable "$LAB/hold/claude" \
+  '{result:{process_info:{pane_id:"w1:p2",foreground_processes:[{pid:$pid,argv:[$executable]}]}}}' > "$RC_INFO"
+"$HELPER" verify named w1:p2 | grep -q 'RC-off launch policy verified' || fail 'runtime-config policy not verified'
+kill "$hold_pid"
+wait "$hold_pid" 2>/dev/null || true
+pass 'verification binds config enforcement to the live Claude environment'
 for argv in \
   '["bash","--settings","{\"disableRemoteControl\":true}"]' \
   '["claude","--settings","{\"disableRemoteControl\":false}"]' \

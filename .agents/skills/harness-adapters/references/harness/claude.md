@@ -48,6 +48,8 @@ The controls are scoped to the launched process and never modify the captain's g
 
 Claude worker and secondmate launch templates use [`fm-claude-rc-off.sh`](../../../../../bin/fm-claude-rc-off.sh) to enforce the session's RC-off policy.
 Use that helper's `verify` operation after a Herdr Claude launch; its header owns arguments, verification limits, and the relaunch requirement for existing unprotected sessions.
+Raw Claude launches inherit an isolated `CLAUDE_CONFIG_DIR` with RC-off enabled, while explicit RC flags, settings overrides, config-directory overrides, and indirectly classified Claude shell programs fail closed.
+This is a non-adversarial raw-shell boundary; machine-enforced managed Claude settings are required when arbitrary shell programs must be unable to replace their environment or settings sources.
 The [runtime verification record](../../../../../docs/verification/runtime-backends.md#claude-remote-control-enforcement) owns the real-harness drift guard and current evidence.
 
 ## Primary integration
