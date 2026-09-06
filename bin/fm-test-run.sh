@@ -1361,7 +1361,12 @@ families_for_changed_path() {
       fi
       ;;
     tests/*)
-      printf '%s\n' "__unmapped__:$path"
+      # A deleted test file has no suite left to select, the same rule the
+      # fixture and bin/ cases above apply. An existing non-.test.sh test
+      # path (safety harness, helper, ...) is genuinely unmapped: fail closed.
+      if [ -e "$path" ]; then
+        printf '%s\n' "__unmapped__:$path"
+      fi
       ;;
     README.md|LICENSE|assets/*|docs/*|.gitignore)
       ;;
