@@ -30,7 +30,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
-#   fm-captain-hold.sh open <task-id>
+#   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -157,8 +157,11 @@
 # is (not Done, hold kind captain), 1 means it is not, and 2 means the answer
 # could not be established, so a caller that must never close a live call can
 # treat "cannot tell" as its own case instead of as a no. With
-# `--distinguish-absent`, an absent local task returns 3 instead of 1. It prints
-# nothing on these predicate results and mutates nothing. bin/fm-teardown.sh asks it before its automatic
+# `--distinguish-absent`, an absent local task returns 3 instead of 1.
+# It prints nothing on these predicate results and mutates nothing, unless
+# `--identity` asks it to print this call's lifecycle identity, which it does on
+# an exit 0 only (see command_open).
+# bin/fm-teardown.sh asks it before its automatic
 # backlog close and, on 0, returns the row to Queued with its deliverable
 # recorded instead (bin/fm-backlog-transition-lib.sh owns that transition), so
 # holding the very work item a question gates is safe; only `answer` with the
@@ -1756,13 +1759,31 @@ EOF
 # A row this home does not carry is 3 when the caller requests the distinction;
 # every other read failure is a 2, printed to stderr, because a mechanical
 # closer must never read "cannot tell" as permission to close.
-command_open() {  # <task-id> [--distinguish-absent]
-  local id=${1:-} data state distinguish_absent=0
-  [ "$#" -ge 1 ] && [ "$#" -le 2 ] || { usage >&2; exit 2; }
-  if [ "$#" -eq 2 ]; then
-    [ "$2" = --distinguish-absent ] || { usage >&2; exit 2; }
-    distinguish_absent=1
-  fi
+#
+# `--identity` additionally prints this call's LIFECYCLE identity on an exit 0,
+# and only then, so the default remains the silent predicate every existing
+# caller reads. The identity is the hold-set stamp and the count of resolution
+# records the body already carries: re-holding released work writes a new stamp
+# (command_hold preserves it only while the same hold stands) and every recorded
+# answer advances the count, so a released-then-re-held task is a DIFFERENT call
+# under the same task id. A consumer that bounds repeated work per call needs
+# exactly that distinction; the task id alone would silently merge two calls.
+# It costs one extra read, paid only when a call is actually open.
+command_open() {  # <task-id> [--identity] [--distinguish-absent]
+  local id='' identity=0 distinguish_absent=0 data state show shown_body
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --identity) identity=1 ;;
+      --distinguish-absent) distinguish_absent=1 ;;
+      --) ;;
+      -*) usage >&2; exit 2 ;;
+      *)
+        [ -z "$id" ] || { usage >&2; exit 2; }
+        id=$1
+        ;;
+    esac
+    shift
+  done
   case "$id" in
     ''|*[!A-Za-z0-9._-]*)
       printf 'fm-captain-hold: task id must be a non-empty privacy-safe slug: %s\n' "$id" >&2
@@ -1775,6 +1796,16 @@ command_open() {  # <task-id> [--distinguish-absent]
   if fm_backlog_row_probe "$data" "$id"; then
     state=${FM_BACKLOG_ROW_STATE%% *}
     if [ "$state" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+      if [ "$identity" -eq 1 ]; then
+        show=$(task_show "$id") || {
+          printf 'fm-captain-hold: captain call %s is open but its record could not be read\n' "$id" >&2
+          exit 2
+        }
+        shown_body=$(show_field "$show" body)
+        printf '%s#%s\n' \
+          "$(body_hold_set_timestamp "$(decode_shown_value "$shown_body")")" \
+          "$(resolution_record_count "$shown_body")"
+      fi
       return 0
     fi
     return 1
