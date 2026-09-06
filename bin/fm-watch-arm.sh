@@ -575,6 +575,7 @@ owned_child_finished() {
     rm -f "$child_out" 2>/dev/null || true
     child=
     child_out=
+    printf 'FM_WATCH_ARM_STATE=busy-holder-waiting\n'
     wait_status=0
     wait_for_busy_holder "$holder" || wait_status=$?
     if [ "$wait_status" -eq 0 ]; then
