@@ -1239,6 +1239,7 @@ run_check_capture() {
 pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
   local id=$1 url=$2 condition=$3 head=$4 state_line state mode spawn_gen message
   local marker="$STATE/$id.pr-refresh-dispatched" delivery_id known=0
+  local escalated="$STATE/$id.pr-refresh-escalated" stale_secs age
   # Captured before the state check so a mid-check replacement can't hand its own generation to the "done" verdict it never earned.
   spawn_gen=$(fm_meta_get "$STATE/$id.meta" spawn_gen)
   state_line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || state_line=
@@ -1255,7 +1256,7 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
     *) state=unknown ;;
   esac
   if [ "$state" != "done" ]; then
-    rm -f "$marker"
+    rm -f "$marker" "$escalated"
     printf 'branch-refresh-refused pr=%s head=%s condition=%s task-state=%s\n' \
       "$url" "$head" "$condition" "$state"
     return 1
@@ -1278,20 +1279,34 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
   # queued work); fm-send's durable fire-and-forget dedup is authoritative,
   # so the marker is only a wake-noise hint, never load-bearing for delivery.
   delivery_id=$(printf '%s' "$head" | cut -c1-16)
-  [ "$(cat "$marker" 2>/dev/null)" = "$head" ] && known=1
+  if [ "$(cat "$marker" 2>/dev/null)" = "$head" ]; then
+    known=1
+  else
+    rm -f "$escalated"
+  fi
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_EXPECTED_SPAWN_GEN="$spawn_gen" \
     "$FM_PR_REFRESH_SEND_BIN" "$id" --fire-and-forget "$delivery_id" "$message" >/dev/null 2>&1; then
-    rm -f "$marker"
+    rm -f "$marker" "$escalated"
     printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=worker-dispatch-failed\n' \
       "$url" "$head" "$condition"
     return 1
   fi
-  printf '%s' "$head" > "$marker"
   if [ "$known" -eq 1 ]; then
+    # Fire-and-forget skips the inbox's own re-ring/escalation ladder, so an
+    # unconfirmed doorbell (dead pane, missing endpoint) must escalate here.
+    stale_secs=${FM_PR_REFRESH_STALE_SECS:-300}
+    age=$(age_of "$marker")
+    if [ "$age" -ge "$stale_secs" ] && [ "$(cat "$escalated" 2>/dev/null)" != "$head" ]; then
+      printf '%s' "$head" > "$escalated"
+      printf 'branch-refresh-stale pr=%s head=%s condition=%s reason=unacknowledged-after-%ss\n' \
+        "$url" "$head" "$condition" "$stale_secs"
+      return 1
+    fi
     printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-pending\n' \
       "$url" "$head" "$condition"
     return 2
   fi
+  printf '%s' "$head" > "$marker"
   printf 'branch-refresh-dispatched pr=%s head=%s condition=%s\n' "$url" "$head" "$condition"
 }
 

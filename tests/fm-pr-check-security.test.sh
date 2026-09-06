@@ -910,6 +910,91 @@ SH
   pass "branch currency reactivates finished work, names conflicts, and refuses active validation"
 }
 
+test_branch_currency_stale_dispatch_escalates() {
+  local dir state rc marker back
+
+  dir=$(make_case branch-currency-stale-escalate)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/3 >/dev/null \
+    || fail "could not arm stale branch-currency fixture"
+  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: done \302\267 source: run-step \302\267 checks green: PR ready for review\n'
+SH
+  cat > "$dir/fakebin/fm-refresh-send.sh" <<'SH'
+#!/usr/bin/env bash
+delivery_id=
+prev=
+for arg in "$@"; do
+  [ "$prev" != --fire-and-forget ] || delivery_id=$arg
+  prev=$arg
+done
+ids_log="$FM_TEST_REFRESH_SEND_LOG.ids"
+if [ -n "$delivery_id" ] && [ -f "$ids_log" ] && grep -qxF "$delivery_id" "$ids_log"; then
+  exit 0
+fi
+[ -z "$delivery_id" ] || printf '%s\n' "$delivery_id" >> "$ids_log"
+printf '%s\n' "$*" >> "$FM_TEST_REFRESH_SEND_LOG"
+SH
+  chmod +x "$dir/fakebin/fm-crew-state.sh" "$dir/fakebin/fm-refresh-send.sh"
+  : > "$dir/refresh-send.log"
+  rm -f "$dir/refresh-send.log.ids"
+
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/stale1.out" 2> "$dir/stale1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "stale-dispatch watcher failed: $(cat "$dir/stale1.err")"
+  assert_grep 'branch-refresh-dispatched pr=https://github.com/o/r/pull/3 head=0123456789abcdef0123456789abcdef01234567 condition=behind' \
+    "$dir/stale1.out" "fresh branch-currency dispatch was not woken"
+
+  marker="$state/task-a.pr-refresh-dispatched"
+  [ -f "$marker" ] || fail "branch-refresh-dispatched left no dedup marker"
+  back=$(( $(date +%s) - 1000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$marker"
+  else touch -m -d "@$back" "$marker"; fi
+
+  # Fire-and-forget carries no re-ring/escalation of its own, so a worker
+  # whose pane never types the doorbell back would otherwise leave this task
+  # "done" and behind forever with nothing louder than a triage-log line.
+  ack_watcher_cycle "$state" || fail "stale branch-currency acknowledgement failed"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND FM_PR_REFRESH_STALE_SECS=300 \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/stale2.out" 2> "$dir/stale2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "stale branch-currency escalation watcher failed: $(cat "$dir/stale2.err")"
+  assert_grep 'branch-refresh-stale pr=https://github.com/o/r/pull/3 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=unacknowledged-after-300s' \
+    "$dir/stale2.out" "an unacknowledged fire-and-forget dispatch never escalated to the captain"
+  [ "$(wc -l < "$dir/refresh-send.log" | tr -d ' ')" -eq 1 ] \
+    || fail "the stale escalation resent a duplicate refresh instruction"
+
+  # Escalating again for the same still-stale head would just be noise; the
+  # next cycle goes back to a quiet deferral until something changes.
+  ack_watcher_cycle "$state" || fail "post-escalation acknowledgement failed"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND FM_PR_REFRESH_STALE_SECS=300 \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/stale3.out" 2> "$dir/stale3.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "post-escalation branch-currency watcher failed: $(cat "$dir/stale3.err")"
+  assert_grep 'branch-refresh-deferred pr=https://github.com/o/r/pull/3 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=dispatch-pending' \
+    "$state/.watch-triage.log" "a repeat cycle after escalation was not quietly deferred"
+  pass "an unacknowledged fire-and-forget branch-refresh escalates once instead of deferring forever"
+}
+
 test_atomic_interruption_leaves_no_partial_artifact() {
   local dir rc
   dir=$(make_case interrupted-write)
@@ -2296,6 +2381,7 @@ test_gitlab_merged_poll_retires() {
 }
 
 test_branch_currency_dispatch_and_active_refusal
+test_branch_currency_stale_dispatch_escalates
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
