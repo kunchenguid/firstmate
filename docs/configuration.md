@@ -255,6 +255,32 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Running-session overview (bin/fm-session-view.sh)
+
+`bin/fm-session-view.sh` shows everything running for one home in a single list: workers, open Lavish review pages, the background services that keep the fleet moving, and the harness background sessions under a shared harness daemon.
+It renders `bin/fm-session-inventory.sh --json`, which is the structured owner of that inventory; both are read-only and neither ever closes, kills, or signals anything it reports.
+Close commands are printed for you to run, and a row that could lose work in progress says so on the line below its command.
+
+Anything at or over the stale threshold is marked with a leading `!`.
+`FM_SESSION_STALE_DAYS` sets that threshold and defaults to 3 days.
+The same threshold drives the unasked `SESSIONS_STALE:` lines a session start prints through [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh); set `FM_BOOTSTRAP_STALE_SESSIONS=0` to opt a home out of those lines.
+
+For a pane you leave open, `--watch` redraws in place:
+
+```sh
+bin/fm-session-view.sh --watch
+```
+
+In WezTerm, one line opens that pane and keeps it there:
+
+```sh
+wezterm cli split-pane --right --percent 35 -- bash -lc 'cd ~/Projects/firstmate && exec bin/fm-session-view.sh --watch'
+```
+
+`--interval` sets the redraw cadence; it defaults to 60 seconds and refuses anything under 15, because a faster redraw would poll harder than supervision itself for a display that changes on the scale of minutes.
+The view stays readable without colour and in a narrow pane: `--color never` disables colour (so does `NO_COLOR`), the "belongs to" column is dropped below 60 columns, and close commands are always printed unabridged so they stay pasteable.
+Each script's `--help` owns its exact flags and bounds.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
