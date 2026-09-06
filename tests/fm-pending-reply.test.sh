@@ -1761,23 +1761,25 @@ test_pre_existing_archive_is_adopted_not_clobbered() {
 }
 
 test_resolution_reports_archive_failure() {
-  local home state corr hot original_archive first_rc=0
+  local home state corr hot archive original_publish first_rc=0
   home=$(setup_parent retention-archive-failure)
   state="$home/state"
   export FM_PENDING_REPLY_NOW=7472
   corr=$(fm_pending_reply_create "$home" "$state" hibit "require archival")
   fm_pending_reply_mark_delivered "$state" "$corr"
   hot=$(fm_pending_reply_path "$state" "$corr")
+  archive="$(fm_pending_reply_archive_dir "$state")/$corr"
   printf 'done [corr=%s]: complete\n' "$corr" > "$state/hibit.status"
-  original_archive=$(declare -f _fm_pending_reply_archive_locked)
-  _fm_pending_reply_archive_locked() { return 1; }
+  original_publish=$(declare -f _fm_pending_reply_publish_stage_locked)
+  _fm_pending_reply_publish_stage_locked() { return 1; }
   fm_pending_reply_try_resolve "$state" "$corr" || first_rc=$?
-  unset -f _fm_pending_reply_archive_locked
-  eval "$original_archive"
+  unset -f _fm_pending_reply_publish_stage_locked
+  eval "$original_publish"
   [ "$first_rc" -ne 0 ] || fail "resolution reported success after archival failed"
   [ -f "$hot" ] || fail "failed archival lost the pending record"
   [ "$(fm_pending_reply_get "$hot" phase)" != resolved ] \
     || fail "failed archival left a terminal record in the hot set"
+  [ ! -e "$archive" ] || fail "failed archive publication exposed a terminal record"
   fm_pending_reply_tick "$state" || fail "watcher retry should succeed"
   [ -f "$(fm_pending_reply_archive_dir "$state")/$corr" ] \
     || fail "watcher retry did not archive"
@@ -1785,7 +1787,7 @@ test_resolution_reports_archive_failure() {
 }
 
 test_archive_failure_does_not_reopen_resolved_reply() {
-  local home state corr hot original_archive escalation_rc=0
+  local home state corr hot original_publish escalation_rc=0
   home=$(setup_parent retention-archive-escalation-race)
   state="$home/state"
   export FM_PENDING_REPLY_NOW=7473
@@ -1794,11 +1796,11 @@ test_archive_failure_does_not_reopen_resolved_reply() {
   hot=$(fm_pending_reply_path "$state" "$corr")
   fm_pending_reply_set "$hot" phase recovery_failed
   printf 'done [corr=%s]: late but resolved\n' "$corr" > "$state/hibit.status"
-  original_archive=$(declare -f _fm_pending_reply_archive_locked)
-  _fm_pending_reply_archive_locked() { return 1; }
+  original_publish=$(declare -f _fm_pending_reply_publish_stage_locked)
+  _fm_pending_reply_publish_stage_locked() { return 1; }
   fm_pending_reply_maybe_escalate "$state" "$corr" || escalation_rc=$?
-  unset -f _fm_pending_reply_archive_locked
-  eval "$original_archive"
+  unset -f _fm_pending_reply_publish_stage_locked
+  eval "$original_publish"
   [ "$escalation_rc" -ne 0 ] || fail "archive failure was hidden by escalation"
   [ "$(fm_pending_reply_get "$hot" phase)" = recovery_failed ] \
     || fail "archive failure changed the retryable recovery phase"
@@ -1808,6 +1810,34 @@ test_archive_failure_does_not_reopen_resolved_reply() {
   [ -f "$(fm_pending_reply_archive_dir "$state")/$corr" ] \
     || fail "watcher retry did not archive after the transient failure"
   pass "archive failure cannot reopen a resolved reply"
+}
+
+test_archive_publication_survives_hot_unlink_failure() {
+  local home state corr hot archive original_unlink first_rc=0
+  home=$(setup_parent retention-archive-unlink-failure)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=7474
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "atomic archival")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  hot=$(fm_pending_reply_path "$state" "$corr")
+  archive="$(fm_pending_reply_archive_dir "$state")/$corr"
+  printf 'done [corr=%s]: complete\n' "$corr" > "$state/hibit.status"
+  original_unlink=$(declare -f _fm_pending_reply_unlink_hot_locked)
+  _fm_pending_reply_unlink_hot_locked() { return 1; }
+  fm_pending_reply_try_resolve "$state" "$corr" || first_rc=$?
+  unset -f _fm_pending_reply_unlink_hot_locked
+  eval "$original_unlink"
+  [ "$first_rc" -ne 0 ] || fail "resolution hid the failed hot unlink"
+  [ -f "$hot" ] || fail "failed unlink unexpectedly removed the hot record"
+  [ "$(fm_pending_reply_get "$hot" phase)" != resolved ] \
+    || fail "failed unlink left a resolved record in the hot set"
+  [ -f "$archive" ] || fail "atomic resolved publication did not reach the archive"
+  [ "$(fm_pending_reply_get "$archive" phase)" = resolved ] \
+    || fail "the archived publication was not fully resolved"
+  fm_pending_reply_tick "$state" || fail "ordinary tick did not converge the duplicate"
+  [ ! -e "$hot" ] || fail "ordinary tick did not remove the unresolved hot copy"
+  [ -f "$archive" ] || fail "ordinary tick lost the resolved archive"
+  pass "resolved publication survives a failed hot unlink"
 }
 
 test_partial_resolution_is_not_published_or_archived() {
@@ -1905,6 +1935,7 @@ test_create_regenerates_an_archived_correlation_collision
 test_pre_existing_archive_is_adopted_not_clobbered
 test_resolution_reports_archive_failure
 test_archive_failure_does_not_reopen_resolved_reply
+test_archive_publication_survives_hot_unlink_failure
 test_partial_resolution_is_not_published_or_archived
 test_resolved_escalation_retry_archives_immediately
 test_archived_wrong_home_lookup_is_inert
