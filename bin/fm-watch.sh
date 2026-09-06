@@ -1034,8 +1034,8 @@ pause_state_class() {  # <window> <task>
 # a decision, or be wedged. A declared wait whose authoritative current state cannot
 # NAME it reaches here even so, on first sight of each distinct stale hash:
 # pause_state_class answers `none` for a still-LIVE agent in that unnamed case, so a
-# worker parked at a gate its own state could not report is never silenced by a
-# declaration it left behind.
+# worker standing somewhere its stale declaration does not name - at a run gate its
+# current state reports as a park, say - is never silenced by that declaration.
 #
 # So a declared wait bounds this path to the same once-per-PAUSE_RESURFACE_SECS
 # cadence resurface_absorbed owns for the absorbed paths, throttled by this
