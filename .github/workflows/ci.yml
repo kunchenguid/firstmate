@@ -390,6 +390,16 @@ jobs:
             exit 1
           }
 
+          # The composer classifier runs under stock /bin/bash on every macOS
+          # fleet, and its fixtures must be pure UTF-8 (Bash 3.2 has no \u).
+          composer_output=$(/bin/bash tests/fm-composer-lib.test.sh)
+          printf '%s\n' "$composer_output"
+          composer_count=$(printf '%s\n' "$composer_output" | grep -c '^ok - ')
+          [ "$composer_count" -eq 33 ] || {
+            echo "::error::expected 33 composer classifier tests, got $composer_count"
+            exit 1
+          }
+
           command -v npm >/dev/null || { echo "::error::npm is required to install tasks-axi"; exit 1; }
           npm install -g tasks-axi@0.2.5 >/dev/null
           PATH="$(npm prefix -g)/bin:$PATH"

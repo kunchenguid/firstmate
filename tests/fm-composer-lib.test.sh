@@ -269,20 +269,22 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
   # rather than the box-drawing family. Without treating those as edges, a bare
   # composer's WRAP region walks through its own closing rule and swallows the
   # footer, whose real content turns an idle pane into a false `pending`.
-  # Captured live from a herdr cursor pane.
-  local screen plain out
-  plain=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n  \u2192 Add a follow-up\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
+  # Captured live from a herdr cursor pane. The glyphs are literal UTF-8 on
+  # purpose: stock macOS Bash 3.2 has no `\u` escape in printf or $'...', so an
+  # escaped fixture feeds the classifier the six ASCII bytes `\u2580` instead.
+  local screen esc out
   # The closing rule must bound the region, so the footer below is not input.
-  fm_composer_row_has_edge " $(printf '\u2580\u2580\u2580')" \
+  fm_composer_row_has_edge ' ▀▀▀' \
     || fail "a half-block rule row must count as a structural edge"
-  fm_composer_row_has_edge " $(printf '\u2584\u2584\u2584')" \
+  fm_composer_row_has_edge ' ▄▄▄' \
     || fail "the upper half-block rule must count as a structural edge"
-  # Non-vacuousness: the footer rows really are non-blank content that would be
-  # swallowed if the rule did not bound the region.
-  case "$plain" in *"Run Everything"*) : ;; *) fail "fixture lost its footer content" ;; esac
-  ESC_LOCAL=$(printf '\033')
-  screen=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n'"  ${ESC_LOCAL}[2m\u2192 ${ESC_LOCAL}[0;7mA${ESC_LOCAL}[0;2mdd a follow-up${ESC_LOCAL}[0m"$'\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$(printf '%b' "$screen")")
+  esc=$(printf '\033')
+  screen=$'transcript\n ▄▄▄▄▄▄▄▄\n'"  ${esc}[2m→ ${esc}[0;7mA${esc}[0;2mdd a follow-up${esc}[0m"$'\n ▀▀▀▀▀▀▀▀\n  Cursor Grok 4.5 High · 6.7%   Run Everything\n  ~/wt · 64cdd3a'
+  # Non-vacuousness: the classified fixture really carries non-blank footer rows
+  # below the closing rule, which would be swallowed if the rule did not bound
+  # the region.
+  case "$screen" in *"Run Everything"*) : ;; *) fail "fixture lost its footer content" ;; esac
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen")
   [ "$out" = empty ] \
     || fail "an idle cursor composer inside herdr half-block rules must read empty, got '$out'"
   pass "matrix: herdr half-block rules bound a bare composer's wrap region"

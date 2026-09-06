@@ -125,6 +125,7 @@ Admitting the family moves that tail into the bounded concurrent group.
 Current runner-file selection was verified on 2026-08-28 with the runner and its tests bound to each measured Bash version.
 Because the runner uses `#!/usr/bin/env bash` and invokes each test with `bash` from `PATH`, the stock macOS measurement used `PATH=/bin:$PATH bin/fm-test-run.sh --changed --max-wall-ms 300000` so both resolved to `/bin/bash` 3.2.57.
 Two runs selected all 33 scripts, passed the five-minute result check in 153.5s and 166.8s, and reported the same two failures as `main`: `tests/fm-muse-harness.test.sh` and `tests/fm-composer-lib.test.sh`.
+`tests/fm-composer-lib.test.sh` passes under that shell as of 2026-09-03: its failure was an escaped `\u` fixture that Bash 3.2 cannot decode, and the stock macOS Bash lane in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) now runs the suite under real `/bin/bash` 3.2 so the defect cannot return unnoticed.
 With Bash 5.3.9 on `PATH`, three runs of `bin/fm-test-run.sh --changed --max-wall-ms 300000` selected the same 33 scripts, completed with 0 failures, and reported 163.8s, 172.0s, and 166.9s.
 All five runs used plain `--changed` with no `--jobs` flag, exercised the production automatic scheduler, and completed under five minutes.
 
