@@ -225,6 +225,25 @@ test_interface_purity_catches_keyword_command_positions() {
   pass "fm-lint.sh catches beads calls after a shell keyword or wrapper"
 }
 
+test_interface_purity_exempts_test_scripts() {
+  local tmp out rc=0
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): interface-boundary tests exemption"
+    return 0
+  fi
+  tmp=$(fm_test_tmproot fm-lint-purity-tests)
+  mkdir -p "$tmp/tests"
+  # A REAL direct bd call, not prose: the exemption must cover an actual call in
+  # a tests/ path, the exact shape upstream fixture scripts need to bootstrap a
+  # beads graph before tasks-axi can operate on it.
+  fm_lint_write_purity_fixture "$tmp/tests/offender.sh" call
+  out=$("$LINT" "$tmp/tests/offender.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a direct beads call in a tests/ path failed the interface boundary"$'\n'"$out"
+  assert_not_contains "$out" "never the beads CLI directly" \
+    "a direct beads call in a tests/ path was reported as a call"
+  pass "fm-lint.sh exempts test scripts from the interface boundary"
+}
+
 test_interface_purity_catches_case_exec_and_eval_positions() {
   local tmp out rc=0
   tmp=$(fm_test_tmproot fm-lint-purity-positions)
@@ -1433,5 +1452,6 @@ test_changed_mode_hides_cross_file_codes_that_ci_still_sees
 test_local_exclusion_list_covers_every_no_external_sources_code
 test_interface_purity_rejects_a_direct_beads_call
 test_interface_purity_allows_prose_and_tasks_axi
+test_interface_purity_exempts_test_scripts
 test_interface_purity_catches_keyword_command_positions
 test_interface_purity_catches_case_exec_and_eval_positions
