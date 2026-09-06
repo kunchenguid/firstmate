@@ -203,13 +203,15 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true`, pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes, and pins `commands.test` to `bin/fm-test-run.sh --changed --exclude-family real-herdr-gated` so the gate's test baseline runs through the repository's own runner instead of a hand-chained walk of `bash tests/*.test.sh`.
+The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.
 Storing evidence in the repo publishes each run's test artifacts to the orphan `no-mistakes/evidence` branch and links them from the PR body, instead of keeping them on local disk under the no-mistakes home.
 That branch shares no history with code branches, so evidence never enters a pushed feature branch or the default branch; the worktree's `.no-mistakes/` stays local and CI rejects tracked entries under that path.
-`commands.test` stays changed-file-scoped and must never become a complete `tests/*.test.sh` walk: `--changed` selects only the families the branch's changed files map to, runs concurrency-admitted scripts with bounded concurrency, keeps every unproven stateful script serial, and applies its own generous per-script bound.
-The runner's `--help` output owns the exact selection, scheduling, and timeout rules.
-It excludes `real-herdr-gated` on the same grounds the portable CI lanes do, because those scripts drive a live Herdr lab and the dedicated required Herdr lane owns that coverage.
-Because firstmate always supplies `--intent`, that command is a baseline and the Test step still runs its intent-targeted evidence agent on top of it.
+`commands.test` must never be configured, whether to a complete `tests/*.test.sh` walk or a partial one (a `--family`/`--changed` selection, or any other fixed script list): no-mistakes runs `commands.test` verbatim and unconditionally after every fix round, so any walk pinned there multiplies by round count.
+PR #3644 pinned `bin/fm-test-run.sh --changed --exclude-family real-herdr-gated` as that baseline and measured 32.7 minutes per validation, against 3.6 minutes leaving Test intent-targeted, because the same 75-162-script walk reran on every one of up to three fix rounds; deleting the pin restored the 3.6-minute posture.
+Local no-mistakes Test is intent-targeted validation of whether the change meets its brief: because firstmate always supplies `--intent`, no-mistakes runs its own intent-targeted evidence agent regardless of `commands.test`.
+`.github/workflows/ci.yml` owns broad regression (behavior suite, platform, security, Herdr, tmux, and lifecycle coverage); a baseline `commands.test` would duplicate that coverage while paying its cost on every fix round.
+Ad hoc local verification of specific paths still goes through `bin/fm-test-run.sh` invoked directly, never pinned here.
+`tests/fm-nm-test-contract.test.sh` is the regression guard enforcing this via a real YAML parse of `.no-mistakes.yaml`, not a grep of its text.
 `commands.test` executes code, so no-mistakes honors it only from the default-branch copy of `.no-mistakes.yaml`; a pushed branch cannot change what the gate runs.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
