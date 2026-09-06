@@ -62,11 +62,12 @@
 #
 # --selection-receipt is the current primary selection receipt required only
 #   when the resolved dispatch profile sets requiresSelectionReceipt=true for
-#   its exact harness/model tuple. Its versioned schema, freshness, and
-#   quota snapshot digest are owned by bin/fm-dispatch-receipt-lib.sh. A
-#   successful guarded dispatch records selection_receipt=,
-#   selection_receipt_sha256=, selection_receipt_created_at=, and
-#   quota_snapshot_sha256= in the task
+#   its exact harness/model tuple. Its versioned schema, effective worker
+#   model, quota-axi evidence, freshness, and quota snapshot digest are owned
+#   by bin/fm-dispatch-receipt-lib.sh. A successful guarded dispatch records
+#   selection_receipt=, selection_receipt_sha256=,
+#   selection_receipt_created_at=, effective_worker_model=,
+#   quota_evidence_source=, and quota_snapshot_sha256= in the task
 #   metadata. The guard proves evidence integrity only; it never routes a task
 #   or ranks a provider.
 #   Nothing else in this home's environment changes, and a spawn without the
@@ -1758,6 +1759,8 @@ SELECTION_RECEIPT_REQUIRED=0
 FM_DISPATCH_RECEIPT_PATH=
 FM_DISPATCH_RECEIPT_SHA256=
 FM_DISPATCH_RECEIPT_CREATED_AT=
+FM_DISPATCH_EFFECTIVE_WORKER_MODEL=
+FM_DISPATCH_QUOTA_EVIDENCE_SOURCE=
 FM_DISPATCH_QUOTA_SNAPSHOT_SHA256=
 if [ "$KIND" != secondmate ]; then
   if fm_dispatch_selection_receipt_required "$CONFIG/crew-dispatch.json" "$HARNESS" "${MODEL:-default}"; then
@@ -3728,7 +3731,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort codex_home selection_receipt selection_receipt_sha256 selection_receipt_created_at quota_snapshot_sha256 busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort codex_home selection_receipt selection_receipt_sha256 selection_receipt_created_at effective_worker_model quota_evidence_source quota_snapshot_sha256 busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3752,6 +3755,8 @@ preserve_relaunch_meta() {
   [ -z "$FM_DISPATCH_RECEIPT_PATH" ] || echo "selection_receipt=$FM_DISPATCH_RECEIPT_PATH"
   [ -z "$FM_DISPATCH_RECEIPT_SHA256" ] || echo "selection_receipt_sha256=$FM_DISPATCH_RECEIPT_SHA256"
   [ -z "$FM_DISPATCH_RECEIPT_CREATED_AT" ] || echo "selection_receipt_created_at=$FM_DISPATCH_RECEIPT_CREATED_AT"
+  [ -z "$FM_DISPATCH_EFFECTIVE_WORKER_MODEL" ] || echo "effective_worker_model=$FM_DISPATCH_EFFECTIVE_WORKER_MODEL"
+  [ -z "$FM_DISPATCH_QUOTA_EVIDENCE_SOURCE" ] || echo "quota_evidence_source=$FM_DISPATCH_QUOTA_EVIDENCE_SOURCE"
   [ -z "$FM_DISPATCH_QUOTA_SNAPSHOT_SHA256" ] || echo "quota_snapshot_sha256=$FM_DISPATCH_QUOTA_SNAPSHOT_SHA256"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"

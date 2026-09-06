@@ -234,11 +234,13 @@ make_control_selection_receipt() {  # <case-dir> <task-id>
   printf 'generatedAt: "%s"\nquota: []\n' "$created_at" > "$snapshot"
   digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
   jq -n --arg id "$id" --arg created_at "$created_at" --arg snapshot "$snapshot" --arg digest "$digest" '
-    {version: 1, createdAt: $created_at, task: $id, harness: "codex",
-     model: "gpt-6-astra", effort: "high", taskFit: "relaunch remains in scope",
+    {version: 2, createdAt: $created_at, task: $id, harness: "codex",
+     model: "gpt-6-astra", effort: "high", effectiveWorkerModel: "gpt-6-astra",
+     taskFit: "relaunch remains in scope",
      candidates: [{harness: "codex", model: "gpt-6-astra", effort: "high",
                    disposition: "selected", rationale: "current primary evidence"}],
      catalogEvidence: ["synthetic catalog evidence"],
+     quotaEvidence: {source: "quota-axi", model: "gpt-6-astra", snapshotSha256: $digest},
      quotaSnapshot: {path: $snapshot, sha256: $digest}}' > "$receipt"
   printf '%s\n' "$receipt"
 }
@@ -770,6 +772,8 @@ test_astra_relaunch_requires_and_revalidates_a_selection_receipt_before_stop() {
   out=$(run_control "$dir" rl-astra relaunch --note "revalidate primary evidence" --selection-receipt "$receipt"); rc=$?
   expect_code 0 "$rc" "a current Astra receipt should permit relaunch: $out"
   assert_grep "selection_receipt=$receipt" "$dir/home/state/rl-astra.meta" "relaunch did not record its current receipt"
+  assert_grep "effective_worker_model=gpt-6-astra" "$dir/home/state/rl-astra.meta" "relaunch did not record its effective worker model"
+  assert_grep "quota_evidence_source=quota-axi" "$dir/home/state/rl-astra.meta" "relaunch did not record its quota evidence source"
   pass "fm-control relaunch: Astra receipt validation happens before stop and reaches fm-spawn"
 }
 

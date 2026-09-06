@@ -459,11 +459,13 @@ make_selection_receipt() {  # <case-dir> <name> <task> <model> [created-at] [sna
   digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
   jq -n --arg created_at "$created_at" --arg task "$task" --arg model "$model" \
     --arg snapshot "$snapshot" --arg digest "$digest" '
-      {version: 1, createdAt: $created_at, task: $task, harness: "codex",
-       model: $model, effort: "high", taskFit: "bounded dispatch verification",
+      {version: 2, createdAt: $created_at, task: $task, harness: "codex",
+       model: $model, effort: "high", effectiveWorkerModel: $model,
+       taskFit: "bounded dispatch verification",
        candidates: [{harness: "codex", model: $model, effort: "high",
                      disposition: "selected", rationale: "current account evidence"}],
        catalogEvidence: ["synthetic authoritative catalog evidence"],
+       quotaEvidence: {source: "quota-axi", model: $model, snapshotSha256: $digest},
        quotaSnapshot: {path: $snapshot, sha256: $digest}}' > "$receipt"
   printf '%s\n' "$receipt"
 }
@@ -624,7 +626,7 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
   status=$?
   expect_code 1 "$status" "a receipt for another task should refuse"
-  assert_contains "$out" "not a valid version 1 primary selection receipt" "wrong-task refusal did not name receipt identity"
+  assert_contains "$out" "not a valid version 2 primary selection receipt" "wrong-task refusal did not name receipt identity"
   assert_absent "$HOME_DIR/state/$id.meta" "wrong-task receipt wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "wrong-task receipt typed a launch command"
 
@@ -633,9 +635,42 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
   status=$?
   expect_code 1 "$status" "a receipt for another model should refuse"
-  assert_contains "$out" "not a valid version 1 primary selection receipt" "wrong-model refusal did not name receipt identity"
+  assert_contains "$out" "not a valid version 2 primary selection receipt" "wrong-model refusal did not name receipt identity"
   assert_absent "$HOME_DIR/state/$id.meta" "wrong-model receipt wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "wrong-model receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" missing-effective-model "$id" gpt-6-astra)
+  jq 'del(.effectiveWorkerModel)' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a receipt missing effective worker model should refuse"
+  assert_contains "$out" "not a valid version 2 primary selection receipt" "missing effective model refusal did not name receipt evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing effective model receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing effective model receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" mismatched-effective-model "$id" gpt-6-astra)
+  jq '.effectiveWorkerModel = "gpt-5.6-terra"' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a mismatched effective worker model should refuse"
+  assert_contains "$out" "not a valid version 2 primary selection receipt" "effective model mismatch did not name receipt evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "mismatched effective model receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "mismatched effective model receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" non-quota-axi-evidence "$id" gpt-6-astra)
+  jq '.quotaEvidence.source = "unverified"' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "quota evidence from another source should refuse"
+  assert_contains "$out" "not a valid version 2 primary selection receipt" "quota evidence source refusal did not name receipt evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "non-quota-axi evidence wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "non-quota-axi evidence typed a launch command"
 
   receipt=$(make_selection_receipt "$CASE_DIR" no-selected-match "$id" gpt-6-astra)
   jq '.candidates[0].disposition = "not-selected"' "$receipt" > "$receipt.tmp"
@@ -644,7 +679,7 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
   status=$?
   expect_code 1 "$status" "a receipt without a selected matching candidate should refuse"
-  assert_contains "$out" "not a valid version 1 primary selection receipt" "candidate accounting refusal did not name receipt identity"
+  assert_contains "$out" "not a valid version 2 primary selection receipt" "candidate accounting refusal did not name receipt identity"
   assert_absent "$HOME_DIR/state/$id.meta" "candidate accounting refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "candidate accounting refusal typed a launch command"
 
@@ -661,7 +696,7 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
   status=$?
   expect_code 1 "$status" "a receipt with two selected candidates should refuse"
-  assert_contains "$out" "not a valid version 1 primary selection receipt" "multiple-selection refusal did not name receipt identity"
+  assert_contains "$out" "not a valid version 2 primary selection receipt" "multiple-selection refusal did not name receipt identity"
   assert_absent "$HOME_DIR/state/$id.meta" "multiple-selection receipt wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "multiple-selection receipt typed a launch command"
 
@@ -683,6 +718,10 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
   assert_grep "selection_receipt=$receipt" "$HOME_DIR/state/$id.meta" "valid receipt path was not recorded"
   assert_grep "selection_receipt_sha256=$(shasum -a 256 "$receipt" | awk '{print $1}')" "$HOME_DIR/state/$id.meta" \
     "receipt byte hash was not recorded separately from the quota snapshot hash"
+  assert_grep "effective_worker_model=gpt-6-astra" "$HOME_DIR/state/$id.meta" \
+    "valid receipt did not record its exact effective worker model"
+  assert_grep "quota_evidence_source=quota-axi" "$HOME_DIR/state/$id.meta" \
+    "valid receipt did not record its quota evidence source"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-6-astra'" "valid receipt did not reach the selected model launch"
   pass "Astra dispatch validates primary evidence before metadata or launch and accepts one current matching receipt"

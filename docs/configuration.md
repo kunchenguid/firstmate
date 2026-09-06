@@ -431,11 +431,11 @@ It is valid only for `harness: "codex"`, and any other harness carrying it is a 
 A profile with no `home` omits `--codex-home` and launches against whatever ambient default Codex account the worker's environment resolves.
 Bootstrap and `fm-spawn.sh` both refuse a path containing control bytes, a relative path, a missing directory, or a directory holding no `auth.json`, so a mistyped home is an actionable error rather than a silent fall back to `~/.codex`; neither ever reads that file's contents.
 `requiresSelectionReceipt` is optional and can only be literal `true` on a profile with an explicit harness and model.
-It makes every effort of that exact harness/model profile refuse before a worker endpoint, worktree, or backlog record changes unless Firstmate supplies a current version-1 selection receipt.
-The receipt binds the task and selected harness/model/effort, a task-fit rationale, candidate accounting, catalog evidence, and the SHA-256 of one saved `quota-axi` snapshot.
-`fm-spawn.sh` and `fm-control.sh` verify the schema, tuple, exactly one selected candidate that matches the tuple, receipt and snapshot digests, and a 15-minute maximum age by default (`FM_DISPATCH_RECEIPT_MAX_AGE_SECONDS` may narrow or extend that local bound).
+It makes every effort of that exact harness/model profile refuse before a worker endpoint, worktree, or backlog record changes unless Firstmate supplies a current version-2 selection receipt.
+The receipt binds the task and selected harness/model/effort, the exact effective worker model, a task-fit rationale, candidate accounting, catalog evidence, and quota evidence that identifies `quota-axi`, that model, and the SHA-256 of one saved `quota-axi` snapshot.
+`fm-spawn.sh` and `fm-control.sh` verify the schema, tuple, effective-worker-model equality, exactly one selected candidate that matches the tuple, quota-evidence source/model/snapshot binding, receipt and snapshot digests, and a 15-minute maximum age by default (`FM_DISPATCH_RECEIPT_MAX_AGE_SECONDS` may narrow or extend that local bound).
 The saved quota snapshot must itself carry a current `generatedAt` in normal quota-axi TOON output or the JSON fallback shape, so a fresh receipt cannot bless stale quota evidence.
-They do not infer a provider, score candidates, or select a route.
+They record the effective worker model and quota-evidence source alongside the receipt hashes in task metadata, but do not infer a provider, score candidates, or select a route.
 Every relaunch requires a newly current receipt too, rather than reusing the task's prior dispatch evidence.
 The two refusals differ in blast radius at bootstrap: a home the file states wrongly is a schema fault that invalidates the file, while a correctly stated home this machine cannot use right now is reported per home so `codex logout` on one account never disables the other account's candidates or rules naming no home.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.

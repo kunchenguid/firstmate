@@ -7,22 +7,26 @@
 # infer providers, rank candidates, or choose a route: those remain the
 # firstmate seat's quota-array-dispatch judgment.
 #
-# Receipt schema (version 1):
+# Receipt schema (version 2):
 # {
-#   "version": 1,
+#   "version": 2,
 #   "createdAt": "2026-09-06T15:04:05Z",
 #   "task": "task-id", "harness": "codex", "model": "gpt-6-astra",
-#   "effort": "high", "taskFit": "why this task fits the choice",
+#   "effort": "high", "effectiveWorkerModel": "gpt-6-astra",
+#   "taskFit": "why this task fits the choice",
 #   "candidates": [{"harness":"...", "model":"...", "effort":"...",
 #                   "disposition":"selected|not-selected", "rationale":"..."}],
 #   "catalogEvidence": ["authoritative catalog evidence"],
+#   "quotaEvidence": {"source":"quota-axi", "model":"gpt-6-astra",
+#                     "snapshotSha256":"..."},
 #   "quotaSnapshot": {"path":"/absolute/path/to/snapshot", "sha256":"..."}
 # }
 #
 # FM_DISPATCH_RECEIPT_MAX_AGE_SECONDS bounds receipt age (default 900).  The
 # successful validator exports only these shell variables for the caller's
-# metadata record: FM_DISPATCH_RECEIPT_PATH, _SHA256, _CREATED_AT, and
-# FM_DISPATCH_QUOTA_SNAPSHOT_SHA256.
+# metadata record: FM_DISPATCH_RECEIPT_PATH, _SHA256, _CREATED_AT,
+# _EFFECTIVE_WORKER_MODEL, _QUOTA_EVIDENCE_SOURCE, and
+# _QUOTA_SNAPSHOT_SHA256.
 
 fm_dispatch_selection_receipt_required() {  # <crew-dispatch.json> <harness> <model>
   local config=$1 harness=$2 model=$3 rc
@@ -92,6 +96,8 @@ fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model>
   FM_DISPATCH_RECEIPT_PATH=
   FM_DISPATCH_RECEIPT_SHA256=
   FM_DISPATCH_RECEIPT_CREATED_AT=
+  FM_DISPATCH_EFFECTIVE_WORKER_MODEL=
+  FM_DISPATCH_QUOTA_EVIDENCE_SOURCE=
   FM_DISPATCH_QUOTA_SNAPSHOT_SHA256=
   case "$receipt" in
     /*) ;;
@@ -109,9 +115,10 @@ fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model>
     return 1
   }
   jq -e --arg task "$task" --arg harness "$harness" --arg model "$model" --arg effort "$effort" '
-    (.version == 1)
+    (.version == 2)
     and (.createdAt | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
     and (.task == $task) and (.harness == $harness) and (.model == $model) and (.effort == $effort)
+    and (.effectiveWorkerModel == $model)
     and (.taskFit | type == "string" and length > 0)
     and (.candidates | type == "array" and length > 0
          and all(.[]; type == "object"
@@ -127,11 +134,17 @@ fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model>
            and $selected[0].effort == $effort)
     and (.catalogEvidence | type == "array" and length > 0
          and all(.[]; type == "string" and length > 0))
-    and (.quotaSnapshot | type == "object"
-         and (.path | type == "string" and test("^/[^[:cntrl:]]*$"))
-         and (.sha256 | type == "string" and test("^[a-f0-9]{64}$")))
+    and (.quotaEvidence | type == "object"
+         and (.source == "quota-axi")
+         and (.model == $model)
+         and (.snapshotSha256 | type == "string" and test("^[a-f0-9]{64}$")))
+    and (.quotaEvidence.snapshotSha256 as $quota_snapshot_sha256
+         | (.quotaSnapshot | type == "object"
+            and (.path | type == "string" and test("^/[^[:cntrl:]]*$"))
+            and (.sha256 | type == "string" and test("^[a-f0-9]{64}$"))
+            and (.sha256 == $quota_snapshot_sha256)))
   ' "$receipt" >/dev/null 2>&1 || {
-    echo "error: --selection-receipt is not a valid version 1 primary selection receipt for $harness/$model/$effort task $task" >&2
+    echo "error: --selection-receipt is not a valid version 2 primary selection receipt for $harness/$model/$effort task $task" >&2
     return 1
   }
   created_at=$(jq -r '.createdAt' "$receipt")
@@ -181,8 +194,16 @@ fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model>
     echo "error: --selection-receipt could not be hashed: $receipt" >&2
     return 1
   }
+  # shellcheck disable=SC2034 # These values are intentionally returned to the sourcing caller.
   FM_DISPATCH_RECEIPT_PATH=$receipt
+  # shellcheck disable=SC2034 # This value is intentionally returned to the sourcing caller.
   FM_DISPATCH_RECEIPT_SHA256=$receipt_digest
+  # shellcheck disable=SC2034 # This value is intentionally returned to the sourcing caller.
   FM_DISPATCH_RECEIPT_CREATED_AT=$created_at
+  # shellcheck disable=SC2034 # This value is intentionally returned to the sourcing caller.
+  FM_DISPATCH_EFFECTIVE_WORKER_MODEL=$(jq -r '.effectiveWorkerModel' "$receipt")
+  # shellcheck disable=SC2034 # This value is intentionally returned to the sourcing caller.
+  FM_DISPATCH_QUOTA_EVIDENCE_SOURCE=$(jq -r '.quotaEvidence.source' "$receipt")
+  # shellcheck disable=SC2034 # This value is intentionally returned to the sourcing caller.
   FM_DISPATCH_QUOTA_SNAPSHOT_SHA256=$expected
 }
