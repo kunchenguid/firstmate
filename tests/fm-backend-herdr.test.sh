@@ -4483,6 +4483,64 @@ test_wait_transition_clean_timeout_returns_1() {
 
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
+# fm_backend_herdr_canonical_socket_path folds a Windows drive-letter spelling
+# into the POSIX spelling of the same socket, so the launcher's claimed socket
+# and the session list's socket_path compare equal on native Windows. `cygpath`
+# ships only with Git for Windows, so these cases stub it and therefore run
+# everywhere; the guard in the adapter matches only `[A-Za-z]:[\/]*`, a shape
+# that cannot occur on Linux or macOS.
+# make_cygpath_fakebin <dir> <map|fail|empty> [mapped-path] -> echoes fakebin dir
+make_cygpath_fakebin() {
+  local dir=$1 mode=$2 mapped=${3-} fb="$1/cygpath-fakebin"
+  mkdir -p "$fb"
+  case "$mode" in
+    map)   printf '#!/usr/bin/env bash\nprintf %%s %s\n' "$(printf '%q' "$mapped")" > "$fb/cygpath" ;;
+    fail)  printf '#!/usr/bin/env bash\nexit 1\n' > "$fb/cygpath" ;;
+    empty) printf '#!/usr/bin/env bash\nprintf ""\n' > "$fb/cygpath" ;;
+  esac
+  chmod +x "$fb/cygpath"
+  printf '%s' "$fb"
+}
+
+canonical_socket_path_via() {  # <fakebin-dir-or-empty> <path> -> stdout, status
+  local fb=$1 path=$2
+  if [ -n "$fb" ]; then
+    PATH="$fb:$PATH" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_canonical_socket_path "$1"' "$ROOT" "$path"
+  else
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_canonical_socket_path "$1"' "$ROOT" "$path"
+  fi
+}
+
+test_canonical_socket_path_folds_a_windows_drive_letter_spelling() {
+  local dir sock fb posix_id win_id
+  dir="$TMP_ROOT/cygpath-map"; mkdir -p "$dir"
+  sock="$dir/herdr.sock"; : > "$sock"
+  fb=$(make_cygpath_fakebin "$dir" map "$sock")
+  posix_id=$(canonical_socket_path_via '' "$sock")
+  [ -n "$posix_id" ] || fail "the POSIX spelling must canonicalize to a non-empty identity"
+  win_id=$(canonical_socket_path_via "$fb" 'C:\fake\herdr.sock')
+  [ "$win_id" = "$posix_id" ] || \
+    fail "a drive-letter spelling must normalize to the same identity as its POSIX spelling (got '$win_id', want '$posix_id')"
+}
+
+test_canonical_socket_path_refuses_a_failed_cygpath() {
+  local dir fb status
+  dir="$TMP_ROOT/cygpath-fail"; mkdir -p "$dir"
+  fb=$(make_cygpath_fakebin "$dir" fail)
+  status=0
+  canonical_socket_path_via "$fb" 'C:\fake\herdr.sock' >/dev/null || status=$?
+  expect_code 1 "$status" "a drive-letter path whose cygpath conversion fails must be refused, not compared half-converted"
+}
+
+test_canonical_socket_path_refuses_empty_cygpath_output() {
+  local dir fb status
+  dir="$TMP_ROOT/cygpath-empty"; mkdir -p "$dir"
+  fb=$(make_cygpath_fakebin "$dir" empty)
+  status=0
+  canonical_socket_path_via "$fb" 'C:\fake\herdr.sock' >/dev/null || status=$?
+  expect_code 1 "$status" "a drive-letter path whose cygpath output is empty must be refused"
+}
+
 
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
@@ -4666,3 +4724,6 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_canonical_socket_path_folds_a_windows_drive_letter_spelling
+test_canonical_socket_path_refuses_a_failed_cygpath
+test_canonical_socket_path_refuses_empty_cygpath_output
