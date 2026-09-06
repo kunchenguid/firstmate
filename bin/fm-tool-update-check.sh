@@ -444,6 +444,7 @@ command_findings() {
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     if budget_exhausted; then
+      INCOMPLETE_REPORTED=1
       emit "$name check failed: the time budget ran out before every copy answered"
       break
     fi
@@ -479,6 +480,7 @@ EOF
       if budget_exhausted; then
         # The version probe's output cannot carry the announcement, so searching
         # it would present a source that was never asked as a clean result.
+        INCOMPLETE_REPORTED=1
         emit "$name check failed: the time budget ran out before the update announcement was checked"
         announce_out=
       else
@@ -533,10 +535,7 @@ published_findings() {
   local url field version status bound
   # command_findings already reports a missing or unreadable resolved command.
   [ -n "$installed" ] || return 0
-  if ! budget_allows "$name published source"; then
-    emit "$name check failed: the time budget ran out before its published source was checked"
-    return 0
-  fi
+  budget_allows "$name published source" || return 0
   if ! command -v curl >/dev/null 2>&1; then
     emit "$name check failed: curl is required to read its published source"
     return 0
@@ -606,6 +605,7 @@ git_probe_answered() {
   local status=$1 name=$2 subject=$3 question=$4
   case "$status" in
     "$GIT_PROBE_NOT_ISSUED")
+      INCOMPLETE_REPORTED=1
       emit "$name check failed: the time budget ran out before $subject was asked $question"
       return 1
       ;;
@@ -818,8 +818,10 @@ action_check() {
   if [ -n "$line" ] && [ "$FINDINGS" != "$RECORD_REPORTED" ]; then
     printf '%s\n' "$line"
   fi
-  # A partial sweep must not replace the last complete report or cadence epoch.
-  if [ "$INCOMPLETE_REPORTED" -eq 0 ] && ! budget_exhausted; then
+  # Only skipped work makes the sweep incomplete. The last issued probe can
+  # finish after the deadline without leaving anything unchecked; keep that
+  # complete result and cadence epoch so its finding is not reported again.
+  if [ "$INCOMPLETE_REPORTED" -eq 0 ]; then
     record_write "$FINDINGS" || true
   fi
   return 0

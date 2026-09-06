@@ -347,6 +347,7 @@ SH
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=2
   report=$(cat "$out")
   assert_contains "$report" "no-mistakes check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
+  assert_absent "$home/state/.tool-updates" "an unchecked announcement produced a complete record"
   pass "an announcement source the budget could not reach is reported, not read as current"
 }
 
@@ -629,6 +630,7 @@ printf '%s\n' "$@" >> "$FM_RELEASE_LOG"
 # A query must not consume stdin even if its caller has input waiting.
 if IFS= read -r input; then exit 91; fi
 if [ "${FM_RELEASE_SLEEP:-0}" != 0 ]; then sleep "$FM_RELEASE_SLEEP"; fi
+if [ -n "${FM_RELEASE_CLOCK:-}" ]; then printf '110\n' > "$FM_RELEASE_CLOCK"; fi
 cat "$FM_RELEASE_RESPONSE"
 exit "${FM_RELEASE_STATUS:-0}"
 SH
@@ -748,6 +750,101 @@ SH
   [ "$elapsed" -lt 10 ] || fail "response parser escaped the probe bound: ${elapsed}s"
   assert_contains "$(cat "$out")" 'could not be reached or read (exit 124)' "stalled parser was not bounded"
   pass "published probes obey their bound and incomplete sweeps leave no record"
+}
+
+# Advance the check's clock only when a fixture probe finishes. This pins the
+# deadline boundary without waiting for a wall-clock second or a real network.
+make_budget_clock() {
+  local dir=$1 clock=$2 real_date
+  real_date=$(command -v date)
+  mkdir -p "$dir"
+  printf '100\n' > "$clock"
+  cat > "$dir/date" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = +%s ]; then cat '$clock'; else exec '$real_date' "\$@"; fi
+SH
+  chmod 0755 "$dir/date"
+}
+
+test_completed_late_sweep_records_and_deduplicates() {
+  local home dir out clock path status queries
+  home=$(make_home release-finish-late)
+  dir="$home/bin"
+  out="$home/out.txt"
+  clock="$home/clock"
+  make_budget_clock "$dir" "$clock"
+  make_release_transport "$dir"
+  make_copy "$dir" "$TOOL" 'herdr 0.8.0'
+  write_release_config "$home" herdr github herdrdev/herdr
+  printf '%s\n' '{"tag_name":"v0.8.2"}' > "$home/response"
+  path=$(fixture_path "$dir")
+
+  # Starts at 100 with deadline 105, returns a valid newer version at 110.
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" FM_TOOL_UPDATE_BUDGET_SECS=5 FM_TOOL_UPDATE_NOW=1700000000
+  [ "$(cat "$clock")" = 110 ] || fail "the final probe did not cross the deadline"
+  assert_contains "$(cat "$out")" 'herdr update available:' "late completed sweep did not report its update"
+  assert_grep 'epoch=1700000000' "$home/state/.tool-updates" "late completed sweep discarded its cadence epoch"
+  assert_grep 'reported=herdr update available:' "$home/state/.tool-updates" "late completed sweep discarded its finding"
+
+  printf '100\n' > "$clock"
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" FM_TOOL_UPDATE_BUDGET_SECS=5 FM_TOOL_UPDATE_NOW=1700000000
+  [ ! -s "$out" ] || fail "same completed late sweep reported its update twice"
+  queries=$(wc -l < "$home/http.log")
+  # A normal cadence-gated poll must not issue another HTTP query at all.
+  status=0
+  env FM_HOME="$home" PATH="$path" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW=1700000300 \
+    FM_TOOL_UPDATE_BUDGET_SECS=5 FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" \
+    "$CHECK" > "$out" 2>&1 || status=$?
+  expect_code 0 "$status" "late sweep cadence poll"
+  [ ! -s "$out" ] || fail "late sweep cadence poll reported again"
+  [ "$(wc -l < "$home/http.log")" = "$queries" ] || fail "late sweep cadence epoch did not suppress probes"
+
+  # Counterfactual: the same late probe with another configured tool after it
+  # leaves work unchecked. That partial sweep must preserve the previous record.
+  cp "$home/state/.tool-updates" "$home/previous-record"
+  jq '.tools += [{name:"unreached",command:"fm-unreached-budget-fixture"}]' "$home/config/watched-tools.json" > "$home/next-config"
+  mv "$home/next-config" "$home/config/watched-tools.json"
+  printf '100\n' > "$clock"
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" FM_TOOL_UPDATE_BUDGET_SECS=5 FM_TOOL_UPDATE_NOW=1700001000
+  assert_contains "$(cat "$out")" 'check incomplete: the time budget ran out before unreached' "an unreached tool was treated as checked"
+  cmp -s "$home/previous-record" "$home/state/.tool-updates" || fail "partial sweep replaced the complete record"
+  rm "$home/state/.tool-updates"
+  printf '100\n' > "$clock"
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" FM_TOOL_UPDATE_BUDGET_SECS=5
+  assert_absent "$home/state/.tool-updates" "partial sweep created a record"
+  pass "a last probe that finishes late records once, while an unreached later tool prevents recording"
+}
+
+test_unstarted_published_probe_reports_budget_once() {
+  local home dir out clock fresh
+  home=$(make_home release-budget-once)
+  dir="$home/bin"
+  out="$home/out.txt"
+  clock="$home/clock"
+  make_budget_clock "$dir" "$clock"
+  make_release_transport "$dir"
+  cat > "$dir/$TOOL" <<SH
+#!/usr/bin/env bash
+printf '110\n' > '$clock'
+printf 'herdr 0.8.0\n'
+SH
+  chmod 0755 "$dir/$TOOL"
+  write_release_config "$home" herdr github herdrdev/herdr
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_LOG="$home/http.log" FM_TOOL_UPDATE_BUDGET_SECS=5
+  [ "$(cat "$out")" = 'tool updates: check incomplete: the time budget ran out before herdr published source' ] \
+    || fail "an unstarted published probe reported its budget failure more than once: $(cat "$out")"
+  assert_absent "$home/http.log" "published source was asked after its budget was gone"
+  assert_absent "$home/state/.tool-updates" "unstarted published probe produced a complete record"
+
+  # A skipped PATH copy is also unfinished work, even within the last tool.
+  fresh="$home/fresh"
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  printf '100\n' > "$clock"
+  run_check "$home" "$(fixture_path "$dir:$fresh")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=5
+  assert_contains "$(cat "$out")" 'the time budget ran out before every copy answered' "skipped PATH copy was treated as checked"
+  assert_absent "$home/state/.tool-updates" "skipped PATH copy produced a complete record"
+  pass "a skipped published probe reports its budget failure once and skipped probes leave no record"
 }
 
 test_malformed_published_config_refuses_whole_registry() {
@@ -1245,6 +1342,8 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
 test_published_versions_for_the_three_motivating_tools
 test_published_failures_do_not_blind_other_tools
 test_published_probe_bounds_and_incomplete_record
+test_completed_late_sweep_records_and_deduplicates
+test_unstarted_published_probe_reports_budget_once
 test_malformed_published_config_refuses_whole_registry
 test_published_dedupe_and_composition
 test_published_numeric_comparison_and_failed_installed_command

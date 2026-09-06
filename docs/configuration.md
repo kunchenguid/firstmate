@@ -546,7 +546,8 @@ Adding, removing, or changing a watched tool is an edit to this file and needs n
 This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
 
 `FM_TOOL_UPDATE_INTERVAL` (default 900 seconds, `0` to probe on every run) sets how often probes actually run, `FM_TOOL_UPDATE_PROBE_SECS` (default 5) bounds one probe, and `FM_TOOL_UPDATE_BUDGET_SECS` (default 20) bounds a whole sweep.
-A sweep that runs out of budget reports the incomplete check and leaves the previous complete report record unchanged, so the unfinished sweep is retried.
+A sweep that skips work because its budget runs out reports the incomplete check and leaves the previous complete report record unchanged, so the unfinished sweep is retried.
+A sweep that completes its last probe after the deadline still records the completed result and cadence epoch.
 The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
