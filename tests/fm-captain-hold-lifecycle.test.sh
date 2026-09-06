@@ -75,6 +75,26 @@ run_captain() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
+# Direct unit test on the pure resolution function: resolve_entry -> id or
+# failure. fm-captain-hold.sh's own bottom dispatch would exit if the file
+# were sourced whole, so resolve_entry and its full call chain (backlog and
+# archive lookups) are extracted from the executable and evaluated in an
+# isolated subshell process alongside the real backlog libraries they
+# depend on, never through the CLI dispatch this file's other tests use.
+run_resolve_entry_unit() {  # <home> <origin> <entry>
+  local home=$1 origin=$2 entry=$3
+  bash -c '
+    set -eu
+    FM_ROOT=$1; STATE=$2; DATA=$3; origin=$4; entry=$5
+    . "$FM_ROOT/bin/fm-classify-lib.sh"
+    . "$FM_ROOT/bin/fm-tasks-axi-lib.sh"
+    . "$FM_ROOT/bin/fm-backlog-transition-lib.sh"
+    eval "$(sed -n "/^fail() {/,/^}/p; /^task_show() {/,/^}/p; /^captain_done_archive_file() {/,/^}/p; /^archive_row_show() {/,/^}/p; /^archive_row_exists() {/,/^}/p; /^archive_unclassified_fail() {/,/^}/p; /^task_show_or_archived() {/,/^}/p; /^resolve_entry() {/,/^}/p" "$FM_ROOT/bin/fm-captain-hold.sh")"
+    CAPTAIN_BACKLOG_FILE=$(fm_backlog_file "$DATA")
+    resolve_entry "$origin" "$entry"
+  ' _ "$ROOT" "$home/state" "$home/data" "$origin" "$entry"
+}
+
 # The retired command surface, kept for one release as a shim; in-flight
 # pre-collapse work still drives the lifecycle through these spellings.
 run_shim() {  # <home> <command args...>
@@ -1123,6 +1143,611 @@ SH
   pass "the chat channel feeds the same keyed-answer intake a captured review does"
 }
 
+# Unit test on the pure resolution function itself: resolve_entry -> id or
+# failure, called directly (not through the CLI), against a live backlog
+# row, an answered archived row, and an entry that exists nowhere.
+test_resolve_entry_direct_unit_backlog_and_archive() {
+  local home out
+  home=$(make_home resolve-entry-unit)
+
+  tasks_in "$home" add sample-unit-backlog-call "Backlog unit call" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the backlog fixture"
+  out=$(run_resolve_entry_unit "$home" "" "sample-unit-backlog-call") \
+    || fail "resolve_entry did not resolve a live backlog row"
+  [ "$out" = "sample-unit-backlog-call" ] \
+    || fail "resolve_entry returned the wrong id for a live backlog row: $out"
+
+  run_captain "$home" hold sample-unit-archived-call --title "Unit archived call" \
+    --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "could not hold the archive fixture"
+  printf 'Unit test decision.\n' > "$home/unit-decision.txt"
+  run_captain "$home" answer sample-unit-archived-call --decision-file "$home/unit-decision.txt" >/dev/null \
+    || fail "could not answer the archive fixture"
+  tasks_in "$home" "done" sample-unit-archived-call --keep 0 >/dev/null \
+    || fail "could not archive the answered fixture"
+  out=$(run_resolve_entry_unit "$home" "" "sample-unit-archived-call") \
+    || fail "resolve_entry did not resolve an answered archived row"
+  [ "$out" = "sample-unit-archived-call" ] \
+    || fail "resolve_entry returned the wrong id for an archived row: $out"
+
+  if out=$(run_resolve_entry_unit "$home" "" "sample-unit-missing-anywhere" 2>"$home/unit-missing.err"); then
+    fail "resolve_entry resolved an entry that exists nowhere: $out"
+  fi
+  assert_grep "no captain-held task sample-unit-missing-anywhere" "$home/unit-missing.err" \
+    "resolve_entry must fail for a genuinely absent entry"
+
+  pass "resolve_entry resolves directly from both the backlog and the archive, and fails for a genuinely absent entry"
+}
+
+# Ordinary Done retention archives an answered captain call into
+# data/done-archive.md under a real `## Archived <date>` heading; verify and
+# complete must still resolve it there, read-only, and the archive itself
+# must stay byte-identical (mutation stays impossible). A done row without a
+# resolution record fails closed instead of being treated as durable (the
+# held branch never covers an archived row), and answer refuses to touch an
+# archived row instead of replaying or reopening it.
+test_archived_answer_resolves_for_verify_and_complete() {
+  local home id before after backlog_before backlog_after archive_view_before archive_view_after
+  home=$(make_home archived-answer)
+  id=sample-archive-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample archive resolution" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the archive-gate origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample archive review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-archive-call \
+    --title "Choose the sample archive path" --reason "captain archive choice pending" \
+    --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the captain-held task"
+  run_captain "$home" complete "$id" sample-archive-call >/dev/null \
+    || fail "completion failed before the answer"
+  printf 'Captain chose the north archive path.\n' > "$home/archive-decision.txt"
+  run_captain "$home" answer sample-archive-call --decision-file "$home/archive-decision.txt" >/dev/null \
+    || fail "could not answer the captain-held task"
+  tasks_in "$home" "done" sample-archive-call --keep 0 >/dev/null \
+    || fail "could not archive the answered captain call"
+  rg '^## Archived ' "$home/data/done-archive.md" >/dev/null \
+    || fail "the fixture did not produce a real Archived heading"
+  rg '^- \[x\] sample-archive-call - ' "$home/data/done-archive.md" >/dev/null \
+    || fail "the answered captain call was not archived"
+  ! rg '^- \[[ x]\] sample-archive-call - ' "$home/data/backlog.md" >/dev/null \
+    || fail "the answered captain call remained in the live backlog after archiving"
+
+  before=$(shasum -a 256 "$home/data/done-archive.md" | awk '{print $1}')
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "verify did not resolve an answered call archived under a real Archived heading"
+  after=$(shasum -a 256 "$home/data/done-archive.md" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "resolving an archived call mutated the archive"
+  # Each normalized view is private to the call that built it and removed
+  # before that call returns, so none may survive past the command that
+  # built it.
+  [ -z "$(find "$home/state" -maxdepth 1 -name 'fm-captain-hold-archive.*' 2>/dev/null)" ] \
+    || fail "verify left a normalized archive view file behind in state"
+
+  # complete's OWN inventory verification (fm-captain-hold.sh :895-904), not
+  # only verify's, must resolve an entry that retention has already archived.
+  before=$(shasum -a 256 "$home/data/done-archive.md" | awk '{print $1}')
+  run_captain "$home" complete "$id" sample-archive-call >/dev/null \
+    || fail "complete did not resolve an answered call archived under a real Archived heading"
+  after=$(shasum -a 256 "$home/data/done-archive.md" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "complete's inventory check mutated the archive"
+
+  tasks_in "$home" add sample-unanswered-call "Choose without answering" --repo sample --start >/dev/null \
+    || fail "could not create the unanswered archive fixture"
+  run_captain "$home" hold sample-unanswered-call --reason "captain choice pending" >/dev/null \
+    || fail "could not hold the unanswered archive fixture"
+  run_captain "$home" complete "$id" sample-unanswered-call >/dev/null \
+    || fail "could not inventory the unanswered archive fixture"
+  tasks_in "$home" "done" sample-unanswered-call --keep 0 >/dev/null \
+    || fail "could not archive the unanswered captain call"
+  if run_captain "$home" verify "$id" > "$home/unanswered-verify.out" 2> "$home/unanswered-verify.err"; then
+    fail "verify accepted a done archived row with no recorded answer"
+  fi
+  assert_grep "neither held for the captain nor closed with a recorded captain answer" \
+    "$home/unanswered-verify.err" \
+    "an unanswered archived row must fail closed with the existing durability message"
+
+  # A done archived row without a recorded answer is not proof "nothing is
+  # owed": the mutation-path refusal must never claim that for the exact row
+  # this fixture proves is unanswered, and must not create a duplicate over it.
+  printf 'Would-be captain decision.\n' > "$home/unanswered-decision.txt"
+  if run_captain "$home" answer sample-unanswered-call --decision-file "$home/unanswered-decision.txt" \
+    > "$home/unanswered-answer.out" 2> "$home/unanswered-answer.err"; then
+    fail "answer accepted a done archived row with no recorded answer"
+  fi
+  assert_no_grep "nothing is owed" "$home/unanswered-answer.err" \
+    "answer must never claim nothing is owed for a done-but-unanswered archived row"
+  assert_grep "cannot be read as an answered call; restore the row to the backlog or repair the archive by hand" \
+    "$home/unanswered-answer.err" \
+    "answer against a done-but-unanswered archived row must give the restore-or-repair reason"
+  if run_captain "$home" hold sample-unanswered-call --title "Choose without answering" \
+    --reason "captain choice pending" --repo sample \
+    > "$home/unanswered-hold.out" 2> "$home/unanswered-hold.err"; then
+    fail "hold created a duplicate over a done-but-unanswered archived row"
+  fi
+  assert_no_grep "nothing is owed" "$home/unanswered-hold.err" \
+    "hold must never claim nothing is owed for a done-but-unanswered archived row"
+  assert_grep "cannot be read as an answered call; restore the row to the backlog or repair the archive by hand" \
+    "$home/unanswered-hold.err" \
+    "hold against a done-but-unanswered archived row must give the restore-or-repair reason"
+  assert_no_grep "sample-unanswered-call - Choose without answering" "$home/data/backlog.md" \
+    "hold must not have created a duplicate task in the live backlog"
+
+  # Prose alone ("nothing is owed") is not proof nothing was actually
+  # written: snapshot both backing files and the row's own reader state
+  # before the refusal and assert byte-for-byte and state-for-state identity
+  # after, so a refusal that quietly wrote anyway would fail this case.
+  backlog_before=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  before=$(shasum -a 256 "$home/data/done-archive.md" | awk '{print $1}')
+  sed 's/^## Archived .*$/## Done/' "$home/data/done-archive.md" > "$home/archive-view-before.md"
+  archive_view_before=$(tasks-axi show sample-archive-call --full --file "$home/archive-view-before.md")
+  if run_captain "$home" answer sample-archive-call --decision-file "$home/archive-decision.txt" \
+    > "$home/answer-archived.out" 2> "$home/answer-archived.err"; then
+    fail "answer mutated or replayed against an archived task"
+  fi
+  assert_grep "is archived (" "$home/answer-archived.err" \
+    "answer against an archived row must name the archive, never a mutation"
+  assert_grep "nothing is owed" "$home/answer-archived.err" \
+    "answer against an archived row must say nothing is owed"
+  backlog_after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  after=$(shasum -a 256 "$home/data/done-archive.md" | awk '{print $1}')
+  sed 's/^## Archived .*$/## Done/' "$home/data/done-archive.md" > "$home/archive-view-after.md"
+  archive_view_after=$(tasks-axi show sample-archive-call --full --file "$home/archive-view-after.md")
+  [ "$backlog_before" = "$backlog_after" ] \
+    || fail "an archived-answer refusal must never mutate the live backlog"
+  [ "$before" = "$after" ] \
+    || fail "an archived-answer refusal must never mutate the archive"
+  [ "$archive_view_before" = "$archive_view_after" ] \
+    || fail "an archived-answer refusal must never change the row's own reader state"
+
+  pass "archived answers still resolve read-only for verify and complete, without a false positive on an unanswered row"
+}
+
+# Fail-closed paths around the archive fallback: a genuinely absent entry is
+# never misreported, an unresolved hold archived by mistake is never read as
+# an open or done task (the real reader returns NOT_FOUND, never a
+# manufactured state), a structurally broken archive fails naming its own
+# path, and a genuinely unreadable backlog fails naming the backlog path
+# without ever touching an archive that would otherwise resolve.
+test_archive_fallback_fails_closed_on_broken_records() {
+  local home id
+  home=$(make_home archive-fail-closed)
+  id=sample-archive-guard-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Guard archive resolution" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the guard origin"
+  write_origin_meta "$home" "$id"
+
+  cat >> "$home/data/done-archive.md" <<'EOF'
+
+## Archived 2026-09-04
+- [ ] sample-mistaken-hold - Held but archived by mistake (repo: sample) (hold: captain choice pending) (hold-kind: captain)
+  Some body text, never a resolution record.
+
+## Queued
+- [ ] sample-nondone-archived-row - A row under a heading normalization never rewrites (repo: sample) (hold: captain choice pending) (hold-kind: captain)
+  Some body text, also never a resolution record.
+EOF
+
+  if run_captain "$home" complete "$id" sample-truly-nothing \
+    > "$home/nothing.out" 2> "$home/nothing.err"; then
+    fail "completion accepted an entry that names no task anywhere"
+  fi
+  assert_no_grep "cannot be read as an answered call" "$home/nothing.err" \
+    "a genuinely absent entry must not be misreported as an unclassifiable archived row"
+
+  if run_captain "$home" complete "$id" sample-mistaken-hold \
+    > "$home/mistaken.out" 2> "$home/mistaken.err"; then
+    fail "completion accepted an unresolved hold archived by mistake"
+  fi
+  assert_grep "cannot be read as an answered call; restore the row to the backlog or repair the archive by hand" \
+    "$home/mistaken.err" \
+    "an unclassifiable archived row must fail closed instead of being read as open or done"
+
+  # A row under a heading normalization never touches (anything but the real
+  # `## Archived <date>` form) reads back with a real, non-done state - not
+  # NOT_FOUND - and is exactly as unclassifiable as the unchecked case above,
+  # never the generic "neither held nor closed" wording.
+  if run_captain "$home" complete "$id" sample-nondone-archived-row \
+    > "$home/nondone.out" 2> "$home/nondone.err"; then
+    fail "completion accepted a readable non-done archived row"
+  fi
+  assert_grep "cannot be read as an answered call; restore the row to the backlog or repair the archive by hand" \
+    "$home/nondone.err" \
+    "a readable non-done archived row must give the restore-or-repair reason, not the generic durability message"
+  assert_no_grep "neither held for the captain nor closed with a recorded captain answer" \
+    "$home/nondone.err" \
+    "a readable non-done archived row must not get the backlog-style generic message"
+
+  # Mutation-path presence alone is not proof of an answer: a row that
+  # exists in the archive but cannot be classified must never be told
+  # "nothing is owed", since it may still be genuinely open.
+  printf 'Would-be captain decision.\n' > "$home/mistaken-decision.txt"
+  if run_captain "$home" answer sample-mistaken-hold --decision-file "$home/mistaken-decision.txt" \
+    > "$home/mistaken-answer.out" 2> "$home/mistaken-answer.err"; then
+    fail "answer accepted an unresolved hold archived by mistake"
+  fi
+  assert_no_grep "nothing is owed" "$home/mistaken-answer.err" \
+    "an unclassifiable archived row must never be told nothing is owed"
+  assert_grep "cannot be read as an answered call; restore the row to the backlog or repair the archive by hand" \
+    "$home/mistaken-answer.err" \
+    "answer against an unclassifiable archived row must fail closed with the same restore-or-repair message"
+  if run_captain "$home" hold sample-mistaken-hold --title "Choose the mistaken path" \
+    --reason "captain choice pending" --repo sample \
+    > "$home/mistaken-hold.out" 2> "$home/mistaken-hold.err"; then
+    fail "hold recreated a task id that is an unresolved hold archived by mistake"
+  fi
+  assert_no_grep "nothing is owed" "$home/mistaken-hold.err" \
+    "hold must never claim nothing is owed for an unclassifiable archived row"
+  assert_grep "cannot be read as an answered call; restore the row to the backlog or repair the archive by hand" \
+    "$home/mistaken-hold.err" \
+    "hold against an unclassifiable archived row must fail closed with the same restore-or-repair message"
+
+  rm -f "$home/data/done-archive.md"
+  mkdir -p "$home/data/done-archive.md"
+  if run_captain "$home" complete "$id" sample-missing-anywhere \
+    > "$home/broken-archive.out" 2> "$home/broken-archive.err"; then
+    fail "completion consulted a directory standing in for the archive instead of failing"
+  fi
+  assert_grep "$home/data/done-archive.md" "$home/broken-archive.err" \
+    "a structurally broken archive must fail naming its own path"
+
+  # A structural archive failure must never be swallowed into an ordinary
+  # miss: hold must refuse rather than silently creating a fresh task over
+  # an id it could not actually clear.
+  if run_captain "$home" hold sample-broken-archive-fresh-id \
+    --title "Choose a path" --reason "captain choice pending" --repo sample \
+    > "$home/broken-archive-hold.out" 2> "$home/broken-archive-hold.err"; then
+    fail "hold created a task while the archive was structurally unreadable"
+  fi
+  assert_grep "$home/data/done-archive.md" "$home/broken-archive-hold.err" \
+    "hold must fail naming the broken archive path instead of proceeding"
+  assert_no_grep "sample-broken-archive-fresh-id" "$home/data/backlog.md" \
+    "hold must not have created the task despite the archive read failure"
+  # The admission check's staging temp is cleaned by the EXIT trap even when
+  # a nested fail() inside archive_row_show ends the process before
+  # archive_row_answered's own rm -f line can run; this must hold on every
+  # structural-failure path, not just the ones exercised as non-root above.
+  [ -z "$(find "$home/state" -maxdepth 1 -name 'fm-captain-hold-check.*' 2>/dev/null)" ] \
+    || fail "a structurally broken archive left an admission check temp file behind in state"
+  rmdir "$home/data/done-archive.md"
+
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "unreadable-archive case skipped as root"
+  else
+    printf '\n## Archived 2026-09-04\n- [x] sample-unreadable-archive-row - Title (repo: sample) (done 2026-09-04)\n' \
+      > "$home/data/done-archive.md"
+    chmod 000 "$home/data/done-archive.md"
+    if run_captain "$home" hold sample-unreadable-archive-fresh-id \
+      --title "Choose a path" --reason "captain choice pending" --repo sample \
+      > "$home/unreadable-archive-hold.out" 2> "$home/unreadable-archive-hold.err"; then
+      chmod 644 "$home/data/done-archive.md"
+      fail "hold created a task while the archive was unreadable"
+    fi
+    chmod 644 "$home/data/done-archive.md"
+    assert_grep "$home/data/done-archive.md" "$home/unreadable-archive-hold.err" \
+      "hold must fail naming the unreadable archive path instead of proceeding"
+    assert_no_grep "sample-unreadable-archive-fresh-id" "$home/data/backlog.md" \
+      "hold must not have created the task despite the unreadable archive"
+    [ -z "$(find "$home/state" -maxdepth 1 -name 'fm-captain-hold-check.*' 2>/dev/null)" ] \
+      || fail "an unreadable archive left an admission check temp file behind in state"
+  fi
+
+  # A dangling symlink at the archive path is structurally broken, never
+  # evidence the archive was never created.
+  rm -f "$home/data/done-archive.md"
+  ln -s "$home/data/nonexistent-archive-target.md" "$home/data/done-archive.md"
+  if run_captain "$home" hold sample-dangling-symlink-fresh-id \
+    --title "Choose a path" --reason "captain choice pending" --repo sample \
+    > "$home/dangling-hold.out" 2> "$home/dangling-hold.err"; then
+    fail "hold created a task while the archive was a dangling symlink"
+  fi
+  assert_grep "$home/data/done-archive.md" "$home/dangling-hold.err" \
+    "hold must fail naming the dangling-symlink archive path instead of proceeding"
+  assert_no_grep "sample-dangling-symlink-fresh-id" "$home/data/backlog.md" \
+    "hold must not have created the task despite the dangling-symlink archive"
+  rm -f "$home/data/done-archive.md"
+
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "unreadable-backlog case skipped as root"
+  else
+    run_captain "$home" hold sample-real-archived-call \
+      --title "Choose the real archived path" --reason "captain choice pending" --repo sample >/dev/null \
+      || fail "could not register the would-resolve archived fixture"
+    run_captain "$home" complete "$id" sample-real-archived-call >/dev/null \
+      || fail "could not inventory the would-resolve archived fixture"
+    printf 'Captain chose the would-resolve archive path.\n' > "$home/would-resolve.txt"
+    run_captain "$home" answer sample-real-archived-call --decision-file "$home/would-resolve.txt" >/dev/null \
+      || fail "could not answer the would-resolve archived fixture"
+    tasks_in "$home" "done" sample-real-archived-call --keep 0 >/dev/null \
+      || fail "could not archive the would-resolve fixture"
+    rg -q '^- \[x\] sample-real-archived-call - ' "$home/data/done-archive.md" \
+      || fail "the would-resolve fixture was not actually archived"
+    chmod 000 "$home/data/backlog.md"
+    if run_captain "$home" verify "$id" > "$home/unreadable.out" 2> "$home/unreadable.err"; then
+      chmod 644 "$home/data/backlog.md"
+      fail "verify treated an unreadable backlog as permission to fall back to the archive"
+    fi
+    chmod 644 "$home/data/backlog.md"
+    assert_grep "$home/data/backlog.md" "$home/unreadable.err" \
+      "an unreadable backlog must fail naming the backlog path"
+    assert_no_grep "done-archive" "$home/unreadable.err" \
+      "an unreadable backlog must never consult the archive"
+  fi
+
+  pass "the archive fallback fails closed on an unclassifiable row, a broken archive, and an unreadable backlog, without a false positive on a genuinely absent entry"
+}
+
+# The existing keyed-answer intake (command_answers) wraps resolve_entry in a
+# command substitution with stderr discarded; a structural archive failure
+# reaching it must still be named, not silently converted into the same
+# "skipped: ... missing" line a genuine miss gets. A live backlog row must
+# stay answerable through an unrelated broken archive, since resolve_entry
+# only ever consults the archive on a true backlog miss.
+test_answers_keyed_intake_names_archive_failures() {
+  local home id backlog_before backlog_after show
+  home=$(make_home answers-archive-failure)
+  id=sample-answers-archive-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Guard keyed-answer archive resolution" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the guard origin"
+  write_origin_meta "$home" "$id"
+  run_captain "$home" hold sample-answers-live-call --title "Choose the live path" \
+    --reason "captain choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the live-hit fixture"
+
+  rm -f "$home/data/done-archive.md"
+  mkdir -p "$home/data/done-archive.md"
+
+  printf 'sample-answers-live-call\tgo with the live path\tlabel\n' \
+    | run_captain "$home" answers --source fixture > "$home/live-hit.out" 2> "$home/live-hit.err"
+  assert_contains "$(cat "$home/live-hit.out")" "closed: sample-answers-live-call" \
+    "a live backlog row must still answer despite an unrelated broken archive"
+  show=$(tasks_in "$home" show sample-answers-live-call --full)
+  assert_contains "$show" "state: done" \
+    "the live-hit answer said closed but left the row's own state open"
+  assert_contains "$show" "Answer: go with the live path" \
+    "the live-hit answer said closed but never recorded the captain's actual answer"
+
+  backlog_before=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  set +e
+  printf 'sample-answers-missing-anywhere\tgo\tlabel\n' \
+    | run_captain "$home" answers --source fixture > "$home/broken.out" 2> "$home/broken.err"
+  set -e
+  assert_no_grep "no captain-held task with that id" "$home/broken.out" \
+    "a structural archive failure reaching the keyed intake must not read as an ordinary missing-key"
+  assert_grep "$home/data/done-archive.md" "$home/broken.out" \
+    "a structural archive failure reaching the keyed intake must name the archive path"
+  backlog_after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  [ "$backlog_before" = "$backlog_after" ] \
+    || fail "a structural archive failure reaching the keyed intake must never mutate the backlog"
+
+  rmdir "$home/data/done-archive.md"
+
+  set +e
+  printf 'sample-answers-genuinely-absent\tgo\tlabel\n' \
+    | run_captain "$home" answers --source fixture > "$home/genuine-miss.out" 2> "$home/genuine-miss.err"
+  set -e
+  assert_grep "skipped: sample-answers-genuinely-absent" "$home/genuine-miss.out" \
+    "a genuine miss with no archive at all must still report the ordinary skipped line"
+
+  pass "the keyed-answer intake names a structural archive failure instead of a generic missing-key skip"
+}
+
+# task_show_or_archived's contract says any non-NOT_FOUND backlog error fails
+# naming the backlog and never consults the archive, but a bare "return 1"
+# made that indistinguishable from a genuine absence: a transient backend
+# failure (never NOT_FOUND) could let hold silently create a duplicate over
+# an id it never actually cleared, and let verify silently fall back to the
+# archive for a row that might still be live.
+test_backlog_read_error_never_reads_as_a_miss() {
+  local home id origin backlog_before backlog_after
+  home=$(make_home backlog-read-error)
+  id=sample-backend-failure-id
+  origin=sample-backend-failure-origin
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = "${TASKS_AXI_FAIL_SHOW_ID:-}" ]; then
+  printf 'error: backend unavailable\n' >&2
+  exit 73
+fi
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+
+  backlog_before=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  if TASKS_AXI_FAIL_SHOW_ID="$id" run_captain "$home" hold "$id" \
+    --title "Choose a path" --reason "captain choice pending" --repo sample \
+    > "$home/hold.out" 2> "$home/hold.err"; then
+    fail "hold created a task while the backlog read a non-NOT_FOUND error"
+  fi
+  assert_grep "$home/data/backlog.md" "$home/hold.err" \
+    "hold must fail naming the backlog path instead of treating a read error as absence"
+  assert_no_grep "$id" "$home/data/backlog.md" \
+    "hold must not have created the task despite the backlog read error"
+  backlog_after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  [ "$backlog_before" = "$backlog_after" ] \
+    || fail "hold must never mutate the backlog when it could not read the target id"
+
+  # The entry must exist and be inventoried WHILE the backlog is still
+  # healthy - the read failure is injected only afterward, for verify's own
+  # later resolution attempt.
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Guard backlog read-error resolution" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the guard origin"
+  write_origin_meta "$home" "$origin"
+  run_captain "$home" hold "$id" --title "Choose the live path" \
+    --reason "captain choice pending" --repo sample --origin "$origin" >/dev/null \
+    || fail "could not register the live fixture before injecting the read error"
+  run_captain "$home" complete "$origin" "$id" >/dev/null \
+    || fail "could not inventory the live fixture before injecting the read error"
+
+  if TASKS_AXI_FAIL_SHOW_ID="$id" run_captain "$home" verify "$origin" \
+    > "$home/verify.out" 2> "$home/verify.err"; then
+    fail "verify treated a backlog read error as permission to fall back to the archive"
+  fi
+  assert_grep "$home/data/backlog.md" "$home/verify.err" \
+    "verify must fail naming the backlog path instead of treating a read error as absence"
+  assert_no_grep "done-archive" "$home/verify.err" \
+    "verify must never consult the archive when the backlog read itself failed"
+
+  pass "a non-NOT_FOUND backlog read error fails naming the backlog, never reading as a miss"
+}
+
+# The all-fail stub above only ever exercises task_show_or_archived: hold's
+# own outer "if show=$(task_show "$id"); then ... else" and command_answer's
+# equivalent read the FIRST task_show result directly and, on any failure at
+# all, unconditionally enter the archive/create branch, which then makes its
+# OWN, second and independent task_show attempt (via archive_row_answered).
+# A stub that fails every call cannot tell a fixed inner helper from a still-
+# open outer boundary, since both make the second attempt fail too. A stub
+# that fails only the FIRST call and succeeds afterward isolates it: the
+# second attempt then reads a genuine NOT_FOUND, and an unfixed outer
+# boundary creates the task anyway.
+test_hold_and_answer_refuse_on_a_one_shot_backlog_read_error() {
+  local home id origin backlog_before backlog_after counter archive_queries
+  home=$(make_home one-shot-read-error)
+  id=sample-one-shot-failure-id
+  origin=sample-one-shot-failure-origin
+  counter="$home/one-shot-counter"
+  archive_queries="$home/archive-query-counter"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = "${TASKS_AXI_ONE_SHOT_FAIL_ID:-}" ]; then
+  n=0
+  [ -f "${TASKS_AXI_ONE_SHOT_COUNTER:?}" ] && n=$(cat "$TASKS_AXI_ONE_SHOT_COUNTER")
+  n=$((n + 1))
+  printf '%s' "$n" > "$TASKS_AXI_ONE_SHOT_COUNTER"
+  if [ "$n" -eq 1 ]; then
+    printf 'error: backend unavailable\n' >&2
+    exit 73
+  fi
+fi
+if [ "${1:-}" = show ] && [ -n "${TASKS_AXI_ARCHIVE_QUERY_COUNTER:-}" ]; then
+  prev=''
+  for arg in "$@"; do
+    # Every ordinary backlog read also passes --file (pointing at
+    # backlog.md), so bare presence of the flag cannot tell an archive query
+    # apart from an ordinary one. Only the VALUE distinguishes them: the
+    # archive's own normalized view is always a fresh mktemp matching
+    # archive_row_show's own fm-captain-hold-archive.* pattern.
+    if [ "$prev" = --file ]; then
+      case "$arg" in
+        */fm-captain-hold-archive.*)
+          m=0
+          [ -f "$TASKS_AXI_ARCHIVE_QUERY_COUNTER" ] && m=$(cat "$TASKS_AXI_ARCHIVE_QUERY_COUNTER")
+          m=$((m + 1))
+          printf '%s' "$m" > "$TASKS_AXI_ARCHIVE_QUERY_COUNTER"
+          ;;
+      esac
+      break
+    fi
+    prev=$arg
+  done
+fi
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+
+  backlog_before=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  : > "$counter"
+  if TASKS_AXI_ONE_SHOT_FAIL_ID="$id" TASKS_AXI_ONE_SHOT_COUNTER="$counter" run_captain "$home" hold "$id" \
+    --title "Choose a path" --reason "captain choice pending" --repo sample \
+    > "$home/hold.out" 2> "$home/hold.err"; then
+    fail "hold created a task after a single transient backlog read error, on the strength of the second, incidental read"
+  fi
+  assert_grep "$home/data/backlog.md" "$home/hold.err" \
+    "a one-shot backlog read error must fail naming the backlog, not fall through on the second read"
+  assert_no_grep "$id" "$home/data/backlog.md" \
+    "hold must not have created the task despite the one-shot backlog read error"
+  backlog_after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
+  [ "$backlog_before" = "$backlog_after" ] \
+    || fail "hold must never mutate the backlog over a one-shot read error"
+
+  # Build a genuinely archived, UNRELATED row first, so the "zero archive
+  # queries" assertion below is meaningful: a done-archive.md that does not
+  # exist at all short-circuits archive_row_show before any tasks-axi call
+  # (archive_row_show's own [ -e "$archive" ] || return 1), which would make
+  # a zero reading pass trivially regardless of whether the fix works. This
+  # same fixture also doubles as the positive control below, proving the
+  # counter itself actually counts.
+  mkdir -p "$home/data/sample-one-shot-control-origin"
+  tasks_in "$home" add sample-one-shot-control-origin "Archive-counter control origin" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the archive-counter control origin"
+  write_origin_meta "$home" sample-one-shot-control-origin
+  run_captain "$home" hold sample-one-shot-control-archived --title "Archived control" \
+    --reason "captain choice pending" --repo sample --origin sample-one-shot-control-origin >/dev/null \
+    || fail "could not hold the archive-counter control fixture"
+  run_captain "$home" complete sample-one-shot-control-origin sample-one-shot-control-archived >/dev/null \
+    || fail "could not inventory the archive-counter control fixture"
+  printf 'Captain chose the control path.\n' > "$home/control-decision.txt"
+  run_captain "$home" answer sample-one-shot-control-archived --decision-file "$home/control-decision.txt" >/dev/null \
+    || fail "could not answer the archive-counter control fixture"
+  tasks_in "$home" "done" sample-one-shot-control-archived --keep 0 >/dev/null \
+    || fail "could not archive the answered control fixture"
+  rg -q '^## Archived ' "$home/data/done-archive.md" \
+    || fail "the archive-counter control fixture did not produce a real archive to query against"
+
+  # Read-only caller control, same one-shot failure, now against a home that
+  # genuinely has an archive: verify must fail naming the backlog and must
+  # never consult that archive on a transient error alone.
+  mkdir -p "$home/data/$origin"
+  tasks_in "$home" add "$origin" "Guard one-shot resolution" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the guard origin"
+  write_origin_meta "$home" "$origin"
+  run_captain "$home" hold "$id" --title "Choose the live path" \
+    --reason "captain choice pending" --repo sample --origin "$origin" >/dev/null \
+    || fail "could not register the live fixture before injecting the one-shot error"
+  run_captain "$home" complete "$origin" "$id" >/dev/null \
+    || fail "could not inventory the live fixture before injecting the one-shot error"
+
+  : > "$counter"
+  rm -f "$archive_queries"
+  if TASKS_AXI_ONE_SHOT_FAIL_ID="$id" TASKS_AXI_ONE_SHOT_COUNTER="$counter" \
+    TASKS_AXI_ARCHIVE_QUERY_COUNTER="$archive_queries" run_captain "$home" verify "$origin" \
+    > "$home/verify.out" 2> "$home/verify.err"; then
+    fail "verify treated a one-shot backlog read error as permission to fall back to the archive"
+  fi
+  assert_grep "$home/data/backlog.md" "$home/verify.err" \
+    "verify must fail naming the backlog path over a one-shot read error"
+  # Before the fix, resolve_entry's own failure only ended its command-
+  # substitution subshell, so verify_hold_durable ran again with an empty
+  # id and printed a SECOND, misleading diagnostic on top of the correct
+  # first one. The fix must leave exactly the one, correct message behind.
+  assert_no_grep "Missing id" "$home/verify.err" \
+    "verify's stderr must carry only the real backend error, not a second empty-id diagnostic"
+  [ "$(wc -l < "$home/verify.err" | tr -d ' ')" -le 1 ] \
+    || fail "verify's stderr must be a single failure line, not resolve_entry's message plus a second one: $(cat "$home/verify.err")"
+  # A silent grep for "done-archive" in stderr is not proof the archive was
+  # never queried: a SUCCESSFUL archive read prints nothing there either. Count
+  # the actual normalized-view reads (every archive query passes --file) instead.
+  # A real archive already exists (built above), so a zero reading here is
+  # meaningful rather than trivial.
+  [ ! -f "$archive_queries" ] || [ "$(cat "$archive_queries")" = 0 ] \
+    || fail "verify must never consult the archive on a one-shot read error, but it queried it $(cat "$archive_queries") time(s)"
+
+  # Positive control: the counter itself must actually count. Verifying the
+  # genuinely archived row built above, through the real fallback (no
+  # one-shot failure injected), must register at least one archive query.
+  rm -f "$archive_queries"
+  TASKS_AXI_ARCHIVE_QUERY_COUNTER="$archive_queries" \
+    run_captain "$home" verify sample-one-shot-control-origin >/dev/null \
+    || fail "verify did not resolve the genuinely archived control fixture"
+  [ -f "$archive_queries" ] && [ "$(cat "$archive_queries")" -ge 1 ] \
+    || fail "the archive-query counter never incremented for a real archive fallback; the counter mechanism itself is broken"
+
+  # Normal-creation control: a different id, never named by the wrapper's
+  # target, is completely unaffected by this fix.
+  run_captain "$home" hold sample-one-shot-control-id --title "Ordinary creation" \
+    --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "an ordinary hold with no injected failure must still succeed"
+  assert_grep "sample-one-shot-control-id" "$home/data/backlog.md" \
+    "the ordinary control task must have been created"
+
+  pass "hold and verify both refuse a one-shot backlog read error instead of accepting the second, incidental read"
+}
+
 test_origin_slug_validation_precedes_path_construction() {
   local home
   home=$(make_home slug-validation)
@@ -1540,6 +2165,12 @@ test_bound_channel_answers_close_at_answer_time
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_chat_channel_feeds_the_same_keyed_answer_intake
+test_resolve_entry_direct_unit_backlog_and_archive
+test_archived_answer_resolves_for_verify_and_complete
+test_archive_fallback_fails_closed_on_broken_records
+test_answers_keyed_intake_names_archive_failures
+test_backlog_read_error_never_reads_as_a_miss
+test_hold_and_answer_refuse_on_a_one_shot_backlog_read_error
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal

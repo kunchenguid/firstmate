@@ -191,6 +191,11 @@ CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
 CAPTAIN_CONTROL_LOCK=
 CAPTAIN_CONTROL_LOCK_HELD=0
+# archive_row_answered's staging file: tracked here (not just rm'd inline in
+# that function) because a fail() nested inside its task_show_or_archived
+# call exits the process before that function's own next line can run, which
+# would otherwise leak this file.
+CAPTAIN_ADMISSION_CHECK_TMP=
 captain_hold_cleanup() {
   if [ "$CAPTAIN_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CAPTAIN_META_LOCK" || true
@@ -200,6 +205,7 @@ captain_hold_cleanup() {
     fm_lock_release "$CAPTAIN_CONTROL_LOCK" || true
     CAPTAIN_CONTROL_LOCK_HELD=0
   fi
+  [ -z "$CAPTAIN_ADMISSION_CHECK_TMP" ] || rm -f -- "$CAPTAIN_ADMISSION_CHECK_TMP"
 }
 trap captain_hold_cleanup EXIT
 
@@ -293,6 +299,99 @@ task_show() {  # <id>
   local data
   data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
   fm_backlog_row_show "$data" "$1" --full 2>/dev/null
+}
+
+# The retention archive: read-only, mirroring .tasks.toml's markdown archive
+# setting. Never opened for writing.
+captain_done_archive_file() {
+  local data
+  data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
+  printf '%s/done-archive.md\n' "$data"
+}
+
+# One row from a private, read-only view of the archive with every
+# `## Archived <date>` heading rewritten to `## Done`, the only heading
+# tasks-axi's markdown backend resolves rows under, or a graceful miss
+# (NOT_FOUND covers both a genuinely absent id and an archived row the
+# reader cannot classify, such as a still-open hold archived by mistake). A
+# fresh mktemp per call, owned and removed here before returning either way:
+# a path predictable from the process id would risk a crashed earlier
+# process at the same pid leaving a stale view a later run could mistake for
+# current, and a variable assigned inside a resolve_entry/verify_hold_durable
+# command-substitution subshell never reaches the parent anyway, so nothing
+# outside this function can rely on reusing one - the miss path pays for two
+# transient normalizations rather than sharing one unsafely.
+#
+# The archive check and view build stay INLINE here rather than behind their
+# own `$(...)`-called helper: a `fail` inside a command substitution only
+# ends that subshell, so a caller reading "$(helper)" would see an ordinary
+# nonzero status indistinguishable from its own graceful-miss convention and
+# treat a structural read failure as a plain absence, letting a mutation
+# path fall through to creating a duplicate task over an archive it could
+# not actually read. Keeping it inline means the `fail` here runs in
+# whatever process actually called archive_row_show, terminating that
+# command for real whenever that call is not itself inside a `$(...)`. An
+# archive that was never created (and is not a symlink pointing nowhere)
+# yields no view (a plain miss); anything else that is not a plain readable
+# file - a directory, or any symlink, dangling or not - is a structural
+# error, loud rather than silent.
+archive_row_show() {  # <id>
+  local id=$1 archive view show rc
+  archive=$(captain_done_archive_file)
+  if [ -L "$archive" ]; then
+    fail "captain decision archive is not a readable file: $archive"
+  fi
+  [ -e "$archive" ] || return 1
+  [ -f "$archive" ] || fail "captain decision archive is not a readable file: $archive"
+  view=$(umask 077; mktemp "$STATE/fm-captain-hold-archive.XXXXXX") \
+    || fail "cannot stage a read-only archive view for $archive"
+  if ! sed 's/^## Archived .*$/## Done/' "$archive" > "$view"; then
+    rm -f -- "$view"
+    fail "cannot build a read-only archive view for $archive"
+  fi
+  show=$(tasks-axi show "$id" --full --file "$view" 2>&1)
+  rc=$?
+  rm -f -- "$view"
+  [ "$rc" -eq 0 ] && { printf '%s' "$show"; return 0; }
+  printf '%s\n' "$show" | rg -q '^code: NOT_FOUND$' && return 1
+  fail "captain decision archive could not be read: $(printf '%s\n' "$show" | head -1)"
+}
+
+# True when <id> names a row anywhere in the archive, any check state, for
+# read-only classification only - never a resolvable answer by itself.
+# Anchored at line start against a `- [ ] <id> - ` or `- [x] <id> - ` shape so
+# an incidental substring inside another row's body can never match.
+archive_row_exists() {  # <id>
+  local id=$1 archive pattern
+  archive=$(captain_done_archive_file)
+  [ -f "$archive" ] && [ ! -L "$archive" ] || return 1
+  pattern=$(printf '%s' "$id" | sed 's/[.[\*^$/]/\\&/g')
+  rg -q "^- \[[ x]\] $pattern - " "$archive"
+}
+
+# NOT_FOUND from the archive view is ambiguous by itself; only a row that
+# actually exists there and still could not be classified as done is a named
+# failure. Everything else is a plain miss for the caller to report.
+archive_unclassified_fail() {  # <id>
+  archive_row_exists "$1" \
+    && fail "captain-held task $1 is in $(captain_done_archive_file) but cannot be read as an answered call; restore the row to the backlog or repair the archive by hand"
+  return 1
+}
+
+# Read-only sibling of task_show - never itself a mutation path. On a true
+# backlog NOT_FOUND, falls back to the normalized archive view; any other
+# backlog error fails naming the backlog and never consults the archive
+# (steady-state cost is unchanged: this adds nothing on the hit path, and at
+# most one archive lookup on a true miss). Source-blind: it only proves the
+# id is readable somewhere, so a caller that must not accept anything a
+# backlog-only hold could accept (verify_hold_durable) composes task_show
+# and archive_row_show directly instead of calling this.
+task_show_or_archived() {  # <id>
+  local id=$1 show
+  show=$(task_show "$id") && { printf '%s' "$show"; return 0; }
+  printf '%s\n' "$show" | rg -q '^code: NOT_FOUND$' \
+    || fail "cannot read task $id from $CAPTAIN_BACKLOG_FILE: $(printf '%s\n' "$show" | head -1)"
+  archive_row_show "$id" || archive_unclassified_fail "$id"
 }
 
 show_field() {  # <show-output> <field>
@@ -415,34 +514,88 @@ resolution_block() {  # <mode>
     "$DECISION_DIGEST" "$1" "$DECISION_TEXT"
 }
 
+# True only when <id> resolves - live or archived - to a row that reads
+# `state: done` AND carries a recorded resolution, never merely that it
+# reads at all: a done archived row with no resolution record, or one the
+# reader cannot classify, is not proof an answer is owed, and the mutation
+# paths below rely on this to name the archive in their refusal only when
+# that refusal is actually true.
+#
+# task_show_or_archived's own output is captured through a temp file, never
+# a command substitution: `$(task_show_or_archived ...)` would run it in a
+# subshell, and a `fail` inside it (an unreadable or structurally broken
+# archive) would then only end that subshell rather than this command,
+# reproducing the same swallowed-failure defect archive_row_show's own inline
+# checks exist to avoid. Called as a plain function (never itself inside a
+# `$(...)`) by the mutation paths, so that `fail` still terminates them.
+archive_row_answered() {  # <id>
+  local id=$1 show
+  CAPTAIN_ADMISSION_CHECK_TMP=$(umask 077; mktemp "$STATE/fm-captain-hold-check.XXXXXX") \
+    || fail "cannot stage a read-only admission check for $id"
+  if ! task_show_or_archived "$id" > "$CAPTAIN_ADMISSION_CHECK_TMP"; then
+    rm -f -- "$CAPTAIN_ADMISSION_CHECK_TMP"
+    CAPTAIN_ADMISSION_CHECK_TMP=
+    return 1
+  fi
+  show=$(cat "$CAPTAIN_ADMISSION_CHECK_TMP")
+  rm -f -- "$CAPTAIN_ADMISSION_CHECK_TMP"
+  CAPTAIN_ADMISSION_CHECK_TMP=
+  [ "$(show_field "$show" state)" = "done" ] || return 1
+  body_has_resolution_record "$(show_field "$show" body)"
+}
+
 # Durable state of one captain call: an active captain hold (annotations
-# surviving even when a date gate has expired) or a recorded captain answer.
+# surviving even when a date gate has expired) or a recorded captain answer,
+# resolved from the live backlog or, on a true miss, a read-only normalized
+# view of the retention archive. The two sources are not interchangeable:
+# only a live row can still be genuinely held, so a done-with-no-record or
+# unclassifiable archived row always fails closed here rather than reusing
+# task_show_or_archived's own (source-blind) success/failure split.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $CAPTAIN_BACKLOG_FILE"
-  state=$(show_field "$show" state)
-  hold_kind=$(show_field_value "$show" hold_kind)
-  body=$(show_field "$show" body)
-  if body_has_resolution_record "$body"; then
-    return 0
+  if show=$(task_show "$id"); then
+    state=$(show_field "$show" state)
+    hold_kind=$(show_field_value "$show" hold_kind)
+    body=$(show_field "$show" body)
+    if body_has_resolution_record "$body"; then
+      return 0
+    fi
+    # A live backlog row may still be genuinely held; an archived row never
+    # is (retention only archives closed rows), so this branch is backlog-
+    # only and must not also gate the archive fallback below.
+    if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
+      return 0
+    fi
+    fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
   fi
-  if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
-    return 0
+  printf '%s\n' "$show" | rg -q '^code: NOT_FOUND$' \
+    || fail "cannot read task $id from $CAPTAIN_BACKLOG_FILE: $(printf '%s\n' "$show" | head -1)"
+  if show=$(archive_row_show "$id"); then
+    state=$(show_field "$show" state)
+    if [ "$state" = "done" ]; then
+      body_has_resolution_record "$(show_field "$show" body)" && return 0
+      fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
+    fi
+    # Any non-done state from the archive is exactly as unclassifiable as a
+    # NOT_FOUND row: retention only ever archives closed rows, so a state
+    # other than done here is itself the anomaly, not a live hold to honor.
+    fail "captain-held task $id is in $(captain_done_archive_file) but cannot be read as an answered call; restore the row to the backlog or repair the archive by hand"
   fi
-  fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
+  archive_unclassified_fail "$id" || true
+  fail "captain-held task $id is absent from $CAPTAIN_BACKLOG_FILE"
 }
 
 # Resolve one inventory entry or channel key to the task that carries it: the
 # exact task id when it exists, else the legacy derived identity.
 resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   local origin=$1 entry=$2 legacy
-  if task_show "$entry" >/dev/null 2>&1; then
+  if task_show_or_archived "$entry" >/dev/null; then
     printf '%s' "$entry"
     return 0
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if task_show "$legacy" >/dev/null 2>&1; then
+    if task_show_or_archived "$legacy" >/dev/null; then
       printf '%s' "$legacy"
       return 0
     fi
@@ -489,6 +642,12 @@ command_hold() {
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
     fi
   else
+    printf '%s\n' "$show" | rg -q '^code: NOT_FOUND$' \
+      || fail "cannot read task $id from $CAPTAIN_BACKLOG_FILE: $(printf '%s\n' "$show" | head -1)"
+    if archive_row_answered "$id"; then
+      fail "captain-held task $id is archived ($(captain_done_archive_file)); nothing is owed"
+    fi
+    archive_unclassified_fail "$id" || true
     [ -n "$title" ] || fail "--title is required to create task $id"
     validate_one_line title "$title"
     if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
@@ -569,7 +728,15 @@ command_answer() {
   load_decision "$decision_file"
   acquire_task_control_lock "$id"
   require_tasks_axi
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $CAPTAIN_BACKLOG_FILE"
+  show=$(task_show "$id") || {
+    printf '%s\n' "$show" | rg -q '^code: NOT_FOUND$' \
+      || fail "cannot read task $id from $CAPTAIN_BACKLOG_FILE: $(printf '%s\n' "$show" | head -1)"
+    if archive_row_answered "$id"; then
+      fail "captain-held task $id is archived ($(captain_done_archive_file)); nothing is owed"
+    fi
+    archive_unclassified_fail "$id" || true
+    fail "captain-held task $id is absent from $CAPTAIN_BACKLOG_FILE"
+  }
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -794,8 +961,9 @@ command_answers() {
         continue
         ;;
     esac
-    if ! id=$(resolve_entry "$origin" "$key" 2>/dev/null); then
-      printf 'skipped: %s (no captain-held task with that id)\n' "$key"
+    if ! id=$(resolve_entry "$origin" "$key" 2>"$err"); then
+      reason=$(tr -d '\n' < "$err" | sed 's/^fm-captain-hold: //')
+      printf 'skipped: %s (%s)\n' "$key" "$reason"
       skipped=$((skipped + 1))
       continue
     fi
@@ -814,7 +982,15 @@ command_answers() {
     if [ -n "$legacy_key" ]; then
       legacy_digest=$(sha256_text "$(legacy_keyed_decision_text "$source" "$legacy_key" "$answer" "$label")")
     fi
-    show=$(task_show "$id") || { printf 'skipped: %s (absent)\n' "$id"; skipped=$((skipped + 1)); continue; }
+    show=$(task_show "$id") || {
+      if printf '%s\n' "$show" | rg -q '^code: NOT_FOUND$'; then
+        printf 'skipped: %s (absent)\n' "$id"
+      else
+        printf 'skipped: %s (%s)\n' "$id" "$(printf '%s\n' "$show" | head -1)"
+      fi
+      skipped=$((skipped + 1))
+      continue
+    }
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
@@ -867,7 +1043,7 @@ command_answers() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc
+  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc resolved_id
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -898,7 +1074,14 @@ command_complete() {
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      verify_hold_durable "$(resolve_entry "$origin" "$entry")"
+      # resolve_entry is captured on its own line, never nested inline as
+      # verify_hold_durable's argument: a fail() inside it (or inside
+      # task_show_or_archived, which it calls directly) would otherwise only
+      # end the command-substitution subshell, letting verify_hold_durable
+      # run with an empty id - a second, misleading failure under an id that
+      # was never actually resolved.
+      resolved_id=$(resolve_entry "$origin" "$entry")
+      verify_hold_durable "$resolved_id"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -940,7 +1123,7 @@ EOF
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys entry key open
+  local origin=${1:-} meta reviewed keys entry key open resolved_id
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
@@ -952,7 +1135,14 @@ command_verify() {
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      verify_hold_durable "$(resolve_entry "$origin" "$entry")"
+      # resolve_entry is captured on its own line, never nested inline as
+      # verify_hold_durable's argument: a fail() inside it (or inside
+      # task_show_or_archived, which it calls directly) would otherwise only
+      # end the command-substitution subshell, letting verify_hold_durable
+      # run with an empty id - a second, misleading failure under an id that
+      # was never actually resolved.
+      resolved_id=$(resolve_entry "$origin" "$entry")
+      verify_hold_durable "$resolved_id"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
