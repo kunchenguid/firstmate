@@ -268,8 +268,27 @@ The separate audit of Firstmate-owned probes found that `bin/fm-pr-merge.sh`'s m
 `steps <kind>` (read-only) prints the ordered step chain a kind's tasks move through.
 Every step is derived from artifacts that already exist for an ordinary task: `dispatched` needs only a spawn-written generation in `state/<id>.meta`, `pr-registered` needs a PR identity already bound in that meta, and `merged` needs the existing `state/<id>.pr-poll-merge-notified` marker; no new data is invented to reach any step.
 `probe` (with no `--task`) already calls `reconcile` for every task that has a `state/<id>.meta` file, on the watcher's normal cadence, regardless of pause state, so a task's record already advances through `dispatched` -> `pr-registered` -> `merged` on its own as those artifacts appear; a freshly spawned task shows `uninitialized` only until its first probe cycle runs.
-Landed so far (PR 209): the record schema, migration from the legacy cache, `reconcile`, `retire`, and the `board-json`/`steps` read surfaces, plus the existing probe cycle calling `reconcile` automatically.
-Not yet landed: explicit `reconcile`/`retire` calls wired directly into `bin/fm-pr-check.sh`, `bin/fm-spawn.sh`, and `bin/fm-teardown.sh` (S2b/S2c), so a record's freshness depends on the next probe cycle rather than updating the instant a PR check, spawn, or teardown happens, and a torn-down task's record is not yet cleaned up automatically.
+Landed so far: the record schema, migration from the legacy cache, `reconcile`, `retire`, and the `board-json`/`steps` read surfaces, plus the existing probe cycle calling `reconcile` automatically (PR 209); an explicit best-effort `reconcile` call wired directly into `bin/fm-pr-check.sh`'s registration seam right after registration, so a `pr-registered` step usually lands the instant a PR check runs; when that call is refused (a bounded lock timeout, a malformed record) registration still proceeds, a warning is printed, and the old record is left as is; the next probe cycle retries the reconcile (a malformed record is refused again until it is repaired by hand) (PR 216).
+Not yet landed: an explicit `reconcile` call wired into `bin/fm-spawn.sh`, so a freshly spawned task's `dispatched` step still depends on the next probe cycle rather than landing the instant spawn runs; and an explicit `retire` call wired into `bin/fm-teardown.sh` (S2c). `probe_all` only iterates tasks with a surviving `.meta` or `.status` file, so once a task is torn down without that wiring its record is never visited again and never cleaned up on its own; run `bin/fm-pipeline.sh retire <id>` by hand for a torn-down task today.
+
+## Wait observation is honest
+
+`bin/fm-pipeline.sh probe` appends one shadow event per active declared wait to `state/pipeline-events.log` (schema `fm-pipeline.v2`), separate from the v3 record above.
+Every such event carries `probe=unknown rule=- action=none`: the probe takes no crew-liveness reading and heals nothing from an unobserved wait.
+Demonstrated in a disposable state directory:
+
+```sh
+home=$(mktemp -d)
+mkdir -p "$home/state"
+printf 'kind=ship\nspawn_gen=gen-wait-demo\n' > "$home/state/wait-demo-task.meta"
+printf 'working: started\npaused [key=upstream]: waiting for an upstream release\n' > "$home/state/wait-demo-task.status"
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_PIPELINE_LOG="$home/state/events-out.txt" \
+  bin/fm-pipeline.sh probe --task wait-demo-task
+```
+
+prints nothing and appends exactly one line to `$home/state/events-out.txt`: `... probe=unknown rule=- action=none ... wait=ext:upstream ...`.
+Because the task has a valid meta, `probe --task` also runs `reconcile` first (see above), so the disposable directory gains two more files as a side effect: `wait-demo-task.pipeline` (the v3 record, `step=dispatched rev=1`) and `wait-demo-task.pipeline-seen` (the probe's observation cache).
+A bound `wait=pr:<url>` or `wait=quota:<provider>` premise is read by the separate `bin/fm-wait-premise.sh`, not by this probe.
 
 ## Two task shapes
 
