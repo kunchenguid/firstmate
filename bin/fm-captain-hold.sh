@@ -47,12 +47,15 @@
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
 # writes a resolution block while preserving the leading hold-set stamp until
 # the close succeeds (the previous body is preserved and archived through
-# tasks-axi --archive-body). It then closes the task with `tasks-axi done` - or,
-# with `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated
-# WORK item resumes instead of closing - and restores resolution-first body
-# ordering. An exact retry also completes unfinished ordering normalization and
-# is idempotent only when its requested close mode
-# matches the newest record; a changed decision or a mode mismatch is rejected.
+# tasks-axi --archive-body). It then closes the task through the guarded
+# backlog close owned by bin/fm-backlog-transition-lib.sh, carrying
+# `--note "answered: <first line of the decision>"` as the close's done-class
+# reason so the closed row records why it closed - or, with `--release`, lifts
+# the hold with `tasks-axi unhold` so a captain-gated WORK item resumes instead
+# of closing - and restores resolution-first body ordering. An exact retry also
+# completes unfinished ordering normalization and is idempotent only when its
+# requested close mode matches the newest record; a changed decision or a mode
+# mismatch is rejected.
 # A re-held task may record a new answer on top. On a task already closed outside this script,
 # `answer` records the missing resolution block (the old `repair` path) only
 # when the task still carries the captain-hold provenance tasks-axi preserves
@@ -176,6 +179,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# The close-kind and worker-record guards live there; closing an answered hold
+# closes a real backlog task, so it goes through that one guarded close.
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
@@ -828,11 +833,27 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
   rm -f -- "$tmp"
 }
 
+# The recorded close note for an answered hold. The captain's answer IS the
+# authority for this close, so it travels with the close itself and tasks-axi
+# records it on the closed task - the same single captain-authority mechanism
+# the `cancelled` kind uses, not a second path. The complete decision is already
+# preserved in the task body by write_resolution_record; a close note is single
+# line and bounded, so this carries the answer's first line as its summary.
+answered_close_note() {  # <decision-text>
+  local first
+  first=$(printf '%s\n' "$1" | sed -n '1p' | LC_ALL=C tr -d '\000-\037\177')
+  first=${first#"${first%%[![:space:]]*}"}
+  first=${first%"${first##*[![:space:]]}"}
+  [ -n "$first" ] || first="captain answer recorded in the task body"
+  printf 'answered: %s' "${first:0:300}"
+}
+
 close_answered() {  # <task-id> <release-0-or-1>
   if [ "$2" = 1 ]; then
     tasks_axi unhold "$1" >/dev/null
   else
-    tasks_axi "done" "$1" >/dev/null
+    fm_backlog_done "$DATA" "$1" "$STATE" \
+      --note "$(answered_close_note "$DECISION_TEXT")" >/dev/null
   fi
 }
 
@@ -934,7 +955,7 @@ command_answer() {
         answered) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
       esac
       if ! close_answered "$id" "$release"; then
-        fail "could not close answered captain-held task $id"
+        fail "could not close answered captain-held task $id${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)}"
       fi
       remove_interrupted_answer_stamp "$id"
       publish_parent_hold "$id" $((occurrence - 1)) resolved "$outcome"
@@ -943,7 +964,7 @@ command_answer() {
     fi
     write_resolution_record "$id" "$outcome" "$body"
     if ! close_answered "$id" "$release"; then
-      fail "could not close answered captain-held task $id"
+      fail "could not close answered captain-held task $id${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)}"
     fi
     remove_interrupted_answer_stamp "$id"
     show=$(task_show "$id") || fail "task $id disappeared after closing"

@@ -19,6 +19,10 @@
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
 # malformed GitHub workflow, including a self-broken ci.yml, fails locally
 # before merge instead of only failing to run as CI.
+# Every run also enforces one interface boundary over the production shell
+# roots it lints: firstmate reaches its backlog through tasks-axi and never
+# through the beads CLI directly (see fm_lint_interface_purity; test scripts
+# are exempt by design).
 #
 # With no explicit paths, the file set and source-following posture depend
 # on context:
@@ -153,6 +157,68 @@ fm_lint_usage() {
 fm_lint_run_workflows() {
   [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
   "$SELF_DIR/fm-lint-workflows.sh"
+}
+
+# Firstmate reaches its backlog only through tasks-axi, never through the beads
+# CLI that tasks-axi wraps. tasks-axi owns the backend gate, the per-home
+# addressing root, and the compatibility verdict, so a direct `bd` call silently
+# bypasses all three and mutates the wrong home or an unsupported schema.
+# This is a source check over the production shell roots this run lints (bin/
+# and bin/backends/), so it applies to the canonical set, a changed-file set,
+# and explicit paths alike. Test scripts are exempt by design: a fixture that
+# exercises a beads-backed backend must bootstrap its scratch graph with `bd`
+# before tasks-axi can operate on it at all - the npm-published tasks-axi ships
+# the markdown backend only, so tests/fm-captain-hold-lifecycle.test.sh drives
+# `bd` directly for fixture setup, documents why, and self-skips on
+# markdown-only installs. A direct `bd` call there builds a throwaway graph and
+# never reaches a real home, so the runtime bypass this boundary exists for
+# cannot happen; a blanket ban over tests/ would instead forbid the repo's own
+# documented fixture pattern.
+# Full-line comments are exempt so prose may still name the tool; grep -H is
+# load-bearing for that, because a single-root run otherwise drops the filename
+# prefix the comment filter anchors on.
+# Command position is recognized lexically, not by parsing shell: the start of a
+# line, after a separator (`;` `&` `|` `(` `)` backtick `!` `{` and either
+# quote), and after a shell keyword or wrapper that is followed IMMEDIATELY by
+# the command (if/while/until/then/do/elif/else/sudo/command/time/xargs/exec/
+# eval/nohup). The closing paren carries a `case` branch, the most common
+# command position in these scripts, and the quotes carry an `eval` body. A `bd`
+# inside a string literal on a code line is reported like any other command
+# position; rewrite such a line rather than suppressing the check.
+#
+# KNOWN, TRACKED GAP - NOT AN OVERSIGHT: because a wrapper must sit immediately
+# before the command, any form that puts ARGUMENTS between them is NOT caught.
+# So `timeout 5 bd close <id>`, `env FOO=1 bd list`, and the inline-assignment
+# prefix `x=1 bd y` all pass this check silently. `env` and `timeout` are absent
+# from the list above for exactly that reason: they are essentially never
+# written bare, so listing them would claim a coverage this pattern does not
+# provide. Widening the pattern to span an argument run risks trading these
+# false negatives for false positives, so the narrower rule is deliberate and
+# the gap is recorded here rather than papered over. Do not read a clean verdict
+# from this check as proof that a script makes no direct beads call.
+fm_lint_is_production_root() {  # <path>
+  local dir base
+  case "$1" in
+    */*) dir=${1%/*}; base=${1##*/} ;;
+    *) dir=; base=$1 ;;
+  esac
+  [ "${base%.sh}" != "$base" ] || return 0
+  case "$dir" in
+    tests | */tests) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+fm_lint_interface_purity() {  # <root>...
+  local hits
+  [ "$#" -gt 0 ] || return 0
+  hits=$(grep -HnE '(^|[;&|()`!{'"'"'"]|(^|[[:space:]])(if|while|until|then|do|elif|else|sudo|env|command|time|xargs|exec|eval|nohup|timeout)[[:space:]])[[:space:]]*bd([^A-Za-z0-9_.=/-]|$)' "$@" 2>/dev/null \
+    | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#') || return 0
+  [ -n "$hits" ] || return 0
+  printf 'fm-lint.sh: firstmate scripts must reach the backlog through tasks-axi, never the beads CLI directly.\n' >&2
+  printf 'fm-lint.sh: replace each call below with the matching tasks-axi command.\n' >&2
+  printf '%s\n' "$hits" >&2
+  return 1
 }
 
 JOBS=${FM_LINT_JOBS:-2}
@@ -293,6 +359,18 @@ if [ "$LIST_FILES" -eq 1 ]; then
   exit 0
 fi
 
+# Runs before ShellCheck resolution so an interface violation is reported even
+# on a host without the pinned ShellCheck. Its verdict is folded into the final
+# exit status rather than exiting here, so one run still reports every finding.
+PURITY_RC=0
+PURITY_ROOTS=()
+for purity_path in ${ROOTS[@]+"${ROOTS[@]}"}; do
+  if fm_lint_is_production_root "$purity_path"; then
+    PURITY_ROOTS+=("$purity_path")
+  fi
+done
+fm_lint_interface_purity ${PURITY_ROOTS[@]+"${PURITY_ROOTS[@]}"} || PURITY_RC=$?
+
 if ! command -v shellcheck >/dev/null 2>&1; then
   printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s with bin/fm-install-shellcheck.sh <destination-directory> and put that directory on PATH.\n' \
     "$REQUIRED_SHELLCHECK" >&2
@@ -321,7 +399,7 @@ fi
 
 if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
   printf 'fm-lint.sh: no changed lint targets\n'
-  overall_rc=0
+  overall_rc=$PURITY_RC
   fm_lint_run_workflows || overall_rc=$?
   exit "$overall_rc"
 fi
@@ -522,6 +600,8 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   worker=$((worker + 1))
 done
 
+[ "$PURITY_RC" -eq 0 ] || overall_rc=$PURITY_RC
+
 if [ -n "$TELEMETRY" ]; then
   TELEMETRY_END_EPOCH=$(date +%s)
   TELEMETRY_SHELLCHECK_END=$(fm_lint_shellcheck_count)
@@ -639,5 +719,4 @@ if [ "$overall_rc" -eq 0 ]; then
 else
   fm_lint_run_workflows || true
 fi
-
 exit "$overall_rc"
