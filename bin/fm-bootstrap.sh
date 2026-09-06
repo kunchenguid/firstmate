@@ -1216,13 +1216,20 @@ crew_dispatch_validate() {
 $report
 EOF
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+    # A configured home is rendered as an "@<home>" suffix because the whole
+    # point of the two-account rule is candidates that agree on every other
+    # axis: without it the two sides of "codex/gpt-5.5/high, codex/gpt-5.5/high"
+    # are indistinguishable in the fact that is supposed to show the operator
+    # what is configured. Only the path the file states is printed - nothing
+    # under that home, and never any credential, is read here.
     jq -r '
     def profile($p):
       ($p.harness | tostring)
       + (if ($p.model? != null) then "/" + ($p.model | tostring)
          elif ($p.effort? != null) then "/default"
          else "" end)
-      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
+      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end)
+      + (if ($p.home? != null) then "@" + ($p.home | tostring) else "" end);
     def profile_set($value; $selector):
       if ($value | type) == "array" then
         (($selector // "quota-balanced") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")

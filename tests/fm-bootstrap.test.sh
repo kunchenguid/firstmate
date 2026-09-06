@@ -1263,6 +1263,50 @@ JSON
   pass "bootstrap reports every unavailable codex home in one pass"
 }
 
+# The two-account rule's candidates agree on harness, model, and effort, so the
+# home is the only axis that tells them apart. A verbose fact that omits it
+# prints the rule as two identical profiles and states nothing about which
+# accounts are configured.
+test_crew_dispatch_verbose_facts_distinguish_codex_homes() {
+  local homes work personal case_dir fakebin out expect
+  homes="$TMP_ROOT/codex-homes-verbose"
+  work="$homes/work"
+  personal="$homes/personal"
+  mkdir -p "$work" "$personal"
+  : > "$work/auth.json"
+  : > "$personal/auth.json"
+
+  case_dir="$TMP_ROOT/dispatch-home-verbose"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/config/crew-dispatch.json" <<JSON
+{
+  "rules": [
+    {
+      "when": "long runs",
+      "use": [
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high", "home": "$work" },
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high", "home": "$personal" }
+      ]
+    },
+    { "when": "quick edits", "use": { "harness": "claude" } }
+  ],
+  "default": { "harness": "codex", "home": "$work" }
+}
+JSON
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_VERBOSE_FACTS=1 "$ROOT/bin/fm-bootstrap.sh")
+
+  expect="BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json
+BOOTSTRAP_INFO: crew dispatch rule: long runs -> quota-balanced[codex/gpt-5.5/high@$work, codex/gpt-5.5/high@$personal]
+BOOTSTRAP_INFO: crew dispatch rule: quick edits -> claude
+BOOTSTRAP_INFO: crew dispatch default: codex@$work"
+  [ "$out" = "$expect" ] || fail "codex home verbose facts mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
+  pass "verbose dispatch facts name each candidate's configured codex home"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1294,3 +1338,4 @@ test_crew_dispatch_validation
 test_crew_dispatch_codex_home_validation
 test_crew_dispatch_unavailable_home_is_candidate_local
 test_crew_dispatch_reports_every_unavailable_home
+test_crew_dispatch_verbose_facts_distinguish_codex_homes
