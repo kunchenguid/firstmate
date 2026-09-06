@@ -335,18 +335,28 @@ test_acquired_worktree_refreshes_a_stale_local_env_file() {
 # serving the revoked one to whoever takes it next. Assert absence only; the
 # fixture is empty because credential bytes are never part of this assertion.
 test_acquired_worktree_retires_a_local_env_file_the_captain_deleted() {
-  local rec id out status
+  local rec id second out status
   id='pool-env-local-r4'
+  second='pool-env-local-r4b'
   rec=$(make_case env-local-deleted "$id")
   read_case_record "$rec"
 
+  # First acquire the slot while the source exists, so the seed record proves
+  # that the pool copy belongs to firstmate before the captain deletes it.
   ignore_local_env_file
-  truncate -s 1 "$POOL_DIR/.env.local"
-  chmod 0600 "$POOL_DIR/.env.local"
+  : > "$PROJECT_DIR/.env.local"
+  chmod 0600 "$PROJECT_DIR/.env.local"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "the fixture's first acquisition should seed the slot"
+  [ -f "$POOL_DIR/.env.local" ] || fail "the fixture never got a seeded .env.local"
+
+  rm -f "$PROJECT_DIR/.env.local"
+  prepare_second_acquisition "$second"
   [ ! -e "$PROJECT_DIR/.env.local" ] \
     || fail "the fixture unexpectedly left a source .env.local in the primary checkout"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$second" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should reissue a slot whose source .env.local was deleted"
   [ ! -e "$POOL_DIR/.env.local" ] \
@@ -469,9 +479,10 @@ test_interrupted_seed_scratch_does_not_outlive_revocation() {
   fm_test_spawn_brief "$HOME_DIR" "$retry"
   out=$(run_spawn "$retry" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "spawn should reissue a slot after the source .env.local was revoked"
-  [ ! -e "$POOL_DIR/.env.local" ] \
-    || fail "spawn left a revoked .env.local in the reissued pool slot"
+  [ "$status" -ne 0 ] \
+    || fail "spawn removed an unrecorded .env.local after the source was revoked"
+  [ -e "$POOL_DIR/.env.local" ] \
+    || fail "spawn removed an unrecorded .env.local from the reissued pool slot"
   [ "$(staged_scratch_count)" = 0 ] \
     || fail "a revoked credential survived in the slot's staging area after reissue"
   pass "an interrupted seed's staged scratch does not outlive the credential's revocation"
