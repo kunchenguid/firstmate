@@ -980,6 +980,7 @@ export default function (pi: ExtensionAPI) {
     let settled = false;
     let readinessSettled = false;
     let verified = false;
+    let busyWaiting = false;
     let resolveReadiness: (readiness: ArmReadiness) => void = () => {};
     let resolveClosed: () => void = () => {};
     const readiness = new Promise<ArmReadiness>((resolveReady) => {
@@ -1004,6 +1005,7 @@ export default function (pi: ExtensionAPI) {
         settleReadiness("ready");
       }
       if (combined.split(/\r?\n/).includes("FM_WATCH_ARM_STATE=busy-holder-waiting")) {
+        busyWaiting = true;
         settleReadiness("busy-holder-waiting");
       }
       const reason = completedActionableLine(stdout) || completedActionableLine(stderr);
@@ -1047,10 +1049,10 @@ export default function (pi: ExtensionAPI) {
       }
       if (owner.restoring) {
         // The pipeline is still delivering the wake this successor was
-        // started for. A verified successor that failed on its own keeps its
+        // started for. A preserved successor that failed on its own keeps its
         // bounded retry for the end of that delivery; an unready child closing
         // here was retired by the restoration itself.
-        if (verified && !armRetired.has(armChild)) {
+        if ((verified || busyWaiting) && !armRetired.has(armChild)) {
           owner.deferredClose = { message: classification.message, predecessorArmPid: predecessor };
         }
         return;
@@ -1064,8 +1066,14 @@ export default function (pi: ExtensionAPI) {
       settleReadiness("failed");
       releaseChild();
       if (!generationIsLive(owner)) return;
-      if (owner.restoring) return;
-      scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
+      const message = `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`;
+      if (owner.restoring) {
+        if (busyWaiting && !armRetired.has(armChild)) {
+          owner.deferredClose = { message, predecessorArmPid: String(armChild.pid ?? "") };
+        }
+        return;
+      }
+      scheduleRetry(owner, message, String(armChild.pid ?? ""));
     });
     return {
       ok: true,
