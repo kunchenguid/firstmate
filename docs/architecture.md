@@ -297,6 +297,13 @@ When a task's status file cannot be read (permission denied, for example), the p
 The clock starts after the task list is built and is checked only before each task; once a task is admitted, nothing later bounds or interrupts its own processing time, and the deadline is never rechecked after the last task runs.
 Once the deadline trips, every task the scan has not yet reached gets one unknown row with `evidence=scan:deadline` instead of a real probe, tasks already visited keep their real result, and the scan exits 1 (an ordinary scan and one with the deadline disabled both exit 0).
 
+## Task flow graph board
+
+`bin/fm-graph-board.sh build <board.json>` validates one `fm-pipeline-board.v1` snapshot (the exact schema `bin/fm-pipeline.sh board-json` prints) and atomically publishes `$FM_HOME/.lavish/graph-board.html`; `fm-graph-board.sh path` prints that path without building anything. The builder has no sensor, forge, server, watcher, or answer-source side effects of its own.
+The builder has no stdin or `-` handling: `[ -r "$data" ]` tests for a file literally named `-`, so a piped `bin/fm-pipeline.sh board-json | bin/fm-graph-board.sh build -` refuses with "board data is not readable: -". Run it with the same `FM_HOME`/`FM_STATE_OVERRIDE` pinned on both sides, through process substitution, and open the printed path in a browser: `FM_HOME=<home> bin/fm-graph-board.sh build <(FM_HOME=<home> FM_STATE_OVERRIDE=<home>/state bin/fm-pipeline.sh board-json)`. An ordinary file works too, but writing one for real fleet data risks clobbering an existing path under ambient permissions; prefer process substitution for that reason.
+Per task, only the record's current proven step (`record_state=ok`, `initialized=true`, `step_proven=true`, and that step name matches a real node in the kind's chain) is drawn `Success` and carries its real evidence string; every other step in that chain reads `Unknown`, never invented from history. A task with no record at all draws every step `Uninitialized` and its banner reads "no owner step recorded yet"; a refused record (`record_state` starting `refused:`) shows that refusal text instead of a guessed step.
+This is the static builder only (S4a); nothing yet re-runs it automatically when a record changes (S4b, not landed).
+
 ## Two task shapes
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
