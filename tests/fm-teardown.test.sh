@@ -320,7 +320,7 @@ setup_squash_rebased_history() {
   pr_head=$(git -C "$tmp" rev-parse HEAD)
   git -C "$tmp" push -q origin "HEAD:refs/pull/7/head"
   git -C "$tmp" checkout -q main
-  git -C "$tmp" merge -q --squash fm/task-x1
+  git -C "$tmp" merge -q --squash fm/task-x1 >/dev/null
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "feat: squash (#7)"
   git -C "$tmp" push -q origin main
   rm -rf "$tmp"
