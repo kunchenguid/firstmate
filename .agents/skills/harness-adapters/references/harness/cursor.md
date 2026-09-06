@@ -48,8 +48,6 @@ Confirmation is verified only on tmux and Herdr.
 Herdr reports Cursor `blocked` in every state, so its native idle path is unreachable; the composer path sees the mid-turn placeholder beside `ctrl+c to stop` as pending.
 `../../../bin/backends/herdr.sh` baselines before Enter and confirms the footer transition, so an already-busy pane cannot confirm.
 
-
-
 Reverse-video placeholder remnants and Herdr half-block edges belong to `../../../bin/fm-composer-lib.sh`; without the edges a bare composer swallows the footer and idle reads pending.
 `../../../docs/verification/runtime-backends.md` owns captures.
 Refresh with `FM_HARNESS_LIVENESS_DRIFT=1 ../../../bin/fm-test-run.sh ../../../tests/fm-harness-liveness-drift-live-e2e.test.sh`.
