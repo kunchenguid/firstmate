@@ -118,6 +118,8 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
+    payload=
+    literal=0
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
@@ -126,6 +128,17 @@ case "${1:-}" in
         fi
         prev=$a
       done
+    fi
+    if [ "${4:-}" = -l ]; then
+      payload=${5:-}
+      literal=1
+    else
+      payload=${4:-}
+    fi
+    if [ "$literal" -eq 0 ] && [ -n "${FM_FAKE_PANE_EXEC_PATH:-}" ]; then
+      case "$payload" in
+        *FM_RAW_CLAUDE_PROBE=1*) PATH="$FM_FAKE_PANE_EXEC_PATH" /bin/sh -c "$payload" ;;
+      esac
     fi
     exit 0
     ;;

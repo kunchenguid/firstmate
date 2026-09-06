@@ -1529,7 +1529,22 @@ if [ "$HARNESS" = claude ]; then
         ;;
     esac
   else
-    CLAUDE_EXECUTABLE=$RAW_HARNESS_EXECUTABLE
+    CLAUDE_EXECUTABLE=$(command -v -- "$RAW_HARNESS_EXECUTABLE" 2>/dev/null || true)
+    [ -n "$CLAUDE_EXECUTABLE" ] && [ -x "$CLAUDE_EXECUTABLE" ] || {
+      echo "error: raw Claude executable '$RAW_HARNESS_EXECUTABLE' not found on Firstmate's PATH" >&2
+      exit 1
+    }
+    case "$CLAUDE_EXECUTABLE" in
+      /*) ;;
+      *)
+        CLAUDE_EXECUTABLE_DIR=$(cd "$(dirname "$CLAUDE_EXECUTABLE")" 2>/dev/null && pwd -P) || {
+          echo "error: could not resolve raw Claude executable '$CLAUDE_EXECUTABLE' to an absolute path" >&2
+          exit 1
+        }
+        CLAUDE_EXECUTABLE="$CLAUDE_EXECUTABLE_DIR/$(basename "$CLAUDE_EXECUTABLE")"
+        ;;
+    esac
+    CLAUDE_VERSION=$("$CLAUDE_EXECUTABLE" --version 2>&1 || true)
   fi
   "$FM_ROOT/bin/fm-claude-rc-off.sh" check-default "$CLAUDE_EXECUTABLE" >/dev/null || {
     echo "error: Claude best-effort managed RC-off default preflight failed; refusing launch. Run '$FM_ROOT/bin/fm-claude-rc-off.sh install-policy' with system privileges." >&2
@@ -3635,6 +3650,45 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
+fi
+if [ "$HARNESS" = claude ] && [ "$RAW_LAUNCH" -eq 1 ]; then
+  CLAUDE_PROBE_BASE="$TASK_TMP/raw-claude-probe"
+  CLAUDE_PROBE_PATH="$CLAUDE_PROBE_BASE.path"
+  CLAUDE_PROBE_VERSION="$CLAUDE_PROBE_BASE.version"
+  CLAUDE_PROBE_STATUS="$CLAUDE_PROBE_BASE.status"
+  CLAUDE_PROBE_READY="$CLAUDE_PROBE_BASE.ready"
+  rm -f "$CLAUDE_PROBE_PATH" "$CLAUDE_PROBE_VERSION" "$CLAUDE_PROBE_STATUS" "$CLAUDE_PROBE_READY"
+  CLAUDE_PROBE_INNER="FM_RAW_CLAUDE_PROBE=1; resolved=\$(command -v -- $(shell_quote "$RAW_HARNESS_EXECUTABLE") 2>/dev/null || true); version=; status=127; if [ -n \"\$resolved\" ]; then version=\$(\"\$resolved\" --version 2>&1 || true); status=0; $(shell_quote "$FM_ROOT/bin/fm-claude-rc-off.sh") check-default \"\$resolved\" >/dev/null 2>&1 || status=\$?; fi; printf '%s' \"\$resolved\" > $(shell_quote "$CLAUDE_PROBE_PATH"); printf '%s' \"\$version\" > $(shell_quote "$CLAUDE_PROBE_VERSION"); printf '%s' \"\$status\" > $(shell_quote "$CLAUDE_PROBE_STATUS"); : > $(shell_quote "$CLAUDE_PROBE_READY")"
+  CLAUDE_PROBE_COMMAND=$CLAUDE_PROBE_INNER
+  if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
+    CLAUDE_PROBE_COMMAND="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$CLAUDE_PROBE_INNER")"
+  fi
+  spawn_send_text_line "$T" "$CLAUDE_PROBE_COMMAND" || {
+    echo "error: could not probe raw Claude executable in the launch pane; refusing launch" >&2
+    exit 1
+  }
+  CLAUDE_PROBE_ATTEMPT=0
+  while [ ! -f "$CLAUDE_PROBE_READY" ] && [ "$CLAUDE_PROBE_ATTEMPT" -lt 50 ]; do
+    sleep 0.1
+    CLAUDE_PROBE_ATTEMPT=$((CLAUDE_PROBE_ATTEMPT + 1))
+  done
+  if [ ! -f "$CLAUDE_PROBE_READY" ]; then
+    rm -f "$CLAUDE_PROBE_PATH" "$CLAUDE_PROBE_VERSION" "$CLAUDE_PROBE_STATUS" "$CLAUDE_PROBE_READY"
+    echo "error: raw Claude launch pane did not return an executable identity; Firstmate resolved '$CLAUDE_EXECUTABLE' ($CLAUDE_VERSION); refusing launch" >&2
+    exit 1
+  fi
+  CLAUDE_PANE_EXECUTABLE=$(cat "$CLAUDE_PROBE_PATH" 2>/dev/null || true)
+  CLAUDE_PANE_VERSION=$(cat "$CLAUDE_PROBE_VERSION" 2>/dev/null || true)
+  CLAUDE_PANE_STATUS=$(cat "$CLAUDE_PROBE_STATUS" 2>/dev/null || true)
+  rm -f "$CLAUDE_PROBE_PATH" "$CLAUDE_PROBE_VERSION" "$CLAUDE_PROBE_STATUS" "$CLAUDE_PROBE_READY"
+  if [ "$CLAUDE_PANE_EXECUTABLE" != "$CLAUDE_EXECUTABLE" ]; then
+    echo "error: raw Claude executable divergence: Firstmate resolved '$CLAUDE_EXECUTABLE' ($CLAUDE_VERSION), launch pane resolved '${CLAUDE_PANE_EXECUTABLE:-not found}' (${CLAUDE_PANE_VERSION:-version unavailable}); refusing launch" >&2
+    exit 1
+  fi
+  if [ "$CLAUDE_PANE_STATUS" != 0 ]; then
+    echo "error: raw Claude launch-pane preflight failed for '$CLAUDE_PANE_EXECUTABLE' (${CLAUDE_PANE_VERSION:-version unavailable}); refusing launch" >&2
+    exit 1
+  fi
 fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"

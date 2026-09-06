@@ -93,6 +93,7 @@ run_spawn() {
   # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_TEST_CLAUDE_MANAGED_SETTINGS_DIR="$home/managed-settings.d" \
+    FM_FAKE_PANE_EXEC_PATH="${FM_TEST_PANE_EXEC_PATH:-$fakebin:$PATH}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
@@ -446,6 +447,49 @@ test_managed_default_allows_raw_claude_forms_unchanged() {
     assert_contains "$launch" "$raw" "managed policy changed raw command: $raw"
   done
   pass "managed default leaves raw Claude forms unchanged"
+}
+
+test_raw_claude_refuses_backend_executable_divergence() {
+  local rec id out status raw backend_bin caller
+  id="profile-raw-claude-divergence-${RANDOM}"
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  backend_bin="$CASE_DIR/backend-bin"
+  mkdir -p "$backend_bin"
+  cat > "$backend_bin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '2.1.127 (Claude Code)'
+fi
+SH
+  chmod +x "$backend_bin/claude"
+  raw='claude --remote-control'
+  caller="$FAKEBIN_DIR/claude"
+
+  out=$(FM_TEST_PANE_EXEC_PATH="$backend_bin:$PATH" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  expect_code 1 "$status" "raw Claude launch should refuse a divergent backend executable"
+  assert_contains "$out" "Firstmate resolved '$caller' (2.1.263 (Claude Code))" "divergence error omitted the Firstmate executable identity"
+  assert_contains "$out" "launch pane resolved '$backend_bin/claude' (2.1.127 (Claude Code))" "divergence error omitted the launch-pane executable identity"
+  [ ! -s "$LAUNCH_LOG" ] || fail "divergent raw Claude command reached the launch channel"
+  pass "raw Claude refuses divergent Firstmate and launch-pane executables"
+}
+
+test_raw_claude_identical_backend_executable_launches_unchanged() {
+  local rec id out status raw launch
+  id="profile-raw-claude-identical-${RANDOM}"
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  raw='claude --remote-control'
+
+  out=$(FM_TEST_PANE_EXEC_PATH="$FAKEBIN_DIR:$PATH" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
+  status=$?
+  expect_code 0 "$status" "raw Claude launch should accept the identical backend executable: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "$raw" "identical raw Claude command bytes changed"
+  pass "raw Claude launches unchanged after matching launch-pane preflight"
 }
 
 test_claude_spawn_refuses_missing_managed_policy() {
@@ -1254,6 +1298,8 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_claude_launch_preserves_executable_and_managed_default
 test_managed_default_allows_raw_claude_forms_unchanged
+test_raw_claude_refuses_backend_executable_divergence
+test_raw_claude_identical_backend_executable_launches_unchanged
 test_claude_spawn_refuses_missing_managed_policy
 test_prefixed_raw_claude_refuses_missing_managed_policy
 test_claude_spawn_refuses_unsupported_version
