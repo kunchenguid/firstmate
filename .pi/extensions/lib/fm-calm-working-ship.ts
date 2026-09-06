@@ -48,7 +48,12 @@ const YELLOW = "\u001b[33m";
 // Restores the default foreground so color never bleeds into padding or later frames.
 const RESET = "\u001b[39m";
 
-export const CALM_WORKING_SHIP_WIDGET_KEY = "firstmate-calm-working-ship";
+// The working-row widget slot is deliberately shared with the standalone Pi Calm
+// extension, which installs its boat under the same "calm-working-ship" key. Pi
+// replaces widgets under one key, so a session that loads both Calms renders a
+// single boat and a session loading either alone is unchanged. Rename the slot
+// in both implementations together, or dual-install sessions duplicate the boat.
+export const CALM_WORKING_SHIP_WIDGET_KEY = "calm-working-ship";
 /** Scheduler period. One tick advances the water by one phase. */
 export const CALM_WORKING_SHIP_TICK_MS = 220;
 /** Boat moves one column every Nth tick, so it travels at 220 * 4 = 880ms per column. */
