@@ -1172,10 +1172,95 @@ a default profile home is accepted^{"default":[{"harness":"codex","home":"$work"
 a home on another harness is flagged^{"rules":[{"when":"x","use":{"harness":"claude","home":"$work"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - home is only valid for the codex harness: claude
 a relative home is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":".codex"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - home must be an absolute path: .codex
 an empty home is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - profile home must be a non-empty string when present
-a missing home directory is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":"$homes/absent"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - codex home directory not found: $homes/absent
-a home with no login is flagged^{"rules":[{"when":"x","use":{"harness":"codex","home":"$never"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - codex home has no auth.json: $never (log that account in with CODEX_HOME=$never codex login)
+a missing home directory is reported per home^{"rules":[{"when":"x","use":{"harness":"codex","home":"$homes/absent"}}]}^exact^CREW_DISPATCH: codex home unavailable: $homes/absent - directory not found; candidates naming this home are ineligible, every other profile still dispatches
+a home with no login is reported per home^{"rules":[{"when":"x","use":{"harness":"codex","home":"$never"}}]}^exact^CREW_DISPATCH: codex home unavailable: $never - no auth.json (log that account in with CODEX_HOME=$never codex login); candidates naming this home are ineligible, every other profile still dispatches
 ROWS
   pass "bootstrap accepts a per-account codex home and reports every unusable one"
+}
+
+# A logged-out account must cost that account its candidates and nothing else.
+# The whole point of naming two homes is that one of them can go down, so an
+# unavailable home may never be reported as file-wide invalidity - that verdict
+# stops profile-based dispatch for every rule, including rules naming no home.
+test_crew_dispatch_unavailable_home_is_candidate_local() {
+  local homes work never case_dir fakebin out
+  homes="$TMP_ROOT/codex-homes-local"
+  work="$homes/work"
+  never="$homes/never-logged-in"
+  mkdir -p "$work" "$never"
+  : > "$work/auth.json"
+
+  case_dir="$TMP_ROOT/dispatch-home-local"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/config/crew-dispatch.json" <<JSON
+{
+  "rules": [
+    {
+      "when": "long runs",
+      "use": [
+        { "harness": "codex", "model": "gpt-5.5", "home": "$work" },
+        { "harness": "codex", "model": "gpt-5.5", "home": "$never" }
+      ]
+    },
+    { "when": "quick edits", "use": { "harness": "claude" } }
+  ]
+}
+JSON
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_VERBOSE_FACTS=1 "$ROOT/bin/fm-bootstrap.sh")
+
+  printf '%s\n' "$out" \
+    | grep -Fx "CREW_DISPATCH: codex home unavailable: $never - no auth.json (log that account in with CODEX_HOME=$never codex login); candidates naming this home are ineligible, every other profile still dispatches" >/dev/null \
+    || fail "expected the logged-out home to be named as unavailable, got: $out"
+  printf '%s\n' "$out" | grep -F "CREW_DISPATCH: invalid" >/dev/null \
+    && fail "a logged-out home must not invalidate the whole dispatch file, got: $out"
+  printf '%s\n' "$out" | grep -F "unavailable: $work" >/dev/null \
+    && fail "the logged-in home must stay usable, got: $out"
+  # Verbose facts are bootstrap's statement of what dispatch is configured, so
+  # their survival is the observable proof the file is still dispatchable.
+  printf '%s\n' "$out" | grep -Fx "BOOTSTRAP_INFO: crew dispatch rule: quick edits -> claude" >/dev/null \
+    || fail "rules naming no home must stay dispatchable, got: $out"
+  pass "an unavailable codex home is candidate-local and leaves the rest of the file dispatchable"
+}
+
+# Every home problem must be visible in one pass; stopping at the first one hides
+# the second account's state behind the first account's.
+test_crew_dispatch_reports_every_unavailable_home() {
+  local homes absent never case_dir fakebin out
+  homes="$TMP_ROOT/codex-homes-multi"
+  absent="$homes/absent"
+  never="$homes/never-logged-in"
+  mkdir -p "$never"
+
+  case_dir="$TMP_ROOT/dispatch-home-multi"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/config/crew-dispatch.json" <<JSON
+{
+  "rules": [
+    {
+      "when": "long runs",
+      "use": [
+        { "harness": "codex", "home": "$absent" },
+        { "harness": "codex", "home": "$never" }
+      ]
+    }
+  ]
+}
+JSON
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+
+  printf '%s\n' "$out" | grep -F "unavailable: $absent - directory not found" >/dev/null \
+    || fail "expected the absent home to be reported, got: $out"
+  printf '%s\n' "$out" | grep -F "unavailable: $never - no auth.json" >/dev/null \
+    || fail "expected the logged-out home to be reported in the same pass, got: $out"
+  pass "bootstrap reports every unavailable codex home in one pass"
 }
 
 test_bootstrap_reporting
@@ -1207,3 +1292,5 @@ test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
 test_crew_dispatch_codex_home_validation
+test_crew_dispatch_unavailable_home_is_candidate_local
+test_crew_dispatch_reports_every_unavailable_home

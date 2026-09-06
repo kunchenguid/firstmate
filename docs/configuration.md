@@ -422,6 +422,7 @@ It is valid only for `harness: "codex"`, and any other harness carrying it is a 
 [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md) owns how such a candidate's quota is measured, and `fm-spawn.sh` exports `CODEX_HOME=<home>` into that one worker's launch while recording the choice in the task's own record.
 A profile with no `home` omits `--codex-home` and launches against whatever ambient default Codex account the worker's environment resolves.
 Bootstrap and `fm-spawn.sh` both refuse a path containing control bytes, a relative path, a missing directory, or a directory holding no `auth.json`, so a mistyped home is an actionable error rather than a silent fall back to `~/.codex`; neither ever reads that file's contents.
+The two refusals differ in blast radius at bootstrap: a home the file states wrongly is a schema fault that invalidates the file, while a correctly stated home this machine cannot use right now is reported per home so `codex logout` on one account never disables the other account's candidates or rules naming no home.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
@@ -445,7 +446,8 @@ A two-account Codex rule looks like this, with one candidate per logged-in home:
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-Malformed JSON, an empty or malformed rule/default array, an unverified harness, an effort value unsupported by that harness, or an unusable `home` is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+Malformed JSON, an empty or malformed rule/default array, an unverified harness, an effort value unsupported by that harness, or a `home` that is empty, relative, control-byte-bearing, or on a non-codex harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+A well-formed `home` whose directory is missing or holds no `auth.json` is instead reported once per home as `CREW_DISPATCH: codex home unavailable: <path> - ...`, which makes only the candidates naming that home ineligible and leaves the rest of the file dispatchable.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
