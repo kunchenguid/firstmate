@@ -933,6 +933,17 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+fm_backend_agent_alive_bounded() {  # <seconds> <backend> <target>
+  local timeout=$1
+  shift
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
+    FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" bash -c \
+    '. "$1"; shift; fm_backend_agent_alive "$@"' _ \
+    "$FM_BACKEND_LIB_DIR/fm-backend.sh" "$@"
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks
@@ -966,6 +977,17 @@ fm_backend_events_capable() {  # <backend> <session>
     herdr) fm_backend_herdr_events_capable "$@" ;;
     *) return 1 ;;
   esac
+}
+
+fm_backend_events_capable_bounded() {  # <seconds> <backend> <session>
+  local timeout=$1
+  shift
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
+    FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" bash -c \
+    '. "$1"; shift; fm_backend_events_capable "$@"' _ \
+    "$FM_BACKEND_LIB_DIR/fm-backend.sh" "$@"
 }
 
 # fm_backend_wait_transition: bounded wait for a fresh actionable (blocked)
