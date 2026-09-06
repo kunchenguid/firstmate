@@ -59,6 +59,9 @@
 # Set by fm_backlog_transition_applies for a return-1 exemption.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_TRANSITION_SKIP=
+# Set by fm_backlog_dispatch_preflight: 1 when the gate applies to the call.
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+FM_BACKLOG_PREFLIGHT_APPLIES=0
 # Set by the mutating helpers when they return non-zero.
 FM_BACKLOG_TRANSITION_ERROR=
 FM_BACKLOG_ROW_RESULT=
@@ -625,6 +628,43 @@ fm_backlog_row_dispatchable() {
     in_flight\ no\ no|queued\ no\ no) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# fm_backlog_dispatch_preflight <config-dir> <data-dir> <kind> <id>: the one
+# pre-mutation dispatch check, shared by bin/fm-spawn.sh (before any endpoint,
+# worktree, or record exists) and bin/fm-control.sh relaunch (before the running
+# agent is stopped), so a row the transition would refuse is refused while
+# nothing has been touched. Returns 0 with FM_BACKLOG_PREFLIGHT_APPLIES=1 and
+# FM_BACKLOG_ROW_STATE set when the row is dispatchable, 0 with
+# FM_BACKLOG_PREFLIGHT_APPLIES=0 when the gate does not apply to this home or
+# kind, and 1 with the refusal in FM_BACKLOG_TRANSITION_ERROR otherwise.
+fm_backlog_dispatch_preflight() {  # <config-dir> <data-dir> <kind> <id>
+  local config=$1 data=$2 kind=$3 id=$4 gate_status=0
+  FM_BACKLOG_PREFLIGHT_APPLIES=0
+  fm_backlog_transition_applies "$config" "$data" "$kind" || gate_status=$?
+  case "$gate_status" in
+    0) ;;
+    2)
+      FM_BACKLOG_TRANSITION_ERROR="task $id cannot be dispatched because its backlog data directory is inaccessible: $data ($FM_BACKLOG_TRANSITION_ERROR)"
+      return 1
+      ;;
+    *) return 0 ;;
+  esac
+  FM_BACKLOG_PREFLIGHT_APPLIES=1
+  if fm_backlog_row_probe "$data" "$id"; then
+    :
+  elif [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+    FM_BACKLOG_TRANSITION_ERROR="task $id has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (tasks-axi add $id '<title>' --kind $kind) and re-run"
+    return 1
+  else
+    FM_BACKLOG_TRANSITION_ERROR="task $id's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)"
+    return 1
+  fi
+  if ! fm_backlog_row_dispatchable "$FM_BACKLOG_ROW_STATE"; then
+    FM_BACKLOG_TRANSITION_ERROR="this home's backlog item $id is not dispatchable in state $FM_BACKLOG_ROW_STATE; refusing before any endpoint, local copy, or agent is touched"
+    return 1
+  fi
+  return 0
 }
 
 fm_backlog_dispatch_transition() {

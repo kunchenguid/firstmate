@@ -1022,6 +1022,16 @@ test_launch_failure_keeps_the_prior_record_and_reports_it() {
   expect_code 1 "$rc" "a failed launch should fail closed"$'\n'"$out"
   assert_contains "$out" "no agent is running" "the failure should say no agent is running"
   assert_contains "$out" "$dir/wt" "the failure should say where the work is preserved"
+  # The launch owner's own refusal must survive into every line a caller might
+  # read last - the summary line, and the rollback line that ends the output -
+  # and into the journal, so a caller keeping only the tail still learns WHY.
+  assert_contains "$(printf '%s\n' "$out" | grep 'could not be launched')" \
+    "not its recorded worktree" \
+    "the summary line should carry the launch owner's refusal"
+  assert_contains "$(printf '%s\n' "$out" | tail -1)" "not its recorded worktree" \
+    "the last line should carry the launch owner's refusal"
+  assert_contains "$(journal_field "$dir" rl13 launch_error)" "not its recorded worktree" \
+    "the journal should record the launch owner's refusal"
   [ "$(cat "$dir/home/state/rl13.meta")" = "$before" ] \
     || fail "a failed launch must keep the prior durable record"
   [ "$(journal_field "$dir" rl13 phase)" = "failed:launching" ] \
@@ -1074,6 +1084,10 @@ test_post_publication_launch_failure_keeps_the_new_record() {
   out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
     run_control "$dir" rl24 relaunch --harness codex --note "keep the published record"); rc=$?
   expect_code 1 "$rc" "a post-publication launch failure should fail closed"$'\n'"$out"
+  # fm-spawn runs under set -e; a backend send that fails must still name the
+  # step instead of ending the launch owner with no diagnostic at all.
+  assert_contains "$out" "could not deliver the launch command" \
+    "a failed launch delivery should name the step that failed"
   [ "$(meta_field "$dir" rl24 harness)" = codex ] \
     || fail "a published replacement record must not be rewritten to the prior harness"
   [ -n "$(meta_field "$dir" rl24 control_relaunch_tx)" ] \
@@ -1532,6 +1546,39 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# The 2026-09-01 field failure: the item had already been closed, so the launch
+# owner refused it - but only after fm-control had stopped the agent, leaving
+# the task with no agent at all, and the refusal line sat above the two lines
+# the caller's `tail -2` kept. The preflight must now run while the agent is
+# still up, and the refusal must name the backlog state.
+test_undispatchable_backlog_item_refuses_before_stopping_anything() {
+  local dir out rc=0 before
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  dir=$(new_case closed-item rl42)
+  add_ship_task "$dir" rl42 claude
+  seed_backlog "$dir" rl42 in_flight
+  tasks-axi 'done' rl42 --file "$dir/home/data/backlog.md" >/dev/null
+  before=$(cat "$dir/home/state/rl42.meta")
+
+  out=$(run_control "$dir" rl42 relaunch --note "relaunching a closed item") || rc=$?
+  expect_code 1 "$rc" "a relaunch of a closed backlog item must refuse"$'\n'"$out"
+  assert_contains "$out" "not dispatchable in state done" \
+    "the refusal should name the backlog state that blocks the relaunch"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a relaunch refused by the backlog preflight must not stop the agent"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing"
+  [ "$(cat "$dir/home/state/rl42.meta")" = "$before" ] \
+    || fail "a refused relaunch must leave the durable record byte-identical"
+  [ ! -e "$dir/home/state/rl42.control-relaunch" ] \
+    || fail "a refusal before the checkpoint must open no relaunch transaction"
+  ! grep -q "relaunching a closed item" "$dir/home/data/rl42/brief.md" \
+    || fail "a refused relaunch must not rewrite the instructions"
+  pass "fm-control relaunch: a backlog item the dispatch cannot own refuses before the agent is stopped"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
@@ -1584,3 +1631,4 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_undispatchable_backlog_item_refuses_before_stopping_anything

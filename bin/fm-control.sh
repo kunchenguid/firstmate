@@ -46,12 +46,15 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
-#              Records a durable checkpoint and that note, exits the old agent,
-#              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. A failure before publication keeps
-#              the prior durable record in place and reports the concrete
-#              state; it never leaves a half-transitioned task claiming to be
-#              running.
+#              Runs the launch owner's backlog dispatch preflight while the
+#              old agent is still running, records a durable checkpoint and
+#              that note, exits the old agent, then delegates the launch to
+#              its single owner, bin/fm-spawn.sh --relaunch. A failure before
+#              publication keeps the prior durable record in place, names the
+#              launch owner's own refusal on this plane's summary line, the
+#              rollback line, and the journal's launch_error= field, and
+#              reports the concrete state; it never leaves a half-transitioned
+#              task claiming to be running.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -121,6 +124,7 @@ fi
 }
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 [ -d "$STATE" ] || {
   echo "error: state dir '$STATE' is missing; fm-control cannot resolve tasks for FM_HOME '$FM_HOME'" >&2
   exit 1
@@ -136,6 +140,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -509,6 +517,8 @@ JOURNAL="$STATE/$ID.control-relaunch"
 META_PRIOR="$JOURNAL.meta-prior"
 BRIEF_PRIOR="$JOURNAL.brief-prior"
 NOTE_FILE="$JOURNAL.note"
+LAUNCH_STDERR="$JOURNAL.launch-stderr"
+RELAUNCH_LAUNCH_ERROR=
 RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
@@ -555,6 +565,7 @@ journal_write() {  # <phase> [extra-line]...
 
 relaunch_rollback() {
   local state
+  local -a launch_lines
   [ "$RELAUNCH_ACTIVE" = 1 ] || return 0
   [ "$RELAUNCH_PHASE" != complete ] || return 0
   RELAUNCH_ACTIVE=0
@@ -589,6 +600,10 @@ relaunch_rollback() {
       esac
       ;;
     exited|launching)
+      # The launch owner's reason, when it failed, rides every line a caller
+      # might read last, and the journal.
+      launch_lines=()
+      [ -z "$RELAUNCH_LAUNCH_ERROR" ] || launch_lines=("launch_error=$RELAUNCH_LAUNCH_ERROR")
       if [ "$RELAUNCH_AGENT_CONFIRMED" = 1 ]; then
         journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-agent-confirmed" || true
         echo "error: $ID's replacement is running on $TARGET_HARNESS, but transaction completion could not be persisted; its published record was retained for reconciliation" >&2
@@ -600,11 +615,13 @@ relaunch_rollback() {
         # harness with no agent confirmed, which is exactly what recovery
         # reconciles. Rewriting it back to the old harness would be a second,
         # worse inaccuracy.
-        journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" || true
-        echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT" >&2
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" \
+          "${launch_lines[@]+"${launch_lines[@]}"}" || true
+        echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed${RELAUNCH_LAUNCH_ERROR:+ ($RELAUNCH_LAUNCH_ERROR)}; its work is preserved at $WT" >&2
       else
-        journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
-        echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" \
+          "${launch_lines[@]+"${launch_lines[@]}"}" || true
+        echo "error: $ID's agent was stopped but the replacement did not launch${RELAUNCH_LAUNCH_ERROR:+ ($RELAUNCH_LAUNCH_ERROR)}; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
       fi
       ;;
   esac
@@ -783,8 +800,21 @@ record_note() {
   esac
 }
 
+# launch_error_line <stderr-file> <exit-code>: the one line that names why the
+# launch owner failed - its last error or REFUSED line, else its last non-empty
+# line that is not a guard banner, else the bare exit code.
+launch_error_line() {  # <stderr-file> <exit-code>
+  local line
+  line=$(grep -E '^(error|REFUSED): ' "$1" 2>/dev/null | tail -1)
+  [ -n "$line" ] || line=$(grep -v -e '^[[:space:]]*$' -e '^●' "$1" 2>/dev/null | tail -1)
+  line=${line#error: }
+  line=${line#REFUSED: }
+  [ -n "$line" ] || line="fm-spawn exited $2 without a diagnostic"
+  printf '%s' "$line"
+}
+
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line launch_rc
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -807,6 +837,13 @@ do_relaunch() {
       die "task $ID records kind '$KIND', which has no defined relaunch shape"
       ;;
   esac
+
+  # The launch owner refuses a backlog item its dispatch transition cannot own,
+  # and left to itself it would do so only AFTER the old agent was stopped -
+  # the one relaunch outcome that leaves a task with no agent at all. Run the
+  # same shared preflight here, while the agent is still running.
+  fm_backlog_dispatch_preflight "$CONFIG" "$DATA" "$KIND" "$ID" \
+    || die "refusing to relaunch $ID before its agent is touched: $FM_BACKLOG_TRANSITION_ERROR"
 
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
@@ -832,13 +869,24 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
-      "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+  # The launch owner's stderr is captured so the failing step it names survives
+  # into this plane's own summary line, the rollback line, and the journal: a
+  # caller reading only the last line or two must still learn WHY the
+  # replacement did not start, never just that it did not.
+  launch_rc=0
+  FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+    "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null 2>"$LAUNCH_STDERR" \
+    || launch_rc=$?
+  cat "$LAUNCH_STDERR" >&2 2>/dev/null || true
+  if [ "$launch_rc" -eq 0 ]; then
+    rm -f "$LAUNCH_STDERR"
     RELAUNCH_META_PUBLISHED=1
   else
+    RELAUNCH_LAUNCH_ERROR=$(launch_error_line "$LAUNCH_STDERR" "$launch_rc")
+    rm -f "$LAUNCH_STDERR"
     [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
       || RELAUNCH_META_PUBLISHED=1
-    die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
+    die "the replacement agent for $ID could not be launched on $TARGET_HARNESS: $RELAUNCH_LAUNCH_ERROR"
   fi
 
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {

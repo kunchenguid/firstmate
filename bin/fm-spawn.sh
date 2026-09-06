@@ -2498,28 +2498,11 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 # costs nothing to unwind, while the same refusal after publication would strand
 # a live pane. The authoritative mutation still runs under the meta lock below.
 BACKLOG_TRANSITION=0
-BACKLOG_ROW_STATE=
-if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
-  BACKLOG_TRANSITION=1
-  if fm_backlog_row_probe "$DATA" "$ID"; then
-    BACKLOG_ROW_STATE=$FM_BACKLOG_ROW_STATE
-  elif [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
-    echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (tasks-axi add $ID '<title>' --kind $KIND) and re-run" >&2
-    exit 1
-  else
-    echo "error: task $ID's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)" >&2
-    exit 1
-  fi
-  if ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
-    echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
-    exit 1
-  fi
+if fm_backlog_dispatch_preflight "$CONFIG" "$DATA" "$KIND" "$ID"; then
+  BACKLOG_TRANSITION=$FM_BACKLOG_PREFLIGHT_APPLIES
 else
-  BACKLOG_GATE_STATUS=$?
-  if [ "$BACKLOG_GATE_STATUS" -eq 2 ]; then
-    echo "error: task $ID cannot be dispatched because its backlog data directory is inaccessible: $DATA ($FM_BACKLOG_TRANSITION_ERROR)" >&2
-    exit 1
-  fi
+  echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  exit 1
 fi
 
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -3770,10 +3753,20 @@ spawn_record_traceparent() {
   return "$status"
 }
 
+# A delivery step that fails must name itself: this script runs under set -e,
+# and a bare backend send that returns non-zero (the adapters swallow the
+# CLI's own stderr) would otherwise end the spawn with no diagnostic at all,
+# which a relaunch caller then reports as a launch that failed for no reason.
+spawn_delivery_fail() {  # <what>
+  echo "error: could not deliver $1 to $ID's endpoint $T on $BACKEND; the agent was not started" >&2
+  exit 1
+}
+
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp" \
+  || spawn_delivery_fail "the GOTMPDIR export"
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
@@ -3811,13 +3804,13 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
+spawn_send_literal "$T" "$LAUNCH" || spawn_delivery_fail "the launch command"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+spawn_send_key "$T" Enter || spawn_delivery_fail "the launch command's Enter"
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
