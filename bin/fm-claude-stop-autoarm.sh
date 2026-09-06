@@ -11,10 +11,13 @@
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
 #   - Identity: only when THIS session's harness ancestor holds state/.lock.
-#     When an existing numeric owner fails the shared harness-liveness predicate,
-#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#     When an existing numeric owner is provably not a live session here - gone,
+#     no longer a harness, or a pid a record proves was recycled - the hook
+#     delegates guarded recovery to bin/fm-lock.sh, which alone decides whether
+#     that owner may be taken over, and then re-verifies ownership. A verified
+#     live owner, any live harness pid this home cannot vouch for, a missing
+#     lock, a malformed lock, or unresolved ancestry all remain inert, so a
+#     competing session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -111,8 +114,11 @@ fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
-# A prior session may have died after leaving its numeric harness pid in .lock.
-# Use the shared liveness predicate to recognize only that stale-owner case.
+# A prior session may have died after leaving its numeric harness pid in .lock,
+# and that pid may since have been recycled. fm_session_lock_reclaimable is the
+# shared owner of that judgement: it is true only for those disproved cases, so a
+# verified live owner - or any live harness pid this home cannot vouch for either
+# way - keeps this hook inert instead of being evicted.
 # Defer the mutating claim until after the unchanged AFK and need gates, so an
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
@@ -122,7 +128,7 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   case "$LOCK_PID" in
     ''|*[!0-9]*) exit 0 ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_session_lock_reclaimable "$STATE" || exit 0
   RECOVER_SESSION_LOCK=1
 fi
 

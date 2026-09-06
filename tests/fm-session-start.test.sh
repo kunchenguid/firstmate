@@ -226,6 +226,9 @@ for argument in "$@"; do
   previous=$argument
 done
 case "$*" in
+  # Process identity is a real property of a real pid: only the harness NAMING
+  # is faked here, so let the identity query through to the real ps.
+  *"lstart="*) exec /bin/ps "$@" ;;
   *"comm="*)
     if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
       || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
@@ -780,7 +783,7 @@ EOF
 
   sleep 300 &
   holder_pid=$!
-  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  fm_record_session_lock_owner "$home/state" "$holder_pid"
 
   status=0
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
@@ -868,7 +871,7 @@ EOF
 
   sleep 300 &
   holder_pid=$!
-  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  fm_record_session_lock_owner "$home/state" "$holder_pid"
   out=$(FM_TRACE_CONTEXT=off run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
@@ -2239,7 +2242,7 @@ EOF
   holder_pid=$!
   printf '%s\n%s\n' "$holder_pid" "$(hash_file_for_test "$root/AGENTS.md")" \
     > "$home/state/.session-start-agents-baseline"
-  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  fm_record_session_lock_owner "$home/state" "$holder_pid"
   baseline_before=$(cat "$home/state/.session-start-agents-baseline")
   completion_before=$(cat "$home/state/.session-start-complete")
 
@@ -2349,7 +2352,7 @@ EOF
   rm -f "$home/state/.lock"
   sleep 300 &
   holder_pid=$!
-  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  fm_record_session_lock_owner "$home/state" "$holder_pid"
   readonly_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     "$SESSION_START" --reemit)

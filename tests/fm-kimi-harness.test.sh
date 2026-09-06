@@ -564,6 +564,7 @@ test_kimi_session_lock_identity() {
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
+  *"lstart="*) exec /bin/ps "$@" ;;
   *"comm="*) printf '%s\n' '/opt/kimi/bin/kimi'; exit 0 ;;
   *"args="*) printf '%s\n' 'kimi'; exit 0 ;;
 esac
@@ -576,7 +577,7 @@ SH
   case "$(cat "$home/state/.lock")" in
     ''|*[!0-9]*) fail "fm-lock did not record the Kimi harness ancestor" ;;
   esac
-  printf '%s\n' "$$" > "$home/state/.lock"
+  fm_record_session_lock_owner "$home/state" "$$"
   out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-lock.sh" status)
   assert_contains "$out" "lock: held by live harness pid" \
     "fm-lock did not recognize Kimi as a live holder"

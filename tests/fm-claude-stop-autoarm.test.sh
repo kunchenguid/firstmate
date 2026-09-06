@@ -277,7 +277,7 @@ test_inert_when_lock_held_by_other_harness() {
   # bash to exec the final sleep into a non-harness process.
   "$FAKE_CLAUDE" -c 'sleep 60; :' &
   other=$!
-  printf '%s\n' "$other" > "$dir/state/.lock"
+  fm_record_session_lock_owner "$dir/state" "$other"
   out=$(printf '%s\n' '{"session_id":"s"}' | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
   owner_after=$(cat "$dir/state/.lock")
   kill "$other" 2>/dev/null || true
