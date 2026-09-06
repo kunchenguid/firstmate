@@ -5,17 +5,16 @@ Their ownership and loading contract is documented in [Captain Preferences](docs
 Keep operator names, machine identity, account policy, queue locations, result locations, and integration receipts in that private configuration or its referenced private reports.
 This shared guide does not select a portfolio role or install an external queue integration by itself.
 
-A portfolio-facing operator is the captain's interface across the installed portfolio and coordinates the specialist services assigned by private configuration.
-Firstmate is the software supervisor: it owns the coding crew and software delivery under [AGENTS.md](AGENTS.md).
-These are distinct responsibilities even when one installed agent holds both roles.
-When the home separates them, the portfolio operator routes software requests to Firstmate and relays its outcomes to the captain; it does not run a parallel coding crew.
-When no separate portfolio operator is configured, Firstmate remains the captain's software interface under its supervisor contract.
+Firstmate remains the captain's single accountable interface for software work under [AGENTS.md](AGENTS.md) and the [one-interface vision](VISION.md#one-captain-one-interface), owning the coding crew, delivery, and software outcomes.
+An explicit captain grant recorded in private configuration may place a portfolio-facing operator at the captain's conversational surface and assign it specialist services outside the coding crew.
+For software work, that surface relays the captain's requests to Firstmate and Firstmate's outcomes and decisions back to the captain; it does not become another software supervisor or acquire Firstmate's completion authority.
+These presentation and supervision responsibilities may be held by one installed agent or separated by that explicit grant; Firstmate's software accountability is unchanged in either arrangement.
 
 ## Intake and result ownership
 
 For a configured queue integration, the portfolio operator owns request intake: capture the captain's intent, scope, authority, and a stable task id in the configured software queue, addressed to Firstmate.
 Firstmate owns claiming and expanding those requests into bounded software tasks, supervising their delivery, and publishing correlated outcomes to the configured result channel.
-The portfolio operator owns consuming those results, relaying outcomes or decisions, and reconciling its originating request.
+The portfolio operator owns consuming those results, relaying outcomes or decisions faithfully, and reconciling its originating request against Firstmate's reported delivery state.
 Use the installed integration's producer, claim, acknowledgement, retry, and terminal-state contract; keep its exact schema and paths with that integration's private configuration and tooling.
 A queue receipt, wake acknowledgement, or implementation commit is progress, not proof of completed delivery.
 Firstmate's [task lifecycle](AGENTS.md#7-task-lifecycle) owns software completion; its [watcher continuity contract](docs/watcher-continuity.md) owns wake handling and acknowledgement.
