@@ -1883,6 +1883,34 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
+    # Ghost-window guard: a recorded window whose backend reports its endpoint
+    # structurally gone (a torn-down task's pane) can still yield a stable
+    # capture hash in some backends, and once it does it feeds the stale ladder
+    # forever: absorbed as busy with timer resets, then wedge-escalated every
+    # STALE_ESCALATE_SECS, waking firstmate for a pane that no longer exists.
+    # `missing` is the backend's structural gone verdict (tmux: the recorded
+    # window absent from the session inventory; herdr: a structurally missing
+    # pane).
+    # `dead` names an existing agent-less pane - an idle shell - which is
+    # exactly the finished-but-unreported state the stale ladder must keep
+    # surfacing, so only `missing` skips.
+    # Every unreadable or ambiguous verdict keeps the existing behavior, so a
+    # transient backend failure cannot silence a real wedge.
+    # Running the guard before the capture also stops the absorbed-busy
+    # timer-reset path from re-arming a ghost, since no wedge bookkeeping is
+    # ever started for one.
+    # Aging out clears the whole per-window stale ladder so a pane that later
+    # reappears under the same recorded id starts fresh rather than inheriting
+    # an old escalation count, and the triage line is written once, on the
+    # first aged-out sight, not on every subsequent poll.
+    if [ "$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null)" = missing ]; then
+      if [ -e "$STATE/.hash-$key" ]; then
+        triage_log "absorbed stale (backend reports the recorded pane gone; ghost window aged out): $w"
+      fi
+      clear_pause_tracking "$key"
+      rm -f "$STATE/.hash-$key" "$STATE/.count-$key"
+      continue
+    fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
