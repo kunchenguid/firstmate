@@ -1104,6 +1104,44 @@ test_ship_brief_carries_the_resource_line() {
   pass "fm-brief.sh: the ship scaffold carries a fillable Resource line beside Prep"
 }
 
+# The Proof bar's "Surface: {SURFACE}" placeholder is the Resource line's twin
+# (captain ruling 2026-09-05): the dashboard is the only way the operator,
+# user, and admin work with the app, so every ship brief must state the page,
+# component, or journey where the operator sees the change, or "none: <reason>".
+test_ship_brief_carries_the_surface_line() {
+  local home id brief content
+  home="$TMP_ROOT/surface-home"
+  mkdir -p "$home/data"
+  id="brief-surface-a1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  grep -Fqx 'Surface: {SURFACE}' "$brief" \
+    || fail "ship brief must scaffold the unfilled \"Surface: {SURFACE}\" placeholder"
+  # It must sit directly under the Resource line, not floating elsewhere in the section.
+  awk '
+    $0 == "Resource: {RESOURCE}" { got_resource = 1; next }
+    got_resource { if ($0 == "Surface: {SURFACE}") found = 1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$brief" || fail "the Surface placeholder must sit directly under the Resource placeholder"
+  assert_grep "Surface, the page, component, or journey where the operator sees this change in the dashboard" "$brief" \
+    "ship brief must carry the Surface tier definition beside the Prep and Resource tier definitions"
+  assert_grep '"none: {reason}" when the change has no operator-visible effect' "$brief" \
+    "the Surface definition must state the none escape hatch for no-operator-visible-effect tasks"
+
+  # Firstmate fills {SURFACE} at intake exactly like {PREP} and {RESOURCE}; the
+  # filled line must be a real, non-placeholder value.
+  content=$(cat "$brief")
+  content=${content//'Prep: {PREP}'/'Prep: Tier 0 - test fixture, not a real change'}
+  content=${content//'Resource: {RESOURCE}'/'Resource: one test process at a time, no whole-repo lint or battery locally'}
+  content=${content//'Surface: {SURFACE}'/'Surface: the run-detail page'\''s Evidence tab'}
+  printf '%s\n' "$content" > "$brief"
+  assert_no_grep '{SURFACE}' "$brief" "a filled Surface line must leave no leftover placeholder token"
+  grep -Fqx "Surface: the run-detail page's Evidence tab" "$brief" \
+    || fail "the filled Surface line did not carry the real value through"
+  pass "fm-brief.sh: the ship scaffold carries a fillable Surface line beside Prep and Resource"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -1130,3 +1168,4 @@ test_scout_and_secondmate_scaffold
 test_task_briefs_carry_project_authority_reconciliation
 test_ship_briefs_batch_findings_before_resubmitting
 test_ship_brief_carries_the_resource_line
+test_ship_brief_carries_the_surface_line

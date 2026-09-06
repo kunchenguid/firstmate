@@ -19,7 +19,10 @@
 #   section is present and the brief's Task text mentions running tests,
 #   builds, a lint battery, or a browser suite, the spawn also refuses a
 #   missing or unfilled "Resource:" line; a brief with no Proof bar section
-#   (a legacy brief) is never checked for one.
+#   (a legacy brief) is never checked for one. When that Proof bar section is
+#   present and the project is not firstmate itself, the spawn also refuses a
+#   missing or unfilled "Surface:" line (the dashboard page, component, or
+#   journey where the operator sees the change, or "none: <reason>").
 #   For a no-mistakes ship, spawn renders `launch-brief.md` with the current
 #   `--intent` contract and the extracted captain intent. A legacy mixed Task is
 #   accepted there only under bin/fm-dod-lib.sh's provenance-marking rules;
@@ -1950,6 +1953,23 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         RESOURCE_BODY=${RESOURCE_LINE#Resource: }
         if [ "$RESOURCE_BODY" = "{RESOURCE}" ]; then
           echo "error: $BRIEF's Resource line is the unfilled placeholder \"Resource: {RESOURCE}\"; state the actual RAM/disk envelope, or \"N/A\" when the task runs no tests or builds, before spawn" >&2
+          exit 1
+        fi
+      fi
+      # The Surface line is required for every Proof-bar ship brief whose project
+      # is not firstmate itself: the dashboard is the only way the operator, user,
+      # and admin work with the app, so a feature not wired into it is not built
+      # (captain ruling 2026-09-05). firstmate's own repo has no dashboard, so a
+      # firstmate-repo task keeps spawning unchanged.
+      if [ "$(basename "$PROJ_ABS")" != firstmate ]; then
+        SURFACE_LINE=$(grep '^Surface: ' "$BRIEF" | head -n 1)
+        if [ -z "$SURFACE_LINE" ]; then
+          echo "error: $BRIEF has no \"Surface:\" line; state the dashboard page, component, or journey at intake (AGENTS.md section 11) before spawn" >&2
+          exit 1
+        fi
+        SURFACE_BODY=${SURFACE_LINE#Surface: }
+        if [ "$SURFACE_BODY" = "{SURFACE}" ]; then
+          echo "error: $BRIEF's Surface line is the unfilled placeholder \"Surface: {SURFACE}\"; state the actual page, component, or journey where the operator sees the change, or \"none: <reason>\" when the change has no operator-visible effect, before spawn" >&2
           exit 1
         fi
       fi

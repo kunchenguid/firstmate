@@ -253,6 +253,7 @@ Verify the selected delivery behavior.
 
 # Proof bar
 Prep: Tier 0 - test fixture, not a real change
+Surface: none: test fixture, no operator-visible effect
 
 # Definition of done
 Delivery contract: mode=direct-PR
@@ -277,6 +278,7 @@ Verify the selected delivery behavior.
 # Proof bar
 Prep: Tier 0 - test fixture, not a real change
 Resource: {RESOURCE}
+Surface: none: test fixture, no operator-visible effect
 
 # Definition of done
 Delivery contract: mode=direct-PR
@@ -301,6 +303,7 @@ Verify the selected delivery behavior.
 # Proof bar
 Prep: Tier 0 - test fixture, not a real change
 Resource: N/A
+Surface: none: test fixture, no operator-visible effect
 
 # Definition of done
 Delivery contract: mode=direct-PR
@@ -323,6 +326,7 @@ Edit the comment text.
 
 # Proof bar
 Prep: Tier 0 - test fixture, not a real change
+Surface: none: test fixture, no operator-visible effect
 
 # Definition of done
 Delivery contract: mode=direct-PR
@@ -353,6 +357,141 @@ EOF
     "a legacy brief with no Proof bar section was refused as an unfilled Resource placeholder"
 
   pass "fm-spawn: the Resource line is required only for a Proof-bar brief whose task mentions tests/builds/lint/browser, and legacy briefs keep spawning"
+}
+
+# The Surface line refusal fires for any Proof-bar ship brief whose project is
+# not firstmate itself (captain ruling 2026-09-05: the dashboard is the only
+# way the operator, user, and admin work with the app, so a feature not wired
+# into it is not built). Unlike Resource, it does not depend on the Task text
+# mentioning tests or builds. A firstmate-repo task is exempt because
+# firstmate's own repo has no dashboard.
+test_ship_spawn_validates_the_surface_line() {
+  local rec home proj fakebin id out status
+  rec=$(make_home surface)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  id=surface-missing
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix a typo in a comment.
+
+## Firstmate spec
+Edit the comment text.
+
+# Proof bar
+Prep: Tier 0 - test fixture, not a real change
+Resource: N/A
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a Proof-bar ship brief for a non-firstmate project with no Surface line should be refused"
+  assert_contains "$out" 'has no "Surface:" line' \
+    "a missing Surface line was not refused with the expected error"
+  assert_absent "$home/state/$id.meta" "missing-Surface spawn wrote task metadata"
+
+  id=surface-unfilled-placeholder
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix a typo in a comment.
+
+## Firstmate spec
+Edit the comment text.
+
+# Proof bar
+Prep: Tier 0 - test fixture, not a real change
+Resource: N/A
+Surface: {SURFACE}
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the unfilled \"Surface: {SURFACE}\" placeholder should be refused"
+  assert_contains "$out" "unfilled placeholder" \
+    "the unfilled Surface placeholder was not named as unfilled"
+  assert_absent "$home/state/$id.meta" "unfilled-Surface-placeholder spawn wrote task metadata"
+
+  id=surface-none-accepted
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix a typo in a comment.
+
+## Firstmate spec
+Edit the comment text.
+
+# Proof bar
+Prep: Tier 0 - test fixture, not a real change
+Resource: N/A
+Surface: none: cosmetic comment fix, no operator-visible effect
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" 'has no "Surface:" line' \
+    "a filled \"Surface: none: ...\" line was rejected as missing"
+  assert_not_contains "$out" "unfilled placeholder" \
+    "a filled \"Surface: none: ...\" line was rejected as the unfilled placeholder"
+
+  id=surface-legacy-no-proof-bar
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix a typo in a comment.
+
+## Firstmate spec
+Edit the comment text.
+
+Prep: Tier 0 - test fixture, not a real change
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" 'has no "Surface:" line' \
+    "a legacy brief with no Proof bar section was refused for a missing Surface line"
+  assert_not_contains "$out" "unfilled placeholder" \
+    "a legacy brief with no Proof bar section was refused as an unfilled Surface placeholder"
+
+  # A firstmate-repo task is exempt: firstmate's own repo has no dashboard.
+  mkdir -p "$home/projects-fm/firstmate"
+  id=surface-firstmate-project-exempt
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix a typo in a comment.
+
+## Firstmate spec
+Edit the comment text.
+
+# Proof bar
+Prep: Tier 0 - test fixture, not a real change
+Resource: N/A
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$home/projects-fm/firstmate" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" 'has no "Surface:" line' \
+    "a firstmate-repo ship brief with no Surface line was wrongly refused"
+  assert_not_contains "$out" "unfilled placeholder" \
+    "a firstmate-repo ship brief was wrongly refused as an unfilled Surface placeholder"
+
+  pass "fm-spawn: the Surface line is required for every Proof-bar brief whose project is not firstmate itself, and legacy briefs and firstmate-repo tasks keep spawning"
 }
 
 # A scout has no merge to govern and a secondmate's posture is fixed, so the flags
@@ -1171,6 +1310,7 @@ EOF
 test_ship_spawn_requires_a_valid_delivery_contract
 test_ship_spawn_validates_the_prep_line
 test_ship_spawn_validates_the_resource_line
+test_ship_spawn_validates_the_surface_line
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
