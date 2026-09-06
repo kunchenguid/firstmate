@@ -581,6 +581,14 @@ fm_procevent_claim_release_locked() {
   fm_procevent_claim_release_mode_locked release "$@"
 }
 
+# fm_procevent_claim_release_terminal_self_locked <source-id> <home> <pid> <token>
+# A live runner uses this only while retiring its own terminal source mid-capture.
+# Its in-flight reservation is transient, so attempt cleanup without making that
+# cleanup a veto; exact ownership still must match before releasing the claim.
+fm_procevent_claim_release_terminal_self_locked() {
+  fm_procevent_claim_release_mode_locked terminal-self "$@"
+}
+
 # fm_procevent_claim_reclaim_locked <source-id> <home> <pid> <token>
 # Lifecycle commands use this only after proving or stopping a dead generation.
 fm_procevent_claim_reclaim_locked() {
@@ -596,11 +604,18 @@ fm_procevent_claim_release_mode_locked() {
     && [ "$FM_PROCEVENT_CLAIM_HOME" = "$home" ] \
     && [ "$FM_PROCEVENT_CLAIM_PID" = "$pid" ] \
     && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$token" ]; then
-    if [ "$mode" = reclaim ]; then
-      fm_procevent_claim_capture_reservation_reclaim_locked || return 1
-    else
-      fm_procevent_claim_capture_reservation_remove_locked || return 1
-    fi
+    case "$mode" in
+      reclaim)
+        fm_procevent_claim_capture_reservation_reclaim_locked || return 1
+        ;;
+      terminal-self)
+        fm_procevent_claim_capture_reservation_remove_locked || true
+        ;;
+      release)
+        fm_procevent_claim_capture_reservation_remove_locked || return 1
+        ;;
+      *) return 1 ;;
+    esac
     rm -f -- "$claim"
     return $?
   fi
