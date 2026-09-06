@@ -164,12 +164,13 @@ if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
 fi
 if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
   case "$label" in
-    fm-active-seeded)
+    *" (active-seeded)")
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/task-pane"
       printf '%s\n' task-created > "$ACTIVE_SEEDED_CONTROL/stage"
       ;;
-    fm-abort-a|fm-abort-b)
-      task=${label#fm-}
+    *" (abort-a)"|*" (abort-b)")
+      task=${label##*' ('}
+      task=${task%')'}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
       ;;
@@ -504,6 +505,12 @@ touch "$HOME_DIR/state/.last-watcher-beat"
 # Presentation spaces are on by default, so the flat baseline below opts out
 # explicitly; the projected cases each restate the setting they exercise.
 printf 'off\n' > "$HOME_DIR/config/herdr-presentation-spaces"
+# Human-readable task-tab labels are default-off opt-in (VISION keeps
+# presentation features opt-in), so this home opts in explicitly to exercise
+# the "<short title> (<id>)" label shape across flat, projected, and recovered
+# spawns; the flag-less default shape is covered by the per-home E2E and unit
+# tests.
+printf '' > "$HOME_DIR/config/herdr-task-titles"
 write_ship_brief "$HOME_DIR" anchor 'Projection anchor fixture.'
 write_ship_brief "$HOME_DIR" shape 'Projection E2E fixture.'
 write_ship_brief "$HOME_DIR" order-a 'Projection ordering fixture A.'
@@ -647,8 +654,8 @@ PROJECTED_PANES=$(lab pane list --workspace "$PROJECTED_WSID")
 [ "$(printf '%s' "$PROJECTED_PANES" | jq -r '.result.panes | length')" = 1 ] \
   || fail "projected workspace did not contain exactly one task pane"
 printf '%s' "$PROJECTED_TABS" | jq -e --arg tab "$PROJECTED_TAB" \
-  '.result.tabs[0].tab_id == $tab and .result.tabs[0].label == "fm-shape"' >/dev/null 2>&1 \
-  || fail "projected workspace's only tab was not the normal fm-shape task tab"
+  '.result.tabs[0].tab_id == $tab and .result.tabs[0].label == "Projection E2E fixture. (shape)"' >/dev/null 2>&1 \
+  || fail "projected workspace's only tab was not the human-readable shape task tab"
 printf '%s' "$PROJECTED_PANES" | jq -e --arg pane "$PROJECTED_PANE" \
   '.result.panes[0].pane_id == $pane' >/dev/null 2>&1 \
   || fail "projected workspace's only pane was not the exact recorded task pane"
@@ -981,7 +988,7 @@ touch "$SECOND_HOME_A/state/.last-watcher-beat" "$SECOND_HOME_B/state/.last-watc
 # may write config/herdr-presentation-spaces.
 git -C "$SECOND_HOME_A" init -q
 git -C "$SECOND_HOME_B" init -q
-printf 'config/herdr-presentation-spaces\nconfig/crew-harness\nconfig/crew-dispatch.json\nconfig/backlog-backend\nconfig/backend\nconfig/startup-memory-budget\n' \
+printf 'config/herdr-presentation-spaces\nconfig/herdr-task-titles\nconfig/crew-harness\nconfig/crew-dispatch.json\nconfig/backlog-backend\nconfig/backend\nconfig/startup-memory-budget\n' \
   > "$SECOND_HOME_A/.gitignore"
 cp "$SECOND_HOME_A/.gitignore" "$SECOND_HOME_B/.gitignore"
 git -C "$SECOND_HOME_A" add .gitignore
@@ -1029,6 +1036,10 @@ propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME_B/config" \
   || fail "primary presentation setting did not reach secondmate A"
 [ -f "$SECOND_HOME_B/config/herdr-presentation-spaces" ] \
   || fail "primary presentation setting did not reach secondmate B"
+[ -f "$SECOND_HOME_A/config/herdr-task-titles" ] \
+  || fail "primary task-title opt-in did not reach secondmate A"
+[ -f "$SECOND_HOME_B/config/herdr-task-titles" ] \
+  || fail "primary task-title opt-in did not reach secondmate B"
 pass "real Herdr lab: the primary presentation setting inherits into real secondmate homes"
 
 # Keep the pre-existing 2ndmate-alpha/bravo workspaces as owning parents and captain focus.
@@ -1185,10 +1196,25 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   RESTART_META="$HOME_DIR/state/$RESTART_ID.meta"
   OLD_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
   OLD_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
+  OLD_RESTART_TAB=$(grep '^herdr_tab_id=' "$RESTART_META" | cut -d= -f2-)
   OLD_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
+  EXPECTED_RESTART_TASK_LABEL=$(grep '^herdr_task_label=' "$RESTART_META" | cut -d= -f2-)
+  [ -n "$EXPECTED_RESTART_TASK_LABEL" ] \
+    || fail "$RESTART_ID fresh metadata did not record its Herdr task label"
   OLD_RESTART_LABEL=$(lab workspace get "$OLD_RESTART_WSID" | jq -r '.result.workspace.label')
   [ "$(grep '^version=' "$HOME_DIR/state/$RESTART_ID.herdr-presentation")" = version=2 ] \
     || fail "$RESTART_ID fresh projection did not publish an exact restart binding"
+  if [ "$RESTART_ID" = fm-hibit-resume-r1 ]; then
+    LEGACY_RESTART_LABEL="fm-$RESTART_ID"
+    EXPECTED_RESTART_TASK_LABEL=$LEGACY_RESTART_LABEL
+    lab tab rename "$OLD_RESTART_TAB" "$LEGACY_RESTART_LABEL" >/dev/null \
+      || fail "$RESTART_ID legacy-label fixture could not rename its task tab"
+    sed -i.bak "s/^task_label=.*/task_label=$LEGACY_RESTART_LABEL/" \
+      "$HOME_DIR/state/$RESTART_ID.herdr-presentation" \
+      || fail "$RESTART_ID legacy-label fixture could not update its journal"
+    rm -f "$HOME_DIR/state/$RESTART_ID.herdr-presentation.bak" \
+      || fail "$RESTART_ID legacy-label fixture could not update its journal"
+  fi
   EXPECTED_CONCISE=${RESTART_ID#fm-}
   case "$OLD_RESTART_LABEL" in
     "└ $EXPECTED_CONCISE · p:"*) ;;
@@ -1211,8 +1237,11 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
   NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
   NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
+  NEW_RESTART_TASK_LABEL=$(grep '^herdr_task_label=' "$RESTART_META" | cut -d= -f2-)
   [ "$NEW_RESTART_WSID" = "$OLD_RESTART_WSID" ] \
     || fail "$RESTART_ID reclaim flattened into a different workspace"
+  [ "$NEW_RESTART_TASK_LABEL" = "$EXPECTED_RESTART_TASK_LABEL" ] \
+    || fail "$RESTART_ID metadata recorded '$NEW_RESTART_TASK_LABEL' instead of the recovered endpoint label '$EXPECTED_RESTART_TASK_LABEL'"
   [ "$NEW_RESTART_PANE" != "$OLD_RESTART_PANE" ] \
     || fail "$RESTART_ID reclaim reused the old husk pane"
   [ "$(lab workspace get "$NEW_RESTART_WSID" | jq -r '.result.workspace.label')" = "$OLD_RESTART_LABEL" ] \

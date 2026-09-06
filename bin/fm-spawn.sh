@@ -81,6 +81,10 @@
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
 #   opt in below that floor; an empty file remains the historical opt-in form.
+#   A new worker's task tab keeps the historical fm-<id> label unless the home
+#   that owns the endpoint opts in through config/herdr-task-titles, which
+#   labels new tabs "<short title> (<id>)" instead (existing tabs are never
+#   renamed, and a relaunch adopts the recorded label verbatim).
 #   A clean fresh task first writes state/<id>.herdr-presentation atomically,
 #   then creates a disposable
 #   workspace containing only the ordinary task pane. A successful clean create
@@ -2415,6 +2419,35 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
 fi
 
 W="fm-$ID"
+HERDR_TASK_LABEL=$W
+if [ "$BACKEND" = herdr ]; then
+  # Human-readable task-tab labels are an OPT-IN presentation choice (VISION:
+  # presentation and convenience features ship opt-in, never as a new
+  # unconfigured default), so the unconfigured default stays the historical
+  # fm-<id> label and only a home that writes config/herdr-task-titles gets
+  # "<short title> (<id>)". The home that owns the endpoint decides, matching
+  # the presentation-projection authority rule: for every kind except
+  # --secondmate that is this process's own config, and a --secondmate spawn
+  # stands up the secondmate's own home, so the secondmate's config decides.
+  HERDR_TASK_LABEL_HOME=$CONFIG
+  if [ "$KIND" = secondmate ]; then
+    HERDR_TASK_LABEL_HOME=$PROJ_ABS/config
+  fi
+  if [ "$(fm_backend_herdr_task_titles_preference "$HERDR_TASK_LABEL_HOME")" = on ]; then
+    HERDR_TASK_TITLE=${FM_BACKLOG_ROW_TITLE:-}
+    if [ -z "$HERDR_TASK_TITLE" ]; then
+      HERDR_TASK_TITLE=$(awk '
+        /^# Task[[:space:]]*$/ { in_task=1; next }
+        in_task && /^#/ { exit }
+        in_task && NF { print; exit }
+      ' "$BRIEF")
+    fi
+    if [ -z "$HERDR_TASK_TITLE" ]; then
+      HERDR_TASK_TITLE=$(awk '!/^#/ && NF { print; exit }' "$BRIEF")
+    fi
+    HERDR_TASK_LABEL=$(fm_backend_herdr_task_label "$HERDR_TASK_TITLE" "$ID")
+  fi
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
@@ -2485,15 +2518,19 @@ case "$BACKEND" in
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
+          fm_backend_herdr_projection_journal_snapshot \
+            "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+          HERDR_RECOVERY_TASK_LABEL=$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$HERDR_RECOVERY_TASK_LABEL" "$PROJ_ABS"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
             0)
+              HERDR_TASK_LABEL=$HERDR_RECOVERY_TASK_LABEL
               HERDR_PROJECTED=1
               HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
               HERDR_SEEDED_DEFAULT_TAB_ID=""
@@ -2543,7 +2580,7 @@ case "$BACKEND" in
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$HERDR_TASK_LABEL"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -2569,11 +2606,11 @@ case "$BACKEND" in
                && fm_backend_herdr_projection_live_binding_matches \
                  "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
                  "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
-                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" \
+                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$HERDR_TASK_LABEL" \
                && fm_backend_herdr_projection_journal_bind \
                  "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
                  "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
+                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$HERDR_TASK_LABEL"; then
               :
             else
               echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
@@ -2596,7 +2633,9 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_LABEL_HISTORY="$STATE/$ID.herdr-task-labels"
+      fm_backend_herdr_task_label_history_append "$HERDR_TASK_LABEL_HISTORY" "$HERDR_TASK_LABEL" || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$HERDR_TASK_LABEL" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID" "$ID" "$HERDR_TASK_LABEL_HISTORY") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -3398,6 +3437,11 @@ preserve_relaunch_meta() {
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+    # herdr_task_label is emitted only on a fresh spawn: a relaunch adopts the
+    # recorded tab without renaming it, so the prior meta's recorded label is
+    # still the tab's exact label and survives through preserve_relaunch_meta
+    # (not an owned key), while a recomputed label could diverge from it.
+    [ "$RELAUNCH" -eq 1 ] || echo "herdr_task_label=$HERDR_TASK_LABEL"
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"
