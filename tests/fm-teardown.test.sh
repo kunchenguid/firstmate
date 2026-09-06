@@ -347,6 +347,22 @@ setup_squash_rebased_history() {
   printf '%s\n' "$pr_head"
 }
 
+# A refusal must leave every recovery route intact: the isolated copy, its task
+# branch still at the unlanded commit, and the durable task record. A completed
+# teardown detaches and deletes that branch and removes the record, so these hold
+# only while nothing destructive ran before the refusal was reported.
+# Args: case_dir label head-before-teardown
+assert_refusal_retained_task_state() {
+  local case_dir=$1 label=$2 head=$3
+  [ -d "$case_dir/wt" ] || fail "$label: refusal removed the isolated copy"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = fm/task-x1 ] \
+    || fail "$label: refusal dropped the task branch"
+  [ "$(git -C "$case_dir/wt" rev-parse HEAD 2>/dev/null)" = "$head" ] \
+    || fail "$label: refusal moved the task branch off the unlanded commit"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "$label: refusal erased the durable task record"
+}
+
 append_pr_meta_for_current_head() {
   local case_dir=$1 head
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -948,13 +964,14 @@ test_squash_merged_rebased_branch_allows() {
 }
 
 test_squash_merged_same_file_different_content_refuses() {
-  local case_dir rc pr_head
+  local case_dir rc pr_head local_head
   case_dir=$(make_case squash-same-path-diverged)
   write_meta "$case_dir" no-mistakes ship
   # The pipeline rebase produced a different blob for shared.txt than the stale
   # local still holds, then squash-merged. Same path is not proof the local
   # content landed.
   pr_head=$(setup_squash_rebased_history "$case_dir" stale)
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
     "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
@@ -967,6 +984,7 @@ test_squash_merged_same_file_different_content_refuses() {
 
   expect_code 1 "$rc" "squash-same-path-diverged: teardown should refuse when the same file has different content"$'\n'"$(cat "$case_dir/stderr")"
   grep -q REFUSED "$case_dir/stderr" || fail "squash-same-path-diverged: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" squash-same-path-diverged "$local_head"
   pass "squash-merged same-path different content still refuses"
 }
 
@@ -974,10 +992,11 @@ test_squash_merged_same_file_different_content_refuses() {
 # q2 ALLOW case exactly. The one unlanded follow-up commit is the sole difference
 # and must be the sole reason teardown refuses.
 test_squash_merged_rebased_local_with_unlanded_commit_refuses() {
-  local case_dir rc pr_head
+  local case_dir rc pr_head local_head
   case_dir=$(make_case squash-rebased-unlanded)
   write_meta "$case_dir" no-mistakes ship
   pr_head=$(setup_squash_rebased_history "$case_dir" rebased-plus-unlanded)
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
     "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
@@ -990,14 +1009,16 @@ test_squash_merged_rebased_local_with_unlanded_commit_refuses() {
 
   expect_code 1 "$rc" "squash-rebased-unlanded: teardown should refuse extra local commits that never landed"$'\n'"$(cat "$case_dir/stderr")"
   grep -q REFUSED "$case_dir/stderr" || fail "squash-rebased-unlanded: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" squash-rebased-unlanded "$local_head"
   pass "squash-merged rebased local still refuses a genuinely unlanded follow-up commit"
 }
 
 test_squash_merged_stale_local_refuses_when_forge_unreachable() {
-  local case_dir rc pr_head
+  local case_dir rc pr_head local_head
   case_dir=$(make_case squash-stale-offline)
   write_meta "$case_dir" no-mistakes ship
   pr_head=$(setup_squash_rebased_history "$case_dir" stale)
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
     "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
@@ -1010,6 +1031,7 @@ test_squash_merged_stale_local_refuses_when_forge_unreachable() {
 
   expect_code 1 "$rc" "squash-stale-offline: teardown should refuse when the forge is down and trees conflict"$'\n'"$(cat "$case_dir/stderr")"
   grep -q REFUSED "$case_dir/stderr" || fail "squash-stale-offline: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" squash-stale-offline "$local_head"
   pass "squash-merged stale local still refuses when the forge is unreachable"
 }
 
