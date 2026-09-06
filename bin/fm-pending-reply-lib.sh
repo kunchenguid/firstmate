@@ -1643,7 +1643,7 @@ fm_pending_reply_tick() {  # <state-dir>
               fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
             case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
           else
-            if [ -n "${FM_PENDING_REPLY_TICK_TIMEOUT:-}" ]; then
+            if [ -n "${FM_PENDING_REPLY_TICK_TIMEOUT:-}" ] && [ "$backend" = herdr ]; then
               observation=$(fm_pending_reply_backend_observation_bounded \
                 "$FM_PENDING_REPLY_TICK_TIMEOUT" "$backend" "$target" "$label" "$harness" \
                 2>/dev/null || printf 'unknown')

@@ -199,8 +199,8 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # touches it. There is no background ticker. Phase boundaries beat after real
 # progress, and bounded check captures beat while the watcher waits for their
 # enforced deadline; the parent enforces that same deadline so a broken timeout
-# child cannot keep the beacon fresh indefinitely. Every external phase is
-# separately bounded so no single one can legitimately outlive the grace.
+# child cannot keep the beacon fresh indefinitely. Every hang-capable external
+# phase is separately bounded so no such phase can outlive the grace.
 beat() {
   touch "$STATE/.last-watcher-beat"
 }
@@ -292,8 +292,8 @@ hash_pane() {
 # verdict returns 0: idle, unknown, and dead all return 1, so a converted
 # adapter whose semantic state is missing, malformed, stale, or unverified is
 # treated as not-provably-working and surfaces rather than being absorbed.
-# <tail40> is the same bounded capture already read for hashing and is
-# consumed only by the Grok-scoped fallback inside the contract.
+# <tail40> is the same watcher capture already read for hashing and is consumed
+# only by the Grok-scoped fallback inside the contract.
 window_is_busy() {  # <window> <tail40>
   local w=$1 tail40=$2 task meta verdict
   task=$(window_to_task "$w" "$STATE")
@@ -345,6 +345,25 @@ window_label() {
   local w=$1 task
   task=$(window_to_task "$w" "$STATE")
   [ -n "$task" ] && printf 'fm-%s' "$task"
+}
+
+# Herdr reads can block on its client/server boundary and retain the watcher
+# deadline. Local backend reads stay in-process so hot polling does not create a
+# timeout process group for every pane.
+watcher_backend_capture() {  # <backend> <target> <lines> [expected-label]
+  if [ "$1" = herdr ]; then
+    fm_backend_capture_bounded "$WATCHER_EXTERNAL_TIMEOUT" "$@"
+  else
+    fm_backend_capture "$@"
+  fi
+}
+
+watcher_backend_agent_alive() {  # <backend> <target>
+  if [ "$1" = herdr ]; then
+    fm_backend_agent_alive_bounded "$WATCHER_EXTERNAL_TIMEOUT" "$@"
+  else
+    fm_backend_agent_alive "$@"
+  fi
 }
 
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
@@ -421,7 +440,7 @@ inbox_steer_check() {  # <window> <task>
       return 0
       ;;
   esac
-  tail40=$(fm_backend_capture_bounded "$WATCHER_EXTERNAL_TIMEOUT" \
+  tail40=$(watcher_backend_capture \
     "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
   if FM_BUSY_NATIVE_TIMEOUT="$WATCHER_EXTERNAL_TIMEOUT" window_is_busy "$w" "$tail40"; then
     return 0
@@ -511,7 +530,7 @@ inbox_steer_check() {  # <window> <task>
 # supervisor may need to read, so only the mechanical turn-end marker gets the
 # fallback.
 #
-# NOT a pure read: one bounded pane capture per referenced task that lacks
+# NOT a pure read: one pane capture per referenced task that lacks
 # authoritative proof. Once EVERY task passes, each churn-proven pane's prior
 # .stale- classification and wedge-escalation count are cleared because churn
 # begins a new quiet interval; retaining either would make the new interval
@@ -615,7 +634,7 @@ signal_turnend_panes_churned() {  # <file> ...
     [ "$hash_bytes" = 32 ] || return 1
     prev=$(cat "$hash_file" 2>/dev/null) || return 1
     [[ $prev =~ ^[0-9a-f]{32}$ ]] || return 1
-    now=$(fm_backend_capture_bounded "$WATCHER_EXTERNAL_TIMEOUT" \
+    now=$(watcher_backend_capture \
       "$backend" "$w" 40 "$label" 2>/dev/null) || return 1
     [ -n "$now" ] || return 1
     [ "$(printf '%s' "$now" | hash_pane)" != "$prev" ] || return 1
@@ -1020,7 +1039,7 @@ pause_state_class() {  # <window> <task>
   kind=$(window_kind "$win")
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$kind" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive_bounded "$WATCHER_EXTERNAL_TIMEOUT" \
+      agent_alive=$(watcher_backend_agent_alive \
         "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
@@ -1038,7 +1057,7 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ "$kind" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive_bounded "$WATCHER_EXTERNAL_TIMEOUT" \
+    agent_alive=$(watcher_backend_agent_alive \
       "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
@@ -1982,10 +2001,10 @@ EOF
     fi
     # One beat per window: the stale scan reads every recorded window's pane, and
     # on a large fleet that is the longest phase of the poll. Beating per window
-    # keeps the beacon measuring progress through the scan; each read is bounded
-    # below the stale grace.
+    # keeps the beacon measuring progress through the scan; hang-capable Herdr
+    # reads retain a deadline below the stale grace.
     beat
-    tail40=$(fm_backend_capture_bounded "$WATCHER_EXTERNAL_TIMEOUT" \
+    tail40=$(watcher_backend_capture \
       "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
