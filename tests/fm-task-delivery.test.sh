@@ -139,6 +139,7 @@ EOF
   git clone --quiet --bare "$source" "$origin"
   remote_abs=$(cd "$origin" && pwd -P)
   rmdir "$proj"
+  # Approved fixture exception: this disposable shallow clone stays inside the test's temporary directory.
   git clone --quiet --depth 1 "file://$remote_abs" "$proj"
   [ "$(git -C "$proj" rev-parse --is-shallow-repository)" = true ] \
     || fail "delivery mismatch fixture is not shallow"

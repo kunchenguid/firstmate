@@ -93,6 +93,7 @@ build_shallow_pair() {
 
   git clone --quiet --bare "$work" "$remote"
   remote_abs=$(cd "$remote" && pwd)
+  # Approved fixture exception: this disposable shallow clone stays inside the test's temporary directory.
   git clone --quiet --depth 2 "file://$remote_abs" "$clone"
   printf '%s\n' "$clone"
 }
