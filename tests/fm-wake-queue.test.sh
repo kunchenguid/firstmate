@@ -18,6 +18,19 @@ GRANT="$ROOT/bin/fm-wake-grant.sh"
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
 
+test_wake_source_time_state_initialization() {
+  local ordinary="$TMP_ROOT/wake-source-ordinary" canonical="$TMP_ROOT/wake-source-canonical"
+  FM_STATE_OVERRIDE="$ordinary" bash -c '. "$1"' _ "$ROOT/bin/fm-wake-lib.sh" \
+    || fail "ordinary wake-library import failed"
+  [ -d "$ordinary" ] || fail "ordinary wake-library import no longer initializes state"
+  FM_STATE_OVERRIDE="$canonical" FM_SESSION_START_STAGE_FILE="$TMP_ROOT/session-stage" \
+    bash -c '. "$1"' _ "$ROOT/bin/fm-wake-lib.sh" \
+    || fail "canonical session-start wake-library import failed"
+  [ ! -e "$canonical" ] || fail "canonical session-start import initialized state before the lock"
+  pass "wake-library source initialization remains ordinary-call compatible and defers only for canonical session start"
+}
+
+
 test_concurrent_append_and_drain() {
   local dir state out1 out2 pids i pid count unique malformed sequence generation
   dir=$(make_case concurrent)
@@ -1568,6 +1581,7 @@ test_historical_annotation_skips_announced_status() {
   pass "historical annotations replay nothing already announced and keep everything new"
 }
 
+test_wake_source_time_state_initialization
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention

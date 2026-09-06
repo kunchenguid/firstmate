@@ -54,6 +54,9 @@ The deferred startup stage deliberately runs in its own process group under its 
 They source `bin/fm-gate-refuse-lib.sh` and stay silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
 They share `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so every hook uses one primary-detection owner.
 The Guard Predicates section of [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns marker validation, plain-checkout detection, and required Firstmate-shaped paths.
+That shared scope check remains a mutation-free candidacy test and requires the effective state directory to exist, so neither tier starts or nudges SessionStart for an uninitialized home.
+Initialize a primary home first with `bin/fm-home-init.sh <home>`; after that explicit boundary, both tiers converge on the same direct `bin/fm-session-start.sh` command, which passes an explicit binding mode to `bin/fm-lock.sh`.
+The `fm-lock.sh` header and `--help` are the single owner of the physical state binding and lock-transaction mechanics, and no wrapper-to-lock claim is carried in the environment.
 
 The nudge payload starts with U+2063 and the stable `FIRSTMATE_OP: ` label, carries the current `session-start` protocol kind, and retains exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` as its body.
 The Ahoy skill owns the rule that this marked operational input is never a captain-authored session boundary, including its narrow legacy compatibility cases, and its own step 0 helm check is the fallback that protects a nudge-tier harness whose first command is a skill.
@@ -97,7 +100,10 @@ That alternative expands trust and writes outside this repository, so Firstmate 
 
 ## Regression coverage
 
-`tests/fm-sessionstart-nudge.test.sh` proves the nudge wrapper's silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock, plus its exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
+`tests/fm-sessionstart-nudge.test.sh` proves the nudge wrapper's silence for both gate signals, an unmarked linked worktree, every uninitialized home, and an already-owned lock, plus its exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
+It proves that direct SessionStart cannot initialize an absent or incomplete home, the canonical initializer serializes concurrent calls, and nudge, run-tier, and manual entry points converge through the same lock topology after initialization.
+It separately proves rejection of a missing noncanonical state override and physical binding across the existing-state lock transaction.
+It also proves that a refused transaction keeps the lock an earlier acquisition of the same session published, so a rejected start never leaves the original home claimable by a second session.
 It separately proves the run wrapper's silence for the gate environment and an unmarked linked worktree, including the internal Pi prerequisite's explicit silent stand-down.
 It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including completion-gated `--reemit` selection, resume delegation, Pi CLI continuation classification, an unrecognized source falling through to the full digest, and bounded loud delivery of an oversized Pi digest.
 The same portable suite proves provider exclusion until settlement, exactly-one execution and context delivery, interruption, process-tree retirement, two rapid replacements, stale completion, eligible empty output, spawn error, wrapper timeout output, truncation, ineligible stand-down, and compaction cancellation through the extension's public event surface.

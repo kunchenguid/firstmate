@@ -337,6 +337,9 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# The explicit lock mode below requires and binds already-initialized state.
+# FM_SESSION_START_STAGE_FILE is inherited by this composer's diagnostic
+# children so their wake-library imports cannot initialize a refused home.
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
@@ -625,7 +628,7 @@ fi
 # --- 1. lock -----------------------------------------------------------
 stage lock
 subsection "LOCK"
-LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
+LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" session-start 2>&1)
 LOCK_RC=$?
 printf '%s\n' "$LOCK_OUT"
 READ_ONLY=0

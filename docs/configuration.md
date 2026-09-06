@@ -286,6 +286,11 @@ When it is unset, most scripts use the repo root as the home; when it is set, sc
 When `FM_HOME` is unset, it also behaves as the old whole-root override.
 `bin/fm-send.sh` is intentionally stricter than that general fallback: it requires `FM_HOME` to be set before resolving a target, so operator steers cannot silently resolve against the wrong home.
 `FM_STATE_OVERRIDE`, `FM_DATA_OVERRIDE`, `FM_PROJECTS_OVERRIDE`, and `FM_CONFIG_OVERRIDE` override individual operational directories for tests and specialized harness setup.
+Initialize a primary operational home explicitly with `bin/fm-home-init.sh <home>` before starting a session against it.
+The initializer creates the canonical `data/`, `state/`, `config/`, and `projects/` directories under an existing immediate parent and serializes concurrent same-home calls through the established parent-local provisioning-lock contract.
+It may complete the tracked Firstmate root or an empty separate home, but refuses symlinked paths and a populated incomplete separate home rather than silently adopting private data.
+Canonical SessionStart requires existing state and never creates `FM_HOME`, `state/`, or a missing noncanonical `FM_STATE_OVERRIDE`; its physical binding and lock-transaction mechanics are owned by `bin/fm-lock.sh --help`.
+The initializer's header and help own its exact direct-creation, validation, convergence, and rollback mechanics.
 Before `fm-brief.sh`, `fm-spawn.sh`, or `fm-afk-launch.sh` persists a path or passes it to another process, it resolves each applicable relative `FM_HOME`, `FM_STATE_OVERRIDE`, or `FM_DATA_OVERRIDE` directory against the caller's working directory, preserves accepted absolute spellings unchanged, and rejects an unresolvable relative directory with the offending variable named.
 `fm-spawn.sh` additionally rejects control bytes in those raw directory inputs before shell or filesystem normalization can change which path the backlog gate checks.
 Lifecycle access to a backlog, task record, or pending-close record must resolve within its configured data or state root, and a final-component symlink is refused even when its target remains within that root.
