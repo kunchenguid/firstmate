@@ -222,4 +222,24 @@ printf '%s\n' "$out" | grep -qx 'status: exhausted' || fail "known semantics wit
 printf '%s\n' "$out" | grep -qx 'condition_polls: 2' || fail "known semantics with unknown headroom stopped early"
 ok "poll preserves unknown headroom under known semantics"
 
+# The result document is the adapter's serialized protocol: `classify` and the
+# process-event-sources wake handler both read it. quota-axi reads one credential
+# home per invocation and the watch never sets CODEX_HOME, so a reading is this
+# home's ambient account, not a fleet-wide provider claim. The scope label is
+# what stops a handler from reading a `low` wake wider than it was measured.
+rm -f "$COUNT"
+out=$(QUOTA_AXI_EXHAUSTED_DETAIL=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" poll --interval 1 --threshold 10 --provider codex --timeout 1)
+detail=$(printf '%s\n' "$out" | sed -n 's/^detail: //p')
+printf '%s\n' "$detail" | jq -e '.scope == "ambient-credential-home"' >/dev/null \
+  || fail "provider detail did not label the account scope it was measured in: $detail"
+
+rm -f "$COUNT"
+out=$(QUOTA_AXI_EXHAUSTED_DETAIL=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" poll --interval 1 --threshold 10 --timeout 1)
+detail=$(printf '%s\n' "$out" | sed -n 's/^detail: //p')
+printf '%s\n' "$detail" | jq -e '.provider == "aggregate" and .scope == "ambient-credential-home"' >/dev/null \
+  || fail "aggregate detail did not label the account scope it was measured in: $detail"
+ok "a quota detail labels the ambient credential home it was measured in"
+
 printf '# all fm-procevent-quota tests passed\n'
