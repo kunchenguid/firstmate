@@ -45,10 +45,11 @@ run_lavish() {  # <home> <command args...>
     "$ROOT/bin/fm-procevent-lavish.sh" "$@"
 }
 
-run_bearings() {  # <home>
+run_bearings() {  # <home> [extra args]
   local home=$1
+  shift
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-14T12:00:00Z \
-    "$BEARINGS" --json
+    "$BEARINGS" --json "$@"
 }
 
 run_teardown() {  # <home> <id>
@@ -2476,7 +2477,7 @@ test_teardown_never_closes_a_captain_held_task() {
 
 test_retained_row_artifacts_survive_captain_answers() {
   local home retained_id precedence_id rejected_id rejected_local_id report_question_id
-  local approved_id released_id local_id
+  local approved_id released_id local_id answered_id legacy_id
   local repo wt
   local local_repo local_wt
   local precedence_pr rejected_pr approved_pr released_pr json show
@@ -2650,7 +2651,26 @@ test_retained_row_artifacts_survive_captain_answers() {
     2> "$home/released-teardown.err" \
     || fail "released report cleanup failed: $(cat "$home/released-teardown.err")"
 
-  json=$(run_bearings "$home") || fail "Bearings failed after retained delivery answers"
+  answered_id=sample-artifactless-captain-answer
+  tasks_in "$home" add "$answered_id" "Choose the artifactless route" --kind captain \
+    --repo sample --start >/dev/null || fail "could not create the artifactless captain call"
+  run_captain "$home" hold "$answered_id" --reason "captain route choice pending" \
+    >/dev/null || fail "could not hold the artifactless captain call"
+  printf 'Continue without a delivery artifact.\n' > "$home/artifactless-answer.txt"
+  run_captain "$home" answer "$answered_id" --release \
+    --decision-file "$home/artifactless-answer.txt" >/dev/null \
+    || fail "could not release the artifactless captain call"
+  tasks_in "$home" 'done' "$answered_id" >/dev/null \
+    || fail "could not complete the released artifactless captain call"
+
+  legacy_id=sample-kindless-legacy-delivery
+  tasks_in "$home" add "$legacy_id" "Complete the legacy work" --repo sample --start \
+    >/dev/null || fail "could not create the kindless legacy delivery"
+  tasks_in "$home" 'done' "$legacy_id" >/dev/null \
+    || fail "could not complete the kindless legacy delivery"
+
+  json=$(run_bearings "$home" --all-landed) \
+    || fail "Bearings failed after retained delivery answers"
   printf '%s' "$json" | jq -e \
     --arg retained_id "$retained_id" --arg retained "data/$retained_id/report.md" \
     --arg precedence_id "$precedence_id" \
@@ -2659,6 +2679,7 @@ test_retained_row_artifacts_survive_captain_answers() {
     --arg report_question_id "$report_question_id" \
     --arg approved_id "$approved_id" --arg local_id "$local_id" \
     --arg approved_pr "$approved_pr" --arg released_id "$released_id" \
+    --arg answered_id "$answered_id" --arg legacy_id "$legacy_id" \
     --arg released "data/$released_id/report.md" '
       (.landed | any(.id == $retained_id and .artifact == $retained))
         and (.landed | any(.id == $precedence_id and .artifact == $precedence))
@@ -2668,6 +2689,12 @@ test_retained_row_artifacts_survive_captain_answers() {
         and (.landed | any(.id == $approved_id and .artifact == $approved_pr))
         and (.landed | any(.id == $local_id))
         and (.landed | any(.id == $released_id and .artifact == $released))
+        # Without the explicit captain-kind boundary, the artifactless answered
+        # call falls through the compatibility path and this assertion fails.
+        and (.landed | any(.id == $answered_id) | not)
+        # Requiring a present non-captain kind would also remove this older
+        # artifactless delivery, so the compatibility boundary stays observable.
+        and (.landed | any(.id == $legacy_id))
     ' >/dev/null || fail "released, retained, or rejected deliveries were misclassified: $json"
   pass "release and scout report retention distinguish deliveries from rejected merge answers"
 }
@@ -3036,6 +3063,172 @@ test_local_merge_entrypoint_refuses_a_captain_held_task() {
   pass "the local merge entrypoint refuses a captain-held task before merging"
 }
 
+test_merge_entrypoints_serialize_forced_teardown_before_task_reads() {
+  local home id pr repo wt ready release merge_pid teardown_rc merge_rc real_grep
+  local local_home local_id local_repo local_wt local_ready local_release local_pid
+  local local_teardown_rc local_merge_rc real_git before after i
+
+  home=$(make_home teardown-race-pr-entrypoint)
+  configure_merged_github "$home"
+  id=sample-teardown-race-pr
+  pr=https://github.com/sample/sample/pull/33
+  repo="$home/projects/sample-pr-race"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" "fm/$id"
+  tasks_in "$home" add "$id" "Ship the released pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the PR teardown-race fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "spawn_gen=fixture-$id"
+  printf 'done: merge ready\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain merge approval pending" >/dev/null \
+    || fail "could not hold the PR teardown-race fixture"
+  printf 'Merge the released pull request.\n' > "$home/race-answer.txt"
+  run_captain "$home" answer "$id" --release --decision-file "$home/race-answer.txt" \
+    >/dev/null || fail "could not release the PR teardown-race fixture"
+
+  real_grep=$(command -v grep)
+  ready="$home/pr-metadata-read-ready"
+  release="$home/pr-metadata-read-release"
+  cat > "$home/fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -qxF ] && [ "${2:-}" = "pr=${FM_TEST_RACE_PR_URL:-}" ] \
+    && [ "${3:-}" = "${FM_TEST_RACE_PR_META:-}" ]; then
+  "$FM_TEST_REAL_GREP" "$@" || exit $?
+  : > "$FM_TEST_RACE_READY"
+  while [ ! -e "$FM_TEST_RACE_RELEASE" ]; do sleep 0.01; done
+  exit 0
+fi
+exec "$FM_TEST_REAL_GREP" "$@"
+SH
+  chmod +x "$home/fakebin/grep"
+  FM_TEST_REAL_GREP="$real_grep" FM_TEST_RACE_PR_URL="$pr" \
+    FM_TEST_RACE_PR_META="$home/state/$id.meta" FM_TEST_RACE_READY="$ready" \
+    FM_TEST_RACE_RELEASE="$release" run_pr_merge "$home" "$id" "$pr" \
+    > "$home/race-pr.out" 2> "$home/race-pr.err" &
+  merge_pid=$!
+  i=0
+  while [ "$i" -lt 500 ]; do
+    [ -e "$ready" ] && break
+    kill -0 "$merge_pid" 2>/dev/null || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$merge_pid" 2>/dev/null || true
+    fail "the PR merge did not reach the post-metadata synchronization point"
+  fi
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/race-pr-teardown.out" 2> "$home/race-pr-teardown.err"
+  teardown_rc=$?
+  set -e
+  : > "$release"
+  wait "$merge_pid"
+  merge_rc=$?
+
+  # Without early lock ownership, forced cleanup succeeds after metadata is
+  # recorded, and the resumed forge call merges work whose task was retired.
+  [ "$teardown_rc" -ne 0 ] \
+    || fail "forced cleanup retired the task between PR metadata recording and merge"
+  assert_grep "another lifecycle action is already running for task $id" \
+    "$home/race-pr-teardown.err" \
+    "PR cleanup was not refused by the merge's task control lock"
+  [ "$merge_rc" -eq 0 ] || fail "the serialized PR merge failed after cleanup was refused"
+  assert_present "$home/state/$id.meta" "the refused PR cleanup removed task metadata"
+  assert_grep 'pr merge 33 ' "$home/gh-axi.log" \
+    "the serialized PR merge did not reach the forge after cleanup was refused"
+
+  local_home=$(make_home teardown-race-local-entrypoint)
+  local_id=sample-teardown-race-local
+  local_repo="$local_home/projects/sample-local-race"
+  local_wt="$local_home/projects/$local_id"
+  fm_git_worktree "$local_repo" "$local_wt" "fm/$local_id"
+  printf 'serialized local delivery\n' > "$local_wt/local.txt"
+  git -C "$local_wt" add local.txt
+  git -C "$local_wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'serialized local delivery'
+  tasks_in "$local_home" add "$local_id" "Ship the released local change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the local teardown-race fixture"
+  fm_write_meta "$local_home/state/$local_id.meta" \
+    "window=firstmate:fm-$local_id" "endpoint_task_id=$local_id" "worktree=$local_wt" \
+    "project=$local_repo" "harness=codex" "kind=ship" "mode=local-only" \
+    "spawn_gen=fixture-$local_id"
+  printf 'done: local merge ready\n' > "$local_home/state/$local_id.status"
+  run_captain "$local_home" hold "$local_id" \
+    --reason "captain local merge approval pending" >/dev/null \
+    || fail "could not hold the local teardown-race fixture"
+  printf 'Land the released local change.\n' > "$local_home/race-answer.txt"
+  run_captain "$local_home" answer "$local_id" --release \
+    --decision-file "$local_home/race-answer.txt" >/dev/null \
+    || fail "could not release the local teardown-race fixture"
+
+  real_git=$(command -v git)
+  local_ready="$local_home/local-validation-ready"
+  local_release="$local_home/local-validation-release"
+  cat > "$local_home/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = "-C ${FM_TEST_RACE_REPO:-} rev-parse --short main" ]; then
+  output=$("$FM_TEST_REAL_GIT" "$@") || exit $?
+  : > "$FM_TEST_RACE_READY"
+  while [ ! -e "$FM_TEST_RACE_RELEASE" ]; do sleep 0.01; done
+  printf '%s\n' "$output"
+  exit 0
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$local_home/fakebin/git"
+  before=$(git -C "$local_repo" rev-parse main)
+  PATH="$local_home/fakebin:$PATH" FM_TEST_REAL_GIT="$real_git" \
+    FM_TEST_RACE_REPO="$local_repo" FM_TEST_RACE_READY="$local_ready" \
+    FM_TEST_RACE_RELEASE="$local_release" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$local_home" FM_STATE_OVERRIDE="$local_home/state" \
+    FM_DATA_OVERRIDE="$local_home/data" FM_CONFIG_OVERRIDE="$local_home/config" \
+    "$ROOT/bin/fm-merge-local.sh" "$local_id" \
+    > "$local_home/race-local.out" 2> "$local_home/race-local.err" &
+  local_pid=$!
+  i=0
+  while [ "$i" -lt 500 ]; do
+    [ -e "$local_ready" ] && break
+    kill -0 "$local_pid" 2>/dev/null || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$local_ready" ]; then
+    : > "$local_release"
+    wait "$local_pid" 2>/dev/null || true
+    fail "the local merge did not reach the post-validation synchronization point"
+  fi
+  set +e
+  PATH="$local_home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$local_home" \
+    FM_STATE_OVERRIDE="$local_home/state" FM_DATA_OVERRIDE="$local_home/data" \
+    FM_CONFIG_OVERRIDE="$local_home/config" "$TEARDOWN" "$local_id" --force \
+    > "$local_home/race-local-teardown.out" 2> "$local_home/race-local-teardown.err"
+  local_teardown_rc=$?
+  set -e
+  : > "$local_release"
+  wait "$local_pid"
+  local_merge_rc=$?
+  after=$(git -C "$local_repo" rev-parse main)
+
+  # Without early lock ownership, forced cleanup succeeds after validation and
+  # the resumed fast-forward lands work whose task was already retired.
+  [ "$local_teardown_rc" -ne 0 ] \
+    || fail "forced cleanup retired the task between local validation and merge"
+  assert_grep "another lifecycle action is already running for task $local_id" \
+    "$local_home/race-local-teardown.err" \
+    "local cleanup was not refused by the merge's task control lock"
+  [ "$local_merge_rc" -eq 0 ] || fail "the serialized local merge failed after cleanup was refused"
+  [ "$after" != "$before" ] || fail "the serialized local merge did not fast-forward main"
+  assert_present "$local_home/state/$local_id.meta" \
+    "the refused local cleanup removed task metadata"
+  pass "merge entrypoints own task state before forced cleanup can retire it"
+}
+
 # No regression covers a re-hold after a merge lands and before cleanup because
 # that accepted window spans two separate lifecycle owners.
 # Queued forge merges are also uncovered because they land asynchronously after
@@ -3159,6 +3352,7 @@ test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task
 test_local_merge_entrypoint_refuses_a_captain_held_task
+test_merge_entrypoints_serialize_forced_teardown_before_task_reads
 test_released_merge_passes_the_entrypoint_and_lands
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
 test_verify_resolves_a_hold_migrated_to_beads_notes

@@ -204,6 +204,8 @@ reject_repo_overrides "$@" || exit 1
 [ "$PROVIDER" != gitlab ] || reject_head_overrides "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
+MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
+fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2
@@ -671,8 +673,6 @@ case "$PROVIDER" in
       FM_PR_GITHUB_AUTO_REQUESTED=true
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
-    MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
-    fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
     require_released_captain_hold || exit 1
     merge_status=0
     merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
@@ -716,8 +716,6 @@ case "$PROVIDER" in
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;
     # the conditions above are what authorize the merge.
-    MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
-    fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
     require_released_captain_hold || exit 1
     merge_status=0
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
