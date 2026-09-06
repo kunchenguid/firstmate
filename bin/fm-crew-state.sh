@@ -56,7 +56,11 @@
 #      checks green, also reads done (held-for-merge), never failed: a monitor
 #      whose only remaining job is to observe a human merge decision must not
 #      convert the absence of that decision into a failure verdict
-#      (nm_failed_run_is_green_held_ci; 2026-09-05 jr-voice incident).
+#      (nm_failed_run_is_green_held_ci; 2026-09-05 jr-voice incident). In the
+#      coarse runs-ledger fallback (no steps table, no ci log), a terminal
+#      FAILED record whose daemon an explicit probe proves down reads unknown,
+#      never failed: an instrument failure must not read as work failure
+#      (nm_daemon_probe_down).
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -449,6 +453,17 @@ nm_reclassify_failed_run_as_held_green() {
   return 0
 }
 
+# 0 when an explicit probe proves the shared daemon down: `no-mistakes daemon
+# status` is the canonical down-probe (the same one fm-brief.sh hands crews
+# before a blocked append) and exits non-zero when the daemon is not running.
+# Bounded like every other CLI call; a probe that fails for any reason -
+# refused socket, timeout, non-zero answer - means the daemon is not provably
+# up, which is the only fact the coarse fallback needs.
+nm_daemon_probe_down() {
+  fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || return 0
+  return 1
+}
+
 nm_ci_step_status() {
   local row rest
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
@@ -598,7 +613,17 @@ if [ "$HAVE_RUN" = 1 ]; then
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
-      failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
+      failed)
+        # The ledger row is terminal but the coarse path has no steps table
+        # and no ci log, so the orphaned-monitor shape cannot be recognized
+        # here. With the daemon provably down, the row is unverified evidence
+        # from a dead instrument and must not read as work failure.
+        if nm_daemon_probe_down; then
+          RUN_STATE=unknown
+          RUN_DETAIL="no-mistakes daemon unreachable; last ledger record failed - unverified"
+        else
+          RUN_STATE=failed; RUN_DETAIL="run failed"
+        fi ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
