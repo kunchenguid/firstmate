@@ -4000,27 +4000,6 @@ if (heartbeatUnresolvable.eligible || !heartbeatUnresolvable.corrupted) {
   throw new Error(`an unresolvable row must still defer a heartbeat review: ${JSON.stringify(heartbeatUnresolvable)}`);
 }
 
-// A needs-decision signal row is excluded rather than vetoing routine
-// dispatch (tested above), but a heartbeat cannot certify its all-or-nothing
-// claim while that row's own task cannot be resolved either - the same veto
-// an ordinary unresolvable row gets, just reached through the needs-decision
-// short-circuit instead of skipping it.
-writeFileSync(
-  `${state}/.wake-queue`,
-  [
-    "1\t1\theartbeat\theartbeat\theartbeat",
-    "1\t2\tsignal\tno-such-task.status\tneeds-decision: no-such-task.status",
-  ].join("\n"),
-);
-const heartbeatUnresolvableDecision = scopeForUnreadWake(state, true);
-if (heartbeatUnresolvableDecision.eligible || !heartbeatUnresolvableDecision.corrupted) {
-  throw new Error(`an unresolvable needs-decision row must still defer a heartbeat review: ${JSON.stringify(heartbeatUnresolvableDecision)}`);
-}
-const routineUnresolvableDecision = scopeForUnreadWake(state, false);
-if (routineUnresolvableDecision.corrupted || routineUnresolvableDecision.eligible) {
-  throw new Error(`an unresolvable needs-decision row must not veto routine dispatch: ${JSON.stringify(routineUnresolvableDecision)}`);
-}
-
 writeFileSync(
   `${state}/.wake-queue`,
   [

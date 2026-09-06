@@ -276,20 +276,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
         // Main-owned exactly like a check-kind row above: a needs-decision
         // status append surfaced through the actionable signal path is
         // excluded from what the branch may claim without vetoing the scan
-        // (docs/pi-supervision-branch.md "Autonomy") for an ordinary routine
-        // dispatch, regardless of whether its own task still resolves - the
-        // decision row is main-owned either way, and an unrelated resolvable
-        // row must stay independently claimable. A heartbeat's all-or-nothing
-        // contract is stricter: it cannot safely certify "every other row is
-        // resolvable" while one excluded row's own task can't be resolved
-        // either, so THAT case still vetoes the whole scan exactly like an
-        // ordinary unresolvable signal/stale row below - and that check must
-        // run before the continue, not after it, or a torn-down task's
-        // decision row silently loses its heartbeat veto.
-        if (heartbeat) {
-          const decisionTask = key.replace(/\.(?:status|turn-ended)$/, "");
-          if (!decisionTask || !metadata.get(decisionTask)) return UNSAFE_SCOPE;
-        }
+        // (docs/pi-supervision-branch.md "Autonomy").
         needsDecisionKeys.push(key);
         continue;
       }
