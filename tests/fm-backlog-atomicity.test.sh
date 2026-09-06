@@ -248,6 +248,31 @@ SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }
 
+# The commit's `start` reports success but never moves the row - the beads
+# failure pattern - and interrupts the spawn; every later `start` (the error
+# path's own read-back repair) never answers. With FM_TASKS_AXI_TIMEOUT
+# bounding each call, the verification must time out and exit with the honest
+# attempted wording instead of holding the per-task meta lock open forever.
+hang_start_after_first() {  # <case-dir>
+  local case_dir=$1 real
+  real=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = start ]; then
+  if [ ! -f "$case_dir/start-interrupted" ]; then
+    : > "$case_dir/start-interrupted"
+    spawn_pid=\$(ps -o ppid= -p "\$PPID" | tr -d ' ')
+    case "\$spawn_pid" in ''|*[!0-9]*) exit 1 ;; esac
+    kill -TERM "\$spawn_pid"
+    exit 0
+  fi
+  sleep 300
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
 change_row_on_second_show() {  # <case-dir> <done|rm>
   local case_dir=$1 action=$2 real
   real=$(command -v tasks-axi)
@@ -1126,6 +1151,39 @@ test_deferred_signal_never_claims_unverified_preservation() {
   assert_present "$(home_of "$case_dir")/state/$id.meta" \
     "the failed repair removed the paired task record"
   pass "a signal-deferred spawn reports attempted preservation as attempted when it cannot be verified"
+}
+
+test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
+  local case_dir id out rc=0
+  id=atomic-dispatch-signal-hang-b5
+  case_dir=$(make_home dispatch-signal-hang "$id")
+  add_item "$case_dir" "$id"
+  hang_start_after_first "$case_dir"
+
+  # The read-back's own `start` never answers, so the spawn must bound it
+  # (FM_TASKS_AXI_TIMEOUT=3), print the attempted wording naming the timeout,
+  # and exit - the outer `timeout -k 5 30` only turns a regression back into
+  # the lock-held-forever hang it exists to catch.
+  mkdir -p "$case_dir/user-home"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
+    HOME="$case_dir/user-home" FM_SPAWN_NO_GUARD=1 \
+    FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" CLAUDE_CONFIG_DIR='' \
+    FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$PATH" \
+    timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
+    --mode no-mistakes --yolo off 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
+  case "$rc" in
+    124|137) fail "the verification hung on the unresponsive start instead of timing out: $out" ;;
+  esac
+  assert_contains "$out" "preservation could not be verified" \
+    "a timed-out verification did not report the preservation as attempted, not verified"
+  assert_contains "$out" "did not finish within 3s" \
+    "the attempted-preservation wording did not name the timeout as its reason"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "the timed-out repair left the backlog row at $(row_state "$case_dir" "$id")"
+  assert_present "$(home_of "$case_dir")/state/$id.meta" \
+    "the timed-out repair removed the paired task record"
+  pass "a signal-deferred spawn bounds its verification so an unresponsive tasks-axi cannot hold the meta lock forever"
 }
 
 test_dispatch_interruption_during_kimi_readiness_fails_before_commit() {
@@ -2472,6 +2530,7 @@ test_dispatch_rolls_back_before_a_failed_launch_delivery
 test_dispatch_defers_interruption_across_backlog_commit
 test_deferred_signal_reads_back_preserved_state
 test_deferred_signal_never_claims_unverified_preservation
+test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi
 test_dispatch_interruption_during_kimi_readiness_fails_before_commit
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight

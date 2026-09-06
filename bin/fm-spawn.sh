@@ -3723,6 +3723,14 @@ if [ "$BACKLOG_TRANSITION" = 1 ]; then
   trap 'SPAWN_DEFERRED_SIGNAL=TERM' TERM
 fi
 SPAWN_BACKLOG_COMMIT_STATUS=0
+# Both the commit and its preservation read-back run under this task's meta
+# lock, so an unresponsive tasks-axi there would hold the lock - and every
+# lifecycle operation waiting on it - open ended, with even the deferred
+# signals parked in a trap. Bound each invocation
+# (bin/fm-backlog-transition-lib.sh's fm_tasks_axi): a timed-out call
+# fails through the ordinary error plumbing, and the interrupted exit path
+# reports it as the reason the preservation could not be verified.
+FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
 if spawn_commit_backlog_transition; then
   SPAWN_FRESH_COMMIT_PENDING=0
 else

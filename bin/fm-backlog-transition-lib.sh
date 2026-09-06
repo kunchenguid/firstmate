@@ -209,6 +209,25 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
   return 0
 }
 
+# Run `tasks-axi` with an optional FM_TASKS_AXI_TIMEOUT bound (GNU timeout, or
+# gtimeout where it is absent). A caller that holds a lock across the call -
+# the spawn commit and its preservation read-back run under the per-task meta
+# lock - sets the bound, so an unresponsive tasks-axi cannot hold that lock
+# open indefinitely; a timed-out call exits 124 and the callers report the
+# timeout as the reason through their existing error plumbing. Must be the
+# last command of a subshell: the exec keeps the tasks-axi process exactly
+# where the plain call sat, and the timeout kills the child, not the caller.
+fm_tasks_axi() {
+  if [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+      exec timeout "$FM_TASKS_AXI_TIMEOUT" tasks-axi "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+      exec gtimeout "$FM_TASKS_AXI_TIMEOUT" tasks-axi "$@"
+    fi
+  fi
+  exec tasks-axi "$@"
+}
+
 # Print one row's `tasks-axi show` output (plus stderr) from the backlog root,
 # with `--file` only for the markdown backend; the exit status is tasks-axi's.
 # Extra flags (such as --full) are passed through.
@@ -218,9 +237,9 @@ fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
   file=$(fm_backlog_file "$data") || return 1
   root=$(fm_backlog_root "$data") || return 1
   if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
-    (cd "$root" 2>/dev/null && tasks-axi show "$id" "$@" --file "$file" 2>&1)
+    (cd "$root" 2>/dev/null && fm_tasks_axi show "$id" "$@" --file "$file" 2>&1)
   else
-    (cd "$root" 2>/dev/null && tasks-axi show "$id" "$@" 2>&1)
+    (cd "$root" 2>/dev/null && fm_tasks_axi show "$id" "$@" 2>&1)
   fi
 }
 
@@ -269,8 +288,13 @@ fm_backlog_row_probe() {  # <data-dir> <id>
       FM_BACKLOG_ROW_RESULT=not_found
     else
       FM_BACKLOG_ROW_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
-      [ -n "$FM_BACKLOG_ROW_ERROR" ] \
-        || FM_BACKLOG_ROW_ERROR="tasks-axi show $id failed with no output"
+      if [ -z "$FM_BACKLOG_ROW_ERROR" ]; then
+        if [ "$command_status" -eq 124 ] && [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
+          FM_BACKLOG_ROW_ERROR="tasks-axi show $id did not finish within ${FM_TASKS_AXI_TIMEOUT}s"
+        else
+          FM_BACKLOG_ROW_ERROR="tasks-axi show $id failed with no output"
+        fi
+      fi
     fi
     return "$command_status"
   fi
@@ -306,19 +330,24 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   FM_BACKLOG_TRANSITION_ERROR=
   root=$(fm_backlog_root "$data") || return 1
   if [ "$(fm_tasks_axi_backend "$root")" != markdown ]; then
-    out=$(cd "$root" 2>/dev/null && tasks-axi "$verb" "$id" "$@" 2>&1)
+    out=$(cd "$root" 2>/dev/null && fm_tasks_axi "$verb" "$id" "$@" 2>&1)
     command_status=$?
   else
     file=$(fm_backlog_file "$data") || return 1
     fm_backlog_record_present "$file" "backlog file" "$authorized_data" || return 1
-    out=$(cd "$root" 2>/dev/null && tasks-axi "$verb" "$id" \
+    out=$(cd "$root" 2>/dev/null && fm_tasks_axi "$verb" "$id" \
         --file "$file" "$@" 2>&1)
     command_status=$?
   fi
   [ "$command_status" -ne 0 ] || return 0
   FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
-  [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
-    || FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb $id failed with no output"
+  if [ -z "$FM_BACKLOG_TRANSITION_ERROR" ]; then
+    if [ "$command_status" -eq 124 ] && [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
+      FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb $id did not finish within ${FM_TASKS_AXI_TIMEOUT}s"
+    else
+      FM_BACKLOG_TRANSITION_ERROR="tasks-axi $verb $id failed with no output"
+    fi
+  fi
   return "$command_status"
 }
 
