@@ -809,6 +809,17 @@ fm_backend_busy_state() {  # <backend> <target>
   esac
 }
 
+fm_backend_busy_state_bounded() {  # <seconds> <backend> <target>
+  local timeout=$1
+  shift
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  fm_run_timed "$timeout" env FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
+    FM_CONFIG_OVERRIDE="$FM_BACKEND_CONFIG_DIR" bash -c \
+    '. "$1"; shift; fm_backend_busy_state "$@"' _ \
+    "$FM_BACKEND_LIB_DIR/fm-backend.sh" "$@"
+}
+
 # fm_backend_composer_state: classify the composer/input area of <target> as
 # empty|pending|pending-unproven|unknown for callers that need a pre-submit
 # input guard, a submit acknowledgement, or a launch-readiness check. It is

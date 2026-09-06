@@ -205,11 +205,10 @@ beat() {
 }
 
 wait_with_beats() {
-  local remaining=$1
-  while [ "$remaining" -gt 0 ]; do
-    sleep 1
+  local deadline=$((SECONDS + $1))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 0.5
     beat
-    remaining=$((remaining - 1))
   done
 }
 
@@ -392,6 +391,13 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # blocking. Runs for secondmates
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
+task_inbox_ring_bounded() {  # <backend> <target> <record-path> [expected-label]
+  fm_run_timed "$WATCHER_EXTERNAL_TIMEOUT" env FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" bash -c \
+    '. "$1"; shift; fm_task_inbox_ring "$@"' _ \
+    "$SCRIPT_DIR/fm-task-inbox-lib.sh" "$@"
+}
+
 inbox_steer_check() {  # <window> <task>
   local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
@@ -415,13 +421,14 @@ inbox_steer_check() {  # <window> <task>
   esac
   tail40=$(fm_backend_capture_bounded "$WATCHER_EXTERNAL_TIMEOUT" \
     "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
-  if window_is_busy "$w" "$tail40"; then
+  if FM_BUSY_NATIVE_TIMEOUT="$WATCHER_EXTERNAL_TIMEOUT" window_is_busy "$w" "$tail40"; then
     return 0
   fi
   case "$verb" in
     ring)
       ring_rc=0
-      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      task_inbox_ring_bounded "$backend" "$w" "$rec" \
+        "$(window_label "$w")" || ring_rc=$?
       if [ "$ring_rc" -eq 3 ]; then
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
@@ -1691,7 +1698,9 @@ while :; do
   # open records stays visibly alive part-way through the phase rather than only
   # at its end. beat runs in this process; the tick is called directly, never in
   # a command substitution, so the beacon is still only ever touched here.
-  FM_PENDING_REPLY_TICK_BEAT=beat fm_pending_reply_tick "$STATE" || true
+  FM_PENDING_REPLY_TICK_BEAT=beat \
+    FM_PENDING_REPLY_TICK_TIMEOUT="$WATCHER_EXTERNAL_TIMEOUT" \
+    fm_pending_reply_tick "$STATE" || true
   beat
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
@@ -1986,7 +1995,8 @@ EOF
     # harness renders its busy indicator) so busy-looking strings in displayed
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if FM_BUSY_NATIVE_TIMEOUT="$WATCHER_EXTERNAL_TIMEOUT" \
+      window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
