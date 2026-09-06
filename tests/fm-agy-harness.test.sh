@@ -819,6 +819,23 @@ test_hook_install_creates_its_directories_tight() {
   pass "fm-agy-turnend-hook.sh: creates its directories 0755 under a permissive umask"
 }
 
+# A byte-identical hook script left loose by a dotfiles sync under umask 002 must
+# still be narrowed on reinstall: remove refuses a hook with mode & 0o077, so an
+# install that accepts it as-is leaves group-writable code agy runs every Stop.
+test_hook_install_renarrows_an_existing_loose_hook_script() {
+  local rec out mode hook
+  rec=$(make_case hook-relax)
+  read_case "$rec"
+  run_hook_install "$AGY_HOME" >/dev/null || fail "first install failed"
+  hook=$(hook_script "$AGY_HOME")
+  chmod 664 "$hook"
+  out=$(run_hook_install "$AGY_HOME")
+  expect_code 0 $? "a reinstall over a loose but byte-identical hook must succeed: $out"
+  mode=$(stat -c %a "$hook" 2>/dev/null || stat -f %Lp "$hook")
+  [ "$mode" = 700 ] || fail "the reinstall left the hook script at mode $mode, not 700"
+  pass "fm-agy-turnend-hook.sh: reinstall narrows a loose byte-identical hook to 0700"
+}
+
 test_hook_install_preserves_operator_hooks_and_remove_restores_them() {
   local rec out config
   rec=$(make_case hook-install)
@@ -1393,6 +1410,7 @@ test_scope_refusal_stays_fail_closed_without_node
 test_concurrent_store_rewrite_is_refused_rather_than_clobbered
 test_hook_install_refuses_a_directory_reached_through_a_loose_ancestor
 test_hook_install_creates_its_directories_tight
+test_hook_install_renarrows_an_existing_loose_hook_script
 test_hook_install_preserves_operator_hooks_and_remove_restores_them
 test_hook_signals_only_a_fully_idle_turn
 test_hook_ignores_an_unregistered_token

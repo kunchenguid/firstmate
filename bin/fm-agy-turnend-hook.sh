@@ -246,6 +246,8 @@ try {
     if (hookInfo !== null) regularNotSymlink(HOOK, "Firstmate hook script");
     if (hookInfo === null || fs.readFileSync(HOOK, "utf8") !== HOOK_BYTES) {
       atomicWrite(HOOK, HOOK_BYTES, 0o700);
+    } else {
+      fs.chmodSync(HOOK, 0o700);
     }
     root[KEY] = firstmateHook();
     atomicWrite(CONFIG, serialize(root), 0o600);
