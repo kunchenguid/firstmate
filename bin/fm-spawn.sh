@@ -69,8 +69,10 @@
 #   or ranks a provider.
 #   Nothing else in this home's environment changes, and a spawn without the
 #   flag behaves exactly as it did before the flag existed.
-#   bin/fm-control.sh relaunch carries the recorded value forward
-#   for a replacement on the same harness.
+#   A --relaunch carries the recorded value forward whenever the replacement
+#   resolves to the codex harness, including through the raw-launch escape hatch
+#   (`--harness 'codex --search'`), and revalidates it; bin/fm-control.sh
+#   relaunch does the same on its own pre-stop side.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -1345,11 +1347,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
-  if [ "$CODEX_HOME_SET" -eq 0 ] \
-    && [ "$ARG3" = codex ] \
-    && [ "$RELAUNCH_PRIOR_HARNESS" = codex ]; then
-    CODEX_HOME_ARG=$RELAUNCH_PRIOR_CODEX_HOME
-  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
@@ -1665,6 +1662,22 @@ fi
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
   echo "error: rovo is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
+fi
+
+# A relaunch stays on the ACCOUNT its task was dispatched against. The question
+# this answers is "does this replacement run the codex CLI", which only the
+# RESOLVED harness knows: `--harness 'codex --search'` is the raw-launch escape
+# hatch and still resolves to codex, so deciding on the pre-resolution token
+# would drop the account and hand the replacement whatever ambient ~/.codex the
+# environment resolves - the silent wrong-account failure this whole feature
+# exists to prevent. A carried value then falls through the same validation
+# below as an explicitly passed one, so a home that has since been removed or
+# logged out is a loud refusal rather than a fall back.
+if [ "$RELAUNCH" -eq 1 ] \
+  && [ "$CODEX_HOME_SET" -eq 0 ] \
+  && [ "$HARNESS" = codex ] \
+  && [ "$RELAUNCH_PRIOR_HARNESS" = codex ]; then
+  CODEX_HOME_ARG=$RELAUNCH_PRIOR_CODEX_HOME
 fi
 
 # A named Codex home is only meaningful to the codex CLI, and an unusable one

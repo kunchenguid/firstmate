@@ -1035,6 +1035,56 @@ test_spawn_relaunch_keeps_the_recorded_codex_home() {
   pass "fm-spawn --relaunch: a Codex task keeps its recorded account home"
 }
 
+# `--harness 'codex --search'` is the raw-launch escape hatch, and its resolved
+# harness is still codex, so the replacement runs the codex CLI. Deciding the
+# account carry-forward on the pre-resolution token dropped it here and launched
+# the replacement against whatever ambient ~/.codex the environment resolves -
+# a DIFFERENT account, with no refusal and no diagnostic.
+test_spawn_relaunch_keeps_the_codex_home_through_a_raw_command() {
+  local dir home out
+  dir=$(new_case spawnhomeraw rl21c)
+  add_ship_task "$dir" rl21c codex
+  home="$dir/codex-personal"
+  mkdir -p "$home"
+  : > "$home/auth.json"
+  printf 'codex_home=%s\n' "$home" >> "$dir/home/state/rl21c.meta"
+  printf 'zsh' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+
+  out=$(run_spawn "$dir" rl21c --relaunch --harness 'codex --search')
+  assert_contains "$out" "spawned rl21c harness=codex" \
+    "a raw codex launch command should still resolve to the codex harness"
+  [ "$(meta_field "$dir" rl21c codex_home)" = "$home" ] \
+    || fail "a raw-command relaunch dropped the recorded Codex home from metadata"
+  assert_contains "$(cat "$dir/fake/literal")" "CODEX_HOME='$home' env -u CURSOR_AGENT" \
+    "a raw-command relaunch must launch against the recorded account, not ambient ~/.codex"
+  assert_contains "$(cat "$dir/fake/literal")" "codex --search" \
+    "carrying the account forward must not alter the raw launch command"
+  pass "fm-spawn --relaunch: a raw codex launch command keeps the recorded account home"
+}
+
+# Carrying the account forward may never become a way to smuggle an unusable one
+# past validation: a home that was logged out since the task was dispatched is a
+# refusal on the raw-command path exactly as it is on the canonical one.
+test_spawn_relaunch_refuses_a_logged_out_carried_codex_home() {
+  local dir home out rc
+  dir=$(new_case spawnhomegone rl21d)
+  add_ship_task "$dir" rl21d codex
+  home="$dir/codex-personal"
+  mkdir -p "$home"
+  printf 'codex_home=%s\n' "$home" >> "$dir/home/state/rl21d.meta"
+  printf 'zsh' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+
+  out=$(run_spawn "$dir" rl21d --relaunch --harness 'codex --search'); rc=$?
+  expect_code 1 "$rc" "a carried Codex home with no auth.json must refuse"$'\n'"$out"
+  assert_contains "$out" "--codex-home has no auth.json: $home" \
+    "the refusal should name the account that is no longer logged in"
+  assert_not_contains "$(cat "$dir/fake/literal")" "codex --search" \
+    "a refused relaunch must not launch a replacement at all"
+  pass "fm-spawn --relaunch: a carried Codex home is revalidated on the raw-command path"
+}
+
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
 # from a raw command records that command's basename rather than the exact
 # adapter name. Retirement must resolve the same way, or a task recorded as
@@ -1708,6 +1758,8 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_spawn_relaunch_keeps_the_recorded_codex_home
+test_spawn_relaunch_keeps_the_codex_home_through_a_raw_command
+test_spawn_relaunch_refuses_a_logged_out_carried_codex_home
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
