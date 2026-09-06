@@ -885,10 +885,19 @@ const cases = [
   ["ls", { path: "." }, { content: [{ type: "text", text: "sample.txt" }], details: {}, isError: false }],
 ];
 const renderUi = { requestRender() {} };
+// Match Pi's stock session registry and interactive lookup. Newer Pi components
+// leave built-in lookup to their caller; undefined now selects generic fallback.
+// Use complete definitions so self-framed tools such as edit keep renderShell.
+const { createAllToolDefinitions } = await import(
+  pathToFileURL(`${packageRoot}/dist/core/tools/index.js`).href,
+);
+const stockTools = createAllToolDefinitions(process.cwd());
+const stockMode = { session: { getToolDefinition: (name) => stockTools[name] } };
 const rows = [];
 for (const [name, args, result] of cases) {
   const wrapped = tools.find((tool) => tool.name === name);
-  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, undefined, renderUi, process.cwd());
+  const stock = InteractiveMode.prototype.getRegisteredToolDefinition.call(stockMode, name);
+  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, stock, renderUi, process.cwd());
   const actual = new ToolExecutionComponent(name, `wrapped-${name}`, args, { showImages: false }, wrapped, renderUi, process.cwd());
   for (const row of [baseline, actual]) {
     row.markExecutionStarted();
@@ -3157,6 +3166,10 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 export default function (pi: ExtensionAPI): void {
+  // Pin the native indicator's configurable label: Pi 0.85 dropped its default
+  // ellipsis and moved it into the editor border. These checks own visibility,
+  // including Calm-off restoration, rather than Pi's choice of default wording.
+  pi.on("session_start", (_event, ctx) => ctx.ui.setWorkingMessage("Working..."));
   pi.registerProvider("calm-e2e", {
     baseUrl: "http://127.0.0.1/unused",
     apiKey: "test-only",
