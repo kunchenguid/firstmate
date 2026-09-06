@@ -252,7 +252,6 @@ fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
   # one of which would eventually be missed, and a stale record is precisely what
   # would authorize deleting a file this library did not write. The retire phase
   # must NOT drop it here: that phase exists to read this evidence.
-  [ "$phase" != seed ] || fm_env_local_drop_seed_record "$worktree"
   # Gates both halves of the contract, in both phases, from one place.
   if fm_env_local_is_tracked "$worktree" "$announce"; then
     return 0
