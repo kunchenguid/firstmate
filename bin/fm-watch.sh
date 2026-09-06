@@ -1913,9 +1913,12 @@ reconcile_requests_detached() {
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
-if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-pipeline.sh" arm >/dev/null; then
-  echo "watcher: pipeline shadow check could not be registered" >&2
-  exit 1
+# The shadow pipeline probe is optional: supervision must survive its refusal
+# (e.g. a collision with a foreign check, or an operator disarm marker). The
+# owner (fm-pipeline.sh) decides the marker policy; the watcher only relays
+# its stderr and moves on.
+if ! PIPELINE_ARM_STDERR=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-pipeline.sh" arm 2>&1 1>/dev/null); then
+  echo "watcher: pipeline shadow check not registered ($PIPELINE_ARM_STDERR); supervision continues" >&2
 fi
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true

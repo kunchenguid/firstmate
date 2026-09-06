@@ -864,9 +864,31 @@ fm_lock_try_acquire() {
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
+  FM_LOCK_FAILURE=
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  fi
+
+  # A creation failure with NO lock present has nothing to steal: recursing
+  # into "$lockdir.steal" would hit the same failure and recurse again
+  # without bound (".steal.steal..." until killed), turning one failure
+  # into a hang instead of a prompt refusal. This covers two distinct
+  # causes a caller cannot tell apart from FM_LOCK_FAILURE alone: owner-dir
+  # preparation or the symlink itself failing (an allocation or filesystem
+  # error), OR fm_lock_claim rejecting this attempt outright because a
+  # SEPARATE process's stale-lock reclaim is in flight (between its
+  # fm_lock_remove_path and its own re-create below) - transient, and
+  # expected to clear on retry, unlike the first cause. Only a PRESENT
+  # lock or steal mutex enters the recovery path below; when the primary is
+  # absent but the steal mutex remains, that path can reclaim a crashed
+  # reclaimer rather than misclassifying it as an allocation failure.
+  steal="$lockdir.steal"
+  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    && [ ! -e "$steal" ] && [ ! -L "$steal" ]; then
+    # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
+    FM_LOCK_FAILURE="owner-create"
+    return 1
   fi
 
   # Compare against ${BASHPID:-$$} inline, never via a command substitution:
@@ -897,7 +919,6 @@ fm_lock_try_acquire() {
     return 1
   fi
 
-  steal="$lockdir.steal"
   if ! fm_lock_try_acquire "$steal"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=

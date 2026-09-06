@@ -9,8 +9,13 @@
 #   fm-pipeline.sh board-json
 #   fm-pipeline.sh steps <kind>
 #   fm-pipeline.sh probe [--task <id>]
-#   fm-pipeline.sh arm
+#   fm-pipeline.sh arm [--force]
 #   fm-pipeline.sh disarm
+#
+# disarm writes state/pipeline-probe.disabled. arm refuses while a valid
+# marker is present, unless --force clears it first; an absent marker never
+# blocks arm, and an invalid one (symlink, directory, wrong mode) refuses the
+# same as a valid one but --force never touches it.
 #
 # FM_HOME selects the operational home and FM_STATE_OVERRIDE selects its state
 # directory for tests; neither changes fm-crew-state.sh's authority over state.
@@ -50,6 +55,8 @@ PIPELINE_META_IDENTITY_READY=0
 PIPELINE_META_PR_OK=0
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
+CHECK_DISABLED="$STATE/$CHECK_ID.disabled"
+PIPELINE_ARM_LOCK="$STATE/$CHECK_ID.lock"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 
 die() {
@@ -151,6 +158,8 @@ pipeline_trust_backup() {
 PIPELINE_ARM_BACKUP=
 PIPELINE_ARM_TRUST_BACKUP=
 PIPELINE_ARM_TRUST_WROTE=0
+PIPELINE_DISABLED_MARKER_STATE=absent
+PIPELINE_DISABLED_MARKER_WHAT=
 
 pipeline_artifact_present() {
   [ -e "$1" ] || [ -L "$1" ]
@@ -211,10 +220,112 @@ pipeline_arm_interrupted() {
   exit 1
 }
 
-pipeline_arm() {
-  local want home state
+# One cheap serialization boundary for arm and disarm: without it, a marker
+# check (or write) and the transaction it gates (arm's shim+trust write, or
+# disarm's retire) are not atomic with respect to a concurrent disarm/arm, so
+# an interleaving can leave the check armed under a disabled marker. Each
+# process holds this lock for its whole call and the EXIT trap releases it
+# exactly once, since arm/disarm each run once per fm-pipeline.sh invocation.
+# fm_lock_try_acquire (already used by lock_log above) gives this a pid file
+# and stale-owner reclaim for free: a plain mkdir here would instead leave a
+# process killed between acquiring and its EXIT trap holding the lock
+# forever, after which every future arm and disarm refuses with a "retry"
+# that can never succeed.
+pipeline_arm_lock_release() {
+  fm_lock_release "$PIPELINE_ARM_LOCK" 2>/dev/null || true
+}
+
+pipeline_arm_lock_acquire() {
+  if fm_lock_try_acquire "$PIPELINE_ARM_LOCK"; then
+    trap pipeline_arm_lock_release EXIT
+    return 0
+  fi
+  # A creation failure (no lock present) is not contention: naming it as
+  # "another arm or disarm holds" the lock would be false. It also is not
+  # necessarily an allocation/filesystem error: fm_lock_claim rejects a
+  # fresh claim outright while a SEPARATE process's stale-lock reclaim is
+  # between removing the old lock and re-creating it, which looks
+  # identical (no lock present, creation failed) but clears on retry.
+  if [ "${FM_LOCK_FAILURE:-}" = owner-create ]; then
+    die "could not create state/$CHECK_ID.lock (owner directory): no lock present after the attempt (allocation or filesystem error, or a stale-lock reclaim in flight); retry, and inspect the state directory if it repeats"
+  fi
+  if [ -n "$FM_LOCK_HELD_PID" ]; then
+    die "another arm or disarm holds state/$CHECK_ID.lock (pid $FM_LOCK_HELD_PID); retry"
+  fi
+  die "state/$CHECK_ID.lock is held or being reclaimed (holder unknown); retry"
+}
+
+# Classifies state/pipeline-probe.disabled into PIPELINE_DISABLED_MARKER_STATE:
+# absent (arm proceeds), valid (a private regular file: arm refuses, --force
+# clears it), or invalid (symlink, directory, or wrong mode/device/link count:
+# arm refuses the same as valid, but --force must never touch it, since a
+# foreign or damaged policy file is the same defect class as a foreign shim).
+pipeline_disabled_marker_check() {
+  local device
+  PIPELINE_DISABLED_MARKER_STATE=absent
+  PIPELINE_DISABLED_MARKER_WHAT=
+  if [ -L "$CHECK_DISABLED" ]; then
+    PIPELINE_DISABLED_MARKER_STATE=invalid
+    PIPELINE_DISABLED_MARKER_WHAT=symlink
+    return 0
+  fi
+  [ -e "$CHECK_DISABLED" ] || return 0
+  if [ -d "$CHECK_DISABLED" ]; then
+    PIPELINE_DISABLED_MARKER_STATE=invalid
+    PIPELINE_DISABLED_MARKER_WHAT=directory
+    return 0
+  fi
+  device=$(fm_pr_file_device "$STATE") || {
+    PIPELINE_DISABLED_MARKER_STATE=invalid
+    PIPELINE_DISABLED_MARKER_WHAT=unreadable
+    return 0
+  }
+  if fm_pr_private_file_valid "$CHECK_DISABLED" 600 "$device"; then
+    PIPELINE_DISABLED_MARKER_STATE=valid
+  else
+    PIPELINE_DISABLED_MARKER_STATE=invalid
+    PIPELINE_DISABLED_MARKER_WHAT="not a private regular file"
+  fi
+}
+
+pipeline_disabled_marker_write() {
+  local device tmp
   mkdir -p "$STATE" || return 1
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  device=$(fm_pr_file_device "$STATE") || return 1
+  tmp=$(umask 077; mktemp "$STATE/.fm-pipeline-disabled.XXXXXX" 2>/dev/null) || return 1
+  if ! printf 'disabled\n' > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 600 "$device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! fm_pr_regular_destination_on_device_or_absent "$CHECK_DISABLED" "$device" \
+    || ! mv -f -- "$tmp" "$CHECK_DISABLED"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+pipeline_arm() {
+  local force=${1:-0} want home state
+  mkdir -p "$STATE" || return 1
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  pipeline_arm_lock_acquire
+  pipeline_disabled_marker_check
+  case "$PIPELINE_DISABLED_MARKER_STATE" in
+    valid)
+      if [ "$force" -eq 1 ]; then
+        rm -f -- "$CHECK_DISABLED" || return 1
+        printf 'cleared: state/%s.disabled\n' "$CHECK_ID"
+      else
+        die "pipeline-probe is disabled by state/$CHECK_ID.disabled; run arm --force to clear it"
+      fi
+      ;;
+    invalid)
+      die "state/$CHECK_ID.disabled marker is not a private regular file: $PIPELINE_DISABLED_MARKER_WHAT; inspect and remove or repair it by hand, then arm"
+      ;;
+  esac
   case "$FM_HOME" in
     /*) home=$FM_HOME ;;
     *) home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1 ;;
@@ -262,7 +373,20 @@ pipeline_arm() {
 }
 
 pipeline_disarm() {
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$REGISTER_BIN" retire "$CHECK_ID"
+  local retire_out
+  mkdir -p "$STATE" || return 1
+  pipeline_arm_lock_acquire
+  # The marker is durable disable INTENT (an arm policy), not a receipt that
+  # a running check stopped; write it first so a failed retire never loses
+  # that intent (a retire-first order can retire successfully and then fail
+  # to persist the disable, letting the next startup re-arm). A failed
+  # retire still fails disarm, but names what happened and how to finish it.
+  pipeline_disabled_marker_write || return 1
+  retire_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$REGISTER_BIN" retire "$CHECK_ID" 2>&1) && {
+    printf '%s\n' "$retire_out"
+    return 0
+  }
+  die "disable policy recorded at state/$CHECK_ID.disabled; the registered check was NOT retired ($retire_out); retry disarm, or retire it by hand with fm-check-register.sh retire $CHECK_ID"
 }
 
 pipeline_meta_cache_load() {  # <meta-file> [force]
@@ -1303,7 +1427,15 @@ EOF
     append_event "$1"
     ;;
   arm)
-    pipeline_arm || die 'could not arm pipeline watcher check'
+    force=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --force) force=1; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) die "unknown arm option: $1" ;;
+      esac
+    done
+    pipeline_arm "$force" || die 'could not arm pipeline watcher check'
     ;;
   disarm)
     pipeline_disarm || die 'could not disarm pipeline watcher check'

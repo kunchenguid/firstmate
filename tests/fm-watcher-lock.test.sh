@@ -283,6 +283,130 @@ test_lock_steals_dead_pid_lock() {
   pass "dead-pid stale lock is reclaimed by a single acquirer"
 }
 
+test_lock_create_failure_returns_promptly_without_stealing() {
+  local dir state lockdir fakebin real_mktemp out rc failure held
+  dir=$(make_case lock-create-failure)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  fakebin="$dir/fakebin"
+  real_mktemp=$(command -v mktemp) || fail "no real mktemp on PATH to wrap"
+
+  # A creation failure with no lock present has nothing to steal: before the
+  # fix, fm_lock_try_acquire recursed into "$lockdir.steal", whose creation
+  # hits the same failure, recursing again without bound. Block every
+  # owner-dir mktemp call, at any ".steal" depth, to reproduce that.
+  cat > "$fakebin/mktemp" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *".owner."*) exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+EOF
+  chmod +x "$fakebin/mktemp"
+
+  rc=0
+  # shellcheck disable=SC2016 # Single-quoted: expands in the child bash -c, not here.
+  out=$(PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" timeout 5 bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then r=0; else r=1; fi
+    printf "rc=%s failure=%s held=%s\n" "$r" "${FM_LOCK_FAILURE:-}" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm_lock_try_acquire did not return promptly on a creation failure (rc=$rc)"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "acquisition unexpectedly succeeded despite the forced creation failure: $out" ;;
+  esac
+  failure=${out#*failure=}; failure=${failure%% *}
+  held=${out#*held=}
+  [ "$failure" = owner-create ] || fail "the creation failure was not exposed as owner-create: $out"
+  [ -z "$held" ] || fail "FM_LOCK_HELD_PID should be empty on a creation failure: $out"
+  [ ! -e "$lockdir" ] || fail "a lock directory was created despite the forced failure"
+  [ -z "$(find "$state" -maxdepth 1 -name '.contend.lock.steal*' 2>/dev/null)" ] \
+    || fail "steal artefacts were left behind after a creation failure"
+  pass "a lock creation failure with no existing lock returns at once, never steals"
+}
+
+test_lock_reclaims_crashed_steal_without_primary() {
+  local dir state lockdir owner_file owner dead out rc=0 pid
+  dir=$(make_case lock-crashed-steal)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  owner_file="$dir/steal-owner"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2.steal" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+  ' _ "$LIB" "$lockdir" "$owner_file" &
+  owner=$!
+  wait "$owner" || fail "crashed steal owner fixture failed"
+  dead=$(cat "$owner_file" 2>/dev/null || true)
+  [ -n "$dead" ] || fail "crashed steal owner did not record its pid"
+  if kill -0 "$dead" 2>/dev/null; then
+    fail "crashed steal owner fixture is still live"
+  fi
+
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then
+      printf "acquired=1 pid=%s failure=%s\n" "$(cat "$2/pid" 2>/dev/null || true)" "${FM_LOCK_FAILURE:-}"
+      fm_lock_release "$2"
+    else
+      printf "acquired=0 pid=%s failure=%s\n" "$(cat "$2/pid" 2>/dev/null || true)" "${FM_LOCK_FAILURE:-}"
+      exit 1
+    fi
+  ' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "a crashed steal mutex was not reclaimed when the primary was absent: $out"
+  case "$out" in
+    *"acquired=1"*) ;;
+    *) fail "the stale steal path did not acquire the primary lock: $out" ;;
+  esac
+  pid=${out#*pid=}; pid=${pid%% *}
+  [ -n "$pid" ] || fail "the recovered primary lock did not record a pid: $out"
+  [ ! -e "$lockdir" ] || fail "the recovered primary lock was not released"
+  [ ! -e "$lockdir.steal" ] || fail "the crashed steal mutex was not cleared"
+  pass "a crashed steal mutex is reclaimed when the primary lock is absent"
+}
+
+test_lock_live_steal_without_primary_is_contention() {
+  local dir state lockdir holder_file holder out lockpid stealpid
+  dir=$(make_case lock-live-stealer-no-primary)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder_file="$dir/holder"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2.steal" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    sleep 2
+    fm_lock_release "$2.steal"
+  ' _ "$LIB" "$lockdir" "$holder_file" &
+  holder=$!
+  local i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$holder_file" ] || fail "live steal mutex holder did not start"
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s failure=%s held=%s lockpid=%s stealpid=%s\n" "$rc" "${FM_LOCK_FAILURE:-}" "${FM_LOCK_HELD_PID:-}" "$(cat "$2/pid" 2>/dev/null || true)" "$(cat "$2.steal/pid" 2>/dev/null || true)"
+  ' _ "$LIB" "$lockdir")
+  wait "$holder" || fail "live steal mutex holder failed"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "acquisition succeeded while a live steal mutex held the absent primary: $out" ;;
+  esac
+  case "$out" in
+    *"failure=owner-create"*) fail "live steal contention was misclassified as owner creation failure: $out" ;;
+  esac
+  lockpid=${out#*lockpid=}; lockpid=${lockpid%% *}
+  stealpid=${out#*stealpid=}; stealpid=${stealpid%% *}
+  [ -z "$lockpid" ] || fail "primary lock appeared while live steal mutex was held: $out"
+  [ "$stealpid" = "$(cat "$holder_file")" ] || fail "live steal mutex owner changed: $out"
+  pass "a live steal mutex refuses acquisition while the primary lock is absent"
+}
+
 test_lock_stale_steal_single_winner_under_concurrency() {
   local dir state lockdir dead marker i pids pid wins
   dir=$(make_case lock-stale-concurrency)
@@ -1288,6 +1412,9 @@ test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
+test_lock_create_failure_returns_promptly_without_stealing
+test_lock_reclaims_crashed_steal_without_primary
+test_lock_live_steal_without_primary_is_contention
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock

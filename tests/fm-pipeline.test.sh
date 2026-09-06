@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 SCRIPT="${FM_PIPELINE_TEST_SCRIPT:-$ROOT/bin/fm-pipeline.sh}"
 TMP_ROOT=$(fm_test_tmproot fm-pipeline)
@@ -1169,6 +1171,406 @@ test_registered_check_reaches_watcher() {
   pass "fm-watch.sh: registered pipeline check reaches the probe and reconciles"
 }
 
+test_arm_refusal_watcher_reaches_supervision() {
+  local dir state fakebin out pid content
+  dir=$(make_case pipeline-watcher-arm-refused)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf 'paused: [key=vendor-release] waiting on vendor\n' > "$state/task.status"
+  printf 'kind=ship\nstep=working\nspawn_gen=gen-1\n' > "$state/task.meta"
+  prime_status_seen "$state" "$state/task.status" || fail "could not prime the task status marker"
+
+  printf '#!/usr/bin/env bash\necho foreign\n' > "$state/pipeline-probe.check.sh"
+  chmod 0600 "$state/pipeline-probe.check.sh"
+  content=$(cat "$state/pipeline-probe.check.sh")
+
+  # A not-due check cadence, PLUS a freshly touched .last-check, keeps the
+  # unauthenticated-foreign-shim scan (fm-watch.sh:2072,2134-2138) from firing
+  # on its own during this window: age_of treats a missing .last-check as due
+  # immediately regardless of FM_CHECK_INTERVAL (fm-watch.sh:1364-1370), so the
+  # interval alone does not suppress it on a fresh state dir. Without both,
+  # that scan's own wake could exit the watcher before the done: signal does,
+  # and the test would prove nothing about ordinary signal handling.
+  touch "$state/.last-check"
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$state" FM_PIPELINE_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" 2>"$dir/watch.err" &
+  pid=$!
+  local i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$state/.last-watcher-beat" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "watcher did not reach supervision after a refused shadow arm"
+  fi
+  rg -F 'pipeline shadow check not registered' "$dir/watch.err" >/dev/null \
+    || fail "watcher did not log the refused shadow arm"
+  # The watcher-authored prefix alone would still match if the relayed arm
+  # diagnostic it wraps were dropped; assert that stable inner diagnostic too.
+  rg -F 'fm-pipeline.sh: could not arm pipeline watcher check' "$dir/watch.err" >/dev/null \
+    || fail "watcher did not relay the arm command's own diagnostic"
+  [ "$(cat "$state/pipeline-probe.check.sh")" = "$content" ] \
+    || fail "the foreign shim was overwritten"
+  [ ! -e "$state/pipeline-probe.check-trust" ] || fail "a trust file appeared despite the refused arm"
+  printf 'done: finished\n' >> "$state/task.status"
+  wait_for_exit "$pid" 40 || fail "watcher did not exit after the integration signal"
+  rg -F "signal: $state/task.status" "$out" >/dev/null \
+    || fail "the watcher did not exit on the ordinary status-signal wake reason"
+  pass "fm-watch.sh: a refused shadow arm is a logged refusal that reaches supervision"
+}
+
+test_disarm_marker_persists_and_force_clears() {
+  local dir state fakebin out pid
+  dir=$(make_case pipeline-watcher-disarm-persists)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf 'paused: [key=vendor-release] waiting on vendor\n' > "$state/task.status"
+  printf 'kind=ship\nstep=working\nspawn_gen=gen-1\n' > "$state/task.meta"
+  prime_status_seen "$state" "$state/task.status" || fail "could not prime the task status marker"
+
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$SCRIPT" arm >/dev/null \
+    || fail "could not arm the pipeline probe before disarming"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$SCRIPT" disarm >/dev/null \
+    || fail "could not disarm the pipeline probe"
+  [ -f "$state/pipeline-probe.disabled" ] || fail "disarm did not write the disabled marker"
+  [ "$(fm_pr_file_mode "$state/pipeline-probe.disabled")" = 600 ] \
+    || fail "the disabled marker is not mode 0600"
+  [ ! -e "$state/pipeline-probe.check.sh" ] || fail "disarm did not retire the check shim"
+  [ ! -e "$state/pipeline-probe.check-trust" ] || fail "disarm did not retire the trust artifact"
+
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$state" FM_PIPELINE_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" 2>"$dir/watch.err" &
+  pid=$!
+  local i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$state/.last-watcher-beat" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "watcher did not reach supervision with the pipeline probe disarmed"
+  fi
+  [ ! -e "$state/pipeline-probe.check.sh" ] || fail "watcher startup recreated the shim despite disarm"
+  [ ! -e "$state/pipeline-probe.check-trust" ] \
+    || fail "watcher startup recreated the trust artifact despite disarm"
+  [ -f "$state/pipeline-probe.disabled" ] || fail "the disabled marker did not persist across watcher start"
+  printf 'done: finished\n' >> "$state/task.status"
+  wait_for_exit "$pid" 40 || fail "watcher did not exit after the integration signal"
+
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$SCRIPT" arm --force >/dev/null \
+    || fail "arm --force did not clear the disabled marker"
+  [ ! -e "$state/pipeline-probe.disabled" ] || fail "arm --force did not remove the disabled marker"
+  [ -f "$state/pipeline-probe.check.sh" ] || fail "arm --force did not recreate the check shim"
+  [ -f "$state/pipeline-probe.check-trust" ] || fail "arm --force did not recreate the trust artifact"
+  pass "fm-pipeline.sh: disarm persists across the next watcher start and arm --force clears it"
+}
+
+test_invalid_marker_refuses_and_preserves() {
+  local dir state fakebin out pid rc output i
+
+  dir=$(make_case pipeline-watcher-invalid-marker-symlink)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf 'paused: [key=vendor-release] waiting on vendor\n' > "$state/task.status"
+  printf 'kind=ship\nstep=working\nspawn_gen=gen-1\n' > "$state/task.meta"
+  prime_status_seen "$state" "$state/task.status" || fail "could not prime the task status marker"
+  ln -s /dev/null "$state/pipeline-probe.disabled"
+
+  rc=0
+  output=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$SCRIPT" arm 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "arm accepted a symlinked disabled marker"
+  printf '%s\n' "$output" | rg -F 'state/pipeline-probe.disabled' >/dev/null \
+    || fail "arm's refusal did not name the marker path for a symlink marker"
+  [ -L "$state/pipeline-probe.disabled" ] || fail "arm deleted the invalid (symlink) marker"
+  [ ! -e "$state/pipeline-probe.check.sh" ] || fail "arm armed the shim despite a symlink marker"
+  [ ! -e "$state/pipeline-probe.check-trust" ] || fail "arm armed the trust artifact despite a symlink marker"
+
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$state" FM_PIPELINE_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" 2>"$dir/watch.err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$state/.last-watcher-beat" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "watcher did not reach supervision with a symlink disabled marker"
+  fi
+  rg -F 'pipeline shadow check not registered' "$dir/watch.err" >/dev/null \
+    || fail "watcher did not log the refused shadow arm for a symlink marker"
+  [ -L "$state/pipeline-probe.disabled" ] || fail "the watcher deleted the invalid (symlink) marker"
+  [ ! -e "$state/pipeline-probe.check.sh" ] \
+    || fail "watcher startup armed the shim despite a symlink marker"
+  printf 'done: finished\n' >> "$state/task.status"
+  wait_for_exit "$pid" 40 \
+    || fail "watcher did not exit after the integration signal with a symlink marker"
+
+  dir=$(make_case pipeline-watcher-invalid-marker-dir)
+  state="$dir/state"
+  mkdir -p "$state/pipeline-probe.disabled"
+  rc=0
+  output=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$SCRIPT" arm 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "arm accepted a directory disabled marker"
+  printf '%s\n' "$output" | rg -F 'state/pipeline-probe.disabled' >/dev/null \
+    || fail "arm's refusal did not name the marker path for a directory marker"
+  [ -d "$state/pipeline-probe.disabled" ] || fail "arm deleted the invalid (directory) marker"
+  [ ! -e "$state/pipeline-probe.check.sh" ] || fail "arm armed the shim despite a directory marker"
+  [ ! -e "$state/pipeline-probe.check-trust" ] || fail "arm armed the trust artifact despite a directory marker"
+  pass "fm-pipeline.sh: an invalid disabled marker refuses arm and is preserved"
+}
+
+test_disarm_records_intent_when_retire_fails() {
+  local root rc=0 output
+  root=$(new_state disarm-retire-failure)
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" arm >/dev/null \
+    || fail "could not arm before forcing a retire failure"
+  rm -f "$root/state/pipeline-probe.check-trust"
+  mkdir -p "$root/state/pipeline-probe.check-trust"
+
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" disarm 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "disarm succeeded despite a forced retire failure"
+  [ -f "$root/state/pipeline-probe.disabled" ] \
+    || fail "disarm did not record the disable intent although the marker write should still succeed"
+  [ "$(fm_pr_file_mode "$root/state/pipeline-probe.disabled")" = 600 ] \
+    || fail "the disabled marker is not mode 0600"
+  [ -f "$root/state/pipeline-probe.check.sh" ] \
+    || fail "the check shim was removed despite a failed retire"
+  [ -d "$root/state/pipeline-probe.check-trust" ] \
+    || fail "the forced-failure trust directory was removed despite a failed retire"
+  printf '%s\n' "$output" | rg -F 'disable policy recorded at state/pipeline-probe.disabled' >/dev/null \
+    || fail "the refusal did not confirm the recorded disable intent"
+  printf '%s\n' "$output" | rg -F 'the registered check was NOT retired' >/dev/null \
+    || fail "the refusal did not name the unretired check"
+  printf '%s\n' "$output" | rg -F 'fm-check-register.sh retire pipeline-probe' >/dev/null \
+    || fail "the refusal did not name the hand-repair exit"
+  pass "fm-pipeline.sh: disarm records the disable intent and names the repair when retire fails"
+}
+
+test_marker_policy_public_boundary() {
+  local root rc=0 output
+  root=$(new_state marker-policy)
+
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" arm >/dev/null \
+    || fail "could not arm before testing the valid-marker refusal"
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" disarm >/dev/null \
+    || fail "could not disarm before testing the valid-marker refusal"
+
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" arm 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "arm accepted a valid disabled marker"
+  printf '%s\n' "$output" | rg -F 'run arm --force to clear it' >/dev/null \
+    || fail "the valid-marker refusal did not name arm --force"
+
+  chmod 0644 "$root/state/pipeline-probe.disabled"
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" arm 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "arm accepted a mode-0644 disabled marker"
+  printf '%s\n' "$output" | rg -F 'not a private regular file' >/dev/null \
+    || fail "a mode-0644 marker was not treated as invalid"
+  [ -f "$root/state/pipeline-probe.disabled" ] || fail "arm deleted a mode-0644 marker"
+
+  rm -f "$root/state/pipeline-probe.disabled"
+  ln -s /dev/null "$root/state/pipeline-probe.disabled"
+  rc=0
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" arm --force >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "arm --force accepted an invalid (symlink) marker"
+  [ -L "$root/state/pipeline-probe.disabled" ] || fail "arm --force deleted the invalid (symlink) marker"
+  pass "fm-pipeline.sh: the disabled-marker policy's valid/0644/force-on-invalid rows hold at the public boundary"
+}
+
+test_arm_disarm_serialize_against_concurrent_contention() {
+  local root rc=0 output
+  root=$(new_state arm-disarm-lock)
+
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" arm >/dev/null \
+    || fail "could not arm before testing the contention lock"
+
+  # Simulates a concurrent arm or disarm mid-transaction: the marker check (or
+  # write) and the transaction it gates are not atomic on their own, so an
+  # interleaving here could otherwise arm the check under a disabled marker.
+  mkdir "$root/state/pipeline-probe.lock" \
+    || fail "could not simulate a concurrent arm/disarm holding the lock"
+
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" disarm 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "disarm proceeded while another arm/disarm held the lock"
+  printf '%s\n' "$output" | rg -F 'state/pipeline-probe.lock is held or being reclaimed' >/dev/null \
+    || fail "the contention refusal did not name the lock"
+  [ ! -e "$root/state/pipeline-probe.disabled" ] \
+    || fail "disarm wrote the marker despite the contention refusal"
+  [ -f "$root/state/pipeline-probe.check.sh" ] \
+    || fail "the check shim was retired despite the contention refusal"
+  [ -f "$root/state/pipeline-probe.check-trust" ] \
+    || fail "the trust artifact was retired despite the contention refusal"
+
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" arm --force 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "arm proceeded while another arm/disarm held the lock"
+  printf '%s\n' "$output" | rg -F 'state/pipeline-probe.lock is held or being reclaimed' >/dev/null \
+    || fail "the contention refusal did not name the lock for arm"
+
+  rmdir "$root/state/pipeline-probe.lock" \
+    || fail "could not clear the simulated lock"
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" disarm >/dev/null \
+    || fail "disarm did not succeed once the lock cleared"
+  [ -f "$root/state/pipeline-probe.disabled" ] \
+    || fail "disarm did not record the disable intent once the lock cleared"
+  pass "fm-pipeline.sh: arm and disarm refuse a named contention instead of interleaving"
+}
+
+test_arm_reports_unknown_holder_for_live_steal_reclaim() {
+  local root holder_file holder output rc=0
+  root=$(new_state arm-live-steal-no-primary)
+  holder_file="$root/holder"
+  FM_STATE_OVERRIDE="$root/state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2/pipeline-probe.lock.steal" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    sleep 2
+    fm_lock_release "$2/pipeline-probe.lock.steal"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$root/state" "$holder_file" &
+  holder=$!
+  local i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$holder_file" ] || fail "live steal mutex holder did not start"
+
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" arm 2>&1) || rc=$?
+  wait "$holder" || fail "live steal mutex holder failed"
+  [ "$rc" -ne 0 ] || fail "arm proceeded while a live steal mutex held the absent primary"
+  assert_contains "$output" 'state/pipeline-probe.lock is held or being reclaimed (holder unknown); retry' \
+    "arm did not name an unknown holder while the lock was being reclaimed"
+  assert_not_contains "$output" 'could not create state/pipeline-probe.lock' \
+    "arm misclassified a live steal mutex as owner creation failure"
+  [ ! -e "$root/state/pipeline-probe.check.sh" ] \
+    || fail "arm wrote the check shim while the steal mutex was live"
+  pass "fm-pipeline.sh: arm names a live steal mutex with an unknown holder"
+}
+
+test_arm_reclaims_a_dead_pid_lock() {
+  local root rc=0 dead
+  root=$(new_state arm-lock-reclaim)
+  dead=$(dead_pid)
+
+  mkdir "$root/state/pipeline-probe.lock" \
+    || fail "could not simulate a stale lock"
+  printf '%s\n' "$dead" > "$root/state/pipeline-probe.lock/pid"
+
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" arm >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "arm refused a stale lock left behind by a dead pid"
+  [ -f "$root/state/pipeline-probe.check.sh" ] \
+    || fail "arm did not complete after reclaiming a stale lock"
+  [ "$(cat "$root/state/pipeline-probe.lock/pid" 2>/dev/null)" != "$dead" ] \
+    || fail "the stale lock's dead pid was not replaced"
+  pass "fm-pipeline.sh: arm reclaims a lock left behind by a dead pid"
+}
+
+test_arm_takes_lock_before_marker_check() {
+  local root fakebin real_uname seen rc=0
+
+  # Proves ORDER, not just that both verbs consult the lock: a uname stub
+  # invoked from inside the marker check (fm_pr_file_device, reached only
+  # once a marker exists to classify) records whether the transaction lock
+  # is already present at that moment. If the check ever moved above the
+  # lock acquisition, this would observe the lock absent and fail.
+  root=$(new_state arm-lock-ordering)
+  fakebin="$root/fakebin"
+  mkdir -p "$fakebin"
+  real_uname=$(command -v uname) || fail "no real uname on PATH to wrap"
+
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" arm >/dev/null \
+    || fail "could not arm before installing a valid disabled marker"
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" disarm >/dev/null \
+    || fail "could not disarm to install a valid disabled marker"
+
+  cat > "$fakebin/uname" <<EOF
+#!/usr/bin/env bash
+if [ -e "$root/state/pipeline-probe.lock" ]; then
+  printf '1\n' > "$root/lock-seen-by-uname"
+else
+  printf '0\n' > "$root/lock-seen-by-uname"
+fi
+exec "$real_uname" "\$@"
+EOF
+  chmod +x "$fakebin/uname"
+
+  PATH="$fakebin:$PATH" FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" \
+    "$SCRIPT" arm >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "arm accepted a valid disabled marker (test setup is broken)"
+  [ -f "$root/lock-seen-by-uname" ] || fail "uname was never invoked during the marker check"
+  seen=$(cat "$root/lock-seen-by-uname")
+  [ "$seen" = 1 ] || fail "the transaction lock was not held when the marker check ran"
+  pass "fm-pipeline.sh: the transaction lock is held before the marker check runs"
+}
+
+test_arm_lock_create_failure_watcher_reaches_supervision() {
+  local dir state fakebin out pid rc real_mktemp
+  dir=$(make_case pipeline-watcher-lock-create-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  real_mktemp=$(command -v mktemp) || fail "no real mktemp on PATH to wrap"
+  printf 'paused: [key=vendor-release] waiting on vendor\n' > "$state/task.status"
+  printf 'kind=ship\nstep=working\nspawn_gen=gen-1\n' > "$state/task.meta"
+  prime_status_seen "$state" "$state/task.status" || fail "could not prime the task status marker"
+
+  # Forces ONLY the pipeline-probe transaction lock's owner-directory
+  # creation to fail with no lock present, at any ".steal" depth: before
+  # the sixth-head fix this recursed without bound inside
+  # fm_lock_try_acquire, so arm never returned and the watcher never
+  # reached supervision. Scoped to pipeline-probe.lock's own owner paths
+  # so the watcher's unrelated .watch.lock is unaffected.
+  cat > "$fakebin/mktemp" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *"pipeline-probe.lock"*".owner."*) exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+EOF
+  chmod +x "$fakebin/mktemp"
+  touch "$state/.last-check"
+
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$state" FM_PIPELINE_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" 2>"$dir/watch.err" &
+  pid=$!
+  local i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$state/.last-watcher-beat" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "watcher did not reach supervision after a lock creation failure"
+  fi
+  rg -F 'could not create state/pipeline-probe.lock (owner directory)' "$dir/watch.err" >/dev/null \
+    || fail "watcher did not relay the creation-failure refusal by name"
+  rg -F 'another arm or disarm holds' "$dir/watch.err" >/dev/null \
+    && fail "a creation failure was misreported as contention"
+  [ ! -e "$state/pipeline-probe.disabled" ] || fail "the marker was written despite a lock creation failure"
+  [ ! -e "$state/pipeline-probe.check.sh" ] || fail "arm armed the shim despite a lock creation failure"
+  printf 'done: finished\n' >> "$state/task.status"
+  wait_for_exit "$pid" 40 || fail "watcher did not exit after the integration signal"
+  pass "fm-watch.sh: a lock-creation failure is a named refusal that reaches supervision, never a hang"
+}
+
 test_line_format_and_unknown_preservation
 test_would_heal_without_evidence_is_rejected
 test_append_rejects_malformed_fields
@@ -1188,7 +1590,7 @@ test_task_paths_are_confined
 test_arm_preserves_existing_check_on_registration_failure
 test_relative_arm_embeds_absolute_state
 test_registered_check_reaches_watcher
- test_reconcile_ignores_status_testimony
+test_reconcile_ignores_status_testimony
  test_append_is_not_agent_facing
  test_legacy_cache_migrates_without_reinterpretation
  test_board_json_does_not_migrate_legacy_cache
@@ -1212,3 +1614,13 @@ test_registered_check_reaches_watcher
  test_absent_home_reconcile_does_not_recreate_state
  test_board_filters_observations_by_generation
  test_board_projects_unknown_and_kind_inconsistent_tasks
+test_arm_refusal_watcher_reaches_supervision
+test_disarm_marker_persists_and_force_clears
+test_invalid_marker_refuses_and_preserves
+test_disarm_records_intent_when_retire_fails
+test_marker_policy_public_boundary
+test_arm_disarm_serialize_against_concurrent_contention
+test_arm_reports_unknown_holder_for_live_steal_reclaim
+test_arm_reclaims_a_dead_pid_lock
+test_arm_takes_lock_before_marker_check
+test_arm_lock_create_failure_watcher_reaches_supervision
