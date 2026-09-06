@@ -52,6 +52,21 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+make_spawn_fake_msys_lock_bin() {
+  local fakebin=$1
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'MINGW64_NT-10.0'
+SH
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = -s ] || exit 97
+[ "$#" -eq 3 ] || exit 98
+cp -R -- "$2" "$3"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ln"
+}
+
 make_spawn_case() {
   local name=$1 harness=$2 case_dir home proj wt fakebin launchlog id
   shift 2
@@ -789,6 +804,33 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+test_fresh_spawn_recovers_abandoned_msys_task_set_lock() {
+  local rec id out status lock oldpid
+  id=profile-msys-task-set-z20
+  rec=$(make_spawn_case profile-msys-task-set codex "$id")
+  read_case_record "$rec"
+  make_spawn_fake_msys_lock_bin "$FAKEBIN_DIR"
+  lock="$HOME_DIR/state/.task-set.lock"
+
+  PATH="$FAKEBIN_DIR:$PATH" FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 10
+    [ -d "$2" ] && [ ! -L "$2" ] || exit 11
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" || fail "could not stage an abandoned MSYS task-set lock"
+
+  oldpid=$(cat "$lock/pid" 2>/dev/null || true)
+  [ -n "$oldpid" ] || fail "staged MSYS task-set lock recorded no pid"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "fresh spawn should recover an abandoned MSYS task-set lock"
+  assert_contains "$out" "spawned $id harness=codex" "spawn did not complete after recovering the MSYS task-set lock"
+  [ -e "$HOME_DIR/state/$id.meta" ] || fail "spawn did not publish task metadata after recovering the MSYS task-set lock"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "spawn left the recovered MSYS task-set lock behind"
+  [ ! -e "$HOME_DIR/state/.spawn-$id.lock" ] || fail "spawn left its per-task lock behind after MSYS task-set recovery"
+  pass "fresh spawn recovers an abandoned MSYS copied task-set lock and releases it cleanly"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -1123,6 +1165,7 @@ test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
+test_fresh_spawn_recovers_abandoned_msys_task_set_lock
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"
