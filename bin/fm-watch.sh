@@ -64,6 +64,9 @@
 #                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
 #   check: <script>: <out> authenticated check output, always actionable
+#                          GitHub behind/conflict reactivates a done worker.
+#                          Active work defers; unsafe states surface as refusals
+#                          without moving the branch.
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -94,6 +97,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+FM_PR_REFRESH_SEND_BIN="${FM_PR_REFRESH_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}"
 mkdir -p "$STATE"
 
 # The native event fast-path and only its true dependencies have one narrow
@@ -1232,6 +1236,53 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
+  local id=$1 url=$2 condition=$3 head=$4 state_line state mode spawn_gen observation message
+  state_line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || state_line=
+  state=${state_line#state: }
+  state=${state%% *}
+  case "$state" in
+    working)
+      printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=active-work\n' \
+        "$url" "$head" "$condition"
+      return 2
+      ;;
+    done) ;;
+    failed|blocked|paused|needs-decision|unknown|stopped) ;;
+    *) state=unknown ;;
+  esac
+  if [ "$state" != "done" ]; then
+    printf 'branch-refresh-refused pr=%s head=%s condition=%s task-state=%s\n' \
+      "$url" "$head" "$condition" "$state"
+    return 1
+  fi
+
+  mode=$(fm_meta_get "$STATE/$id.meta" mode)
+  case "$mode" in no-mistakes|direct-PR) ;; *)
+    printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=unsupported-mode\n' \
+      "$url" "$head" "$condition"
+    return 1
+  esac
+  spawn_gen=$(fm_meta_get "$STATE/$id.meta" spawn_gen)
+  case "$condition" in
+    behind) observation='is behind its base' ;;
+    conflict) observation='has a merge conflict with its base' ;;
+    *) return 1 ;;
+  esac
+  if [ "$mode" = no-mistakes ]; then
+    message="FIRSTMATE_OP: v1 branch-currency: Your open pull request $url $observation at head $head. Re-run this brief's no-mistakes delivery contract with its exact serialized captain intent. Before any edit or branch movement, inspect no-mistakes axi status and do not act while an active run owns the branch. Let the pipeline's rebase step bring the branch current and re-establish every check on the resulting head. If rebase conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
+  else
+    message="FIRSTMATE_OP: v1 branch-currency: Your open pull request $url $observation at head $head. Refresh it through this brief's direct-PR delivery path. Before any edit or branch movement, confirm no active validation run owns the branch. Fetch and merge the pull request's base without force, run the project checks on the resulting head, push normally, and wait for current-head checks. If the merge conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
+  fi
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_EXPECTED_SPAWN_GEN="$spawn_gen" \
+    "$FM_PR_REFRESH_SEND_BIN" "$id" "$message" >/dev/null 2>&1; then
+    printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=worker-dispatch-failed\n' \
+      "$url" "$head" "$condition"
+    return 1
+  fi
+  printf 'branch-refresh-dispatched pr=%s head=%s condition=%s\n' "$url" "$head" "$condition"
+}
+
 # 0 when any signaled status file carries a captain-relevant event in the bytes
 # appended since this watcher last classified it. The start offset is the
 # classified-position field in that file's .seen-* marker, and fm-classify-lib.sh's
@@ -1718,6 +1769,21 @@ while :; do
             continue
           fi
           wake "$reason"
+        fi
+        if [ "$is_pr_poll" -eq 1 ]; then
+          condition=${out%% *}
+          head=${out#* }
+          case "$condition" in
+            behind|conflict)
+              dispatch_out=$(pr_refresh_dispatch "$id" "$url" "$condition" "$head")
+              dispatch_rc=$?
+              if [ "$dispatch_rc" -eq 2 ]; then
+                triage_log "$dispatch_out"
+                continue
+              fi
+              reason="check: $c: $dispatch_out"
+              ;;
+          esac
         fi
         fm_wake_append check "$c" "$reason" || exit 1
         touch "$STATE/.last-check"

@@ -146,6 +146,15 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 case " $* " in
+  *" state,mergeStateStatus,mergeable,headRefOid "*)
+    [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
+    printf '%s\t%s\t%s\t%s\n' \
+      "${FM_TEST_GH_STATE:-OPEN}" \
+      "${FM_TEST_GH_MERGE_STATE:-CLEAN}" \
+      "${FM_TEST_GH_MERGEABLE:-MERGEABLE}" \
+      "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
@@ -698,6 +707,15 @@ test_static_poll_contract() {
   done
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
+  out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND run_poll "$dir")
+  [ "$out" = 'behind 0123456789abcdef0123456789abcdef01234567' ] \
+    || fail "static poll did not identify an open PR behind its base"
+  out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=DIRTY \
+    FM_TEST_GH_MERGEABLE=CONFLICTING run_poll "$dir")
+  [ "$out" = 'conflict 0123456789abcdef0123456789abcdef01234567' ] \
+    || fail "static poll did not identify an open PR with a base conflict"
+  out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND FM_TEST_GH_HEAD=invalid run_poll "$dir")
+  [ -z "$out" ] || fail "static poll emitted branch currency from an invalid head"
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted after gh failure"
 
@@ -734,6 +752,73 @@ test_static_poll_contract() {
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
   pass "static poll is silent except for one merged line and remains watcher-bounded"
+}
+
+test_branch_currency_dispatch_and_active_refusal() {
+  local dir state rc
+
+  dir=$(make_case branch-currency-active-refusal)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null \
+    || fail "could not arm active-validation branch-currency fixture"
+  add_stop_custom_check "$dir"
+  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: working \302\267 source: run-step \302\267 validating (running)\n'
+SH
+  cat > "$dir/fakebin/fm-refresh-send.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_REFRESH_SEND_LOG"
+SH
+  chmod +x "$dir/fakebin/fm-crew-state.sh" "$dir/fakebin/fm-refresh-send.sh"
+  : > "$dir/refresh-send.log"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/active.out" 2> "$dir/active.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "active-validation refusal watcher failed: $(cat "$dir/active.err")"
+  [ ! -s "$dir/refresh-send.log" ] || fail "branch refresh moved under an active validation run"
+  assert_grep 'branch-refresh-deferred pr=https://github.com/o/r/pull/1 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=active-work' \
+    "$state/.watch-triage.log" "active validation refusal was not recorded"
+
+  dir=$(make_case branch-currency-dispatch)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/2 >/dev/null \
+    || fail "could not arm branch-currency dispatch fixture"
+  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: done \302\267 source: run-step \302\267 checks green: PR ready for review\n'
+SH
+  cat > "$dir/fakebin/fm-refresh-send.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_REFRESH_SEND_LOG"
+SH
+  chmod +x "$dir/fakebin/fm-crew-state.sh" "$dir/fakebin/fm-refresh-send.sh"
+  : > "$dir/refresh-send.log"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=DIRTY FM_TEST_GH_MERGEABLE=CONFLICTING \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/dispatch.out" 2> "$dir/dispatch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "branch-currency dispatch watcher failed: $(cat "$dir/dispatch.err")"
+  assert_grep 'branch-refresh-dispatched pr=https://github.com/o/r/pull/2 head=0123456789abcdef0123456789abcdef01234567 condition=conflict' "$dir/dispatch.out" \
+    "conflicting PR did not surface its named condition"
+  [ "$(wc -l < "$dir/refresh-send.log" | tr -d ' ')" -eq 1 ] \
+    || fail "conflicting PR did not reactivate exactly one owning worker"
+  assert_grep 'do not act while an active run owns the branch' "$dir/refresh-send.log" \
+    "refresh instruction lost the active-run ownership gate"
+  assert_grep 'current-head checks are green' "$dir/refresh-send.log" \
+    "refresh instruction allowed a stale ready report"
+  pass "branch currency reactivates finished work, names conflicts, and refuses active validation"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -2121,6 +2206,7 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_branch_currency_dispatch_and_active_refusal
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
