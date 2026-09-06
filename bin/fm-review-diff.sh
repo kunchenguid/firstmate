@@ -167,9 +167,13 @@ if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # is a review that must not happen at all. ls-remote separates them - 0 the
   # branch is present, 2 the remote is reachable and has no such branch, anything
   # else the remote is unreachable - and its stderr is deliberately left intact
-  # so the unreachable case reports git's own reason.
+  # so the unreachable case reports git's own reason. The pattern is the FULL ref
+  # the fetch below asks for, never the bare name: ls-remote matches a pattern
+  # against the tail of each ref on a path-component boundary, so a bare
+  # `<target>` also matches a remote `mirror/<target>` and would classify an
+  # unpushed base as present.
   LS_REMOTE_STATUS=0
-  git -C "$WT" ls-remote --exit-code --heads origin "$TARGET" >/dev/null || LS_REMOTE_STATUS=$?
+  git -C "$WT" ls-remote --exit-code --heads origin "refs/heads/$TARGET" >/dev/null || LS_REMOTE_STATUS=$?
   case "$LS_REMOTE_STATUS" in
     0)
       # Update the remote-tracking ref itself; a bare single-branch fetch can leave

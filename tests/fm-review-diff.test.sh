@@ -16,8 +16,9 @@
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
 #   (f) base= recorded -> diff against that branch, not the repo default branch
 #   (g) base= recorded but never pushed, remote reachable -> local ref + warning
-#   (h) origin unreachable -> refuse; a base that cannot be confirmed is never guessed
-#   (i) base= recorded and resolving nowhere -> refuse, naming the branch and its source
+#   (h) origin carries mirror/<base> but not <base> -> still absent, not present
+#   (i) origin unreachable -> refuse; a base that cannot be confirmed is never guessed
+#   (j) base= recorded and resolving nowhere -> refuse, naming the branch and its source
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -240,6 +241,40 @@ test_unpushed_recorded_base_uses_the_local_ref() {
   pass "fm-review-diff reviews an unpushed delivery target branch against its local ref"
 }
 
+# "Does origin carry the target?" must ask about the exact ref the fetch will
+# request. ls-remote matches a pattern against the TAIL of each ref on a
+# path-component boundary, so a bare branch name also matches a remote
+# `mirror/<target>` - classifying an unpushed base as present and sending the
+# review down a fetch that cannot succeed.
+test_suffix_colliding_remote_branch_is_not_the_target() {
+  local case_dir out err
+  case_dir=$(make_case suffix-collision)
+
+  git -C "$case_dir/wt" checkout -q -b feat/local-stack
+  printf 'local-stack-only\n' > "$case_dir/wt/stack.txt"
+  git -C "$case_dir/wt" add stack.txt
+  git -C "$case_dir/wt" commit -qm "commit only the unpushed local stack carries"
+  # origin carries mirror/feat/local-stack but never feat/local-stack itself.
+  git -C "$case_dir/wt" push -q origin "feat/local-stack:refs/heads/mirror/feat/local-stack"
+  git -C "$case_dir/wt" checkout -q -B fm/task-x1 feat/local-stack
+  printf 'task-change\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "the task's own change"
+
+  write_task_meta "$case_dir" "mode=local-only" "base=feat/local-stack"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  err=$(cat "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: feat/local-stack' \
+    "suffix-collision: a remote mirror/<base> must not read as origin carrying <base>"
+  assert_contains "$out" '+task-change' \
+    "suffix-collision: the task's own change must be in the diff"
+  assert_contains "$err" 'origin has no feat/local-stack' \
+    "suffix-collision: the classifier must report the exact ref as absent"
+  pass "fm-review-diff does not mistake a remote mirror/<base> for the delivery target branch"
+}
+
 # An unreachable remote is a STOP, not a fallback. It cannot be told apart from a
 # ref-absent remote by `git fetch`'s exit status alone, and guessing wrong means
 # reviewing against a local base that lags origin - which presents commits the
@@ -296,5 +331,6 @@ test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_recorded_base_is_the_review_base
 test_unpushed_recorded_base_uses_the_local_ref
+test_suffix_colliding_remote_branch_is_not_the_target
 test_unreachable_remote_refuses_rather_than_guessing
 test_unresolvable_recorded_base_is_refused
