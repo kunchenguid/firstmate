@@ -526,7 +526,7 @@ A `published` object selects one public release source:
 
 `published` accepts only the fields shown for its source, and requires a package name or `owner/repo`, without a URL, query, or credentials.
 It compares that source with the version from the command that `PATH` resolves, and reports an update only when the published version is numerically newer.
-The installed version is the first dotted number in the command output, so `0.1.49`, `v0.8.2`, and `herdr 0.8.2` work.
+The installed version is the first dotted number in the output of a version command that exits successfully, so `0.1.49`, `v0.8.2`, and `herdr 0.8.2` work.
 The published version must be a dotted numeric version with an optional leading `v`; other formats, including prerelease suffixes, produce a check failure.
 Components are compared numerically, with leading zeroes and missing trailing zero components ignored.
 These queries use `curl` and the existing `jq` parser, without an npm installation or a GitHub login; `curl` is required only for a `published` probe.
