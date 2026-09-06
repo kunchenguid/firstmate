@@ -214,10 +214,10 @@ fm_env_local_retire_unignored_copy() {  # <worktree> <target> <refusing-step>
   echo "warning: removed this seeding's own copy at '$target' because the project no longer ignores .env.local; restore that ignore rule so crew worktrees can carry it again" >&2
 }
 
-# Remove the copy this library seeded, once the caller's own work-preservation
-# checks have already passed on it. It re-asks the authorship question rather than
-# trusting the caller's earlier answer, so a file that changed in between is never
-# deleted on a stale verdict.
+# Remove the copy this library seeded after the caller's work-preservation checks
+# have passed and its task processes have been reaped. It re-asks the authorship
+# question rather than trusting the caller's earlier answer, so a file that changed
+# in between is never deleted on a stale verdict.
 fm_env_local_retire_seeded_copy() {  # <worktree>
   local worktree=$1
   fm_env_local_seeded_copy_intact "$worktree" || return 1
