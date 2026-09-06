@@ -541,6 +541,92 @@ test_acquire_still_succeeds_when_identity_cannot_be_read() {
   pass "session-lock: an unreadable process identity still acquires and holds the home"
 }
 
+# A record naming some OTHER pid is stale data about a process that is not in
+# the lock file, so it neither confirms nor disproves the pid that is. Reachable
+# by rolling the checkout back to a version that writes state/.lock without a
+# record and starting a session there, which leaves the record pointing at the
+# older pid while a genuinely live session holds the lock.
+test_owner_record_for_a_different_pid_is_not_evidence() {
+  local dir fakebin foreign session out status
+  dir="$TMP_ROOT/record-other-pid"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/noproc"
+  start_fixture_process foreign
+  start_fixture_process session
+  write_owner_record_ps "$fakebin" "$foreign" "$session"
+  FM_PROC_ROOT_OVERRIDE="$dir/noproc" PATH="$fakebin:$PATH" \
+    fm_record_session_lock_owner "$dir/state" "$session"
+  printf '%s\n' "$foreign" > "$dir/state/.lock"
+
+  status=0
+  out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  stop_fixture_processes
+
+  expect_code 1 "$status" "a record about another pid was treated as proof about this one: $out"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$foreign" ] \
+    || fail "a live session was evicted on evidence about a different pid: $(cat "$dir/state/.lock")"
+  assert_contains "$out" "ownership record is for a different pid" \
+    "the refusal did not say what the record actually is"
+  assert_contains "$out" "ChatGPT.app" \
+    "the refusal did not name the process an operator has to go find"
+  assert_not_contains "$out" "reclaimed" "an untouched lock was reported as reclaimed"
+  assert_not_contains "$out" "no ownership record" \
+    "the refusal denied a record that does exist"
+  assert_not_contains "$out" "holding this home since" \
+    "another pid's acquisition time was attributed to this process"
+  pass "session-lock: an owner record for a different pid never justifies a takeover"
+}
+
+# The record names this exact pid, but no identity comparison is possible, so
+# nothing disproves the process holding the lock and it keeps the home.
+test_unreadable_recorded_identity_is_not_reclaimable() {
+  local dir fakebin foreign session out status
+  dir="$TMP_ROOT/blind-record"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/noproc"
+  start_fixture_process foreign
+  start_fixture_process session
+  write_owner_record_ps "$fakebin" "$foreign" "$session"
+  FM_TEST_IDENTITY_BLIND="$foreign" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" fm_record_session_lock_owner "$dir/state" "$foreign"
+
+  status=0
+  out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  stop_fixture_processes
+
+  expect_code 1 "$status" "an owner that could not be compared was evicted anyway: $out"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$foreign" ] \
+    || fail "a live owner lost its home to an impossible comparison"
+  assert_not_contains "$out" "reclaimed" "an untouched lock was reported as reclaimed"
+  pass "session-lock: an owner whose recorded identity cannot be compared keeps the home"
+}
+
+# The other side of the invariant: a lock pid that is alive but is NOT a verified
+# harness process is proof of absence, and must still be reclaimed.
+test_live_non_harness_pid_is_still_reclaimed() {
+  local dir fakebin foreign session stale out status
+  dir="$TMP_ROOT/live-non-harness"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/noproc"
+  start_fixture_process foreign
+  start_fixture_process session
+  start_fixture_process stale
+  write_owner_record_ps "$fakebin" "$foreign" "$session"
+  printf '%s\n' "$stale" > "$dir/state/.lock"
+
+  status=0
+  out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  stop_fixture_processes
+
+  expect_code 0 "$status" "a live pid that is not a harness kept the home: $out"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$session" ] \
+    || fail "the lock was not reclaimed from a non-harness pid: $(cat "$dir/state/.lock")"
+  pass "session-lock: a live pid that is not a verified harness is still reclaimed"
+}
+
 test_owner_record_still_refuses_a_genuine_second_session() {
   local dir fakebin foreign session out status
   dir="$TMP_ROOT/genuine-second"
@@ -601,6 +687,9 @@ test_recycled_pid_never_inherits_the_previous_owners_lock() {
 test_legacy_bare_pid_lock_is_held_not_reclaimed
 test_original_holder_repairs_its_own_missing_owner_record
 test_acquire_still_succeeds_when_identity_cannot_be_read
+test_owner_record_for_a_different_pid_is_not_evidence
+test_unreadable_recorded_identity_is_not_reclaimable
+test_live_non_harness_pid_is_still_reclaimed
 test_owner_record_still_refuses_a_genuine_second_session
 test_recycled_pid_never_inherits_the_previous_owners_lock
 
