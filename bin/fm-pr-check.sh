@@ -149,4 +149,12 @@ case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
+OWNER_RC=0
+OWNER_ERR=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-pipeline.sh" reconcile "$ID" 2>&1 >/dev/null) || OWNER_RC=$?
+if [ "$OWNER_RC" -ne 0 ]; then
+  OWNER_ERR=$(printf '%s' "$OWNER_ERR" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+  printf 'warning: pipeline record for %s was not reconciled (rc=%s): %s\n' \
+    "$ID" "$OWNER_RC" "$OWNER_ERR" >&2
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

@@ -838,6 +838,46 @@ EOF
   pass "fm-pipeline.sh: pure record, derivation, header, and scalar units pass"
 }
 
+test_pipeline_lock_timeout_validation() {
+  local root output
+  root=$(new_state lock-timeout-units)
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" FM_PIPELINE_SOURCE_ONLY=1 \
+    bash -c '
+      set -u
+      source "$1"
+      check() {
+        local label=$1 result
+        shift
+        if result=$(pipeline_lock_timeout_validate "$@"); then
+          printf "%s=%s\\n" "$label" "$result"
+        else
+          printf "%s=refused\\n" "$label"
+        fi
+      }
+      check unset
+      check empty ""
+      check one 1
+      check ten 10
+      check zero 0
+      check double-zero 00
+      check plus +1
+      check negative -1
+      check decimal 1.5
+      check alpha abc
+    ' _ "$SCRIPT")
+  assert_contains "$output" 'unset=10' "unset lock timeout did not default to 10"
+  assert_contains "$output" 'empty=refused' "empty lock timeout was accepted"
+  assert_contains "$output" 'one=1' "positive lock timeout was refused"
+  assert_contains "$output" 'ten=10' "ten-second lock timeout was refused"
+  assert_contains "$output" 'zero=refused' "zero lock timeout was accepted"
+  assert_contains "$output" 'double-zero=refused' "double-zero lock timeout was accepted"
+  assert_contains "$output" 'plus=refused' "plus-prefixed lock timeout was accepted"
+  assert_contains "$output" 'negative=refused' "negative lock timeout was accepted"
+  assert_contains "$output" 'decimal=refused' "decimal lock timeout was accepted"
+  assert_contains "$output" 'alpha=refused' "non-numeric lock timeout was accepted"
+  pass "fm-pipeline.sh: lock timeout validation accepts only positive integer seconds"
+}
+
 test_pipeline_restart_recovery() {
   local root fakebin ready hold target writer pgid lock_pid before after event_size event_tmp temp candidate orphan_before orphan_after header revs board output rc=0 i=0
   root=$(new_state restart-recovery)
@@ -1606,6 +1646,7 @@ test_reconcile_ignores_status_testimony
  test_quiet_registered_probe_and_refusal_projection
  test_retire_owner_records
  test_pipeline_pure_function_units
+ test_pipeline_lock_timeout_validation
  test_pipeline_restart_recovery
  test_reconcile_serializes_owner_transaction
  test_reconcile_rechecks_metadata_inside_owner_transaction

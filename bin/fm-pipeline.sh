@@ -610,10 +610,44 @@ valid_event_lines() {
   printf '__fm_pipeline_rejected_rows=%s\n' "$rejected"
 }
 
+pipeline_lock_timeout_validate() {
+  local seconds=${1-10}
+  case "$seconds" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$seconds" -gt 0 ] 2>/dev/null || return 1
+  printf '%s\n' "$seconds"
+}
+
 lock_log() {
-  local lock="$LOG.lock"
+  local lock="$LOG.lock" rc
+  PIPELINE_LOCK_TIMEOUT=${FM_PIPELINE_LOCK_TIMEOUT-10}
+  PIPELINE_LOCK_TIMEOUT=$(pipeline_lock_timeout_validate "$PIPELINE_LOCK_TIMEOUT") || \
+    die "invalid FM_PIPELINE_LOCK_TIMEOUT: ${FM_PIPELINE_LOCK_TIMEOUT-} (positive integer seconds; unset defaults to 10)"
   mkdir -p "$(dirname "$LOG")" || die "cannot create log directory"
-  fm_lock_acquire_wait "$lock" || die "cannot acquire event log lock"
+  rc=0
+  fm_lock_acquire_wait_bounded "$lock" "$PIPELINE_LOCK_TIMEOUT" || rc=$?
+  case "$rc" in
+    0) ;;
+    124)
+      if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+        printf 'fm-pipeline.sh: refused:lock-held lock=%s holder=%s; rerun after the holder releases the lock\n' \
+          "$lock" "$FM_LOCK_HELD_PID" >&2
+      else
+        printf 'fm-pipeline.sh: refused:lock-unavailable lock=%s holder=unknown; rerun after the lock clears\n' \
+          "$lock" >&2
+      fi
+      exit 3
+      ;;
+    *)
+      if [ "${FM_LOCK_FAILURE:-}" = owner-create ]; then
+        printf 'fm-pipeline.sh: refused:lock-unavailable lock=%s holder=unknown; rerun after the lock clears\n' \
+          "$lock" >&2
+        exit 3
+      fi
+      die "cannot acquire event log lock"
+      ;;
+  esac
   PIPELINE_LOCK_DIR=$lock
   trap 'fm_lock_release "$PIPELINE_LOCK_DIR"' EXIT
 }

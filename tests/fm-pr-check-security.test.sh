@@ -22,6 +22,7 @@ REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
+REAL_MKTEMP=$(command -v mktemp)
 # The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
 # deliberately restricted, so a case that needs jq exposes this one rather than
 # depending on the host keeping jq in one of those four directories.
@@ -670,6 +671,232 @@ SH
     [ ! -e "$dir/home/state/$id.meta" ] || fail "legacy task teardown retained metadata"
   done
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
+}
+
+test_pr_registration_reconciles_pipeline() {
+  local dir state output rc=0
+  dir=$(make_case pr-registration-record)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' 'spawn_gen=gen-pr-registration' >> "$state/task-a.meta"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/7 > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "valid PR registration did not complete"
+  assert_grep 'schema=fm-pipeline.v3 task=task-a kind=ship' "$state/task-a.pipeline" \
+    "PR registration did not create the owner record header"
+  assert_grep 'step=pr-registered' "$state/task-a.pipeline" \
+    "PR registration did not reconcile the registered step"
+  assert_grep 'evidence=meta:state/task-a.meta' "$state/task-a.pipeline" \
+    "PR registration record did not name its proving metadata"
+
+  dir=$(make_case pr-registration-refusal)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' 'spawn_gen=gen-pr-registration' >> "$state/task-a.meta"
+  mkdir "$state/task-a.pipeline"
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/7 > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "record refusal must not fail PR registration"
+  assert_contains "$(cat "$dir/stdout")" 'armed: state/task-a.check.sh' \
+    "PR registration did not finish arming after an owner refusal"
+  assert_contains "$(cat "$dir/stderr")" 'warning: pipeline record for task-a was not reconciled (rc=1):' \
+    "PR registration did not warn after an owner refusal"
+  assert_contains "$(cat "$dir/stderr")" 'refused:' \
+    "PR registration warning did not carry the owner refusal"
+  [ -d "$state/task-a.pipeline" ] || fail "record refusal changed the unsafe directory"
+  pass "fm-pr-check.sh: registration reconciles the owner and forwards refusals"
+}
+
+test_pr_registration_bounded_lock_acquisition() {
+  local dir state holder before after start end elapsed output lock_warning rc=0
+  dir=$(make_case pr-registration-lock-held)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' 'spawn_gen=gen-pr-registration' >> "$state/task-a.meta"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pipeline.sh" reconcile task-a \
+    >/dev/null || fail "could not create the pre-lock lifecycle record"
+  before=$(shasum -a 256 "$state/task-a.pipeline")
+  mkdir "$state/pipeline-events.log.lock"
+  sleep 60 &
+  holder=$!
+  printf '%s\n' "$holder" > "$state/pipeline-events.log.lock/pid"
+  start=$(perl -MTime::HiRes=time -e 'printf "%.6f", time')
+  set +e
+  FM_PIPELINE_LOCK_TIMEOUT=1 run_check_entry "$dir" task-a https://github.com/o/r/pull/7 \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  end=$(perl -MTime::HiRes=time -e 'printf "%.6f", time')
+  elapsed=$(awk -v start="$start" -v end="$end" 'BEGIN { printf "%.3f", end - start }')
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 0 "$rc" "a held pipeline lock must not fail PR registration"
+  awk -v elapsed="$elapsed" 'BEGIN { exit !(elapsed < 5) }' \
+    || fail "held pipeline lock exceeded the five-second registration bound: ${elapsed}s"
+  output=$(cat "$dir/stderr")
+  assert_contains "$(cat "$dir/stdout")" 'armed: state/task-a.check.sh' \
+    "held pipeline lock prevented PR registration from finishing"
+  assert_contains "$output" 'warning: pipeline record for task-a was not reconciled (rc=3):' \
+    "held pipeline lock warning lost the owner exit code"
+  lock_warning=$(printf '%s\n' "$output" | rg -F 'warning: pipeline record for task-a was not reconciled (rc=3): fm-pipeline.sh: refused:lock-held' || true)
+  [ -n "$lock_warning" ] || fail "held pipeline lock warning did not name the refusal"
+  assert_contains "$lock_warning" "holder=$holder" \
+    "held pipeline lock warning did not name the live holder on the refusal line"
+  [ "$(shasum -a 256 "$state/task-a.pipeline")" = "$before" ] \
+    || fail "held pipeline lock changed the lifecycle record"
+  [ ! -e "$state/pipeline-events.log.lock.steal" ] \
+    || fail "held pipeline lock left a steal artefact"
+  rm -rf "$state/pipeline-events.log.lock"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pipeline.sh" reconcile task-a \
+    >/dev/null || fail "reconcile did not recover after the holder released the lock"
+  assert_grep 'step=pr-registered' "$state/task-a.pipeline" \
+    "reconcile did not record the registered PR after lock recovery"
+  pass "fm-pr-check.sh: a live event-log holder is bounded and recoverable"
+}
+
+test_pr_registration_allocation_failure_is_bounded() {
+  local dir state before start end elapsed output rc=0
+  dir=$(make_case pr-registration-lock-allocation)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf '%s\n' 'spawn_gen=gen-pr-registration' >> "$state/task-a.meta"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pipeline.sh" reconcile task-a \
+    >/dev/null || fail "could not create the pre-allocation lifecycle record"
+  before=$(shasum -a 256 "$state/task-a.pipeline")
+  cat > "$dir/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *pipeline-events.log.lock.owner.*) exit 1 ;;
+esac
+exec "$REAL_MKTEMP" "\$@"
+SH
+  chmod +x "$dir/fakebin/mktemp"
+  start=$(perl -MTime::HiRes=time -e 'printf "%.6f", time')
+  set +e
+  FM_PIPELINE_LOCK_TIMEOUT=1 run_check_entry "$dir" task-a https://github.com/o/r/pull/7 \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  end=$(perl -MTime::HiRes=time -e 'printf "%.6f", time')
+  elapsed=$(awk -v start="$start" -v end="$end" 'BEGIN { printf "%.3f", end - start }')
+  expect_code 0 "$rc" "an event-log allocation failure must not fail PR registration"
+  awk -v elapsed="$elapsed" 'BEGIN { exit !(elapsed < 5) }' \
+    || fail "event-log allocation failure exceeded the five-second registration bound: ${elapsed}s"
+  output=$(cat "$dir/stderr")
+  assert_contains "$output" 'warning: pipeline record for task-a was not reconciled (rc=3):' \
+    "allocation failure warning lost the owner exit code"
+  assert_contains "$output" 'refused:lock-unavailable' \
+    "allocation failure warning did not name an unavailable lock"
+  assert_contains "$output" 'holder=unknown' \
+    "allocation failure warning invented a lock holder"
+  assert_contains "$(cat "$dir/stdout")" 'armed: state/task-a.check.sh' \
+    "allocation failure prevented PR registration from finishing"
+  [ "$(shasum -a 256 "$state/task-a.pipeline")" = "$before" ] \
+    || fail "event-log allocation failure changed the lifecycle record"
+  [ -z "$(find "$state" -maxdepth 1 -name 'pipeline-events.log.lock*' -print)" ] \
+    || fail "event-log allocation failure left lock artefacts"
+  rm -f "$dir/fakebin/mktemp"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pipeline.sh" reconcile task-a \
+    >/dev/null || fail "reconcile did not recover after event-log allocation failure"
+  assert_grep 'step=pr-registered' "$state/task-a.pipeline" \
+    "reconcile did not record the registered PR after allocation recovery"
+  pass "fm-pr-check.sh: event-log allocation failure is bounded and recoverable"
+}
+
+test_pr_registration_restart_controls() {
+  local dir state target ready hold writer pgid lock_pid before after temp orphan_before orphan_after output rc=0 i=0 candidate
+  dir=$(make_case pr-registration-restart)
+  state="$dir/home/state"
+  target="$state/task-a.pipeline"
+  ready="$dir/mv-ready"
+  hold="$dir/mv-hold"
+  write_task_meta "$dir"
+  printf '%s\n' 'spawn_gen=gen-pr-registration' >> "$state/task-a.meta"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pipeline.sh" reconcile task-a \
+    >/dev/null || fail "could not create the pre-restart lifecycle record"
+  printf '%s\n' 'pr=https://github.com/o/r/pull/7' >> "$state/task-a.meta"
+  : > "$ready"
+  mkfifo "$hold" || fail "could not create the restart writer barrier"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+if [ "${4:-}" = "${FM_PIPELINE_TEST_RECORD_TARGET:-}" ]; then
+  awk 'NR == 3 { sub(/ts=[^ ]+/, "ts=2099-01-01T00:00:00Z") } { print }' "$3" > "$3.changed"
+  /bin/mv -- "$3.changed" "$3"
+  printf '%s\n' ready > "$FM_PIPELINE_TEST_MV_READY"
+  cat "$FM_PIPELINE_TEST_MV_HOLD" >/dev/null
+fi
+exec /bin/mv "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  set -m
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" PATH="$dir/fakebin:$BASE_PATH" \
+    FM_PIPELINE_TEST_RECORD_TARGET="$target" FM_PIPELINE_TEST_MV_READY="$ready" \
+    FM_PIPELINE_TEST_MV_HOLD="$hold" "$ROOT/bin/fm-pipeline.sh" reconcile task-a \
+    > "$dir/writer.out" 2> "$dir/writer.err" &
+  writer=$!
+  pgid=$(ps -o pgid= -p "$writer" 2>/dev/null | tr -d '[:space:]')
+  [ "$pgid" = "$writer" ] || fail "restart fixture writer did not get its own process group"
+  while [ ! -s "$ready" ] && [ "$i" -lt 100 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -s "$ready" ] || fail "restart fixture writer did not reach its atomic rename barrier"
+  [ -e "$state/pipeline-events.log.lock" ] || [ -L "$state/pipeline-events.log.lock" ] \
+    || fail "restart fixture writer did not hold the event-log lock"
+  lock_pid=$(cat "$state/pipeline-events.log.lock/pid")
+  [ "$lock_pid" = "$writer" ] || fail "restart fixture lock did not name the writer"
+  kill -KILL -- "-$pgid" 2>/dev/null || fail "could not kill the restart fixture writer group"
+  wait "$writer" 2>/dev/null || true
+  set +m
+  before=$(shasum -a 256 "$target")
+  temp=
+  for candidate in "$state"/.fm-pipeline-record.*; do
+    [ -f "$candidate" ] || continue
+    temp=$candidate
+    break
+  done
+  [ -n "$temp" ] || fail "restart fixture did not leave an abandoned record temp"
+  orphan_before=$(shasum -a 256 "$temp")
+  output=$(run_check_entry "$dir" task-a https://github.com/o/r/pull/7 2>&1) || rc=$?
+  expect_code 0 "$rc" "PR registration did not recover the killed writer state"
+  assert_contains "$output" 'armed: state/task-a.check.sh' \
+    "PR registration did not finish after recovering the killed writer"
+  assert_grep 'step=pr-registered' "$target" \
+    "PR registration did not append the registered step after writer recovery"
+  assert_grep 'rev=2' "$target" "PR registration did not preserve monotonic record revisions"
+  assert_not_contains "$(cat "$target")" 'ts=2099-01-01T00:00:00Z' \
+    "PR registration consumed the abandoned record temp"
+  orphan_after=$(shasum -a 256 "$temp")
+  [ "$orphan_after" = "$orphan_before" ] || fail "PR registration changed the abandoned record temp"
+  [ "$(shasum -a 256 "$target")" != "$before" ] || fail "PR registration did not recover the canonical record"
+
+  dir=$(make_case pr-registration-corruption)
+  state="$dir/home/state"
+  target="$state/task-a.pipeline"
+  write_task_meta "$dir"
+  printf '%s\n' 'spawn_gen=gen-pr-registration' >> "$state/task-a.meta"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pipeline.sh" reconcile task-a \
+    >/dev/null || fail "could not create the corruption-control record"
+  printf '%s\n' 'pr=https://github.com/o/r/pull/7' >> "$state/task-a.meta"
+  printf '%s' 'rev=2 ts=2026-09-05T00:00:00Z step=dispatched evidence=meta:' >> "$target"
+  before=$(shasum -a 256 "$target")
+  rc=0
+  set +e
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/7 > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "record corruption must not fail PR registration"
+  assert_contains "$(cat "$dir/stdout")" 'armed: state/task-a.check.sh' \
+    "record corruption prevented PR registration from finishing"
+  output=$(cat "$dir/stderr")
+  assert_contains "$output" 'warning: pipeline record for task-a was not reconciled (rc=1):' \
+    "record corruption warning lost the owner exit code"
+  assert_contains "$output" "refused:malformed-record-line $target:3" \
+    "record corruption warning did not preserve the owner refusal"
+  [ "$(shasum -a 256 "$target")" = "$before" ] \
+    || fail "record corruption changed canonical bytes"
+  pass "fm-pr-check.sh: restart and corruption controls preserve owner truth"
 }
 
 run_watcher_bounded() {
@@ -3591,6 +3818,10 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_pr_registration_reconciles_pipeline
+test_pr_registration_bounded_lock_acquisition
+test_pr_registration_allocation_failure_is_bounded
+test_pr_registration_restart_controls
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
