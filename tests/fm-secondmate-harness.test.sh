@@ -744,7 +744,7 @@ test_spawn_bare_harness_no_model_effort_flag() {
   [ "$(meta_field "$meta" model)" = default ] || fail "bare-tokens: meta model not default (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "bare-tokens: meta effort not default (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "CLAUDE_CODE_SEND_FEEDBACK=0 claude" \
+  assert_contains "$launch" "CLAUDE_CODE_SEND_FEEDBACK=0 '$ROOT/bin/fm-claude-rc-off.sh' launch" \
     "bare-tokens: Claude secondmate launch did not disable feedback drafts"
   assert_not_contains "$launch" "--model" "bare-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "--effort" "bare-tokens: launch must not carry an --effort flag"
@@ -769,7 +769,7 @@ test_spawn_secondmate_harness_model_token() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-token: meta model not opus (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "model-token: meta effort not default (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --model 'opus'" \
+  assert_contains "$launch" "'$ROOT/bin/fm-claude-rc-off.sh' launch --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --model 'opus'" \
     "model-token: launch did not carry --model opus"
   assert_not_contains "$launch" "--effort" "model-token: launch must not carry an --effort flag"
   pass "C3 spawn: config/secondmate-harness's model token threads --model into the launch and meta"
@@ -791,7 +791,7 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-effort-tokens: meta model not opus"
   [ "$(meta_field "$meta" effort)" = high ] || fail "model-effort-tokens: meta effort not high (got '$(meta_field "$meta" effort)')"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --model 'opus' --effort 'high'" \
+  assert_contains "$launch" "'$ROOT/bin/fm-claude-rc-off.sh' launch --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --model 'opus' --effort 'high'" \
     "model-effort-tokens: launch did not carry both --model opus and --effort high"
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
 }
@@ -910,6 +910,7 @@ test_spawned_secondmate_uses_its_harness_supervision_model() {
     # whether this assertion passes.
     cat > "$fakebin/$harness" <<SH
 #!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo "2.1.263 (Claude Code)"; exit 0; fi
 FM_ROOT_OVERRIDE="$sm" "$ROOT/bin/fm-guard.sh"
 SH
     chmod +x "$fakebin/$harness"

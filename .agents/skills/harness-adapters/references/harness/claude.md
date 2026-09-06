@@ -44,6 +44,12 @@ Styled capture stays internal to the boolean detector; `fm-peek` and model-facin
 The spawn disables Claude's `/bug` and `/feedback` model-drafted feedback flow for every Claude worker and secondmate, preventing a fleet-launched agent from queuing or submitting a bug report on the captain's behalf.
 The controls are scoped to the launched process and never modify the captain's global Claude settings; `launch_template()` in `../../../../../bin/fm-spawn.sh` owns their exact mechanics and defense-in-depth rationale.
 
+## Remote Control
+
+Claude worker and secondmate launch templates use [`fm-claude-rc-off.sh`](../../../../../bin/fm-claude-rc-off.sh) to enforce the session's RC-off policy.
+Use that helper's `verify` operation after a Herdr Claude launch; its header owns arguments, verification limits, and the relaunch requirement for existing unprotected sessions.
+The [runtime verification record](../../../../../docs/verification/runtime-backends.md#claude-remote-control-enforcement) owns the real-harness drift guard and current evidence.
+
 ## Primary integration
 
 Primary behavior was verified 2026-07-04 on 2.1.201, preserved 2026-07-08 on 2.1.204, and Stop auto-arm revalidated 2026-07-24 on 2.1.219.

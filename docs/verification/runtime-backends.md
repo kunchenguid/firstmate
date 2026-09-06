@@ -6,6 +6,37 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Claude Remote Control enforcement
+
+Verified on 2026-09-06 with Claude Code 2.1.263 on Linux through named Herdr lab sessions.
+The command was run from a pre-registered trusted worktree with `CLAUDE_CONFIG_DIR` selecting the target Claude Max account.
+
+```sh
+FM_CLAUDE_RC_OFF_LIVE_E2E=1 tests/fm-claude-rc-off-live-e2e.test.sh
+```
+
+Exact stable result lines:
+
+```text
+ok - 2.1.263 (Claude Code): real baseline RC connection observed and unprotected policy rejected
+ok - 2.1.263 (Claude Code): RC-on flag blocked, both RC commands unavailable, RC-off policy retained after a model turn
+```
+
+The baseline's `/remote-control` dialog offered `Disconnect this session` and displayed a connected session URL.
+The protected launch explicitly requested `--remote-control`, but its `/remote-control` command returned `Unknown command: /remote-control`.
+After a completed tool-free model turn, `/rc` returned `Unknown command: /rc`.
+Herdr's `pane process-info` independently exposed the foreground Claude process's inline `disableRemoteControl=true` launch setting before and after the turn.
+The verifier accepted that protected process and rejected the baseline, regardless of its rendered terminal history.
+Successful guard exit includes lab teardown and the default-session fleet-state tripwire.
+
+[`fm-claude-rc-off.sh`](../../bin/fm-claude-rc-off.sh) owns the launch and verification interface.
+The verification reports the live process's launch policy; it is not an independent measurement of network connections and does not retrofit an existing process.
+The enforcement mechanism is Claude's documented [`disableRemoteControl` setting](https://code.claude.com/docs/en/settings), supported from 2.1.128.
+The portable regression is [`fm-claude-rc-off.test.sh`](../../tests/fm-claude-rc-off.test.sh), and the opt-in guard above must be rerun after Claude or Herdr upgrades before refreshing this evidence.
+The common Claude launch template applies to workers and secondmates across tmux, Herdr, Zellij, Orca, and cmux; the change does not alter their transport interfaces.
+Other harnesses are not applicable because this is a Claude-specific setting and their launch templates do not call the helper.
+Only Herdr received live verification in this record; portable spawn regressions cover the common launch construction and Orca routing.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
