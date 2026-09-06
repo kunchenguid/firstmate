@@ -181,18 +181,6 @@ fm_pending_reply_require_wake_lib() {
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
 }
 
-fm_pending_reply_archive() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 lock rc=0
-  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
-  STATE=$state
-  lock="$state/.pending-reply-$corr.lock"
-  fm_pending_reply_require_wake_lib || return 1
-  fm_lock_acquire_wait "$lock" || return 1
-  _fm_pending_reply_archive_locked "$state" "$corr" || rc=$?
-  fm_lock_release "$lock"
-  return "$rc"
-}
-
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
 fm_pending_reply_new_id() {
   local raw hex

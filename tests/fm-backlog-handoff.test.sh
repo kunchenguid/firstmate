@@ -230,7 +230,7 @@ SH
   [ -e "$home/handoff-reading" ] || fail "the handoff did not begin its locked correlation snapshot"
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"
-    fm_pending_reply_archive "$2" "$3"
+    fm_pending_reply_try_resolve "$2" "$3"
   ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$home/state" "$corr" &
   archiver=$!
   sleep 0.2
