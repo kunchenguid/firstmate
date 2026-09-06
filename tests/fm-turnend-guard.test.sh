@@ -470,6 +470,17 @@ test_hook_x_mode_only_blocks_in_default_mode() {
   pass "fm-turnend-guard: X-mode-only supervision remains guarded in default mode"
 }
 
+test_hook_registered_check_only_blocks_with_check_banner() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-check-only")
+  register_custom_check "$dir/state" issue-comments
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "default hook mode must block a registered-check-only blind turn"
+  assert_contains "$out" "1 registered custom check(s), but no live watcher" "check-only blind stop must identify its supervision need"
+  assert_not_contains "$out" "X-mode relay polling needs supervision" "check-only blind stop must not be misreported as relay polling"
+  pass "fm-turnend-guard: registered-check-only supervision is named in the block banner"
+}
+
 test_hook_ignores_repo_state_when_fm_home_set() {
   local dir home out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-fm-home-ignore-root")
@@ -1995,6 +2006,7 @@ test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
 test_hook_x_mode_only_blocks_in_default_mode
+test_hook_registered_check_only_blocks_with_check_banner
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
