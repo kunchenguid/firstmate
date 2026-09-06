@@ -4024,17 +4024,20 @@ test_beacon_stays_fresh_while_absorbing() {
 }
 
 test_signal_coalescing_wait_keeps_beacon_fresh() {
-  local dir state fakebin out pid beat now age max=0 i=0
+  local dir state fakebin out pid beat seen now age max=0 i=0
   dir=$(make_case beacon-signal-wait); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; beat="$state/.last-watcher-beat"
+  out="$dir/watch.out"; beat="$state/.last-watcher-beat"; seen="$state/.seen-task_status"
   printf 'working: coalescing a trailing turn end\n' > "$state/task.status"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=1 FM_SIGNAL_GRACE=5 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=3 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_WATCHER_STALE_GRACE=2 FM_GUARD_GRACE=2 "$WATCH" > "$out" 2>&1 &
   pid=$!
-  while [ "$i" -lt 70 ]; do
+  # The seen marker is committed immediately after coalescing. Stop sampling
+  # there: later poll work is unrelated to whether this watcher-owned wait beat.
+  while [ "$i" -lt 100 ]; do
     kill -0 "$pid" 2>/dev/null || break
+    [ -e "$seen" ] && break
     if [ -e "$beat" ]; then
       now=$(date +%s)
       age=$((now - $(file_mtime "$beat")))
@@ -4044,6 +4047,7 @@ test_signal_coalescing_wait_keeps_beacon_fresh() {
     i=$((i + 1))
   done
   kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "watcher exited during a benign signal wait: $(cat "$out")"; }
+  [ -e "$seen" ] || { reap "$pid"; fail "signal coalescing did not complete"; }
   reap "$pid"
   [ "$max" -lt 2 ] || fail "signal coalescing wait let the beacon age to ${max}s"
   pass "signal coalescing keeps the watcher beacon inside its grace"
@@ -4066,13 +4070,13 @@ test_beacon_tracks_phase_progress_across_a_long_iteration() {
   local beat now age max=0 i=0 captures
   dir=$(make_case beacon-phase-progress); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; beat="$state/.last-watcher-beat"
-  grace=4
-  slow=1
+  grace=2
+  slow=0.75
   count_file="$dir/captures"
   : > "$count_file"
   printf '0\n' > "$count_file"
   windows=""
-  for w in a b c d e f; do
+  for w in a b c; do
     printf 'kind=ship\nwindow=firstmate:fm-%s\n' "$w" > "$state/$w.meta"
     printf 'working: %s\n' "$w" > "$state/$w.status"
     windows="${windows}${windows:+$'\n'}fm-$w"
@@ -4086,28 +4090,30 @@ test_beacon_tracks_phase_progress_across_a_long_iteration() {
     FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
     FM_FAKE_TMUX_CAPTURE_SLEEP="$slow" \
     FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$count_file" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_POLL=0.1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_WATCHER_STALE_GRACE="$grace" FM_GUARD_GRACE="$grace" \
     "$WATCH" > "$out" 2>&1 &
   pid=$!
-  # Sample the beacon's age for longer than one whole slow iteration
-  # (6 windows x 1s > the 4s grace), so a once-per-iteration beat would be caught.
-  while [ "$i" -lt 140 ]; do
+  # Three 0.75s reads make one iteration exceed the 2s grace. The fourth read
+  # proves that full iteration completed, so stop instead of occupying a suite
+  # worker for an unrelated fixed 14-second observation window.
+  while [ "$i" -lt 100 ]; do
     kill -0 "$pid" 2>/dev/null || break
     if [ -e "$beat" ]; then
       now=$(date +%s)
       age=$(( now - $(file_mtime "$beat") ))
       [ "$age" -le "$max" ] || max=$age
     fi
+    captures=$(cat "$count_file" 2>/dev/null || echo 0)
+    [ "$captures" -ge 4 ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  captures=$(cat "$count_file" 2>/dev/null || echo 0)
   reap "$pid"
-  # Guard against a vacuous pass: the slow pane reads must actually have run, or
-  # this proves nothing about a long iteration.
-  [ "$captures" -ge 6 ] \
-    || fail "the slow-phase fixture never entered the stale scan (only $captures pane reads)"
+  # Guard against a vacuous pass: one complete slow iteration must actually have
+  # run, followed by the first capture of the next iteration.
+  [ "$captures" -ge 4 ] \
+    || fail "the slow-phase fixture never completed an iteration (only $captures pane reads)"
   [ -e "$beat" ] || fail "the watcher never wrote a beacon"
   [ "$max" -lt "$grace" ] \
     || fail "beacon aged to ${max}s during a multi-phase iteration, past the ${grace}s grace"
