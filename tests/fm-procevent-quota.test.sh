@@ -275,6 +275,13 @@ esac
   || fail "source-id did not resolve the same per-account id the poll reported"
 ok "codex-home watch polls the selected account under its own CODEX_HOME and source id"
 
+acct_alias="$LAB/accounts/codex-account-alias"
+ln -s "$ACCT" "$acct_alias"
+alias_source_id=$("$BIN/fm-procevent-quota.sh" source-id --provider codex --codex-home "$acct_alias")
+[ "$alias_source_id" = "$source_id" ] \
+  || fail "a symlink alias for one account produced a duplicate source id: $alias_source_id"
+ok "codex-home watch canonicalizes aliases to one account identity"
+
 rm -f "$COUNT" "$ARGV_LOG"
 out=$(QUOTA_AXI_PER_HOME=1 QUOTA_AXI_ARGV_LOG="$ARGV_LOG" QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
   "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)

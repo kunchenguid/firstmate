@@ -56,12 +56,14 @@
 #   user's $HOME here, at spawn time, because the profile file is inherited
 #   byte-exact into secondmate homes on machines with other users. The expanded
 #   directory must exist and hold a non-empty auth.json (bin/fm-codex-home-lib.sh
-#   owns that check; it reads the file's size, never its contents), and any
-#   failure refuses the spawn: a Codex worker never silently falls back to the
-#   default ~/.codex account. On success the launch is prefixed with
-#   CODEX_HOME=<quoted expanded path>, exactly as CLAUDE_CONFIG_DIR is forwarded
-#   onto claude launches, and the expanded path is recorded as codex_home= in
-#   state/<id>.meta. Without the flag no prefix is added and no codex_home= line
+#   owns that check; it reads the file's size, never its contents), and its
+#   physical path becomes the account identity. A missing directory, missing or
+#   empty auth.json, relative path, or control byte refuses the spawn: a Codex
+#   worker never silently falls back to the default ~/.codex account. On success
+#   the launch is prefixed with CODEX_HOME=<quoted physical path>, exactly as
+#   CLAUDE_CONFIG_DIR is forwarded onto claude launches, and the physical path
+#   is recorded as codex_home= in state/<id>.meta. Without the flag no prefix is
+#   added and no codex_home= line
 #   is written, so the single-account default path is byte-identical to before.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
@@ -241,7 +243,7 @@
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
-# A codex ship, scout, or relaunch given --codex-home records the expanded account
+# A codex ship, scout, or relaunch given --codex-home records the physical account
 # directory as codex_home=; every other spawn writes no such line.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.

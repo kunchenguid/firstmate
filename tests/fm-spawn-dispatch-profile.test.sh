@@ -850,6 +850,30 @@ test_codex_home_expands_tilde_against_the_launching_home() {
   pass "codex --codex-home expands ~/ against the launching user's HOME at spawn time"
 }
 
+test_codex_home_canonicalizes_an_account_alias() {
+  local rec id out status launch physical alias
+  id=profile-codex-home-alias-z34
+  rec=$(make_spawn_case profile-codex-home-alias codex "$id")
+  read_case_record "$rec"
+  physical="$CASE_DIR/accounts/codex-physical"
+  alias="$CASE_DIR/accounts/codex-alias"
+  make_codex_account "$physical"
+  ln -s "$physical" "$alias"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --codex-home "$alias")
+  status=$?
+  expect_code 0 "$status" "codex spawn through an account alias should succeed"$'\n'"$out"
+  assert_grep "codex_home=$physical" "$HOME_DIR/state/$id.meta" \
+    "meta must record the physical account identity"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$physical' env -u CURSOR_AGENT" \
+    "codex launch must use the physical account identity"
+  assert_not_contains "$launch" "CODEX_HOME='$alias'" \
+    "codex launch must not retain an alias spelling"
+  pass "codex --codex-home canonicalizes aliases before launch and metadata"
+}
+
 test_codex_without_codex_home_stays_on_the_default_account() {
   local rec id out status launch
   id=profile-codex-home-off-z22
@@ -917,6 +941,16 @@ test_codex_home_refuses_a_bare_tilde() {
   refuse_codex_home_case profile-codex-home-bare-tilde profile-codex-home-bare-tilde-z32 codex --codex-home '~'
   assert_contains "$REFUSE_OUT" "must be an absolute path or start with ~/" "refusal must explain the accepted spellings"
   pass "codex --codex-home refuses a bare tilde"
+}
+
+test_codex_home_refuses_a_control_byte() {
+  local acct
+  acct="$TMP_ROOT/profile-codex-home-control/accounts/"$'codex-1\nspawn_gen=forged'
+  make_codex_account "$acct"
+  refuse_codex_home_case profile-codex-home-control profile-codex-home-control-z33 codex --codex-home "$acct"
+  assert_contains "$REFUSE_OUT" "codex home contains an invalid control byte" \
+    "refusal must reject the path before it can corrupt line-oriented metadata"
+  pass "codex --codex-home refuses control bytes before metadata publication"
 }
 
 test_codex_home_refuses_an_empty_value() {
@@ -1006,12 +1040,14 @@ test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_codex_home_forwards_the_account_and_records_it
 test_codex_home_expands_tilde_against_the_launching_home
+test_codex_home_canonicalizes_an_account_alias
 test_codex_without_codex_home_stays_on_the_default_account
 test_codex_home_refuses_an_account_with_no_auth_json
 test_codex_home_refuses_an_empty_auth_json
 test_codex_home_refuses_a_missing_directory
 test_codex_home_refuses_a_relative_path
 test_codex_home_refuses_a_bare_tilde
+test_codex_home_refuses_a_control_byte
 test_codex_home_refuses_an_empty_value
 test_codex_home_refuses_a_non_codex_harness
 test_codex_home_refuses_a_secondmate_launch

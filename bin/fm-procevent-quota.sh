@@ -40,8 +40,9 @@
 # bin/fm-quota-axi-lib.sh's fm_quota_axi_read_codex_home, so an account that
 # is signed out mid-watch ends the watch with an error wake rather than
 # silently reporting the default account. The source id becomes
-# `quota-codex-<basename>-<8 hex of the expanded path>`, one watch per
-# account, and the result document adds a `codex_home: <expanded path>` line.
+# `quota-codex-<basename>-<8 hex of the physical path>`, one watch per account
+# even when callers use path aliases, and the result document adds a
+# `codex_home: <physical path>` line.
 # Without the flag the registration, the poll, and the result are byte-identical
 # to before.
 set -u
@@ -95,7 +96,7 @@ resolve_provider() {
   fm_procevent_source_id_valid "$CANONICAL_SOURCE_ID" || die "source id is not path-safe: $CANONICAL_SOURCE_ID"
 }
 
-# codex_home_slug <expanded-path>
+# codex_home_slug <physical-path>
 # A path-safe, unique-per-account tail for the source id: the home's basename
 # (leading dots dropped, unsafe bytes folded to dashes, bounded) plus a short
 # digest of the whole path so two accounts sharing a basename never share a
