@@ -827,7 +827,7 @@ SH
       [ -x "$pane_shell" ] || continue
       pane_path=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
         TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
-        "$pane_shell" -c 'printf %s "$PATH"') \
+        "$pane_shell" -c "printf %s \"\$PATH\"") \
         || fail "could not read $pane_shell startup PATH"
       result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
       TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \

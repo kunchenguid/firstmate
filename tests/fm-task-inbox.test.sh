@@ -224,7 +224,8 @@ test_doorbell_rejects_terminal_controls() {
     state="$dir/${control}touch marker; # $label/state"
     mkdir -p "$state"
     rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
-    doorbell= rc=0
+    doorbell=
+    rc=0
     doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec") || rc=$?
     [ "$rc" -ne 0 ] || fail "a $label path should make doorbell construction fail"
     [ -z "$doorbell" ] || fail "a rejected $label path emitted doorbell bytes"

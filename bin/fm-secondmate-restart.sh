@@ -324,16 +324,25 @@ done
 while [ "$((pending_count + restart_active_count))" -gt 0 ]; do
   now=$(date +%s)
   next_wait=$PERSIST_POLL
+  # Resolve every arrived answer before processing any timeout. Delivery of a
+  # later fleet request can outlast an earlier mate's deadline under load; that
+  # expired mate must not hold an already-confirmed mate behind its fallback.
+  i=0
+  while [ "$i" -lt "${#IDS[@]}" ]; do
+    if [ "${PLAN[i]}" = persisted-pending ] \
+      && fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
+      pending_count=$((pending_count - 1))
+      launch_restart "$i"
+    fi
+    i=$((i + 1))
+  done
   i=0
   while [ "$i" -lt "${#IDS[@]}" ]; do
     if [ "${PLAN[i]}" != persisted-pending ]; then
       i=$((i + 1))
       continue
     fi
-    if fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
-      pending_count=$((pending_count - 1))
-      launch_restart "$i"
-    elif [ "$now" -ge "${DEADLINE[i]}" ]; then
+    if [ "$now" -ge "${DEADLINE[i]}" ]; then
       fall_back_to_nudge "${IDS[$i]}" \
         "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
       PLAN[i]="done"
