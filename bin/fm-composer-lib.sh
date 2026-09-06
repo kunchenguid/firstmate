@@ -317,13 +317,14 @@ FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 # omp (Oh My Pi) renders its TUI busy line as `Working…` with U+2026 HORIZONTAL
-# ELLIPSIS, not Pi's three ASCII dots, while its headless -p mode still writes
-# three dots to stderr (verified byte-level on omp 18.1.2, re-verified live on
-# 18.1.11 through the Herdr backend); both forms are accepted. The status row's
+# ELLIPSIS, not Pi's three ASCII dots (verified byte-level on omp 18.1.2,
+# re-verified live on 18.1.11 through the Herdr backend). Only the TUI form is
+# accepted: every supervised omp pane is the TUI, and the three-dot spelling its
+# headless -p mode writes to stderr never reaches a pane. The status row's
 # leading braille spinner plus elapsed cell (`⠧ 11s`) is the second, independent
 # busy signal, so no single vendor string is load-bearing; its idle form is a
 # static identity glyph with no elapsed time.
-FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT='Working(\.\.\.|…)|^[[:space:]]*[⠁-⣿][[:space:]]+[0-9]+[smh]'
+FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT='Working…|^[[:space:]]*[⠁-⣿][[:space:]]+[0-9]+[smh]'
 FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
 # same version rendered both `Working` and `Running` beside its braille spinner

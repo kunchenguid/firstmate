@@ -322,11 +322,11 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   printf 'Working...\n' > "$composer"
   pane_busy pi pi || fail "Pi Working footer should be busy"
   pane_busy pi-signed pi-signed || fail "pi-signed should share Pi's exact Working footer"
-  # omp (Oh My Pi) renders the TUI line with U+2026 and the headless line with
-  # three dots; both are its own signature, and neither Pi nor Codex may borrow
-  # the ellipsis form. The status-row spinner cell is its second, independent
-  # signal, and an idle status row (identity glyph, no elapsed time) is not busy.
-  pane_busy omp omp || fail "omp headless Working... footer should be busy"
+  # omp (Oh My Pi) renders its TUI line with U+2026; Pi's three-dot footer is
+  # not omp's signature, and neither Pi nor Codex may borrow the ellipsis form.
+  # The status-row spinner cell is its second, independent signal, and an idle
+  # status row (identity glyph, no elapsed time) is not busy.
+  pane_busy omp-three-dots omp && fail "omp must not read Pi's three-dot Working... footer as busy"
   printf ' \xf3\xb1\x8a\xb7 Working\xe2\x80\xa6\n' > "$composer"
   pane_busy omp omp || fail "omp TUI Working… footer should be busy"
   pane_busy omp-ellipsis-pi pi && fail "Pi must not borrow omp's Working… footer"

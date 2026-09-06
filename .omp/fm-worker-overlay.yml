@@ -13,11 +13,6 @@ composer:
   # already reads; the shipped default `band` and six other shapes are not in
   # its catalogue, and the shape is otherwise a captain-level setting.
   shape: borderless
-tools:
-  # `write` (and `always-ask`) prompt on every shell command; nobody answers a
-  # worker's prompt. --auto-approve on the launch line pins the same thing, so
-  # the two agree even if one is dropped.
-  approvalMode: yolo
 plan:
   # `plan.defaultOnStartup: true` opens every session read-only; a worker that
   # cannot edit files sits on its brief forever.

@@ -130,9 +130,10 @@
 #   wizard with OMP_SKIP_SETUP=1, forces --auto-approve, pins the working
 #   directory with --cwd, and passes the tracked worker posture overlay
 #   .omp/fm-worker-overlay.yml through --config. That overlay pins composer
-#   shape, approval mode, plan mode off, prewalk off, and the non-interactive
-#   usage-reserve policy for the one session only; the captain's own
-#   ~/.omp/agent/config.yml (model roles, providers, theme) is never written.
+#   shape, plan mode off, prewalk off, and the non-interactive usage-reserve
+#   policy for the one session only (--auto-approve alone owns approval); the
+#   captain's own ~/.omp/agent/config.yml (model roles, providers, theme) is
+#   never written.
 #   A model written as <provider>/<id> is validated against `omp models --json`
 #   only when that provider appears in the listing; a provider absent from the
 #   listing (an extension-registered provider such as claude-bridge, which omp
@@ -580,7 +581,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1405,12 +1406,13 @@ launch_template() {
     # the launch boundary and documented in the header above: foreign markers
     # cleared (omp has none of its own, so an inherited CLAUDECODE would win),
     # FM_OMP_HARNESS=omp established for bin/fm-harness.sh, OMP_SKIP_SETUP=1
-    # against the fresh-profile provider wizard, --auto-approve plus the tracked
-    # posture overlay so a captain-level approval, plan, prewalk, or usage
-    # dialog can never park an unattended worker, and --cwd pinned to the
-    # worktree because omp's extension discovery is cwd-only. A secondmate loads
-    # its two primary extensions by that discovery alone: naming them with -e as
-    # well loads each twice (verified), doubling every session_stop continuation.
+    # against the fresh-profile provider wizard, --auto-approve so no approval
+    # prompt can park an unattended worker, the tracked posture overlay so a
+    # captain-level plan, prewalk, or usage dialog cannot either, and --cwd
+    # pinned to the worktree because omp's extension discovery is cwd-only. A
+    # secondmate loads its two primary extensions by that discovery alone:
+    # naming them with -e as well loads each twice (verified), doubling every
+    # session_stop continuation.
     omp)
       printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ --auto-approve --cwd __WORKTREE__'
       if [ "$kind" = secondmate ]; then
@@ -3586,6 +3588,9 @@ if [ "$KIND" = secondmate ]; then
   # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): Claude's
   # Stop auto-arm and Cursor's stop-hook park both run the watcher only BETWEEN
   # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
+  # Pi and pi-signed secondmates previously received persistent here and now
+  # receive extension to match fm_supervision_model's own table, so their pull
+  # guard tolerates the extension hand-off exactly as a Pi primary does.
   case "$HARNESS" in
     claude|cursor) supervision_model=autoarm ;;
     pi|pi-signed|omp) supervision_model=extension ;;
