@@ -131,7 +131,7 @@ pass "the Linux start path puts the whole worker tree in its own process group"
 # this case reproduces.
 WORKER_PPID=$(ppid_of "$WORKER")
 case "$WORKER_PPID" in
-  ''|*[!0-9]*|$$)
+  ''|*[!0-9]*|"$$")
     fail "the fixture worker is not orphaned from its launcher, so this case does not reproduce the leak" ;;
 esac
 
