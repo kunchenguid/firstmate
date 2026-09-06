@@ -164,10 +164,12 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     note_reclaim
   fi
 fi
-if ! fm_session_lock_record_owner "$STATE" "$me"; then
-  echo "error: cannot record session-lock ownership; operate read-only until resolved" >&2
-  exit 1
-fi
+# Publish and verify the lock BEFORE recording ownership, so an interruption
+# between the two writes leaves a lock naming this session's own live harness -
+# repaired in place by its own next acquire, and stale the moment it exits -
+# rather than a record and a lock naming different pids, which no session could
+# confirm and none could reclaim. If the record then fails, take the lock back
+# down so the home reads free instead of unconfirmable.
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -178,6 +180,11 @@ written=$(cat "$LOCK" 2>/dev/null) || {
 }
 if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
+  exit 1
+fi
+if ! fm_session_lock_record_owner "$STATE" "$me"; then
+  rm -f "$LOCK" 2>/dev/null || true
+  echo "error: cannot record session-lock ownership; operate read-only until resolved" >&2
   exit 1
 fi
 release_claim_lock

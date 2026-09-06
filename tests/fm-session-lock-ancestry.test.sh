@@ -558,6 +558,42 @@ test_acquire_still_succeeds_when_identity_cannot_be_read() {
 # by rolling the checkout back to a version that writes state/.lock without a
 # record and starting a session there, which leaves the record pointing at the
 # older pid while a genuinely live session holds the lock.
+# A reclaim that dies between its two writes must not wedge the home it was
+# repairing. Publishing the lock before recording ownership is what keeps that
+# true: the record is only ever advanced once the lock it describes is in place,
+# so a home that had the evidence to recover automatically still has it.
+test_interrupted_reclaim_leaves_the_home_recoverable() {
+  local dir fakebin foreign session out status
+  dir="$TMP_ROOT/interrupted-reclaim"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/noproc"
+  start_fixture_process foreign
+  start_fixture_process session
+  write_owner_record_ps "$fakebin" "$foreign" "$session"
+  # A recycled pid: reclaimable, and the home can prove it without an operator.
+  FM_TEST_FOREIGN_START='Sun Dec 31 23:00:00 2019' FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" fm_record_session_lock_owner "$dir/state" "$foreign"
+
+  # Interrupt the reclaim at its publishing step, the way a hook timeout would.
+  chmod 0400 "$dir/state/.lock"
+  status=0
+  out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 1 "$status" "an unpublishable lock reported success: $out"
+  chmod 0600 "$dir/state/.lock"
+
+  # The home must still be able to recover itself, with no operator step.
+  status=0
+  out=$(FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" FM_PROC_ROOT_OVERRIDE="$dir/noproc" \
+    PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  stop_fixture_processes
+
+  expect_code 0 "$status" "an interrupted reclaim wedged a home that could recover itself: $out"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$session" ] \
+    || fail "the recycled pid still holds the home: $(cat "$dir/state/.lock")"
+  pass "session-lock: an interrupted reclaim leaves the home recoverable, not wedged"
+}
+
 test_owner_record_for_a_different_pid_is_not_evidence() {
   local dir fakebin foreign session out status
   dir="$TMP_ROOT/record-other-pid"
@@ -700,6 +736,7 @@ test_recycled_pid_never_inherits_the_previous_owners_lock() {
 test_legacy_bare_pid_lock_is_held_not_reclaimed
 test_original_holder_repairs_its_own_missing_owner_record
 test_acquire_still_succeeds_when_identity_cannot_be_read
+test_interrupted_reclaim_leaves_the_home_recoverable
 test_owner_record_for_a_different_pid_is_not_evidence
 test_unreadable_recorded_identity_is_not_reclaimable
 test_live_non_harness_pid_is_still_reclaimed
