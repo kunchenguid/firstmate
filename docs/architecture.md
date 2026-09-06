@@ -290,6 +290,12 @@ prints nothing and appends exactly one line to `$home/state/events-out.txt`: `..
 Because the task has a valid meta, `probe --task` also runs `reconcile` first (see above), so the disposable directory gains two more files as a side effect: `wait-demo-task.pipeline` (the v3 record, `step=dispatched rev=1`) and `wait-demo-task.pipeline-seen` (the probe's observation cache).
 A bound `wait=pr:<url>` or `wait=quota:<provider>` premise is read by the separate `bin/fm-wait-premise.sh`, not by this probe.
 
+A full `probe` (no `--task`) refuses outright, writing nothing, when the state directory is absent, a symlink, or not a directory; it never follows a symlink and never creates one.
+When a task's status file cannot be read (permission denied, for example), the probe appends exactly one unknown row with `evidence=scan:activity-read-failed` and no wait identity, rather than guessing at its pauses.
+`FM_PIPELINE_DEADLINE` is a between-task coverage deadline, not a hard wall-time or completion guarantee: unset defaults to 20 seconds, `0` disables it and runs to completion, and any other value must be a non-negative integer of decimal seconds up to the signed 64-bit integer maximum (`9223372036854775807`) or the scan is refused before it starts (exit 2), naming the bad value.
+The clock starts after the task list is built and is checked only before each task; once a task is admitted, nothing later bounds or interrupts its own processing time, and the deadline is never rechecked after the last task runs.
+Once the deadline trips, every task the scan has not yet reached gets one unknown row with `evidence=scan:deadline` instead of a real probe, tasks already visited keep their real result, and the scan exits 1 (an ordinary scan and one with the deadline disabled both exit 0).
+
 ## Two task shapes
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
