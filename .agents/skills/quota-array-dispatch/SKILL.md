@@ -32,10 +32,11 @@ Authoritative multi-provider routing - including provider discovery from the har
 Use it only when the brief already fixed the candidate order and every candidate's provider is the harness's primary family.
 It does not replace the reasoning-class, runway-feasibility, or authentication gates above.
 Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
+That watch measures this home's ambient credential home only, so its wake is never per-home evidence about a candidate naming its own `home`; re-measure that home here instead.
 
 ## Read the default TOON
 
-Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate.
+Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate that runs on this home's ambient credentials.
 Post-consolidation quota-axi (the floor owned by `bin/fm-quota-axi-lib.sh`) puts `spendPriority` in the default `quota[]` block beside `effectivePercentRemaining`, `runway`, `confidence`, `limitedBy`, and `resetsAt`.
 Sparse `exhaustion[]` carries finite-runway seconds only for `projected_exhaustion` and `exhausted_now`.
 Sparse `attention[]` names auth, stale, and unmeasurable facts.

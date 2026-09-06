@@ -27,6 +27,16 @@
 # The canonical source id is `quota` for the aggregate tracked provider.
 # A provider named with --provider sets the tracked provider and the source id
 # becomes `quota-<provider>`.
+#
+# Account scope: every poll runs `quota-axi` in firstmate's OWN environment, and
+# quota-axi reads one credential home per provider per invocation (for codex,
+# CODEX_HOME if set, else ~/.codex). A reading is therefore this home's ambient
+# account only, never a fleet-wide provider claim: with two logged-in Codex
+# accounts, a `low` wake means the ambient account is low while a dispatch
+# candidate naming the other home may still have headroom. The emitted detail
+# carries `scope: "ambient-credential-home"` so a handler never reads it wider
+# than it was measured. Per-home measurement belongs to the
+# .agents/skills/quota-array-dispatch procedure, which owns it for dispatch.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -154,6 +164,7 @@ details() {
     if $provider == "" then
       {
         provider: "aggregate",
+        scope: "ambient-credential-home",
         summary: [
           (.providers[]? |
             { provider: .provider,
@@ -166,6 +177,7 @@ details() {
       (.providers[]? | select(.provider == $provider)) as $p |
       {
         provider: $provider,
+        scope: "ambient-credential-home",
         best: best_detail($p.quotaSemantics.effectiveAvailability // [])
       }
     end
