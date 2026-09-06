@@ -610,16 +610,28 @@ EOF
 # the question is settled outright, so a structured row still open behind it is a
 # contradiction between the two records - see fm-captain-hold.sh's `diverged`.
 #
-# Semantics are not re-derived here: every line goes through the same
+# Semantics are not re-derived here: every candidate line goes through the same
 # _fm_decision_fold_line rule the two folds use, and the reported verb is read
 # off the transitions that rule produces.
+#
+# One `grep` pre-selects those candidates so the bash fold below costs the log's
+# TRANSITIONS rather than its whole lifetime length - status files are only ever
+# appended to, and this runs per open task on every supervision presentation.
+# The pre-select deliberately over-includes: it takes any line whose leading word
+# could be a fold verb (including the ship/scout terminals, which carry no key
+# token), and the fold alone decides which of them really moves the set. A line
+# whose leading word is followed by neither whitespace, a colon, nor a bracket
+# tag cannot be a transition, because the fold's own declaration guard rejects it.
 status_key_closing_verb() {  # <status-file> <key>
-  local f=$1 want=$2 line resolve held open='' was verb='' kind event
+  local f=$1 want=$2 line resolve held open='' was verb='' kind event candidates
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   [ -n "$want" ] || return 0
   kind=$(_fm_status_kind "$f")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  candidates=$(grep -E \
+    "^[[:space:]]*(needs-decision|blocked|done|failed|$resolve|$held)[[:space:]:[]" \
+    "$f") || [ "$?" -eq 1 ] || candidates=$(cat "$f")
   while IFS= read -r line || [ -n "$line" ]; do
     status_line_verb "$line" event
     case "$event:$kind" in
@@ -640,7 +652,9 @@ status_key_closing_verb() {  # <status-file> <key>
     if [ "$was" = 1 ] && ! _fm_open_set_has "$open" "$want"; then
       verb=$event
     fi
-  done < "$f"
+  done <<EOF
+$candidates
+EOF
   if _fm_open_set_has "$open" "$want"; then
     _fm_open_set_verb "$open" "$want"
     return 0
