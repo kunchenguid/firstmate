@@ -14,8 +14,8 @@
 # task closes, but a non-release answer keeps hold-kind and the hold reason.
 # Merge approval removes those annotations through the release contract before
 # cleanup records the merged PR or local-only landing, so either artifact on a
-# Done captain-hold row is not a delivery. A retained scout closes with its
-# hold-kind intact, so its recorded report remains a delivery.
+# Done captain-hold row is not a delivery. A scout's recorded report is its
+# delivery regardless of release state or other links in its title.
 #
 # The distinction that decides the section is delivery: Recently Landed is
 # merged PRs, completed scouts, and finished local-only merges. A closed row
@@ -34,27 +34,25 @@
 
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_LANDED_JQ_DEFS='
-  def retained_scout_report:
+  def scout_report:
     .kind == "scout"
-    and .hold_kind == "captain"
     and (.report_path // null) != null;
   def landed_artifact:
-    if retained_scout_report then (.report_path // null)
+    if scout_report then (.report_path // null)
+    elif .kind == "scout" then null
     elif .completion.verb == "merged" then (.pr_url // null)
-    elif .completion.verb == "reported" then (.report_path // null)
     elif .completion.verb == "done" then (.local_note // null)
     else null
     end;
   def landed_delivery:
-    retained_scout_report
-    or (.kind != "captain"
+    scout_report
+    or (.kind != "scout"
+      and .kind != "captain"
       and .hold_kind != "captain"
       and .completion.verb == "merged"
       and (.pr_url // null) != null)
-    or (.kind != "captain"
-      and .completion.verb == "reported"
-      and (.report_path // null) != null)
     or ((.kind // null) != null
+      and .kind != "scout"
       and .kind != "captain"
       and .hold_kind != "captain"
       and .completion.verb == "done"
