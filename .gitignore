@@ -11,3 +11,11 @@ __pycache__/
 *.pyc
 .env
 config/
+
+# TypeScript core
+node_modules/
+dist/
+*.tsbuildinfo
+.tools/
+.commandcode/
+
