@@ -43,8 +43,8 @@
 #      flags still win.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-ff-lib.sh"
 # shellcheck source=/dev/null
@@ -421,11 +421,7 @@ test_propagate_lib() {
 make_noop_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" tmux
   printf '%s\n' "$fakebin"
 }
 
@@ -1048,15 +1044,7 @@ make_fake_toolchain() {
   mkdir -p "$fakebin"
   fm_fake_exit0 "$fakebin" node chrome-devtools-axi
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
-  cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.1.29'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/gh-axi"
+  fm_test_fake_gh_axi "$fakebin"
   # tmux fake supports fm-send's composer-verified submit path and optional
   # FM_FAKE_TMUX_LOG / FM_FAKE_TMUX_FAIL_LITERAL for reread-nudge assertions.
   cat > "$fakebin/tmux" <<'SH'
@@ -1085,47 +1073,11 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  cat > "$fakebin/gh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/gh"
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
-fi
-exit 0
-SH
-  chmod +x "$fakebin/treehouse"
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.46.0 (fake)'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/no-mistakes"
-  cat > "$fakebin/tasks-axi" <<'SH'
-#!/usr/bin/env bash
-case "${1:-} ${2:-}" in
-  "--version ") printf '%s\n' '0.2.4' ;;
-  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
-  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tasks-axi"
-  cat > "$fakebin/quota-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.1.29'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/quota-axi"
+  fm_test_fake_gh "$fakebin"
+  fm_test_fake_treehouse "$fakebin"
+  fm_test_fake_no_mistakes "$fakebin"
+  fm_test_fake_tasks_axi "$fakebin"
+  fm_test_fake_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

@@ -18,16 +18,16 @@ test_no_mistakes_version_constant() {
   fakebin=$(fm_fakebin "$TMP_ROOT/nm")
   fm_test_fake_no_mistakes "$fakebin"
   out=$("$fakebin/no-mistakes" --version)
-  [ "$out" = "$FM_TEST_NO_MISTAKES_FAKE_VERSION" ] || \
-    fail "fake no-mistakes --version should be the shared constant, got '$out'"
-  out=$(FM_FAKE_NO_MISTAKES_VERSION="$FM_TEST_NO_MISTAKES_FAKE_VERSION_TS" \
-    "$fakebin/no-mistakes" --version)
   [ "$out" = "$FM_TEST_NO_MISTAKES_FAKE_VERSION_TS" ] || \
-    fail "timestamped banner override should round-trip, got '$out'"
+    fail "fake no-mistakes --version should default to the shared timestamped banner, got '$out'"
   case "$out" in
     "$FM_TEST_NO_MISTAKES_FAKE_VERSION "*) ;;
     *) fail "timestamped banner '$out' is not the shared constant plus a suffix" ;;
   esac
+  out=$(FM_FAKE_NO_MISTAKES_VERSION="$FM_TEST_NO_MISTAKES_FAKE_VERSION" \
+    "$fakebin/no-mistakes" --version)
+  [ "$out" = "$FM_TEST_NO_MISTAKES_FAKE_VERSION" ] || \
+    fail "banner override should round-trip, got '$out'"
   out=$(FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v9.9.9 (fake)' \
     "$fakebin/no-mistakes" --version)
   [ "$out" = 'no-mistakes version v9.9.9 (fake)' ] || \
@@ -58,6 +58,7 @@ test_fake_gh_and_gh_axi() {
   fakebin=$(fm_fakebin "$TMP_ROOT/gh")
   fm_test_fake_gh "$fakebin"
   fm_test_fake_gh_axi "$fakebin"
+  fm_test_fake_quota_axi "$fakebin"
   "$fakebin/gh" auth status
   expect_code 0 $? "fake gh auth status should succeed"
   "$fakebin/gh" pr list
@@ -67,7 +68,78 @@ test_fake_gh_and_gh_axi() {
     fail "fake gh-axi --version should be $FM_TEST_GH_AXI_VERSION, got '$out'"
   out=$(FM_FAKE_GH_AXI_VERSION=0.9.9 "$fakebin/gh-axi" --version)
   [ "$out" = 0.9.9 ] || fail "FM_FAKE_GH_AXI_VERSION should override, got '$out'"
-  pass "fake gh authenticates and fake gh-axi reports the shared version"
+  out=$("$fakebin/quota-axi" --version)
+  [ "$out" = "$FM_TEST_QUOTA_AXI_VERSION" ] || \
+    fail "fake quota-axi --version should be $FM_TEST_QUOTA_AXI_VERSION, got '$out'"
+  out=$(FM_FAKE_QUOTA_AXI_VERSION=0.8.8 "$fakebin/quota-axi" --version)
+  [ "$out" = 0.8.8 ] || fail "FM_FAKE_QUOTA_AXI_VERSION should override, got '$out'"
+  pass "fake gh authenticates; fake gh-axi/quota-axi report the shared version"
+}
+
+test_fake_treehouse_and_tasks_axi() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/caps")
+  fm_test_fake_treehouse "$fakebin"
+  out=$("$fakebin/treehouse" get --help)
+  [ "$out" = 'Usage: treehouse get [--lease]' ] || \
+    fail "default treehouse help should advertise the lease form, got '$out'"
+  out=$(FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$fakebin/treehouse" get --help)
+  [ "$out" = 'Usage: treehouse get [--lease] [--lease-holder <holder>]' ] || \
+    fail "FM_FAKE_TREEHOUSE_LEASE_HELP should switch the lease-holder form, got '$out'"
+  out=$("$fakebin/treehouse" return --force /tmp/wt)
+  expect_code 0 $? "fake treehouse other verbs should exit 0"
+  fm_test_fake_treehouse "$fakebin" 'Usage: treehouse get'
+  out=$("$fakebin/treehouse" get --help)
+  [ "$out" = 'Usage: treehouse get' ] || \
+    fail "a suite's non-lease default usage should be honored, got '$out'"
+  fm_test_fake_tasks_axi "$fakebin"
+  out=$("$fakebin/tasks-axi" --version)
+  [ "$out" = "$FM_TEST_TASKS_AXI_VERSION" ] || \
+    fail "fake tasks-axi --version should be $FM_TEST_TASKS_AXI_VERSION, got '$out'"
+  out=$("$fakebin/tasks-axi" update --help)
+  assert_contains "$out" '  --body-file <path>' "update help should advertise --body-file"
+  assert_contains "$out" '  --archive-body' "update help should advertise --archive-body"
+  out=$("$fakebin/tasks-axi" mv --help)
+  assert_contains "$out" '[<id>...]' "mv help should advertise the multi-id form"
+  fm_test_fake_tasks_axi "$fakebin" 9.9.9 no no
+  out=$("$fakebin/tasks-axi" --version)
+  [ "$out" = 9.9.9 ] || fail "version override should round-trip, got '$out'"
+  out=$("$fakebin/tasks-axi" update --help)
+  assert_not_contains "$out" '  --archive-body' "archive-body=no must drop the capability line"
+  out=$("$fakebin/tasks-axi" mv --help)
+  assert_not_contains "$out" '[<id>...]' "multi-id=no must drop the multi-id usage"
+  "$fakebin/tasks-axi" hold t1
+  expect_code 0 $? "fake tasks-axi other verbs should exit 0"
+  pass "fake treehouse and tasks-axi answer the capability helps suites probe"
+}
+
+test_fake_uname_curl_hasher() {
+  local fakebin out log rc
+  fakebin=$(fm_fakebin "$TMP_ROOT/lint")
+  fm_test_fake_uname "$fakebin"
+  out=$("$fakebin/uname" -s)
+  [ "$out" = Linux ] || fail "fake uname -s should default to Linux, got '$out'"
+  out=$(FM_TEST_UNAME_M=arm64 "$fakebin/uname" -m)
+  [ "$out" = arm64 ] || fail "FM_TEST_UNAME_M should override the machine, got '$out'"
+  log="$TMP_ROOT/lint/curls"
+  : > "$log"
+  fm_test_fake_curl "$fakebin"
+  CURL_COUNT="$log.count" CURL_URL_LOG="$log" "$fakebin/curl" -o "$TMP_ROOT/lint/dl" https://example.test/a
+  expect_code 0 $? "fake curl should succeed by default"
+  assert_grep 'https://example.test/a' "$log" "fake curl did not log its URL"
+  [ "$(cat "$log.count")" = 1 ] || \
+    fail "fake curl should have counted exactly 1 call, got '$(cat "$log.count")'"
+  CURL_COUNT="$log.count" CURL_FAIL_UNTIL=2 "$fakebin/curl" -o "$TMP_ROOT/lint/dl" https://example.test/b; rc=$?
+  expect_code 22 "$rc" "fake curl should fail while under CURL_FAIL_UNTIL"
+  fm_test_fake_hasher "$fakebin" sha256sum
+  out=$(SHA256_STUB_HASH=abc123 "$fakebin/sha256sum" "$log")
+  case "$out" in 'abc123  '*) ;; *) fail "fake hasher should print <hash>  <file>, got '$out'" ;; esac
+  fm_test_fake_hasher "$fakebin" shasum
+  SHA256_STUB_HASH=abc123 "$fakebin/shasum" -a 256 "$log" >/dev/null
+  expect_code 0 $? "fake shasum should accept -a 256"
+  SHA256_STUB_HASH=abc123 "$fakebin/shasum" -a 1 "$log" >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "fake shasum should refuse a non-256 algorithm"
+  pass "fake uname/curl/hasher answer the installer suites' probes"
 }
 
 test_spawn_tmux_and_fakebin() {
@@ -127,6 +199,8 @@ test_spawn_home_layout() {
 test_no_mistakes_version_constant
 test_no_mistakes_init_doctor_markers
 test_fake_gh_and_gh_axi
+test_fake_treehouse_and_tasks_axi
+test_fake_uname_curl_hasher
 test_spawn_tmux_and_fakebin
 test_send_stubs_and_ssh
 test_spawn_home_layout

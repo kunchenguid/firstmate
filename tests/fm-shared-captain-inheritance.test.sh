@@ -5,8 +5,8 @@
 # data/captain.md and data/learnings.md remain domain-local in every home.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-config-inherit-lib.sh"
@@ -208,11 +208,7 @@ make_fake_spawn_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" tmux
   printf '%s\n' "$fakebin"
 }
 
@@ -221,40 +217,10 @@ add_bootstrap_compatible_tools() {
   local fakebin=$1
   fm_fake_exit0 "$fakebin" node chrome-devtools-axi gh treehouse
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
-  cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.1.29'
-  exit 0
-fi
-exit 0
-SH
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.46.0 (fake)'
-  exit 0
-fi
-exit 0
-SH
-  cat > "$fakebin/tasks-axi" <<'SH'
-#!/usr/bin/env bash
-case "${1:-} ${2:-}" in
-  "--version ") printf '%s\n' '0.2.4' ;;
-  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
-  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
-esac
-exit 0
-SH
-  cat > "$fakebin/quota-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.1.29'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/gh-axi" "$fakebin/no-mistakes" "$fakebin/tasks-axi" "$fakebin/quota-axi"
+  fm_test_fake_gh_axi "$fakebin"
+  fm_test_fake_no_mistakes "$fakebin"
+  fm_test_fake_tasks_axi "$fakebin"
+  fm_test_fake_quota_axi "$fakebin"
 }
 
 new_git_world() {

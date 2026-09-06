@@ -196,20 +196,13 @@ case "${1:-}:${2:-}" in
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac
 SH
-  cat > "$CASE_BIN/treehouse" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
+  fm_fake_exit0 "$CASE_BIN" treehouse
   cat > "$CASE_BIN/claude" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
   chmod +x "$CASE_BIN/uname" "$CASE_BIN/launchctl" "$CASE_BIN/tasks-axi" "$CASE_BIN/treehouse" "$CASE_BIN/claude"
-  cat > "$CASE_BIN/sleep" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$CASE_BIN/sleep"
+  fm_fake_exit0 "$CASE_BIN" sleep
 }
 
 # doctor [args...] -> runs the real doctor against the current fixture,

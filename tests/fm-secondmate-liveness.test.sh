@@ -32,8 +32,8 @@
 #     secondmates never spawn secondmates), it is a silent no-op.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
@@ -208,56 +208,12 @@ make_toolchain() {
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" node chrome-devtools-axi pi-signed
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
-  cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.1.29'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/gh-axi"
-  cat > "$fakebin/gh" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/gh"
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
-fi
-exit 0
-SH
-  chmod +x "$fakebin/treehouse"
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.46.0 (fake)'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/no-mistakes"
-  cat > "$fakebin/tasks-axi" <<'SH'
-#!/usr/bin/env bash
-case "${1:-} ${2:-}" in
-  "--version ") printf '%s\n' '0.2.4' ;;
-  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
-  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tasks-axi"
-  cat > "$fakebin/quota-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.1.29'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/quota-axi"
+  fm_test_fake_gh_axi "$fakebin"
+  fm_test_fake_gh "$fakebin"
+  fm_test_fake_treehouse "$fakebin"
+  fm_test_fake_no_mistakes "$fakebin"
+  fm_test_fake_tasks_axi "$fakebin"
+  fm_test_fake_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

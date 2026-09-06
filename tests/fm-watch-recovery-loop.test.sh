@@ -71,11 +71,7 @@ test_unacknowledged_recovery_is_announced_once_per_generation() {
   mkdir -p "$repo/bin" "$home/state" "$home/config" "$fakebin"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" tmux
   cat > "$repo/bin/fm-watch-arm.sh" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = --handling-delivered ]; then

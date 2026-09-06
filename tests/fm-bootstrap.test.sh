@@ -23,8 +23,8 @@
 # twice.
 set -u
 
-# shellcheck source=tests/lib.sh disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
@@ -46,88 +46,13 @@ make_fake_toolchain() {
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
-  cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_GH_AXI_VERSION:-0.1.29}"
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/gh-axi"
-  cat > "$fakebin/gh" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/gh"
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
-    printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
-  else
-    printf '%s\n' 'Usage: treehouse get'
-  fi
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/treehouse"
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z}"
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/no-mistakes"
-  add_tasks_axi "$fakebin" "0.2.4"
-  add_quota_axi "$fakebin"
+  fm_test_fake_gh_axi "$fakebin"
+  fm_test_fake_gh "$fakebin"
+  fm_test_fake_treehouse "$fakebin" 'Usage: treehouse get'
+  fm_test_fake_no_mistakes "$fakebin"
+  fm_test_fake_tasks_axi "$fakebin"
+  fm_test_fake_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
-}
-
-add_quota_axi() {
-  local fakebin=$1
-  cat > "$fakebin/quota-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.29}"
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/quota-axi"
-}
-
-add_tasks_axi() {
-  local fakebin=$1 version=$2 archive_body=${3:-yes} multi_id=${4:-yes} archive_line mv_usage
-  archive_line=""
-  [ "$archive_body" = yes ] && archive_line='  --archive-body'
-  mv_usage='usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
-  [ "$multi_id" = yes ] || mv_usage='usage: tasks-axi mv <id> --to <path-or-dir>'
-  cat > "$fakebin/tasks-axi" <<SH
-#!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then
-  printf '%s\n' '$version'
-  exit 0
-fi
-if [ "\${1:-}" = update ] && [ "\${2:-}" = --help ]; then
-  printf '%s\n' 'usage: tasks-axi update <id> [flags]'
-  printf '%s\n' '  --body-file <path>'
-  [ -z '$archive_line' ] || printf '%s\n' '$archive_line'
-  exit 0
-fi
-if [ "\${1:-}" = mv ] && [ "\${2:-}" = --help ]; then
-  printf '%s\n' '$mv_usage'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/tasks-axi"
 }
 
 add_real_jq() {
@@ -274,7 +199,7 @@ test_bootstrap_reporting() {
           tasks=${tasks%:nomulti}
           ;;
       esac
-      add_tasks_axi "$fakebin" "$tasks" "$archive_body" "$multi_id"
+      fm_test_fake_tasks_axi "$fakebin" "$tasks" "$archive_body" "$multi_id"
     fi
     if [ "$quota" = "0" ]; then
       rm -f "$fakebin/quota-axi"
@@ -428,7 +353,7 @@ test_tasks_axi_min_version() {
         version=${version%:nomulti}
         ;;
     esac
-    add_tasks_axi "$fakebin" "$version" "$archive_body" "$multi_id"
+    fm_test_fake_tasks_axi "$fakebin" "$version" "$archive_body" "$multi_id"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
