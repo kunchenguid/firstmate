@@ -374,22 +374,27 @@ def cmd_poll_list():
                 retry_emitted += 1
             else:
                 new_emitted += 1
-        # Emit the mailbox generation guard first, then each message row
-        # (uid, date, from, subject, status) so the bash layer diffs against
-        # the cursor and the retry set. The rows must be printed BEFORE the
-        # retry-scan position is persisted: an interruption between emission
-        # and the position write must never advance the cursor over rows that
-        # never reached the bash wake layer. A failed position write still
-        # fails the poll loudly, so the same bounded window is re-scanned on
-        # the next poll rather than silently restarting from the old head.
-        print('uidvalidity\t%s' % uidv)
-        for uid, idate, fr, subj, status in out:
-            print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
-        save_retry_pos(retry_pos_path, len(retry_order), window, retry_pos)
+        # Finish every IMAP round-trip before emit or persist so a hung
+        # logout cannot run after the retry-scan position advances. Then emit
+        # the mailbox generation guard and each message row (uid, date, from,
+        # subject, status) so the bash layer diffs against the cursor and the
+        # retry set. Flush stdout before persisting: under a pipe CPython
+        # block-buffers, and a timeout kill would otherwise discard unflushed
+        # rows after the position had already advanced. An interruption
+        # between emission and the position write must never advance the
+        # cursor over rows that never reached the bash wake layer. A failed
+        # position write still fails the poll loudly, so the same bounded
+        # window is re-scanned on the next poll rather than silently
+        # restarting from the old head.
         try:
             m.logout()
         except Exception:
             pass
+        print('uidvalidity\t%s' % uidv)
+        for uid, idate, fr, subj, status in out:
+            print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
+        sys.stdout.flush()
+        save_retry_pos(retry_pos_path, len(retry_order), window, retry_pos)
         return 0
     except Exception as e:
         # stderr, not stdout: the bash poll's command substitution captures

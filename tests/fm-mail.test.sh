@@ -1221,6 +1221,128 @@ PYEOF
   pass "fm-mail: retry-scan position is saved only after rows are emitted"
 }
 
+test_poll_retry_logout_before_emit_and_position_save() {
+  # A standing check can SIGKILL poll_list while IMAP logout is still blocked.
+  # Logout must finish before any emit or persist so that kill cannot advance
+  # the retry-scan position over rows bash never received.
+  local harness out rc=0 pos
+  harness="$TMP_ROOT/retry-logout-order-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, signal, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_RETRY_POS': sys.argv[3],
+    'FM_MAIL_POLL_MAX_WAKES': '1',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'81 82'])
+        if cmd == 'fetch':
+            if args[0] == b'81':
+                return ('NO', None)
+            return ('OK', [(b'', b'Subject: recovered\r\nFrom: bob@x.com\r\n\r\n')])
+    def logout(self):
+        os.kill(os.getpid(), signal.SIGKILL)
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[4])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  {
+    printf 'uidvalidity=90009\n'
+    printf '81\n82\n'
+  } > "$HOME_DIR/state/.mail-seen"
+  printf '81\n82\n' > "$HOME_DIR/state/.mail-retry"
+  : > "$HOME_DIR/state/.mail-retry-pos"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "poll_list must not exit 0 when logout is killed"
+  assert_not_contains "$out" $'82\t' "a killed logout must not emit rows"
+  pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "" "$pos" "a killed logout must not advance the retry-scan position"
+  pass "fm-mail: hung logout cannot advance the retry-scan position"
+}
+
+test_poll_retry_flush_before_position_save() {
+  # Under a pipe, CPython block-buffers stdout. Persist then SIGKILL must still
+  # leave the recovered row in the capture, which only happens if stdout was
+  # flushed before the position write.
+  local harness out rc=0 pos
+  harness="$TMP_ROOT/retry-flush-order-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, signal, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_RETRY_POS': sys.argv[3],
+    'FM_MAIL_POLL_MAX_WAKES': '1',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'81 82'])
+        if cmd == 'fetch':
+            if args[0] == b'81':
+                return ('NO', None)
+            return ('OK', [(b'', b'Subject: recovered\r\nFrom: bob@x.com\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[4])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+orig = mod.save_retry_pos
+def save_then_kill(*a, **k):
+    orig(*a, **k)
+    os.kill(os.getpid(), signal.SIGKILL)
+mod.save_retry_pos = save_then_kill
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  {
+    printf 'uidvalidity=90009\n'
+    printf '81\n82\n'
+  } > "$HOME_DIR/state/.mail-seen"
+  printf '81\n82\n' > "$HOME_DIR/state/.mail-retry"
+  : > "$HOME_DIR/state/.mail-retry-pos"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "poll_list must not exit 0 when killed after persist"
+  assert_contains "$out" $'82\t\tbob@x.com\trecovered\tretry' \
+    "flushed rows survive a kill immediately after the position write"
+  pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "1" "$pos" "position write completed before the kill"
+  pass "fm-mail: stdout is flushed before the retry-scan position is saved"
+}
+
 test_poll_skips_unfetchable_uid_but_keeps_progress() {
   local harness out rc=0
   harness="$TMP_ROOT/poll-window-harness.py"
@@ -1777,6 +1899,8 @@ test_poll_skips_unfetchable_uid_but_keeps_progress
 test_poll_retries_transient_fetch_and_surfaces_real_metadata
 test_poll_retry_cursor_advances_past_failures
 test_poll_retry_emission_precedes_position_save
+test_poll_retry_logout_before_emit_and_position_save
+test_poll_retry_flush_before_position_save
 test_poll_retry_surfaces_under_new_mail_flood
 test_poll_resurfaces_degraded_uid_whose_wake_never_recorded
 test_poll_cap_one_never_suppresses_new_mail
