@@ -386,6 +386,12 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       | if $v == null then null else ($v | trim) end;
     def metadata($rest; $key):
       cap($rest; ".*(?:\\(|,[[:space:]]*)" + $key + ":[[:space:]]*(?<v>[^,)]*)");
+    def kind_of($rest):
+      metadata($rest; "kind") as $kind
+      | if $kind != null then $kind
+        elif ($rest | test("^SCOUT(?:[[:space:]]|$)")) then "scout"
+        elif ($rest | test("^SHIP(?:[[:space:]]|$)")) then "ship"
+        else null end;
     def hold_metadata($rest):
       cap($rest; ".*\\(hold:[[:space:]]*(?<v>[^)]*)");
     def metadata_word($rest; $key):
@@ -451,7 +457,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              checked:($m.check | test("[xX]")),
              title:title_of($rest),
              repo:metadata($rest; "repo"),
-             kind:metadata($rest; "kind"),
+             kind:kind_of($rest),
              priority:metadata($rest; "priority"),
              hold_reason:hold_metadata($rest),
              hold_kind:metadata($rest; "hold-kind"),
