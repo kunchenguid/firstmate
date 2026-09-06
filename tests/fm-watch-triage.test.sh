@@ -2396,18 +2396,25 @@ test_live_named_declared_wait_takes_the_bounded_pause_cadence() {
 
   # Round 1 is the first sight of the declared wait: the pane is idle, the agent is
   # alive, and the wait is named - so it must be absorbed onto the pause cadence
-  # rather than surfaced as an inconclusive stale.
+  # rather than surfaced as an inconclusive stale. It is also the round that proves
+  # the read counter is wired: round 1 has no cached verdict and MUST take the full
+  # path, so a zero here would mean the instrument, not the cheap path, is what the
+  # churn rounds below are measuring.
+  FM_FAKE_CREW_STATE_COUNT_FILE="$dir/crew-reads"; export FM_FAKE_CREW_STATE_COUNT_FILE
   printf 'board up, elapsed 1s' > "$capture_file"
   printf '%s' "$(hash_text "board up, elapsed 1s")" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb "$crew" \
     || fail "first sight of a live named declared wait surfaced instead of taking the pause cadence"
   [ -e "$state/.paused-$key" ] || fail "first sight recorded no pause cadence marker"
+  reads=$(cat "$dir/crew-reads" 2>/dev/null || echo 0)
+  [ "$reads" -ge 1 ] \
+    || fail "the crew-state read counter recorded nothing on the uncached first sight, so its zero below would prove nothing"
 
   # The pane now churns while the SAME named wait stands. Each new hash re-enters
   # the stale path; none of them may alarm, and none may pay for a fresh
   # authoritative read while round 1's verdict is still cached.
-  FM_FAKE_CREW_STATE_COUNT_FILE="$dir/crew-reads"; export FM_FAKE_CREW_STATE_COUNT_FILE
+  printf '0\n' > "$dir/crew-reads"
   round=2
   while [ "$round" -le 3 ]; do
     printf 'board up, elapsed %ss' "$round" > "$capture_file"
