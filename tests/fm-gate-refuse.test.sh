@@ -303,6 +303,7 @@ SH
   git -C "$case_dir/wt" commit -q --allow-empty -m "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
+  fm_fake_treehouse_pool "$fakebin" "$case_dir/wt"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
     "worktree=$case_dir/wt" "project=$case_dir/project" \

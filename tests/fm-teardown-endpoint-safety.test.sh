@@ -26,6 +26,16 @@ exit 0
 SH
   cat > "$TMP_ROOT/$dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+# `status` is a read-only pool inspection fm-teardown.sh's pre-reap
+# treehouse_is_managed check makes; answered directly (reporting the sibling
+# `worktree` dir as pool-managed) and never logged to the shared runtime log,
+# which stays scoped to actual endpoint actions (tmux/treehouse return calls)
+# this suite's "did teardown reach the endpoint" assertions police.
+if [ "${1:-}" = status ]; then
+  wt=$(cd ../worktree 2>/dev/null && pwd -P)
+  [ -n "$wt" ] && printf '1     leased       %s\n' "$wt"
+  exit 0
+fi
 printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"

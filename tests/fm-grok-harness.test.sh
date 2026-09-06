@@ -21,6 +21,7 @@ make_spawn_case() {
   fm_test_spawn_home "$home"
   fm_test_spawn_brief "$home" "$id" brief
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  fm_fake_treehouse_pool "$fakebin" "$wt"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$grok_home|$id"
 }
 

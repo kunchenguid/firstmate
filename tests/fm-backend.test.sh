@@ -926,9 +926,10 @@ test_spawn_symlinked_project_prefix_avoids_false_refusal() {
 
 # --- old vs new: fm-teardown.sh ----------------------------------------------
 
-make_teardown_fakebin() {  # <dir> -> echoes fakebin dir; logs tmux+treehouse calls
-  local dir=$1 fb="$1/fakebin"
+make_teardown_fakebin() {  # <dir> <pool-path> -> echoes fakebin dir; logs tmux+treehouse calls
+  local dir=$1 pool_path=$2 fb="$1/fakebin"
   mkdir -p "$fb"
+  printf '%s\n' "$pool_path" > "$fb/.treehouse-pool-path"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -938,6 +939,11 @@ SH
   cat > "$fb/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = status ]; then
+  pool_path=$(cat "$(cd "$(dirname "$0")" && pwd -P)/.treehouse-pool-path")
+  printf '1     leased       %s\n' "$pool_path"
+  exit 0
+fi
 { printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
 exit 0
 SH
@@ -978,7 +984,7 @@ test_teardown_conformance_old_vs_new() {
   proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
   id="teardownconform1"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  fb=$(make_teardown_fakebin "$TMP_ROOT/teardown-fake")
+  fb=$(make_teardown_fakebin "$TMP_ROOT/teardown-fake" "$wt")
 
   data="$TMP_ROOT/teardown-data"
   mkdir -p "$data/$id"

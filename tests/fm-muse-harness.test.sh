@@ -135,6 +135,7 @@ Exercise Muse dispatch.
 Verify the Muse harness behavior under test.
 EOF
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  fm_fake_treehouse_pool "$fakebin" "$wt"
   touch "$home/state/.last-watcher-beat"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$id"
 }

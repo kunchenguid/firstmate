@@ -155,6 +155,7 @@ Exercise Kimi dispatch.
 Verify launch and delivery behavior.
 EOF
   printf 'kimi\n' > "$home/config/crew-harness"
+  fm_fake_treehouse_pool "$fakebin" "$wt"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"
