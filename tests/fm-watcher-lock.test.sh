@@ -460,35 +460,68 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
-test_watch_restart_rejects_reused_pid() {
-  local dir state fakebin out live pid i
-  dir=$(make_case restart-reused-pid)
+test_watch_restart_reclaims_dead_holder() {
+  local dir state fakebin out dead_pid armpid i lock_pid
+  dir=$(make_case restart-dead-holder)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
-  sleep 300 &
-  live=$!
+  dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid + 1)); done
   mkdir "$state/.watch.lock"
-  printf '%s\n' "$live" > "$state/.watch.lock/pid"
-  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
-  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
-  printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
-  pid=$!
+  printf '%s\n' "$dead_pid" > "$state/.watch.lock/pid"
+  FM_WATCH_PREDECESSOR_ARM_PID=fixture PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" --restart > "$out" &
+  armpid=$!
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$pid"; do
+  lock_pid=$dead_pid
+  while [ "$i" -lt 80 ]; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$lock_pid" ] && [ "$lock_pid" != "$dead_pid" ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  is_live_non_zombie "$pid" \
-    && fail "restart did not surface recovery after replacing a reused-pid lock"
-  wait "$pid" 2>/dev/null || true
-  grep -F 'check: rearm-resurface' "$out" >/dev/null \
-    || fail "restart replaced reused-pid lock without surfacing recovery: $(cat "$out")"
-  is_live_non_zombie "$live" || fail "restart killed a reused unrelated pid"
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
-  pass "watch restart preserves recovery without signaling a reused pid"
+  [ -n "$lock_pid" ] && [ "$lock_pid" != "$dead_pid" ] \
+    || fail "restart did not reclaim the dead holder's stale lock: $(cat "$out")"
+  is_live_non_zombie "$lock_pid" || fail "restart replacement watcher was not live"
+  kill "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "watch restart reclaims a dead holder without signalling it"
+}
+
+test_watch_restart_leaves_live_missing_beacon_holder_unsignalled() {
+  local dir state fakebin out ready signalled holder identity status held
+  dir=$(make_case restart-live-missing-beacon)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  ready="$dir/holder.ready"
+  signalled="$dir/holder.signalled"
+  node -e 'const fs=require("node:fs"); process.on("SIGTERM",()=>fs.writeFileSync(process.argv[2],"TERM\n")); process.on("SIGINT",()=>fs.writeFileSync(process.argv[2],"INT\n")); fs.writeFileSync(process.argv[1],"ready\n"); setTimeout(()=>{},300000)' "$ready" "$signalled" &
+  holder=$!
+  while [ ! -s "$ready" ]; do sleep 0.02; done
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder") \
+    || fail "could not identify the live restart holder"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_GUARD_GRACE=2 FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" --restart > "$out" 2>&1 || status=$?
+  held=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ "$status" -eq 0 ] || fail "restart failed instead of preserving its live holder: $(cat "$out")"
+  grep -F 'FM_WATCH_ARM_RESULT=busy-holder' "$out" >/dev/null \
+    || fail "restart did not return the typed busy-holder result: $(cat "$out")"
+  [ ! -e "$signalled" ] || fail "restart signalled its live missing-beacon holder: $(cat "$signalled")"
+  is_live_non_zombie "$holder" || fail "restart terminated its live missing-beacon holder"
+  [ "$held" = "$holder" ] || fail "restart replaced its live holder's lock"
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "watch restart classifies a live missing-beacon holder before acting"
 }
 
 test_watch_restart_attaches_to_healthy_peer() {
@@ -1492,7 +1525,8 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
-test_watch_restart_rejects_reused_pid
+test_watch_restart_reclaims_dead_holder
+test_watch_restart_leaves_live_missing_beacon_holder_unsignalled
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
