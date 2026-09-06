@@ -6,12 +6,14 @@
 # running forever after teardown, because nothing ever brought it down.
 #
 # Covers:
-#   - the core fix: a task's own docker containers are stopped and removed by
-#     its teardown (test_docker_stack_is_stopped_on_teardown, which FAILS
-#     against the pre-fix script).
+#   - the core fix: a task's own Docker Compose containers and networks are
+#     removed by its teardown (test_docker_stack_is_stopped_on_teardown, which
+#     FAILS against the pre-fix script).
 #   - isolation, the most important property: tearing down one task's stack
 #     never touches a second task's unrelated stack, even though both are
 #     live at the same time (test_docker_stack_isolation_leaves_other_task_untouched).
+#   - a Compose project spanning another worktree is refused as a unit before
+#     any of its containers or networks are removed.
 #   - an absent docker binary, an unreachable daemon, and a task that never
 #     started a stack are all ordinary, silent no-ops.
 #   - a container-enumeration failure (daemon reachable, query itself fails)
@@ -50,13 +52,13 @@ docker_test_cleanup() {
   local id net
   if [ "$REAL_DOCKER_AVAILABLE" = 1 ]; then
     for id in "${DOCKER_CLEANUP_CONTAINER_IDS[@]:-}"; do
-      [ -n "$id" ] && docker rm -f "$id" >/dev/null 2>&1
+      [ -n "$id" ] && docker rm -f "$id" >/dev/null 2>&1 || true
     done
     for net in "${DOCKER_CLEANUP_NETWORKS[@]:-}"; do
-      [ -n "$net" ] && docker network rm "$net" >/dev/null 2>&1
+      [ -n "$net" ] && docker network rm "$net" >/dev/null 2>&1 || true
     done
   fi
-  fm_test_cleanup
+  fm_test_cleanup || true
 }
 trap docker_test_cleanup EXIT
 trap 'docker_test_cleanup; exit 130' INT
@@ -155,6 +157,7 @@ run_teardown() {
   FM_FAKE_DOCKER_STATE="$case_dir/docker.state" \
   FM_FAKE_DOCKER_STOP_FAIL_ID="${FM_FAKE_DOCKER_STOP_FAIL_ID:-}" \
   FM_FAKE_DOCKER_RM_FAIL_ID="${FM_FAKE_DOCKER_RM_FAIL_ID:-}" \
+  FM_FAKE_DOCKER_NETWORK_RM_FAIL_ID="${FM_FAKE_DOCKER_NETWORK_RM_FAIL_ID:-}" \
   FM_FAKE_DOCKER_HANG_COMMAND="${FM_FAKE_DOCKER_HANG_COMMAND:-}" \
   FM_FAKE_DOCKER_HANG_SECS="${FM_FAKE_DOCKER_HANG_SECS:-3}" \
   FM_TEARDOWN_DOCKER_TIMEOUT_SECS="${FM_TEARDOWN_DOCKER_TIMEOUT_SECS:-10}" \
@@ -171,6 +174,9 @@ install_stateful_docker() {
 set -u
 state=${FM_FAKE_DOCKER_STATE:?}
 command=${1:-}
+if [ "$command" = network ]; then
+  command="network-${2:-}"
+fi
 if [ "${FM_FAKE_DOCKER_HANG_COMMAND:-}" = "$command" ]; then
   sleep "${FM_FAKE_DOCKER_HANG_SECS:-3}"
   : > "${state}.${command}.completed"
@@ -181,22 +187,35 @@ case "${1:-}" in
     exit 0
     ;;
   ps)
-    filter=
+    working_filter=
+    project_filter=
+    formatted=0
     for arg in "$@"; do
       case "$arg" in
         label=com.docker.compose.project.working_dir=*)
-          filter=${arg#label=com.docker.compose.project.working_dir=}
+          working_filter=${arg#label=com.docker.compose.project.working_dir=}
+          ;;
+        label=com.docker.compose.project=*)
+          project_filter=${arg#label=com.docker.compose.project=}
+          ;;
+        --format)
+          formatted=1
           ;;
       esac
     done
     [ -f "$state" ] || exit 0
-    awk -F '\t' -v label="$filter" '$2 == label { print $1 }' "$state"
+    awk -F '\t' -v working="$working_filter" -v project="$project_filter" -v formatted="$formatted" '
+      (working == "" || $2 == working) && (project == "" || $3 == project) {
+        if (formatted == 1) print $1 "\t" $3 "\t" $2
+        else print $1
+      }
+    ' "$state"
     ;;
   stop)
     id=${2:-}
     [ "${FM_FAKE_DOCKER_STOP_FAIL_ID:-}" != "$id" ] || exit 1
     tmp="${state}.tmp.$$"
-    awk -F '\t' -v OFS='\t' -v id="$id" '$1 == id { $3 = "stopped" } { print }' "$state" > "$tmp" \
+    awk -F '\t' -v OFS='\t' -v id="$id" '$1 == id { $4 = "stopped" } { print }' "$state" > "$tmp" \
       && mv "$tmp" "$state"
     ;;
   rm)
@@ -208,13 +227,37 @@ case "${1:-}" in
     ;;
   inspect)
     id=${!#}
-    status=$(awk -F '\t' -v id="$id" '$1 == id { print $3; exit }' "$state")
+    status=$(awk -F '\t' -v id="$id" '$1 == id { print $4; exit }' "$state")
     [ -n "$status" ] || exit 1
     if [ "$status" = running ]; then
       echo true
     else
       echo false
     fi
+    ;;
+  network)
+    case "${2:-}" in
+      ls)
+        project_filter=
+        for arg in "$@"; do
+          case "$arg" in
+            label=com.docker.compose.project=*)
+              project_filter=${arg#label=com.docker.compose.project=}
+              ;;
+          esac
+        done
+        [ -f "${state}.networks" ] || exit 0
+        awk -F '\t' -v project="$project_filter" '$2 == project { print $1 }' "${state}.networks"
+        ;;
+      rm)
+        id=${3:-}
+        [ "${FM_FAKE_DOCKER_NETWORK_RM_FAIL_ID:-}" != "$id" ] || exit 1
+        tmp="${state}.networks.tmp.$$"
+        awk -F '\t' -v id="$id" '$1 != id { print }' "${state}.networks" > "$tmp" \
+          && mv "$tmp" "${state}.networks"
+        ;;
+      *) exit 2 ;;
+    esac
     ;;
   *)
     exit 2
@@ -225,8 +268,13 @@ SH
 }
 
 seed_fake_docker_container() {
-  local case_dir=$1 id=$2 label=$3
-  printf '%s\t%s\trunning\n' "$id" "$label" >> "$case_dir/docker.state"
+  local case_dir=$1 id=$2 label=$3 project=${4:-project-$2}
+  printf '%s\t%s\t%s\trunning\n' "$id" "$label" "$project" >> "$case_dir/docker.state"
+}
+
+seed_fake_docker_network() {
+  local case_dir=$1 id=$2 project=$3
+  printf '%s\t%s\n' "$id" "$project" >> "$case_dir/docker.state.networks"
 }
 
 fake_docker_container_ids() {
@@ -240,6 +288,12 @@ fake_docker_container_running() {
   local case_dir=$1 id=$2
   FM_FAKE_DOCKER_STATE="$case_dir/docker.state" \
     "$case_dir/fakebin/docker" inspect -f '{{.State.Running}}' "$id"
+}
+
+fake_docker_network_exists() {
+  local case_dir=$1 id=$2
+  awk -F '\t' -v id="$id" '$1 == id { found=1 } END { exit !found }' \
+    "$case_dir/docker.state.networks" 2>/dev/null
 }
 
 # Build a PATH with every common tool except docker, so `command -v docker`
@@ -260,8 +314,8 @@ make_path_without_docker() {  # <case-dir>
 
 # Start a one-container docker compose stack rooted exactly at <dir>, so its
 # com.docker.compose.project.working_dir label equals <dir>. Registers the
-# stack's default network for this file's own cleanup because teardown removes
-# only matching containers, not the network. Args: <dir> <project>
+# stack's default network for this file's own fallback cleanup. Args: <dir>
+# <project>
 start_docker_stack() {
   local dir=$1 project=$2 out
   cat > "$dir/docker-compose.yml" <<'YML'
@@ -341,6 +395,9 @@ test_docker_stack_is_stopped_on_teardown() {
 
   ids=$(docker_stack_container_ids "$abs_wt")
   [ -z "$ids" ] || fail "docker-stack-core: container(s) for $abs_wt are still alive after teardown: $ids"
+  if docker network inspect "${project}_default" >/dev/null 2>&1; then
+    fail "docker-stack-core: Compose network ${project}_default remains after teardown"
+  fi
   assert_absent "$case_dir/wt" \
     "docker-stack-core: treehouse did not return the worktree after docker cleanup"
   assert_grep "$case_dir/wt" "$case_dir/treehouse.log" \
@@ -385,11 +442,12 @@ test_docker_stack_isolation_leaves_other_task_untouched() {
 }
 
 test_portable_docker_stack_is_stopped_on_teardown() {
-  local id=docker-portable-core case_dir abs_wt ids rc
+  local id=docker-portable-core case_dir abs_wt ids rc compose_project=portable-core-project
   case_dir=$(make_case "$id")
   abs_wt=$(canon "$case_dir/wt")
   install_stateful_docker "$case_dir"
-  seed_fake_docker_container "$case_dir" portable-core "$abs_wt"
+  seed_fake_docker_container "$case_dir" portable-core "$abs_wt" "$compose_project"
+  seed_fake_docker_network "$case_dir" portable-core-network "$compose_project"
 
   ids=$(fake_docker_container_ids "$case_dir" "$abs_wt")
   [ "$ids" = portable-core ] || fail "docker-portable-core: fixture did not expose the task container"
@@ -402,9 +460,43 @@ test_portable_docker_stack_is_stopped_on_teardown() {
 
   ids=$(fake_docker_container_ids "$case_dir" "$abs_wt")
   [ -z "$ids" ] || fail "docker-portable-core: task container remains after teardown"
+  if fake_docker_network_exists "$case_dir" portable-core-network; then
+    fail "docker-portable-core: task Compose network remains after teardown"
+  fi
+  assert_grep "removed Compose project $compose_project for task $id: 1 container(s), 1 network(s)" \
+    "$case_dir/stderr" "docker-portable-core: successful cleanup was not reported exactly"
   assert_absent "$case_dir/wt" \
     "docker-portable-core: treehouse did not return the worktree after docker cleanup"
   pass "portable teardown removes its task's docker container before returning the worktree"
+}
+
+test_portable_shared_compose_project_is_refused() {
+  local id=docker-portable-shared case_dir abs_wt other_wt rc state compose_project=portable-shared-project
+  case_dir=$(make_case "$id")
+  abs_wt=$(canon "$case_dir/wt")
+  other_wt="$case_dir/other-wt"
+  mkdir -p "$other_wt"
+  other_wt=$(canon "$other_wt")
+  install_stateful_docker "$case_dir"
+  seed_fake_docker_container "$case_dir" shared-task "$abs_wt" "$compose_project"
+  seed_fake_docker_container "$case_dir" shared-other "$other_wt" "$compose_project"
+  seed_fake_docker_network "$case_dir" shared-network "$compose_project"
+
+  set +e
+  run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-portable-shared: refusal should not block teardown"
+
+  state=$(fake_docker_container_running "$case_dir" shared-task)
+  [ "$state" = true ] || fail "docker-portable-shared: task container was removed from a cross-worktree project"
+  state=$(fake_docker_container_running "$case_dir" shared-other)
+  [ "$state" = true ] || fail "docker-portable-shared: other worktree container was removed"
+  fake_docker_network_exists "$case_dir" shared-network \
+    || fail "docker-portable-shared: shared project network was removed"
+  assert_grep "has containers outside task $id's exact worktree" "$case_dir/stderr" \
+    "docker-portable-shared: cross-worktree ownership refusal was not reported"
+  pass "a Compose project spanning another worktree is refused intact and reported"
 }
 
 test_portable_docker_stack_isolation() {
@@ -456,14 +548,39 @@ test_docker_removal_failure_is_reported_and_non_blocking() {
   pass "a failed docker removal is visible and does not block teardown"
 }
 
+test_docker_network_removal_failure_is_reported() {
+  local id=docker-network-remove-fail case_dir abs_wt rc compose_project=network-remove-fail-project
+  case_dir=$(make_case "$id")
+  abs_wt=$(canon "$case_dir/wt")
+  install_stateful_docker "$case_dir"
+  seed_fake_docker_container "$case_dir" network-owner "$abs_wt" "$compose_project"
+  seed_fake_docker_network "$case_dir" sticky-network "$compose_project"
+
+  set +e
+  FM_FAKE_DOCKER_NETWORK_RM_FAIL_ID=sticky-network \
+    run_teardown "$case_dir" "$id" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "docker-network-remove-fail: network failure should not block teardown"
+
+  [ -z "$(fake_docker_container_ids "$case_dir" "$abs_wt")" ] \
+    || fail "docker-network-remove-fail: verified project container remains"
+  fake_docker_network_exists "$case_dir" sticky-network \
+    || fail "docker-network-remove-fail: fixture did not preserve the failed network"
+  assert_grep "network cleanup failed for: sticky-network" "$case_dir/stderr" \
+    "docker-network-remove-fail: failed network removal was not reported exactly"
+  pass "a failed Compose network removal is visible and non-blocking"
+}
+
 test_docker_commands_are_bounded() {
   local command id case_dir abs_wt rc
-  for command in info ps stop rm; do
+  for command in info ps stop rm network-ls network-rm; do
     id="docker-timeout-$command"
     case_dir=$(make_case "$id")
     abs_wt=$(canon "$case_dir/wt")
     install_stateful_docker "$case_dir"
     seed_fake_docker_container "$case_dir" "timeout-$command" "$abs_wt"
+    seed_fake_docker_network "$case_dir" "timeout-$command-network" "project-timeout-$command"
 
     set +e
     FM_FAKE_DOCKER_HANG_COMMAND="$command" \
@@ -646,7 +763,9 @@ test_docker_stack_never_touches_unregistered_directory() {
 
 test_portable_docker_stack_is_stopped_on_teardown
 test_portable_docker_stack_isolation
+test_portable_shared_compose_project_is_refused
 test_docker_removal_failure_is_reported_and_non_blocking
+test_docker_network_removal_failure_is_reported
 test_docker_commands_are_bounded
 test_docker_absent_does_not_break_teardown
 test_docker_daemon_unreachable_does_not_break_teardown

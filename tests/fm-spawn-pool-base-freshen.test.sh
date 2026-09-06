@@ -90,6 +90,7 @@ make_shallow_case() {
   done
   git clone --quiet --bare "$source" "$origin"
   remote_abs=$(cd "$origin" && pwd)
+  # Approved fixture exception: this disposable shallow clone stays inside the test's temporary directory.
   git clone --quiet --depth 2 "file://$remote_abs" "$project"
   git -C "$project" worktree add --quiet --detach "$pool" HEAD
 

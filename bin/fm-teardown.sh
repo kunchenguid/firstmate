@@ -141,12 +141,14 @@
 #     repo, and requires a git worktree registered for the recorded project.
 #     It then selects containers only by an exact
 #     com.docker.compose.project.working_dir label match, never by a name
-#     pattern or broad sweep. This removes matching containers, not Compose
-#     networks or other project resources. A missing Docker binary, an
-#     unreachable daemon, an absent or uninspectable worktree, or no matching
-#     containers is a silent no-op. Registration or enumeration failures and
-#     containers that remain after bounded removal attempts are reported, but
-#     Docker cleanup never blocks teardown.
+#     pattern or broad sweep. Before removal it captures each Compose project,
+#     verifies every container in that project belongs to the same exact
+#     working directory, and captures the project's labeled networks. It then
+#     removes the verified containers and networks. A missing Docker binary,
+#     an unreachable daemon, an absent or uninspectable worktree, or no
+#     matching containers is a silent no-op. Registration, inventory, removal,
+#     and cross-worktree ownership failures are reported, but Docker cleanup
+#     never blocks teardown.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1537,7 +1539,10 @@ EOF
 # explicit home and repo exclusions remain necessary because git registers the
 # main checkout as a worktree too.
 teardown_task_docker_stack() {  # <worktree-dir> <project>
-  local dir=$1 project=$2 abs_dir abs_home abs_root ids id count failed_ids=
+  local dir=$1 project=$2 abs_dir abs_home abs_root inventory projects compose_project
+  local project_inventory network_inventory id project_label working_dir extra safe
+  local count network_count removed_networks failed_ids failed_networks
+  local -a project_ids network_ids
   [ -n "$dir" ] || return 0
   command -v docker >/dev/null 2>&1 || return 0
   fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker info >/dev/null 2>&1 || return 0
@@ -1556,26 +1561,109 @@ teardown_task_docker_stack() {  # <worktree-dir> <project>
     echo "warning: cannot verify $abs_dir is task $ID's own registered worktree of ${project:-<no project recorded>}; leaving any docker stack in place for manual inspection" >&2
     return 0
   fi
-  if ! ids=$(fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker ps -aq \
-      --filter "label=com.docker.compose.project.working_dir=$abs_dir" 2>&1); then
-    echo "warning: cannot enumerate docker containers for task $ID's worktree $abs_dir ($ids); leaving any docker stack in place for manual inspection" >&2
+  if ! inventory=$(fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker ps -a \
+      --filter "label=com.docker.compose.project.working_dir=$abs_dir" \
+      --format '{{.ID}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.project.working_dir"}}' 2>&1); then
+    echo "warning: cannot enumerate docker containers for task $ID's worktree $abs_dir ($inventory); leaving any docker stack in place for manual inspection" >&2
     return 0
   fi
-  [ -n "$ids" ] || return 0
-  count=$(printf '%s\n' "$ids" | grep -c .)
-  echo "teardown: stopping $count docker container(s) started by task $ID's own worktree ($abs_dir)" >&2
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker stop "$id" >/dev/null 2>&1 || true
-    if ! fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker rm -f "$id" >/dev/null 2>&1; then
-      failed_ids="${failed_ids}${failed_ids:+ }$id"
-    fi
+  [ -n "$inventory" ] || return 0
+  projects=
+  safe=1
+  while IFS=$'\t' read -r id project_label working_dir extra; do
+    case "$id" in ''|*[!A-Za-z0-9_.-]*) safe=0 ;; esac
+    case "$project_label" in ''|*[!A-Za-z0-9_.-]*) safe=0 ;; esac
+    [ "$working_dir" = "$abs_dir" ] || safe=0
+    [ -z "$extra" ] || safe=0
+    [ "$safe" -eq 1 ] || break
+    projects="${projects}${projects:+$'\n'}$project_label"
   done <<EOF
-$ids
+$inventory
 EOF
-  if [ -n "$failed_ids" ]; then
-    echo "warning: could not confirm removal of docker container(s) for task $ID's worktree $abs_dir: $failed_ids; inspect them manually" >&2
+  if [ "$safe" -ne 1 ]; then
+    echo "warning: cannot safely identify Compose projects for task $ID's worktree $abs_dir; leaving its docker resources in place for manual inspection" >&2
+    return 0
   fi
+  projects=$(printf '%s\n' "$projects" | LC_ALL=C sort -u)
+
+  while IFS= read -r compose_project; do
+    [ -n "$compose_project" ] || continue
+    if ! project_inventory=$(fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker ps -a \
+        --filter "label=com.docker.compose.project=$compose_project" \
+        --format '{{.ID}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.project.working_dir"}}' 2>&1); then
+      echo "warning: cannot revalidate Compose project $compose_project for task $ID ($project_inventory); leaving it in place for manual inspection" >&2
+      continue
+    fi
+    safe=1
+    count=0
+    project_ids=()
+    while IFS=$'\t' read -r id project_label working_dir extra; do
+      [ -n "$id" ] || continue
+      case "$id" in *[!A-Za-z0-9_.-]*) safe=0 ;; esac
+      [ "$project_label" = "$compose_project" ] || safe=0
+      [ "$working_dir" = "$abs_dir" ] || safe=0
+      [ -z "$extra" ] || safe=0
+      [ "$safe" -eq 1 ] || break
+      project_ids+=("$id")
+      count=$((count + 1))
+    done <<EOF
+$project_inventory
+EOF
+    if [ "$safe" -ne 1 ] || [ "$count" -eq 0 ]; then
+      echo "warning: Compose project $compose_project has containers outside task $ID's exact worktree $abs_dir or could not be revalidated; leaving the whole project in place" >&2
+      continue
+    fi
+    if ! network_inventory=$(fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker network ls \
+        --filter "label=com.docker.compose.project=$compose_project" --format '{{.ID}}' 2>&1); then
+      echo "warning: cannot enumerate networks for Compose project $compose_project owned by task $ID ($network_inventory); leaving the whole project in place" >&2
+      continue
+    fi
+    safe=1
+    network_count=0
+    network_ids=()
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      case "$id" in *[!A-Za-z0-9_.-]*) safe=0; break ;; esac
+      network_ids+=("$id")
+      network_count=$((network_count + 1))
+    done <<EOF
+$network_inventory
+EOF
+    if [ "$safe" -ne 1 ]; then
+      echo "warning: network inventory for Compose project $compose_project owned by task $ID was malformed; leaving the whole project in place" >&2
+      continue
+    fi
+
+    echo "teardown: removing Compose project $compose_project owned by task $ID's exact worktree ($abs_dir): $count container(s), $network_count network(s)" >&2
+    failed_ids=
+    for id in "${project_ids[@]}"; do
+      fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker stop "$id" >/dev/null 2>&1 || true
+      if ! fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker rm -f "$id" >/dev/null 2>&1; then
+        failed_ids="${failed_ids}${failed_ids:+ }$id"
+      fi
+    done
+    if [ -n "$failed_ids" ]; then
+      echo "warning: could not confirm removal of Compose project $compose_project container(s) for task $ID: $failed_ids; preserving its networks for inspection" >&2
+      continue
+    fi
+
+    failed_networks=
+    removed_networks=0
+    for id in "${network_ids[@]}"; do
+      if fm_run_timed "$TEARDOWN_DOCKER_TIMEOUT_SECS" docker network rm "$id" >/dev/null 2>&1; then
+        removed_networks=$((removed_networks + 1))
+      else
+        failed_networks="${failed_networks}${failed_networks:+ }$id"
+      fi
+    done
+    if [ -n "$failed_networks" ]; then
+      echo "warning: Compose project $compose_project containers were removed, but network cleanup failed for: $failed_networks; inspect them manually" >&2
+      continue
+    fi
+    echo "teardown: removed Compose project $compose_project for task $ID: $count container(s), $removed_networks network(s)" >&2
+  done <<EOF
+$projects
+EOF
 }
 
 require_orca_worktree_path_match() {
