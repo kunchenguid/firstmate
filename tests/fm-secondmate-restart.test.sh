@@ -316,6 +316,43 @@ test_arrived_answer_precedes_deadline_check() {
   pass "T2b an arrived persist answer is resolved before timeout"
 }
 
+# --- T2c: an answer arriving between resolution and timeout wins -------------
+test_answer_between_resolution_and_timeout_wins() {
+  local dir out rc
+  dir=$(new_case answer-at-timeout-decision)
+  add_local_mate "$dir" sm1
+
+  # Delay the modelled answer until the first resolution attempt has completed
+  # its unsuccessful status scan. The real pending-reply machinery publishes
+  # that scan signature with mv; this wrapper appends the correlated answer only
+  # after that publication, reproducing the boundary race deterministically.
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+/bin/mv "$@" || exit $?
+target=${!#}
+case "$target" in
+  "${FM_FAKE_DIR%/fake}"/home/state/pending-replies/*)
+    if [ ! -e "$FM_FAKE_DIR/answer-after-scan" ] \
+      && grep -q '^parent_status_scan_signature=.' "$target"; then
+      : > "$FM_FAKE_DIR/answer-after-scan"
+      corr=${target##*/}
+      status=$(sed -n 's/^parent_status=//p' "$target")
+      printf 'done [corr=%s]: open records written down\n' "$corr" >> "$status"
+    fi
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/mv"
+
+  out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" sm1); rc=$?
+
+  expect_code 0 "$rc" "an answer already on disk at the timeout decision must release the gate"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1" "the reply that raced the timeout was ignored"
+  assert_not_contains "$out" "nudged: sm1" "a confirmed mate must not take the timeout fallback"
+  pass "T2c a reply between the preliminary scan and timeout decision wins"
+}
+
 # --- T3: a runtime that cannot prove a restart never gets one ----------------
 test_unprovable_runtime_falls_back() {
   local dir out rc
@@ -770,6 +807,7 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
+test_answer_between_resolution_and_timeout_wins
 test_unprovable_runtime_falls_back
 test_unknown_mate_is_accounted_for
 test_refused_restart_falls_back_without_claiming_a_reload

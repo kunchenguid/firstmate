@@ -343,10 +343,17 @@ while [ "$((pending_count + restart_active_count))" -gt 0 ]; do
       continue
     fi
     if [ "$now" -ge "${DEADLINE[i]}" ]; then
-      fall_back_to_nudge "${IDS[$i]}" \
-        "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
-      PLAN[i]="done"
-      pending_count=$((pending_count - 1))
+      # A reply can land after the fleet-wide resolution pass. Recheck at the
+      # timeout decision so an answer already on disk wins over the fallback.
+      if fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
+        pending_count=$((pending_count - 1))
+        launch_restart "$i"
+      else
+        fall_back_to_nudge "${IDS[$i]}" \
+          "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
+        PLAN[i]="done"
+        pending_count=$((pending_count - 1))
+      fi
     else
       remaining=$((DEADLINE[i] - now))
       [ "$remaining" -ge "$next_wait" ] || next_wait=$remaining
