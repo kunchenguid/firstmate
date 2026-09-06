@@ -187,7 +187,10 @@ for provider in -- codex-; do
 done
 ok "arm rejects noncanonical provider identities"
 
-out=$(FM_HOME="$LAB/retire-home" FM_STATE_OVERRIDE="$LAB/retire-state" \
+RETIRE_HOME="$LAB/retire-home"
+RETIRE_STATE="$LAB/retire-state"
+(umask 077; mkdir -p "$RETIRE_HOME" "$RETIRE_STATE")
+out=$(FM_HOME="$RETIRE_HOME" FM_STATE_OVERRIDE="$RETIRE_STATE" \
   "$BIN/fm-procevent-quota.sh" retire --provider codex)
 [ "$out" = "retired: quota-codex" ] || fail "provider retire targeted the wrong source: $out"
 ok "provider retire resolves the armed source id"

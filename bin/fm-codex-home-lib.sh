@@ -13,10 +13,10 @@
 # LAUNCHING user's $HOME at spawn time - never against the author's.
 #
 # fm_codex_home_expand <path>
-#   Sets FM_CODEX_HOME_PATH to the expanded absolute path. `~` and `~/...`
-#   expand against $HOME; an absolute path is kept unchanged. Anything else
-#   (relative, empty, or a `~user/` form) fails, as does `~` when $HOME is unset
-#   or relative.
+#   Sets FM_CODEX_HOME_PATH to the expanded absolute path. `~/...` expands
+#   against $HOME; an absolute path is kept unchanged. Anything else (bare
+#   `~`, relative, empty, or a `~user/` form) fails, as does expansion when
+#   $HOME is unset or relative.
 # fm_codex_home_validate <path>
 #   Expands, then requires the directory to exist and to hold a non-empty
 #   regular auth.json, and sets FM_CODEX_HOME_PATH on success. The check reads
@@ -40,7 +40,7 @@ fm_codex_home_expand() {
       FM_CODEX_HOME_ERROR="codex home is empty"
       return 1
       ;;
-    '~'|'~/'*)
+    '~/'*)
       home=${HOME:-}
       case "$home" in
         /*) ;;
@@ -49,11 +49,7 @@ fm_codex_home_expand() {
           return 1
           ;;
       esac
-      if [ "$path" = '~' ]; then
-        path=$home
-      else
-        path="$home/${path#\~/}"
-      fi
+      path="$home/${path#\~/}"
       ;;
     /*) ;;
     *)

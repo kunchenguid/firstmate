@@ -913,6 +913,12 @@ test_codex_home_refuses_a_relative_path() {
   pass "codex --codex-home refuses a relative path"
 }
 
+test_codex_home_refuses_a_bare_tilde() {
+  refuse_codex_home_case profile-codex-home-bare-tilde profile-codex-home-bare-tilde-z32 codex --codex-home '~'
+  assert_contains "$REFUSE_OUT" "must be an absolute path or start with ~/" "refusal must explain the accepted spellings"
+  pass "codex --codex-home refuses a bare tilde"
+}
+
 test_codex_home_refuses_an_empty_value() {
   refuse_codex_home_case profile-codex-home-empty profile-codex-home-empty-z27 codex --codex-home ''
   assert_contains "$REFUSE_OUT" "--codex-home requires a non-empty value" "refusal must name the empty flag"
@@ -1005,6 +1011,7 @@ test_codex_home_refuses_an_account_with_no_auth_json
 test_codex_home_refuses_an_empty_auth_json
 test_codex_home_refuses_a_missing_directory
 test_codex_home_refuses_a_relative_path
+test_codex_home_refuses_a_bare_tilde
 test_codex_home_refuses_an_empty_value
 test_codex_home_refuses_a_non_codex_harness
 test_codex_home_refuses_a_secondmate_launch
