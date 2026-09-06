@@ -404,7 +404,7 @@ FM_TEST_SUMMARY total=5 failed=0 skipped_gate=0 duration_ms=280160
 
 **Superseded on 2026-09-05:** the passive `WATCHER DOWN - SUPERVISION IS OFF` banner quoted in this section no longer exists.
 It was removed from `bin/fm-guard.sh` for every supervision model, so the observed output below records behavior that is no longer current.
-The evidence is kept because the model-routing guarantee it verified is still current; that guarantee is now exercised through the resolved supervision model rather than banner text, in `tests/fm-guard-stale-banner.test.sh` and `tests/fm-secondmate-harness.test.sh`.
+The output remains only as dated evidence of the superseded check; `tests/fm-guard-stale-banner.test.sh` now proves watcher-liveness silence and retention of the guard's independent alarms, while `tests/fm-secondmate-harness.test.sh` separately preserves harness-model resolution.
 
 The same correction was verified against a live Pi primary's own supervision evidence on 2026-08-13.
 The hand-off was captured live at beacon age 63s, then the home's `state/.lock`, `state/.last-watcher-beat`, both `state/.pi-*-extension-loaded` markers, and both `.pi/extensions/*.ts` builds were copied into an isolated fixture with no watcher lock.

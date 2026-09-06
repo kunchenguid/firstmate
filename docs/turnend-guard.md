@@ -137,8 +137,8 @@ Without those records an older park still running after the next `stop` could le
 Cursor's `beforeSubmitPrompt` step fires once on a real captain message and does not fire for hook-driven follow-ups, so invalidating the park baton there would close the pre-claim window exactly.
 That hook is deliberately left to a follow-up alongside the deferred `preCompact` surface and is not registered in this change.
 
-If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
-That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
+If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, that adapter fails open silently at the host boundary; the removed mid-turn watcher warning provides no fallback report.
+When the shared turn-end guard itself returns a block, its message uses `bin/fm-supervision-instructions.sh --repair-line`, so the delivered recovery instruction follows the active harness protocol rather than duplicating one here.
 
 ## Compatibility limits
 

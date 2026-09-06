@@ -35,10 +35,11 @@
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused
-# pid. A dead-pid holder may be reclaimed through the singleton recovery path.
-# An identity-matched live holder whose beacon age, or lock age when the beacon
-# is missing, has reached the stale threshold is waited on for roughly half the
-# effective stale grace, then reported and left alone without signalling or replacement. On started it waits the child and propagates the wake reason; on
+# pid. A dead-pid or reused-pid watcher lock may be reclaimed through the
+# singleton recovery path without signalling a live process. An identity-matched
+# live holder whose beacon is stale or absent is waited on for roughly half the
+# effective stale grace, then reported and left alone without signalling or
+# replacement. On started it waits the child and propagates the wake reason; on
 # attached it stays live across identity-matched successors. A cycle that ends
 # with no reason line and no healthy successor is resolved against the watcher's
 # identity-bound delivery record: a matching record reports that wake and exits
@@ -54,9 +55,10 @@
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
 #
-# --restart: compatibility spelling for a non-destructive re-arm. A live holder
-# is attached to or classified as busy and left alone; only a dead holder's stale
-# lock is reclaimed before a fresh cycle starts.
+# --restart: compatibility spelling for a non-destructive re-arm. An
+# identity-matched live holder is attached to or classified as busy and left
+# alone; dead-pid and proven reused-pid watcher locks may be reclaimed before a
+# fresh cycle starts, without signalling the unrelated live reused-pid process.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

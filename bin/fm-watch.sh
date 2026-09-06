@@ -1531,9 +1531,10 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
     # cannot distinguish a slow phase from a stuck one, and the captain ruled on
     # 2026-09-05 that a running monitor process is never terminated on age.
     # The typed outcome is ONLY for a holder this home can positively identify as
-    # its own watcher. A live process holding the lock without matching identity
-    # is not a busy watcher - it is an unconfirmable lock, and the honest answer
-    # for that is still a loud failure. Without this gate the arm would wait on,
+    # its own watcher. A proven reused-pid watcher lock was already reclaimed
+    # above without signalling its unrelated live process. Any remaining live
+    # lock that lacks matching watcher identity is unconfirmable, so the honest
+    # answer is still a loud failure. Without this gate the arm would wait on,
     # and then quietly excuse, a lock no watcher can ever be confirmed behind.
     if fm_watcher_busy_holder "$STATE" "$WATCH_PATH" "$GUARD_GRACE" "$FM_HOME"; then
       echo "watcher: busy holder pid=$FM_WATCHER_BUSY_PID ${FM_WATCHER_BUSY_AGE_SOURCE}=${FM_WATCHER_BUSY_AGE}s (grace ${GUARD_GRACE}s)"
