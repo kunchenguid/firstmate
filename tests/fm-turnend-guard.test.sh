@@ -20,6 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
 REQUIRED_REASON='watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn'
+AWAY_REQUIRED_REASON='Away mode owns watcher supervision'
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
@@ -1342,6 +1343,7 @@ test_hook_claude_mode_blocks_on_pid_reused_arming_claim() {
   printf '%s\n' "$identity" > "$dir/state/.claude-autoarm.lock/pid-identity"
   printf 'epoch=464 owner_pid=%s outcome=arming updated_at=1\n' "$pid" > "$dir/state/.claude-autoarm-epoch"
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  : > "$dir/state/.last-watcher-beat"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
@@ -1349,6 +1351,77 @@ test_hook_claude_mode_blocks_on_pid_reused_arming_claim() {
   assert_contains "$out" "TURN WOULD END BLIND" "reused-pid claim block must carry the blind-turn banner"
   assert_contains "$out" "2 task(s) in flight" "reused-pid claim block must name the unsupervised work"
   pass "fm-turnend-guard --claude: a claim whose pid was reused stops counting as recovery even while its entry reads arming"
+}
+
+# The legacy stuck-arming shape (the 2026-08-26 flap): a live identity-matched
+# lock-holding owner frozen at arming past grace with a beacon just as stale
+# must not count as recovery under way.
+test_hook_claude_mode_blocks_on_stuck_arming_claim() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stuck-arming-claim")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/task2.meta"
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  identity=$(fm_test_pid_identity "$pid") || fail "could not compute a claim pid-identity"
+  printf '%s\n' "$identity" > "$dir/state/.claude-autoarm.lock/pid-identity"
+  printf 'epoch=464 owner_pid=%s outcome=arming updated_at=1\n' "$pid" > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a live owner stuck arming past grace with a stale beacon must not pass for recovery under way"
+  assert_contains "$out" "TURN WOULD END BLIND" "stuck-arming claim block must carry the blind-turn banner"
+  assert_contains "$out" "2 task(s) in flight" "stuck-arming claim block must name the unsupervised work"
+  pass "fm-turnend-guard --claude: a hung owner frozen at arming with no watcher beat no longer allows a blind stop"
+}
+
+# The generation model's ownership proof: a live open ledger claim (two-line
+# entry, identity-matched owner, watcher still beating) owns recovery with no
+# lock held at all.
+test_hook_claude_mode_allows_on_open_generation_claim() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-open-generation")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(fm_test_pid_identity "$pid") || fail "could not compute a claim pid-identity"
+  printf 'epoch=464 owner_pid=%s outcome=arming updated_at=1\n%s\n' "$pid" "$identity" \
+    > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  : > "$dir/state/.last-watcher-beat"
+  [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "this case must start with no owner lock at all"
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "--claude mode must allow when a live open generation claim owns recovery"
+  [ -z "$out" ] || fail "open-generation-claim allow produced output: $out"
+  pass "fm-turnend-guard --claude: a live open generation claim owns recovery with no lock held"
+}
+
+# The same claim gone stuck (entry and beacon both past grace) stops counting
+# as recovery even though its owner is alive and identity-matched.
+test_hook_claude_mode_blocks_on_stuck_generation_claim() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stuck-generation")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/task2.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(fm_test_pid_identity "$pid") || fail "could not compute a claim pid-identity"
+  printf 'epoch=464 owner_pid=%s outcome=arming updated_at=1\n%s\n' "$pid" "$identity" \
+    > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a stuck generation claim must not pass for recovery under way"
+  assert_contains "$out" "TURN WOULD END BLIND" "stuck-generation-claim block must carry the blind-turn banner"
+  assert_contains "$out" "2 task(s) in flight" "stuck-generation-claim block must name the unsupervised work"
+  pass "fm-turnend-guard --claude: a stuck generation claim no longer allows a blind stop"
 }
 
 # The same abandoned claim on the terminal path: stepping aside for it allowed the
@@ -1699,6 +1772,156 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
+# --- AWAY MODE: the daemon owns supervision ----------------------------------
+#
+# While state/.afk exists, bin/fm-supervise-daemon.sh owns supervision and runs
+# bin/fm-watch.sh ONE-SHOT: the watcher exits on every wake and the daemon
+# starts its replacement, so a turn boundary regularly lands in a hand-off with
+# no watcher process holding the lock and nothing wrong. The guard must accept a
+# live identity-matched daemon there, and must keep blocking on every genuine
+# lapse - no daemon, a dead or pid-reused daemon, a stale beacon - and must not
+# accept a daemon at all when away mode is off.
+
+# Record a live away-mode daemon holding this home, the way the daemon does at
+# startup: its singleton lock names the daemon pid plus the process identity it
+# computed for itself (watcher_identity is that same fm_pid_identity read).
+record_daemon_lock() {  # <dir> <pid> [identity]
+  local dir=$1 pid=$2 identity=${3:-} lockdir
+  if [ -z "$identity" ]; then
+    identity=$(watcher_identity "$dir" "$pid") || return 1
+  fi
+  lockdir="$dir/state/.supervise-daemon.lock"
+  mkdir -p "$lockdir"
+  printf '%s\n' "$pid" > "$lockdir/pid"
+  printf '%s\n' "$identity" > "$lockdir/pid-identity"
+}
+
+# An away-mode home mid-watcher-cycle: away flag, work in flight, a fresh beacon
+# from the watcher that just exited, and NO watcher lock at all.
+make_away_home_between_cycles() {  # <dir-path>
+  local dir=$1
+  dir=$(make_primary_dir "$dir")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  touch "$dir/state/.last-watcher-beat"
+  printf '%s\n' "$dir"
+}
+
+test_hook_away_daemon_allows_between_watcher_cycles() {
+  local dir pid out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-daemon-live")
+  sleep 60 &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live away-mode daemon holder"
+  }
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "away mode with a live daemon must not block between watcher cycles"
+  [ -z "$out" ] || fail "away-mode daemon ownership still produced a block banner: $out"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "--claude away mode with a live daemon must not block between watcher cycles"
+  [ -z "$out" ] || fail "--claude away-mode daemon ownership still produced a block banner: $out"
+  pass "fm-turnend-guard: a live away-mode daemon satisfies supervision with no watcher holding the lock"
+}
+
+test_hook_away_daemon_allows_over_dead_watcher_lock() {
+  local dir pid dead out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-daemon-dead-watcher")
+  dead=$(nonexistent_pid)
+  record_watcher_lock "$dir" "$dead" "dead watcher identity"
+  sleep 60 &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live away-mode daemon holder"
+  }
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a live away-mode daemon must outweigh a watcher lock its exited child left behind"
+  [ -z "$out" ] || fail "away-mode daemon ownership still produced a block banner: $out"
+  pass "fm-turnend-guard: away-mode daemon ownership survives a leftover dead watcher lock"
+}
+
+test_hook_away_mode_blocks_without_any_supervisor() {
+  local dir out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-no-supervisor")
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "away mode with no daemon and no watcher must still block"
+  assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  pass "fm-turnend-guard: away mode with no daemon and no watcher still blocks"
+}
+
+test_hook_away_mode_blocks_on_dead_daemon() {
+  local dir dead out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-dead-daemon")
+  dead=$(nonexistent_pid)
+  record_daemon_lock "$dir" "$dead" "dead daemon identity"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "a daemon lock left by a dead daemon must not satisfy supervision"
+  assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  pass "fm-turnend-guard: away mode blocks on a dead away-mode daemon"
+}
+
+test_hook_away_mode_blocks_on_pid_reused_daemon() {
+  local dir pid out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-reused-daemon")
+  sleep 60 &
+  pid=$!
+  # Same pid, an identity from some earlier process: exactly what a recycled pid
+  # looks like, and the reason a bare kill -0 is not ownership evidence.
+  record_daemon_lock "$dir" "$pid" "some other process identity"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a live pid whose recorded identity does not match must not satisfy supervision"
+  assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  pass "fm-turnend-guard: away mode blocks on a pid-reused away-mode daemon lock"
+}
+
+test_hook_away_mode_blocks_on_stale_beacon() {
+  local dir pid out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-stale-beacon")
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live away-mode daemon holder"
+  }
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a live daemon that stopped restarting its watcher must block once the beacon goes stale"
+  assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  pass "fm-turnend-guard: away-mode daemon ownership never substitutes for a fresh beacon"
+}
+
+test_hook_daemon_lock_is_ignored_without_away_mode() {
+  local dir pid out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-no-afk-daemon-lock")
+  rm -f "$dir/state/.afk"
+  sleep 60 &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live daemon holder"
+  }
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "with away mode off the strict watcher predicate must be unchanged"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: a daemon lock proves nothing while away mode is off"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -1753,6 +1976,9 @@ test_hook_claude_mode_terminal_boundary_excludes_starting_owner
 test_hook_claude_mode_allows_on_fresh_rewake_epoch
 test_hook_claude_mode_blocks_on_abandoned_autoarm_claim
 test_hook_claude_mode_blocks_on_pid_reused_arming_claim
+test_hook_claude_mode_blocks_on_stuck_arming_claim
+test_hook_claude_mode_allows_on_open_generation_claim
+test_hook_claude_mode_blocks_on_stuck_generation_claim
 test_hook_claude_mode_terminal_fail_open_clears_abandoned_claim
 test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open
@@ -1767,3 +1993,10 @@ test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_reports_a_budget_reset_the_filesystem_refused
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
+test_hook_away_daemon_allows_between_watcher_cycles
+test_hook_away_daemon_allows_over_dead_watcher_lock
+test_hook_away_mode_blocks_without_any_supervisor
+test_hook_away_mode_blocks_on_dead_daemon
+test_hook_away_mode_blocks_on_pid_reused_daemon
+test_hook_away_mode_blocks_on_stale_beacon
+test_hook_daemon_lock_is_ignored_without_away_mode

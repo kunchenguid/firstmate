@@ -1,7 +1,7 @@
 projects/
 state/
 data/
-scratchpad/
+scratchpad*
 .no-mistakes/
 .lavish/
 .fm-secondmate-home

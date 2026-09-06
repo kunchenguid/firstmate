@@ -330,10 +330,18 @@ test_pi_startup_classifies_cli_continuations() {
   fixture="$TMP_ROOT/pi-continuation-source"
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
   cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "${FM_HOME:?}/state/sources"
+source_name=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source) source_name=${2:-}; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' "$source_name" >> "${FM_HOME:?}/state/sources"
 SH
   cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -352,12 +360,19 @@ const pi = {
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?continuation=${Date.now()}`);
 extension.default(pi);
+let sessionNumber = 0;
 const fire = async (args, entries = [], timestamp = new Date().toISOString()) => {
   process.argv.splice(1, process.argv.length, "pi", ...args);
-  await handlers.get("session_start")(
-    { reason: "startup" },
-    { sessionManager: { getEntries: () => entries, getHeader: () => ({ timestamp }) } },
-  );
+  const sessionId = `continuation-${++sessionNumber}`;
+  const ctx = {
+    sessionManager: {
+      getEntries: () => entries,
+      getHeader: () => ({ timestamp }),
+      getSessionId: () => sessionId,
+    },
+  };
+  handlers.get("session_start")({ reason: "startup" }, ctx);
+  await handlers.get("before_agent_start")({ prompt: "test" }, ctx);
 };
 const oldTimestamp = "2000-01-01T00:00:00.000Z";
 const nameEntry = [{ type: "session_info", name: "named" }];
@@ -382,26 +397,483 @@ JS
   expect_code 0 "$status" "Pi continuation classification"
   [ -z "$out" ] || fail "Pi continuation classification printed output: $out"
   expected=$(printf '%s\n' \
-    '--source startup' \
-    '--source startup' \
-    '--source resume' \
-    '--source startup' \
-    '--source resume' \
-    '--source startup' \
-    '--source resume' \
-    '--source startup' \
-    '--source resume' \
-    '--source resume' \
-    '--source startup' \
-    '--source resume' \
-    '--source startup' \
-    '--source resume' \
-    '--source fork' \
-    '--source startup')
+    'startup' \
+    'startup' \
+    'resume' \
+    'startup' \
+    'resume' \
+    'startup' \
+    'resume' \
+    'startup' \
+    'resume' \
+    'resume' \
+    'startup' \
+    'resume' \
+    'startup' \
+    'resume' \
+    'fork' \
+    'startup')
   actual=$(cat "$fixture/state/sources")
   [ "$actual" = "$expected" ] \
     || fail "Pi continuation classification produced unexpected sources: $actual"
   pass "Pi distinguishes header-proven restored CLI sessions from named create-if-missing startups"
+}
+
+test_pi_sessionstart_generation_prerequisite() {
+  local fixture out status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi session-start generation prerequisite test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-sessionstart-generation"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_HOME:?}/state
+source_name=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source) source_name=${2:-}; shift 2 ;;
+    *) shift ;;
+  esac
+done
+count=$(( $(wc -l < "$state/launches" 2>/dev/null || printf '0') + 1 ))
+behavior=$(cat "$state/behavior-$count")
+printf 'launch:%s:%s:%s:%s:%s\n' \
+  "$count" "$behavior" "$source_name" "$$" "${FM_SESSIONSTART_SUPERVISOR_PID:-}" >> "$state/launches"
+printf 'launch:%s\n' "$count" >> "$state/events"
+case "$behavior" in
+  success)
+    printf 'GENERATION_DIGEST_%s source=%s\n' "$count" "$source_name"
+    : > "$state/completed-$count"
+    ;;
+  slow|timeout)
+    (
+      trap '' TERM INT
+      while :; do sleep 30; done
+    ) </dev/null >/dev/null 2>&1 &
+    grandchild=$!
+    printf '%s\n' "$grandchild" > "$state/grandchild-$count"
+    trap 'printf "term:'"$count"'\n" >> "$state/events"; exit 143' TERM INT
+    : > "$state/started-$count"
+    while [ ! -f "$state/release-$count" ]; do sleep 0.02; done
+    if [ "$behavior" = timeout ]; then
+      printf 'STARTUP TRUNCATED - stage=bootstrap generation=%s\n' "$count"
+    else
+      printf 'GENERATION_DIGEST_%s source=%s\n' "$count" "$source_name"
+    fi
+    : > "$state/completed-$count"
+    kill -KILL "$grandchild" 2>/dev/null || true
+    wait "$grandchild" 2>/dev/null || true
+    ;;
+  stale)
+    trap 'printf "stale-close:'"$count"'\n" >> "$state/events"; printf "STALE_DIGEST_'"$count"'\n"; : > "$state/completed-'"$count"'"; exit 0' TERM INT
+    : > "$state/started-$count"
+    while [ ! -f "$state/release-$count" ]; do sleep 0.02; done
+    printf 'STALE_DIGEST_%s\n' "$count"
+    : > "$state/completed-$count"
+    ;;
+  empty)
+    : > "$state/completed-$count"
+    ;;
+  ineligible)
+    : > "$state/completed-$count"
+    exit 3
+    ;;
+  error)
+    : > "$state/completed-$count"
+    exit 7
+    ;;
+  truncate)
+    printf 'TRUNCATION_PREFIX_%s\n' "$count"
+    i=0
+    while [ "$i" -lt 700 ]; do
+      printf '%01024d' 0
+      i=$((i + 1))
+    done
+    printf '\nTRUNCATION_SUFFIX_%s\n' "$count"
+    : > "$state/completed-$count"
+    ;;
+  *)
+    exit 9
+    ;;
+esac
+SH
+  chmod +x "$fixture/bin/"*.sh
+  : > "$fixture/state/launches"
+  : > "$fixture/state/events"
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    node --input-type=module 2>&1 <<'JS'
+import {
+  existsSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const state = `${process.env.FM_HOME}/state`;
+const runner = `${process.env.FM_HOME}/bin/fm-sessionstart-run.sh`;
+const handlers = new Map();
+const sent = [];
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  sendMessage(message) { sent.push(message); },
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?generation=${Date.now()}`);
+extension.default(pi);
+process.argv.splice(1, process.argv.length, "pi");
+
+const assert = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 400; i += 1) {
+    if (predicate()) return;
+    await delay(5);
+  }
+  throw new Error(message);
+};
+const alive = (pid) => {
+  try { process.kill(Number(pid), 0); return true; } catch { return false; }
+};
+const waitDead = async (pid, message) => {
+  await waitFor(() => !alive(pid), message);
+};
+const ctx = (sessionId) => ({
+  sessionManager: {
+    getHeader: () => ({ timestamp: new Date().toISOString() }),
+    getSessionId: () => sessionId,
+  },
+});
+const begin = (reason, sessionId) => {
+  const current = ctx(sessionId);
+  handlers.get("session_start")({ reason }, current);
+  return current;
+};
+const providerCalls = [];
+const providerCall = async (current, prompt) => {
+  const preflight = await handlers.get("before_agent_start")({ prompt }, current);
+  providerCalls.push({ prompt, message: preflight?.message });
+  return preflight;
+};
+const plan = (index, behavior) => {
+  writeFileSync(`${state}/behavior-${index}`, `${behavior}\n`);
+};
+const release = (index) => writeFileSync(`${state}/release-${index}`, "\n");
+const launchLines = () => readFileSync(`${state}/launches`, "utf8").trim().split("\n").filter(Boolean);
+const pidFor = (index) => Number(launchLines().find((line) => line.startsWith(`launch:${index}:`))?.split(":")[4]);
+const supervisorFor = (index) => Number(launchLines().find((line) => line.startsWith(`launch:${index}:`))?.split(":")[5]);
+const grandchildFor = (index) => Number(readFileSync(`${state}/grandchild-${index}`, "utf8").trim());
+const startupMessages = () => providerCalls.map((call) => call.message).filter(Boolean);
+
+// The failing immediate-prompt path is now a prerequisite: no provider call is
+// observable until the matching slow native generation settles.
+plan(1, "slow");
+const immediate = begin("startup", "session-immediate");
+await waitFor(() => existsSync(`${state}/started-1`), "immediate generation never started");
+const immediateCall = providerCall(immediate, "immediate prompt");
+await delay(100);
+assert(providerCalls.length === 0, "provider call escaped before the startup prerequisite settled");
+release(1);
+const immediateResult = await immediateCall;
+assert(immediateResult?.message?.content.includes("GENERATION_DIGEST_1"), "first payload lost matching startup context");
+assert(launchLines().length === 1, "immediate generation executed more than once");
+assert((await handlers.get("before_agent_start")({ prompt: "second prompt" }, immediate)) === undefined,
+  "one generation delivered startup context more than once");
+assert(startupMessages().length === 1, "immediate generation produced more than one model-visible startup context");
+assert(sent.length === 0, "session start still used asynchronous sendMessage delivery");
+
+// Proven non-racing path: native completion before submission produces the same
+// first-payload guarantee without a manual fallback.
+plan(2, "success");
+const proven = begin("new", "session-proven");
+await waitFor(() => existsSync(`${state}/completed-2`), "proven generation never completed");
+const provenResult = await providerCall(proven, "proven prompt");
+assert(provenResult?.message?.content.includes("GENERATION_DIGEST_2"), "proven path lost startup context");
+assert(!provenResult.message.content.includes("Run `bin/fm-session-start.sh`"), "proven path used manual fallback");
+const provenSupervisor = supervisorFor(2);
+assert(alive(provenSupervisor), "completed generation lost its stable supervisor owner");
+const originalKill = process.kill;
+let ownedGroupSignalCount = 0;
+process.kill = (pid, signal) => {
+  if (pid === -provenSupervisor && signal !== 0) ownedGroupSignalCount += 1;
+  return Reflect.apply(originalKill, process, [pid, signal]);
+};
+
+// Shutdown owns interruption and the whole child process group. The pending
+// preflight settles without stale delivery.
+plan(3, "slow");
+const interrupted = begin("new", "session-interrupted");
+process.kill = originalKill;
+assert(ownedGroupSignalCount > 0, "replacement did not retire the completed generation's stable owner");
+await waitFor(() => existsSync(`${state}/started-3`) && existsSync(`${state}/grandchild-3`),
+  "interrupted generation never started its process tree");
+const interruptedCall = handlers.get("before_agent_start")({ prompt: "interrupted" }, interrupted);
+const interruptedPid = pidFor(3);
+const interruptedGrandchild = grandchildFor(3);
+await handlers.get("session_shutdown")({ reason: "new" }, interrupted);
+assert((await interruptedCall) === undefined, "shutdown delivered cancelled startup context");
+await waitDead(interruptedPid, "shutdown left the startup child alive");
+await waitDead(interruptedGrandchild, "shutdown left a startup grandchild alive");
+
+// Two rapid replacements serialize retirement. The middle generation never
+// starts, stale completion is ignored, and only the newest generation delivers.
+plan(4, "stale");
+plan(5, "success");
+const stale = begin("new", "session-stale");
+await waitFor(() => existsSync(`${state}/started-4`), "stale generation never started");
+const staleCall = handlers.get("before_agent_start")({ prompt: "stale" }, stale);
+begin("new", "session-replaced-once");
+const newest = begin("new", "session-replaced-twice");
+const newestResult = await providerCall(newest, "newest");
+assert(newestResult?.message?.content.includes("GENERATION_DIGEST_5"), "newest replacement lost its context");
+assert((await staleCall) === undefined, "stale generation delivered after replacement");
+assert(launchLines().length === 5, "rapid replacements launched the cancelled middle generation");
+assert(!startupMessages().some((message) => message.content.includes("STALE_DIGEST_4")),
+  "stale completion reached model context");
+const events = readFileSync(`${state}/events`, "utf8");
+assert(events.indexOf("stale-close:4") < events.indexOf("launch:5"),
+  "newest generation started before stale child retirement completed");
+
+// Empty output and spawn failure settle first, then inject the existing exact
+// manual instruction. Intentional ineligibility remains silent.
+plan(6, "empty");
+const empty = begin("new", "session-empty");
+const emptyResult = await providerCall(empty, "empty");
+assert(existsSync(`${state}/completed-6`), "empty attempt had not settled before fallback delivery");
+assert(emptyResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions."),
+  "empty output lost the exact manual fallback");
+
+renameSync(runner, `${runner}.missing`);
+const spawnError = begin("new", "session-spawn-error");
+const spawnErrorResult = await providerCall(spawnError, "spawn error");
+renameSync(`${runner}.missing`, runner);
+assert(spawnErrorResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once"),
+  "spawn error lost the manual fallback");
+
+plan(7, "ineligible");
+const ineligible = begin("new", "session-ineligible");
+assert((await providerCall(ineligible, "ineligible")) === undefined,
+  "intentional gate/scope stand-down injected a manual fallback");
+
+plan(8, "error");
+const failed = begin("new", "session-failed");
+const failedResult = await providerCall(failed, "failed");
+assert(failedResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once"),
+  "failed eligible attempt lost the manual fallback");
+
+plan(9, "error");
+const failedResume = begin("resume", "session-failed-resume");
+const failedResumeResult = await providerCall(failedResume, "failed resume");
+assert(failedResumeResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once"),
+  "failed eligible resume lost the manual fallback");
+
+plan(10, "error");
+const failedFork = begin("fork", "session-failed-fork");
+const failedForkResult = await providerCall(failedFork, "failed fork");
+assert(failedForkResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once"),
+  "failed eligible fork lost the manual fallback");
+
+plan(11, "empty");
+const emptyResume = begin("resume", "session-empty-resume");
+assert((await providerCall(emptyResume, "empty resume")) === undefined,
+  "empty context-restored resume injected a manual fallback");
+
+plan(12, "empty");
+const emptyFork = begin("fork", "session-empty-fork");
+assert((await providerCall(emptyFork, "empty fork")) === undefined,
+  "empty context-restored fork injected a manual fallback");
+
+// The wrapper's bounded timeout result and the extension's 512 KiB containment
+// remain loud provider prerequisites rather than falling back or going stale.
+plan(13, "timeout");
+const timed = begin("new", "session-timeout");
+await waitFor(() => existsSync(`${state}/started-13`), "timeout generation never started");
+const timedCall = providerCall(timed, "timeout");
+await delay(100);
+assert(!providerCalls.some((call) => call.prompt === "timeout"), "timeout provider call escaped before settlement");
+release(13);
+const timedResult = await timedCall;
+assert(timedResult?.message?.content.includes("STARTUP TRUNCATED - stage=bootstrap"), "timeout banner was lost");
+assert(!timedResult.message.content.includes("Run `bin/fm-session-start.sh`"), "bounded timeout incorrectly used manual fallback");
+
+plan(14, "truncate");
+const truncated = begin("new", "session-truncated");
+const truncatedResult = await providerCall(truncated, "truncated");
+assert(truncatedResult?.message?.content.includes("TRUNCATION_PREFIX_14"), "truncated digest lost its prefix");
+assert(truncatedResult.message.content.includes("PI SESSION-START DELIVERY TRUNCATED"), "truncated digest was not loud");
+assert(!truncatedResult.message.content.includes("TRUNCATION_SUFFIX_14"), "truncated digest exceeded its bound");
+
+// Compaction keeps its supported asynchronous transport for retry-without-
+// preflight, but it shares the same generation cancellation and exactly-once claim.
+plan(15, "success");
+const compactContext = ctx("session-truncated");
+await handlers.get("session_compact")({}, compactContext);
+assert(sent.length === 1 && sent[0].content.includes("GENERATION_DIGEST_15"),
+  "compaction lost its existing persistent delivery");
+assert((await handlers.get("before_agent_start")({ prompt: "post compact" }, compactContext)) === undefined,
+  "compaction delivered the same context twice");
+
+plan(16, "slow");
+const compactPending = handlers.get("session_compact")({}, compactContext);
+await waitFor(() => existsSync(`${state}/started-16`) && existsSync(`${state}/grandchild-16`),
+  "cancelled compaction generation never started");
+const compactPid = pidFor(16);
+const compactGrandchild = grandchildFor(16);
+await handlers.get("session_shutdown")({ reason: "quit" }, compactContext);
+await compactPending;
+assert(sent.length === 1, "cancelled compaction delivered stale context");
+await waitDead(compactPid, "shutdown left the compaction child alive");
+await waitDead(compactGrandchild, "shutdown left a compaction grandchild alive");
+JS
+  ) || status=$?
+  expect_code 0 "$status" "Pi session-start generation prerequisite"
+  [ -z "$out" ] || fail "Pi session-start generation prerequisite printed output: $out"
+  pass "Pi provider preflight owns one generation-bound startup prerequisite with deterministic fallback, replacement, cancellation, timeout, and truncation"
+}
+
+test_pi_reload_releases_sessionstart_exit_listener() {
+  local fixture out status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi reload exit-listener test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-reload-exit-listener"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_HOME:?}/state
+index=$(( $(wc -l < "$state/launches" 2>/dev/null || printf '0') + 1 ))
+printf '%s:%s:%s\n' "$index" "$$" "${FM_SESSIONSTART_SUPERVISOR_PID:-}" >> "$state/launches"
+(
+  trap '' TERM INT HUP
+  while :; do sleep 30; done
+) </dev/null >/dev/null 2>&1 &
+grandchild=$!
+printf '%s\n' "$grandchild" > "$state/grandchild-$index"
+: > "$state/started-$index"
+if [ "$index" -eq 3 ]; then
+  exit 0
+fi
+trap 'exit 143' TERM INT
+while :; do sleep 30; done
+SH
+  chmod +x "$fixture/bin/"*.sh
+  : > "$fixture/state/launches"
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const state = `${process.env.FM_HOME}/state`;
+const baselineListeners = process.listeners("exit");
+const baselineCount = baselineListeners.length;
+const assert = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 600; i += 1) {
+    if (predicate()) return;
+    await delay(5);
+  }
+  throw new Error(message);
+};
+const alive = (pid) => {
+  try { process.kill(Number(pid), 0); } catch { return false; }
+  const status = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+  return status.status === 0 && !status.stdout.trim().startsWith("Z");
+};
+const ctx = (sessionId) => ({
+  sessionManager: {
+    getHeader: () => ({ timestamp: new Date().toISOString() }),
+    getSessionId: () => sessionId,
+  },
+});
+
+let launchIndex = 0;
+for (let instance = 1; instance <= 2; instance += 1) {
+  const handlers = new Map();
+  const pi = {
+    on(event, handler) { handlers.set(event, handler); },
+    sendMessage() {},
+  };
+  const extension = await import(
+    `${pathToFileURL(process.env.EXT).href}?reload=${instance}-${Date.now()}`
+  );
+  extension.default(pi);
+  assert(process.listenerCount("exit") === baselineCount + 1,
+    `reload ${instance} did not own exactly one exit listener`);
+  const sessionCount = instance === 1 ? 2 : 1;
+  for (let session = 1; session <= sessionCount; session += 1) {
+    launchIndex += 1;
+    const current = ctx(`reload-${instance}-session-${session}`);
+    handlers.get("session_start")({ reason: "new" }, current);
+    assert(process.listenerCount("exit") === baselineCount + 1,
+      `reload ${instance} session ${session} did not own exactly one exit listener`);
+    await waitFor(() => existsSync(`${state}/started-${launchIndex}`),
+      `reload ${instance} session ${session} startup generation never started`);
+    const launch = readFileSync(`${state}/launches`, "utf8").trim().split("\n")[launchIndex - 1];
+    const child = Number(launch.split(":")[1]);
+    const supervisor = Number(launch.split(":")[2]);
+    const grandchild = Number(readFileSync(`${state}/grandchild-${launchIndex}`, "utf8").trim());
+    if (launchIndex === 3) {
+      await waitFor(() => !alive(child), "leader did not close before process-exit cleanup");
+      assert(alive(grandchild), "TERM-resistant descendant exited with its leader");
+      assert(alive(supervisor), "leader close lost the stable supervisor owner");
+      assert(process.listenerCount("exit") === baselineCount + 1,
+        "leader close removed the active instance exit listener");
+      const ownedListener = process.listeners("exit").find(
+        (listener) => !baselineListeners.includes(listener)
+      );
+      assert(ownedListener, "active reload had no process-exit cleanup listener");
+      ownedListener(0);
+      await waitFor(() => !alive(grandchild),
+        "active process-exit cleanup left the leaderless process group alive");
+    }
+    await handlers.get("session_shutdown")({ reason: "reload" }, current);
+    assert(process.listenerCount("exit") === baselineCount,
+      `reload ${instance} session ${session} retained its exit listener after shutdown`);
+    assert((await handlers.get("before_agent_start")({ prompt: "stale" }, current)) === undefined,
+      `reload ${instance} session ${session} retained model-visible startup context after shutdown`);
+    assert(!alive(child) && !alive(grandchild),
+      `reload ${instance} session ${session} retained its stale startup process group`);
+    if (session < sessionCount) {
+      assert(process.listenerCount("exit") === baselineCount,
+        "same-instance replacement started with a stale exit listener");
+    }
+  }
+}
+JS
+  ) || status=$?
+  [ -z "$out" ] || fail "Pi reload exit-listener ownership printed output: $out"
+  expect_code 0 "$status" "Pi reload exit-listener ownership"
+  pass "Pi reload shutdown releases its exit listener and stale startup generation"
 }
 
 test_pi_large_sessionstart_digest_is_delivered_loudly() {
@@ -416,7 +888,8 @@ test_pi_large_sessionstart_digest_is_delivered_loudly() {
   git -C "$fixture" commit -q --allow-empty -m init
   : > "$fixture/AGENTS.md"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
     "$ROOT/bin/fm-hook-host-lib.sh" \
@@ -438,19 +911,17 @@ SH
     node --input-type=module 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 const handlers = new Map();
-const messages = [];
 const pi = {
   on(event, handler) { handlers.set(event, handler); },
-  sendMessage(message) { messages.push(message); },
+  sendMessage() { throw new Error("session start must use provider preflight"); },
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?large=${Date.now()}`);
 extension.default(pi);
-await handlers.get("session_start")(
-  { reason: "startup" },
-  { sessionManager: { getEntries: () => [] } },
-);
-if (messages.length !== 1) throw new Error(`expected one message, got ${messages.length}`);
-const content = messages[0].content;
+const ctx = { sessionManager: { getEntries: () => [], getSessionId: () => "large-digest" } };
+handlers.get("session_start")({ reason: "startup" }, ctx);
+const result = await handlers.get("before_agent_start")({ prompt: "test" }, ctx);
+if (!result?.message) throw new Error("expected one persistent preflight message");
+const content = result.message.content;
 if (!content.includes("PI_LARGE_DIGEST_PREFIX")) throw new Error("digest prefix was lost");
 if (!content.includes("PI SESSION-START DELIVERY TRUNCATED")) throw new Error("truncation marker was lost");
 if (content.includes("PI_LARGE_DIGEST_SUFFIX")) throw new Error("delivery exceeded its declared bound");
@@ -459,7 +930,7 @@ JS
   ) || status=$?
   expect_code 0 "$status" "Pi large session-start delivery"
   [ -z "$out" ] || fail "Pi large session-start delivery printed output: $out"
-  pass "Pi retains a bounded digest prefix and loudly marks oversized delivery"
+  pass "Pi retains a bounded digest prefix and loudly marks oversized preflight delivery"
 }
 
 test_run_resume_delegates_to_the_nudge() {
@@ -509,17 +980,27 @@ test_run_unknown_source_takes_the_helm() {
 
 test_run_gate_and_scope_are_silent() {
   local root="$TMP_ROOT/run-gate" base="$TMP_ROOT/run-linked-base" linked="$TMP_ROOT/run-linked"
+  local out status=0
   make_run_primary "$root"
   expect_silent_zero "gate env run" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
     FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" --source startup
   assert_absent "$root/state/.lock" "a gate agent's session open still took the fleet lock"
+  out=$(env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" \
+    "$RUN" --source startup --pi-prerequisite 2>&1) || status=$?
+  expect_code 3 "$status" "gate env Pi prerequisite stand-down"
+  [ -z "$out" ] || fail "gate env Pi prerequisite stand-down must be silent, got: $out"
 
   fm_git_worktree "$base" "$linked" fm/run-linked
   mkdir -p "$linked/bin" "$linked/state"
   : > "$linked/AGENTS.md"
   expect_silent_zero "linked worktree run" run_hook "$linked" --source startup
+  status=0
+  out=$(run_hook "$linked" --source startup --pi-prerequisite 2>&1) || status=$?
+  expect_code 3 "$status" "linked worktree Pi prerequisite stand-down"
+  [ -z "$out" ] || fail "linked worktree Pi prerequisite stand-down must be silent, got: $out"
   assert_absent "$linked/state/.lock" "an unmarked task worktree still took the fleet lock"
-  pass "run wrapper: a gate agent and an unmarked task worktree never run a session start"
+  pass "run wrapper: ordinary ineligible opens stay silent-zero and Pi preflight gets an explicit silent stand-down"
 }
 
 test_run_reports_a_failed_session_start_as_digest_text() {
@@ -553,4 +1034,6 @@ test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text
 test_pi_startup_classifies_cli_continuations
+test_pi_sessionstart_generation_prerequisite
+test_pi_reload_releases_sessionstart_exit_listener
 test_pi_large_sessionstart_digest_is_delivered_loudly

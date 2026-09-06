@@ -135,6 +135,7 @@ unit_fresh_vs_refresh() {
   lock="$st/state/.supervise-daemon.lock"
   mkdir -p "$lock"
   printf '%s' "$sleep_pid" > "$lock/pid"
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$START" >/dev/null 2>&1
   if [ -e "$st/state/.subsuper-escalations" ] && [ -e "$st/state/.subsuper-inject-wedged" ]; then
@@ -162,10 +163,12 @@ unit_stop_ordering() {
     trap "if [ -f \"$1/state/.afk\" ]; then echo present > \"$2\"; else echo absent > \"$2\"; fi; exit 0" TERM
     while :; do sleep 0.2; done
   ' _ "$st" "$marker" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   daemon_pid=$!
   lock="$st/state/.supervise-daemon.lock"
   mkdir -p "$lock"
   printf '%s' "$daemon_pid" > "$lock/pid"
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" 2>/dev/null ) || true
   printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
@@ -196,6 +199,7 @@ unit_stop_rejects_reused_pid() {
   mkdir -p "$st/state"
   date '+%s' > "$st/state/.afk"
   sleep 600 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   sleeper_pid=$!
   lock="$st/state/.supervise-daemon.lock"
   mkdir -p "$lock"
@@ -240,9 +244,13 @@ unit_concurrent_start_serialized() {
   TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $cap_session"
   cap_pane=$(tmux display-message -p -t "$cap_session" '#{pane_id}')
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$cap_pane" \
-    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start >/dev/null 2>&1 & first=$!
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start >/dev/null 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  first=$!
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$cap_pane" \
-    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start >/dev/null 2>&1 & second=$!
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start >/dev/null 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  second=$!
   wait "$first"; wait "$second"
   rec=$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)
   count=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | awk -v expected="$rec" '$0 == expected {n++} END{print n+0}')
@@ -266,6 +274,7 @@ unit_lock_initialization_grace() {
     sleep 0.15
     if [ -d "$st/state/.afk-launch.lock" ]; then
       printf '%s' "$$" > "$st/state/.afk-launch.lock/pid"
+      # shellcheck source=/dev/null
       ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$$" > "$st/state/.afk-launch.lock/pid-identity" 2>/dev/null ) || true
       # shellcheck disable=SC2031 # The subshell writes the path value; it does not reassign the variable.
       : > "$marker"
@@ -273,6 +282,7 @@ unit_lock_initialization_grace() {
       rm -rf "$st/state/.afk-launch.lock"
     fi
   ) &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   initializer=$!
   # shellcheck disable=SC2031 # The initializer communicates through this shared file path.
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
@@ -298,6 +308,7 @@ unit_signal_exits_with_lock_cleanup() {
     fm_afk_launch_main start
     : > "$2"
   ' _ "$LAUNCH" "$marker" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   child=$!
   # Signal only once the lifecycle actually holds its lock. Killing before the
   # lock exists tests nothing, and on a loaded machine it used to race: the
@@ -651,9 +662,12 @@ unit_stop_validates_before_signal() {
   mkdir -p "$st/state"
   : > "$st/state/.afk"
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
-  sleep 30 & sleeper_pid=$!
+  sleep 30 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  sleeper_pid=$!
   mkdir -p "$st/state/.supervise-daemon.lock"
   printf '%s' "$sleeper_pid" > "$st/state/.supervise-daemon.lock/pid"
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || true
   if kill -0 "$sleeper_pid" 2>/dev/null && [ -e "$st/state/.afk" ]; then
@@ -706,8 +720,10 @@ unit_stop_confirms_daemon_exit() {
   : > "$st/state/.afk"
   printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
   bash -c 'trap "" TERM; while :; do sleep 1; done' &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   daemon_pid=$!
   printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
@@ -737,8 +753,11 @@ unit_refresh_validates_record() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-record.XXXXXX")
   mkdir -p "$st/state/.supervise-daemon.lock"
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
-  sleep 30 & daemon_pid=$!
+  sleep 30 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  daemon_pid=$!
   printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
     FM_SUPERVISOR_BACKEND=tmux bash -c '

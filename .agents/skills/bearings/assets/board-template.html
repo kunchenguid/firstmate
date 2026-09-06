@@ -435,6 +435,12 @@ __FM_BEARINGS_BOARD_DATA__
     return n;
   }
   function badge(tone, text) { return el("span", "fm-badge fm-badge--" + tone, text); }
+  /* Warnings ride the charted feed for layout only; they are alarms, not work,
+     so every count of queued work excludes them. */
+  function isWarning(t) { return t && t.kind === "warning"; }
+  function chartedQueued(rows) { return (rows || []).filter(function (t) { return !isWarning(t); }); }
+  var chartedMoreQueued = data.charted_more || 0;
+  var chartedMoreWarnings = data.charted_warning_more || 0;
   function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
@@ -446,7 +452,7 @@ __FM_BEARINGS_BOARD_DATA__
     { n: callTotal, l: "need you", call: true },
     { n: data.underway.length, l: "underway" },
     { n: data.landed.length, l: "landed recently" },
-    { n: data.charted.length + (data.charted_more || 0), l: "charted next" }
+    { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "charted next" }
   ];
   var strip = document.getElementById("bb-stats");
   stats.forEach(function (s) {
@@ -651,10 +657,12 @@ __FM_BEARINGS_BOARD_DATA__
     barBtn.disabled = !n;
   }
 
-  if (!data.charted.length) ch.appendChild(el("div", "bb-empty", "Nothing is queued."));
+  if (!chartedQueued(data.charted).length && !chartedMoreQueued) {
+    ch.appendChild(el("div", "bb-empty", "Nothing is queued."));
+  }
   data.charted.forEach(function (t) {
     var row = el("div", "bb-row");
-    if (t.dispatchable) {
+    if (t.dispatchable && !isWarning(t)) {
       anyPickable = true;
       var pick = document.createElement("input");
       pick.type = "checkbox"; pick.className = "bb-pick"; pick.value = t.id;
@@ -677,14 +685,19 @@ __FM_BEARINGS_BOARD_DATA__
     var chSub = t.repo || t.id;
     main.appendChild(el("div", "bb-row__sub", t.reason ? t.reason + " · " + chSub : chSub));
     row.appendChild(main);
-    if (t.reason) row.appendChild(badge("warn", "waiting"));
+    if (isWarning(t)) row.appendChild(badge("danger", "needs repair"));
+    else if (t.reason) row.appendChild(badge("warn", "waiting"));
     ch.appendChild(row);
   });
-  var chartedTotal = data.charted.length + (data.charted_more || 0);
+  var chartedShown = chartedQueued(data.charted).length;
+  var chartedTotal = chartedShown + chartedMoreQueued;
   document.getElementById("bb-charted-sub").textContent =
-    data.charted_more ? "showing " + data.charted.length + " of " + chartedTotal : "";
-  if (data.charted_more) {
-    ch.appendChild(el("span", "bb-morechip", "+" + data.charted_more + " more queued - ask firstmate for the full chart"));
+    chartedMoreQueued ? "showing " + chartedShown + " of " + chartedTotal : "";
+  if (chartedMoreQueued) {
+    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreQueued + " more queued - ask firstmate for the full chart"));
+  }
+  if (chartedMoreWarnings) {
+    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreWarnings + " more repair warning" + (chartedMoreWarnings === 1 ? "" : "s") + " - ask firstmate for the full chart"));
   }
 
   if (anyPickable) {

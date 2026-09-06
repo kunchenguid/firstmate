@@ -20,21 +20,31 @@
 #     translation time so a mid-cycle AFK transition is honored).
 #   - Need: arms only while work is in flight (state/*.meta) or X mode has a
 #     relay poll to run (state/x-watch.check.sh); an idle home exits 0.
-#   - Single-flight: Claude does not dedupe async hooks, so a home-scoped owner
-#     lock (state/.claude-autoarm.lock) admits exactly one owner; every other
-#     concurrent firing exits 0 without translating, which keeps one event
-#     epoch on exactly one recovery turn. A lock left behind by a claim whose
-#     ledger outcome is already terminal, or whose recorded pid-identity no
-#     longer matches its live pid, is reclaimed once rather than deferred to
-#     forever (fm_autoarm_claim_abandoned in bin/fm-wake-lib.sh).
+#   - Single-flight: Claude does not dedupe async hooks, so exactly one
+#     GENERATION owner arms per event epoch: the epoch ledger's monotonic
+#     sequence is the claim generation, every firing defers (exit 0) to a live
+#     open claim, and a stuck, dead, identity-mismatched, or finished claim is
+#     superseded by taking the next generation instead of being unlocked or
+#     revoked. No mutex is ever held across arming or output - the owner lock
+#     survives only as the micro-mutex serializing individual ledger writes -
+#     and a superseded owner goes completely silent: ownership is re-verified
+#     before every arm invocation, episode-state mutation, ledger write, and
+#     continuation (fm_autoarm_claim_open/fm_autoarm_claim_next in
+#     bin/fm-wake-lib.sh own the contract, including the legacy shim for a
+#     pre-generation lock).
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
 #   - Translation: while supervision is still needed and AFK remains inactive,
 #     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
 #     rewake banner to stderr and exits 2, which wakes Claude even while idle
-#     ("Stop hook feedback"). A close that reports no actionable reason is
-#     benign when a live identity-matched watcher still has a fresh beacon.
+#     ("Stop hook feedback"). The irrevocable commit point is the EXIT STATUS:
+#     the harness delivers the collected stderr only on exit 2, so an owned
+#     terminal commit decides the exit. Markerless outcomes commit with the
+#     ledger write; the failure notice additionally requires its marker write.
+#     A refused generation exits 0 silently even after printing. A close that
+#     reports no actionable reason is benign when a live identity-matched
+#     watcher still has a fresh beacon.
 #   - Failure handling: a typed failure is rechecked against the same live,
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
@@ -42,10 +52,11 @@
 #     exit 2 to guarantee the next Stop-owned retry without repeating notice,
 #     until the synchronous guard has consumed its attended fail-open.
 #
-# The epoch ledger state/.claude-autoarm-epoch records the latest claim and
-# outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
-# allow a stop whose recovery this hook already owns, instead of forcing a
-# duplicate continuation for the same event epoch. The failure marker
+# The epoch ledger state/.claude-autoarm-epoch records the latest claim
+# generation and outcome so the synchronous Stop guard
+# (bin/fm-turnend-guard.sh --claude) can allow a stop whose recovery this hook
+# already owns, instead of forcing a duplicate continuation for the same event
+# epoch. The failure marker
 # state/.claude-autoarm-failure-notified deduplicates the last-resort notice,
 # and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
 # suppresses any later automatic continuation in that unresolved episode.
@@ -79,7 +90,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
-EPOCH="$STATE/.claude-autoarm-epoch"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
@@ -149,17 +159,18 @@ if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   fm_session_lock_owned_by_self "$STATE" || exit 0
 fi
 
-# --- single-flight owner claim ------------------------------------------------
+# --- single-flight generation claim --------------------------------------------
 # Claude runs one background process per firing with no dedupe. Exactly one
-# owner foregrounds the arm and translates its close; every other firing exits
-# 0 so one watcher cycle maps to at most one exit-2 rewake.
-#
-# A claim whose own ledger entry or recorded pid-identity proves its supervision
-# decision already finished is abandoned, not in flight: deferring to it forever
-# is what leaves a home unsupervised with no watcher and no lock
-# (fm_autoarm_claim_abandoned in bin/fm-wake-lib.sh owns that proof and its
-# race-free reclaim). Reclaim it once and retry; anything still genuinely
-# deciding keeps the lock and this firing stays inert.
+# generation owner arms and translates per event epoch: every firing defers to
+# a live open claim, and a stuck, dead, identity-mismatched, or finished claim
+# is superseded by taking the next generation (fm_autoarm_claim_open and
+# fm_autoarm_claim_next in bin/fm-wake-lib.sh own the contract). No mutex is
+# held past this point. A micro-mutex contention with a bare hold is another
+# participant's short ledger section and the next Stop firing simply retries,
+# while a role-carrying hold is a legacy lock-holding claim from a
+# pre-generation build (or the guard's own terminal-check), which the legacy
+# shim defers to while genuinely deciding and reclaims once when proven
+# abandoned.
 #
 # A lock the filesystem refused outright is not another firing holding it: no
 # owner exists, nobody armed, and every later state write this hook makes will
@@ -174,48 +185,49 @@ autoarm_refuse_if_lock_unavailable() {  # <lock-path>
     "$1" >&2
   exit 0
 }
-if ! fm_lock_try_acquire "$OWNER_LOCK"; then
+fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
+fm_autoarm_claim_next "$STATE" "$GRACE"
+CLAIM_RC=$?
+if [ "$CLAIM_RC" -ne 0 ]; then
+  [ "$CLAIM_RC" -eq 2 ] && exit 0
   autoarm_refuse_if_lock_unavailable "$OWNER_LOCK"
+  ROLE=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
+  [ -n "$ROLE" ] || exit 0
   # The reclaim takes the steal mutex beside the lock, so it has a refusal of
   # its own to report. A claim that is simply not abandoned leaves the held
-  # reason from the acquire above in place, and the helper stands down.
-  if ! fm_autoarm_release_abandoned "$STATE"; then
+  # reason from the claim above in place, and the helper stands down.
+  if ! fm_autoarm_release_abandoned "$STATE" "$GRACE"; then
     autoarm_refuse_if_lock_unavailable "$OWNER_LOCK"
     exit 0
   fi
-  if ! fm_lock_try_acquire "$OWNER_LOCK"; then
+  if ! fm_autoarm_claim_next "$STATE" "$GRACE"; then
     autoarm_refuse_if_lock_unavailable "$OWNER_LOCK"
     exit 0
   fi
 fi
-# Record WHO this claim is before publishing the role both Stop participants read
-# as ownership. A bare pid the operating system later hands to an unrelated live
-# process is exactly what makes a killed claim look in flight forever, in the two
-# shapes the ledger cannot settle: an entry still reading arming, and no entry at
-# all. Best effort; a home whose identity cannot be recorded keeps the ledger-only
-# boundary rather than losing its claim.
-fm_autoarm_claim_record_identity "$STATE" || true
-if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
-  fm_lock_release "$OWNER_LOCK"
-  exit 0
-fi
-trap 'fm_lock_release "$OWNER_LOCK"' EXIT
+MY_GEN=$FM_AUTOARM_MY_GEN
+[ -n "$MY_GEN" ] || exit 0
 
-write_epoch() {  # <outcome>
-  local outcome=$1 seq tmp
-  seq=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$EPOCH" 2>/dev/null || true)
-  case "$seq" in
-    ''|*[!0-9]*) seq=0 ;;
-  esac
-  seq=$((seq + 1))
-  tmp="$EPOCH.tmp.$$"
-  printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
-    "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$EPOCH" 2>/dev/null
-  rm -f "$tmp" 2>/dev/null || true
+# Commit <outcome> (optionally with the once-per-episode notice marker) for
+# this generation. Success means this generation's translation WINS and the
+# caller exits 2 unconditionally. Markerless outcomes commit with the owned
+# ledger write; a notice wins only when its following marker write succeeds in
+# the same hold. Failure means refused or unverifiable: the caller goes silent
+# (cleanup, exit 0) - the harness discards the collected stderr on exit 0, so
+# even an already-printed banner is never delivered by a losing generation.
+autoarm_commit() {  # <outcome> [marker-file]
+  if [ -n "${2:-}" ]; then
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" "$2"
+  else
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1"
+  fi
 }
 
-write_epoch arming
+# Best-effort ownership-checked record for exit-0 paths, where supersession
+# changes nothing about the action taken.
+autoarm_record() {  # <outcome>
+  fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
+}
 
 # X mode cadence: source the generated config so an X instance polls at its
 # 30s cadence (fm-bootstrap.sh x_mode_setup contract).
@@ -234,6 +246,13 @@ ACTIONABLE=0
 HEALTHY=0
 attempt=0
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
+  # A superseded owner must not start or attach another watcher or mutate any
+  # watcher/wake state: re-verify generation ownership before every arm
+  # invocation, first attempt and retries alike.
+  if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
   attempt=$((attempt + 1))
   OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
   if [ -n "$OUT" ]; then
@@ -245,7 +264,7 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress
   # every subsequent classification and handoff.
   if [ -e "$STATE/.afk" ]; then
-    write_epoch afk
+    autoarm_record afk
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
@@ -270,56 +289,85 @@ done
 # The need may have vanished mid-cycle (fleet torn down, X opted out): nothing
 # left to supervise, so close quietly instead of waking the model.
 if ! need_supervision; then
-  write_epoch clean
+  autoarm_record clean
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
 
 if [ "$HEALTHY" -eq 1 ]; then
-  if fm_failure_episode_reset "$STATE"; then
-    write_epoch clean
+  fm_autoarm_reset_owned "$STATE" "$MY_GEN"
+  RESET_RC=$?
+  if [ "$RESET_RC" -eq 0 ]; then
+    autoarm_record clean
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
-  write_epoch failed-suppressed
+  if [ "$RESET_RC" -eq 2 ]; then
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
+  if autoarm_commit failed-suppressed; then
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    [ -e "$FAILURE_ALARM" ] && exit 0
+    exit 2
+  fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  [ -e "$FAILURE_ALARM" ] && exit 0
-  exit 2
+  exit 0
 fi
 
 # After the synchronous guard has consumed the episode's attended fail-open,
 # do not create another exit-2 continuation that could defeat it.
 if [ -e "$FAILURE_ALARM" ]; then
-  write_epoch failed-suppressed
+  autoarm_record failed-suppressed
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
 
 if [ "$ACTIONABLE" -eq 1 ]; then
-  write_epoch rewake
+  # Cheap early-out before composing the banner; the real commit decision is
+  # the owned terminal write below.
+  if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
+  if autoarm_commit rewake; then
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 2
+  fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  exit 2
+  exit 0
 fi
 
 # Notify only once for this continuous failure episode; every later invocation
 # still exits 2 so Claude must continue into another Stop-owned retry without
-# creating a repeated operator notice or manual-arm loop.
+# creating a repeated operator notice or manual-arm loop. The notice marker
+# commits in the same owned critical section as the winning failed write, so a
+# losing generation can neither consume nor deliver it.
 if [ ! -e "$FAILURE_NOTICE" ]; then
-  write_epoch failed
+  if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
   {
     printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
     [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
     printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n'
   } >&2
-  : > "$FAILURE_NOTICE" 2>/dev/null || true
+  if autoarm_commit failed "$FAILURE_NOTICE"; then
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 2
+  fi
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 0
+fi
+if autoarm_commit failed-suppressed; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 2
 fi
-write_epoch failed-suppressed
 [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-exit 2
+exit 0

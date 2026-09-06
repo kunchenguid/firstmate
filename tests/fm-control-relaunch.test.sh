@@ -86,7 +86,7 @@ case "${1:-}" in
         'export GOTMPDIR='*)
           if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
             : > "$FM_FAKE_TRACE_PREPARE"
-            while [ ! -e "$FM_FAKE_META_WRITER_READY" ]; do /bin/sleep 0.01; done
+            while [ ! -e "$FM_FAKE_TRACE_RELEASE" ]; do /bin/sleep 0.01; done
           fi
           ;;
         'export TRACEPARENT='*)
@@ -117,6 +117,7 @@ SH
   chmod +x "$fb/tmux"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_FAKE_LOCK_WAITING:-}" ] || : > "$FM_FAKE_LOCK_WAITING"
 exit 0
 SH
   chmod +x "$fb/sleep"
@@ -141,7 +142,14 @@ add_ship_task() {
   local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
-  printf '# brief for %s\n\nDo the thing.\n' "$id" > "$home/data/$id/brief.md"
+  cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Exercise relaunch behavior for $id.
+
+## Firstmate spec
+Preserve the task while replacing its agent process.
+EOF
   {
     echo "window=fmses:fm-$id"
     echo "endpoint_task_id=$id"
@@ -162,13 +170,19 @@ add_ship_task() {
 
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
+  # A claude spawn pre-registers workspace trust in the launching user's own
+  # store (bin/fm-claude-trust.sh), and a relaunch reaches it through fm-control.sh, so this runs against a throwaway HOME;
+  # without it this suite would write the developer's real ~/.claude.json.
+  mkdir -p "$dir/user-home"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
+    FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
     "$CONTROL" "$@" 2>&1
@@ -176,7 +190,12 @@ run_control() {  # <case-dir> <args...>
 
 run_spawn() {  # <case-dir> <args...>
   local dir=$1; shift
+  # A claude spawn pre-registers workspace trust in the launching user's own
+  # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
+  # without it this suite would write the developer's real ~/.claude.json.
+  mkdir -p "$dir/user-home"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
 }
@@ -246,6 +265,38 @@ SH
   chmod +x "$1/fakebin/rm"
 }
 
+# Give a case home a real backlog carrying <id>, so the relaunch path's paired
+# backlog transition (bin/fm-backlog-transition-lib.sh) is live rather than
+# skipped for want of a backlog file.
+seed_backlog() {  # <case-dir> <id> <queued|in_flight>
+  local dir=$1 id=$2 want=$3 file="$1/home/data/backlog.md"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$file"
+  tasks-axi add "$id" "relaunch fixture task" --kind ship --file "$file" >/dev/null
+  [ "$want" != in_flight ] || tasks-axi start "$id" --file "$file" >/dev/null
+}
+
+backlog_state() {  # <case-dir> <id>
+  tasks-axi show "$2" --file "$1/home/data/backlog.md" 2>/dev/null |
+    sed -n 's/^  state: *//p' | head -1
+}
+
+# Shadow tasks-axi so every `start` fails and every other verb is real. A
+# relaunch that re-reads the row before acting never calls it; one that assumes
+# it must re-run the transition trips over it.
+break_tasks_axi_start() {  # <case-dir>
+  local dir=$1 real
+  real=$(command -v tasks-axi)
+  cat > "$dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = start ]; then
+  echo 'error: "start refused"' >&2
+  exit 1
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$dir/fakebin/tasks-axi"
+}
+
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
@@ -273,6 +324,44 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_relaunch_from_linked_home_preserves_recorded_worktree() {
+  local dir out rc head fetch_head
+  dir=$(new_case linked-home rl42)
+  add_ship_task "$dir" rl42 claude
+  git -C "$dir/proj" worktree add --quiet --detach "$dir/secondmate" HEAD
+  sed "s|^project=.*|project=$dir/secondmate|" "$dir/home/state/rl42.meta" > "$dir/linked.meta"
+  mv "$dir/linked.meta" "$dir/home/state/rl42.meta"
+  printf 'committed task work\n' > "$dir/wt/task.txt"
+  git -C "$dir/wt" add task.txt
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm task-work
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'unfinished task work\n' >> "$dir/wt/task.txt"
+  fetch_head=$(git -C "$dir/wt" rev-parse --git-path FETCH_HEAD)
+
+  out=$(run_control "$dir" rl42 relaunch --note "continue from linked home"); rc=$?
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# evidence begin: linked-home relaunch\n'
+    printf '$ bin/fm-control.sh rl42 relaunch --note "continue from linked home"\n%s\nexit=%s\n' "$out" "$rc"
+    printf 'worker HEAD before=%s after=%s\n' "$head" "$(git -C "$dir/wt" rev-parse HEAD)"
+    printf 'saved task metadata:\n'; cat "$dir/home/state/rl42.meta"
+    printf 'worker status:\n'; git -C "$dir/wt" status --short
+    printf 'preserved task.txt:\n'; cat "$dir/wt/task.txt"
+    if [ -e "$fetch_head" ]; then
+      printf 'worker FETCH_HEAD:\n'; cat "$fetch_head"
+    else
+      printf 'worker FETCH_HEAD absent\n'
+    fi
+    printf '# evidence end\n'
+  fi
+  expect_code 0 "$rc" "a linked spawning home should relaunch its recorded copy"$'\n'"$out"
+  [ "$(meta_field "$dir" rl42 worktree)" = "$dir/wt" ] || fail "relaunch replaced the recorded copy"
+  [ "$(meta_field "$dir" rl42 project)" = "$dir/secondmate" ] || fail "relaunch replaced the linked spawning home"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head" ] || fail "relaunch reset committed task work"
+  assert_grep 'unfinished task work' "$dir/wt/task.txt" "relaunch discarded unfinished task work"
+  [ ! -e "$fetch_head" ] || fail "relaunch fetched instead of preserving the recorded copy"
+  pass "fm-control relaunch: a linked spawning home preserves committed and unfinished work in the recorded copy"
+}
+
 test_relaunch_preserves_durable_task_metadata() {
   local dir out rc
   dir=$(new_case durable-meta rl19)
@@ -298,20 +387,20 @@ test_relaunch_preserves_durable_task_metadata() {
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
-  local dir control_pid link_pid rc i=0 traceparent prepare ready exported release
+  local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
   add_ship_task "$dir" rl28 claude
   printf '%s\n' "$$" > "$dir/home/state/.lock"
   printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
   make_mv_failure_stub "$dir"
   prepare="$dir/trace-prepare"
+  launch_release="$dir/trace-release"
+  waiting="$dir/meta-writer-waiting"
   ready="$dir/meta-writer-ready"
-  exported="$dir/trace-exported"
   release="$dir/meta-writer-release"
   FM_REAL_MV=$(command -v mv) \
     FM_FAKE_TRACE_PREPARE="$prepare" \
-    FM_FAKE_META_WRITER_READY="$ready" \
-    FM_FAKE_TRACE_EXPORTED="$exported" \
+    FM_FAKE_TRACE_RELEASE="$launch_release" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
   while [ ! -e "$prepare" ] && [ "$i" -lt 200 ]; do
@@ -325,6 +414,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
   }
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_REAL_MV="$(command -v mv)" \
+    FM_FAKE_LOCK_WAITING="$waiting" \
     FM_FAKE_META_WRITER_TARGET="$dir/home/state/rl28.meta" \
     FM_FAKE_META_WRITER_READY="$ready" \
     FM_FAKE_META_WRITER_RELEASE="$release" \
@@ -332,22 +422,34 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
       --carry-platform x --carry-max 280 > "$dir/link.out" 2>&1 &
   link_pid=$!
   i=0
-  while { [ ! -e "$ready" ] || [ ! -e "$exported" ]; } && [ "$i" -lt 200 ]; do
+  while [ ! -e "$waiting" ] && [ "$i" -lt 200 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
-  [ -e "$ready" ] && [ -e "$exported" ] || {
+  [ -e "$waiting" ] && [ ! -e "$ready" ] || {
+    : > "$launch_release"
     : > "$release"
+    wait "$link_pid" 2>/dev/null || true
+    wait "$control_pid" 2>/dev/null || true
+    fail "a durable metadata writer was not blocked during relaunch delivery"
+  }
+  : > "$launch_release"
+  i=0
+  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || {
     kill "$link_pid" "$control_pid" 2>/dev/null || true
     wait "$link_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
-    fail "trace publication did not overlap the concurrent metadata writer"
+    fail "durable metadata writer did not resume after relaunch delivery committed"
   }
   : > "$release"
   wait "$link_pid"; rc=$?
   expect_code 0 "$rc" "concurrent X metadata publication should serialize"$'\n'"$(cat "$dir/link.out")"
   wait "$control_pid"; rc=$?
-  expect_code 0 "$rc" "relaunch should complete after serialized metadata publication"$'\n'"$(cat "$dir/control.out")"
+  expect_code 0 "$rc" "relaunch should complete before serialized metadata publication"$'\n'"$(cat "$dir/control.out")"
   [ "$(meta_field "$dir" rl28 x_request)" = request-28 ] \
     || fail "relaunch erased metadata published concurrently through the X interface"
   [ "$(meta_field "$dir" rl28 x_followups)" = 1 ] \
@@ -355,7 +457,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
   traceparent=$(meta_field "$dir" rl28 traceparent)
   fm_trace_context_valid "$traceparent" \
     || fail "concurrent metadata publication erased the replacement's trace carrier"
-  pass "fm-control relaunch: trace and concurrent task metadata publications serialize"
+  pass "fm-control relaunch: delivery and concurrent task metadata publication serialize"
 }
 
 test_disabled_relaunch_clears_prior_trace_context() {
@@ -385,7 +487,7 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   out=$(run_control "$dir" rl2 relaunch --note "reproduced the crash in parser.go"); rc=$?
   expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
   brief="$dir/home/data/rl2/brief.md"
-  assert_grep "Do the thing." "$brief" "the original instructions must survive"
+  assert_grep "Exercise relaunch behavior for rl2." "$brief" "the original instructions must survive"
   assert_grep "## Progress note" "$brief" "the note should be a dated section in the instructions"
   assert_grep "reproduced the crash in parser.go" "$brief" "the note text should reach the replacement"
   assert_grep "reproduced the crash in parser.go" "$dir/home/state/rl2.control-relaunch.note" \
@@ -1273,6 +1375,89 @@ test_spawn_relaunch_refuses_a_live_agent() {
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
 
+test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
+  local dir meta target out rc
+  dir=$(new_case symlink-meta rl37)
+  add_ship_task "$dir" rl37 claude
+  meta="$dir/home/state/rl37.meta"
+  target="$dir/foreign-task-record"
+  mv "$meta" "$target"
+  ln -s "$target" "$meta"
+  mv "$dir/fakebin/tmux" "$dir/fakebin/tmux-real"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+: > "$dir/relaunch-endpoint-inspected"
+exec "$dir/fakebin/tmux-real" "\$@"
+SH
+  chmod +x "$dir/fakebin/tmux"
+
+  out=$(run_spawn "$dir" rl37 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunching from symlinked metadata should refuse"
+  assert_contains "$out" "task record resolves outside its authorized directory" \
+    "relaunch did not identify the unsafe task record"
+  [ -L "$meta" ] || fail "relaunch replaced or removed the symlinked record"
+  assert_present "$target" "relaunch removed the foreign record target"
+  assert_absent "$dir/relaunch-endpoint-inspected" \
+    "relaunch inspected or acted on an endpoint from unsafe metadata"
+  pass "fm-spawn --relaunch: symlinked records refuse before inspection"
+}
+
+test_spawn_relaunch_keeps_its_early_meta_lock_continuous() {
+  local dir lock out rc
+  dir=$(new_case continuous-meta-lock rl38)
+  add_ship_task "$dir" rl38 claude
+  printf 'zsh' > "$dir/fake/command"
+  lock="$dir/home/state/.meta-rl38.lock"
+  mv "$dir/fakebin/tmux" "$dir/fakebin/tmux-real"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ -d "$lock" ]; then
+  if [ ! -e "$dir/lock-observation-started" ]; then
+    : > "$dir/lock-observation-started"
+    : > "$lock/continuity-sentinel"
+  elif [ ! -e "$lock/continuity-sentinel" ]; then
+    : > "$dir/meta-lock-was-recreated"
+  fi
+fi
+exec "$dir/fakebin/tmux-real" "\$@"
+SH
+  chmod +x "$dir/fakebin/tmux"
+
+  out=$(run_spawn "$dir" rl38 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunch with one continuous meta lock should succeed"$'\n'"$out"
+  assert_present "$dir/lock-observation-started" \
+    "test did not observe the relaunch-held meta lock"
+  assert_absent "$dir/meta-lock-was-recreated" \
+    "relaunch released or recreated its already-held meta lock"
+  pass "fm-spawn --relaunch: keeps its early meta lock continuous"
+}
+
+test_spawn_relaunch_refuses_a_pending_authoritative_close() {
+  local dir meta marker out rc
+  dir=$(new_case pending-close rl36)
+  add_ship_task "$dir" rl36 claude
+  meta="$dir/home/state/rl36.meta"
+  printf 'spawn_gen=spawn-pending\n' >> "$meta"
+  cp "$meta" "$dir/meta.before"
+  mkdir -p "$dir/wt/.claude"
+  printf 'prior wiring\n' > "$dir/wt/.claude/settings.local.json"
+  marker="$dir/home/state/rl36.backlog-close"
+  printf 'id=rl36\ndata=%s\nspawn_gen=spawn-pending\narg=--note\narg=local%%20main\n' \
+    "$dir/home/data" > "$marker"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl36 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunching over a pending close should refuse"
+  assert_contains "$out" "pending authoritative backlog close" \
+    "the refusal should identify the close that still owns the task"
+  cmp -s "$dir/meta.before" "$meta" \
+    || fail "pending-close refusal replaced the task incarnation"
+  assert_grep 'prior wiring' "$dir/wt/.claude/settings.local.json" \
+    "pending-close refusal cleared the prior worker wiring"
+  assert_present "$marker" "pending-close refusal discarded the authoritative close"
+  pass "fm-spawn --relaunch: pending closes refuse before replacement begins"
+}
+
 test_spawn_relaunch_refuses_contradicting_flags() {
   local dir out rc
   dir=$(new_case flags rl16)
@@ -1312,7 +1497,43 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
+  local dir out rc=0
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  dir=$(new_case reverify rl40)
+  add_ship_task "$dir" rl40 claude
+  seed_backlog "$dir" rl40 in_flight
+  break_tasks_axi_start "$dir"
+
+  out=$(run_control "$dir" rl40 relaunch --note "picking the work back up") || rc=$?
+  expect_code 0 "$rc" "a relaunch must not re-run a transition the row already reflects"$'\n'"$out"
+  [ "$(backlog_state "$dir" rl40)" = in_flight ] \
+    || fail "a relaunch changed an already In-flight item to $(backlog_state "$dir" rl40)"
+  pass "relaunch re-reads the backlog item instead of blindly re-running the transition"
+}
+
+test_relaunch_moves_a_drifted_item_back_in_flight() {
+  local dir out rc=0
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  dir=$(new_case drifted rl41)
+  add_ship_task "$dir" rl41 claude
+  seed_backlog "$dir" rl41 queued
+
+  out=$(run_control "$dir" rl41 relaunch --note "picking the work back up") || rc=$?
+  expect_code 0 "$rc" "a relaunch onto a drifted item should succeed"$'\n'"$out"
+  [ "$(backlog_state "$dir" rl41)" = in_flight ] \
+    || fail "a relaunch left its item at $(backlog_state "$dir" rl41)"
+  pass "relaunch heals an item that drifted out of In flight while the task stayed live"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
@@ -1355,6 +1576,11 @@ test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
+test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
+test_spawn_relaunch_keeps_its_early_meta_lock_continuous
+test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
+test_relaunch_moves_a_drifted_item_back_in_flight

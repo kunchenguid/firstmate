@@ -37,6 +37,24 @@ fm_git_identity fmtest fmtest@example.invalid
 . "$ROOT/bin/fm-backend.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
+# A claude spawn writes workspace trust into the launching user's own store,
+# and the script resolves it as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so the value
+# is pinned EMPTY beside the throwaway HOME: an inherited one would beat that
+# HOME and reach the developer's real store, while empty falls through to it
+# and adds no launch prefix, since fm-spawn only prefixes a non-empty value.
+SPAWN_HOME="$TMP_ROOT/user-home"
+mkdir -p "$SPAWN_HOME"
+
+write_spawn_brief() {  # <file> <id>
+  cat > "$1" <<EOF
+# Task
+## Captain's intent
+Exercise backend dispatch for $2.
+
+## Firstmate spec
+Verify backend selection without changing task intent.
+EOF
+}
 
 # fm_backend_detect's cmux fallback (bundle id + process ancestry,
 # docs/cmux-backend.md "Runtime auto-detection") consults uname, lsappinfo,
@@ -520,7 +538,7 @@ test_backend_validate_spawn_accepts_orca() {
 }
 
 test_meta_get_and_backend_of_meta() {
-  local meta=$TMP_ROOT/meta-get.meta
+  local meta=$TMP_ROOT/meta-get.meta edge=$TMP_ROOT/meta-get-edge.meta
   fm_write_meta "$meta" "window=firstmate:fm-x1" "harness=claude"
   [ "$(fm_meta_get "$meta" window)" = "firstmate:fm-x1" ] || fail "fm_meta_get did not read window="
   [ "$(fm_meta_get "$meta" missing)" = "" ] || fail "fm_meta_get should print nothing for an absent key"
@@ -529,7 +547,11 @@ test_meta_get_and_backend_of_meta() {
   printf 'backend=tmux\n' >> "$meta"
   [ "$(fm_backend_of_meta "$meta")" = tmux ] || fail "fm_backend_of_meta should read an explicit backend=tmux"
 
-  pass "fm_meta_get / fm_backend_of_meta: read key=value, default backend to tmux"
+  printf 'token=first\ntoken=last=value' > "$edge"
+  [ "$(fm_meta_get "$edge" token)" = "last=value" ] \
+    || fail "fm_meta_get did not preserve last-value or no-final-newline semantics"
+
+  pass "fm_meta_get / fm_backend_of_meta: read last key=value and default backend to tmux"
 }
 
 test_resolve_selector_three_forms() {
@@ -793,7 +815,7 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
   local bin=$1 fb=$2 log=$3 state=$4 data=$5 config=$6 proj=$7; shift 7
   [ "${1:-}" = -- ] && shift
   : > "$log"
-  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" \
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TMUX_LOG="$log" \
@@ -882,7 +904,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/symlink-fake-$label" "$initial_path" "$wt")
   data="$TMP_ROOT/symlink-data-$label"
   mkdir -p "$data/$id"
-  printf 'test brief content\n' > "$data/$id/brief.md"
+  write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/symlink-state-$label"; config="$TMP_ROOT/symlink-config-$label"
   mkdir -p "$state" "$config"
   log="$TMP_ROOT/symlink-spawn-$label.log"
@@ -1043,11 +1065,11 @@ test_spawn_default_backend_writes_no_meta_field() {
   fm_git_worktree "$proj" "$wt" "fm/$id"
   local fb
   fb=$(make_spawn_fakebin "$TMP_ROOT/nobackend-fake" "$wt")
-  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/nobackend-state"; config="$TMP_ROOT/nobackend-config"
   mkdir -p "$state" "$config"
 
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_TMUX_LOG="$TMP_ROOT/nobackend.log" \
@@ -1065,13 +1087,13 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   id="explicitbackendz4"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$wt")
-  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
   mkdir -p "$state" "$config"
 
   # HERDR_ENV=1 is present (as if firstmate itself were running under herdr),
   # but an explicit --backend tmux flag must still win outright.
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" \
@@ -1089,7 +1111,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   id="nestbackendz5"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_spawn_fakebin "$TMP_ROOT/nest-fake" "$wt")
-  mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
+  mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"
   mkdir -p "$state" "$config"
 
@@ -1098,7 +1120,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   # (tmux nested inside a herdr pane) - the full fm-spawn.sh pipeline, not just
   # fm_backend_name, must resolve this to tmux and stay completely silent about
   # it (today's default path, byte-identical).
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/nest.log" \

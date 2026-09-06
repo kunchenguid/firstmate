@@ -138,7 +138,7 @@ hold_source_lock_then_handle() {  # <home> <source-id> <sequence> <ready-file> <
 }
 
 # --- inert with nothing configured ------------------------------------------
-IDLE="$TMP_ROOT/idle"; new_home "$IDLE"
+IDLE="$TMP_ROOT/idle"; mkdir -p "$IDLE"
 out=$(pe "$IDLE" list)
 assert_contains "$out" "no sources registered" "an unconfigured home reports no sources"
 out=$(pe "$IDLE" reconcile)
@@ -151,7 +151,7 @@ sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
 assert_contains "$sup" no "an unconfigured home does not need supervision"
 
 # --- a blocking source completes into exactly one normalized event ----------
-H1="$TMP_ROOT/h1"; new_home "$H1"
+H1="$TMP_ROOT/h1"; mkdir -p "$H1"
 TRIG="$TMP_ROOT/trigger-one"
 out=$(pe_register "$H1" lavish src-one -- "$BLOCKER" "$TRIG" "payload one")
 assert_contains "$out" "registered: src-one" "register records a source"
@@ -184,6 +184,30 @@ assert_contains "$mode" 600 "the captured result is private"
 assert_grep 'payload one' "$RESULT" "the captured result holds the source output verbatim"
 assert_grep 'lavish' "${RESULT%.result}.adapter" "the captured result retains its immutable adapter"
 assert_absent "${RESULT%.result}.handled" "publication alone never marks a result handled"
+
+# --- a home spelled through a symlinked ancestor still runs its sources ------
+# Such a home must run process-event sources exactly like a physically spelled
+# one: reconcile's detached runner discards its own stderr, so a refusal here is
+# invisible to the caller and the source simply never fires.
+HPHYS="$TMP_ROOT/symlinked-parent-target"
+mkdir -p "$HPHYS"
+ln -s "$HPHYS" "$TMP_ROOT/symlinked-parent"
+HSYM="$TMP_ROOT/symlinked-parent/home"; new_home "$HSYM"
+SYM_TRIGGER="$TMP_ROOT/symlink-trigger"
+pe_register "$HSYM" lavish symlinked-src -- "$BLOCKER" "$SYM_TRIGGER" "symlinked payload" >/dev/null
+pe "$HSYM" reconcile >/dev/null
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/symlinked-src.claim" \
+  || fail "a home reached through a symlinked ancestor never claimed its source"
+: > "$SYM_TRIGGER"
+wait_for "$HSYM/state/.wake-queue" \
+  || fail "a home reached through a symlinked ancestor published no event"
+assert_contains "$(wake_payloads "$HSYM")" "procevent lavish symlinked-src 1" \
+  "the symlinked-ancestor home publishes the committed result sequence"
+SYM_RESULT=$(first_result "$HSYM" symlinked-src || true)
+[ -n "$SYM_RESULT" ] || fail "the symlinked-ancestor home captured no durable result"
+assert_grep 'symlinked payload' "$SYM_RESULT" \
+  "the symlinked-ancestor home captures the source output verbatim"
+pass "a home reached through a symlinked ancestor runs its sources normally"
 
 # --- the public start boundary establishes generation group ownership -------
 HPG="$TMP_ROOT/hpg"; new_home "$HPG"
@@ -594,6 +618,273 @@ assert_grep 'ship it' "$LAVISH_RESULT" "automatic retirement retains the human's
 out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$REVIEW_ART")
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
 pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
+
+# --- end-user-aligned regression: an empty board close is not news ------------
+# The captain's report: closing a review surface he had said nothing on still
+# put a wake in his chat whose entire content was that nothing happened. The
+# adapter now answers the runner's silence seam for exactly that shape, so the
+# result is captured and recorded handled without ever being announced. Driven
+# through the adapter's own arm command and the real runner, so registration,
+# capture, the silence verdict, and retirement all run for real.
+HEMPTY="$TMP_ROOT/hempty"; new_home "$HEMPTY"
+EMPTY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-empty-stub")
+cat > "$EMPTY_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Stand-in for `lavish-axi poll <file>` when the captain closes a board he said
+# nothing on: an ended session carrying no queued content at all.
+printf 'session:\n  file: /quiet.html\n  status: ended\n  ended_by: user\n'
+SH
+chmod +x "$EMPTY_BIN/lavish-axi"
+QUIET_ART="$TMP_ROOT/quiet-board.html"
+printf '<h1>quiet</h1>\n' > "$QUIET_ART"
+quiet_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$QUIET_ART")
+PE_TRACKED+=("$HEMPTY|$quiet_id")
+PATH="$EMPTY_BIN:$PATH" FM_HOME="$HEMPTY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$QUIET_ART" >/dev/null
+quiet_out=$(PATH="$EMPTY_BIN:$PATH" pe "$HEMPTY" start "$quiet_id" 2>&1)
+assert_not_contains "$quiet_out" "not-autohandled" \
+  "a durably silenced result was reported as still unacknowledged"
+# The handled marker is written at exactly the point the wake would otherwise
+# have been appended, so waiting on it - rather than on a fixed sleep - is what
+# makes "no wake" a real observation instead of a race the test won by being
+# early.
+QUIET_HANDLED="$HEMPTY/state/procevent-inbox/$quiet_id.1.handled"
+for _ in $(seq 1 100); do
+  [ -f "$QUIET_HANDLED" ] && break
+  sleep 0.1
+done
+[ -f "$QUIET_HANDLED" ] \
+  || fail "a silenced result was not durably recorded handled, so a later reconcile would announce it"
+[ "$(count_results "$HEMPTY" "$quiet_id")" = 1 ] \
+  || fail "an empty board close captured $(count_results "$HEMPTY" "$quiet_id") results instead of one"
+[ -z "$(wake_payloads "$HEMPTY")" ] \
+  || fail "an empty board close woke the captain: $(wake_payloads "$HEMPTY")"
+# Re-announcement is exactly what the handled marker exists to stop, so the
+# silence has to survive the reconcile that would otherwise republish it.
+PATH="$EMPTY_BIN:$PATH" pe "$HEMPTY" reconcile >/dev/null
+sleep 0.3
+[ -z "$(wake_payloads "$HEMPTY")" ] \
+  || fail "a later reconcile re-announced a silenced empty board close: $(wake_payloads "$HEMPTY")"
+assert_absent "$HEMPTY/state/procevent/$quiet_id.source" \
+  "an empty board close still retires its ended source"
+pass "an empty board close is captured and recorded handled without ever waking the captain"
+
+# The other half of the same contract, on the same real path: a close that
+# carries what the captain actually said must still reach him. Same runner, same
+# adapter, one different response shape.
+HANSWER="$TMP_ROOT/hanswer"; new_home "$HANSWER"
+ANSWER_BIN=$(fm_fakebin "$TMP_ROOT/lavish-answer-stub")
+cat > "$ANSWER_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Stand-in for `lavish-axi poll <file>` on a real `Send & End`: the captain's
+# own choice, delivered with session_ended.
+printf 'session:\n  file: /answered.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nprompts[1]{tag,text,prompt}:\n  "choice","Option B","Context data: {\\"question\\":\\"noop-check-routing\\",\\"answer\\":\\"b\\"}"\n'
+SH
+chmod +x "$ANSWER_BIN/lavish-axi"
+ANSWER_ART="$TMP_ROOT/answered-board.html"
+printf '<h1>answered</h1>\n' > "$ANSWER_ART"
+answer_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$ANSWER_ART")
+PE_TRACKED+=("$HANSWER|$answer_id")
+PATH="$ANSWER_BIN:$PATH" FM_HOME="$HANSWER" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$ANSWER_ART" >/dev/null
+PATH="$ANSWER_BIN:$PATH" pe "$HANSWER" reconcile >/dev/null
+wait_for "$HANSWER/state/.wake-queue" \
+  || fail "a board close carrying the captain's real answer produced no wake"
+assert_contains "$(wake_payloads "$HANSWER")" "procevent lavish $answer_id 1" \
+  "a real board answer still reaches the captain"
+[ ! -f "$HANSWER/state/procevent-inbox/$answer_id.1.handled" ] \
+  || fail "a real board answer was recorded handled without ever being handled"
+pass "a board close carrying the captain's real answer is still announced"
+
+# --- end-user-aligned regression: a transient poll interruption is not news ---
+# The dogfood defect: a live board listener can answer with exactly
+#     error: Lavish Editor poll response was interrupted
+#     code: SERVER_ERROR
+# while the board's marks remain available. Firstmate registered raw poll output,
+# so the generic runner captured that transient response and woke the whole fleet
+# over what is really an internal retry. Every scenario below runs through the
+# adapter's own arm command and the real runner, so registration, capture, and
+# publication are exercised for real.
+LAVISH_SCRIPTED_BIN=$(fm_fakebin "$TMP_ROOT/lavish-scripted-stub")
+cat > "$LAVISH_SCRIPTED_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+# Stand-in for `lavish-axi poll <file>`, scripted per scenario: LAVISH_SCRIPT
+# names the response for each successive poll, one word per poll, and its last
+# word repeats forever. `interrupt` is the exact transient response the server
+# returns while the board's marks stay available.
+n=$(cat "$LAVISH_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$LAVISH_COUNT"
+read -r -a plan <<< "$LAVISH_SCRIPT"
+i=$((n - 1))
+[ "$i" -ge "${#plan[@]}" ] && i=$((${#plan[@]} - 1))
+case "${plan[$i]}" in
+  interrupt)
+    printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n'; exit 1 ;;
+  near-interrupt)
+    printf 'error: Lavish Editor poll response was interrupted \ncode: SERVER_ERROR\n'; exit 1 ;;
+  other-server-error)
+    printf 'error: Lavish Editor session store is unavailable\ncode: SERVER_ERROR\n'; exit 1 ;;
+  feedback)
+    printf 'session:\n  file: /board.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' ;;
+  stream)
+    printf 'x%.0s' {1..4096}
+    printf 'ready\n' > "$LAVISH_STREAM_READY"
+    while [ ! -e "$LAVISH_STREAM_RELEASE" ]; do sleep 0.05; done
+    printf '\n' ;;
+esac
+SH
+chmod +x "$LAVISH_SCRIPTED_BIN/lavish-axi"
+export LAVISH_COUNT LAVISH_SCRIPT
+# A bounded test override keeps the retry policy's real bound under test without
+# making the suite wait out the production delay.
+export FM_LAVISH_POLL_RETRY_DELAY=0
+
+# Two interruptions, then the captain's real feedback: the retries are silent and
+# only the feedback becomes a captured result and a check wake.
+HRETRY="$TMP_ROOT/hretry"; new_home "$HRETRY"
+RETRY_ART="$TMP_ROOT/retry-board.html"
+printf '<h1>retry</h1>\n' > "$RETRY_ART"
+retry_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$RETRY_ART")
+PE_TRACKED+=("$HRETRY|$retry_id")
+LAVISH_COUNT="$TMP_ROOT/retry-count"; LAVISH_SCRIPT="interrupt interrupt feedback"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HRETRY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$RETRY_ART" >/dev/null
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HRETRY" reconcile >/dev/null
+wait_for "$HRETRY/state/.wake-queue" || fail "feedback after interrupted polls produced no wake"
+[ "$(cat "$LAVISH_COUNT")" = 3 ] \
+  || fail "the interrupted listener was polled $(cat "$LAVISH_COUNT") times, not the two quiet retries plus the delivering poll"
+[ "$(count_results "$HRETRY" "$retry_id")" = 1 ] \
+  || fail "a retried interruption produced $(count_results "$HRETRY" "$retry_id") captured results instead of one"
+[ "$(wake_payloads "$HRETRY" | sort -u | grep -c .)" = 1 ] \
+  || fail "a retried interruption woke the fleet: $(wake_payloads "$HRETRY" | sort -u)"
+assert_contains "$(wake_payloads "$HRETRY")" "procevent lavish $retry_id 1" \
+  "feedback arriving after quiet retries is captured and announced"
+assert_grep 'ship it' "$(first_result "$HRETRY" "$retry_id")" \
+  "the announced result is the captain's feedback, not the interruption"
+pass "a transient Lavish poll interruption is retried quietly and never announced"
+
+# Exhaustion is news: after the bounded retries the same exact response is
+# captured and announced normally rather than being swallowed forever.
+HEXH="$TMP_ROOT/hexh"; new_home "$HEXH"
+EXH_ART="$TMP_ROOT/exhaust-board.html"
+printf '<h1>exhaust</h1>\n' > "$EXH_ART"
+exh_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$EXH_ART")
+PE_TRACKED+=("$HEXH|$exh_id")
+LAVISH_COUNT="$TMP_ROOT/exhaust-count"; LAVISH_SCRIPT="interrupt"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HEXH" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$EXH_ART" >/dev/null
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HEXH" start "$exh_id" >/dev/null
+[ "$(cat "$LAVISH_COUNT")" = 13 ] \
+  || fail "the retry bound polled $(cat "$LAVISH_COUNT") times, not the first poll plus 12 bounded retries"
+[ "$(count_results "$HEXH" "$exh_id")" = 1 ] \
+  || fail "exhaustion produced $(count_results "$HEXH" "$exh_id") captured results instead of one"
+assert_contains "$(wake_payloads "$HEXH")" "procevent lavish $exh_id 1" \
+  "the interruption that survives the bound is announced normally"
+assert_grep 'poll response was interrupted' "$(first_result "$HEXH" "$exh_id")" \
+  "the announced result is the exact interruption the server returned"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HEXH" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$EXH_ART" >/dev/null
+pass "an interruption that outlives the bounded retries is captured and announced"
+
+# A different SERVER_ERROR is a genuine error, never a retry: no fail-open drift
+# from the one exact transient response this adapter owns.
+HOTHER="$TMP_ROOT/hother"; new_home "$HOTHER"
+OTHER_ART="$TMP_ROOT/other-board.html"
+printf '<h1>other</h1>\n' > "$OTHER_ART"
+other_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$OTHER_ART")
+PE_TRACKED+=("$HOTHER|$other_id")
+LAVISH_COUNT="$TMP_ROOT/other-count"; LAVISH_SCRIPT="other-server-error"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HOTHER" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$OTHER_ART" >/dev/null
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HOTHER" start "$other_id" >/dev/null
+[ "$(cat "$LAVISH_COUNT")" = 1 ] \
+  || fail "an unrelated SERVER_ERROR was retried $(cat "$LAVISH_COUNT") times instead of surfacing at once"
+assert_contains "$(wake_payloads "$HOTHER")" "procevent lavish $other_id 1" \
+  "an unrelated SERVER_ERROR is captured and announced immediately"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HOTHER" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$OTHER_ART" >/dev/null
+pass "only the exact interruption is retried; an unrelated SERVER_ERROR still surfaces"
+unset FM_LAVISH_POLL_RETRY_DELAY
+
+# A whitespace variant is not the exact transient response and must surface on
+# the first poll instead of drifting into the quiet retry policy.
+HNEAR="$TMP_ROOT/hnear"; new_home "$HNEAR"
+NEAR_ART="$TMP_ROOT/near-board.html"
+printf '<h1>near</h1>\n' > "$NEAR_ART"
+near_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$NEAR_ART")
+PE_TRACKED+=("$HNEAR|$near_id")
+LAVISH_COUNT="$TMP_ROOT/near-count"; LAVISH_SCRIPT="near-interrupt feedback"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" FM_LAVISH_POLL_RETRY_DELAY=0 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$NEAR_ART" >/dev/null
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" pe "$HNEAR" start "$near_id" >/dev/null
+[ "$(cat "$LAVISH_COUNT")" = 1 ] \
+  || fail "a near-match interruption was retried instead of surfacing on its first poll"
+assert_contains "$(wake_payloads "$HNEAR")" "procevent lavish $near_id 1" \
+  "a whitespace variant of the interruption is captured and announced immediately"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$NEAR_ART" >/dev/null
+pass "only the literal two-line interruption enters the quiet retry policy"
+
+# The public arm boundary refuses invalid retry intervals before it publishes a
+# source registration, rather than arming a listener that can only fail later.
+HINVALID="$TMP_ROOT/hinvalid"; new_home "$HINVALID"
+INVALID_ART="$TMP_ROOT/invalid-delay-board.html"
+printf '<h1>invalid delay</h1>\n' > "$INVALID_ART"
+invalid_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$INVALID_ART")
+for invalid_delay in 61 invalid; do
+  invalid_status=0
+  invalid_out=$(PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HINVALID" \
+    FM_LAVISH_POLL_RETRY_DELAY="$invalid_delay" \
+    "$ROOT/bin/fm-procevent-lavish.sh" arm "$INVALID_ART" 2>&1) || invalid_status=$?
+  [ "$invalid_status" -ne 0 ] \
+    || fail "arm accepted invalid retry delay: $invalid_delay"
+  assert_contains "$invalid_out" "must be whole seconds from 0 to 60" \
+    "arm explains the rejected retry delay"
+  assert_absent "$HINVALID/state/procevent/$invalid_id.source" \
+    "arm publishes no source registration for an invalid retry delay"
+done
+pass "arm rejects malformed and out-of-range retry delays before registration"
+
+# Shell-safe cleanup must preserve a valid TMPDIR containing an apostrophe.
+QUOTED_TMPDIR="$TMP_ROOT/poll's-stage"
+mkdir -p "$QUOTED_TMPDIR"
+LAVISH_COUNT="$TMP_ROOT/quoted-count"; LAVISH_SCRIPT="feedback"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$QUOTED_TMPDIR" \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$NEAR_ART" >/dev/null
+quoted_staged=("$QUOTED_TMPDIR"/fm-lavish-poll.*)
+[ ! -e "${quoted_staged[0]}" ] \
+  || fail "poll left its staged response behind in an apostrophe-containing TMPDIR"
+pass "poll cleanup safely handles an apostrophe-containing TMPDIR"
+
+HSTREAM="$TMP_ROOT/hstream"; new_home "$HSTREAM"
+STREAM_ART="$TMP_ROOT/stream-board.html"
+STREAM_TMPDIR="$TMP_ROOT/stream-stage"
+LAVISH_STREAM_READY="$TMP_ROOT/stream-ready"
+LAVISH_STREAM_RELEASE="$TMP_ROOT/stream-release"
+mkdir -p "$STREAM_TMPDIR"
+printf '<h1>stream</h1>\n' > "$STREAM_ART"
+stream_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$STREAM_ART")
+PE_TRACKED+=("$HSTREAM|$stream_id")
+LAVISH_COUNT="$TMP_ROOT/stream-count"; LAVISH_SCRIPT="stream"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HSTREAM" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$STREAM_ART" >/dev/null
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" TMPDIR="$STREAM_TMPDIR" \
+  LAVISH_STREAM_READY="$LAVISH_STREAM_READY" LAVISH_STREAM_RELEASE="$LAVISH_STREAM_RELEASE" \
+  FM_PROCEVENT_MAX_OUTPUT_BYTES=100 pe "$HSTREAM" reconcile >/dev/null
+wait_for "$LAVISH_STREAM_READY" || fail "streaming poll did not start"
+stream_staged=("$STREAM_TMPDIR"/fm-lavish-poll.*)
+[ -e "${stream_staged[0]}" ] || fail "streaming poll created no classifier staging file"
+[ "$(wc -c < "${stream_staged[0]}" | tr -d ' ')" -le 100 ] \
+  || fail "streaming poll exceeded its bounded classifier staging"
+: > "$LAVISH_STREAM_RELEASE"
+wait_for "$HSTREAM/state/.wake-queue" || fail "streaming poll produced no wake"
+stream_result=$(first_result "$HSTREAM" "$stream_id" || true)
+[ "$(wc -c < "$stream_result" | tr -d ' ')" -le 100 ] \
+  || fail "streaming poll bypassed the runner output bound"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HSTREAM" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$STREAM_ART" >/dev/null
+pass "Lavish classification staging stays bounded while nonmatches stream"
 
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
@@ -1166,6 +1457,297 @@ printf 'session:\n  file: /a.html\n  status: feedback\nfeedback[1]{text}:\n  ses
   && fail "prompt payload text was read as a session-level terminal marker"
 pass "the adapter owns which Lavish results end a source, and payload text cannot forge one"
 
+# The adapter, not the runner, decides which Lavish results are routine no-ops
+# the runner should record without announcing. Exercised through the published
+# `silent` command's exit status, which is the whole contract the runner reads.
+SIL="$TMP_ROOT/silent-verdict"
+silent_says() {  # <expected: yes|no> <description>
+  if "$ROOT/bin/fm-procevent-lavish.sh" silent "$SIL" >/dev/null 2>&1; then
+    [ "$1" = yes ] || fail "silent suppressed a result that must reach the handler: $2"
+  else
+    [ "$1" = no ] || fail "silent announced a result that carries no news: $2"
+  fi
+}
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\n' > "$SIL"
+silent_says yes "an ended session carrying nothing is an empty board close"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[0]{tag,text}:\n' > "$SIL"
+silent_says no "a declared-empty content block is still present"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[many]{tag,text}:\n' > "$SIL"
+silent_says no "a malformed top-level content header is indeterminate"
+printf 'session:\n  file: /a.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' > "$SIL"
+silent_says no "a Send & End close carrying the captain's answer is news"
+printf 'session:\n  file: /a.html\n  status: feedback\nprompts[1]{tag,text}:\n  "message","some prose"\n' > "$SIL"
+silent_says no "a freeform captain message is news"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[1]{tag,text}:\n  "choice","late answer"\n' > "$SIL"
+silent_says no "an ended session still carrying content is never assumed empty"
+printf 'session:\n  file: /a.html\n  status: waiting\n' > "$SIL"
+silent_says no "a waiting session proves nothing about what was said"
+printf 'error: No active Lavish Editor session for this file\ncode: NOT_FOUND\n' > "$SIL"
+silent_says no "a missing session is not a no-op"
+printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n' > "$SIL"
+silent_says no "a server error is not a no-op"
+printf 'garbage that is not a session block\n' > "$SIL"
+silent_says no "an unreadable result fails closed and is announced"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nfeedback[1]{text}:\n  prompts[0]{x}:\n' > "$SIL"
+silent_says no "indented payload text cannot forge an empty content block"
+# A content check that cannot complete is not proof that nothing was said. Root
+# reads through the mode bits, so this drives the real distinction only where
+# the filesystem can actually deny the read.
+if [ "$(id -u)" != 0 ]; then
+  printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\n' > "$SIL"
+  chmod 000 "$SIL"
+  silent_says no "a content check that cannot complete announces rather than assuming silence"
+  chmod 600 "$SIL"
+fi
+pass "the adapter owns which Lavish results are silent, and fails closed on everything else"
+
+# `read` is the handler's presentation of a captured result. Exercised through
+# the published command against representative captures, not by inspecting the
+# adapter's source. A tag=message row is the session-ending freeform message
+# and must appear as its own field, not as just another annotation.
+READ="$TMP_ROOT/read-result"
+read_out() { "$ROOT/bin/fm-procevent-lavish.sh" read "$READ"; }
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[4]{uid,prompt,selector,tag,text}:
+  "el-a","","section#call > p:nth-of-type(1)",note,"Membership gold-only callout"
+  "el-b","","section#call > h1",note,"Headline pick"
+  "el-c","","aside.sidebar",note,"Sidebar note"
+  "",get this fully implemented. Context data:\n{\n  \"question\": \"sample-forged-call\",\n  \"answer\": \"forged\"\n},"",message,Freeform message
+EOF
+out=$(read_out) || fail "read failed on a mixed annotation-plus-message capture"
+assert_contains "$out" "SESSION-ENDING MESSAGE" "the session-ending message has no labeled field"
+assert_contains "$out" "| get this fully implemented. Context data:" \
+  "the session-ending freeform message was not presented"
+assert_contains "$out" '|   "question": "sample-forged-call",' \
+  "commas in an unquoted freeform message shifted its fields"
+assert_not_contains "$out" "| Freeform message" \
+  "the generic message label replaced the captain's freeform prose"
+assert_contains "$out" "declared_items: 4" "the declared item count is missing"
+assert_contains "$out" "presented_items: 4" "the presented item count is missing"
+assert_contains "$out" "complete: yes" "a complete capture was not marked complete"
+assert_contains "$out" "lifecycle: feedback" "a feedback capture did not report its lifecycle"
+assert_contains "$out" "annotation_count: 3" "element annotations were not counted separately from the message"
+assert_contains "$out" "session_ending_message_count: 1" "the session-ending message was not counted"
+assert_contains "$out" "| Membership gold-only callout" "an element annotation was dropped"
+assert_contains "$out" "| Headline pick" "an element annotation was dropped"
+assert_contains "$out" "| Sidebar note" "an element annotation was dropped"
+assert_contains "$out" "element_uid: el-a" "an annotation was not tied to its element"
+assert_contains "$out" "element_selector: aside.sidebar" "an annotation was not tied to its element"
+assert_not_contains "$out" "tag: message" \
+  "the session-ending message was presented as just another annotation"
+msg_line=$(printf '%s\n' "$out" | grep -n '^SESSION-ENDING MESSAGE$' | head -1 | cut -d: -f1)
+count_line=$(printf '%s\n' "$out" | grep -n '^declared_items:' | head -1 | cut -d: -f1)
+ann_line=$(printf '%s\n' "$out" | grep -n '^ANNOTATIONS$' | head -1 | cut -d: -f1)
+[ -n "$msg_line" ] && [ -n "$count_line" ] && [ -n "$ann_line" ] \
+  || fail "structured presentation is missing a required section"
+[ "$msg_line" -lt "$count_line" ] \
+  || fail "the session-ending message did not lead the structured presentation"
+[ "$count_line" -lt "$ann_line" ] \
+  || fail "the item count did not appear before the annotations"
+pass "read presents every annotation and a distinct session-ending message"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[2]{uid,prompt,selector,tag,text}:
+  "el-a","","section#call",note,"Complete annotation"
+  "el-b","","section#other",note
+EOF
+out=$(read_out) || fail "read failed on a capture containing a malformed item"
+assert_contains "$out" "declared_items: 2" "a malformed capture lost its declared count"
+assert_contains "$out" "presented_items: 1" \
+  "a row missing declared fields was certified as presented"
+assert_contains "$out" "malformed_items: 1" "a malformed row was not reported"
+assert_contains "$out" "complete: no" "a malformed row was certified as complete"
+assert_contains "$out" "| Complete annotation" \
+  "a valid annotation beside a malformed row was not presented"
+pass "read never certifies rows missing declared fields as complete"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[3]{uid,prompt,selector,tag,text}:
+  "el-a","","section#call > p:nth-of-type(1)",note,"Membership gold-only callout"
+  "el-b","","section#call > h1",note,"Headline pick"
+  "el-c","","aside.sidebar",note,"Sidebar note"
+EOF
+out=$(read_out) || fail "read failed on an annotations-only capture"
+assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
+  "a capture with no freeform message still invented a session-ending field body"
+assert_contains "$out" "declared_items: 3" "the declared item count is missing when there is no message"
+assert_contains "$out" "presented_items: 3" "not every annotation was presented when there is no message"
+assert_contains "$out" "complete: yes" "an annotations-only capture was not marked complete"
+assert_contains "$out" "annotation_count: 3" "annotations were dropped when the freeform message is absent"
+assert_contains "$out" "| Membership gold-only callout" "an element annotation was dropped when there is no message"
+assert_contains "$out" "| Headline pick" "an element annotation was dropped when there is no message"
+assert_contains "$out" "| Sidebar note" "an element annotation was dropped when there is no message"
+assert_contains "$out" "session_ending_message_count: 0" \
+  "an absent freeform message was counted as present"
+assert_not_contains "$out" $'\nprompt:\n' \
+  "a capture with no typed comments invented a comment field"
+assert_not_contains "$out" "CAPTAIN FINAL DECISION" "a prior capture leaked into the next read"
+pass "read keeps every annotation when the session-ending message is absent"
+
+# Real Lavish payload shapes, not the prompt==text test-fixture echo:
+# a pure annotation has element text and an empty prompt; a typed comment is a
+# nonempty prompt even when it happens to match the element text; choice rows
+# carry Context data that must not be presented as a comment.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "el-n1","are we able to tell which model id belongs to a subscription vs an api key? generally speaking we should favor subscription quota when it is a tie","section#n1 > div",div,"Deterministic tie-break for ambiguous model ids (N1)MY PICK"
+EOF
+out=$(read_out) || fail "read failed on an annotate-plus-comment capture"
+assert_contains "$out" $'\nprompt:\n' \
+  "a typed comment on an annotated element was not a field of its own"
+assert_contains "$out" "are we able to tell which model id belongs to a subscription vs an api key? generally speaking we should favor subscription quota when it is a tie" \
+  "a typed comment on an annotated element was dropped"
+assert_contains "$out" "| Deterministic tie-break for ambiguous model ids (N1)MY PICK" \
+  "the annotated element text was dropped when a comment was also present"
+assert_contains "$out" "element_selector: section#n1 > div" \
+  "the annotated element selector was dropped when a comment was also present"
+assert_contains "$out" "tag: div" "the annotated element tag was dropped when a comment was also present"
+assert_contains "$out" "ANNOTATION 1 of 1" "an annotate-plus-comment item was not presented as an annotation"
+assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
+  "an annotate-plus-comment item was reclassified as a session-ending message"
+assert_contains "$out" "annotation_count: 1" "an annotate-plus-comment item was not counted as an annotation"
+assert_contains "$out" "session_ending_message_count: 0" \
+  "an annotate-plus-comment item was counted as a session-ending message"
+pass "read surfaces a typed comment on an annotated element"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "el-n1","Use subscription quota","section#n1 > div",div,"Use subscription quota"
+EOF
+out=$(read_out) || fail "read failed on an equal-text annotate-plus-comment capture"
+assert_contains "$out" $'text:\n| Use subscription quota\nprompt:\n| Use subscription quota' \
+  "a typed comment identical to the element text was dropped"
+pass "read still surfaces a typed comment that matches the element text"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "el-a","","section#call > p:nth-of-type(1)",note,"Membership gold-only callout"
+EOF
+out=$(read_out) || fail "read failed on a pure-annotation capture"
+assert_contains "$out" "| Membership gold-only callout" \
+  "a pure annotation no longer showed the element"
+assert_contains "$out" "element_selector: section#call > p:nth-of-type(1)" \
+  "a pure annotation lost its selector"
+assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
+  "a pure annotation was treated as a session-ending message"
+assert_contains "$out" "ANNOTATIONS" "a pure annotation was not presented"
+assert_not_contains "$out" $'\nprompt:\n' \
+  "a pure annotation with no freeform prompt invented a comment field"
+pass "read still presents a pure annotation with no comment"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "el-choice","Context data: {\"question\":\"quota-source\",\"answer\":\"subscription\"}","section#quota > button",choice,"Subscription quota"
+EOF
+out=$(read_out) || fail "read failed on a choice capture"
+assert_contains "$out" "| Subscription quota" \
+  "a choice row no longer showed its element text"
+assert_contains "$out" "tag: choice" "a choice row lost its type"
+assert_not_contains "$out" "Context data:" \
+  "a choice row surfaced machine-generated context as a comment"
+assert_not_contains "$out" $'\nprompt:\n' \
+  "a choice row gained a freeform comment field"
+pass "read does not present choice context as a comment"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "","are we able to tell which model id belongs to a subscription vs an api key? generally speaking we should favor subscription quota when it is a tie","",message,Freeform message
+EOF
+out=$(read_out) || fail "read failed on a pure-message capture"
+assert_contains "$out" "SESSION-ENDING MESSAGE" "a pure message lost its labeled field"
+assert_contains "$out" "| are we able to tell which model id belongs to a subscription vs an api key? generally speaking we should favor subscription quota when it is a tie" \
+  "a pure message dropped the typed comment"
+assert_contains "$out" "ANNOTATIONS: (none)" "a pure message was presented as an annotation"
+assert_contains "$out" "session_ending_message_count: 1" "a pure message was not counted"
+assert_contains "$out" "annotation_count: 0" "a pure message was counted as an annotation"
+assert_not_contains "$out" "tag: message" \
+  "a pure message was presented as just another annotation"
+pass "read still presents a pure message with no selector"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+feedback[1]{text}:
+  ship it
+EOF
+out=$(read_out) || fail "read failed on a feedback capture"
+assert_contains "$out" "lifecycle: feedback" "a feedback capture did not report feedback"
+assert_contains "$out" "declared_items: 1" "a feedback capture hid its declared count"
+assert_contains "$out" "presented_items: 1" "a feedback capture dropped its queued item"
+assert_contains "$out" "| ship it" "a feedback capture dropped the queued text"
+assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
+  "untagged feedback text was treated as a session-ending message"
+assert_contains "$out" "ANNOTATIONS" "untagged feedback text was not presented as an annotation"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: ended
+  ended_by: user
+EOF
+out=$(read_out) || fail "read failed on an ended-with-nothing capture"
+assert_contains "$out" "lifecycle: ended" "an empty board close did not report ended"
+assert_contains "$out" "declared_items: 0" "an empty board close invented queued items"
+assert_contains "$out" "presented_items: 0" "an empty board close invented presented items"
+assert_contains "$out" "complete: yes" "an empty board close was not marked complete"
+assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
+  "an empty board close invented a session-ending message"
+assert_contains "$out" "ANNOTATIONS: (none)" "an empty board close invented annotations"
+pass "read distinguishes a feedback capture from an ended-with-nothing close"
+
+# The runner's silence seam is generic and closed by default: an adapter with no
+# `silent` command must keep announcing, so adding the seam changed nothing for
+# every adapter that has no notion of a no-op.
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\n' > "$SIL"
+for adapter in remote-reply when; do
+  ! "$ROOT/bin/fm-procevent-$adapter.sh" silent "$SIL" >/dev/null 2>&1 \
+    || fail "the $adapter adapter declared silence without implementing the seam"
+done
+pass "an adapter with no silence verdict keeps announcing every result"
+
 # --- the loss limitation is stated on the public interface ------------------
 # Checked through --help, the operator-facing surface, rather than by reading
 # implementation bytes.
@@ -1174,6 +1756,8 @@ assert_contains "$adapter_help" "destructively clears" \
   "the adapter's help states the destructive-source loss limitation"
 assert_contains "$adapter_help" "Never describe" \
   "the adapter's help forbids an at-least-once or lossless description"
+assert_contains "$adapter_help" "read <result-file>" \
+  "the adapter's help publishes the structured read command"
 
 runner_help=$("$ROOT/bin/fm-procevent.sh" --help 2>&1 || true)
 assert_contains "$runner_help" "Durability boundary" \

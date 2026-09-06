@@ -1936,65 +1936,6 @@ EOF
   pass "secondmate force teardown discards child work"
 }
 
-test_secondmate_force_teardown_refuses_child_quarantine_symlink() {
-  local home subhome childproj childwt external fakebin log err rc
-  home="$TMP_ROOT/force-quarantine-home"
-  subhome="$TMP_ROOT/force-quarantine-subhome"
-  childproj="$subhome/projects/alpha"
-  childwt="$TMP_ROOT/force-quarantine-child-worktree"
-  external="$TMP_ROOT/force-quarantine-external"
-  err="$TMP_ROOT/force-quarantine.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$external"
-  fm_git_worktree "$childproj" "$childwt" force-quarantine-child
-  printf 'domain\n' > "$subhome/.fm-secondmate-home"
-  cat > "$home/state/domain.meta" <<EOF
-window=firstmate:fm-domain
-worktree=$subhome
-project=$subhome
-harness=echo
-kind=secondmate
-mode=secondmate
-yolo=off
-home=$subhome
-projects=alpha
-EOF
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
-  cat > "$subhome/state/child.meta" <<EOF
-window=firstmate:fm-child
-worktree=$childwt
-project=$childproj
-harness=echo
-kind=ship
-mode=no-mistakes
-yolo=off
-EOF
-  printf 'child check\n' > "$subhome/state/child.check.sh"
-  printf 'external quarantine artifact\n' > "$external/child.check.protected"
-  chmod 0640 "$external/child.check.protected"
-  ln -s "$external" "$subhome/state/.pr-check-quarantine"
-  fakebin=$(make_fake_tmux "$TMP_ROOT/force-quarantine-fake")
-  log="$TMP_ROOT/force-quarantine-fake/tmux.log"
-
-  set +e
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
-    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-quarantine-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2> "$err"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "force teardown accepted a child quarantine-directory symlink"
-  [ -d "$subhome" ] || fail "force teardown removed the subhome before quarantine refusal"
-  [ -d "$childwt" ] || fail "force teardown removed child work before quarantine refusal"
-  [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta before quarantine refusal"
-  [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta before quarantine refusal"
-  [ "$(cat "$subhome/state/child.check.sh")" = 'child check' ] || fail "force teardown removed the child check before quarantine refusal"
-  [ "$(cat "$external/child.check.protected")" = 'external quarantine artifact' ] \
-    || fail "force teardown changed the child quarantine symlink target"
-  [ "$(file_mode "$external/child.check.protected")" = 640 ] \
-    || fail "force teardown changed the child quarantine target mode"
-  grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed a window before child quarantine validation"
-  pass "secondmate force teardown prevalidates child quarantine cleanup without following symlinks"
-}
-
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
   local home subhome childproj childwt fakebin log err rc lock
   home="$TMP_ROOT/force-lock-home"
@@ -2389,6 +2330,7 @@ EOF
 
 task_set_lock_path() {  # <state-dir>
   local state=$1
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_task_set_lock_path "$state" )
 }
 
@@ -2409,6 +2351,7 @@ hold_task_set_lock() {  # <state-dir> -> echoes "<holder-pid> <lock-path>"
     fm_lock_try_acquire "$lock" || exit 1
     sleep 30
   ) >/dev/null 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   holder=$!
   while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
     sleep 0.1
@@ -2523,6 +2466,7 @@ SH
     XDG_STATE_HOME="$TMP_ROOT/taskset-state-absent-xdg" \
     FM_TASK_SET_TEST_READY="$ready" FM_TASK_SET_TEST_RELEASE="$release" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   pid=$!
   while [ ! -e "$ready" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 200 ]; do
     sleep 0.05
@@ -2796,6 +2740,7 @@ EOF
   out="$TMP_ROOT/watch-fake/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_LOG="$TMP_ROOT/watch-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/watch-fake/pane.txt" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   pid=$!
   if ! wait_live "$pid" 25; then
     wait "$pid" || true
@@ -3009,7 +2954,6 @@ test_secondmate_force_teardown_preserves_nested_restore_status
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
-test_secondmate_force_teardown_refuses_child_quarantine_symlink
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home

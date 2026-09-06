@@ -146,7 +146,14 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$home/.kimi-code"
   printf '# Kimi test config\ndefault_model = "test"\n' > "$home/.kimi-code/config.toml"
-  printf 'brief for kimi\n' > "$home/data/$id/brief.md"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise Kimi dispatch.
+
+## Firstmate spec
+Verify launch and delivery behavior.
+EOF
   printf 'kimi\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -170,7 +177,7 @@ run_spawn() {
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
-    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
+    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
@@ -198,13 +205,13 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
     || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
 
-  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
+  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/launch-brief.md"
   pointer=$(cat "$CASE_DIR/pointer.log")
   [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
     || fail "kimi pointer was not the exact absolute-path-only instruction: $pointer"
@@ -455,7 +462,7 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$fallback' --auto" ] \
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$fallback' --auto" ] \
     || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
@@ -506,6 +513,9 @@ test_kimi_readiness_gate_precedes_pointer() {
   assert_contains "$out" "kimi did not show a verified ready signal" \
     "kimi readiness failure lacked a loud diagnostic"
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi pointer was sent before readiness"
+  jq -e --arg id "$id" 'any(.endpoints[]; .id == $id)' \
+    "$HOME_DIR/state/home-summary.json" >/dev/null \
+    || fail "kimi readiness failure omitted its durable endpoint from the home summary"
   pass "fm-spawn: kimi never sends the brief pointer before an observable ready signal"
 }
 
@@ -537,10 +547,10 @@ SH
   chmod +x "$fakebin/ps"
 
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
-  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
     CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
   pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence"

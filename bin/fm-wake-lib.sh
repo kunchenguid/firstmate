@@ -15,8 +15,34 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
 mkdir -p "$STATE"
 
-fm_current_pid() {
-  printf '%s\n' "${BASHPID:-$$}"
+# Most wake-library consumers need only queue and lock primitives, including
+# deliberately minimal recovery fixtures and remote installations.
+# Load the classifier only when a status presentation helper is actually used.
+_fm_wake_require_classify() {
+  command -v status_observed_signature >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$FM_WAKE_LIB_DIR/fm-classify-lib.sh"
+}
+
+# Load the bounded-execution owner only for callers that use the presentation
+# lock deadline. Most wake-library consumers need no timeout machinery.
+_fm_wake_require_timeout() {
+  command -v fm_run_timed >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$FM_WAKE_LIB_DIR/fm-timeout-lib.sh"
+}
+
+# Pass a variable name to capture this frame's pid without forking it in $().
+# On Bash 3.2, exec a child shell so its PPID identifies this frame, unlike $$.
+fm_current_pid() {  # [output-variable]
+  local fm_pid
+  fm_pid=${BASHPID:-$(exec sh -c 'printf "%s\n" "$PPID"')} || return 1
+  case "$fm_pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  if [ "$#" -gt 0 ]; then
+    printf -v "$1" '%s' "$fm_pid"
+  else
+    printf '%s\n' "$fm_pid"
+  fi
 }
 
 fm_pid_alive() {
@@ -226,6 +252,35 @@ fm_pi_extension_owns_supervision() {
   fm_pid_alive "$session_pid"
 }
 
+# Away-mode supervision evidence. While state/.afk exists the away-mode daemon
+# (bin/fm-supervise-daemon.sh) owns supervision: it runs bin/fm-watch.sh
+# one-shot, so the watcher exits on EVERY wake and the daemon starts its
+# replacement. Between those cycles no watcher process holds the watch lock,
+# with nothing at all wrong - the supervisor is the daemon, and the watcher is
+# its restarting child.
+#
+# fm_afk_daemon_owns_supervision <state>
+# True when away mode is active AND a live, identity-matched daemon holds this
+# home's singleton daemon lock. The identity match is the same discipline the
+# watcher lock uses (fm_watcher_lock_matches_pid): a recycled pid, a lock left
+# by a killed daemon, or a daemon that never recorded its identity all fail it,
+# so only a daemon process that is genuinely still running counts as ownership.
+# This proves an OWNER, never freshness: callers keep their own beacon test, so
+# a daemon that stops restarting its watcher still fails supervision once the
+# beacon passes grace.
+fm_afk_daemon_owns_supervision() {
+  local state=$1 lockdir pid recorded current
+  [ -e "$state/.afk" ] || return 1
+  lockdir="$state/.supervise-daemon.lock"
+  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
+  fm_pid_alive "$pid" || return 1
+  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null) || return 1
+  [ -n "$recorded" ] || return 1
+  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$current" ] || return 1
+  [ "$current" = "$recorded" ]
+}
+
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
@@ -302,7 +357,7 @@ fm_lock_set_role() {
     autoarm|terminal-check) : ;;
     *) return 1 ;;
   esac
-  current=${BASHPID:-$$}
+  fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 1
   printf '%s\n' "$role" > "$lockdir/role" 2>/dev/null || return 1
@@ -330,7 +385,7 @@ fm_lock_owner_dir() {
 
 fm_lock_prepare_owner() {
   local ownerdir=$1 mypid back
-  mypid=${BASHPID:-$$}
+  fm_current_pid mypid || return 1
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$mypid" ]
@@ -417,7 +472,7 @@ fm_lock_note_claim_write_failure() {  # <owner-dir>
 
 fm_lock_claim() {
   local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
-  mypid=${BASHPID:-$$}
+  fm_current_pid mypid || return 1
   if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
     fm_lock_note_claim_write_failure "$ownerdir"
     fm_lock_discard_owner "$ownerdir"
@@ -1031,7 +1086,7 @@ fm_lock_clear_legacy_steal_chain() {  # <steal-mutex-path>
 # Only one owner directory can satisfy those at a time, so at most one process
 # publishes. That is the property fm_autoarm_release_abandoned depends on.
 fm_lock_try_acquire_leaf() {  # <steal-mutex-path>
-  local lockdir=$1 pid owner
+  local lockdir=$1 pid owner current
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -1044,10 +1099,9 @@ fm_lock_try_acquire_leaf() {  # <steal-mutex-path>
   fi
   fm_lock_after_failed_create "$lockdir" || return 1
 
-  # Compare against ${BASHPID:-$$} inline, never via a command substitution:
-  # $() forks a subshell whose BASHPID is not this frame's pid.
+  fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+  if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
     # An interrupting trap abandoned the frame that held it; see the same case
     # in fm_lock_try_acquire.
     fm_lock_remove_path "$lockdir" || true
@@ -1099,7 +1153,7 @@ fm_lock_try_acquire_leaf() {  # <steal-mutex-path>
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   # A steal mutex is a leaf and reclaims its own stale holder directly. Routing
   # it here rather than appending a further ".steal" is what bounds the chain
   # to one level for every caller, including fm_autoarm_release_abandoned.
@@ -1123,10 +1177,9 @@ fm_lock_try_acquire() {
     fm_lock_orphan_steal_blocks_create "$lockdir" || return 1
   fi
 
-  # Compare against ${BASHPID:-$$} inline, never via a command substitution:
-  # $() forks a subshell whose BASHPID is not this frame's pid.
+  fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+  if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
     # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
@@ -1248,9 +1301,98 @@ fm_lock_acquire_wait() {
   done
 }
 
+# Acquire in the timed helper process, then transfer the lock record to the
+# waiting caller before exiting. The lock's ordinary stale-owner recovery makes
+# every interruption safe: before transfer the helper is the owner; after
+# transfer the still-live caller is the owner.
+_fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
+  local lockdir=$1 caller_pid=$2 ownerdir current back
+  case "$caller_pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_pid_alive "$caller_pid" || return 1
+  trap 'fm_lock_release "$lockdir"; exit 143' TERM INT
+  fm_lock_acquire_wait "$lockdir" || return 1
+  if [ -L "$lockdir" ]; then
+    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || {
+      fm_lock_release "$lockdir"
+      return 1
+    }
+  else
+    ownerdir=$lockdir
+  fi
+  fm_current_pid current || { fm_lock_release "$lockdir"; return 1; }
+  back=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  if [ "$back" != "$current" ] \
+    || ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
+    || [ "$(cat "$ownerdir/pid" 2>/dev/null || true)" != "$caller_pid" ]; then
+    fm_lock_release "$lockdir"
+    return 1
+  fi
+  trap - TERM INT
+}
+
+# fm_lock_acquire_wait_bounded <lockdir> <positive-seconds>
+#
+# Bounded acquire variant. It preserves the ordinary wait/reclaim behavior
+# until fm-timeout-lib.sh's hard deadline, returns 124 when a live holder still
+# owns the lock, and leaves FM_LOCK_HELD_PID naming that holder.
+# Use it where a caller must refuse rather than block: wake presentation, and
+# the guarded remote link clear, whose whole contract is to return a
+# reconciliation refusal instead of wedging an unattended close.
+# Mutation-critical callers that can safely block keep fm_lock_acquire_wait.
+fm_lock_acquire_wait_bounded() {
+  local lockdir=$1 seconds=$2 caller_pid rc owner_pid
+  case "$seconds" in ''|*[!0-9]*|0) return 2 ;; esac
+  _fm_wake_require_timeout || return 1
+  if fm_lock_try_acquire "$lockdir"; then
+    return 0
+  fi
+
+  fm_current_pid caller_pid || return 1
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  if fm_run_timed "$seconds" env \
+    "FM_STATE_OVERRIDE=$STATE" \
+    "FM_ROOT_OVERRIDE=$FM_ROOT" \
+    "FM_LOCK_STALE_AFTER=$FM_LOCK_STALE_AFTER" \
+    bash -c '. "$1"; _fm_lock_acquire_wait_handoff "$2" "$3"' \
+      _ "$FM_WAKE_LIB_DIR/fm-wake-lib.sh" "$lockdir" "$caller_pid" \
+      </dev/null >/dev/null 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  if [ "$owner_pid" = "$caller_pid" ]; then
+    return 0
+  fi
+  [ "$rc" -ne 0 ] || rc=1
+  # A deadline can kill the helper just after it acquired and before handoff.
+  # Give ordinary stale-owner recovery one final non-blocking chance so that
+  # helper cleanup cannot manufacture a false contention advisory.
+  if fm_lock_try_acquire "$lockdir"; then
+    return 0
+  fi
+  if [ "$rc" -eq 124 ]; then
+    owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+    case "$owner_pid" in
+      ''|*[!0-9]*|0) ;;
+      *)
+        if [ "$owner_pid" -gt 0 ] 2>/dev/null && fm_pid_alive "$owner_pid"; then
+          FM_LOCK_HELD_PID=$owner_pid
+          return 124
+        fi
+        ;;
+    esac
+    # shellcheck disable=SC2034 # Output read by callers after bounded acquisition.
+    FM_LOCK_HELD_PID=
+    return 1
+  fi
+  return "$rc"
+}
+
 fm_lock_release() {
   local lockdir=$1 pid current ownerdir
-  current=${BASHPID:-$$}
+  fm_current_pid current || return 1
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0
@@ -1312,7 +1454,7 @@ fm_failure_episode_reset() {
       acquired=1
       ;;
     held)
-      current=${BASHPID:-$$}
+      fm_current_pid current || return 1
       pid=$(cat "$lock/pid" 2>/dev/null || true)
       [ "$pid" = "$current" ] || return 1
       ;;
@@ -1340,48 +1482,79 @@ fm_failure_episode_reset() {
   return 0
 }
 
-# --- Claude Stop auto-arm claim abandonment ----------------------------------
+# --- Claude Stop auto-arm generation claims -----------------------------------
 # Both Stop-event participants (bin/fm-claude-stop-autoarm.sh and
-# bin/fm-turnend-guard.sh --claude) stand down for whoever holds the auto-arm's
-# single-flight owner lock, on the premise that a live holder is still deciding
-# supervision. A holder that has already FINISHED that decision but never
-# released the lock turns the courtesy into indefinite silence: every later
-# async firing exits at the lock, the epoch ledger freezes at its last outcome,
-# and each following turn end allows a blind stop while nothing re-arms the
-# watcher. Observed 2026-08-14: one delivered rewake, then a beacon that went
-# 40 minutes without a beat, no watcher lock at all, two workers in flight, and
-# both of their reports unread until an operator drained the queue by hand.
+# bin/fm-turnend-guard.sh --claude) coordinate through the epoch ledger
+# state/.claude-autoarm-epoch, whose monotonic epoch sequence IS the claim
+# generation. This is an optimistic, generation-based single-flight design:
 #
-# One abandonment proof is the ledger, not pid liveness, because both ways a
-# finished claim keeps a live pid - reuse of the recorded pid, and a hook still
-# blocked writing its rewake banner - look alive:
+#   - The CURRENT claim is the ledger's latest entry: line 1 is the classic
+#     "epoch=N owner_pid=P outcome=O updated_at=T" record, and line 2 is the
+#     claiming process's pid-identity, the same identity every other
+#     supervision lock in this repo records (fm_pid_identity above). The
+#     identity is MANDATORY: a claimant that cannot record it does not claim
+#     (continuity falls to the synchronous guard), and the identity is read
+#     from the ledger entry alone - never substituted from any lock - so a
+#     reused pid can never authenticate someone else's stale entry.
+#   - A claim is OPEN (fm_autoarm_claim_open) while its outcome is "arming",
+#     its owner pid is alive, its recorded identity successfully recomputes
+#     and matches that pid, and it is not STUCK - stuck meaning both the
+#     ledger entry and the watcher beacon (state/.last-watcher-beat) are older
+#     than the guard grace, which proves the owner hung mid-arm with nothing
+#     supervising (every legitimate arming phase with no watcher is bounded in
+#     seconds, while a healthy hours-long cycle keeps the beacon beating).
+#   - Every firing DEFERS (exits 0) to an open claim; anything else - a
+#     terminal outcome, a dead or identity-mismatched owner, a stuck owner, an
+#     identityless entry, or no claim at all - lets the next firing take
+#     generation N+1 (fm_autoarm_claim_next). Taking a newer generation IS the
+#     reclaim: a steady-state predecessor is never signalled or revoked.
+#   - NO mutex is ever held across a blocking step. The owner lock
+#     state/.claude-autoarm.lock survives only as a micro-mutex serializing
+#     individual ledger reads-then-writes (a few non-blocking file
+#     operations); a holder that dies inside the hold is reclaimed by
+#     fm_lock_try_acquire's ordinary dead-owner steal.
+#   - A superseded owner goes COMPLETELY silent - cleanup only. Ownership is
+#     re-verified before every side effect: each arm invocation, each
+#     episode-state mutation, each ledger write, and each continuation.
+#   - The irrevocable commit point of a translation is the EXIT STATUS: the
+#     harness delivers the collected stderr banner only on exit 2 and discards
+#     it on exit 0. Markerless outcomes commit with the owned terminal ledger
+#     write. The once-per-episode failure notice commits only when its marker is
+#     created after the winning "failed" write in the same owned critical
+#     section. A superseded generation or failed required-marker creation is
+#     refused and exits 0 silently even after printing; a later generation
+#     supersedes the terminal entry and retries the notice.
 #
-#   1. the owner lock exists and carries the auto-arm role,
-#   2. its recorded pid is numeric,
-#   3. the ledger's owner_pid is exactly that pid, and
-#   4. the ledger's outcome is present and is not "arming".
+# This structurally removes the failure classes the lock-held-across-arm
+# design produced: a hung owner deferring every later firing forever (observed
+# 2026-08-26: a hook hung mid-arm with its ledger frozen at "arming" kept the
+# watcher from ever being auto-re-armed again; and 2026-08-14: a finished
+# claim whose leftover lock silenced both participants for 40 beacon-less
+# minutes), a reclaim mutex held across a blocking banner write recreating the
+# same unreclaimable-live-owner shape, and a reclaimed-but-alive owner racing
+# its replacement to translate one close twice.
 #
-# Condition 3 is what makes reclaiming race-free. A fresh claimant creates the
-# lock BEFORE it writes "arming", so until it does the ledger still names the
-# PREVIOUS owner and the two pids cannot match; a just-started claim is never
-# mistaken for an abandoned one. Condition 4 treats "arming" as in progress no
-# matter how old, because the owner foregrounds fm-watch-arm.sh for the whole
-# watcher cycle, which legitimately runs for hours.
+# Two bounded residuals are ACCEPTED INTENT, because closing them absolutely
+# would require a mutex held across output or steady-state revocation, both
+# deliberately rejected: (1) an owner that dies between its owned terminal
+# write and its own process exit leaves a committed outcome whose banner was
+# never delivered (process-death territory; the durable wake queue retains the
+# underlying event), and (2) a hung old-build owner that resumes during the
+# one legacy upgrade window may add one duplicate continuation. Each residual
+# costs at most one extra exit-2 continuation turn absorbed by the durable
+# idempotent wake queue. A claim misread as stuck in a pathological race
+# (e.g. a beacon read right at system wake) likewise yields at most one extra
+# arm that the watcher singleton dedupes, while the superseded owner still
+# goes silent.
 #
-# The ledger alone cannot prove every abandonment, though: an entry still reading
-# "arming", or no entry at all, says nothing about a recorded pid the operating
-# system has since handed to an unrelated live process - the same lapse, reached
-# when a session teardown kills a claim's whole process group before it can record
-# any outcome or run its release trap. So the claim also records the pid-identity
-# every other supervision lock in this repo records (fm_pid_identity above, used by
-# state/.watch.lock, the supervise-daemon lock, and the AFK launch lock), and a
-# recorded identity that no longer matches the live pid is abandonment on its own,
-# whatever the ledger says. That identity is written BEFORE the auto-arm role is
-# published, and every participant requires that role first, so a claim that is
-# genuinely mid-flight is never read as identity-less. A claim carrying no recorded
-# identity at all (an older build, a hand-edited lock) keeps exactly the
-# ledger-only reasoning above, and an identity that cannot be recomputed for the
-# live pid proves nothing either way, so it falls through to the ledger too.
+# fm_autoarm_claim_abandoned / fm_autoarm_release_abandoned below survive as
+# the LEGACY shim for a lock-holding claim from a pre-generation build (the
+# lock carries a role file only in that legacy shape, and in the guard's own
+# short terminal-check hold): a live legacy owner still defers per the legacy
+# proof, and a proven-abandoned one is reclaimed once through the steal mutex
+# - with an identity-verified live owner retired via TERM first, because old
+# code cannot re-check generations - so an upgrade mid-session can neither
+# double-arm nor deadlock behind a hung legacy hook.
 _fm_autoarm_epoch_field() {  # <epoch-file> <field>
   local file=$1 field=$2 tok
   local -a toks=()
@@ -1397,42 +1570,188 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
   return 1
 }
 
-# Record the claiming process's pid-identity inside the auto-arm owner lock, the
-# way every other supervision lock in this repo records it. Best effort by design:
-# a platform where fm_pid_identity cannot answer keeps the ledger-only reasoning
-# rather than losing the claim, and a record that cannot be completed leaves NO
-# identity file behind, so a partial write can never read as a mismatch against
-# its own live owner. Call it before publishing the auto-arm role.
-fm_autoarm_claim_record_identity() {  # <state-dir>
-  local state=$1 lock pid held identity back
-  lock="$state/.claude-autoarm.lock"
-  # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside the
-  # command substitution below would resolve it in that subshell, recording the
-  # identity of a process that exits immediately and leaving every later reader
-  # with a permanent mismatch against the real owner.
-  pid=${BASHPID:-$$}
-  # The identity must describe the pid the lock publishes, so record it only for a
-  # lock this process actually holds (the same ownership test as fm_lock_set_role).
-  held=$(cat "$lock/pid" 2>/dev/null || true)
-  [ "$held" = "$pid" ] || return 1
-  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
-  [ -n "$identity" ] || return 1
-  if ! printf '%s\n' "$identity" > "$lock/pid-identity" 2>/dev/null; then
-    rm -f "$lock/pid-identity" 2>/dev/null || true
-    return 1
-  fi
-  back=$(cat "$lock/pid-identity" 2>/dev/null || true)
-  if [ "$back" != "$identity" ]; then
-    rm -f "$lock/pid-identity" 2>/dev/null || true
+# Parse the current ledger claim. Sets FM_AUTOARM_GEN, FM_AUTOARM_OWNER,
+# FM_AUTOARM_OUTCOME, and FM_AUTOARM_IDENTITY (line 2 of the entry, and ONLY
+# line 2 - identity is never substituted from a lock, so a transient
+# micro-mutex hold or a reused pid can never authenticate a stale entry).
+fm_autoarm_ledger_read() {  # <state-dir>
+  local state=$1 epoch
+  epoch="$state/.claude-autoarm-epoch"
+  FM_AUTOARM_GEN=
+  FM_AUTOARM_OWNER=
+  FM_AUTOARM_OUTCOME=
+  FM_AUTOARM_IDENTITY=
+  FM_AUTOARM_GEN=$(_fm_autoarm_epoch_field "$epoch" epoch) || return 1
+  FM_AUTOARM_OWNER=$(_fm_autoarm_epoch_field "$epoch" owner_pid) || return 1
+  FM_AUTOARM_OUTCOME=$(_fm_autoarm_epoch_field "$epoch" outcome) || return 1
+  case "$FM_AUTOARM_GEN" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  FM_AUTOARM_IDENTITY=$(sed -n '2p' "$epoch" 2>/dev/null || true)
+  return 0
+}
+
+# True while the CURRENT ledger claim is open and healthy - the defer predicate
+# both Stop participants use. Open means: outcome "arming", a live owner whose
+# mandatory recorded identity recomputes and matches its pid, and not stuck
+# (the contract comment above owns the stuck proof). fm_path_age reports an
+# absent beacon as ancient, which is exactly right: arming for a full grace
+# window without producing a first beat is the same hang. An identityless
+# entry is never open: real generation claims always record identity, a legacy
+# build's entry gets its deference from its held role-carrying lock through
+# the legacy shim, and anything else must not defer.
+fm_autoarm_claim_open() {  # <state-dir> [grace]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current
+  epoch="$state/.claude-autoarm-epoch"
+  case "$grace" in
+    ''|*[!0-9]*|0) grace=300 ;;
+  esac
+  fm_autoarm_ledger_read "$state" || return 1
+  [ "$FM_AUTOARM_OUTCOME" = arming ] || return 1
+  fm_pid_alive "$FM_AUTOARM_OWNER" || return 1
+  [ -n "$FM_AUTOARM_IDENTITY" ] || return 1
+  current=$(fm_pid_identity "$FM_AUTOARM_OWNER" 2>/dev/null) || return 1
+  [ -n "$current" ] || return 1
+  [ "$current" = "$FM_AUTOARM_IDENTITY" ] || return 1
+  if [ "$(fm_path_age "$epoch")" -ge "$grace" ] \
+    && [ "$(fm_path_age "$state/.last-watcher-beat")" -ge "$grace" ]; then
     return 1
   fi
   return 0
 }
 
-fm_autoarm_claim_abandoned() {  # <state-dir>
-  local state=$1 epoch lock role pid owner outcome recorded current
+# Atomically publish this process as the owner of generation N+1, under one
+# short micro-mutex hold. Returns 0 with FM_AUTOARM_MY_GEN set on success, 2
+# when a competing claimant won the race (the ledger holds an open claim), and
+# 1 when the micro-mutex is contended, the mandatory identity cannot be
+# computed, or the write failed.
+fm_autoarm_claim_next() {  # <state-dir> [grace]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock epoch pid gen identity tmp
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
+  FM_AUTOARM_MY_GEN=
+  # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside a
+  # command substitution would resolve it in that subshell, recording the
+  # identity of a process that exits immediately.
+  pid=${BASHPID:-$$}
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
+  fm_lock_try_acquire "$lock" || return 1
+  if fm_autoarm_claim_open "$state" "$grace"; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  gen=$(_fm_autoarm_epoch_field "$epoch" epoch 2>/dev/null || true)
+  case "$gen" in
+    ''|*[!0-9]*) gen=0 ;;
+  esac
+  gen=$((gen + 1))
+  tmp="$epoch.tmp.$pid"
+  if ! printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s\n%s\n' \
+      "$gen" "$pid" "$(date +%s)" "$identity" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+  # shellcheck disable=SC2034 # Read by callers after the claim succeeds.
+  FM_AUTOARM_MY_GEN=$gen
+  return 0
+}
+
+# Write a new outcome for a generation this process still owns, re-verified
+# under the micro-mutex so a superseded owner can never clobber a newer claim.
+# With a fourth argument, create that marker after the ledger rename in the same
+# owned critical section (the once-per-episode failure notice). A marker failure
+# refuses the commit even though its terminal ledger entry remains; marker-first
+# ordering could permanently suppress a notice whose ledger write never won.
+# Returns 0 committed, 2 refused (superseded or required-marker failure), and 1
+# unable (bounded contention or ledger-write failure).
+fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
+  local state=$1 gen=$2 outcome=$3 marker=${4:-} lock epoch pid identity tmp i
+  lock="$state/.claude-autoarm.lock"
+  epoch="$state/.claude-autoarm-epoch"
+  pid=${BASHPID:-$$}
+  i=0
+  while ! fm_lock_try_acquire "$lock"; do
+    [ "$i" -lt 20 ] || return 1
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if ! fm_autoarm_ledger_read "$state" \
+    || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  identity=$FM_AUTOARM_IDENTITY
+  tmp="$epoch.tmp.$pid"
+  if ! {
+      printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
+        "$gen" "$pid" "$outcome" "$(date +%s)"
+      [ -z "$identity" ] || printf '%s\n' "$identity"
+    } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$lock"
+    return 1
+  fi
+  if [ -n "$marker" ] && ! : > "$marker" 2>/dev/null; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  fm_lock_release "$lock"
+  return 0
+}
+
+# Lockless pre-side-effect ownership check: true while the ledger still names
+# <gen> owned by this process. A superseded owner must go silent instead of
+# arming, mutating shared state, or emitting.
+fm_autoarm_still_owner() {  # <state-dir> <gen>
+  local state=$1 gen=$2 pid
+  pid=${BASHPID:-$$}
+  fm_autoarm_ledger_read "$state" || return 1
+  [ "$FM_AUTOARM_GEN" = "$gen" ] && [ "$FM_AUTOARM_OWNER" = "$pid" ]
+}
+
+fm_autoarm_reset_owned() {  # <state-dir> <gen>
+  local state=$1 gen=$2 lock pid
+  lock="$state/.claude-autoarm.lock"
+  pid=${BASHPID:-$$}
+  fm_lock_try_acquire "$lock" || return 2
+  if ! fm_autoarm_ledger_read "$state" \
+    || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  if ! fm_failure_episode_reset "$state"; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+  return 0
+}
+
+# LEGACY shim (see the contract comment above): the abandonment proof for a
+# lock-holding claim from a pre-generation build, recognizable by the role
+# file only such claims and the guard's short terminal-check hold publish.
+# A live legacy owner defers per this proof; a finished, identity-mismatched,
+# or stuck one is abandoned:
+#
+#   1. the owner lock exists and carries the auto-arm role,
+#   2. its recorded pid is numeric,
+#   3. a recorded pid-identity that no longer matches the live pid is
+#      abandonment on its own (pid reuse after a group kill), and otherwise
+#   4. the ledger's owner_pid is exactly that pid and its outcome is present
+#      and either is not "arming", or is "arming" while both the ledger entry
+#      and the watcher beacon are older than the guard grace (the same stuck
+#      proof as fm_autoarm_claim_open).
+fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch lock role pid owner outcome recorded current
+  lock="$state/.claude-autoarm.lock"
+  epoch="$state/.claude-autoarm-epoch"
+  case "$grace" in
+    ''|*[!0-9]*|0) grace=300 ;;
+  esac
   [ -e "$lock" ] || [ -L "$lock" ] || return 1
   role=$(fm_lock_role "$lock")
   [ "$role" = autoarm ] || return 1
@@ -1449,31 +1768,90 @@ fm_autoarm_claim_abandoned() {  # <state-dir>
   [ "$owner" = "$pid" ] || return 1
   outcome=$(_fm_autoarm_epoch_field "$epoch" outcome) || return 1
   case "$outcome" in
-    ''|arming) return 1 ;;
+    '') return 1 ;;
+    arming)
+      [ "$(fm_path_age "$epoch")" -ge "$grace" ] || return 1
+      [ "$(fm_path_age "$state/.last-watcher-beat")" -ge "$grace" ] || return 1
+      return 0
+      ;;
   esac
   return 0
 }
 
-# Remove a proven-abandoned auto-arm claim so the next claimant can arm.
-# The proof is re-verified while holding the lock's steal mutex, which is the
-# same serialization fm_lock_try_acquire uses for stale-owner reclaim. That
-# mutex is a leaf and is not exclusive on its own: a racer reclaiming the same
-# stale mutex can take this one away mid-flight. What keeps the window between
+# Remove a proven-abandoned legacy claim so the next claimant can arm. The
+# proof is re-verified while holding the lock's steal mutex, the same
+# serialization fm_lock_try_acquire uses for stale-owner reclaim. That mutex is
+# a leaf and is not exclusive on its own: a racer reclaiming the same stale
+# mutex can take this one away mid-flight. What keeps the window between
 # proving abandonment and removing the lock from swallowing a genuine new claim
 # is therefore the same thing that protects the reclaim path - the mutex still
 # pointing at this process's owner directory, re-proved immediately before the
 # removal, since only the process that owns it can publish the primary lock.
-fm_autoarm_release_abandoned() {  # <state-dir>
-  local state=$1 lock steal steal_owner
+#
+# Old-build code cannot re-check generations, so a LIVE proven-abandoned
+# legacy owner whose recorded identity is verified to match its pid is retired
+# with TERM before the lock is removed: once the TERM is successfully queued
+# the process can never resume normal execution (delivery precedes any further
+# user code when it continues), so a short bounded wait for observed exit is a
+# courtesy, not a requirement. A pid is never signalled without a verified
+# matching identity; when the kill itself fails or the identity stops matching
+# mid-procedure (pid reuse), the reclaim refuses. Missing identity evidence
+# never blocks the reclaim of a proven-abandoned claim - it only disables the
+# TERM and the ledger graft below, keeping the documented bounded
+# upgrade-window residual instead of the deadlock.
+fm_autoarm_release_abandoned() {  # <state-dir> [grace]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock steal steal_owner epoch lock_pid recorded current owner line1 tmp i
   lock="$state/.claude-autoarm.lock"
   steal="$lock.steal"
-  fm_autoarm_claim_abandoned "$state" || return 1
+  epoch="$state/.claude-autoarm-epoch"
+  fm_autoarm_claim_abandoned "$state" "$grace" || return 1
   fm_lock_try_acquire "$steal" || return 1
   steal_owner=${FM_LOCK_OWNER_DIR:-}
-  if ! fm_autoarm_claim_abandoned "$state"; then
+  if ! fm_autoarm_claim_abandoned "$state" "$grace"; then
     fm_lock_release "$steal"
     return 1
   fi
+  lock_pid=$(cat "$lock/pid" 2>/dev/null || true)
+  recorded=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  if [ -n "$recorded" ] && fm_pid_alive "$lock_pid" \
+    && current=$(fm_pid_identity "$lock_pid" 2>/dev/null) \
+    && [ -n "$current" ] && [ "$current" = "$recorded" ]; then
+    # A live pid still answering to the recorded identity IS the genuine
+    # legacy owner (proven stuck or blocked after a terminal write): retire it
+    # before removing its lock, because old-build code cannot re-check
+    # generations. A pid the recorded identity does NOT verify - reused,
+    # unverifiable, or never recorded - is NEVER signalled; those shapes are
+    # reclaimed as-is, which is safe exactly because the recorded owner is
+    # gone or was never provably this process.
+    if ! kill -TERM "$lock_pid" 2>/dev/null; then
+      fm_lock_release "$steal"
+      return 1
+    fi
+    i=0
+    while [ "$i" -lt 20 ] && fm_pid_alive "$lock_pid"; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+  fi
+  # Preserve the legacy lock's identity evidence in the ledger before the lock
+  # disappears, keeping the ledger's original mtime so the stuck proof's age
+  # window is not silently reopened. Best effort.
+  if [ -n "$recorded" ] && [ -n "$lock_pid" ] \
+    && owner=$(_fm_autoarm_epoch_field "$epoch" owner_pid 2>/dev/null) \
+    && [ "$owner" = "$lock_pid" ] \
+    && [ -z "$(sed -n '2p' "$epoch" 2>/dev/null)" ]; then
+    line1=$(sed -n '1p' "$epoch" 2>/dev/null || true)
+    tmp="$epoch.tmp.${BASHPID:-$$}"
+    if [ -n "$line1" ] \
+      && printf '%s\n%s\n' "$line1" "$recorded" > "$tmp" 2>/dev/null \
+      && touch -r "$epoch" "$tmp" 2>/dev/null \
+      && mv -f "$tmp" "$epoch" 2>/dev/null; then
+      :
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+  # The TERM wait and the ledger graft above are several forks wide, so re-prove
+  # the mutex is still this process's immediately before the removal.
   if ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
     fm_lock_release "$steal"
     return 1
@@ -1543,6 +1921,71 @@ fm_wake_queued_keys_locked() {
     "$FM_WAKE_QUEUE" 2>/dev/null || true
 }
 
+fm_wake_secondmate_stall_marker_write() { # <task> <row-key>
+  local task=$1 row_key=$2 marker tmp
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$row_key" in ''|*[!0-9-]*) return 1 ;; esac
+  marker="$STATE/.secondmate-wake-stall-$task"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  fi
+  tmp=$(mktemp "$STATE/.secondmate-wake-stall.XXXXXX") || return 1
+  if ! printf '%s\n' "$row_key" > "$tmp" || ! chmod 0600 "$tmp" \
+    || ! _fm_atomic_replace "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_wake_secondmate_stall_receipt_write() { # <task> <row-key>
+  local task=$1 row_key=$2 root task_dir receipt tmp
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$row_key" in ''|*[!0-9-]*) return 1 ;; esac
+  root="$STATE/.secondmate-wake-stall-receipts"
+  task_dir="$root/$task"
+  if [ -e "$root" ] || [ -L "$root" ]; then
+    [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  else
+    mkdir "$root" || return 1
+    chmod 0700 "$root" || return 1
+  fi
+  if [ -e "$task_dir" ] || [ -L "$task_dir" ]; then
+    [ -d "$task_dir" ] && [ ! -L "$task_dir" ] || return 1
+  else
+    mkdir "$task_dir" || return 1
+    chmod 0700 "$task_dir" || return 1
+  fi
+  receipt="$task_dir/$row_key"
+  [ "$(cat "$receipt" 2>/dev/null || true)" != "$row_key" ] || return 0
+  tmp=$(mktemp "$task_dir/.receipt.XXXXXX") || return 1
+  if ! printf '%s\n' "$row_key" > "$tmp" || ! chmod 0600 "$tmp" \
+    || ! _fm_atomic_replace "$tmp" "$receipt"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_wake_commit_secondmate_stall_receipts_through() { # <cutoff> [<rows-file>]
+  local cutoff=$1 rows=${2:-} key seq rest epoch task row_key
+  while IFS= read -r key; do
+    seq=${key##*-}
+    rest=${key%-*}
+    epoch=${rest##*-}
+    task=${rest#secondmate-wake-loop-}
+    task=${task%-"$epoch"}
+    case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+    case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+    case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    row_key="$epoch-$seq"
+    fm_wake_secondmate_stall_receipt_write "$task" "$row_key" || return 1
+  done < <(awk -F '\t' -v cutoff="$cutoff" -v rows="$rows" '
+    BEGIN { if (rows != "") while ((getline line < rows) > 0) owned[line]=1 }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff \
+      && (rows == "" || ($2 in owned)) && $3 == "check" \
+      && $4 ~ /^secondmate-wake-loop-[A-Za-z0-9._-]+-[0-9]+-[0-9]+$/ { print $4 }
+  ' "$FM_WAKE_QUEUE" 2>/dev/null)
+}
+
 fm_wake_restore_queue() {
   local drained=$1 restore
   restore="$STATE/.wake-queue.restore.$(fm_current_pid)"
@@ -1578,35 +2021,95 @@ fm_wake_print_deduped() {
 # --- signal announcement signatures -----------------------------------------
 #
 # The watcher's per-file signal scan (bin/fm-watch.sh scan_signals) detects a
-# status or turn-ended change by comparing a size:mtime signature against a
-# persisted state/.seen-* marker, and advances that marker only after the change
-# has been surfaced to firstmate or deliberately absorbed by the signal triage.
-# These three helpers plus the guarded append below are the ONE owner of that
-# signature and marker format, shared by the scan itself, by the drain-time
-# historical-annotation staleness check, and by this home's own bookkeeping
-# writers.
+# status or turn-ended change by comparing a file signature against a persisted
+# state/.seen-* marker.
+# fm-classify-lib.sh's header owns the status marker contract, including its
+# independent reported signature and classified position.
+# These helpers own wake-facing marker routing, the legacy turn-ended signature,
+# drain-time staleness checks, and guarded bookkeeping writes.
 
-fm_wake_signal_sig() {  # <file> -> "size:mtime"
-  if [ "$_FM_UNAME" = Darwin ]; then
-    stat -f '%z:%Fm' "$1" 2>/dev/null
-  else
-    stat -c '%s:%Y' "$1" 2>/dev/null
-  fi
+fm_wake_signal_sig() {  # <file> -> reported-state signature
+  case "$1" in
+    *.status)
+      _fm_wake_require_classify || return 1
+      status_observed_signature "$1"
+      ;;
+    *)
+      if [ "$_FM_UNAME" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
+      ;;
+  esac
 }
 
 fm_wake_signal_seen_path() {  # <state> <file>
-  printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')"
+  local task
+  case "$2" in
+    *.status)
+      task=$(basename "$2"); task=${task%.status}
+      printf '%s/.seen-%s' "$1" "$(printf '%s.status' "$task" | tr '.' '_')"
+      ;;
+    *) printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')" ;;
+  esac
 }
 
-# 0 when <file>'s current signature exactly matches its recorded seen marker,
-# meaning every byte in it was already surfaced or deliberately absorbed.
-# A missing marker or unreadable signature is NOT a match, so uncertainty reads
-# as "unannounced bytes present".
+# The byte size recorded in <file>'s seen marker, or 0 when no marker exists, it
+# cannot be read, or it does not hold the supported presentation-marker format.
+# That size is the position the watcher has already classified, independently of
+# the file signature it has already reported. A 0 means "classify the whole
+# file", which surfaces events rather than losing them.
+fm_wake_signal_seen_size() {  # <state> <file>
+  local marker sig size
+  marker=$(fm_wake_signal_seen_path "$1" "$2")
+  case "$2" in
+    *.status)
+      _fm_wake_require_classify || { printf '0'; return 0; }
+      status_presentation_marker_offset "$marker" "$2"
+      ;;
+    *)
+      sig=$(cat "$marker" 2>/dev/null) || { printf '0'; return 0; }
+      case "$sig" in *:*) size=${sig%%:*} ;; *) size=0 ;; esac
+      case "$size" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$size" ;; esac
+      ;;
+  esac
+}
+
+# 0 when <file>'s current signature matches its recorded reported state.
+# For a status file this means the current state was already reported, not that
+# every byte was successfully classified; the separate classified position owns
+# that fact.
+# A missing marker or unreadable signature is not a match, so uncertainty reads
+# as an unreported state.
 fm_wake_signal_seen_current() {  # <state> <file>
-  local sig
+  local sig marker
   sig=$(fm_wake_signal_sig "$2") || return 1
   [ -n "$sig" ] || return 1
-  [ "$(cat "$(fm_wake_signal_seen_path "$1" "$2")" 2>/dev/null)" = "$sig" ]
+  marker=$(fm_wake_signal_seen_path "$1" "$2")
+  case "$2" in
+    *.status)
+      _fm_wake_require_classify || return 1
+      status_presentation_marker_reported_matches "$marker" "$sig"
+      ;;
+    *) [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] ;;
+  esac
+}
+
+fm_wake_status_reported_commit() {  # <state> <status-file> <reported-signature>
+  _fm_wake_require_classify || return 1
+  status_presentation_marker_report "$(fm_wake_signal_seen_path "$1" "$2")" "$3"
+}
+
+fm_wake_status_seen_commit() {  # <state> <status-file> <captured-end> <captured-identity>
+  _fm_wake_require_classify || return 1
+  status_presentation_marker_commit "$(fm_wake_signal_seen_path "$1" "$2")" "$2" "$3" "$4"
+}
+
+# Mark the current complete status snapshot as both reported and classified.
+# This is the public setup primitive for consumers that adopt an existing log.
+fm_wake_status_mark_current() {  # <state> <status-file>
+  local size ident
+  _fm_wake_require_classify || return 1
+  size=$(_fm_status_file_size "$2") || return 1
+  ident=$(_fm_open_decisions_file_ident "$2") || return 1
+  fm_wake_status_seen_commit "$1" "$2" "$size" "$ident"
 }
 
 # Guarded self-announced status append - the one dedup primitive for a status
@@ -1628,22 +2131,25 @@ fm_wake_signal_seen_current() {  # <state> <file>
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
 # (the safe direction), 2 the append itself failed.
 fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
-  local state=$1 file=$2 line=$3 marker pre_sig='' post_sig pre_size post_size
+  local state=$1 file=$2 line=$3 marker pre_sig='' pre_size='' pre_ident='' post_size post_ident
   local LC_ALL=C
+  _fm_wake_require_classify || return 1
   marker=$(fm_wake_signal_seen_path "$state" "$file")
   if [ -e "$file" ]; then
     pre_sig=$(fm_wake_signal_sig "$file") || pre_sig=''
+    pre_size=$(_fm_status_file_size "$file") || pre_size=''
+    pre_ident=$(_fm_open_decisions_file_ident "$file") || pre_ident=''
   fi
   printf '%s\n' "$line" >> "$file" || return 2
   [ -n "$pre_sig" ] || return 1
-  [ "$(cat "$marker" 2>/dev/null)" = "$pre_sig" ] || return 1
-  post_sig=$(fm_wake_signal_sig "$file") || return 1
-  [ -n "$post_sig" ] || return 1
-  pre_size=${pre_sig%%:*}
-  post_size=${post_sig%%:*}
+  status_presentation_marker_reported_matches "$marker" "$pre_sig" || return 1
+  [ "$(status_presentation_marker_offset "$marker" "$file")" = "$pre_size" ] || return 1
+  post_size=$(_fm_status_file_size "$file") || return 1
+  post_ident=$(_fm_open_decisions_file_ident "$file") || return 1
   case "$pre_size$post_size" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ] || return 1
   [ "$post_size" -eq $((pre_size + ${#line} + 1)) ] || return 1
-  printf '%s' "$post_sig" > "$marker" 2>/dev/null || return 1
+  fm_wake_status_seen_commit "$state" "$file" "$post_size" "$post_ident" || return 1
   return 0
 }
 

@@ -69,7 +69,8 @@ while IFS= read -r rel; do
     config/*) source="$CONFIG/${rel#config/}" ;;
     data/*) source="$DATA/${rel#data/}" ;;
   esac
-  if [ -e "$source" ] || [ -L "$source" ]; then
+  source_present=$(fm_config_source_present "$source") || exit 1
+  if [ "$source_present" = 1 ]; then
     [ -f "$source" ] && [ ! -L "$source" ] || die "inherited source is unsafe: $source"
     [ "$(file_link_count "$source")" = 1 ] || die "inherited source is hardlinked: $source"
     if [ "$rel" = data/captain-shared.md ]; then
@@ -80,7 +81,7 @@ while IFS= read -r rel; do
     [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || die "inherited source snapshot is unsafe: $source"
     bytes=$(LC_ALL=C wc -c < "$snapshot" | tr -d ' ')
     hash=$(sha256_file "$snapshot") || die "cannot hash inherited source: $source"
-    "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh put "$rel" "$bytes" "$hash" "$GENERATION" < "$snapshot"
+    "$SCRIPT_DIR/fm-on.sh" --stdin "$ID" fm-remote-inherit.sh put "$rel" "$bytes" "$hash" "$GENERATION" < "$snapshot"
   else
     # This loop's heredoc is its control stream, not remote command input.
     "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh absent "$rel" 0 "$EMPTY_HASH" "$GENERATION" < /dev/null

@@ -95,11 +95,13 @@ write_remote_delta() {  # <result-path> <status-line>
 }
 
 status_signature() {  # <status-path>
-  if [ "$(uname)" = Darwin ]; then
-    stat -f '%z:%Fm' "$1"
-  else
-    stat -c '%s:%Y' "$1"
-  fi
+  bash -c '
+    . "$1"
+    reported=$(status_observed_signature "$2") || exit 1
+    size=$(_fm_status_file_size "$2") || exit 1
+    ident=$(_fm_open_decisions_file_ident "$2") || exit 1
+    printf "v2\t%s\t%s@%s" "$reported" "$size" "$ident"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$1"
 }
 
 wait_for_file_text() {  # <file> <fixed-text>
@@ -278,7 +280,6 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   kill -KILL "$watcher_pid" 2>/dev/null || fail "could not abruptly stop pre-outage watcher"
   wait "$ARM_PID" 2>/dev/null || true
   [ ! -e "$state/.watcher-down" ] || fail "abrupt watcher exit unexpectedly ran cleanup"
-  rm -f "$state/.pr-check-migration-v1" "$state/.pr-check-migration-scan-v1"
 
   # Two independent durable wakes arrive while no watcher exists. Neither gets
   # a later status change to rescue it, which is the down-window loss shape.

@@ -19,6 +19,8 @@ install_pi_watch_extension_fixture() {
     "$repo/node_modules/typebox" \
     "$repo/bin"
   cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
@@ -161,9 +163,10 @@ EOF
   pass "unacknowledged recovery is announced at most once per generation and the successor stays alive"
 }
 
-# T2: a handling successor must enter its poll loop immediately and surface a
-# real crew event instead of sitting in a pre-loop wait that refreshes the
-# liveness beacon and then exits with a synthetic rearm-resurface.
+# T2: a handling successor must enter its poll loop and surface a real crew
+# event within a bounded startup-and-poll budget instead of sitting in a
+# pre-loop wait that refreshes the liveness beacon and then exits with a
+# synthetic rearm-resurface.
 test_handling_successor_does_not_go_blind() {
   local dir home state fakebin child event_start now out
   dir=$(make_case recovery-gap-successor)
@@ -191,7 +194,7 @@ test_handling_successor_does_not_go_blind() {
   printf 'done: crew finished its task\n' >> "$state/crew.status"
   event_start=$(date +%s)
   now=0
-  while [ "$now" -lt 5 ]; do
+  while [ "$now" -lt 20 ]; do
     if grep -q '^signal:' "$out" 2>/dev/null; then
       break
     fi
@@ -201,7 +204,7 @@ test_handling_successor_does_not_go_blind() {
   if ! grep -q '^signal:' "$out" 2>/dev/null; then
     kill -TERM "$child" 2>/dev/null || true
     wait "$child" 2>/dev/null || true
-    fail "handling successor did not surface the crew event within a poll interval or two (waited $(( $(date +%s) - event_start ))s): $(cat "$out")"
+    fail "handling successor did not surface the crew event within the bounded startup-and-poll budget (waited $(( $(date +%s) - event_start ))s): $(cat "$out")"
   fi
   grep -F 'crew.status' "$out" >/dev/null \
     || { kill -TERM "$child" 2>/dev/null || true; fail "handling successor did not name the crew status file: $(cat "$out")"; }

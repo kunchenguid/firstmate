@@ -32,8 +32,10 @@ The entrypoint authorizes that bootstrap with normal git tracking when git resol
 After setup, every other command verifies Firstmate's account-owned remote job worker, stages the encoded argv and stdin bytes, waits for its result, and relays stdout, stderr, and the exit status separately.
 On macOS the worker is `dev.firstmate.remote-job`, an Aqua-scoped LaunchAgent at `~/Library/LaunchAgents/dev.firstmate.remote-job.plist` with logs under `~/Library/Logs/`.
 After that bootstrap every non-doctor `fm-on.sh` target runs through that worker in the remote account's GUI session, never in the SSH process or a Herdr pane.
-The worker runs one staged job at a time and preempts a running reply long-poll as soon as any command other than another reply long-poll is queued, so interactive commands and startup checks are never serialized behind a poll window.
+The worker serves one lane per staged home: jobs for the same home follow the staging-order contract owned by [`bin/fm-remote-job-lib.sh`](../bin/fm-remote-job-lib.sh), while different homes' lanes run concurrently so one home's long job never delays another home's commands.
+Within a home's lane the worker preempts a running reply long-poll as soon as any command other than another reply long-poll is queued for that home, so interactive commands and startup checks are never serialized behind a poll window.
 `bin/fm-remote-job-lib.sh` owns that preemption contract and distinguishes preemption from a wait window that closes with no data, so only a genuinely quiet window proves channel freshness while either outcome can re-arm without losing data.
+A caller that disconnects or whose caller-side wait expires before its job completes cancels it instead of abandoning it: cancelled queued work is skipped, cancelled running work is stopped, and the finalized record is cleaned up, so retries never convoy behind abandoned work.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
 A worker stops itself once its configured code root stops being a Firstmate checkout, so a worker started from a worktree cannot outlive that worktree, and `bin/fm-remote-job-reap-orphans.sh` clears any worker already left behind that way without ever touching one whose checkout still exists.
 The remote account must provide the required toolchain, the selected worker runtime, the selected session backend, and credentials that work on that host.
@@ -162,6 +164,9 @@ Backends that already refuse secondmate launch, currently Orca and cmux, remain 
 
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
 
+A persistent remote route's parent metadata intentionally has no local spawn-generation marker and identifies the route by its recorded host instead.
+The Bearings inventory-reconcile hook therefore accepts these markerless routes, revalidates the sampled host at delivery, and refuses a route that changed hosts; [`fm-secondmate-reconcile.sh`](../bin/fm-secondmate-reconcile.sh) owns the exact cooldown, identity, and reporting contract.
+
 Send routed requests normally:
 
 ```sh
@@ -169,12 +174,18 @@ FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
 ```
 
 The [`fm-send.sh` header](../bin/fm-send.sh) owns the exact delivery-status contract.
-When the verified remote endpoint accepts the text and Enter but synchronous submit confirmation remains pending, the primary reports the request as delivered rather than failed; do not resend it, because its pending-reply expectation remains armed.
+A routed request is delivered as a durable record in the remote home's steering inbox plus a best-effort doorbell, never by typing the payload into the pane; exit 0 means the record durably exists.
+Every remote transport attempt is bounded by `FM_SEND_REMOTE_BUDGET`; that header owns the setting's default and validation contract.
+An unconfirmed SSH transport (exit 255) is retried identically once, while a budget expiry is not retried because completion is unknown; either outcome preserves this ordinary reply-bearing request's pending-reply expectation for the record that may have landed.
+If delivery remains unconfirmed, only the exact `FM_PENDING_REPLY_EXISTING_CORR=<id>` resend command printed by `fm-send` is safe to run later because it preserves the request body and lets the remote enqueue deduplicate onto the same record; a plain rerun mints a different correlation and is not idempotent.
+When deduplication finds that the worker already moved the matching record into `handled/`, the resend exits successfully without ringing the doorbell again.
+The remote host runs no doorbell re-ring ladder of its own; a swallowed doorbell for an ordinary reply-bearing request surfaces through the parent's pending-reply recovery and escalation, whose recovery request rings the doorbell again when it is enqueued.
 `fm-peek.sh` and `fm-crew-state.sh` route remote-secondmate reads to the endpoint's host instead of consulting local worktree or backend state.
 An unreachable or unreadable remote read is unknown, not evidence that the endpoint is dead.
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
+The remote home's own outcome publishers append there too, through the channel contract in `bin/fm-parent-channel-lib.sh` ([secondmate-parent-channel.md](secondmate-parent-channel.md)).
 A process-event source performs a non-destructive, cursor-anchored delta read, fetches only referenced `data/*.md` documents through the confined reader, mirrors every content-bearing line at most once into the primary status channel, and does not carry blank separators.
 The channel carries the mate's status and decision model: an uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.
 Correlation is a per-line property that settles a pending request; it is never a gate on the stream, so no single line can stop or wedge the relay or hold the cursor back.
@@ -190,8 +201,8 @@ The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
 
 An SSH exit status of 255 always means transport failure or unknown remote completion.
-The transport never retries automatically.
-Semantic callers preserve the route or pending request and require same-host reconciliation rather than resending an operation that may already have happened.
+The underlying `fm-on` transport never retries automatically, but `fm-send` retries its correlation-preserving steering-inbox leg exactly once.
+Semantic callers preserve the route or pending request; an operation that is not idempotent requires same-host reconciliation rather than a blind resend, while an unconfirmed steer may be retried only through the correlation-preserving command described above.
 An unavailable remote home is projected as unknown and is never replaced by a local second mate.
 
 ## Backlog handoff
@@ -204,8 +215,8 @@ bin/fm-backlog-handoff.sh <id> <item-key>...
 
 For a remote route, `tasks-axi mv` first moves the dependency-closed set atomically from the primary backlog into `data/handoff/<id>.outbox.md`.
 The outbox is then copied to the remote handoff scratch directory and `fm-backlog-receive.sh` atomically ingests every destination-absent key under the remote backlog's own lock.
-Confirmed receipt removes the outbox.
-An existing outbox is the complete retry record, and `--resume-pending` safely re-delivers it.
+After receipt, the helper sends a marked routed-work instruction through the recorded remote endpoint and removes the outbox only after that wake is confirmed.
+A failed wake leaves the remote backlog intact and the outbox available for `--resume-pending`; an unresolved send is reported without a blind resend.
 Bootstrap retries pending outboxes and emits `SECONDMATE_HANDOFF:` only when one remains.
 There is no two-phase journal and no additional tasks-axi release requirement.
 
@@ -216,8 +227,14 @@ Changed live routes receive a marked instruction to re-read the transferred file
 The primary records that remote nudge before delivery and retries it during locked startup convergence after a failed send.
 Local secondmates retain their generation-specific local pointer contract; remote transfers do not copy those primary-local instruction paths.
 
-`/updatefirstmate` updates each remote code root from its own origin, then guardedly fast-forwards the persistent remote home to that code-root commit.
-Dirty, diverged, unavailable, or otherwise unsafe targets are reported and left untouched.
+A live remote second mate is restarted with `relaunch`, which runs the ordinary [control plane](agent-control.md) on that host: the endpoint record there was written by a host-local launch and carries no remote placement, so the transaction, its checkpoint, and its postconditions are the local ones.
+The primary passes `<harness> <model|default|-> <effort|default|->` explicitly, using `default` when an axis has no parent pin, because `config/secondmate-harness` is not inherited into a second mate's home and the file on that host belongs to a different home; letting the far side re-resolve it would silently move the mate onto another runtime.
+SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
+
+Session start and every remote launch converge the persistent remote home on the primary's own default-branch commit rather than on the Firstmate copy that host keeps.
+The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the guarded convergence contract, including the distinct `/updatefirstmate` behavior, and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh) owns the commit-import mechanics.
+Neither session start nor launch moves the host's own Firstmate copy, and an unsafe or unavailable target is reported and left untouched.
+A completed sync reports which watched instruction paths its advance changed, because the primary cannot diff a checkout it cannot read and needs that fact to decide whether the running remote agent must be replaced to actually reload.
 
 Retire a remote second mate with the normal guarded command:
 
@@ -239,11 +256,14 @@ The lifecycle test covers seeding a registered project that this machine has nev
 ```sh
 bin/fm-test-run.sh tests/fm-on.test.sh
 bin/fm-test-run.sh tests/fm-send-remote-delivery.test.sh
+bin/fm-test-run.sh tests/fm-secondmate-reconcile.test.sh
 bin/fm-test-run.sh tests/fm-peek-remote.test.sh
 bin/fm-test-run.sh tests/fm-crew-state.test.sh
 bin/fm-test-run.sh tests/fm-remote-job.test.sh
+bin/fm-test-run.sh tests/fm-remote-transport-lanes.test.sh
 bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
 bin/fm-test-run.sh tests/fm-project-origin.test.sh
+bin/fm-test-run.sh tests/fm-secondmate-sync.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh

@@ -13,12 +13,12 @@ Hidden elapsed time does not advance the animation, and a resize while hidden cl
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
-Calm hides collapsed thinking labels, mid-turn assistant working notes, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` tool shell, and canonically classified Firstmate operational user rows.
+Calm hides collapsed thinking labels, mid-turn assistant working notes, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
 A mid-turn working note is assistant text in a message the model did not end its response with, identified by that message's own `stopReason` of `toolUse`, or of `length` with tool calls present.
 Hiding it removes the narration a model emits alongside its tool calls, while the genuine reply that ends a response stays visible.
 Text that is still streaming is never hidden, because suppressing it would also stop a genuine reply from streaming, so a working note is briefly visible before its row collapses.
 The narration is hidden only from the live transcript presentation, and remains in the message, model context, session storage, and `/export` artifacts.
-The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
+The operational inputs Calm classifies remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Outside Pi's same-name built-in override collision described below, Calm changes presentation only.
@@ -28,7 +28,7 @@ Legacy operational custom messages remain in session data and Pi's sidebar tree,
 Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved.
 
 Pi's supported presentation API does not expose a global transcript filter.
-Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and arbitrary custom-tool or extension rows remain visible.
+Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and other arbitrary custom-tool or extension rows remain visible.
 These are supported-API boundaries rather than hidden-content failures.
 
 ## Pi compatibility
@@ -53,6 +53,7 @@ Regression entry points:
 
 ```sh
 tests/fm-calm-pi-extension.test.sh
+tests/fm-pi-branch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 ```

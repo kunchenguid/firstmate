@@ -6,21 +6,30 @@
 # next line is working [key=<workstream>], never resolved [key=<decision>].
 # fm-send's --resolve-key removes that writer-dependency at its source: the
 # ANSWERING firstmate closes the decision in this home's own ledger at answer
-# time. These tests drive the real fm-send executable over stubbed transports
-# and assert closure through the real consumer (fm-wake-drain.sh's OPEN
-# DECISIONS section), never through source text:
+# time - for a local target that is ENQUEUE time, because the durable inbox
+# write is delivery to the task's record. These tests drive the real fm-send
+# executable over stubbed transports and assert closure through the real
+# consumer (fm-wake-drain.sh's OPEN DECISIONS section), never through source
+# text:
 #   1. An answer send closes the open decision, including the answer-starts-work
 #      scenario where the worker never writes a matching resolved line.
 #   2. A routine steer without the flag never closes anything, and a working:/
 #      done: line still cannot clear a captain decision.
 #   3. A key that is not open refuses BEFORE anything is sent (mistype safety).
-#   4. A failed or unconfirmed send never closes a key.
-#   5. A local secondmate answer is marked+corr'd yet closes the same way, and
-#      the closing line carries the plain answer, not marker or corr bytes.
+#   4. The close happens at enqueue: a failed doorbell ring still closes the
+#      answered key (the record is durably sent), while a failed ENQUEUE - the
+#      real local failure - closes nothing and leaves the decision open.
+#   5. A local secondmate answer is marked+corr'd in its record yet closes the
+#      same way, and the closing line carries the plain answer, not marker or
+#      corr bytes.
 #   6. A remote secondmate answer differs only at the transport layer: the
 #      message crosses the stubbed ssh transport while the close is the same
 #      local ledger append; a failed transport closes nothing.
 #   7. Flag misuse (--key, empty message, explicit backend target) refuses.
+#   8. A reserved pending-reply-* decision actually closes through --resolve-key
+#      (the operator path the OPEN DECISIONS hint names), while an unrelated
+#      writer's answered: note still cannot hijack or clear that key. A reserved
+#      key this send cannot close refuses before anything is sent.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -63,7 +72,9 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    printf '%s\n' fm-t1 fm-t2 fm-t3 fm-t4 fm-t5 fm-t6 fm-t7 fm-t8 fm-t9 fm-mate
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -121,7 +132,9 @@ test_answer_send_closes_open_decision() {
 
   run_send "$fb" "$home" "$log" t1 --resolve-key api-shape "go with REST"; rc=$?
   expect_code 0 "$rc" "an answer send with --resolve-key should succeed"
-  assert_contains "$(cat "$log")" "go with REST" "the answer text should reach the worker"
+  grep -qF "go with REST" "$home/state/t1.inbox/001.msg" \
+    || fail "the answer text should reach the worker's durable inbox record"
+  assert_contains "$(cat "$log")" "Firstmate instruction waiting" "the doorbell should be rung for the answer"
   grep -F 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" >/dev/null \
     || fail "fm-send did not append the closing resolved line:"$'\n'"$(cat "$home/state/t1.status")"
 
@@ -145,8 +158,7 @@ test_answer_close_is_self_announced() {
   printf 'needs-decision [key=port-choice]: 8080 or 9090\n' > "$home/state/t9.status"
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"
-    sig=$(fm_wake_signal_sig "$3") || exit 1
-    printf "%s" "$sig" > "$(fm_wake_signal_seen_path "$2" "$3")"
+    fm_wake_status_mark_current "$2" "$3"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t9.status" \
     || fail "could not prime the announced baseline"
 
@@ -258,6 +270,7 @@ test_not_open_key_refuses_before_send() {
   assert_contains "$(cat "$err")" "--resolve-key 'mistyped'" "the refusal should name the bad key"
   assert_contains "$(cat "$err")" "nothing was sent" "the refusal should state nothing was sent"
   [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
+  [ ! -d "$home/state/t4.inbox" ] || fail "a refused answer still enqueued an inbox record"
   if grep -F 'resolved' "$home/state/t4.status" >/dev/null; then
     fail "a refused answer still closed something: $(cat "$home/state/t4.status")"
   fi
@@ -267,11 +280,14 @@ test_not_open_key_refuses_before_send() {
   pass "fm-send --resolve-key: a key that is not open refuses loudly before anything is sent"
 }
 
-test_failed_send_does_not_close() {
+# The close is an enqueue-time fact: the durable record IS the delivery, so a
+# failed doorbell keystroke must not reopen the split-brain where the close
+# waited on an unconfirmable submit.
+test_failed_ring_still_closes_at_enqueue() {
   local dir fb log home rc out
-  dir="$TMP_ROOT/send-fail"; mkdir -p "$dir"
+  dir="$TMP_ROOT/ring-fail"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
-  home=$(setup_home send-fail)
+  home=$(setup_home ring-fail)
   fm_write_meta "$home/state/t5.meta" "window=sess:fm-t5" "kind=ship"
   printf 'blocked [key=creds]: need the deploy token\n' > "$home/state/t5.status"
 
@@ -279,14 +295,42 @@ test_failed_send_does_not_close() {
   env PATH="$fb:$PATH" FM_FAKE_TMUX_SEND_FAIL=1 \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" t5 --resolve-key creds "token is in the vault now" >/dev/null 2>&1; rc=$?
-  [ "$rc" -ne 0 ] || fail "a failed backend send should exit nonzero"
-  if grep -F 'resolved' "$home/state/t5.status" >/dev/null; then
-    fail "a failed send still closed the decision: $(cat "$home/state/t5.status")"
+  expect_code 0 "$rc" "a failed doorbell must not fail the durably enqueued answer"
+  grep -qF 'token is in the vault now' "$home/state/t5.inbox/001.msg" \
+    || fail "the answer must be durably recorded despite the failed ring"
+  grep -F 'resolved [key=creds]' "$home/state/t5.status" >/dev/null \
+    || fail "the enqueued answer must close the decision at answer time: $(cat "$home/state/t5.status")"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F '[key=creds]' >/dev/null; then
+    fail "the answered blocker still lists as open after an enqueue-time close: $out"
   fi
+  pass "fm-send --resolve-key: the close happens at enqueue, surviving a failed doorbell"
+}
+
+# The real local failure - an unwritable record - is the case that must never
+# close anything: nothing durable was sent.
+test_failed_enqueue_does_not_close() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/enqueue-fail"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home enqueue-fail)
+  fm_write_meta "$home/state/t5.meta" "window=sess:fm-t5" "kind=ship"
+  printf 'blocked [key=creds]: need the deploy token\n' > "$home/state/t5.status"
+  : > "$home/state/t5.inbox"   # a FILE where the inbox dir must go
+
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t5 --resolve-key creds "token is in the vault now" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed enqueue should exit nonzero"
+  if grep -F 'resolved' "$home/state/t5.status" >/dev/null; then
+    fail "a failed enqueue still closed the decision: $(cat "$home/state/t5.status")"
+  fi
+  [ ! -s "$log" ] || fail "a failed enqueue still typed something: $(cat "$log")"
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=creds]' >/dev/null \
-    || fail "the blocker vanished after a failed send: $out"
-  pass "fm-send --resolve-key: a failed send never closes the decision"
+    || fail "the blocker vanished after a failed enqueue: $out"
+  pass "fm-send --resolve-key: a failed enqueue never closes the decision"
 }
 
 test_multiple_keys_close_together() {
@@ -323,10 +367,11 @@ test_local_secondmate_answer_marked_and_closed() {
 
   run_send "$fb" "$home" "$log" fm-domain --resolve-key fleet-split "shard by team"; rc=$?
   expect_code 0 "$rc" "a secondmate answer send should succeed"
-  got=$(cat "$log")
+  got=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" \
+    "$home/state/domain.inbox/001.msg")
   case "$got" in
     "$FM_FROMFIRST_MARK"corr=*) : ;;
-    *) fail "the secondmate answer lost its from-firstmate marker/corr framing" ;;
+    *) fail "the secondmate answer's record lost its from-firstmate marker/corr framing: $got" ;;
   esac
   closing=$(grep -F 'resolved [key=fleet-split]' "$home/state/domain.status" || true)
   [ -n "$closing" ] || fail "the secondmate decision was not closed: $(cat "$home/state/domain.status")"
@@ -496,16 +541,201 @@ test_flag_misuse_refuses() {
   pass "fm-send --resolve-key: --key, empty message, explicit targets, and malformed keys refuse loudly"
 }
 
+# The reported silent no-op: fm-send --resolve-key on a reserved pending-reply-*
+# key used to write "answered: ..." and exit 0 while the classify fold left the
+# decision open. The operator path must actually close it, using the owning
+# library's vocabulary, without weakening the guard against an unrelated writer.
+test_reserved_pending_reply_key_closes_through_resolve_key() {
+  local dir fb log home rc out key corr
+  dir="$TMP_ROOT/reserved-close"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home reserved-close)
+  corr=abcdef0123456789
+  key="pending-reply-$corr"
+  fm_write_meta "$home/state/mate.meta" "window=sess:fm-mate" "kind=ship"
+  printf 'blocked [key=%s]: pending-reply-missed: task=mate pending-reply-id=%s request=ship it\n' \
+    "$key" "$corr" > "$home/state/mate.status"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F "[key=$key]" >/dev/null \
+    || fail "precondition: the reserved pending-reply decision should list as open: $out"
+
+  run_send "$fb" "$home" "$log" mate --resolve-key "$key" "ack, false escalation"; rc=$?
+  expect_code 0 "$rc" "closing a reserved pending-reply key via --resolve-key should succeed"
+  grep -F "pending-reply-resolved: task=mate pending-reply-id=$corr via=operator-resolve-key" \
+    "$home/state/mate.status" >/dev/null \
+    || fail "the operator close did not write the owning library's close note:"$'\n'"$(cat "$home/state/mate.status")"
+  if grep -E "resolved \[key=$key\]: answered:" "$home/state/mate.status" >/dev/null; then
+    fail "the operator close still wrote a bare answered: note that the fold ignores:"$'\n'"$(cat "$home/state/mate.status")"
+  fi
+
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the reserved pending-reply decision still lists as open after --resolve-key: $out"
+  fi
+  pass "fm-send --resolve-key: a reserved pending-reply key actually closes through the operator path"
+}
+
+test_unrelated_writer_cannot_close_or_hijack_reserved_key() {
+  local dir fb log home rc out key corr
+  dir="$TMP_ROOT/reserved-guard"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home reserved-guard)
+  corr=abcdef0123456789
+  key="pending-reply-$corr"
+  fm_write_meta "$home/state/mate.meta" "window=sess:fm-mate" "kind=ship"
+  {
+    printf 'blocked [key=%s]: pending-reply-missed: task=mate pending-reply-id=%s request=ship it\n' \
+      "$key" "$corr"
+    printf 'blocked [key=%s]: shipping is blocked on infra\n' "$key"
+    printf 'resolved [key=%s]: answered: operator thought this would close it\n' "$key"
+    printf 'resolved [key=%s]: all good now\n' "$key"
+  } > "$home/state/mate.status"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F "pending-reply-id=$corr" >/dev/null \
+    || fail "an unrelated answered: resolution cleared a reserved decision: $out"
+  if printf '%s' "$out" | grep -F 'shipping is blocked on infra' >/dev/null; then
+    fail "an unrelated writer took over a reserved decision key: $out"
+  fi
+
+  run_send "$fb" "$home" "$log" mate --resolve-key "$key" "dismiss the missed-reply hold"; rc=$?
+  expect_code 0 "$rc" "the operator close should still succeed after foreign no-op lines"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the reserved key stayed open after the operator close: $out"
+  fi
+  pass "fm-send --resolve-key: an unrelated writer cannot close or hijack a reserved key, and the operator close still can"
+}
+
+test_unclosable_reserved_key_refuses_before_send() {
+  local dir fb log home err rc out
+  dir="$TMP_ROOT/reserved-refuse"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home reserved-refuse)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'blocked [key=secret-abc]: secret-held: keep this\n' > "$home/state/t1.status"
+
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_CLASSIFY_RESERVED_KEY_PREFIXES='pending-reply- secret-' \
+    "$SEND" t1 --resolve-key secret-abc "this must not silently no-op" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a reserved key this send cannot close should refuse"
+  assert_contains "$(cat "$err")" "--resolve-key 'secret-abc'" "the refusal should name the reserved key"
+  assert_contains "$(cat "$err")" "cannot take effect" "the refusal should say the close cannot take effect"
+  assert_contains "$(cat "$err")" "nothing was sent" "the refusal should state nothing was sent"
+  [ ! -s "$log" ] || fail "a refused reserved-key close still typed text: $(cat "$log")"
+  [ ! -d "$home/state/t1.inbox" ] || fail "a refused reserved-key close still enqueued an inbox record"
+  if grep -F 'resolved' "$home/state/t1.status" >/dev/null; then
+    fail "a refused reserved-key close still wrote a resolved line: $(cat "$home/state/t1.status")"
+  fi
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=secret-abc]' >/dev/null \
+    || fail "the reserved decision disappeared after a refused close: $out"
+  pass "fm-send --resolve-key: a reserved key this send cannot close refuses loudly before anything is sent"
+}
+
+test_long_decision_key_refuses_before_send() {
+  local dir fb log home err key rc out
+  dir="$TMP_ROOT/long-key"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home long-key)
+  key=$(printf 'k%.0s' {1..230})
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=%s]: choose safely\n' "$key" > "$home/state/t1.status"
+
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t1 --resolve-key "$key" "answer the long-key decision" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a key whose close prefix cannot fit should refuse before sending"
+  assert_contains "$(cat "$err")" "decision key of length 230" "the refusal should report the key-length cause"
+  assert_contains "$(cat "$err")" "220-character status-line cap" "the refusal should report the truncation limit"
+  assert_contains "$(cat "$err")" "nothing was sent" "the refusal should state nothing was sent"
+  [ ! -s "$log" ] || fail "a refused long-key close still typed text: $(cat "$log")"
+  [ ! -d "$home/state/t1.inbox" ] || fail "a refused long-key close still enqueued an inbox record"
+  if grep -F 'resolved' "$home/state/t1.status" >/dev/null; then
+    fail "a refused long-key close still wrote a malformed resolution: $(cat "$home/state/t1.status")"
+  fi
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null \
+    || fail "the long-key decision disappeared after a refused close: $out"
+  pass "fm-send --resolve-key: an overlong decision key refuses before sending"
+}
+
+test_failed_close_recovery_command_is_shell_safe() {
+  local dir fb log home err marker answer rc diagnostic manual out
+  dir="$TMP_ROOT/manual-close"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home "manual close")
+  marker="$dir/injected"
+  answer="ok'; touch $marker; echo '"
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=quote-safety]: choose safely\n' > "$home/state/t1.status"
+  chmod 0400 "$home/state/t1.status"
+
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t1 --resolve-key quote-safety "$answer" >/dev/null 2>"$err"; rc=$?
+  chmod 0600 "$home/state/t1.status"
+  [ "$rc" -ne 0 ] || fail "a delivered answer with a failed close append should fail loudly"
+  diagnostic=$(cat "$err")
+  assert_contains "$diagnostic" "Close it manually with:" "the close failure should provide recovery guidance"
+  manual=${diagnostic#*Close it manually with: }
+  manual=${manual% - do not resend the answer.}
+  bash -c "$manual" || fail "the generated manual close command should execute successfully"
+  [ ! -e "$marker" ] || fail "the generated manual close command executed answer text as shell code"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the generated manual close command did not close the decision: $out"
+  fi
+  pass "fm-send --resolve-key: failed-close recovery commands safely quote operator text and paths"
+}
+
+test_remote_reserved_pending_reply_key_closes_locally() {
+  local dir fb log home ssh_log rc out key corr
+  dir="$TMP_ROOT/remote-reserved"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  home=$(setup_remote_home remote-reserved)
+  corr=d448ea86afa4bf67
+  key="pending-reply-$corr"
+  printf 'blocked [key=%s]: pending-reply-missed: task=rsm pending-reply-id=%s request=ship it\n' \
+    "$key" "$corr" > "$home/state/rsm.status"
+
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_FAKE_SSH_RC=0 \
+    "$SEND" rsm --resolve-key "$key" "ack the missed-reply hold" >/dev/null 2>&1; rc=$?
+  expect_code 0 "$rc" "a remote reserved-key --resolve-key should succeed"
+  grep -F "pending-reply-resolved: task=rsm pending-reply-id=$corr via=operator-resolve-key" \
+    "$home/state/rsm.status" >/dev/null \
+    || fail "the remote operator close did not write the owning library's close note: $(cat "$home/state/rsm.status")"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the remote reserved pending-reply decision still lists as open: $out"
+  fi
+  pass "fm-send --resolve-key: a remote secondmate reserved-key close is the same local ledger append"
+}
+
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
 test_not_open_key_refuses_before_send
-test_failed_send_does_not_close
+test_failed_ring_still_closes_at_enqueue
+test_failed_enqueue_does_not_close
 test_multiple_keys_close_together
 test_local_secondmate_answer_marked_and_closed
 test_remote_secondmate_answer_closes_locally
 test_remote_reply_corr_tag_does_not_block_resolve_key
 test_remote_transport_failure_does_not_close
 test_flag_misuse_refuses
+test_reserved_pending_reply_key_closes_through_resolve_key
+test_unrelated_writer_cannot_close_or_hijack_reserved_key
+test_unclosable_reserved_key_refuses_before_send
+test_long_decision_key_refuses_before_send
+test_failed_close_recovery_command_is_shell_safe
+test_remote_reserved_pending_reply_key_closes_locally

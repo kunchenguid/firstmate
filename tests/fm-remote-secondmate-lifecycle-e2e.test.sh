@@ -283,6 +283,15 @@ sha256_file() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi
 }
 
+# The correlation token of the newest record in the remote secondmate's
+# steering inbox: a remote steer is delivered as a durable record there, so
+# the corr a reply must echo is read from the record body, never from typed
+# pane bytes.
+newest_remote_inbox_corr() {
+  grep -Eoh 'corr=[a-f0-9]{16}' "$REMOTE_HOME"/state/parent-route/ios.inbox/*.msg 2>/dev/null \
+    | tail -1 | cut -d= -f2-
+}
+
 seed_env() {
   FM_HOME="$TMP_ROOT/seed-parent" \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
@@ -854,20 +863,34 @@ wait "$spawn_config_push" || fail "config push failed after serialized remote sp
   || fail "stale spawn inheritance overwrote later config convergence"
 pass "remote spawn serializes inheritance through launch publication"
 
-# A normal marked parent request traverses SSH, reaches the remote endpoint once,
-# and resolves only after the correlated remote log delta is ingested.
+# A normal marked parent request traverses SSH as a durable remote inbox
+# record plus a rung doorbell - the payload is never typed into the pane. An
+# ambiguous transport (the remote leg executed, then ssh exit 255) is retried
+# identically once, and the idempotent remote write lands both executions on
+# ONE record; the send reports itself unconfirmed with a correlation-preserving
+# resend command, and the expectation resolves only after the correlated remote log
+# delta is ingested.
 ssh_before_send=$(cat "$SSH_COUNT")
+records_before_send=$(find "$REMOTE_HOME/state/parent-route/ios.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
 set +e
 FM_FAKE_SSH_MODE=ambiguous remote_env "$ROOT/bin/fm-send.sh" fm-ios \
   'report the build result' > "$TMP_ROOT/send.out" 2> "$TMP_ROOT/send.err"
 send_rc=$?
 set -e
 [ "$send_rc" -ne 0 ] || fail "ambiguous remote send claimed definite delivery"
-assert_grep 'do not resend' "$TMP_ROOT/send.err" "ambiguous remote send did not require same-host reconciliation"
+assert_grep 'Only the correlation-reusing resend below is idempotent' "$TMP_ROOT/send.err" "ambiguous remote send did not state the correlation-preserving resend boundary"
+assert_no_grep 'do not resend' "$TMP_ROOT/send.err" "ambiguous remote send kept the deleted do-not-resend trap"
 ssh_after_send=$(cat "$SSH_COUNT")
-[ "$ssh_after_send" -eq $((ssh_before_send + 1)) ] || fail "ambiguous remote send was retried"
-CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$HERDR_LOG" | tail -1 | cut -d= -f2-)
+[ "$ssh_after_send" -eq $((ssh_before_send + 2)) ] \
+  || fail "ambiguous remote send was not retried exactly once (ssh calls: $((ssh_after_send - ssh_before_send)))"
+records_after_send=$(find "$REMOTE_HOME/state/parent-route/ios.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+[ "$records_after_send" -eq $((records_before_send + 1)) ] \
+  || fail "the retried remote steer did not dedup onto one new record, went $records_before_send -> $records_after_send"
+assert_no_grep 'report the build result' "$HERDR_LOG" "the steer payload was typed into the remote pane"
+assert_grep 'Firstmate instruction waiting' "$HERDR_LOG" "the remote doorbell never rang"
+CORR=$(newest_remote_inbox_corr)
 [ -n "$CORR" ] || fail "remote send did not carry a correlation token"
+assert_grep "FM_PENDING_REPLY_EXISTING_CORR=$CORR" "$TMP_ROOT/send.err" "ambiguous remote send did not print its correlation-reusing command"
 phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
 [ "$phase" = delivery_unknown ] || fail "ambiguous remote send did not preserve its pending expectation"
 printf 'done [corr=%s]: remote build passed\n' "$CORR" >> "$REMOTE_HOME/state/parent-replies.status"
@@ -902,7 +925,7 @@ remote_env "$ROOT/bin/fm-bootstrap.sh" > "$TMP_ROOT/config-partial-retry.out" \
 [ "$(cat "$REMOTE_HOME/config/crew-harness")" = grok ] \
   || fail "bootstrap did not apply the remaining inherited file"
 assert_absent "$NUDGE_MARKER" "bootstrap cleared no remote reread marker after convergence"
-PARTIAL_CONFIG_CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$HERDR_LOG" | tail -1 | cut -d= -f2-)
+PARTIAL_CONFIG_CORR=$(newest_remote_inbox_corr)
 [ -n "$PARTIAL_CONFIG_CORR" ] || fail "bootstrap config reread did not carry a correlation token"
 printf 'done [corr=%s]: converged inherited config re-read\n' "$PARTIAL_CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
@@ -952,21 +975,26 @@ wait "$config_second" || fail "bootstrap inheritance transaction failed after wa
 pass "config push and bootstrap serialize remote inheritance convergence"
 
 printf 'codex\n' > "$PARENT/config/crew-harness"
-touch "$TMP_ROOT/herdr-send-fail"
+# A failed reread nudge now means the durable remote inbox RECORD could not be
+# written (a swallowed doorbell alone no longer fails a recorded steer), so
+# the failure is induced by making the remote steering inbox unwritable.
+chmod 555 "$REMOTE_HOME/state/parent-route/ios.inbox"
 if remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-fail.out" 2>&1; then
-  fail "remote config push claimed success after its reread send failed"
+  chmod 755 "$REMOTE_HOME/state/parent-route/ios.inbox"
+  fail "remote config push claimed success after its reread record could not be written"
 fi
 if [ ! -f "$NUDGE_MARKER" ]; then
+  chmod 755 "$REMOTE_HOME/state/parent-route/ios.inbox"
   printf 'config push failure output:\n%s\n' "$(cat "$TMP_ROOT/config-push-fail.out")" >&2
   fail "failed remote config reread did not retain a retry marker"
 fi
 assert_grep 'remote=1' "$NUDGE_MARKER" "remote config reread marker lost its placement"
-rm -f "$TMP_ROOT/herdr-send-fail"
+chmod 755 "$REMOTE_HOME/state/parent-route/ios.inbox"
 remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-retry.out" \
   || fail "unchanged remote config push did not retry its pending reread"
 assert_absent "$NUDGE_MARKER" "successful remote config reread left its retry marker"
 assert_grep 'config-reread: sent' "$TMP_ROOT/config-push-retry.out" "remote config reread retry was not reported"
-CONFIG_CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$HERDR_LOG" | tail -1 | cut -d= -f2-)
+CONFIG_CORR=$(newest_remote_inbox_corr)
 [ -n "$CONFIG_CORR" ] || fail "remote config reread did not carry a correlation token"
 printf 'done [corr=%s]: inherited config re-read\n' "$CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
@@ -996,15 +1024,20 @@ resolve_ios_pending() {
 }
 resolve_ios_pending
 
-# Structured fleet state comes from each home's own snapshot. The remote host is
-# explicit, and the local route remains alongside it.
+# Structured fleet state comes from each home's published ledger. The remote
+# host is explicit, and the local route remains alongside it.
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LOCAL_HOME" \
+  "$ROOT/bin/fm-home-summary-refresh.sh" >/dev/null \
+  || fail "local fixture did not publish its home ledger"
+remote_env "$ROOT/bin/fm-on.sh" ios fm-home-summary-refresh.sh >/dev/null \
+  || fail "remote fixture did not publish its home ledger"
 SNAPSHOT=$(remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
 if ! printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "ios" and .remote == true and .host == "remote-mac" and .provenance.selected == "structured-home")' >/dev/null; then
   printf 'secondmate projection:\n%s\n' "$(printf '%s' "$SNAPSHOT" | jq '.secondmate_current')" >&2
   fail "fleet snapshot did not select the remote structured-home projection"
 fi
-printf '%s' "$SNAPSHOT" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == true' >/dev/null \
-  || fail "remote structured observation did not prove the remote home present"
+printf '%s' "$SNAPSHOT" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == null and .endpoint.agent_alive == "unknown"' >/dev/null \
+  || fail "the fleet snapshot performed or invented a remote endpoint-liveness probe"
 printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "local" and .remote == false)' >/dev/null \
   || fail "fleet snapshot lost the existing local secondmate route"
 pass "fleet snapshot projects mixed local and remote structured state"
@@ -1026,6 +1059,30 @@ assert_contains "$UPDATE_OUT" 'synced:' "remote update did not report a host-loc
   || fail "remote persistent home did not fast-forward to its code-root commit"
 assert_present "$REMOTE_HOME/REMOTE_UPDATE_PROBE" "remote update did not materialize the code-root commit"
 pass "remote update imports and fast-forwards the persistent home on its configured host"
+
+# The remote restart verb is not a second implementation: its host-local leg runs
+# the ORDINARY control plane against a record that is plain and local on that
+# host. These two refusals can only come from that plane's own pre-stop
+# capability tables, and they leave the live agent exactly as it was - which is
+# the whole safety property of asking before anything is stopped.
+RELAUNCH_UNVERIFIED=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh \
+  relaunch ios notaharness - - 2>&1) && fail "an unverified runtime should refuse a remote restart"
+assert_contains "$RELAUNCH_UNVERIFIED" 'unverified remote secondmate harness' \
+  "the remote restart verb did not refuse an unverified runtime"
+RELAUNCH_ROUTE_META="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$RELAUNCH_ROUTE_META" "$TMP_ROOT/ios-before-relaunch.meta"
+mkdir -p "$TMP_ROOT/not-a-checkout"
+sed "s|^worktree=.*|worktree=$TMP_ROOT/not-a-checkout|" \
+  "$TMP_ROOT/ios-before-relaunch.meta" > "$RELAUNCH_ROUTE_META"
+RELAUNCH_CHECKPOINT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh \
+  relaunch ios codex - - 2>&1) && fail "a restart with no accountable checkout should refuse"
+assert_contains "$RELAUNCH_CHECKPOINT" 'refusing to relaunch without a checkout whose unlanded work can be accounted for' \
+  "the host-local restart did not reach the control plane's own pre-stop checkpoint"
+cp "$TMP_ROOT/ios-before-relaunch.meta" "$RELAUNCH_ROUTE_META"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "a refused remote restart must leave the running agent untouched"
+pass "the remote restart verb delegates to the host-local control plane and refuses before stopping anything"
+
 
 rm -f "$TMP_ROOT/doctor.repaired"
 : > "$DOCTOR_LOG"
@@ -1079,7 +1136,11 @@ mv -f "$TMP_ROOT/remote-ios-before-liveness-legacy.meta" "$remote_route_meta"
 rm -f "$TMUX_STATE"
 pass "startup reports alive legacy backends without changing their routes"
 
-# Host loss maps to unknown/unavailable and never creates a local replacement.
+# Host loss never creates a local replacement. Remove both the published ledger
+# and its parent-side cache so the structured-home read degrades explicitly;
+# endpoint liveness remains the startup supervisor's concern.
+rm -f -- "$REMOTE_HOME/state/home-summary.json"
+rm -rf -- "$PARENT/state/secondmate-summary-cache"
 launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
 rm -rf -- "$PARENT/state/.watch.lock"
 rm -f -- "$PARENT/state/.last-watcher-beat"
@@ -1087,16 +1148,18 @@ BOOT_UNAVAILABLE=$(FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-bootstr
 assert_contains "$BOOT_UNAVAILABLE" 'SECONDMATE_LIVENESS: secondmate ios: skipped: remote host unavailable or endpoint state unknown' \
   "bootstrap did not preserve an unreachable remote endpoint as unknown"
 UNAVAILABLE=$(FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
-printf '%s' "$UNAVAILABLE" | jq -e '.secondmate_current.records | any(.id == "ios" and .current.state == "unknown")' >/dev/null \
-  || fail "unreachable remote host was not projected unknown"
-printf '%s' "$UNAVAILABLE" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == null' >/dev/null \
-  || fail "unreachable remote home presence was not projected unknown"
+printf '%s' "$UNAVAILABLE" | jq -e '.secondmate_current.records | any(.id == "ios"
+  and .current.state == "unknown" and .provenance.selected != "structured-home"
+  and (.current.reason | test("home ledger.*(timed out|missing|unreadable|invalid)")))' >/dev/null \
+  || fail "unreachable no-ledger remote home did not degrade to explicit unknown state"
+printf '%s' "$UNAVAILABLE" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == null and .endpoint.agent_alive == "unknown"' >/dev/null \
+  || fail "unreachable remote endpoint liveness was not left to supervision"
 rm -f "$PARENT/state/.wake-queue"
 launches_after=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$launches_before" -eq "$launches_after" ] || fail "unreachable projection attempted a replacement launch"
 assert_present "$PARENT/state/ios.meta" "unreachable readiness removed the parent route metadata"
 assert_grep '- ios ' "$PARENT/data/secondmates.md" "unreachable readiness removed the registry route"
-pass "unreachable remote state remains unknown with no local respawn or failover"
+pass "unreachable no-ledger remote state remains explicit with no local respawn or failover"
 
 # Retirement delegates its safety check to the remote home. An in-flight child
 # record refuses cleanup and preserves both machines' durable routes.
@@ -1149,6 +1212,19 @@ assert_present "$REMOTE_HOME" "unsafe pending-replies retirement removed the rem
 assert_present "$TMP_ROOT/external-pending/escape" "unsafe retirement removed an external pending reply"
 rm -f "$PARENT/state/pending-replies"
 mv "$PARENT/state/pending-replies.safe" "$PARENT/state/pending-replies"
+retired_wake_corr=$(FM_HOME="$PARENT" bash -c '
+  . "$1"
+  fm_pending_reply_create "$2" "$2/state" ios "New routed work is in your backlog."
+' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$PARENT") \
+  || fail "could not seed remote receiver wake retirement state"
+retired_wake_rec="$PARENT/state/pending-replies/$retired_wake_corr"
+FM_HOME="$PARENT" bash -c '
+  . "$1"
+  fm_pending_reply_set "$2" phase resolved
+  fm_pending_reply_set "$2" delivered_epoch 1
+' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$retired_wake_rec" \
+  || fail "could not settle remote receiver wake retirement state"
+printf 'confirmed:%s\n' "$retired_wake_corr" > "$PARENT/state/.backlog-handoff-ios.wake-pending"
 handoff_lock="$PARENT/state/.backlog-handoff-ios.lock"
 FM_HOME="$PARENT" /bin/bash -c '
   . "$1"
@@ -1199,6 +1275,9 @@ if ! wait "$teardown_pid"; then
 fi
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
 assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"
+assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \
+  "remote retirement left receiver wake state that could poison a replacement route"
+assert_absent "$retired_wake_rec" "remote retirement left the retired receiver wake correlation"
 assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote retirement did not remove the registry route"
 jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
   any(.workspaces[]; .workspace_id == $workspace and .label == "2ndmate-macos")

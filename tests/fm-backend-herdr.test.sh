@@ -23,6 +23,14 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 herdr_forget_inherited_pane
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
+# Pin the ambient-home default to a marker-free fixture: FM_HOME resolves to
+# the suite's own root when unset, and a secondmate-marked checkout (any
+# treehouse crew home carries .fm-secondmate-home) would flip the default
+# workspace label to 2ndmate-*, silently changing placement behavior for
+# every test that does not set FM_HOME itself. Per-test FM_HOME prefixes
+# still override this default.
+mkdir -p "$TMP_ROOT/ambient-home"
+export FM_HOME="$TMP_ROOT/ambient-home"
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
@@ -58,6 +66,38 @@ if [ -f "$RESP/$n.exit" ]; then
 fi
 [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+# make_herdr_server_env_fakebin: a stateful server stub that records only the
+# long-lived server launch environment, then reports the server as running.
+make_herdr_server_env_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    if [ -e "$FM_HERDR_SERVER_MARKER" ]; then
+      printf '{"server":{"running":true}}\n'
+    else
+      printf '{"server":{"running":false}}\n'
+    fi
+    ;;
+  server)
+    {
+      for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_HERDR_SENTINEL HERDR_SESSION; do
+        eval 'value=${'"$name"'-<unset>}'
+        printf '%s=%s\n' "$name" "$value"
+      done
+      printf 'args=%s\n' "$*"
+    } > "$FM_HERDR_SERVER_ENV_LOG"
+    : > "$FM_HERDR_SERVER_MARKER"
+    ;;
+esac
 SH
   chmod +x "$fb/herdr"
   printf '%s\n' "$fb"
@@ -522,6 +562,27 @@ test_container_ensure_starts_server_and_workspace() {
   assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''firstmate' \
     "container_ensure did not create the firstmate workspace with the given cwd"
   pass "fm_backend_herdr_container_ensure: version-gates, starts the server, ensures the firstmate workspace, echoes session:workspace_id + the seeded default tab id"
+}
+
+test_server_ensure_scrubs_home_and_harness_identity() {
+  local dir log marker fb output name
+  dir="$TMP_ROOT/server-env"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
+  fb=$(make_herdr_server_env_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_SERVER_ENV_LOG="$log" FM_HERDR_SERVER_MARKER="$marker" FM_HERDR_SENTINEL=kept \
+    FM_HOME=/tmp/wrong-home FM_ROOT_OVERRIDE=/tmp/wrong-root FM_STATE_OVERRIDE=/tmp/wrong-state \
+    FM_DATA_OVERRIDE=/tmp/wrong-data FM_PROJECTS_OVERRIDE=/tmp/wrong-projects FM_CONFIG_OVERRIDE=/tmp/wrong-config \
+    CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed GROK_AGENT=1 FM_SUPERVISION_MODEL=autoarm \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
+  expect_code 0 $? "server_ensure should start under a polluted launcher environment"
+  output=$(cat "$log")
+  for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
+    CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL; do
+    assert_contains "$output" "$name=<unset>" "server_ensure leaked $name into the long-lived Herdr server"
+  done
+  assert_contains "$output" "FM_HERDR_SENTINEL=kept" "server_ensure removed an unrelated environment variable"
+  assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
+  assert_contains "$output" "args=server --session fmtest" "server_ensure lost the trailing Herdr session flag"
+  pass "fm_backend_herdr_server_ensure: scrubs home and harness identity without disturbing unrelated environment or session routing"
 }
 
 test_container_ensure_reuses_existing_workspace() {
@@ -3606,11 +3667,11 @@ test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued() {
 # --- the never-idle-native-state harness (real cursor on herdr) --------------
 # Measured live on cursor-agent 2026.08.11-e8db854 under herdr: `agent get`
 # reports a cursor pane `blocked` in EVERY state - idle, mid-turn, and after -
-# so the idle-baseline native path is structurally unreachable and every send
-# lands in the composer branch. Cursor's mid-turn composer row renders its own
+# so the idle-baseline native path is structurally unreachable and every typed
+# send lands in the composer branch. Cursor's mid-turn composer row renders its own
 # `Add a follow-up` placeholder beside a right-aligned `ctrl+c to stop`, so the
 # content verdict is `pending` on a composer holding no user text, and every
-# steer reported delivery unconfirmed on a message that had actually landed.
+# typed steer reported delivery unconfirmed on a message that had actually landed.
 # The bytes below are the real captures from that pane.
 
 # The idle capture: no busy token anywhere, which is the pre-Enter baseline.
@@ -4446,6 +4507,7 @@ test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher
 test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
+test_server_ensure_scrubs_home_and_harness_identity
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label

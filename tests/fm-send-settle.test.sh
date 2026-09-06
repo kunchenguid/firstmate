@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# fm-send post-submit settle pause (FM_SEND_SETTLE).
+# fm-send typed-plane post-submit settle pause (FM_SEND_SETTLE).
 #
-# fm-send's success only proves the composer cleared - the Enter landed and the
-# text was submitted. The harness then takes a beat to spin up the turn before its
-# busy footer appears, so an immediate peek after fm-send returns would see the
-# stale idle pane. fm-send therefore pauses FM_SEND_SETTLE seconds (default 1, 0
-# disables) after a successful text submit, so the receiving turn has time to
-# visibly start. These tests pin that behavior hermetically (stubbed tmux + sleep,
-# no real agent):
-#   1. A successful text send pauses for the FM_SEND_SETTLE value (default 1).
+# A typed-plane fm-send success only proves the composer cleared - the Enter
+# landed and the text was submitted. The harness then takes a beat to spin up the
+# turn before its busy footer appears, so an immediate peek after fm-send returns
+# would see the stale idle pane. fm-send therefore pauses FM_SEND_SETTLE seconds
+# (default 1, 0 disables) after a successful typed submit, so the receiving turn
+# has time to visibly start. These tests use an explicit backend target to stay on
+# that plane and pin the behavior hermetically (stubbed tmux + sleep, no real
+# agent):
+#   1. A successful typed text send pauses for the FM_SEND_SETTLE value (default 1).
 #   2. FM_SEND_SETTLE=0 produces no pause at all (sleep is never invoked for it).
 #   3. The pause is tunable (FM_SEND_SETTLE=7 pauses 7).
 #   4. The --key path never pauses (it bypasses the submit/settle path entirely).

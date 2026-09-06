@@ -19,15 +19,8 @@ fm_quota_axi_compatible() {
     case "$timeout" in
       ''|*[!0-9]*|0) return 1 ;;
     esac
-    if command -v timeout >/dev/null 2>&1; then
-      output=$(timeout "$timeout" quota-axi --version 2>/dev/null </dev/null) || return 1
-    elif command -v gtimeout >/dev/null 2>&1; then
-      output=$(gtimeout "$timeout" quota-axi --version 2>/dev/null </dev/null) || return 1
-    elif command -v perl >/dev/null 2>&1; then
-      output=$(perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout" quota-axi --version 2>/dev/null </dev/null) || return 1
-    else
-      return 1
-    fi
+    [ "$(type -t fm_run_timed)" = function ] || return 1
+    output=$(fm_run_timed "$timeout" quota-axi --version 2>/dev/null </dev/null) || return 1
   else
     output=$(quota-axi --version 2>/dev/null </dev/null) || return 1
   fi
@@ -46,4 +39,55 @@ fm_quota_axi_compatible() {
   [ "$minor" -gt "$min_minor" ] && return 0
   [ "$minor" -eq "$min_minor" ] || return 1
   [ "$patch" -ge "$min_patch" ]
+}
+
+fm_quota_json_valid() {
+  jq -se '
+    length == 1 and
+    (.[0] | type) == "object" and
+    (.[0] |
+      .schemaVersion == 5 and
+      (.providers | type) == "array" and
+      (([.providers[].provider] | length) == ([.providers[].provider] | unique | length)) and
+      all(.providers[];
+      (.provider | type) == "string" and
+      (.provider | test("^[a-z0-9]+(-[a-z0-9]+)*$")) and
+      (.quotaSemantics | type) == "object" and
+      (.quotaSemantics.status as $semantics_status |
+        (["known", "partial", "unknown"] | index($semantics_status)) != null and
+        (.quotaSemantics.effectiveAvailability | type) == "array" and
+        (if $semantics_status == "known" then
+           ((.quotaSemantics.effectiveAvailability | length) > 0 and
+            all(.quotaSemantics.effectiveAvailability[];
+              .status == "known" or .status == "unknown"
+            ))
+         elif $semantics_status == "unknown" then
+           all(.quotaSemantics.effectiveAvailability[]; .status == "unknown")
+         else true
+         end) and
+        all(.quotaSemantics.effectiveAvailability[];
+          type == "object" and
+          (.scope | type) == "string" and
+          (.scope | length) > 0 and
+          ((.scope | test("^\\s|\\s$")) | not) and
+          ((.status == "known" and
+            (.runway.status as $runway_status |
+            ((.effectivePercentRemaining | type) == "number" and
+             .effectivePercentRemaining >= 0 and
+             .effectivePercentRemaining <= 100 and
+             (.runway | type) == "object" and
+             ($runway_status | type) == "string" and
+             (["through_reset", "projected_exhaustion", "exhausted_now", "unknown"] |
+               index($runway_status)) != null))) or
+           (.status == "unknown" and
+            (has("effectivePercentRemaining") | not) and
+            ((has("runway") | not) or
+             ((.runway | type) == "object" and
+              (.runway.status as $unknown_runway_status |
+               (["unknown", "exhausted_now"] | index($unknown_runway_status)) != null)))))
+        )
+      )
+    )
+    )
+  ' >/dev/null 2>&1
 }

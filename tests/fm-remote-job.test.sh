@@ -19,6 +19,7 @@ REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
 REPEAT_WORKER_PID=
+RESTART_SUPERVISOR_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -27,6 +28,7 @@ cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
   [ -z "$REPEAT_WORKER_PID" ] || kill "$REPEAT_WORKER_PID" 2>/dev/null || true
+  [ -z "$RESTART_SUPERVISOR_PID" ] || kill -KILL "$RESTART_SUPERVISOR_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -164,6 +166,25 @@ case ":$FM_REMOTE_JOB_OPERATOR_PATH:" in
   *) fail "the composed PATH omitted a resolved Nix profile bin link" ;;
 esac
 pass "operator PATH resolves the authorized Nix profile bin link"
+
+# Which install of a multi-version tool a remote job resolves is decided by the
+# order these directories land on PATH, so the composition has to be sorted
+# rather than whatever order the filesystem returns. The fixture is created in
+# a deliberately unsorted order, and the expectation is the shell's own
+# pathname expansion - the mechanism the portable-PATH contract in
+# tests/fm-on.test.sh reconstructs.
+MISE_INSTALLS="$ACCOUNT_HOME/.local/share/mise/installs"
+for TOOL_VERSION in node/26.7.0 node/8.1 node/26 bun/1.4 bun/1.3.14 python/3.12.7; do
+  mkdir -p "$MISE_INSTALLS/$TOOL_VERSION/bin"
+done
+fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
+MISE_COMPOSED=$(printf '%s\n' "$FM_REMOTE_JOB_OPERATOR_PATH" | tr ':' '\n' | grep -F "$MISE_INSTALLS/" || true)
+MISE_EXPECTED=$(printf '%s\n' "$MISE_INSTALLS"/*/*/bin)
+[ "$MISE_COMPOSED" = "$MISE_EXPECTED" ] \
+  || fail "the composed operator PATH did not order tool installs like the shell's own expansion"$'\n'"expected: $MISE_EXPECTED"$'\n'"actual:   $MISE_COMPOSED"
+# This assertion detects the defect on bash 3.2 and 5.2, where compgen -G returns unsorted glob matches, but reads green on bash 5.3+ because glob sorting moved into the glob library so both mechanisms agree there.
+rm -rf -- "$ACCOUNT_HOME/.local/share/mise"
+pass "operator PATH orders discovered tool installs deterministically"
 
 HOME="$ACCOUNT_HOME" PATH="$RUNTIME_BIN:/usr/bin:/bin:/usr/sbin:/sbin" FM_FAKE_PERL_LOG="$FAKE_PERL_LOG" \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
@@ -521,12 +542,9 @@ pass "the worker drains bounded output without changing command results"
 
 SIDE_EFFECT="$TMP_ROOT/side-effect"
 WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
-kill -TERM "$WORKER_PID"
-for _ in $(seq 1 100); do
-  [ ! -f "$STATE_ROOT/worker.pid" ] && break
-  sleep 0.05
-done
-assert_absent "$STATE_ROOT/worker.pid" "the worker did not stop before the staged-record tamper"
+fm_remote_job_stop_worker_tree "$WORKER_PID" \
+  || fail "the worker tree did not stop before the staged-record tamper"
+assert_absent "$STATE_ROOT/worker.pid" "the worker did not clear its pid before the staged-record tamper"
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-touch-job.sh "$SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 JOB_DIR="$STATE_ROOT/jobs/$JOB_ID"
@@ -606,8 +624,11 @@ RECOVERY_REFUSED_RC=$?
 set -e
 [ "$RECOVERY_REFUSED_RC" -ne 0 ] || fail "quarantine recovery ignored a recorded live process"
 assert_present "$RECOVERY_STATE/worker.lock/quarantine" "a live recorded process lost quarantine protection"
-kill "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
-wait "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
+printf '%s\n' "$QUARANTINED_PROCESS_PID" > "$RECOVERY_JOB/.claim/owner"
+printf 'stale owner identity\n' > "$RECOVERY_JOB/.claim/owner_start"
+printf 'stale supervisor identity\n' > "$RECOVERY_JOB/.claim/supervisor_start"
+chmod 600 "$RECOVERY_JOB/.claim/owner" "$RECOVERY_JOB/.claim/owner_start" \
+  "$RECOVERY_JOB/.claim/supervisor_start"
 HOME="$RECOVERY_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$RECOVERY_STATE" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
   > "$TMP_ROOT/recovery-worker.out" 2> "$TMP_ROOT/recovery-worker.err" &
@@ -616,12 +637,16 @@ for _ in $(seq 1 300); do
   [ -f "$RECOVERY_STATE/worker.ready" ] && break
   sleep 0.05
 done
-assert_present "$RECOVERY_STATE/worker.ready" "a stopped quarantined execution did not permit worker recovery"
+assert_present "$RECOVERY_STATE/worker.ready" "a reused supervisor pid did not permit worker recovery"
 assert_absent "$RECOVERY_STATE/worker.lock/quarantine" "recovered worker retained stale quarantine"
+kill -0 "$QUARANTINED_PROCESS_PID" 2>/dev/null \
+  || fail "worker recovery signalled a process whose supervisor identity did not match"
 kill -TERM "$RECOVERY_WORKER_PID"
 wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
-pass "quarantine clears only after recorded execution has stopped"
+kill "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
+wait "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
+pass "quarantine recovery refuses unverifiable supervisors and ignores reused pids"
 
 # A replacement stops a Linux worker by signalling its whole isolated group, and
 # the supervisor in that group forwards a second stop signal to the same serving
@@ -690,5 +715,54 @@ kill -TERM "$REPEAT_WORKER_PID"
 wait "$REPEAT_WORKER_PID" 2>/dev/null || true
 REPEAT_WORKER_PID=
 pass "a repeatedly signalled shutdown still releases ownership for the next worker"
+
+# A child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
+# consecutive-failure backoff, so a child that dies just past that threshold
+# used to reset the only guard the supervisor had and restart forever. The
+# fixture below is that worker: it exits non-zero after living just longer than
+# the healthy window, so every restart is accounted as healthy-then-failed.
+RESTART_ROOT="$TMP_ROOT/restart-root"
+RESTART_HOME="$TMP_ROOT/restart-account"
+RESTART_STATE="$TMP_ROOT/restart-state"
+RESTART_CHILD_LOG="$TMP_ROOT/restart-children"
+mkdir -p "$RESTART_ROOT/bin" "$RESTART_HOME"
+cp "$ROOT/bin/fm-remote-job-lib.sh" "$RESTART_ROOT/bin/"
+cp "$ROOT/bin/fm-remote-job-worker.sh" "$RESTART_ROOT/bin/fm-remote-job-supervisor-under-test.sh"
+printf 'fixture\n' > "$RESTART_ROOT/AGENTS.md"
+cat > "$RESTART_ROOT/bin/fm-remote-job-worker.sh" <<'SH'
+#!/bin/bash
+set -u
+[ "${1:-}" = --serve ] || exit 2
+printf '%s\n' "${BASHPID:-$$}" >> "$FM_TEST_SUPERVISOR_CHILD_LOG"
+sleep "$FM_TEST_SUPERVISOR_CHILD_SECONDS"
+exit "$FM_TEST_SUPERVISOR_CHILD_STATUS"
+SH
+chmod +x "$RESTART_ROOT/bin"/*.sh
+HOME="$RESTART_HOME" FM_ROOT_OVERRIDE="$RESTART_ROOT" \
+  FM_REMOTE_JOB_STATE_ROOT="$RESTART_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS=1 FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS=3 \
+  FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS=0 FM_TEST_SUPERVISOR_CHILD_LOG="$RESTART_CHILD_LOG" \
+  FM_TEST_SUPERVISOR_CHILD_SECONDS=1.1 FM_TEST_SUPERVISOR_CHILD_STATUS=1 \
+  "$RESTART_ROOT/bin/fm-remote-job-supervisor-under-test.sh" \
+  > "$TMP_ROOT/restart-supervisor.out" 2> "$TMP_ROOT/restart-supervisor.err" &
+RESTART_SUPERVISOR_PID=$!
+for _ in $(seq 1 300); do
+  kill -0 "$RESTART_SUPERVISOR_PID" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$RESTART_SUPERVISOR_PID" 2>/dev/null; then
+  fail "workers dying just past the healthy threshold drove an unbounded restart loop"
+fi
+set +e
+wait "$RESTART_SUPERVISOR_PID"
+RESTART_SUPERVISOR_RC=$?
+set -e
+RESTART_SUPERVISOR_PID=
+[ "$RESTART_SUPERVISOR_RC" -ne 0 ] || fail "the exhausted restart guard reported success"
+[ "$(wc -l < "$RESTART_CHILD_LOG" | tr -d ' ')" -eq 3 ] \
+  || fail "the restart guard did not stop at the configured maximum"
+assert_grep "remote job worker exited 3 times; stopping the supervisor" "$TMP_ROOT/restart-supervisor.err" \
+  "the restart guard did not explain why it stopped"
+pass "barely healthy worker failures remain bounded by the restart guard"
 
 echo "ALL TESTS PASSED"

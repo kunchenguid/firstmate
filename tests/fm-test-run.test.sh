@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Contract tests for bin/fm-test-run.sh - the single owner of behavior suite
-# selection, portable lane composition, proven-isolated --jobs, timing markers,
-# JSON artifacts, coverage guard, and aggregate exit status.
+# selection, portable lane composition, bounded concurrency, budgets, timing
+# markers, JSON artifacts, coverage guard, and aggregate exit status.
 #
 # These tests intentionally exercise the runner with fixtures, --list, and
 # focused scheduler checks, not the complete Firstmate suite.
@@ -96,19 +96,27 @@ init_changed_fixture_repo() {
   for script in \
     fm-brief.test.sh \
     fm-ask-user-authority.test.sh \
+    fm-documentation-audiences.test.sh \
+    fm-test-isolation-proof.test.sh \
+    fm-test-run.test.sh \
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
+    fm-harness-adapter-instructions-live-e2e.test.sh \
+    fm-harness-adapter-references.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
     fm-pr-merge.test.sh \
+    fm-procevent-quota.test.sh \
+    fm-quota-choose.test.sh \
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
+    fm-control-herdr-smoke.test.sh \
     fm-backend-orca.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
@@ -116,19 +124,86 @@ init_changed_fixture_repo() {
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-control-lib.sh"
+  : >"$repo/bin/fm-timeout-lib.sh"
+  : >"$repo/bin/fm-procevent-quota.sh"
+  : >"$repo/bin/fm-quota-axi-lib.sh"
+  : >"$repo/bin/fm-quota-choose.sh"
   : >"$repo/bin/unmapped-source.sh"
+  # A shared helper with no curated family of its own, named by exactly ONE
+  # script of the expensive real-Herdr family and consumed by one curated
+  # watcher script. This is the shape that made a one-line helper change select
+  # every real-Herdr E2E.
+  : >"$repo/bin/shared-probe-lib.sh"
+  printf '# shared-probe-lib.sh\n' >>"$repo/tests/fm-backend-herdr-smoke.test.sh"
+  # shellcheck disable=SC2016  # literal fixture text: the reference must reach
+  # the file verbatim so the changed-file scan can find it, not expand here.
+  printf '. "$ROOT/bin/shared-probe-lib.sh"\n' >"$repo/bin/fm-watch-probe.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
-  mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" "$repo/src"
+  mkdir -p \
+    "$repo/.agents/skills/example" \
+    "$repo/.agents/skills/harness-adapters/references/common" \
+    "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src"
   : >"$repo/.agents/skills/example/SKILL.md"
+  : >"$repo/.agents/skills/harness-adapters/SKILL.md"
+  : >"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  : >"$repo/docs/fm-test-isolation-proof.md"
+  : >"$repo/CONTRIBUTING.md"
   : >"$repo/src/unmapped.ts"
   git -C "$repo" init -q
   git -C "$repo" add .
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
+}
+
+test_changed_runner_surfaces_select_their_family() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-owner-scope.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  # A change to the runner selects the WHOLE pure-contract-unit family, not
+  # just its own contract test. The runner executes every script in that
+  # family, so its own test passing proves its logic is right, not that the
+  # suite it drives still runs. Narrowing this to the contract owners would
+  # also make any wall-clock claim about the changed suite trivially true by
+  # not running the work.
+  printf '\n' >>"$repo/bin/fm-test-run.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD | LC_ALL=C sort)
+  case "$listed" in
+    *tests/fm-test-run.test.sh*) ;;
+    *) fail "runner change did not select its own contract test: $listed" ;;
+  esac
+  case "$listed" in
+    *tests/fm-brief.test.sh*) ;;
+    *) fail "runner change did not select its pure-contract-unit family: $listed" ;;
+  esac
+  case "$listed" in
+    *tests/fm-ask-user-authority.test.sh*) ;;
+    *) fail "runner change did not select its pure-contract-unit family: $listed" ;;
+  esac
+  git -C "$repo" add bin/fm-test-run.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm runner-change
+
+  # The same holds for the surfaces that document that contract.
+  printf '\n' >>"$repo/docs/fm-test-isolation-proof.md"
+  printf '\n' >>"$repo/CONTRIBUTING.md"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD | LC_ALL=C sort)
+  case "$listed" in
+    *tests/fm-documentation-audiences.test.sh*) ;;
+    *) fail "documentation surface change did not select audience coverage: $listed" ;;
+  esac
+  case "$listed" in
+    *tests/fm-brief.test.sh*) ;;
+    *) fail "documentation surface change did not select its curated family: $listed" ;;
+  esac
+
+  rm -rf "$tmp"
+  pass "runner and its documentation surfaces select their curated family, not just their contract owners"
 }
 
 test_changed_dependency_selection_and_unmapped_failure() {
@@ -170,6 +245,57 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
 
+  printf '\n' >>"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-harness-adapter-references.test.sh" "harness adapter reference selects portable structural coverage"
+  assert_contains "$listed" "tests/fm-harness-adapter-instructions-live-e2e.test.sh" "harness adapter reference selects opt-in instruction coverage"
+  git -C "$repo" add .agents/skills/harness-adapters
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm harness-adapter-reference-change
+
+  printf '\n' >>"$repo/.agents/skills/harness-adapters/SKILL.md"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-harness-adapter-references.test.sh" "harness adapter router selects portable structural coverage"
+  assert_contains "$listed" "tests/fm-harness-adapter-instructions-live-e2e.test.sh" "harness adapter router selects opt-in instruction coverage"
+  git -C "$repo" add .agents/skills/harness-adapters/SKILL.md
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm harness-adapter-router-change
+
+  printf '\n' >>"$repo/bin/fm-procevent-quota.sh"
+  printf '\n' >>"$repo/bin/fm-quota-choose.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-procevent-quota.test.sh" \
+    "quota process-event source selects its focused test"
+  assert_contains "$listed" "tests/fm-quota-choose.test.sh" \
+    "quota chooser source selects its focused test"
+  git -C "$repo" add bin/fm-procevent-quota.sh bin/fm-quota-choose.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm quota-source-change
+
+  printf '\n' >>"$repo/bin/fm-quota-axi-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-procevent-quota.test.sh" \
+    "shared quota validator selects process-event coverage"
+  assert_contains "$listed" "tests/fm-quota-choose.test.sh" \
+    "shared quota validator selects chooser coverage"
+  git -C "$repo" add bin/fm-quota-axi-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm quota-validator-change
+
+  printf '\n' >>"$repo/bin/fm-control-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend.test.sh" \
+    "control library keeps backend coverage"
+  assert_contains "$listed" "tests/fm-session-start.test.sh" \
+    "control library keeps session coverage"
+  assert_contains "$listed" "tests/fm-quota-choose.test.sh" \
+    "control library selects chooser coverage"
+  git -C "$repo" add bin/fm-control-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm control-lib-change
+
+  printf '\n' >>"$repo/bin/fm-timeout-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-procevent-quota.test.sh" \
+    "timeout library selects quota polling coverage"
+  git -C "$repo" add bin/fm-timeout-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm timeout-lib-change
+
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e
   (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
@@ -182,24 +308,300 @@ test_changed_dependency_selection_and_unmapped_failure() {
   pass "changed selection covers dependents and fails closed for unmapped source"
 }
 
+# A direct test reference is per-script evidence. Widening it to the referencing
+# test's whole family is what turned a one-line change to a shared helper into
+# every real-Herdr E2E, including scripts with no dependency on it at all.
+# Consumer bin/ scripts must still resolve through the curated map, so recorded
+# family-level coupling is not lost along the way.
+test_changed_bin_reference_selects_per_script_not_per_family() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed-scope.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/bin/shared-probe-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+
+  assert_contains "$listed" "tests/fm-backend-herdr-smoke.test.sh" \
+    "the one gated script that names the helper must still be selected"
+  case "$listed" in
+    *tests/fm-control-herdr-smoke.test.sh*)
+      fail "a single gated script's reference dragged in its whole family: $listed"
+      ;;
+  esac
+  # The curated consumer keeps its family-level coupling.
+  assert_contains "$listed" "tests/fm-daemon.test.sh" \
+    "a curated consumer of the helper must still select its whole family"
+  assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" \
+    "a curated consumer of the helper must still select its whole family"
+
+  rm -rf "$tmp"
+  pass "a bin reference selects the referencing scripts, and consumers still select their curated families"
+}
+
+# Exercise begin/end markers from real fixture processes to prove the automatic
+# changed-suite default and its explicit serial override.
+test_changed_uses_bounded_automatic_concurrency() {
+  local tmp repo script serial_shape parallel_shape timeout_repo timeout_script expected_jobs rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed-consent.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  for script in fm-backend-herdr-smoke.test.sh fm-daemon.test.sh fm-pi-watch-extension.test.sh; do
+    cat >"$repo/tests/$script" <<'SH'
+#!/usr/bin/env bash
+sleep 1
+echo "ok - concurrency consent fixture"
+SH
+    chmod +x "$repo/tests/$script"
+  done
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixtures
+  printf '\n' >>"$repo/bin/shared-probe-lib.sh"
+
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --json "$tmp/parallel.json") \
+    >"$tmp/parallel.out" 2>"$tmp/parallel.err" \
+    || fail "default changed fixture run failed: $(cat "$tmp/parallel.err")"
+  parallel_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/parallel.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
+  [ "$parallel_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN ] \
+    || fail "plain --changed did not use bounded concurrent scheduling: $parallel_shape"
+
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --jobs 1 --json "$tmp/serial.json") \
+    >"$tmp/serial.out" 2>"$tmp/serial.err" \
+    || fail "explicit serial changed fixture run failed: $(cat "$tmp/serial.err")"
+  serial_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/serial.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
+  [ "$serial_shape" = FM_TEST_BEGIN,FM_TEST_END ] \
+    || fail "explicit --jobs 1 did not force serial execution: $serial_shape"
+  expected_jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+  case "$expected_jobs" in
+    ''|*[!0-9]*) expected_jobs=1 ;;
+  esac
+  [ "$expected_jobs" -le 4 ] || expected_jobs=4
+  [ "$expected_jobs" -ge 1 ] || expected_jobs=1
+  python3 - "$tmp/parallel.json" "$tmp/serial.json" "$expected_jobs" <<'PY' \
+    || fail "changed timing artifacts did not record their resolved worker counts"
+import json, sys
+automatic = json.load(open(sys.argv[1], encoding="utf-8"))
+serial = json.load(open(sys.argv[2], encoding="utf-8"))
+expected = int(sys.argv[3])
+assert automatic["selection"].split(";")[-1] == f"jobs={expected}"
+assert serial["selection"].split(";")[-1] == "jobs=1"
+PY
+
+  timeout_repo="$tmp/timeout-repo"
+  timeout_script=tests/fm-calm-pi-extension.test.sh
+  mkdir -p "$timeout_repo/bin" "$timeout_repo/tests"
+  cp "$RUNNER" "$timeout_repo/bin/fm-test-run.sh"
+  cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
+fm_run_timed() {
+  [ "$1" -eq 900 ] || return 99
+  return 124
+}
+SH
+  cat >"$timeout_repo/$timeout_script" <<'SH'
+#!/usr/bin/env bash
+touch should-not-run
+echo "not ok - automatic timeout helper was bypassed"
+SH
+  chmod +x "$timeout_repo/bin/fm-test-run.sh" "$timeout_repo/$timeout_script"
+  git -C "$timeout_repo" init -q
+  git -C "$timeout_repo" add .
+  git -C "$timeout_repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
+  printf '\n' >>"$timeout_repo/$timeout_script"
+  set +e
+  (cd "$timeout_repo" && bin/fm-test-run.sh --changed --base HEAD) \
+    >"$tmp/timeout.out" 2>"$tmp/timeout.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "single-script automatic timeout must fail the run, got $rc"
+  grep -Eq '^FM_TEST_END .+ tests/fm-calm-pi-extension\.test\.sh exit=124 ' "$tmp/timeout.out" \
+    || fail "single unproven changed script did not receive the automatic timeout: $(cat "$tmp/timeout.out")"
+  [ ! -e "$timeout_repo/should-not-run" ] || fail "automatic timeout helper did not own the single changed script"
+
+  rm -rf "$tmp"
+  pass "changed defaults to bounded automatic scheduling with serial override"
+}
+
+# A local verification round names the subjects it cares about. Exercise begin/end
+# markers from real fixture processes to prove that a plain list of script paths
+# gets bounded automatic scheduling without changing its per-script timeout
+# contract, so verifying several subjects is one bounded concurrent run rather
+# than a serial chain of separate `bash tests/X.test.sh` invocations.
+test_script_list_uses_bounded_automatic_concurrency() {
+  local tmp repo script parallel_shape serial_shape mixed_shape expected_jobs
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-script-list.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  rm -f "$repo/bin/fm-timeout-lib.sh"
+  # fm-cd-pretool-check and fm-pr-merge are individually proven isolated;
+  # fm-backend-orca is not, so it must still land in the serial tail.
+  for script in fm-cd-pretool-check.test.sh fm-pr-merge.test.sh fm-backend-orca.test.sh; do
+    cat >"$repo/tests/$script" <<'SH'
+#!/usr/bin/env bash
+sleep 1
+echo "ok - script-list concurrency fixture"
+SH
+    chmod +x "$repo/tests/$script"
+  done
+
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-cd-pretool-check.test.sh tests/fm-pr-merge.test.sh \
+      --json "$tmp/parallel.json") >"$tmp/parallel.out" 2>"$tmp/parallel.err" \
+    || fail "default script-list run failed: $(cat "$tmp/parallel.err")"
+  parallel_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/parallel.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
+  [ "$parallel_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN ] \
+    || fail "a plain script list did not use bounded concurrent scheduling: $parallel_shape"
+
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-cd-pretool-check.test.sh tests/fm-pr-merge.test.sh \
+      --jobs 1 --json "$tmp/serial.json") >"$tmp/serial.out" 2>"$tmp/serial.err" \
+    || fail "explicit serial script-list run failed: $(cat "$tmp/serial.err")"
+  serial_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/serial.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
+  [ "$serial_shape" = FM_TEST_BEGIN,FM_TEST_END ] \
+    || fail "explicit --jobs 1 did not force a serial script list: $serial_shape"
+
+  # An unproven script in the list is scheduled around, never refused and never
+  # run beside another script.
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-cd-pretool-check.test.sh tests/fm-pr-merge.test.sh \
+      tests/fm-backend-orca.test.sh) >"$tmp/mixed.out" 2>"$tmp/mixed.err" \
+    || fail "mixed proven/unproven script list failed: $(cat "$tmp/mixed.err")"
+  mixed_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/mixed.out" | awk '{print $1}' | paste -sd, -)
+  [ "$mixed_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN,FM_TEST_END,FM_TEST_END,FM_TEST_BEGIN,FM_TEST_END ] \
+    || fail "an unproven script was not kept in the serial tail: $mixed_shape"
+
+  expected_jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+  case "$expected_jobs" in
+    ''|*[!0-9]*) expected_jobs=1 ;;
+  esac
+  [ "$expected_jobs" -le 4 ] || expected_jobs=4
+  [ "$expected_jobs" -ge 1 ] || expected_jobs=1
+  python3 - "$tmp/parallel.json" "$tmp/serial.json" "$expected_jobs" <<'PYJSON' \
+    || fail "script-list timing artifacts did not record their resolved worker counts"
+import json, sys
+automatic = json.load(open(sys.argv[1], encoding="utf-8"))
+serial = json.load(open(sys.argv[2], encoding="utf-8"))
+expected = int(sys.argv[3])
+assert automatic["selection"].split(";")[-1] == f"jobs={expected}"
+assert serial["selection"].split(";")[-1] == "jobs=1"
+PYJSON
+
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-backend-orca.test.sh) \
+    >"$tmp/named.out" 2>"$tmp/named.err" \
+    || fail "a named script unexpectedly required a timeout helper: $(cat "$tmp/named.err")"
+  grep -Eq '^FM_TEST_END .+ tests/fm-backend-orca\.test\.sh exit=0 ' "$tmp/named.out" \
+    || fail "a named script did not run without an automatic bound: $(cat "$tmp/named.out")"
+
+  rm -rf "$tmp"
+  pass "a plain script list defaults to bounded automatic concurrency without an automatic timeout"
+}
+
+test_family_proofs_run_in_separate_concurrent_phases() {
+  local tmp repo script
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-family-phases.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  for script in \
+    fm-calm-pi-extension.test.sh fm-vendor-auth-probe.test.sh \
+    fm-pr-check-security.test.sh fm-teardown.test.sh; do
+    cat >"$repo/tests/$script" <<'SH'
+#!/usr/bin/env bash
+sleep 1
+echo "ok - family phase fixture"
+SH
+    chmod +x "$repo/tests/$script"
+  done
+
+  (cd "$repo" && bin/fm-test-run.sh \
+      tests/fm-pr-check-security.test.sh tests/fm-calm-pi-extension.test.sh \
+      tests/fm-teardown.test.sh tests/fm-vendor-auth-probe.test.sh --jobs 4) \
+    >"$tmp/out" 2>"$tmp/err" \
+    || fail "cross-family phase fixture failed: $(cat "$tmp/err")"
+
+  python3 - "$tmp/out" <<'PY' \
+    || fail "family-proof scripts from different families overlapped: $(cat "$tmp/out")"
+import re, sys
+active = {}
+overlap = {"pure-contract-unit": False, "pr-forge": False}
+for line in open(sys.argv[1], encoding="utf-8"):
+    if line.startswith("FM_TEST_BEGIN "):
+        match = re.search(r" (tests/\S+) family=(\S+) ", line)
+        assert match, line
+        path, family = match.groups()
+        assert not active or set(active.values()) == {family}, (active, line)
+        active[path] = family
+        if sum(value == family for value in active.values()) > 1:
+            overlap[family] = True
+    elif line.startswith("FM_TEST_END "):
+        match = re.search(r" (tests/\S+) exit=", line)
+        assert match and match.group(1) in active, (active, line)
+        del active[match.group(1)]
+assert not active, active
+assert all(overlap.values()), overlap
+PY
+
+  rm -rf "$tmp"
+  pass "family proofs run concurrently only within separate family phases"
+}
+
 test_empty_selection_emits_summary() {
-  local tmp repo out json
+  local tmp repo out json rc fake_bin real_git
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
   printf 'documentation only\n' >"$repo/README.md"
   out=$(cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --json "$tmp/artifacts/timing.json" 2>"$tmp/err") \
     || fail "empty valid changed selection must pass"
-  [ "$out" = "FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0" ] \
-    || fail "empty selection summary is missing or non-deterministic: $out"
+  printf '%s\n' "$out" | grep -Eq \
+    '^FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=[0-9]+$' \
+    || fail "empty selection summary is missing or malformed: $out"
   json="$tmp/artifacts/timing.json"
   python3 -c '
 import json, sys
 doc = json.load(open(sys.argv[1]))
-assert doc["summary"] == {"duration_ms": 0, "failed": 0, "skipped_gate": 0, "total": 0}
+assert doc["summary"]["total"] == 0
+assert doc["summary"]["failed"] == 0
+assert doc["summary"]["skipped_gate"] == 0
+assert doc["summary"]["duration_ms"] >= 0
 assert doc["scripts"] == []
 assert doc["families"] == []
 ' "$json" || { rm -rf "$tmp"; fail "empty selection JSON summary is wrong"; }
+  fake_bin="$tmp/fake-bin"
+  real_git=$(command -v git)
+  mkdir -p "$fake_bin"
+  cat >"$fake_bin/git" <<'SH'
+#!/usr/bin/env bash
+if [ ! -e "$SLOW_GIT_MARKER" ]; then
+  : >"$SLOW_GIT_MARKER"
+  sleep 1
+fi
+exec "$REAL_GIT" "$@"
+SH
+  chmod +x "$fake_bin/git"
+  set +e
+  (cd "$repo" && PATH="$fake_bin:$PATH" REAL_GIT="$real_git" SLOW_GIT_MARKER="$tmp/slow-git" \
+    bin/fm-test-run.sh --changed --base HEAD --max-wall-ms 100) \
+    >"$tmp/slow-selection.out" 2>"$tmp/slow-selection.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "an empty run past its budget must fail normally, got $rc"
+  grep -Eq '^FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=[0-9]+$' "$tmp/slow-selection.out" \
+    || fail "over-budget empty selection omitted its summary"
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=100 duration_ms=[0-9]+$' "$tmp/slow-selection.out" \
+    || fail "over-budget empty selection omitted its budget result"
+  [ -e "$tmp/slow-git" ] || fail "the slow selection fixture did not run"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --max-wall-ms nope) \
+    >"$tmp/bad-budget.out" 2>"$tmp/bad-budget.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "malformed budget on an empty selection must be refused, got $rc"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --per-script-timeout-secs nope) \
+    >"$tmp/bad-timeout.out" 2>"$tmp/bad-timeout.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "malformed timeout on an empty selection must be refused, got $rc"
   rm -rf "$tmp"
   pass "empty changed selection emits deterministic text and JSON summaries"
 }
@@ -432,6 +834,31 @@ test_portable_serial_shards_partition_the_serial_lane() {
   pass "portable serial shards are a deterministic disjoint cover of the serial lane"
 }
 
+test_portable_serial_hint_coverage_is_reported_and_bounded() {
+  local out serial unhinted
+  # Shards are packed from measured duration hints, so an unmeasured script is
+  # placed on a guess. Enough of them and the partition still looks balanced by
+  # script count while one shard carries far more real work than another and
+  # reaches its CI job cap. The coverage guard therefore reports the unmeasured
+  # share and refuses past its bound; assert that contract is live rather than
+  # trusting the hint table to stay fresh on its own.
+  out=$("$RUNNER" --check-coverage)
+  assert_contains "$out" "serial_unhinted=" "coverage guard must report the unmeasured serial share"
+  serial=$(printf '%s\n' "$out" | sed -n 's/.*[^_]serial=\([0-9][0-9]*\).*/\1/p')
+  unhinted=$(printf '%s\n' "$out" | sed -n 's/.*serial_unhinted=\([0-9][0-9]*\).*/\1/p')
+  [ -n "$serial" ] && [ -n "$unhinted" ] \
+    || fail "coverage summary must carry numeric serial counts: $out"
+  [ "$serial" -gt 0 ] || fail "portable serial lane must be non-empty, got $serial"
+  [ "$unhinted" -le "$serial" ] \
+    || fail "unmeasured count $unhinted exceeds the serial lane size $serial"
+  # 15% is the guard's own bound; staying well inside it is what keeps the
+  # balance evidence-based. Refresh from a green run's timing artifacts when
+  # this trips (docs/fm-test-portable-shards.md).
+  [ "$((unhinted * 100))" -le "$((serial * 15))" ] \
+    || fail "$unhinted of $serial portable serial scripts lack a measured hint; refresh them"
+  pass "coverage guard reports and bounds the unmeasured portable serial share"
+}
+
 test_portable_serial_shard_lane_refusals() {
   local tmp count rc other
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-shard-lane.XXXXXX")
@@ -477,10 +904,10 @@ test_jobs_requires_proven_isolated() {
   grep -Fq 'not in the proven-isolated set' "$tmp/err" \
     || fail "--jobs refusal message missing: $(cat "$tmp/err")"
   set +e
-  "$RUNNER" --jobs 2 tests/fm-watcher-lock.test.sh >"$tmp/out2" 2>"$tmp/err2"
+  "$RUNNER" --jobs 2 tests/fm-afk-inject-e2e.test.sh >"$tmp/out2" 2>"$tmp/err2"
   rc=$?
   set -e
-  [ "$rc" -eq 2 ] || fail "--jobs on watcher-lock must refuse, got $rc"
+  [ "$rc" -eq 2 ] || fail "--jobs on a family with no recorded proof must refuse, got $rc"
   # Sharding across runners never relaxes the serial rule inside one shard.
   shard_lane=$("$RUNNER" --list-lanes | grep -m1 '^portable-serial-[0-9]*of[0-9]*$')
   set +e
@@ -492,6 +919,246 @@ test_jobs_requires_proven_isolated() {
     || fail "shard --jobs refusal message missing: $(cat "$tmp/err3")"
   rm -rf "$tmp"
   pass "--jobs refuses non-proven / stateful selections"
+}
+
+# The complement of the refusal above: a family carrying a recorded concurrent
+# proof is admitted and actually scheduled, so the admission rule is two-sided
+# rather than a blanket refusal that happens to pass its negative cases.
+test_jobs_admits_a_concurrent_safe_family() {
+  local tmp rc external
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-admit.XXXXXX")
+  # --list exits before the admission guard, so this has to be a real run for
+  # the assertion to mean anything. Two cheap watcher-wake-lock scripts exercise
+  # admission and the concurrent scheduler for real.
+  set +e
+  "$RUNNER" --jobs 2 \
+    tests/fm-supervision-events.test.sh tests/fm-session-lock-ancestry.test.sh \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "--jobs on a proven family must be admitted, got $rc: $(cat "$tmp/err") $(cat "$tmp/out")"
+  grep -Fq 'FM_TEST_SUMMARY total=2 failed=0' "$tmp/out" \
+    || fail "the admitted concurrent run did not report both scripts green: $(cat "$tmp/out")"
+
+  set +e
+  "$RUNNER" --jobs 5 tests/fm-session-lock-ancestry.test.sh \
+    >"$tmp/over-cap.out" 2>"$tmp/over-cap.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "a family run above its proven four-worker cap must be refused, got $rc"
+
+  external="$tmp/fm-session-lock-ancestry.test.sh"
+  printf '#!/usr/bin/env bash\necho "ok - colliding external fixture"\n' >"$external"
+  chmod +x "$external"
+  set +e
+  "$RUNNER" --jobs 2 "$external" >"$tmp/external.out" 2>"$tmp/external.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] \
+    || fail "an external script colliding with a proven family member must be refused, got $rc"
+  rm -rf "$tmp"
+  pass "--jobs admits and schedules a family with a recorded concurrent proof"
+}
+
+# The residual `standalone` family carries a concurrent proof, but the `*)`
+# catch-all it was split out of must not: a test nobody has classified yet is
+# exactly the one with no proof, so it has to stay serial rather than inherit
+# concurrency from the family map's default arm.
+test_unmapped_new_test_never_inherits_family_concurrency() {
+  local tmp repo rc script
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-unmapped.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  # Two members of the proven residual family, plus a test basename the family
+  # map has never seen - the shape of any test added tomorrow.
+  for script in fm-procevent.test.sh fm-quota-choose.test.sh fm-zz-unmapped-fixture.test.sh; do
+    printf '#!/usr/bin/env bash\necho "ok - %s fixture"\n' "$script" >"$repo/tests/$script"
+    chmod +x "$repo/tests/$script"
+  done
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --jobs 2 \
+    tests/fm-procevent.test.sh tests/fm-quota-choose.test.sh) \
+    >"$tmp/family.out" 2>"$tmp/family.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "two members of the proven residual family must be admitted, got $rc: $(cat "$tmp/family.err")"
+  grep -Fq 'FM_TEST_SUMMARY total=2 failed=0' "$tmp/family.out" \
+    || fail "the admitted residual-family run did not report both scripts green: $(cat "$tmp/family.out")"
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --jobs 2 \
+    tests/fm-procevent.test.sh tests/fm-zz-unmapped-fixture.test.sh) \
+    >"$tmp/unmapped.out" 2>"$tmp/unmapped.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] \
+    || fail "an unclassified new test must not be admitted under --jobs, got $rc: $(cat "$tmp/unmapped.out")"
+  grep -Fq 'fm-zz-unmapped-fixture.test.sh' "$tmp/unmapped.err" \
+    || fail "the refusal did not name the unclassified script: $(cat "$tmp/unmapped.err")"
+
+  # It is only concurrency that is refused: the same script still runs serially.
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-zz-unmapped-fixture.test.sh) \
+    >"$tmp/serial.out" 2>"$tmp/serial.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "an unclassified test must still run serially, got $rc: $(cat "$tmp/serial.err")"
+  grep -Eq '^FM_TEST_BEGIN .+ family=unclassified expected_gate_skip=none$' "$tmp/serial.out" \
+    || fail "the unmapped fixture did not land in the catch-all family: $(cat "$tmp/serial.out")"
+  rm -rf "$tmp"
+  pass "an unclassified new test stays serial while the proven residual family runs concurrently"
+}
+
+# Workers are handed scripts in order, so the slowest script must start first or
+# it runs alone at the tail and throws away most of the concurrency.
+test_concurrent_runs_are_ordered_longest_first() {
+  local tmp listed first
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-order.XXXXXX")
+  set +e
+  "$RUNNER" --jobs 2 --family watcher-wake-lock --list >"$tmp/serial" 2>&1
+  set -e
+  # The scheduler reorders the real run, so assert on the begin-marker order of
+  # a real concurrent run over scripts whose hints differ by a wide margin.
+  set +e
+  "$RUNNER" --jobs 2 \
+    tests/fm-session-lock-ancestry.test.sh tests/fm-task-inbox.test.sh \
+    >"$tmp/out" 2>"$tmp/err"
+  set -e
+  first=$(grep -m1 '^FM_TEST_BEGIN' "$tmp/out" | awk '{print $3}')
+  [ "$first" = tests/fm-task-inbox.test.sh ] \
+    || fail "concurrent run did not start the longest script first, started: $first"
+  rm -rf "$tmp"
+  pass "a concurrent run starts the longest-hint script first"
+}
+
+# --max-wall-ms is checked after the run, so it cannot end a run that never
+# finishes. A hung script has to become a bounded failure, because an unbounded
+# suite is exactly what silently outruns its caller's invocation budget.
+test_per_script_timeout_bounds_a_hang() {
+  local tmp repo runner hang rc began ended grandchild_pid grandchild waited
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-hang.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  hang=tests/fm-hang-fixture.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  grandchild_pid="$tmp/grandchild.pid"
+  cat >"$repo/$hang" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixture is about to hang"
+sh -c 'trap "" TERM; echo $$ >"$1"; sleep 600' _ "$GRANDCHILD_PID" &
+sleep 600
+SH
+  chmod +x "$runner" "$repo/$hang"
+
+  began=$(date +%s)
+  set +e
+  GRANDCHILD_PID="$grandchild_pid" \
+    "$runner" --per-script-timeout-secs 3 "$hang" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  ended=$(date +%s)
+
+  [ "$rc" -ne 0 ] || fail "a terminated script must fail the run: $(cat "$tmp/out")"
+  [ "$((ended - began))" -lt 120 ] \
+    || fail "the per-script bound did not stop a 600s hang (took $((ended - began))s)"
+  grep -Fq 'exceeded the per-script bound' "$tmp/out" \
+    || fail "the terminated script was not named: $(cat "$tmp/out")"
+  grep -Eq 'FM_TEST_END .* exit=124 ' "$tmp/out" \
+    || fail "a terminated script must be recorded as exit 124: $(cat "$tmp/out")"
+  # The run still completes and accounts for the script, rather than dying.
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=1' "$tmp/out" \
+    || fail "the bounded run did not report a complete summary: $(cat "$tmp/out")"
+  [ -s "$grandchild_pid" ] || fail "the hanging fixture did not record its grandchild"
+  grandchild=$(cat "$grandchild_pid")
+  waited=0
+  while kill -0 "$grandchild" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$grandchild" 2>/dev/null; then
+    kill -KILL "$grandchild" 2>/dev/null || true
+    fail "the timed-out script left grandchild $grandchild running"
+  fi
+
+  # 0 keeps the historical unbounded behavior, so no existing caller changes.
+  set +e
+  "$runner" --per-script-timeout-secs nope "$hang" >"$tmp/o2" 2>"$tmp/e2"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "--per-script-timeout-secs with a non-number must be refused, got $rc"
+
+  rm -rf "$tmp"
+  pass "--per-script-timeout-secs turns a hung script into a bounded failure"
+}
+
+# The duration regression this guard exists for: a suite whose scripts are all
+# green but whose wall clock outgrew its caller's invocation budget. The caller
+# gets killed mid-run and retries invisibly, so an over-budget run has to be a
+# failure, not a note in the log.
+test_max_wall_ms_is_a_result_not_advice() {
+  local tmp repo runner fast rc summary_duration budget_duration
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-budget.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fast=tests/fm-budget-fixture.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$fast" <<'SH'
+#!/usr/bin/env bash
+sleep 1
+echo "ok - budget fixture"
+SH
+  chmod +x "$runner" "$repo/$fast"
+
+  # Comfortably inside budget: the run passes and states the budget it met.
+  set +e
+  "$runner" --max-wall-ms 60000 "$fast" >"$tmp/under" 2>"$tmp/under.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "a run inside its budget must pass, got $rc: $(cat "$tmp/under.err")"
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=60000 duration_ms=[0-9]+$' "$tmp/under" \
+    || fail "an inside-budget run did not report the budget: $(cat "$tmp/under")"
+
+  # Same green script, budget it cannot meet: the run must FAIL.
+  set +e
+  "$runner" --max-wall-ms 500 "$fast" >"$tmp/over" 2>"$tmp/over.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "an over-budget run must fail through the result path, got $rc"
+  grep -Eq '^FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=[0-9]+$' "$tmp/over" \
+    || fail "an over-budget run omitted its summary: $(cat "$tmp/over")"
+  grep -Eq '^FM_TEST_SUMMARY_FAMILY .+$' "$tmp/over" \
+    || fail "an over-budget run omitted its family summary: $(cat "$tmp/over")"
+  grep -Eq '^FM_TEST_SLOWEST rank=1 .+$' "$tmp/over" \
+    || fail "an over-budget run omitted its slowest result: $(cat "$tmp/over")"
+  grep -Eq '^FM_TEST_BUDGET max_wall_ms=500 duration_ms=[0-9]+$' "$tmp/over" \
+    || fail "an over-budget run omitted its budget result: $(cat "$tmp/over")"
+  summary_duration=$(awk '/^FM_TEST_SUMMARY / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/over")
+  budget_duration=$(awk '/^FM_TEST_BUDGET / { for (i=1;i<=NF;i++) if ($i ~ /^duration_ms=/) { sub(/^duration_ms=/, "", $i); print $i } }' "$tmp/over")
+  [ "$budget_duration" = "$summary_duration" ] \
+    || fail "budget verdict used a different duration than the summary: $(cat "$tmp/over")"
+
+  # A malformed budget is refused rather than silently ignored.
+  set +e
+  "$runner" --max-wall-ms 0 "$fast" >"$tmp/bad" 2>"$tmp/bad.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "--max-wall-ms 0 must be refused (exit 2), got $rc"
+  set +e
+  "$runner" --max-wall-ms nope "$fast" >"$tmp/bad2" 2>"$tmp/bad2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "--max-wall-ms with a non-number must be refused (exit 2), got $rc"
+
+  rm -rf "$tmp"
+  pass "--max-wall-ms fails an over-budget run and refuses a malformed budget"
 }
 
 test_jobs_parallel_scheduler_and_failure_propagation() {
@@ -707,7 +1374,12 @@ test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
+test_changed_runner_surfaces_select_their_family
 test_changed_dependency_selection_and_unmapped_failure
+test_changed_bin_reference_selects_per_script_not_per_family
+test_changed_uses_bounded_automatic_concurrency
+test_script_list_uses_bounded_automatic_concurrency
+test_family_proofs_run_in_separate_concurrent_phases
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
@@ -716,8 +1388,14 @@ test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
 test_portable_serial_shards_partition_the_serial_lane
+test_portable_serial_hint_coverage_is_reported_and_bounded
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
+test_jobs_admits_a_concurrent_safe_family
+test_unmapped_new_test_never_inherits_family_concurrency
+test_concurrent_runs_are_ordered_longest_first
+test_per_script_timeout_bounds_a_hang
+test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json

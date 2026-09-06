@@ -3,13 +3,14 @@
 #
 # Usage:
 #   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
+#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
-#   fm-remote-secondmate-control.sh send <id> <message>
+#   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
-#   fm-remote-secondmate-control.sh sync <id>
+#   fm-remote-secondmate-control.sh sync <id> [<parent-commit>]
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
@@ -21,11 +22,25 @@
 # The home's own workers keep their ordinary backend selection.
 # bin/fm-remote-doctor.sh owns that host's readiness for Herdr.
 # docs/remote-secondmates.md owns why.
+#
+# With <parent-commit>, sync follows the PARENT PRIMARY's default-branch commit,
+# which the parent resolves on its own checkout and passes in, so a remote home
+# tracks the primary exactly like a local one instead of stopping at whatever
+# this host's Firstmate copy happens to hold. Omitting <parent-commit> targets
+# this host's own code-root HEAD instead, which is what /updatefirstmate wants
+# after it has refreshed that
+# code root from origin. Because this home is a standalone clone, the target
+# commit is imported here first and the fast-forward itself is the shared one in
+# bin/fm-ff-lib.sh, so the clean, ancestry, and branch guards have a single owner.
 # A private parent-route state directory stores only the remote secondmate
 # agent's endpoint record; the home's own
 # state/*.meta remains reserved for workers the secondmate supervises.
 # Retirement closes only this secondmate's panes or workspace and never
 # stops fm-remote or removes a sibling secondmate's workspace or panes.
+#
+# Relaunch is not a second lifecycle implementation: it runs the ORDINARY local
+# control plane here, because from this host the mate is a plain local
+# secondmate. cmd_relaunch below owns why the parent must hand it the profile.
 #
 # The optional launch traceparent is the per-task W3C trace-context carrier the
 # PARENT home resolved for this secondmate; this host only delivers it to the
@@ -44,11 +59,15 @@ REMOTE_HERDR_SESSION=fm-remote
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
 
 validate_home() { # <id> [allow-absent]
@@ -165,6 +184,10 @@ cmd_launch() {
       *) die "remote endpoint state is $current; refusing duplicate launch" ;;
     esac
   fi
+  # The parent owns both convergence legs before it asks for this launch: it
+  # already fast-forwarded this home to ITS primary commit and pushed inherited
+  # local material, so this spawn must not redo either against this host's own
+  # Firstmate copy, which would target the wrong checkout.
   ARGS=("$id" "$TARGET_HOME" --secondmate --harness "$harness" --backend "$selected_backend")
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
@@ -172,6 +195,7 @@ cmd_launch() {
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
+    FM_SKIP_SECONDMATE_SYNC=1 \
     "$SCRIPT_DIR/fm-spawn.sh" "${ARGS[@]}" 2>&1); then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     die "remote host-local secondmate launch failed"
@@ -183,19 +207,87 @@ cmd_launch() {
   print_route "$id"
 }
 
-cmd_send() {
-  local id=$1 message=$2
+# Restart the second-mate agent this host runs, by executing the ORDINARY local
+# control plane here. From this host's point of view the mate is a plain local
+# secondmate: its endpoint record under the private parent-route state directory
+# was written by a host-local fm-spawn and carries no remote_host= field, so
+# bin/fm-control.sh's remote refusal never fires, and every checkpoint, journal,
+# rollback, and postcondition that plane owns applies unchanged. This verb is the
+# transport hop, not a second implementation.
+#
+# harness/model/effort come from the PARENT and are passed explicitly, because
+# config/secondmate-harness is deliberately not inherited into a secondmate home:
+# the copy on this host is a different home's file, so letting the control plane
+# re-resolve it here would silently drift the mate onto another runtime. `default`
+# explicitly clears an absent parent pin; `-` remains its compatibility spelling.
+cmd_relaunch() {
+  local id=$1 harness=$2 model=$3 effort=$4
+  local -a control_args
+
   validate_id "$id"
   validate_home "$id"
+  case "$harness" in
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    *) die "unverified remote secondmate harness: $harness" ;;
+  esac
+  case "$effort" in -|default|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  case "$model" in *[[:space:]]*) die "invalid remote secondmate model: $model" ;; esac
   remote_endpoint_require "$id"
-  # fm-send's exit status is the delivery verdict the parent home acts on
-  # (0 = confirmed, 3 = delivered with the submit read-back unconfirmed, other
-  # nonzero = failed; see bin/fm-send.sh's header). The job worker, entrypoint,
-  # and ssh all preserve it, so no mapping may happen here: flattening exit 3
-  # into a generic failure is exactly the false-negative the parent's remote
-  # send path exists to avoid.
-  FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
-    "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "$message"
+  [ "$model" != - ] || model=default
+  [ "$effort" != - ] || effort=default
+  control_args=("$id" relaunch --harness "$harness" --model "$model" --effort "$effort")
+  # The same launch-boundary facts cmd_launch establishes: the endpoint lives in
+  # the dedicated fm-remote session, and the parent already owns both convergence
+  # legs, so the host-local spawn must not re-sync or re-inherit against this
+  # host's own Firstmate copy.
+  HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
+    FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
+    FM_SKIP_SECONDMATE_SYNC=1 \
+    "$SCRIPT_DIR/fm-control.sh" "${control_args[@]}"
+}
+
+cmd_send() {
+  local id=$1 message=$2 delivery_mode=${3:-} rec ring_rc=0 meta meta_lock
+  validate_id "$id"
+  [ -z "$delivery_mode" ] || [ "$delivery_mode" = fire-and-forget ] || die "invalid send delivery mode"
+  validate_home "$id"
+  meta=$(meta_path "$id")
+  meta_lock=$(fm_meta_lock_path "$meta") || die "remote secondmate metadata lock path is invalid"
+  fm_task_inbox_lock_acquire "$meta_lock" \
+    || die "remote secondmate endpoint metadata could not be locked for final delivery validation"
+  if ! remote_endpoint_load "$id"; then
+    fm_lock_release "$meta_lock"
+    die "$REMOTE_ENDPOINT_ERROR"
+  fi
+  # A remote steer is delivered by durable record, never by typing its payload
+  # into the pane: write it into this secondmate's host-local steering inbox,
+  # then ring the constant self-describing doorbell into the recorded pane,
+  # best-effort (bin/fm-task-inbox-lib.sh owns the record and doorbell). The
+  # write is idempotent - re-running the same request after an ambiguous
+  # transport failure lands on the existing record instead of a duplicate - so
+  # the parent may safely repeat this leg. Exit 0 once the record durably
+  # exists; no ring outcome changes it, because the parent transport owns any
+  # retry or reply-tracking policy from here.
+  if ! rec=$(fm_task_inbox_write_idempotent "$CONTROL_STATE" "$id" "$message" "$delivery_mode"); then
+    fm_lock_release "$meta_lock"
+    die "steering-inbox record could not be written under $CONTROL_STATE/$id.inbox"
+  fi
+  fm_lock_release "$meta_lock"
+  case "$rec" in
+    */handled/*)
+      # The dedup landed on a record the worker already acknowledged: the
+      # steer was delivered and acted on, so there is nothing to announce.
+      printf 'notice: this steer was already delivered and acknowledged at %s; nothing re-rung\n' "$rec" >&2
+      return 0
+      ;;
+  esac
+  fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
+  case "$ring_rc" in
+    1) printf 'notice: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at %s\n' "$rec" >&2 ;;
+    2) printf 'notice: doorbell did not reach %s; the steer is durably recorded at %s\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
+    3) printf 'notice: doorbell not typed because the agent in %s has exited; the steer is durably recorded at %s for recovery\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
+  esac
 }
 
 cmd_key() {
@@ -227,27 +319,53 @@ cmd_observe() {
   printf '\n'
 }
 
-cmd_sync() {
-  local id=$1 target dirty head current
-  validate_id "$id"
-  validate_home "$id"
-  target=$TARGET_HOME
-  dirty=$(git -C "$target" status --porcelain 2>/dev/null | awk '$0 != "?? .fm-secondmate-home" { print; exit }')
-  [ -z "$dirty" ] || die "remote secondmate checkout is dirty; sync skipped"
-  head=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null) || die "remote code root HEAD is unreadable"
-  current=$(git -C "$target" rev-parse HEAD 2>/dev/null) || die "remote home HEAD is unreadable"
-  if [ "$current" = "$head" ]; then
-    printf 'current: %s\n' "$head"
+# Make <commit> readable in this home's own object store without moving any other
+# checkout. Ordered by cost: already present, then this host's Firstmate copy (a
+# read-only fetch of that one commit, which never advances that copy's HEAD), then
+# the home's own origin for that one commit. No pack transport beyond those two.
+import_home_commit() { # <home> <commit>
+  local home=$1 commit=$2
+  if git -C "$home" cat-file -e "$commit^{commit}" 2>/dev/null; then return 0; fi
+  if git -C "$home" fetch --quiet --no-tags -- "$FM_ROOT" "$commit" 2>/dev/null \
+    && git -C "$home" cat-file -e "$commit^{commit}" 2>/dev/null; then
     return 0
   fi
-  if ! git -C "$target" cat-file -e "$head^{commit}" 2>/dev/null; then
-    git -C "$target" fetch --quiet --no-tags "$FM_ROOT" "$head" \
-      || die "remote home could not import the code-root commit"
+  if git -C "$home" remote get-url origin >/dev/null 2>&1 \
+    && git -C "$home" fetch --quiet --no-tags -- origin "$commit" 2>/dev/null \
+    && git -C "$home" cat-file -e "$commit^{commit}" 2>/dev/null; then
+    return 0
   fi
-  git -C "$target" cat-file -e "$head^{commit}" 2>/dev/null || die "remote home does not contain the code-root commit"
-  git -C "$target" merge-base --is-ancestor HEAD "$head" || die "remote secondmate checkout is not a fast-forward"
-  git -C "$target" checkout --detach -q "$head" || die "remote secondmate fast-forward failed"
-  printf 'synced: %s\n' "$head"
+  return 1
+}
+
+cmd_sync() {
+  local id=$1 commit report out
+  validate_id "$id"
+  validate_home "$id"
+  if [ "$#" -ge 2 ]; then
+    commit=$2
+    case "$commit" in *[!0-9a-f]*) die "sync target must be a full 40-character commit id" ;; esac
+    [ "${#commit}" -eq 40 ] || die "sync target must be a full 40-character commit id"
+  else
+    commit=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null) || die "remote code root HEAD is unreadable"
+  fi
+  import_home_commit "$TARGET_HOME" "$commit" \
+    || die "remote home could not import $commit from this host's Firstmate copy or the home's origin; run /updatefirstmate to refresh this host's copy, or push that commit first"
+  # ff_target publishes its verdict in FF_STATUS, so it must run in THIS shell.
+  report=$(mktemp "${TMPDIR:-/tmp}/fm-remote-sync.XXXXXX") || die "cannot stage the sync report"
+  ff_target "$TARGET_HOME" "remote home" "$commit" yes yes > "$report" 2>&1
+  out=$(cat "$report")
+  rm -f "$report"
+  case "$FF_STATUS" in
+    # instr= names the watched instruction paths this advance changed, with no
+    # spaces so the whole result stays one parseable line. The parent needs it to
+    # decide whether the running agent must reload; an older parent ignores the
+    # suffix, and an older HOST omits it, which a parent must read as unknown
+    # rather than as "nothing changed".
+    updated) printf 'synced: %s instr=%s\n' "$commit" "$(printf '%s' "$FF_INSTR" | tr -d ' ')" ;;
+    current) printf 'current: %s\n' "$commit" ;;
+    *) die "remote secondmate home sync skipped: ${out#remote home: skipped: }" ;;
+  esac
 }
 
 cmd_update() {
@@ -297,13 +415,14 @@ cmd_retire() {
 
 case "${1:-}" in
   launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
+  relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
-  send) shift; [ "$#" -eq 2 ] || usage; cmd_send "$@" ;;
+  send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
-  sync) shift; [ "$#" -eq 1 ] || usage; cmd_sync "$@" ;;
+  sync) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;

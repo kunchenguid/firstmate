@@ -7,6 +7,25 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
+# A claude spawn writes workspace trust into the launching user's own store,
+# and the script resolves it as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so the value
+# is pinned EMPTY beside the throwaway HOME: an inherited one would beat that
+# HOME and reach the developer's real store, while empty falls through to it
+# and adds no launch prefix, since fm-spawn only prefixes a non-empty value.
+SPAWN_HOME="$TMP_ROOT/user-home"
+mkdir -p "$SPAWN_HOME"
+
+write_spawn_brief() {  # <data-dir> <id>
+  local data=$1 id=$2
+  cat > "$data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise Orca dispatch.
+
+## Firstmate spec
+Verify the Orca lifecycle behavior under test.
+EOF
+}
 
 make_orca_fakebin() {  # <dir> -> echoes fakebin dir
   local fb="$1/fakebin"
@@ -461,7 +480,7 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   config="$TMP_ROOT/pathless-cleanup-config"
   fm_git_init_commit "$proj"
   mkdir -p "$data/$id" "$state" "$config"
-  printf 'brief\n' > "$data/$id/brief.md"
+  write_spawn_brief "$data" "$id"
   touch "$state/.last-watcher-beat"
   orca_case pathless-cleanup-fail
   printf '1\n' > "$RESP/1.exit"
@@ -469,7 +488,7 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   printf '{"ok":true,"result":{"worktree":{"id":"wt-pathless-cleanup"}}}\n' > "$RESP/3.out"
   printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/4.out"
   printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/5.out"
-  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
@@ -497,14 +516,14 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   config="$TMP_ROOT/spawn-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
-  printf 'brief\n' > "$data/$id/brief.md"
+  write_spawn_brief "$data" "$id"
   touch "$state/.last-watcher-beat"
   orca_case spawn
   log="$LOG"
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-spawn"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-spawn","path":"%s"},"terminal":{"handle":"term-spawn"}}}\n' "$wt" > "$RESP/3.out"
-  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
@@ -520,7 +539,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
   assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
     "spawn did not export GOTMPDIR through the Orca terminal"
-  assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
+  assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" \
     "spawn did not send the selected harness launch command through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
@@ -562,11 +581,11 @@ test_spawn_refuses_orca_when_runtime_not_ready() {
   config="$TMP_ROOT/runtime-down-config"
   fm_git_init_commit "$proj"
   mkdir -p "$data/$id" "$state" "$config"
-  printf 'brief\n' > "$data/$id/brief.md"
+  write_spawn_brief "$data" "$id"
   touch "$state/.last-watcher-beat"
   orca_case runtime-down-spawn
   printf '{"ok":true,"result":{"runtime":{"reachable":false,"state":"starting"}}}\n' > "$RESP/1.out"
-  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_STATUS_RESPONSE=sequence \
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_STATUS_RESPONSE=sequence \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
@@ -591,13 +610,13 @@ test_spawn_refuses_orca_nonisolated_worktree() {
   config="$TMP_ROOT/bad-spawn-config"
   fm_git_init_commit "$proj"
   mkdir -p "$data/$id" "$state" "$config"
-  printf 'brief\n' > "$data/$id/brief.md"
+  write_spawn_brief "$data" "$id"
   touch "$state/.last-watcher-beat"
   orca_case bad-spawn
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-bad"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-bad","path":"%s"},"terminal":{"handle":"term-bad"}}}\n' "$proj" > "$RESP/3.out"
-  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
@@ -625,14 +644,14 @@ test_spawn_removes_orca_worktree_when_terminal_create_fails() {
   config="$TMP_ROOT/terminal-fail-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
-  printf 'brief\n' > "$data/$id/brief.md"
+  write_spawn_brief "$data" "$id"
   touch "$state/.last-watcher-beat"
   orca_case terminal-fail
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-terminal-fail"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-terminal-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '1\n' > "$RESP/4.exit"
-  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
@@ -658,7 +677,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   config="$TMP_ROOT/cleanup-fail-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
-  printf 'brief\n' > "$data/$id/brief.md"
+  write_spawn_brief "$data" "$id"
   touch "$state/.last-watcher-beat"
   orca_case cleanup-fail
   printf '1\n' > "$RESP/1.exit"
@@ -666,7 +685,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   printf '{"ok":true,"result":{"worktree":{"id":"wt-cleanup-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '1\n' > "$RESP/4.exit"
   printf '1\n' > "$RESP/5.exit"
-  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
@@ -692,19 +711,20 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   config="$TMP_ROOT/meta-fail-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state/$id.meta" "$config"
-  printf 'brief\n' > "$data/$id/brief.md"
+  write_spawn_brief "$data" "$id"
   orca_case meta-fail
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-meta-fail"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-meta-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"handle":"term-meta-fail"}}}\n' > "$RESP/4.out"
-  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata cannot be written"
-  assert_contains "$out" "Is a directory" "spawn should fail at metadata publication"
+  assert_contains "$out" "task record for $id could not be published" \
+    "spawn should report metadata publication failure without relying on platform-specific mv output"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json' \
     "Orca spawn should close the recorded terminal when a later abort occurs"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json' \
@@ -714,7 +734,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
 }
 
 test_peek_send_and_crew_state_route_through_orca_meta() {
-  local wt state id out neutral
+  local wt state id out neutral record body
   id="orcaiopathz2"
   wt="$TMP_ROOT/io-wt"
   fm_git_init_commit "$wt"
@@ -743,11 +763,17 @@ test_peek_send_and_crew_state_route_through_orca_meta() {
     "peek/crew-state did not read the recorded Orca terminal"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f'"fm-$id" \
     "crew-state should not read the stable Orca alias as a terminal handle"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f''hello orca'$'\x1f''--json' \
-    "send did not type through the recorded Orca terminal"
+  record="$state/$id.inbox/001.msg"
+  [ -f "$record" ] || fail "send did not enqueue through the task inbox"
+  body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$record")
+  [ "$body" = "hello orca" ] || fail "Orca task inbox did not preserve the send body, got '$body'"
+  assert_not_contains "$(cat "$LOG")" $'--text\x1fhello orca\x1f' \
+    "send typed the payload instead of recording it"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f'': Firstmate instruction waiting:' \
+    "send did not ring the inbox doorbell through the recorded Orca terminal"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f\x1f''--enter'$'\x1f''--json' \
-    "send did not submit Enter through the recorded Orca terminal"
-  pass "fm-peek/fm-send/fm-crew-state route through backend=orca metadata"
+    "send did not submit the doorbell through the recorded Orca terminal"
+  pass "fm-peek/fm-send/fm-crew-state route through backend=orca metadata and its durable inbox"
 }
 
 test_peek_and_crew_state_fail_closed_on_orca_error_json() {
