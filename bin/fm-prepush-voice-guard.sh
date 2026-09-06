@@ -49,30 +49,25 @@
 # untouched, while "…: Captain, fixed the…" and "…scans, captain" refuse.
 #
 # A link to the working session is internal material leaving the machine exactly
-# as an address is, and three such trailers are already in merged history, so it
-# is refused here rather than by a second mechanism. A trailer key must contain
-# session, conversation, or transcript as an exact hyphen-separated token, and
-# its value must still be a URL or opaque id. That catches Codex-Session and
-# Session-Link without treating Thread-Safety-Docs as a session key. "thread"
-# and "chat" are deliberately absent because both are ordinary repository
-# vocabulary and neither appears in a real merged leak.
+# as an address is, so it is refused here rather than by a second mechanism. All
+# sixteen real merged leaks use the fleet's own format: a Claude-Session trailer
+# whose URL contains session_ followed by a machine identifier beginning with a
+# digit. The trailer rule accepts session, conversation, or transcript only as
+# an exact hyphen-separated key token, while the bare-link rule matches that
+# literal session_ identifier format. Matching formats this fleet emits keeps
+# Thread-Safety-Docs, /session/architecture.html, and /sessions/list legitimate.
+# "thread" and "chat" are deliberately absent because both are ordinary
+# repository vocabulary and neither appears in a real merged leak.
 #
-# The bare-link rule requires an http(s) URL whose /session/ or /session_ marker
-# is followed by an opaque identifier of at least ten characters. The identifier
-# is the evidence of a working-session pointer, so /session-locking.html and
-# /sessions/list remain ordinary links. The 333 legitimate merged lines using
-# "session" in its ordinary technical sense still pass.
-#
-# The private work-document rules likewise key on a path shape, not a word. A
-# path with a subdirectory under data/, data/<id>/<file> or anything deeper, is
-# the per-task brief or report shape AGENTS.md defines. It catches exactly three
-# real leaks in the same merged history - data/fm-send-reliability-reframe-s1/
-# report.md and data/agentsmd-diet-s2/report.md twice - with zero false
-# positives. The second such shape is the Lavish review artifact, .lavish/<file>
-# and deeper, which has zero matches in merged history while the bare word
-# "Lavish" has 59, because this repo develops that integration. Keying on the
-# path and never on the word is what keeps those 59 legitimate messages
-# shipping.
+# The private work-document rules likewise match formats this fleet produces,
+# not generic secret-shaped paths. A relative path with a subdirectory under
+# data/, data/<id>/<file> or anything deeper, is the per-task brief or report
+# shape AGENTS.md defines. It catches exactly three real leaks in the same merged
+# history - all relative data/<id>/report.md paths - with zero false positives.
+# The second such shape is the Lavish review artifact, .lavish/<file> and deeper,
+# which has zero matches in merged history while the bare word "Lavish" has 59,
+# because this repo develops that integration. Keying on the fleet's path rather
+# than the word is what keeps those 59 legitimate messages shipping.
 #
 # Neither rule bounds how deep the path may go. A depth limit here would be a
 # regex artifact rather than a chosen bound: data/<id>/evidence/report.md is as
@@ -119,6 +114,13 @@
 # legitimately changes the Lavish artifact integration could name ".lavish/" in
 # its own message and would be refused. No such line exists in merged history,
 # and rewording to the bare word clears it, so the rule is kept.
+#
+# A bare working-session link in a format this fleet does not emit is outside the
+# link rule, though the trailer rule still catches it when it appears under a
+# session-bearing trailer key, as every real leak has. A private work-document
+# path rooted somewhere other than a relative base or a macOS or Linux home
+# directory is likewise outside its rule. These are declared format boundaries,
+# not claims that arbitrary session links or filesystem roots are covered.
 #
 # REJECTED, with the evidence that rejected them:
 #   - Bare nautical words (ahoy, shipshape, avast). This repo ships an /ahoy
@@ -258,10 +260,10 @@ FM_VOICE_RULES+=("delivery-machinery-handoff${TAB}i${TAB}(^|[^[:alnum:]_])outer[
 FM_VOICE_RULES+=("internal-session-pointer${TAB}i${TAB}^[[:space:]]*([[:alpha:]]+-)*(session|conversation|transcript)(-[[:alpha:]]+)*[[:space:]]*:[[:space:]]*(https?://|[A-Za-z0-9_-]{16,})${TAB}Published history must not link the working session that produced the change. Delete the trailer.")
 
 # The same pointer as a bare link, which survives being moved out of a trailer
-# and into a sentence in a pull request description. Matched on the opaque id
-# after a /session/ or /session_ marker rather than on the host or bare word, so
-# ordinary session documentation stays legitimate without a vendor list.
-FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}https?://[^[:space:]?#]*/session[_/][A-Za-z0-9][A-Za-z0-9_-]{9,}${TAB}Published history must not link the working session that produced the change. Remove the link.")
+# and into a sentence in a pull request description. This matches the literal
+# session_ plus digit-led machine identifier that the fleet emits, rather than a
+# generic long path component that could be ordinary documentation.
+FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}https?://[^[:space:]?#]*/session_[0-9][A-Za-z0-9]{15,}${TAB}Published history must not link the working session that produced the change. Remove the link.")
 
 # A private per-task work document is a path rooted at data/ with at least one
 # subdirectory: data/<id>/<file>, and anything deeper. Requiring a subdirectory
@@ -277,17 +279,13 @@ FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}https?://[^[:space:]?#]*/ses
 # is allowed there. Both relative leading classes exclude "." so a longer
 # dotted name cannot be split into a false match.
 #
-# That slash exclusion is also what let a ROOT-QUALIFIED path through, because
-# the leak this guard is for is usually pasted absolute: the same private report
-# written as /Users/<user>/<home>/data/<id>/report.md has a slash before "data"
-# and so escaped the rule that refuses its relative spelling. The second
-# alternative admits exactly that shape, at start of line or after whitespace,
-# an opening quote, or an opening bracket. A URL contains no whitespace, so this
-# structural anchor cannot begin in one regardless of its punctuation. An
-# optional "~", ".", or ".." root token keeps home-rooted and relative forms,
-# while ancestor components accept spaces because a real home directory can
-# contain them. It matches no additional line in merged history.
-FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}((^|[^[:alnum:]_/.-])data/[[:alnum:]_.-]+/[[:alnum:]_./-]+|(^|[[:space:]\"'([<])(~|\.\.?)?(/[[:alnum:]_.-][[:alnum:]_. -]*)*/data/[[:alnum:]_.-]+/[[:alnum:]_./-]+)${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
+# Root-qualified forms require evidence of a real machine path: "~", ".", "..",
+# /Users/<name>, or /home/<name>. The root must begin at start of line or after
+# whitespace, an opening quote, or an opening bracket, and home components accept
+# spaces. A root-relative web route such as /data/api/schema.json has none of
+# that machine-path evidence and remains legitimate. The relative alternative
+# above is unchanged and catches every private-path leak in merged history.
+FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}((^|[^[:alnum:]_/.-])data/[[:alnum:]_.-]+/[[:alnum:]_./-]+|(^|[[:space:]\"'([<])(~|\.\.?|/Users/[[:alnum:]_.-][[:alnum:]_. -]*|/home/[[:alnum:]_.-][[:alnum:]_. -]*)(/[[:alnum:]_.-][[:alnum:]_. -]*)*/data/[[:alnum:]_.-]+/[[:alnum:]_./-]+)${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
 
 # The local Lavish review artifact, which is the other private work-document
 # shape this repo produces. Keyed on the dot-prefixed directory path so the 59

@@ -541,6 +541,18 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   worker=$((worker + 1))
 done
 
+# Always run the voice refusal, even after a ShellCheck or workflow failure, so
+# one lint round reports every message that has to be reworded rather than
+# revealing them one failed run at a time.
+if [ "$overall_rc" -eq 0 ]; then
+  fm_lint_run_workflows || overall_rc=$?
+else
+  fm_lint_run_workflows || true
+fi
+voice_rc=0
+fm_lint_run_voice_guard || voice_rc=$?
+[ "$overall_rc" -ne 0 ] || overall_rc=$voice_rc
+
 if [ -n "$TELEMETRY" ]; then
   TELEMETRY_END_EPOCH=$(date +%s)
   TELEMETRY_SHELLCHECK_END=$(fm_lint_shellcheck_count)
@@ -652,18 +664,5 @@ EOF
     [ "$overall_rc" -ne 0 ] || overall_rc=2
   fi
 fi
-
-if [ "$overall_rc" -eq 0 ]; then
-  fm_lint_run_workflows || overall_rc=$?
-else
-  fm_lint_run_workflows || true
-fi
-
-# Always run the voice refusal, even after a ShellCheck or workflow failure, so
-# one lint round reports every message that has to be reworded rather than
-# revealing them one failed run at a time.
-voice_rc=0
-fm_lint_run_voice_guard || voice_rc=$?
-[ "$overall_rc" -ne 0 ] || overall_rc=$voice_rc
 
 exit "$overall_rc"
