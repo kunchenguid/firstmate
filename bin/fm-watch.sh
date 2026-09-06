@@ -1248,7 +1248,7 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
       return 2
       ;;
     done) ;;
-    failed|blocked|paused|needs-decision|unknown|stopped) ;;
+    failed|blocked|paused|parked|unknown) ;;
     *) state=unknown ;;
   esac
   if [ "$state" != "done" ]; then
