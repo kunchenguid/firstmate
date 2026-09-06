@@ -224,16 +224,14 @@ fm_session_lock_describe_pid() {  # <pid>
 # no competing lock involved at all. The caution belongs in the verification
 # below, which never reclaims from an owner it cannot disprove.
 fm_session_lock_record_owner() {  # <state> <pid>
-  local state=$1 pid=$2 identity acquired tmp
+  local state=$1 pid=$2 identity tmp
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ -d "$state" ] || return 1
   _fm_session_lock_require_identity
   identity=$(fm_pid_identity "$pid" 2>/dev/null | tr -d '\n' || true)
-  acquired=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
   tmp=$(mktemp "$state/.lock-owner.XXXXXX" 2>/dev/null) || return 1
   if ! {
     printf 'pid=%s\n' "$pid"
-    printf 'acquired=%s\n' "$acquired"
     printf 'identity=%s\n' "$identity"
   } > "$tmp" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null
@@ -253,39 +251,33 @@ fm_session_lock_record_owner() {  # <state> <pid>
 #   free        no lock file at all
 #   malformed   the lock is not a regular file, or carries no numeric pid
 #   dead        that pid is gone, or is no longer a verified harness
-#   unrecorded  no session in this home ever recorded that live pid as owner
-#   unverified  this home's owner record is for a different pid entirely
+#   unrecorded  this home holds no owner record naming that live pid
 #   reused      an unrelated process now occupies that pid
 #   live        a verified live owner
-# and FM_LOCK_OWNER_PID/COMMAND to the detail a refusal or reclaim needs, plus
-# FM_LOCK_OWNER_SINCE only once the record is proven to describe the process
-# now at that pid - a record left by a previous owner says nothing about when
-# the process that inherited its pid started.
+# and FM_LOCK_OWNER_PID/COMMAND to the detail a refusal or reclaim needs.
 #
 # Only a genuine identity MISMATCH demotes an owner. An identity that cannot be
 # read at all leaves a recorded, live, harness-named owner holding the lock, so
 # an unreadable process table can never hand a live session's home to a second
 # one.
 #
-# unrecorded and unverified are both missing evidence, NOT evidence of absence.
-# unrecorded is what a still-running session that acquired its lock before owner
-# records existed looks like; unverified is a record about some other pid, which
-# says nothing at all about the process in the lock file today. Only dead and
-# reused prove the pid in the lock is not a live session here, and
-# fm_session_lock_reclaimable below is the one place that judgement is made.
+# unrecorded is missing evidence, NOT evidence of absence: no record at all is
+# what a still-running session that acquired its lock before owner records
+# existed looks like, and a record about some other pid says nothing at all
+# about the process in the lock file today. Only dead and reused prove the pid
+# in the lock is not a live session here, and fm_session_lock_reclaimable below
+# is the one place that judgement is made.
 FM_LOCK_OWNER_STATUS=free
 FM_LOCK_OWNER_PID=
 FM_LOCK_OWNER_COMMAND=
-FM_LOCK_OWNER_SINCE=
 fm_session_lock_live_owner() {  # <state>
-  local state=$1 lock owner lock_pid rec_pid='' rec_identity='' rec_acquired=''
+  local state=$1 lock owner lock_pid rec_pid='' rec_identity=''
   local live_identity line key value
   lock="$state/.lock"
   owner="$state/.lock-owner"
   FM_LOCK_OWNER_STATUS=free
   FM_LOCK_OWNER_PID=
   FM_LOCK_OWNER_COMMAND=
-  FM_LOCK_OWNER_SINCE=
   [ -e "$lock" ] || [ -L "$lock" ] || return 1
   if [ ! -f "$lock" ] || [ -L "$lock" ]; then
     FM_LOCK_OWNER_STATUS=malformed
@@ -304,16 +296,11 @@ fm_session_lock_live_owner() {  # <state>
       value=${line#*=}
       case "$key" in
         pid) rec_pid=$value ;;
-        acquired) rec_acquired=$value ;;
         identity) rec_identity=$value ;;
       esac
     done < "$owner"
   fi
-  if [ -n "$rec_pid" ] && [ "$rec_pid" != "$lock_pid" ]; then
-    FM_LOCK_OWNER_STATUS=unverified
-    return 1
-  fi
-  if [ -z "$rec_pid" ]; then
+  if [ "$rec_pid" != "$lock_pid" ]; then
     FM_LOCK_OWNER_STATUS=unrecorded
     return 1
   fi
@@ -323,7 +310,6 @@ fm_session_lock_live_owner() {  # <state>
     FM_LOCK_OWNER_STATUS=reused
     return 1
   fi
-  FM_LOCK_OWNER_SINCE=$rec_acquired
   FM_LOCK_OWNER_STATUS=live
   return 0
 }
@@ -345,7 +331,7 @@ fm_session_lock_live_owner() {  # <state>
 fm_session_lock_reclaimable() {  # <state>
   fm_session_lock_live_owner "$1" && return 1
   case "$FM_LOCK_OWNER_STATUS" in
-    unrecorded|unverified) return 1 ;;
+    unrecorded) return 1 ;;
   esac
   return 0
 }

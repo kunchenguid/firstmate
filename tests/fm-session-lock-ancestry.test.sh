@@ -472,8 +472,6 @@ test_legacy_bare_pid_lock_is_held_not_reclaimed() {
   assert_not_contains "$out" "reclaimed" "an untouched lock was reported as reclaimed"
   assert_not_contains "$out" "not a firstmate session" \
     "the refusal asserted something it cannot know about a live process"
-  assert_not_contains "$out" "holding this home since" \
-    "an unverified record's timestamp was attributed to the process at that pid"
   pass "session-lock: a legacy bare-pid lock on a live harness is held, not reclaimed"
 }
 
@@ -502,8 +500,6 @@ test_original_holder_repairs_its_own_missing_owner_record() {
   stop_fixture_processes
   assert_contains "$out" "lock: held by live harness pid $session" \
     "the repaired record did not verify: $out"
-  assert_contains "$out" "holding this home since" \
-    "a proven live owner lost the acquisition time it can honestly report"
   pass "session-lock: the original holder repairs its own missing owner record in place"
 }
 
@@ -566,15 +562,11 @@ test_owner_record_for_a_different_pid_is_not_evidence() {
   expect_code 1 "$status" "a record about another pid was treated as proof about this one: $out"
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$foreign" ] \
     || fail "a live session was evicted on evidence about a different pid: $(cat "$dir/state/.lock")"
-  assert_contains "$out" "ownership record is for a different pid" \
-    "the refusal did not say what the record actually is"
+  assert_contains "$out" "no ownership record naming it" \
+    "the refusal did not say why the holder could not be confirmed"
   assert_contains "$out" "ChatGPT.app" \
     "the refusal did not name the process an operator has to go find"
   assert_not_contains "$out" "reclaimed" "an untouched lock was reported as reclaimed"
-  assert_not_contains "$out" "no ownership record" \
-    "the refusal denied a record that does exist"
-  assert_not_contains "$out" "holding this home since" \
-    "another pid's acquisition time was attributed to this process"
   pass "session-lock: an owner record for a different pid never justifies a takeover"
 }
 
@@ -679,8 +671,6 @@ test_recycled_pid_never_inherits_the_previous_owners_lock() {
   assert_contains "$out" "$foreign" "the reclaim did not name the recycled pid"
   assert_contains "$out" "ChatGPT.app" \
     "the reclaim did not name the real process an operator has to go find"
-  assert_not_contains "$out" "holding this home since" \
-    "the dead owner's acquisition time was attributed to the process that took its pid"
   pass "session-lock: a recycled pid does not inherit the previous owner's lock"
 }
 

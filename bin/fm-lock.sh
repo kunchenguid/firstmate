@@ -14,14 +14,13 @@
 # process now at it is not the one the record pinned - is never fatal: it is
 # reclaimed with a note naming the process that had been holding the home.
 #
-# A lock this home cannot vouch for either way is a different thing entirely,
-# and is never reclaimed: no record at all is what a session which acquired its
-# lock before owner records existed looks like while it is still genuinely
-# running, and a record about some other pid says nothing about this one.
-# Evicting either would put two sessions in one home. Both are refused with the
-# process named, so the operator can see whether it is their own session (which
-# repairs its own record the next time it touches the lock) or something to
-# quit. fm_session_lock_reclaimable is the single predicate that decides.
+# A lock this home holds no record naming is a different thing entirely, and is
+# never reclaimed. That is what a session which acquired its lock before owner
+# records existed looks like while it is still genuinely running, and evicting
+# it would put two sessions in one home. It is refused with the process named,
+# so the operator can see whether it is their own session (which repairs its own
+# record the next time it touches the lock) or something to quit.
+# fm_session_lock_reclaimable is the single predicate that decides.
 #
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
@@ -48,7 +47,6 @@ mkdir -p "$STATE" 2>/dev/null || {
 owner_detail() {
   local detail=''
   [ -z "$FM_LOCK_OWNER_COMMAND" ] || detail=" ($FM_LOCK_OWNER_COMMAND)"
-  [ -z "$FM_LOCK_OWNER_SINCE" ] || detail="$detail, holding this home since $FM_LOCK_OWNER_SINCE"
   printf '%s' "$detail"
 }
 
@@ -64,10 +62,8 @@ if [ "${1:-}" = "status" ]; then
     dead) echo "lock: stale (pid $FM_LOCK_OWNER_PID dead or not a harness)" ;;
     reused)
       echo "lock: stale (pid $FM_LOCK_OWNER_PID was recycled and now belongs to an unrelated process$(owner_detail)); the next session start reclaims it" ;;
-    unrecorded)
-      echo "lock: unconfirmed (pid $FM_LOCK_OWNER_PID$(owner_detail) is a live harness process, but this home holds no ownership record for it); it is held, not reclaimed" ;;
     *)
-      echo "lock: unconfirmed (pid $FM_LOCK_OWNER_PID$(owner_detail) is a live harness process, but this home's only ownership record is for a different pid); it is held, not reclaimed" ;;
+      echo "lock: unconfirmed (pid $FM_LOCK_OWNER_PID$(owner_detail) is a live harness process, but this home holds no ownership record naming it); it is held, not reclaimed" ;;
   esac
   exit 0
 fi
@@ -103,18 +99,13 @@ refuse_live_owner() {
 # session. Say what is actually known about the process now at that pid, name it
 # so the operator can decide, and never take the home from it.
 refuse_unconfirmed_owner() {
-  local because
-  case "$FM_LOCK_OWNER_STATUS" in
-    unrecorded) because="this home holds no ownership record for it" ;;
-    *) because="this home's only ownership record is for a different pid, which says nothing about this one" ;;
-  esac
-  echo "error: the session lock names live harness pid $FM_LOCK_OWNER_PID$(owner_detail), and $because, so it cannot be taken over safely: if that is a firstmate session it keeps the home and repairs its own record, and if it is not, quit it or remove $LOCK; operate read-only until resolved" >&2
+  echo "error: the session lock names live harness pid $FM_LOCK_OWNER_PID$(owner_detail), and this home holds no ownership record naming it, so it cannot be taken over safely: if that is a firstmate session it keeps the home and repairs its own record, and if it is not, quit it or remove $LOCK; operate read-only until resolved" >&2
   exit 1
 }
 
 refuse_blocking_owner() {
   case "$FM_LOCK_OWNER_STATUS" in
-    unrecorded|unverified) refuse_unconfirmed_owner ;;
+    unrecorded) refuse_unconfirmed_owner ;;
   esac
   refuse_live_owner
 }
