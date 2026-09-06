@@ -76,6 +76,11 @@
 #                   sinks that block finalization are explicitly out of scope.
 #   -h, --help      print this header
 #
+# Environment: ambient FM_HOME, FM_*_OVERRIDE, FM_BACKEND, and crew-state path
+# overrides are scrubbed before selection on every path, so passing one to this
+# runner has no effect; each script owns its own fixtures. The scrub site in
+# this script owns why (a live Firstmate session exports task-scoped overrides).
+#
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
