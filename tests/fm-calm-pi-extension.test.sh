@@ -703,7 +703,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const extPath = fileURLToPath(pathToFileURL(process.env.EXT).href);
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { UserMessageComponent }, { InteractiveMode }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }, { createReadToolDefinition, createBashToolDefinition, createEditToolDefinition, createWriteToolDefinition, createGrepToolDefinition, createFindToolDefinition, createLsToolDefinition }] = await Promise.all([
+const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { UserMessageComponent }, { InteractiveMode }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }, { createReadToolDefinition: stockCreateReadToolDefinition }, { createBashToolDefinition: stockCreateBashToolDefinition }, { createEditToolDefinition: stockCreateEditToolDefinition }, { createWriteToolDefinition: stockCreateWriteToolDefinition }, { createGrepToolDefinition: stockCreateGrepToolDefinition }, { createFindToolDefinition: stockCreateFindToolDefinition }, { createLsToolDefinition: stockCreateLsToolDefinition }] = await Promise.all([
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/custom-entry.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
@@ -712,22 +712,15 @@ const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionC
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
   import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/core/export-html/tool-renderer.js`).href),
-  // The calm-off equivalence baseline needs each built-in's REAL stock renderers.
-  // Pi 0.84 and older silently substituted the built-in definition when a
-  // ToolExecutionComponent was constructed without one, so a definition-less
-  // baseline used to read as stock; Pi 0.85 removed that substitution and the
-  // definition-less row now renders the generic text fallback instead.
-  import(pathToFileURL(`${packageRoot}/dist/core/tools/index.js`).href),
+  // The calm-off equivalence baseline needs each built-in's real stock renderer.
+  import(pathToFileURL(`${packageRoot}/dist/core/tools/read.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/core/tools/bash.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/core/tools/edit.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/core/tools/write.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/core/tools/grep.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/core/tools/find.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/core/tools/ls.js`).href),
 ]);
-const stockDefinitions = {
-  read: createReadToolDefinition,
-  bash: createBashToolDefinition,
-  edit: createEditToolDefinition,
-  write: createWriteToolDefinition,
-  grep: createGrepToolDefinition,
-  find: createFindToolDefinition,
-  ls: createLsToolDefinition,
-};
 initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 
@@ -805,6 +798,15 @@ const expectedNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 if (JSON.stringify(names) !== JSON.stringify(expectedNames)) {
   throw new Error(`unexpected wrapped built-ins: ${names.join(",")}`);
 }
+const stockTools = new Map([
+  stockCreateReadToolDefinition(process.cwd()),
+  stockCreateBashToolDefinition(process.cwd()),
+  stockCreateEditToolDefinition(process.cwd()),
+  stockCreateWriteToolDefinition(process.cwd()),
+  stockCreateGrepToolDefinition(process.cwd()),
+  stockCreateFindToolDefinition(process.cwd()),
+  stockCreateLsToolDefinition(process.cwd()),
+].map((tool) => [tool.name, tool]));
 if (!calmCommand || !handlers.has("session_start")) {
   throw new Error("calm command or session lifecycle handler was not registered");
 }
@@ -903,7 +905,7 @@ const renderUi = { requestRender() {} };
 const rows = [];
 for (const [name, args, result] of cases) {
   const wrapped = tools.find((tool) => tool.name === name);
-  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, stockDefinitions[name](process.cwd()), renderUi, process.cwd());
+  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, stockTools.get(name), renderUi, process.cwd());
   const actual = new ToolExecutionComponent(name, `wrapped-${name}`, args, { showImages: false }, wrapped, renderUi, process.cwd());
   for (const row of [baseline, actual]) {
     row.markExecutionStarted();
