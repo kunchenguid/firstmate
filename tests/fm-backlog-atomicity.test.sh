@@ -220,6 +220,34 @@ SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }
 
+# The commit's `start` reports success but never moves the row - the beads
+# failure pattern - and interrupts the spawn, so the deferred-signal exit path
+# must read the preserved state back before it claims anything about it.
+# <repair> decides whether a LATER start (the error path's own read-back
+# repair) can move the row, or fails too.
+lie_start_then_interrupt() {  # <case-dir> <repair: works|fails>
+  local case_dir=$1 repair=$2 real
+  real=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = start ]; then
+  if [ ! -f "$case_dir/start-interrupted" ]; then
+    : > "$case_dir/start-interrupted"
+    spawn_pid=\$(ps -o ppid= -p "\$PPID" | tr -d ' ')
+    case "\$spawn_pid" in ''|*[!0-9]*) exit 1 ;; esac
+    kill -TERM "\$spawn_pid"
+    exit 0
+  fi
+  if [ "$repair" = fails ]; then
+    echo 'error: "backlog is unwritable"' >&2
+    exit 1
+  fi
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
 change_row_on_second_show() {  # <case-dir> <done|rm>
   local case_dir=$1 action=$2 real
   real=$(command -v tasks-axi)
@@ -1050,14 +1078,54 @@ test_dispatch_defers_interruption_across_backlog_commit() {
     rc=0
     out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
     [ "$rc" -ne 0 ] || fail "a $timing-commit interruption was reported as success"
-    assert_contains "$out" "paired task record and In-flight backlog state were preserved" \
-      "a $timing-commit interruption did not report its atomic outcome"
+    assert_contains "$out" "verified preserved: its paired task record is present and its backlog item is In flight" \
+      "a $timing-commit interruption did not report its verified atomic outcome"
     [ "$(row_state "$case_dir" "$id")" = in_flight ] \
       || fail "a $timing-commit interruption left the backlog row queued"
     assert_present "$(home_of "$case_dir")/state/$id.meta" \
       "a $timing-commit interruption removed the paired task record"
   done
   pass "dispatch retries interrupted transitions before honoring termination"
+}
+
+test_deferred_signal_reads_back_preserved_state() {
+  local case_dir id out rc=0
+  id=atomic-dispatch-signal-readback-b5
+  case_dir=$(make_home dispatch-signal-readback "$id")
+  add_item "$case_dir" "$id"
+  lie_start_then_interrupt "$case_dir" works
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
+  assert_contains "$out" "moved to In flight now and verified" \
+    "a signal-deferred spawn did not read the row back and repair it"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "the read-back repair left the backlog row at $(row_state "$case_dir" "$id")"
+  assert_present "$(home_of "$case_dir")/state/$id.meta" \
+    "the read-back repair lost the paired task record"
+  pass "a signal-deferred spawn verifies its preserved state and repairs a row that did not move"
+}
+
+test_deferred_signal_never_claims_unverified_preservation() {
+  local case_dir id out rc=0
+  id=atomic-dispatch-signal-unverified-b5
+  case_dir=$(make_home dispatch-signal-unverified "$id")
+  add_item "$case_dir" "$id"
+  lie_start_then_interrupt "$case_dir" fails
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
+  assert_contains "$out" "preservation could not be verified" \
+    "an unverifiable preservation was not reported as attempted, not verified"
+  case "$out" in
+    *"In-flight backlog state were preserved"*) \
+      fail "the interrupted spawn still claimed a preservation it never verified" ;;
+  esac
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "the failed repair left the backlog row at $(row_state "$case_dir" "$id")"
+  assert_present "$(home_of "$case_dir")/state/$id.meta" \
+    "the failed repair removed the paired task record"
+  pass "a signal-deferred spawn reports attempted preservation as attempted when it cannot be verified"
 }
 
 test_dispatch_interruption_during_kimi_readiness_fails_before_commit() {
@@ -2402,6 +2470,8 @@ test_dispatch_reports_an_incomplete_record_rollback
 test_dispatch_reports_an_incomplete_busy_rollback
 test_dispatch_rolls_back_before_a_failed_launch_delivery
 test_dispatch_defers_interruption_across_backlog_commit
+test_deferred_signal_reads_back_preserved_state
+test_deferred_signal_never_claims_unverified_preservation
 test_dispatch_interruption_during_kimi_readiness_fails_before_commit
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
