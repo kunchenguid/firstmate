@@ -2277,7 +2277,12 @@ EOF
   pass "Pi session replacement auto-arms and carries its in-flight actionable close"
 }
 
-test_pi_streaming_followup_is_replayed_after_replacement() {
+# Acceptance is the redelivery bound: a follow-up Pi accepted while main was
+# streaming is in the old session's run, so a replacement must never re-send
+# it, even though the model never read it before the replacement. A lockless
+# replacement must adopt nothing early, and a reclaimed session must stay
+# silent too, because the accepted record cleared its handoff.
+test_pi_streaming_followup_is_never_redelivered_after_replacement() {
   local repo home plugin trigger out status
   repo="$TMP_ROOT/pi-streaming-followup-replacement-root"
   home="$TMP_ROOT/pi-streaming-followup-replacement-home"
@@ -2348,47 +2353,46 @@ const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?r
 const replacement = makePi();
 replacementMod.default(replacement.pi);
 await replacement.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-await waitFor(
-  () => replacement.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
-  "replacement-session replay",
-);
-if (replacement.prompts.filter((message) => message.includes("signal: streaming queued actionable outcome")).length !== 1) {
-  throw new Error(`replacement did not replay the unconsumed follow-up exactly once: ${replacement.prompts.join(" | ")}`);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (replacement.prompts.some((message) => message.includes("signal: streaming queued actionable outcome"))) {
+  throw new Error(`replacement re-sent a follow-up Pi had accepted: ${replacement.prompts.join(" | ")}`);
 }
+const { existsSync, unlinkSync } = await import("node:fs");
+const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+for (let i = 0; i < 200 && existsSync(handoffPath); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (existsSync(handoffPath)) throw new Error("the accepted follow-up kept its persisted handoff record");
 await replacement.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 
 const finalMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=idle-followup`);
 const finalSession = makePi();
 finalMod.default(finalSession.pi);
-const { unlinkSync } = await import("node:fs");
 unlinkSync(`${process.env.FM_HOME}/state/.lock`);
 await finalSession.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
 if (finalSession.prompts.length !== 0) throw new Error("lockless replacement adopted its handoff early");
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const reclaimed = await finalSession.getTool().execute("reclaimed-arm", {}, undefined, undefined, {});
 if (!reclaimed.details?.ok) throw new Error(`reclaimed arm failed: ${JSON.stringify(reclaimed.details)}`);
-await waitFor(
-  () => finalSession.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
-  "second replacement replay before idle consumption",
-);
-if (finalSession.prompts.filter((message) => message.includes("signal: streaming queued actionable outcome")).length !== 1) {
-  throw new Error(`second replacement did not replay the idle queued follow-up exactly once: ${finalSession.prompts.join(" | ")}`);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (finalSession.prompts.some((message) => message.includes("signal: streaming queued actionable outcome"))) {
+  throw new Error(`reclaimed session re-sent the accepted follow-up: ${finalSession.prompts.join(" | ")}`);
 }
-finalSession.handlers.get("before_agent_start")?.({ prompt: finalSession.prompts[0] }, {});
-await new Promise((resolve) => setTimeout(resolve, 20));
 process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi replacement must replay a streaming follow-up before consumption"
+  expect_code 0 "$status" "Pi replacement must never re-send a follow-up Pi accepted"
   [ -z "$out" ] || fail "Pi streaming follow-up replacement test printed output: $out"
-  pass "Pi replacement replays a streaming follow-up before consumption"
+  pass "Pi replacement never re-sends an accepted streaming follow-up"
 }
 
 # The 2026-09-02 incident: a wake delivered while main was mid-turn never raised
 # before_agent_start, the extension waited for it, and every later actionable
-# close was dropped. Continuity must settle on Pi accepting the follow-up, while
-# consumption still decides what a replacement replays.
+# close was dropped. Continuity must settle on Pi accepting the follow-up.
+# Acceptance is now also the redelivery bound: both streaming-time wakes are
+# accepted, so the replacement must replay neither, clear their handoff
+# records, and keep the successor chain armed.
 test_pi_streaming_time_delivery_keeps_the_successor_chain() {
   local repo home plugin log trigger out status
   repo="$TMP_ROOT/pi-streaming-chain-root"
@@ -2470,32 +2474,218 @@ await waitFor(() => arms() === 3, "successor after the second streaming-time del
 if (beforeAgentStarts !== 0) throw new Error(`streaming follow-ups raised before_agent_start ${beforeAgentStarts} times`);
 
 // The run reaches the first queued follow-up; the second is still queued when
-// the captain replaces the session, so only the second rides the handoff.
+// the captain replaces the session. Both were accepted, so the handoff may
+// carry only a record marked delivered (cleanup raced the shutdown) and the
+// replacement must re-send neither.
 consumeQueued(prompts[0]);
 await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
-const handoff = JSON.parse(readFileSync(handoffPath, "utf8"));
-if (handoff.pending.length !== 1 || handoff.pending[0].delivered || !handoff.pending[0].message.includes("signal: streaming chain wake 2")) {
-  throw new Error(`replacement handoff did not carry exactly the unconsumed wake: ${JSON.stringify(handoff)}`);
+let handoff = null;
+try {
+  handoff = JSON.parse(readFileSync(handoffPath, "utf8"));
+} catch {}
+if (handoff) {
+  if (handoff.pending.length !== 1 || !handoff.pending[0].delivered || !handoff.pending[0].message.includes("signal: streaming chain wake 2")) {
+    throw new Error(`replacement handoff must carry only the accepted wake, marked delivered: ${JSON.stringify(handoff)}`);
+  }
 }
 streaming = false;
 const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=streaming-chain`);
 replacementMod.default(pi);
 await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-await waitFor(() => prompts.length === 3, "replacement replay of the unconsumed wake");
-if (wakes("signal: streaming chain wake 2") !== 2 || wakes("signal: streaming chain wake 1") !== 1) {
-  throw new Error(`replacement replayed the wrong wakes: ${prompts.join(" | ")}`);
-}
-if (beforeAgentStarts !== 1) throw new Error(`idle replay raised before_agent_start ${beforeAgentStarts} times`);
 await waitFor(() => arms() === 4, "replacement arm");
-await waitFor(() => !existsSync(handoffPath), "consumed replay clears its handoff record");
+if (wakes("signal: streaming chain wake 2") !== 1 || wakes("signal: streaming chain wake 1") !== 1) {
+  throw new Error(`replacement re-sent an accepted wake: ${prompts.join(" | ")}`);
+}
+if (beforeAgentStarts !== 0) throw new Error(`an accepted replay raised before_agent_start ${beforeAgentStarts} times`);
+await waitFor(() => !existsSync(handoffPath), "replacement cleared the accepted wake's handoff record");
 process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi streaming-time wake delivery must keep the successor chain and replay only unconsumed wakes"
+  expect_code 0 "$status" "Pi streaming-time wake delivery must keep the successor chain and never re-send accepted wakes"
   [ -z "$out" ] || fail "Pi streaming-time delivery chain test printed output: $out"
-  pass "Pi streaming-time wake delivery keeps the successor chain and replays only unconsumed wakes"
+  pass "Pi streaming-time wake delivery keeps the successor chain and never re-sends accepted wakes"
+}
+
+# The watch-extension fixture plus the replay gate and its source deps, so the
+# replay-gating tests below exercise the real durable-state verdicts.
+install_pi_replay_gate_fixture() {
+  local repo=$1
+  install_pi_watch_extension_fixture "$repo"
+  cp "$ROOT/bin/fm-watch-replay-gate.sh" "$repo/bin/fm-watch-replay-gate.sh"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-backend.sh" "$repo/bin/fm-backend.sh"
+  chmod +x "$repo/bin/fm-watch-replay-gate.sh"
+}
+
+# The observed incident, replayed mechanically: a task was torn down, its stale
+# wake was presented, handled, and acknowledged (empty queue, acked recovery
+# episode, no task meta), yet the persisted replacement handoff record kept
+# re-presenting the identical wake at consecutive turn boundaries. The
+# replacement session must drop that record instead of re-presenting it, clear
+# it from the handoff, and keep its own watcher cycle armed.
+test_pi_replayed_acked_wake_of_torn_down_task_is_dropped() {
+  local repo home plugin stop out status handoff
+  repo="$TMP_ROOT/pi-replay-acked-drop-root"
+  home="$TMP_ROOT/pi-replay-acked-drop-home"
+  stop="$TMP_ROOT/pi-replay-acked-drop.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_replay_gate_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=incident-fixture\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.watcher-down`, "acked:handling:130247.1788720192.pbH0L2\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "");
+const handoff = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+mkdirSync(handoff.slice(0, handoff.lastIndexOf("/")), { recursive: true });
+writeFileSync(handoff, `${JSON.stringify({
+  version: 2,
+  pending: [{
+    version: 1,
+    token: "130247-1788720192-1",
+    message: "stale: default:wMA:p2",
+    predecessorArmPid: "",
+  }],
+})}\n`);
+
+const handlers = new Map();
+const prompts = [];
+let tool = null;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+  events: { on() {}, emit() {} },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await new Promise((resolve) => setTimeout(resolve, 300));
+if (prompts.some((message) => message.includes("stale: default:wMA:p2"))) {
+  throw new Error(`an acked replay of a torn-down task's wake was re-presented: ${prompts.join(" | ")}`);
+}
+if (existsSync(handoff)) throw new Error("the dropped replay kept its persisted handoff record");
+if (!tool) throw new Error("Pi watch tool was not registered");
+const redundant = await tool.execute("post-drop-arm", {}, undefined, undefined, {});
+if (!redundant.details?.ok || !String(redundant.details.message).includes("unchanged")) {
+  throw new Error(`dropping the replay disturbed arm ownership: ${JSON.stringify(redundant.details)}`);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "an acked replay whose task is gone must be dropped, never re-presented"
+  [ -z "$out" ] || fail "Pi replay-acked-drop test printed output: $out"
+  pass "an acked replay for a torn-down task is dropped and its handoff record cleared"
+}
+
+# A replayed record whose referenced wake is still unhandled delivers exactly
+# once; Pi's acceptance then retires the record, so a further replacement is
+# silent. Redelivery is bounded at one presentation per acceptance.
+test_pi_replayed_unhandled_wake_delivers_once_then_stops() {
+  local repo home plugin stop out status handoff
+  repo="$TMP_ROOT/pi-replay-queued-once-root"
+  home="$TMP_ROOT/pi-replay-queued-once-home"
+  stop="$TMP_ROOT/pi-replay-queued-once.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_replay_gate_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=replay-fixture\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/fm-live.meta`, "window=fm-live\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tstale\tfm-live\tstale: fm-live\n");
+const handoff = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+mkdirSync(handoff.slice(0, handoff.lastIndexOf("/")), { recursive: true });
+writeFileSync(handoff, `${JSON.stringify({
+  version: 2,
+  pending: [{
+    version: 1,
+    token: "42-2-3",
+    message: "stale: fm-live",
+    predecessorArmPid: "",
+  }],
+})}\n`);
+
+function makePi() {
+  const handlers = new Map();
+  const prompts = [];
+  let tool = null;
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+    },
+    events: { on() {}, emit() {} },
+  };
+  return { pi, handlers, prompts, getTool: () => tool };
+}
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const first = makePi();
+mod.default(first.pi);
+await first.handlers.get("session_start")?.({ type: "session_start", reason: "resume" }, {});
+for (let i = 0; i < 250 && first.prompts.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (first.prompts.filter((message) => message.includes("stale: fm-live")).length !== 1) {
+  throw new Error(`an unhandled replay must present exactly once: ${first.prompts.join(" | ")}`);
+}
+for (let i = 0; i < 250 && existsSync(handoff); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (existsSync(handoff)) throw new Error("the accepted replay kept its persisted handoff record");
+await first.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+
+const second = makePi();
+mod.default(second.pi);
+await second.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (second.prompts.some((message) => message.includes("stale: fm-live"))) {
+  throw new Error(`a replay accepted once was presented again: ${second.prompts.join(" | ")}`);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "an unhandled replay must present once and then stop"
+  [ -z "$out" ] || fail "Pi replay-queued-once test printed output: $out"
+  pass "an unhandled replay presents once; acceptance retires it for later replacements"
 }
 
 # A verified successor can die while the wake it was started for is still
@@ -2822,8 +3012,13 @@ import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const handlers = new Map();
+const eventHandlers = new Map();
 let tool = null;
-let deliveryStarted = false;
+let branchAccepted = false;
+let releaseDelivery = () => {};
+const blockedDelivery = new Promise((resolve) => {
+  releaseDelivery = resolve;
+});
 const prompts = [];
 const pi = {
   on(event, handler) {
@@ -2834,10 +3029,22 @@ const pi = {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
   sendUserMessage: async (message) => {
-    deliveryStarted = true;
     prompts.push(message);
   },
-  events: { on() {}, emit() {} },
+  events: {
+    on(event, handler) {
+      eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), handler]);
+    },
+    emit(event, data) {
+      // Only the FIRST dispatch is claimed by the open branch settlement; the
+      // replacement's own delivery must fall back to main.
+      if (event === "fm-branch-supervision:dispatch" && !branchAccepted) {
+        branchAccepted = true;
+        data.accept(blockedDelivery);
+      }
+      for (const handler of eventHandlers.get(event) ?? []) handler(data);
+    },
+  },
 };
 
 async function waitFor(pred, label) {
@@ -2853,7 +3060,10 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 const armed = await tool.execute("initial-arm", {}, undefined, undefined, {});
 if (!armed.details?.ok) throw new Error(`initial arm failed: ${JSON.stringify(armed.details)}`);
-await waitFor(() => deliveryStarted && existsSync(process.env.FM_CHILD_MARKER), "blocked delivery and successor child");
+// The wake is claimed by an accepting branch whose settlement stays open, so
+// the record is still undelivered when the session is replaced - the one shape
+// that still rides the replacement handoff.
+await waitFor(() => branchAccepted && existsSync(process.env.FM_CHILD_MARKER), "blocked delivery and successor child");
 writeFileSync(`${process.env.FM_HOME}/state/extensions`, "block handoff directory\n");
 let shutdownError = null;
 try {
@@ -2865,17 +3075,21 @@ if (!shutdownError) throw new Error("replacement shutdown hid the handoff persis
 await waitFor(() => !existsSync(process.env.FM_CHILD_MARKER), "successor cleanup after persistence failure");
 const { unlinkSync } = await import("node:fs");
 unlinkSync(`${process.env.FM_HOME}/state/extensions`);
+// Settle the open branch claim so the replacement's delivery can proceed.
+releaseDelivery();
 const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=persistence-failure`);
 replacementMod.default(pi);
-await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-await waitFor(() => prompts.length >= 2, "in-process handoff after persistence failure");
-if (!prompts[1].includes("signal: persistence failure actionable outcome")) {
+const replacementStart = handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await replacementStart;
+await waitFor(() => prompts.length >= 1, "in-process handoff after persistence failure");
+if (!prompts[0].includes("signal: persistence failure actionable outcome")) {
   throw new Error(`replacement lost the in-process actionable outcome: ${prompts.join(" | ")}`);
 }
-if (!prompts[1].includes("could not persist a replacement-session actionable wake")) {
-  throw new Error(`replacement did not surface the persistence failure: ${prompts[1]}`);
+if (!prompts[0].includes("could not persist a replacement-session actionable wake")) {
+  throw new Error(`replacement did not surface the persistence failure: ${prompts[0]}`);
 }
-handlers.get("before_agent_start")?.({ prompt: prompts[1] }, {});
+handlers.get("before_agent_start")?.({ prompt: prompts[0] }, {});
+releaseDelivery();
 process.exit(0);
 EOF
 )
@@ -3998,7 +4212,9 @@ test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
-test_pi_streaming_followup_is_replayed_after_replacement
+test_pi_streaming_followup_is_never_redelivered_after_replacement
+test_pi_replayed_acked_wake_of_torn_down_task_is_dropped
+test_pi_replayed_unhandled_wake_delivers_once_then_stops
 test_pi_streaming_time_delivery_keeps_the_successor_chain
 test_pi_successor_failure_during_delivery_is_retried_after_delivery
 test_pi_late_retiring_actionable_reaches_replacement
