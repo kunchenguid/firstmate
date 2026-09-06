@@ -26,6 +26,16 @@ if [ -n "${FM_TEST_LIB_SOURCED:-}" ]; then
 fi
 FM_TEST_LIB_SOURCED=1
 
+# Fixture scaffolding assumes the conventional 022 umask: home/state fixtures
+# must stay owner-private enough for bin/fm-procevent.sh's private-directory
+# guard and the path-trust walk to accept them, and a box whose login default
+# is 002 would otherwise hand every suite a 0775 chain that fails on its own
+# scaffolding rather than on anything under test (fm-agy-harness and
+# fm-teardown already pinned 022 locally for the same reason). Suites that
+# deliberately test permissive or tighter modes set their own umask at the
+# point of use.
+umask 022
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every
