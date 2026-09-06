@@ -29,13 +29,7 @@ document:
 # Invocation wiring is asserted by `tests/fm-lint.test.sh` and
 # `tests/fm-lint-workflows.test.sh`.
 #
-# Do not add commands.test here, complete or partial (a full tests/*.test.sh
-# walk, a --family/--changed selection, or any other pinned walk): no-mistakes
-# runs commands.test verbatim and unconditionally after EVERY fix round, so a
-# walk pinned here multiplies by round count and duplicates what CI already
-# owns. docs/configuration.md "Gate defaults (.no-mistakes.yaml)" owns the full
-# rationale and the measured regression this caused once (PR #3644).
-# tests/fm-nm-test-contract.test.sh is the regression guard enforcing this.
+# Keep commands.test absent; the firstmate-coding-guidelines skill owns this policy.
 commands:
   lint: 'bin/fm-lint.sh'
 
