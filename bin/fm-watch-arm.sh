@@ -37,8 +37,8 @@
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused
 # pid. A dead-pid holder may be reclaimed through the singleton recovery path.
 # An identity-matched live holder whose beacon age, or lock age when the beacon
-# is missing, has reached the stale threshold is waited on for at most 30
-# seconds, then reported and left alone without signalling or replacement. On started it waits the child and propagates the wake reason; on
+# is missing, has reached the stale threshold is waited on for roughly half the
+# effective stale grace, then reported and left alone without signalling or replacement. On started it waits the child and propagates the wake reason; on
 # attached it stays live across identity-matched successors. A cycle that ends
 # with no reason line and no healthy successor is resolved against the watcher's
 # identity-bound delivery record: a matching record reports that wake and exits

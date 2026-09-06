@@ -1769,6 +1769,36 @@ test_legacy_settled_record_in_hot_set_is_archived_by_the_tick() {
   pass "a legacy settled record in the hot set is archived by the tick"
 }
 
+test_partial_resolution_is_not_published_or_archived() {
+  local home state corr hot original_set first_rc=0
+  home=$(setup_parent retention-partial-resolution)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=7475
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "complete resolution fields")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  hot=$(fm_pending_reply_path "$state" "$corr")
+  printf 'done [corr=%s]: complete\n' "$corr" > "$state/hibit.status"
+  original_set=$(declare -f fm_pending_reply_set)
+  eval "$(printf '%s\n' "$original_set" | sed '1s/^fm_pending_reply_set /fm_pending_reply_set_original /')"
+  fm_pending_reply_set() {
+    if [ "$2" = resolved_via ] && [ "${FM_TEST_FAIL_RESOLVED_VIA:-0}" = 1 ]; then
+      return 1
+    fi
+    fm_pending_reply_set_original "$@"
+  }
+  FM_TEST_FAIL_RESOLVED_VIA=1 fm_pending_reply_try_resolve "$state" "$corr" || first_rc=$?
+  unset -f fm_pending_reply_set fm_pending_reply_set_original
+  eval "$original_set"
+  [ "$first_rc" -ne 0 ] || fail "partial resolution fixture unexpectedly succeeded"
+  [ "$(fm_pending_reply_get "$hot" phase)" != resolved ] \
+    || fail "partial resolution published the terminal phase"
+  [ -f "$hot" ] || fail "partial resolution was archived as complete"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "partial resolution retry should complete"
+  [ -f "$(fm_pending_reply_archive_dir "$state")/$corr" ] \
+    || fail "completed resolution retry was not archived"
+  pass "partial resolution cannot publish or archive terminal state"
+}
+
 test_resolved_escalation_retry_archives_immediately() {
   local home state corr hot archive
   home=$(setup_parent retention-resolve-retry)
@@ -1836,6 +1866,7 @@ test_archived_record_is_still_found_by_correlation_id
 test_create_regenerates_an_archived_correlation_collision
 test_pre_existing_archive_is_adopted_not_clobbered
 test_legacy_settled_record_in_hot_set_is_archived_by_the_tick
+test_partial_resolution_is_not_published_or_archived
 test_resolved_escalation_retry_archives_immediately
 test_archived_wrong_home_lookup_is_inert
 test_settled_record_with_an_open_escalation_stays_hot

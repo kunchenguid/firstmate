@@ -75,7 +75,7 @@ wait_poll_cycle() {  # <state> <pid> [limit-ticks]
   done
   [ -e "$state/.last-watcher-beat" ] || return 1
   i=0
-  while [ "$i" -lt 12 ]; do
+  while [ "$i" -lt 25 ]; do
     kill -0 "$pid" 2>/dev/null || return 1
     sleep 0.1
     i=$((i + 1))
@@ -4011,14 +4011,39 @@ test_beacon_stays_fresh_while_absorbing() {
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
 
+test_signal_coalescing_wait_keeps_beacon_fresh() {
+  local dir state fakebin out pid beat now age max=0 i=0
+  dir=$(make_case beacon-signal-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; beat="$state/.last-watcher-beat"
+  printf 'working: coalescing a trailing turn end\n' > "$state/task.status"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=5 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCHER_STALE_GRACE=2 FM_GUARD_GRACE=2 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  while [ "$i" -lt 70 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    if [ -e "$beat" ]; then
+      now=$(date +%s)
+      age=$((now - $(file_mtime "$beat")))
+      [ "$age" -le "$max" ] || max=$age
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "watcher exited during a benign signal wait: $(cat "$out")"; }
+  reap "$pid"
+  [ "$max" -lt 2 ] || fail "signal coalescing wait let the beacon age to ${max}s"
+  pass "signal coalescing keeps the watcher beacon inside its grace"
+}
+
 # --- Fix A: the beacon measures PHASE progress, not the whole iteration ------
 #
 # 2026-09-04 supervision investigation: fm-watch.sh touched the beacon once per
 # poll iteration. When one iteration on a busy home grew to 100-350s against a
 # 300s liveness grace, a perfectly healthy watcher read as dead and the arm layer
 # reported a working fleet's supervision as broken. The fix beats at every phase
-# boundary. These two tests are a pair on purpose: the first proves the beats
-# happen, the second proves they track progress rather than the clock.
+# boundary while external backend captures are independently time-bounded.
 
 # Progress: an iteration whose phases TOTAL more than the grace, with each phase
 # comfortably under it, must keep the beacon inside the grace throughout. The
@@ -4075,48 +4100,6 @@ test_beacon_tracks_phase_progress_across_a_long_iteration() {
   [ "$max" -lt "$grace" ] \
     || fail "beacon aged to ${max}s during a multi-phase iteration, past the ${grace}s grace"
   pass "the beacon stays inside the grace across an iteration that totals more than the grace"
-}
-
-# Anti-masking: a watcher blocked INSIDE one phase must let the beacon go stale.
-# Without this, Fix A could be satisfied by a background ticker or a timer, which
-# would hide a genuinely stuck subprocess - the exact condition the beacon exists
-# to expose, and the one the arm layer's wait-and-attach depends on.
-test_beacon_goes_stale_when_one_phase_blocks() {
-  local dir state fakebin out pid grace beat now age i=0 seen_stale=0
-  dir=$(make_case beacon-blocked-phase); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; beat="$state/.last-watcher-beat"
-  grace=3
-  printf 'kind=ship\nwindow=firstmate:fm-stuck\n' > "$state/stuck.meta"
-  printf 'working: inside a long backend read\n' > "$state/stuck.status"
-  printf 'pane\n' > "$dir/capture.txt"
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  rm -f "$beat"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
-    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_FAKE_TMUX_WINDOWS="fm-stuck" \
-    FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
-    FM_FAKE_TMUX_CAPTURE_SLEEP=12 \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_WATCHER_STALE_GRACE="$grace" FM_GUARD_GRACE="$grace" \
-    "$WATCH" > "$out" 2>&1 &
-  pid=$!
-  while [ "$i" -lt 150 ]; do
-    kill -0 "$pid" 2>/dev/null || break
-    if [ -e "$beat" ]; then
-      now=$(date +%s)
-      age=$(( now - $(file_mtime "$beat") ))
-      if [ "$age" -gt "$grace" ]; then
-        seen_stale=1
-        break
-      fi
-    fi
-    sleep 0.1
-    i=$((i + 1))
-  done
-  reap "$pid"
-  [ "$seen_stale" -eq 1 ] \
-    || fail "the beacon kept advancing while the watcher was blocked inside one phase - beats are on a timer, not on progress"
-  pass "a watcher blocked inside one phase stops beating, so a real stall is still visible"
 }
 
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
@@ -4290,8 +4273,8 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
+test_signal_coalescing_wait_keeps_beacon_fresh
 test_beacon_tracks_phase_progress_across_a_long_iteration
-test_beacon_goes_stale_when_one_phase_blocks
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

@@ -174,6 +174,7 @@ esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+case "$SIGNAL_GRACE" in ''|*[!0-9]*) SIGNAL_GRACE=30 ;; esac
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
@@ -196,6 +197,15 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # separately bounded so no single one can legitimately outlive the grace.
 beat() {
   touch "$STATE/.last-watcher-beat"
+}
+
+wait_with_beats() {
+  local remaining=$1
+  while [ "$remaining" -gt 0 ]; do
+    sleep 1
+    beat
+    remaining=$((remaining - 1))
+  done
 }
 
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
@@ -1804,7 +1814,7 @@ while :; do
   # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
-    sleep "$SIGNAL_GRACE"
+    wait_with_beats "$SIGNAL_GRACE"
     beat
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
