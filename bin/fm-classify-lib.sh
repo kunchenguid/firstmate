@@ -503,7 +503,9 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
     *) printf '%s' "$open"; return 0 ;;
   esac
   status_line_verb "$line" verb
-  case "$verb:$kind" in done:ship|done:scout|failed:ship|failed:scout) return 0 ;; esac
+  case "$line" in
+    *:*) case "$verb:$kind" in done:ship|done:scout|failed:ship|failed:scout) return 0 ;; esac ;;
+  esac
   case "$verb" in
     needs-decision|blocked|"$resolve"|"$held") ;;
     *) printf '%s' "$open"; return 0 ;;
@@ -734,10 +736,12 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # 6: a done/failed line on a ship or scout closes every open decision, and the
 # persisted version now carries the task kind, so cursors folded without that
 # terminal rule are discarded.
+# 7: that terminal rule now fires only for a line carrying a colon, so a cursor
+# folded when bare prose could close every open decision is discarded.
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=6
+FM_OPEN_DECISIONS_FOLD_VERSION=7
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity

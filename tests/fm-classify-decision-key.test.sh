@@ -401,3 +401,29 @@ test_closing_verb_filter_preserves_terminal_chronology() {
 
 test_closing_verb_filters_unrelated_history_without_subshell_growth
 test_closing_verb_filter_preserves_terminal_chronology
+
+test_bare_prose_cannot_impersonate_a_terminal_declaration() {
+  local dir f kind word open
+  dir=$(case_dir prose-terminal)
+  open=$(printf 'route\tneeds-decision\tA or B?\n')
+  for kind in ship scout; do
+    for word in 'done' failed; do
+      f="$dir/$kind-$word.status"
+      printf 'kind=%s\n' "$kind" > "$dir/$kind-$word.meta"
+      printf 'needs-decision [key=route]: A or B?\npaused: waiting on the vendor\nSteps remaining:\n %s\n' \
+        "$word" > "$f"
+      assert_fold "$f" "$open" "$kind: bare '$word' prose"
+      [ "$(status_key_closing_verb "$f" route)" = needs-decision ] \
+        || fail "$kind: bare '$word' prose closed a still-open key"
+      f="$dir/$kind-$word-real.status"
+      printf 'kind=%s\n' "$kind" > "$dir/$kind-$word-real.meta"
+      printf 'needs-decision [key=route]: A or B?\n%s: real outcome\n' "$word" > "$f"
+      assert_fold "$f" '' "$kind: genuine $word supersedes"
+      [ "$(status_key_closing_verb "$f" route)" = "$word" ] \
+        || fail "$kind: genuine $word no longer supersedes the open key"
+    done
+  done
+  pass "prose without a colon cannot impersonate a ship or scout terminal declaration"
+}
+
+test_bare_prose_cannot_impersonate_a_terminal_declaration
