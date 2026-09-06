@@ -20,6 +20,21 @@
 # bounded schedule, and a worker that never acknowledges surfaces through the
 # ordinary stale wake into stuck-crewmate-recovery.
 #
+# Zustellbeleg (captain directive, 2026-09-06, fm-send-rc0-ohne-zustellung):
+# fm_task_inbox_write and fm_task_inbox_write_idempotent never report a record
+# path (rc=0) on the strength of `mv`'s own exit code, or of a dedup scan's
+# earlier content match, alone. Both re-read the record straight back out of
+# the inbox through _fm_task_inbox_verify_record immediately before returning
+# and refuse loudly (nonzero, no path printed, record left in place) when that
+# proof fails. This closes the exact gap that let fm-send report rc=0 without
+# a delivered message: the check lives here, once, so every caller - the local
+# fm-send.sh plane and the host-local remote leg
+# (bin/fm-remote-secondmate-control.sh cmd_send) alike - inherits it without
+# restating it. A remote TRANSPORT loss (ssh exit 255/timeout) is a different,
+# already-handled case: fm-send.sh's own remote leg reports that as explicitly
+# unconfirmed rather than success, because no local proof is possible there at
+# all (see bin/fm-send.sh's remote-inbox-leg header).
+#
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
 #   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement
@@ -137,6 +152,10 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
 
 # Write one record into the next sequence slot: temp-write, then atomic
 # rename. Prints the record path. Caller must hold .seq.lock.
+# Never reports success on the mv's exit code alone: a successful rename
+# proves the syscall returned, not that the byte-exact record is readable
+# back out of the inbox, so the last step independently re-reads it before
+# this is allowed to look like delivery to any caller.
 _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
   local dir=$1 text=$2 delivery_mode=${3:-} seq tmp rec status=0
   seq=$(fm_task_inbox_next_seq "$dir")
@@ -150,6 +169,10 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
     printf '%s' "$text"
   } > "$tmp" && mv "$tmp" "$rec" || status=1
   [ "$status" -eq 0 ] || { rm -f "$tmp"; return 1; }
+  if ! _fm_task_inbox_verify_record "$rec" "$text"; then
+    echo "fm-task-inbox: wrote $rec but could not verify it back out of the inbox afterward; refusing to report delivery (record left in place for inspection)" >&2
+    return 1
+  fi
   printf '%s' "$rec"
 }
 
@@ -223,12 +246,39 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
     rm -f "${want:-}" 2>/dev/null || true
     status=1
   fi
+  # A dedup hit was matched by re-reading its content moments ago, but that is
+  # not the final word: re-verify right before this is allowed to report
+  # delivery, so a record removed or altered between the scan and here (a
+  # narrow race the .seq.lock does not fully close against an outside actor)
+  # cannot still be reported as a successful send.
+  if [ "$status" -eq 0 ] && [ -n "$rec" ] && ! _fm_task_inbox_verify_record "$rec" "$text"; then
+    echo "fm-task-inbox: dedup matched $rec but it could not be verified in the inbox afterward; refusing to report delivery" >&2
+    status=1
+  fi
   if [ "$status" -eq 0 ] && [ -z "$rec" ]; then
     rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode") || status=1
   fi
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
   printf '%s' "$rec"
+}
+
+# Zustellbeleg (delivery proof): independently prove a record that was just
+# written, or found by the idempotent dedup scan, actually lies in the inbox
+# with the exact intended body - never trust `mv`'s own exit code, or a
+# directory-scan match, as delivery proof by itself. Re-reads the record from
+# disk through the same fm_task_inbox_body every reader uses, piped straight
+# into cmp so no command-substitution trailing-newline stripping can paper
+# over a mismatch.
+_fm_task_inbox_verify_record() {  # <record-path> <expected-text>
+  local rec=$1 expected=$2 dir want ok=1
+  [ -f "$rec" ] || return 1
+  dir=${rec%/*}
+  want=$(mktemp "$dir/.verify.XXXXXX") || return 1
+  printf '%s' "$expected" > "$want" || { rm -f "$want"; return 1; }
+  fm_task_inbox_body "$rec" 2>/dev/null | cmp -s - "$want" || ok=0
+  rm -f "$want"
+  [ "$ok" -eq 1 ]
 }
 
 # The exact enqueued text back out of a record.
