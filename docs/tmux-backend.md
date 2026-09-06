@@ -1,6 +1,6 @@
 # tmux runtime backend
 
-tmux is Firstmate's default runtime backend and the fully supported baseline for secondmate homes.
+tmux is Firstmate's verified reference runtime backend and the fully supported baseline for secondmate homes.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
 ## Setup
