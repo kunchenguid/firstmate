@@ -2084,6 +2084,23 @@ record_script_result() {
   TOTAL=$((TOTAL + 1))
 }
 
+# The fleet-home overrides a test script must never inherit from whoever
+# invoked the runner. A test builds its own home; an inherited one is a
+# second, invisible input that can decide a verdict - bin/fm-arm-pretool-
+# check.sh, for one, reads FM_HOME as a classification input. The serial
+# lane below and the parallel worker subshell further down both scrub this
+# same list so a script's verdict cannot depend on the lane it was
+# scheduled into.
+FM_TEST_INHERITED_OVERRIDES=(
+  FM_HOME
+  FM_STATE_OVERRIDE
+  FM_DATA_OVERRIDE
+  FM_ROOT_OVERRIDE
+  FM_PROJECTS_OVERRIDE
+  FM_CONFIG_OVERRIDE
+  FM_BACKEND
+)
+
 # Run <script>, capturing output to <out>. <stream> 1 also echoes it live.
 # <id> only has to be unique within this run. When PER_SCRIPT_TIMEOUT_SECS is
 # positive, a script that outruns it is terminated and reported as exit 124: a
@@ -2091,18 +2108,25 @@ record_script_result() {
 # because an unbounded suite is what silently outruns its caller's budget.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
-  local rc
+  local rc name
+  local -a scrub=()
   : "$id"
   set +e
   if [ "$stream" -eq 1 ]; then
+    # The serial lane runs the script from this shell, so the scrub is an
+    # env -u prefix on the child rather than the parallel worker subshell's
+    # unset of its own environment.
+    for name in "${FM_TEST_INHERITED_OVERRIDES[@]}"; do
+      scrub+=(-u "$name")
+    done
     if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
       # Expansion is intentionally deferred to the child bash passed to -c.
       # shellcheck disable=SC2016
-      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
+      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" env "${scrub[@]}" bash -c \
         'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
       rc=$?
     else
-      bash "$script" 2>&1 | tee "$out"
+      env "${scrub[@]}" bash "$script" 2>&1 | tee "$out"
       rc=${PIPESTATUS[0]}
     fi
   elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
@@ -2242,8 +2266,7 @@ else
       set +e
       export TMPDIR="$work/tmp"
       export TMP="$work/tmp"
-      unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
-        FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
+      unset "${FM_TEST_INHERITED_OVERRIDES[@]}" 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
       set +e

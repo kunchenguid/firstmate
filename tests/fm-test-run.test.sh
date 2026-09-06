@@ -1294,6 +1294,91 @@ SH
   pass "jobs scheduler runs proven scripts; failure propagates; non-proven refused"
 }
 
+# A test script builds its own fleet home, so an FM_HOME (or any other
+# override) inherited from whoever invoked the runner is a second, invisible
+# input that can decide a verdict - bin/fm-arm-pretool-check.sh reads FM_HOME
+# as a classification input. The parallel worker subshell has always scrubbed
+# those; this pins that the serial path scrubs the identical list, so a
+# script cannot pass in one lane and fail in the other. The passthrough
+# marker proves the scrub is targeted and not a blanket wipe of the
+# environment a test still needs.
+test_fleet_home_overrides_are_scrubbed_in_both_lanes() {
+  local tmp repo runner evidence fake_bin a b rc lane name seen
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-scrub.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  evidence="$tmp/evidence"
+  fake_bin="$tmp/fake-bin"
+  a=tests/fm-brief.test.sh
+  b=tests/fm-composer-lib.test.sh
+  mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
+  cp "$RUNNER" "$runner"
+  cat >"$fake_bin/stat" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then
+  printf '700\n'
+  exit 0
+fi
+if [ "$1" = "-f" ] && [ "$2" = "%Lp" ]; then
+  printf '  File: "%s"\n    ID: fake Namelen: 255 Type: ext2/ext3\n700\n' "$3"
+  exit 0
+fi
+exit 1
+SH
+  cat >"$repo/$a" <<'SH'
+#!/usr/bin/env bash
+out="$SCRUB_EVIDENCE/$SCRUB_LANE"
+: >"$out"
+for name in FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
+  FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND; do
+  eval "value=\${$name:-absent}"
+  printf '%s=%s\n' "$name" "$value" >>"$out"
+done
+printf 'PASSTHROUGH=%s\n' "${SCRUB_PASSTHROUGH:-absent}" >>"$out"
+echo "ok - scrub fixture"
+SH
+  cat >"$repo/$b" <<'SH'
+#!/usr/bin/env bash
+echo "ok - filler fixture"
+SH
+  chmod +x "$runner" "$repo/$a" "$repo/$b" "$fake_bin/stat"
+
+  set +e
+  env FM_HOME="$tmp/leaked-home" FM_STATE_OVERRIDE="$tmp/leaked-state" \
+    FM_DATA_OVERRIDE="$tmp/leaked-data" FM_ROOT_OVERRIDE="$tmp/leaked-root" \
+    FM_PROJECTS_OVERRIDE="$tmp/leaked-projects" FM_CONFIG_OVERRIDE="$tmp/leaked-config" \
+    FM_BACKEND=leaked-backend SCRUB_EVIDENCE="$evidence" SCRUB_LANE=serial \
+    SCRUB_PASSTHROUGH=kept "$runner" "$a" >"$tmp/out-serial" 2>"$tmp/err-serial"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { cat "$tmp/out-serial" "$tmp/err-serial"; rm -rf "$tmp"; fail "serial scrub fixture run failed"; }
+
+  set +e
+  env FM_HOME="$tmp/leaked-home" FM_STATE_OVERRIDE="$tmp/leaked-state" \
+    FM_DATA_OVERRIDE="$tmp/leaked-data" FM_ROOT_OVERRIDE="$tmp/leaked-root" \
+    FM_PROJECTS_OVERRIDE="$tmp/leaked-projects" FM_CONFIG_OVERRIDE="$tmp/leaked-config" \
+    FM_BACKEND=leaked-backend SCRUB_EVIDENCE="$evidence" SCRUB_LANE=parallel \
+    SCRUB_PASSTHROUGH=kept PATH="$fake_bin:$PATH" \
+    "$runner" --jobs 2 "$a" "$b" >"$tmp/out-parallel" 2>"$tmp/err-parallel"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { cat "$tmp/out-parallel" "$tmp/err-parallel"; rm -rf "$tmp"; fail "parallel scrub fixture run failed"; }
+
+  for lane in serial parallel; do
+    seen="$evidence/$lane"
+    [ -s "$seen" ] || { rm -rf "$tmp"; fail "$lane lane produced no scrub evidence"; }
+    for name in FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
+      FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND; do
+      grep -qx "$name=absent" "$seen" \
+        || { rm -rf "$tmp"; fail "$lane lane leaked $name into the test script: $(grep "^$name=" "$seen")"; }
+    done
+    grep -qx 'PASSTHROUGH=kept' "$seen" \
+      || { rm -rf "$tmp"; fail "$lane lane wiped an unrelated variable the test still needs"; }
+  done
+  rm -rf "$tmp"
+  pass "both lanes scrub the same inherited fleet-home overrides and keep the rest of the environment"
+}
+
 test_herdr_ci_family_run_has_a_step_timeout() {
   # The required Herdr lane's hang tripwire is the family-run *step* bound, not
   # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
@@ -1397,5 +1482,6 @@ test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
+test_fleet_home_overrides_are_scrubbed_in_both_lanes
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
