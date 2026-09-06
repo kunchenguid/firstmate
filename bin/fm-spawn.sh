@@ -3464,8 +3464,53 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
+# Every spawned pane starts with the five FM_*_OVERRIDE variables genuinely
+# unset, regardless of KIND. Without this, a pane that inherits environment
+# from somewhere in the launching process tree (for example a secondmate
+# context still live in that tree) can pick up a foreign home's override
+# values instead of resolving its own defaults, which then makes the worker's
+# own watcher and fm-*.sh helpers look at the wrong home (see the WATCHER-DOWN
+# false-alarm class this fixed). An ordinary ship/scout worker has no home of
+# its own and is meant to resolve the same FM_HOME/FM_ROOT as the launching
+# firstmate, so it gets only this reset, never an FM_HOME redirection.
+# It must be `unset`, not an empty assignment prefix: consumers distinguish
+# unset from empty (bin/fm-check-unregister.sh resolves
+# `${FM_STATE_OVERRIDE-$FM_HOME/state}` and refuses an explicitly empty
+# override), and it must stay the outermost prefix so the secondmate's FM_HOME
+# redirect above still applies to the launched command, not to the reset.
+#
+# The reset is spelled twice because the pane's shell is the operator's login
+# shell, and bin/backends/tmux.sh recognizes fish alongside the POSIX family:
+# `unset` is not a fish builtin (fish spells it `set --erase`), so the POSIX
+# line alone is a silent no-op there and leaves exactly the inheritance this
+# guards against reachable on a fish pane. The fish spelling has to ride behind
+# a guard because `set --erase` is NOT inert in a POSIX shell - `set` is a
+# builtin everywhere, and a shell that reads `-e` out of that word would turn
+# on errexit in the pane. `status` is a fish builtin that no POSIX shell
+# provides, so `status fish-path` fails (silently - the diagnostic is
+# discarded) on every non-fish pane and the erase never runs there. The erase
+# is `--global` scoped because global is where fish lands a variable it
+# imported from the pane's inherited environment, which is the only copy this
+# reset is entitled to touch: unscoped, fish erases the smallest scope holding
+# the name, so an operator's persisted universal (`set -Ux FM_ROOT_OVERRIDE`)
+# would be deleted out of ~/.config/fish/fish_variables and stay deleted long
+# after the pane is gone. Such a universal is machine-wide operator config
+# rather than a foreign home leaking through the launching process tree, so it
+# deliberately survives the reset. Every command in the reset discards its own
+# stderr, and only stderr: `unset` is as foreign to fish as `status` is to a
+# POSIX shell, so without those redirections a fish pane would take fish's
+# unknown-command diagnostic on every spawn. Discarding stdout as well would
+# take a second redirection on one command, which a csh pane parses as an
+# ambiguous redirect and would drop the whole launch line over, so a fish pane
+# still takes the one path `status fish-path` prints - which costs no pane its
+# launch. Both spellings stay statement prefixes rather than an `env -u`
+# command prefix so that a non-simple raw launch command from the crew-dispatch
+# escape hatch (`cmd-a && cmd-b`) runs entirely under the reset instead of only
+# its first word.
+SPAWN_OVERRIDE_RESET_VARS='FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE'
+LAUNCH="unset $SPAWN_OVERRIDE_RESET_VARS 2>/dev/null; status fish-path 2>/dev/null && set --erase --global $SPAWN_OVERRIDE_RESET_VARS 2>/dev/null; $LAUNCH"
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi

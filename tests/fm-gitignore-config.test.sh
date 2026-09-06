@@ -82,8 +82,47 @@ test_scratchpad2_does_not_dirty_porcelain() {
   pass "scratchpad2/ does not make git status --porcelain dirty"
 }
 
+test_agent_tool_artifact_dirs_are_ignored() {
+  # Agent tooling writes its own runtime stores into the home it runs in (the
+  # squish MCP memory database landed a 708 KB SQLite file in a fix-round
+  # commit before .squish/ was ignored). Those stores belong to the workspace,
+  # not to the repository: an unignored one both dirties the tree that guarded
+  # sync paths refuse to touch and can be committed by accident, and a binary
+  # blob is not removable from history afterwards without a rewrite.
+  local dir sample
+  for dir in .no-mistakes .lavish .squish; do
+    for sample in "$dir/store.db" "$dir/nested/$(random_leaf artifact)"; do
+      git -C "$ROOT" check-ignore -q "$sample" \
+        || fail "git does not ignore $sample ($dir/ must be ignored as a directory)"
+    done
+  done
+  pass "agent tool artifact directories are ignored as directories"
+}
+
+test_agent_tool_artifact_dirs_dirty_no_porcelain() {
+  # The consumer that actually matters: git status --porcelain, which the sync
+  # paths read to decide whether a home is dirty.
+  local repo status
+  repo=$(mktemp -d "${TMPDIR:-/tmp}/fm-artifact-ignore.XXXXXX")
+  git init -q "$repo"
+  cp "$ROOT/.gitignore" "$repo/.gitignore"
+  git -C "$repo" add .gitignore
+  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'seed gitignore'
+  mkdir -p "$repo/.squish" "$repo/.lavish" "$repo/.no-mistakes/run"
+  printf 'SQLite format 3\0' > "$repo/.squish/squish.db"
+  printf 'artifact\n' > "$repo/.lavish/board.html"
+  printf 'run\n' > "$repo/.no-mistakes/run/state.json"
+  status=$(git -C "$repo" status --porcelain)
+  rm -rf "$repo"
+  [ -z "$status" ] || fail "agent tool artifacts still dirty porcelain: $status"
+  pass "agent tool artifact directories do not make git status --porcelain dirty"
+}
+
 test_config_dir_ignored_as_category
 test_unrelated_path_stays_visible
 test_scratchpad_prefix_is_ignored
 test_scratchpad_prefix_ignores_no_tracked_path
 test_scratchpad2_does_not_dirty_porcelain
+test_agent_tool_artifact_dirs_are_ignored
+test_agent_tool_artifact_dirs_dirty_no_porcelain

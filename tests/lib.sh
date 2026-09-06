@@ -40,6 +40,23 @@ export FM_GATE_REFUSE_BYPASS=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# --- spawn launch-line constants --------------------------------------------
+#
+# The FM_*_OVERRIDE reset prefix fm-spawn.sh puts at the head of every pane
+# launch line (bin/fm-spawn.sh). The launch line is an emitted interface that
+# several suites assert verbatim, so the literal lives here once: a spelling
+# change is a single edit instead of six, and no site can silently keep a stale
+# copy that then fails as a whole-string diff saying nothing about which token
+# moved. FM_TEST_SPAWN_RESET_POSIX is the POSIX half alone, for assertions that
+# pin only that half. Plain literals on purpose - deriving them by reading
+# bin/fm-spawn.sh would make every assertion vacuous.
+# shellcheck disable=SC2034
+FM_TEST_SPAWN_RESET_VARS='FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE'
+# shellcheck disable=SC2034
+FM_TEST_SPAWN_RESET_POSIX="unset $FM_TEST_SPAWN_RESET_VARS 2>/dev/null;"
+# shellcheck disable=SC2034
+FM_TEST_SPAWN_RESET_PREFIX="$FM_TEST_SPAWN_RESET_POSIX status fish-path 2>/dev/null && set --erase --global $FM_TEST_SPAWN_RESET_VARS 2>/dev/null;"
+
 # --- reporters --------------------------------------------------------------
 
 fail() {
