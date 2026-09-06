@@ -1,0 +1,19 @@
+$ bin/fm-teardown.sh stale-task --force
+exit_code=1
+--- stderr ---
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e /Users/kunchen/.no-mistakes/worktrees/016d88035d58/01M1TJBY608T137DYWBW3YGY44/.pi/extensions/fm-primary-turnend-guard.ts -e /Users/kunchen/.no-mistakes/worktrees/016d88035d58/01M1TJBY608T137DYWBW3YGY44/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REFUSED: task stale-task's recorded worktree /Users/kunchen/.no-mistakes/worktrees/016d88035d58/01M1TJBY608T137DYWBW3YGY44/.slot-collision-e2e.6IymFN/pool/1/project is also task live-task's recorded worktree.
+Returning that pool slot would kill live-task's processes and reset its copy, so nothing was changed - not even with --force.
+Reconcile whichever record is wrong (bin/fm-crew-state.sh stale-task; bin/fm-crew-state.sh live-task), then re-run teardown.
+--- postconditions ---
+live_worker=alive
+slot_payload=worker-data-must-survive
+stale_record=preserved
+cross_home_live_record=preserved
+mutating_runtime_calls=none
