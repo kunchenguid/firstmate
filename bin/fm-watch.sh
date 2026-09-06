@@ -970,17 +970,23 @@ clear_pause_tracking() {  # <window-key>
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered for a confidently dead ordinary crew, for a secondmate (whose endpoint
-# liveness this function deliberately never reads), or when the pane's busy state
-# is unresolvable: a well-formed declared pause is status-log evidence and is
-# believed even if the terminal cannot be classified.
+# liveness this function deliberately never reads), or when the endpoint is
+# CONFIRMED alive but its busy state is unresolvable: a well-formed declared pause
+# is status-log evidence and is believed even if the terminal cannot be classified.
+# An endpoint whose liveness itself could not be read stays unresolved rather than
+# absorbed, so an unreadable or lost worker still takes the bounded stale
+# inspection path instead of hiding for the whole pause cadence.
 #
 # pause_live_agent_blocks_absorb: 0 when a live ordinary crew with a resolvable
 # busy or idle verdict must still surface, so a worker at a live decision gate
-# is not silenced. 1 when the agent is dead, or when busy state is unknown.
+# is not silenced. 1 when the agent is confirmed dead, or confirmed alive with an
+# unresolvable busy verdict. Liveness itself reading unknown returns 0, since that
+# case cannot rule out a live decision gate.
 pause_live_agent_blocks_absorb() {  # <window> <task> [tail40]
   local win=$1 task=$2 tail40=${3-} agent_alive busy_state verdict
   agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
   [ "$agent_alive" != dead ] || return 1
+  [ "$agent_alive" = alive ] || return 0
   verdict=$(window_busy_verdict "$win" "$tail40" "$task")
   busy_state=${verdict%% *}
   [ "$busy_state" != unknown ]
@@ -1022,13 +1028,13 @@ pause_state_class() {  # <window> <task> [tail40]
   fi
   # Recover paused classification for a declared wait that authoritative crew state
   # could not name. Reaching here already proves an admissible case: an ordinary
-  # crew whose agent is dead or whose busy state is unresolvable, so no live
-  # decision gate with a readable pane is being silenced, or a secondmate, whose
-  # endpoint liveness is deliberately never read and so cannot supply that
-  # confirmation. Without the mate case a mate's captain hold - which has no
-  # current-state mapping and so arrives as `none` - would be silenced by every
-  # caller rather than taking the bounded re-surface cadence, and a forgotten hold
-  # would rot invisibly.
+  # crew whose agent is confirmed dead, or confirmed alive with an unresolvable
+  # busy verdict, so no live decision gate with a readable pane is being silenced,
+  # or a secondmate, whose endpoint liveness is deliberately never read and so
+  # cannot supply that confirmation. Without the mate case a mate's captain hold -
+  # which has no current-state mapping and so arrives as `none` - would be
+  # silenced by every caller rather than taking the bounded re-surface cadence,
+  # and a forgotten hold would rot invisibly.
   [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
@@ -1043,8 +1049,9 @@ pause_state_class() {  # <window> <task> [tail40]
 # agent with a resolvable idle or busy verdict even under a declared wait, so a
 # worker genuinely waiting on a decision is never silenced - which routes every
 # parked-but-live worker whose busy state can be read here, on first sight of
-# each distinct stale hash. An unresolvable busy verdict takes the paused-absorb
-# path instead.
+# each distinct stale hash. A confirmed-alive agent with an unresolvable busy
+# verdict takes the paused-absorb path instead; an agent whose liveness itself
+# is unresolvable also lands here, since it cannot rule out a live decision gate.
 #
 # So a declared wait bounds this path to the same once-per-PAUSE_RESURFACE_SECS
 # cadence resurface_absorbed owns for the absorbed paths, throttled by this
