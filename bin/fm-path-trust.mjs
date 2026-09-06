@@ -26,6 +26,13 @@
 // platform, and a directory service is free not to enumerate at all. Guessing
 // at that opened the first hole; it is not guessed at here.
 //
+// OWNERSHIP IS JUDGED ALONGSIDE THE MODE BITS. A tight mode cannot help a
+// directory owned by a different account: that account can chmod it back open,
+// or simply is its owner and needs no bits at all to replace what a resolution
+// finds there. So a walked directory whose uid is neither this process's nor
+// root is loose however tight its mode. The root carve-out keeps the standard
+// ancestors (/ , /home, /tmp, /Users) safe rather than failing every path.
+//
 // THE STICKY BIT IS THE ONE REAL EXCEPTION, and it is not a carve-out for
 // convenience: `chmod +t` is precisely the rule that stops a non-owner renaming
 // or removing an entry that is not theirs, which is the exact capability this
@@ -47,6 +54,7 @@ const MAX_LINKS = 40;
 // Throws if `dir` cannot be read; every caller here has already resolved it.
 function directoryIsLoose(dir, entry) {
   const st = fs.statSync(dir);
+  if (st.uid !== OUR_UID && st.uid !== 0) return true;
   if ((st.mode & 0o022) === 0) return false;
   if ((st.mode & 0o1000) === 0) return true;
   // Sticky: safe only for an existing entry nobody else may replace.

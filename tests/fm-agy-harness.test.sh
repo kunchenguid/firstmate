@@ -547,6 +547,38 @@ test_store_symlink_chain_through_a_loose_directory_is_refused() {
   pass "fm-agy-trust.sh: refuses a store symlink chain through a directory others can write"
 }
 
+# The path-trust walk also refuses a directory owned by a third account however
+# tight its mode, because that account can chmod it back open. An unprivileged
+# test cannot chown a fixture to a third account, so the predicate is asserted
+# against a directory discovered at runtime whose owner is neither this uid nor
+# root; machines with no such directory among the usual ancestors skip instead.
+test_directory_owned_by_another_account_is_loose() {
+  local real out
+  real=$(node -e '
+    const fs = require("node:fs");
+    const uid = process.getuid();
+    for (const c of ["/", "/etc", "/usr", "/usr/local", "/var", "/opt", "/srv",
+                     "/home", "/Users", "/Applications", "/Library"]) {
+      try {
+        const st = fs.statSync(c);
+        if (st.isDirectory() && st.uid !== uid && st.uid !== 0) {
+          console.log(fs.realpathSync(c));
+          process.exit(0);
+        }
+      } catch {}
+    }
+    process.exit(1);
+  ')
+  if [ -z "$real" ]; then
+    pass "fm-path-trust.mjs: refuses a directory owned by another account (no third-party-owned ancestor on this machine)"
+    return 0
+  fi
+  out=$(node "$ROOT/bin/fm-path-trust.mjs" check "$real" 2>&1)
+  expect_code 0 $?
+  assert_contains "$out" "loose:$real" "the verdict did not name the third-party-owned directory"
+  pass "fm-path-trust.mjs: refuses a directory owned by another account ($real)"
+}
+
 # The directory holding the store is not the only one that decides where the
 # store resolves: whoever can write an ANCESTOR of it renames it aside and plants
 # their own. ~/.gemini is not $HOME, and writing it does not own this login, so
@@ -1350,6 +1382,7 @@ test_symlinked_store_to_an_owned_target_is_accepted
 test_store_directory_writable_by_others_is_refused
 test_store_directory_writable_by_the_primary_group_is_refused
 test_store_symlink_chain_through_a_loose_directory_is_refused
+test_directory_owned_by_another_account_is_loose
 test_settings_directory_ancestor_writable_by_others_is_refused
 test_store_hop_ancestor_writable_by_others_is_refused
 test_created_store_directory_is_not_group_writable
