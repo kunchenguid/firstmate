@@ -1139,22 +1139,32 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   mkdir -p "$home/data/$id"
   tasks_in "$home" add "$id" "Review a terminal sample finding" --kind scout --repo sample --start >/dev/null
   write_origin_meta "$home" "$id"
-  printf 'needs-decision [key=default]: choose route A or route B\ndone: report complete\n' \
+  printf 'blocked [key=access]: waiting\ndone: report complete\nnote: cleanup complete\n' \
     > "$home/state/$id.status"
   printf '# Terminal sample review\n\nNo unresolved captain choice remains.\n' > "$home/data/$id/report.md"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
-  assert_contains "$open" "default" "fixture must retain the raw stale status decision"
+  [ -z "$open" ] || fail "the shared fold retained a pre-terminal blocker"
   run_captain "$home" complete "$id" --none >/dev/null \
     || fail "terminal single-owner stale status decision blocked empty inventory completion"
   run_captain "$home" verify "$id" >/dev/null \
     || fail "terminal single-owner stale status decision blocked inventory verification"
+  printf 'blocked [key=access]: reopened\nnote: more cleanup\n' >> "$home/state/$id.status"
+  if run_captain "$home" complete "$id" --none > "$home/reopened.out" 2> "$home/reopened.err"; then
+    fail "completion accepted a genuinely reopened post-terminal decision"
+  fi
+  if run_captain "$home" verify "$id" > "$home/reopened-verify.out" 2> "$home/reopened-verify.err"; then
+    fail "verification accepted a genuinely reopened post-terminal decision"
+  fi
+  printf 'resolved [key=access]: answered\nfailed: investigation ended\nnote: final cleanup\n' >> "$home/state/$id.status"
+  run_captain "$home" complete "$id" --none >/dev/null || fail "resolved reopening blocked completion"
+  run_captain "$home" verify "$id" >/dev/null || fail "resolved reopening blocked verification"
   run_teardown "$home" "$id" >/dev/null 2> "$home/terminal-teardown.err" \
     || fail "terminal single-owner stale status decision blocked teardown: $(cat "$home/terminal-teardown.err")"
 
   secondmate=sample-secondmate
   write_origin_meta "$home" "$secondmate" secondmate
-  printf 'needs-decision [key=route]: choose route A or route B\ndone: heartbeat complete\n' \
+  printf 'blocked [key=route]: waiting\ndone: heartbeat complete\nnote: cleanup complete\n' \
     > "$home/state/$secondmate.status"
   if run_captain "$home" complete "$secondmate" --none \
     > "$home/secondmate-terminal.out" 2> "$home/secondmate-terminal.err"; then

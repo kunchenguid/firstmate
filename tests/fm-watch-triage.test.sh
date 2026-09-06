@@ -302,6 +302,10 @@ test_stale_is_terminal_classifier() {
   stale_is_terminal "default:w1:p2" "$state" || fail "terminal herdr stale status not resolved through metadata"
   printf 'working: compiling\n' > "$state/nonterm.status"
   stale_is_terminal "sess:fm-nonterm" "$state" && fail "non-terminal stale classified terminal"
+  printf 'paused: waiting on upstream PR #123 to land\nOnce it is merged I will rebase and continue.\n' > "$state/prose-pause.status"
+  stale_is_terminal "sess:fm-prose-pause" "$state" && fail "prose mentioning a legacy token escalated a multi-line pause as terminal"
+  status_is_paused_or_captain_held "$(last_status_line "$state/prose-pause.status")" \
+    || fail "prose mentioning a legacy token hid a multi-line pause from the wait cadence"
   stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified terminal"
   pass "stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign"
 }
@@ -311,6 +315,11 @@ test_classifier_primitives() {
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
+  printf 'paused [corr=aaaa1111bbbb2222]: waiting for release\nMore detail: still waiting.\n\n' > "$state/x.status"
+  [ "$(last_status_line "$state/x.status")" = 'paused [corr=aaaa1111bbbb2222]: waiting for release' ] \
+    || fail "continuation prose hid the last declared status verb"
+  printf 'merged\n\n' > "$state/x.status"
+  [ "$(last_status_line "$state/x.status")" = merged ] || fail "legacy free-text status was lost"
   status_is_captain_relevant "done: b" || fail "done: not recognized as captain-relevant"
   status_is_captain_relevant "needs-decision [key=q1]: b" || fail "keyed needs-decision not recognized as captain-relevant"
   status_is_captain_relevant "working: b" && fail "working: wrongly recognized as captain-relevant"
@@ -1473,6 +1482,27 @@ test_secondmate_status_note_surfaced_despite_busy_agent() {
   pass "a secondmate's status note surfaces even while its own agent is busy"
 }
 
+test_secondmate_buried_block_wakes_despite_busy_agent() {
+  local dir state fakebin out suffix pid
+  for suffix in '' 'note: unrelated progress' 'resolved [key=other]: unrelated answer'; do
+    dir=$(make_case "secondmate-buried-block-${#suffix}"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    printf 'kind=secondmate\n' > "$state/mate.meta"
+    printf 'blocked [key=access]: need release access\n%s\n' "$suffix" > "$state/mate.status"
+    [ "$(status_line_verb "$(status_current_line "$state/mate.status" secondmate)")" = blocked ] \
+      || fail "unrelated '$suffix' hid an open blocker from current-state resolution"
+    export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+    watch_bg "$state" "$fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "busy secondmate's blocker did not wake after '$suffix'"
+    grep -F "signal: $state/mate.status" "$out" >/dev/null \
+      || fail "busy secondmate's blocker was not surfaced"
+    grep -F "$state/mate.status" "$state/.wake-queue" >/dev/null \
+      || fail "busy secondmate's blocker was not durably queued"
+  done
+  pass "a secondmate blocker wakes despite busy evidence and later unrelated appends"
+}
+
 test_self_announced_close_does_not_rewake_but_next_note_does() {
   local dir state fakebin out status_file pid rc
   dir=$(make_case self-close-quiet); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -2364,7 +2394,7 @@ test_secondmate_paused_resurfaces_in_normal_mode() {
   window="test:fm-secondmate-held"
   printf 'idle awaiting external\n' > "$capture_file"
   printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-held.meta"
-  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  printf 'paused: awaiting the upstream release\nThe release window opens tomorrow.\n\n' > "$statusf"
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
@@ -4141,6 +4171,7 @@ test_turn_ended_invalid_churn_deadline_surfaced
 test_turn_ended_surfaced_batch_opens_no_partial_deadline
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
+test_secondmate_buried_block_wakes_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
 test_needs_decision_signal_payload_marked_for_branch_exclusion

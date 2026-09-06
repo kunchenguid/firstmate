@@ -61,18 +61,22 @@
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
-#   3. Reconcile the status log: if its last line says needs-decision/blocked but
+#   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
+#      open decisions survive unrelated events and continuation prose cannot
+#      hide a declaration. Ship/scout terminal declarations supersede stale log
+#      decisions. If it says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked. A `blocked:` line that reports a
 #      refused or missing daemon socket remains blocked even if an attributed
-#      run record is stale or terminal. Other daemon, timeout, or unreachability
+#      run record is stale or terminal, for as long as that blocker is still the
+#      log's latest event. Other daemon, timeout, or unreachability
 #      claims are superseded BECAUSE THE RUN IS ALIVE when the run is
 #      running/fixing with recent reported activity: a killed or timed-out drive
 #      call is not daemon death, so that claim is answered by steering the crew
 #      to reattach, not by escalating.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
+#      recorded backend's pane busy state, then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
@@ -153,11 +157,6 @@ fi
 
 # --- status log ------------------------------------------------------------
 
-# Last non-empty status line; fm-classify-lib.sh owns leading-verb normalization.
-log_last_line() {
-  [ -f "$LOG" ] || return 1
-  grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
-}
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
 # a crew with no active run and an idle pane that declared a known external wait
@@ -178,7 +177,7 @@ map_log_state() {  # <line>
   esac
 }
 
-LOG_LINE=$(log_last_line || true)
+LOG_LINE=$(status_current_line "$LOG" "$KIND")
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 # --- remote secondmate: the true source is the remote endpoint ---------------
@@ -716,15 +715,22 @@ if [ "$HAVE_RUN" = 1 ]; then
   #
   # A refused or missing daemon socket is positive daemon-down evidence and
   # outranks any attributed run record, including a terminal one left behind
-  # after the daemon stopped. Other blocked claims caused by a timed-out drive
-  # call are contradicted only when the run reports recent
-  # activity; the answer is then to steer the crew to reattach without touching
-  # the shared daemon.
+  # after the daemon stopped, but only while that blocker is itself the log's
+  # LATEST recognized event: a later event of any kind means the crew has moved
+  # on, and the attributed run is the better witness again. The evidence is
+  # therefore read off that latest event, not off the reconciled declaration -
+  # the two are the same line while the blocker is current, and when they differ
+  # the open blocker is by definition no longer the log's tip. Other blocked
+  # claims caused by a timed-out drive call are contradicted only when the run
+  # reports recent activity; the answer is then to steer the crew to reattach
+  # without touching the shared daemon.
   case "$LOG_VERB" in
     needs-decision|blocked)
+      LOG_LATEST=$(last_status_line "$LOG")
       if [ "$LOG_VERB" = blocked ] \
-        && log_reports_daemon_socket_down "$LOG_LINE"; then
-        emit blocked status-log "$(status_line_note "$LOG_LINE")${SEP}daemon socket down despite attributed run record"
+        && [ "$(status_line_verb "$LOG_LATEST")" = blocked ] \
+        && log_reports_daemon_socket_down "$LOG_LATEST"; then
+        emit blocked status-log "$(status_line_note "$LOG_LATEST")${SEP}daemon socket down despite attributed run record"
       fi
       if [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
@@ -816,7 +822,7 @@ if [ "$KIND" != secondmate ]; then
   esac
 fi
 
-# Fall back to the status log's last line, but ONLY when its verb maps to a real
+# Fall back to the resolved status declaration, but ONLY when its verb maps to a real
 # run-state. A decision-closing event - resolved: (fm-classify-lib.sh's
 # FM_CLASSIFY_RESOLVE_VERB), and any future decision-only sibling - is NOT a state:
 # it exists solely to CLOSE a keyed decision in the durable fold, so a trailing

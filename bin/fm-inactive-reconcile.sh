@@ -347,20 +347,23 @@ notice_parent_report_failed() { # <record> <fingerprint> <payload>
   queue_notice_once "$record" "inactive-reconcile:$fingerprint" "$payload" || true
 }
 
-# The whole terminal line a child's ledger ends in, or non-zero when the ledger
-# is absent, unusable, still being appended (no trailing newline yet), or does
-# not end in a done or failed line.
+# The whole terminal event a child's ledger states, or non-zero when the ledger
+# is absent, unusable, or states no done or failed event (1), or when that event
+# is the line still being appended (2, no trailing newline yet). The event is
+# selected through the shared latest-event reader, so the ledger path owns a
+# terminal record whose continuation prose trails it, and an unfinished line of
+# ordinary prose withholds nothing.
 child_terminal_ledger_line() { # <status>
   local status=$1 snapshot last marker='__FM_LEDGER_SNAPSHOT_END__'
   [ -f "$status" ] && [ ! -L "$status" ] && [ -s "$status" ] || return 1
+  last=$(last_status_line "$status")
+  case "$(status_line_verb "$last")" in done|failed) ;; *) return 1 ;; esac
   snapshot=$(cat "$status"; printf '%s' "$marker") || return 1
-  case "$snapshot" in *$'\n'"$marker") ;; *) return 1 ;; esac
-  snapshot=${snapshot%"$marker"}
-  last=$(printf '%s' "$snapshot" | grep -v '^[[:space:]]*$' | tail -1)
-  case "$(status_line_verb "$last")" in
-    done|failed) printf '%s\n' "$last" ;;
-    *) return 1 ;;
+  case "$snapshot" in
+    *$'\n'"$marker") ;;
+    "$last$marker"|*$'\n'"$last$marker") return 2 ;;
   esac
+  printf '%s\n' "$last"
 }
 
 # Claim one already-delivered inactive fallback as the delivery of this ledger
@@ -401,12 +404,11 @@ report_child_ledger_locked() { # <id> <meta>
   pr=$(pr_for_task "$meta" "$status" "$last")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
-  previous=$(grep -v '^[[:space:]]*$' "$status" 2>/dev/null \
-    | tail -2 | awk 'NR == 1 { first = $0 } NR == 2 { print first }' || true)
-  predecessor_head=$(sha256_text "$previous")
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
+  last_status_line "$status" previous >/dev/null
+  predecessor_head=$(sha256_text "$previous")
   if claim_inactive_report_for_ledger "$id" "$incarnation" "$state" "$fingerprint" "$predecessor_head"; then
     # The fallback line is already on the parent channel. This reported ledger
     # receipt records that its richer rendering owes no second publication.
@@ -479,8 +481,9 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   last=$(last_status_line "$status")
   status_line_verb "$last" | grep -Fx captain-held >/dev/null 2>&1 && return 0
   # A ledger that states its own outcome is the ledger-first path's to deliver.
-  if [ -n "$self" ] && child_terminal_ledger_line "$status" >/dev/null; then
-    return 0
+  if [ -n "$self" ]; then
+    child_terminal_ledger_line "$status" >/dev/null
+    case "$?" in 0|2) return 0 ;; esac
   fi
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
@@ -489,7 +492,8 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   [ "$state_rc" -ne 124 ] || return 3
   last=$(last_status_line "$status")
   if [ -n "$self" ]; then
-    case "$(status_line_verb "$last")" in done|failed) return 0 ;; esac
+    child_terminal_ledger_line "$status" >/dev/null
+    case "$?" in 0|2) return 0 ;; esac
   fi
   case "$state_line" in
     'state: done '*) state='done' ;;
