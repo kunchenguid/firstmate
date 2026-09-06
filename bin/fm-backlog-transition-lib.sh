@@ -209,23 +209,69 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
   return 0
 }
 
-# Run `tasks-axi` with an optional FM_TASKS_AXI_TIMEOUT bound (GNU timeout, or
-# gtimeout where it is absent). A caller that holds a lock across the call -
-# the spawn commit and its preservation read-back run under the per-task meta
-# lock - sets the bound, so an unresponsive tasks-axi cannot hold that lock
-# open indefinitely; a timed-out call exits 124 and the callers report the
-# timeout as the reason through their existing error plumbing. Must be the
-# last command of a subshell: the exec keeps the tasks-axi process exactly
-# where the plain call sat, and the timeout kills the child, not the caller.
+# Run `tasks-axi` with an optional FM_TASKS_AXI_TIMEOUT bound. A caller that
+# holds a lock across the call - the spawn commit and its preservation
+# read-back run under the per-task meta lock - sets the bound, so an
+# unresponsive tasks-axi cannot hold that lock open indefinitely; a timed-out
+# call exits 124 and the callers report the timeout as the reason through
+# their existing error plumbing. GNU timeout is used where it exists,
+# gtimeout where coreutils ships under that name, and a small perl watchdog
+# elsewhere (a stock macOS host has perl but no timeout variant; perl is
+# already a hard dependency of this library's byte validators, so the
+# fallback adds no new tool). When a bound was requested but no bounding
+# mechanism exists at all, the call fails closed instead of running unbounded:
+# an unbounded call under the lock is exactly the hang the bound exists to
+# prevent. Must be the last command of a subshell: the exec keeps the
+# tasks-axi process exactly where the plain call sat, and the bound kills the
+# child, not the caller.
 fm_tasks_axi() {
-  if [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
-    if command -v timeout >/dev/null 2>&1; then
-      exec timeout "$FM_TASKS_AXI_TIMEOUT" tasks-axi "$@"
-    elif command -v gtimeout >/dev/null 2>&1; then
-      exec gtimeout "$FM_TASKS_AXI_TIMEOUT" tasks-axi "$@"
-    fi
+  local bound=${FM_TASKS_AXI_TIMEOUT:-}
+  if [ -z "$bound" ]; then
+    exec tasks-axi "$@"
   fi
-  exec tasks-axi "$@"
+  if command -v timeout >/dev/null 2>&1; then
+    exec timeout "$bound" tasks-axi "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    exec gtimeout "$bound" tasks-axi "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    # Fork, run tasks-axi in the child, and poll waitpid(WNOHANG) until the
+    # child exits or the bound expires: the same contract as
+    # `timeout $bound tasks-axi ...`. Expiry kills the child with TERM, waits
+    # one further bound of grace, then KILL, and exits 124 so the callers'
+    # timeout plumbing reports it. Polling rather than alarm+die keeps the
+    # bound off perl's platform-dependent syscall-restart signal semantics.
+    exec perl -MPOSIX=WNOHANG -e '
+      my $bound = shift;
+      exit 127 unless defined $bound && $bound =~ /\A[0-9]+\z/;
+      my $pid = fork;
+      exit 127 unless defined $pid;
+      if ($pid == 0) { exec @ARGV; exit 127 }
+      my $step = 0.05;
+      my $elapsed = 0;
+      while (1) {
+        my $done = waitpid $pid, WNOHANG;
+        exit(($? & 127) ? 128 + ($? & 127) : $? >> 8) if $done == $pid;
+        exit 127 if $done == -1;
+        if ($elapsed >= $bound) {
+          kill "TERM", $pid;
+          my $grace = 0;
+          my $gone = waitpid $pid, WNOHANG;
+          while ($gone == 0 && $grace < $bound) {
+            select undef, undef, undef, $step;
+            $grace += $step;
+            $gone = waitpid $pid, WNOHANG;
+          }
+          kill "KILL", $pid if $gone == 0;
+          waitpid $pid, 0;
+          exit 124;
+        }
+        select undef, undef, undef, $step;
+        $elapsed += $step;
+      }
+    ' -- "$bound" tasks-axi "$@"
+  fi
+  printf 'fm_tasks_axi: cannot bound tasks-axi within %ss: none of timeout, gtimeout, or perl is available\n' "$bound" >&2
+  exit 127
 }
 
 # Print one row's `tasks-axi show` output (plus stderr) from the backlog root,

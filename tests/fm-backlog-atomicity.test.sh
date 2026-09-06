@@ -273,6 +273,82 @@ SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }
 
+# --- fm_tasks_axi's own bound -------------------------------------------------
+
+# A PATH with no timeout variant on it - the stock-macOS shape, where GNU
+# timeout is absent and coreutils does not ship gtimeout. fm_tasks_axi must
+# still bound the call, through its perl watchdog, instead of running it
+# unbounded under the per-task meta lock.
+make_fallback_bin() {  # <case-dir> <tasks-axi-stub-script>
+  local case_dir=$1 stub=$2 fb="$1/fallbackbin"
+  mkdir -p "$fb"
+  ln -s "$(command -v perl)" "$fb/perl"
+  ln -s "$(command -v sleep)" "$fb/sleep"
+  printf '%s\n' "$stub" > "$fb/tasks-axi"
+  chmod +x "$fb/tasks-axi"
+  printf '%s\n' "$fb"
+}
+
+run_bounded_fm_tasks_axi() {  # <fallback-bin> <bound> [args...]
+  local fb=$1 bound=$2 out rc=0 saved_path=$PATH
+  shift 2
+  # The fallback shape itself: a PATH with no timeout variant on it. Set and
+  # restored here, never in a subshell, so the change cannot leak into other
+  # tests.
+  PATH="$fb"
+  out=$(
+    . "$ROOT/bin/fm-backlog-transition-lib.sh"
+    FM_TASKS_AXI_TIMEOUT="$bound" fm_tasks_axi "$@" 2>&1
+  ) || rc=$?
+  PATH=$saved_path
+  printf '%s' "$out"
+  return "$rc"
+}
+
+test_fm_tasks_axi_fallback_bounds_the_call_without_a_timeout_binary() {
+  local case_dir fb out rc=0 started
+  case_dir=$(make_home fm-tasks-axi-fallback)
+  fb=$(make_fallback_bin "$case_dir" '#!/bin/bash
+exec sleep 300')
+  started=$SECONDS
+  out=$(run_bounded_fm_tasks_axi "$fb" 2 show never-answers) || rc=$?
+  [ "$rc" -eq 124 ] \
+    || fail "the perl watchdog fallback did not report the call as timed out (rc=$rc, out=$out)"
+  [ $((SECONDS - started)) -ge 2 ] \
+    || fail "the perl watchdog fallback fired before the bound elapsed"
+  [ $((SECONDS - started)) -lt 20 ] \
+    || fail "the perl watchdog fallback did not bound the call (${SECONDS}s)"
+  pass "fm_tasks_axi bounds the call through its perl watchdog when no timeout binary exists"
+}
+
+test_fm_tasks_axi_fallback_passes_the_child_status_and_output_through() {
+  local case_dir fb out rc=0
+  case_dir=$(make_home fm-tasks-axi-passthrough)
+  fb=$(make_fallback_bin "$case_dir" '#!/bin/bash
+echo "stub failed"
+exit 7')
+  out=$(run_bounded_fm_tasks_axi "$fb" 5 show x) || rc=$?
+  [ "$rc" -eq 7 ] \
+    || fail "the perl watchdog fallback did not pass the child status through (rc=$rc)"
+  assert_contains "$out" "stub failed" "the perl watchdog fallback lost the child's output"
+  pass "fm_tasks_axi's perl watchdog passes the child status and output through unchanged"
+}
+
+test_fm_tasks_axi_fails_closed_when_nothing_can_bound_the_call() {
+  local case_dir fb out rc=0
+  case_dir=$(make_home fm-tasks-axi-unboundable)
+  fb="$case_dir/unboundablebin"
+  mkdir -p "$fb"
+  printf '#!/bin/bash\nexit 0\n' > "$fb/tasks-axi"
+  chmod +x "$fb/tasks-axi"
+  out=$(run_bounded_fm_tasks_axi "$fb" 5 show x) || rc=$?
+  [ "$rc" -eq 127 ] \
+    || fail "fm_tasks_axi ran the call although nothing could bound it (rc=$rc)"
+  assert_contains "$out" "cannot bound tasks-axi" \
+    "the fail-closed diagnostic did not say why the call was refused"
+  pass "fm_tasks_axi fails closed rather than running unbounded when no bounding mechanism exists"
+}
+
 change_row_on_second_show() {  # <case-dir> <done|rm>
   local case_dir=$1 action=$2 real
   real=$(command -v tasks-axi)
@@ -2531,6 +2607,9 @@ test_dispatch_defers_interruption_across_backlog_commit
 test_deferred_signal_reads_back_preserved_state
 test_deferred_signal_never_claims_unverified_preservation
 test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi
+test_fm_tasks_axi_fallback_bounds_the_call_without_a_timeout_binary
+test_fm_tasks_axi_fallback_passes_the_child_status_and_output_through
+test_fm_tasks_axi_fails_closed_when_nothing_can_bound_the_call
 test_dispatch_interruption_during_kimi_readiness_fails_before_commit
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
