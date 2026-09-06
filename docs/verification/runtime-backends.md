@@ -6,6 +6,21 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Foreground checkpoint ownership
+
+Verified 2026-09-06 on Darwin 25.5.0 with Bash 3.2.57 using isolated `FM_HOME` fixtures and the real watcher and checkpoint executables.
+This checks process ownership and exit behavior, independent of vendor-rendered harness output or a live backend session.
+Refresh with `bin/fm-test-run.sh tests/fm-watch-checkpoint.test.sh tests/fm-supervision-instructions.test.sh`.
+The checkpoint suite reported:
+
+```text
+ok - checkpoint reports self-eviction as failure and preserves the replacement owner
+ok - quiet checkpoint exits 124 with a clean checkpoint line and no live lock
+ok - checkpoint passes through a real watcher wake and leaves the queue for drain
+ok - checkpoint preserves watcher environment for registered custom checks
+ok - checkpoint rejects an existing watcher singleton as unowned
+```
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
