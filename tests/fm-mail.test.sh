@@ -185,6 +185,8 @@ SH
   expect_code 0 "$rc" "second poll must succeed"
   assert_not_contains "$out" "woke for 42" "re-polling the same uid must not re-wake"
   assert_contains "$out" "no new mail" "second poll reports no new mail"
+  assert_not_contains "$(cat "$HOME_DIR/state/.mail-seen" 2>/dev/null)" $'\t' \
+    "heal must record only the uid, not a tagged journal field, into the cursor"
   pass "fm-mail: poll surfaces each new uid exactly once"
 }
 
