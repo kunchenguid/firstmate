@@ -1406,6 +1406,27 @@ treehouse_return_is_index_lock_error() {
   printf '%s\n' "$text" | grep -Eq "Unable to create ['\"].*index\\.lock['\"]: File exists"
 }
 
+# On Windows a `treehouse return` can fail because a just-killed launcher or
+# harness process (the `env` that exec'd claude, a detached node hook, a shell)
+# is still exiting when treehouse takes its liveness snapshot. There is no Unix
+# process group to make this deterministic here, but the processes DO die a
+# moment later, so it is a transient worth the same bounded retry as a git
+# index.lock. Matched on Windows only.
+treehouse_return_is_windows_process_race() {
+  local text=$1
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$text" | grep -Eq "still has live processes after termination"
+}
+
+# A treehouse-return failure eligible for the bounded retry: a transient git
+# index.lock, or (Windows) a still-exiting process caught by the liveness snapshot.
+treehouse_return_is_retryable_transient() {
+  treehouse_return_is_index_lock_error "$1" || treehouse_return_is_windows_process_race "$1"
+}
+
 # Absolute path to the git index lock for a worktree/repo dir, or empty when it
 # cannot be resolved (dir missing or not a git worktree at all).
 worktree_git_lock_path() {
@@ -1462,7 +1483,7 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc retry_reason
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
@@ -1472,15 +1493,20 @@ teardown_treehouse_return() {
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 
-  if ! treehouse_return_is_index_lock_error "$out"; then
+  if ! treehouse_return_is_retryable_transient "$out"; then
     return 1
   fi
 
   lock=$(worktree_git_lock_path "$dir") || lock=""
   if [ -n "$lock" ]; then
     lock_desc=$lock
+    retry_reason="transient git lock ($lock_desc)"
+  elif treehouse_return_is_windows_process_race "$out"; then
+    lock_desc="index.lock"
+    retry_reason="a process still exiting"
   else
     lock_desc="index.lock"
+    retry_reason="transient git lock ($lock_desc)"
   fi
 
   max_retries=$TREEHOUSE_RETURN_LOCK_RETRIES
@@ -1488,18 +1514,18 @@ teardown_treehouse_return() {
 
   while [ "$attempt" -lt "$max_retries" ]; do
     attempt=$(( attempt + 1 ))
-    echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
+    echo "teardown: $label return failed ($retry_reason); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
     if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
-      echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
+      echo "teardown: $label return succeeded on retry" >&2
       return 0
     fi
     [ -n "$out" ] && printf '%s\n' "$out" >&2
 
-    if ! treehouse_return_is_index_lock_error "$out"; then
-      echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
+    if ! treehouse_return_is_retryable_transient "$out"; then
+      echo "teardown: $label return failed with a non-transient error after retry; aborting" >&2
       return 1
     fi
   done
@@ -1809,6 +1835,15 @@ reap_task_backend_process_group() {  # <label>
     echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2
     return 0
     ;;
+  esac
+  # Windows (Git Bash + psmux) has neither lsof nor Unix process groups, so a
+  # process-group reap is impossible here. Defer to the worktree return below:
+  # treehouse terminates the pane's processes (shell, subshell, harness, and
+  # their children) as it reclaims the worktree, and it kills them in tree order
+  # rather than force-killing the pane root first - which would orphan the
+  # harness's detached children and defeat the return's own liveness check.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
   esac
   leader_start=$(task_process_identity "$leader") || {
     echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2

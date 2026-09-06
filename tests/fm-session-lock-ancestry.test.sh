@@ -35,12 +35,33 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # --- unit layer: identity behind a deterministic process table ---------------
 
 # Run one library expression with <fakebin> shadowing ps. kill is stubbed so
-# liveness questions are decided by the process table alone.
+# liveness questions are decided by the process table alone. The fixtures below
+# model the `ps -o comm=/args=/ppid=` world, so the unix inspection path is
+# pinned explicitly - otherwise a Windows (MSYS) test host would select the
+# native-tree path and never touch the faked ps at all.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
-  PATH="$fakebin:$PATH" bash -c "
+  FM_LOCK_PLATFORM=unix PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return 0; }
+    $expr
+  " "$LIB"
+}
+
+# Run one library expression on the Windows inspection path. The native data
+# seams are shadowed from fixtures (as lib_eval shadows kill): this shell's MSYS
+# pid, the MSYS logical process table, the Win32_Process ancestry walk, the
+# `ps -W` native table, and the /proc winpid fallback. WIN_MSYSSELF, WIN_MSYSPS,
+# WIN_CHAIN, WIN_PSW, and WIN_SELF are read from the environment.
+win_eval() {  # <expression>
+  local expr=$1
+  FM_LOCK_PLATFORM=windows bash -c "
+    . \"\$0\"
+    _fm_win_self_msyspid() { printf '%s\n' \"\$WIN_MSYSSELF\"; }
+    _fm_win_ps() { cat \"\$WIN_MSYSPS\"; }
+    _fm_win_walk_rows() { [ \"\$1\" = \"\${WIN_EXPECT_START:-100}\" ] && cat \"\$WIN_CHAIN\"; }
+    _fm_win_ps_w() { cat \"\$WIN_PSW\"; }
+    _fm_win_self_winpid() { printf '%s\n' \"\$WIN_SELF\"; }
     $expr
   " "$LIB"
 }
@@ -220,6 +241,120 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# --- unit layer: the Windows native-tree inspection path ---------------------
+
+# Build the Windows fixtures for one scenario under <dir> and export the seams
+# win_eval reads. The chain is the real Git Bash shape: two bash.exe hops - whose
+# command lines mention ~/.claude, which must NOT be read as a harness - below the
+# claude.exe session, then cmd.exe and the terminal. Paths carry literal
+# backslashes, so every field is passed as a %s argument rather than baked into
+# the printf format.
+win_fixture() {  # <dir>
+  local dir=$1
+  mkdir -p "$dir/state"
+  {
+    printf '%s\t%s\t%s\n' 100 bash.exe '"C:\Program Files\Git\bin\..\usr\bin\bash.exe" -c "source /c/Users/u/.claude/shell-snapshots/snap.sh && eval cmd"'
+    printf '%s\t%s\t%s\n' 101 bash.exe '"C:\Program Files\Git\bin\bash.exe" -c "source /c/Users/u/.claude/shell-snapshots/snap.sh"'
+    printf '%s\t%s\t%s\n' 200 claude.exe claude
+    printf '%s\t%s\t%s\n' 300 cmd.exe 'C:\WINDOWS\system32\cmd.exe'
+    printf '%s\t%s\t%s\n' 400 wezterm-gui.exe '"C:\Program Files\WezTerm\wezterm-gui.exe" start'
+  } > "$dir/chain"
+  # ps -W table. STIME is two tokens ("Jul 30") on the claude row to prove the
+  # COMMAND parser anchors on the drive-letter path, not a fixed column offset;
+  # System has a bare COMMAND (no path) and must never resolve as a harness.
+  {
+    printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+    printf '%s\n' '  4217716       0       0        200   ?              0 Jul 30 C:\Users\u\AppData\Local\claude.exe'
+    printf '%s\n' '  4194308       0       0          4   ?              0 Jul 30 System'
+    printf '%s\n' '  4207384       0       0        101   ?              0 10:02:04 C:\Program Files\Git\usr\bin\bash.exe'
+  } > "$dir/psw"
+  # MSYS logical process table: this subprocess (msys 50, winpid 3856 - orphaned,
+  # never a valid Win32 walk start) under the topmost MSYS shell (msys 51, winpid
+  # 100), which was spawned directly by the harness and whose winpid IS the valid
+  # Win32 walk entry point. The chain above is keyed to start at winpid 100.
+  {
+    printf '%s\n' '      PID    PPID    PGID     WINPID   TTY   UID STIME COMMAND'
+    printf '%s\n' '   50 51 50 3856 ? 197609 17:31 /usr/bin/bash'
+    printf '%s\n' '   51 1 51 100 ? 197609 17:31 /usr/bin/bash'
+  } > "$dir/msysps"
+  export WIN_MSYSSELF=50 WIN_MSYSPS="$dir/msysps" WIN_CHAIN="$dir/chain" WIN_PSW="$dir/psw" WIN_SELF=999
+}
+
+test_windows_harness_is_found_beyond_the_bash_hops() {
+  local dir got
+  dir="$TMP_ROOT/win-found"
+  win_fixture "$dir"
+  # This is the whole bug: the MSYS ps saw only the bash hops and reported no
+  # harness, so every session refused the lock. The native-tree walk climbs past
+  # the two bash.exe hops - whose ~/.claude command lines are not harness
+  # evidence - to the claude.exe session.
+  got=$(win_eval 'fm_harness_ancestry_pid') \
+    || fail "windows: the claude.exe session was not found in the native ancestry at all"
+  [ "$got" = 200 ] || fail "windows: ancestry resolved '$got', expected the claude.exe pid 200"
+  printf '200\n' > "$dir/state/.lock"
+  win_eval "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "windows: the session holding the lock did not recognize itself as the owner"
+  pass "session-lock: on Windows the claude.exe session is found above the Git Bash hops"
+}
+
+test_windows_liveness_reads_the_native_process_table() {
+  local dir
+  dir="$TMP_ROOT/win-live"
+  win_fixture "$dir"
+  win_eval 'fm_harness_pid_alive 200' \
+    || fail "windows: a live claude.exe was not recognized as a harness (COMMAND parse under a two-token STIME)"
+  if win_eval 'fm_harness_pid_alive 101'; then
+    fail "windows: a live bash.exe passed the harness-liveness predicate"
+  fi
+  if win_eval 'fm_harness_pid_alive 4'; then
+    fail "windows: a bare-name native process (System) was treated as a harness"
+  fi
+  if win_eval 'fm_harness_pid_alive 999999'; then
+    fail "windows: a pid absent from the native-process table was reported alive"
+  fi
+  pass "session-lock: on Windows liveness and identity come from the native-process table"
+}
+
+test_windows_lock_above_the_harness_is_not_owned() {
+  local dir
+  dir="$TMP_ROOT/win-gap"
+  win_fixture "$dir"
+  # cmd.exe (300) sits above the contiguous harness run; a lock naming it is not
+  # this session's, exactly as on Unix ownership stops at the first non-harness.
+  printf '300\n' > "$dir/state/.lock"
+  if win_eval "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "windows: a lock held by a process above the harness was claimed as this session's own"
+  fi
+  pass "session-lock: on Windows ownership stops at the first non-harness above the session"
+}
+
+test_windows_ancestry_start_bridges_msys_to_windows() {
+  local dir got
+  dir="$TMP_ROOT/win-bridge"
+  win_fixture "$dir"
+  # A Git Bash subprocess is fork-orphaned: its own winpid (WIN_SELF=999) has no
+  # valid Win32 parent. The start pid must instead be the topmost MSYS shell's
+  # winpid (100), resolved by climbing the MSYS logical table.
+  got=$(win_eval '_fm_win_ancestry_start_winpid') \
+    || fail "windows: could not resolve an ancestry start winpid"
+  [ "$got" = 100 ] \
+    || fail "windows: start winpid resolved '$got', expected the top MSYS shell's winpid 100 (not the orphaned self)"
+  pass "session-lock: on Windows the ancestry start bridges the MSYS chain to the top shell's winpid"
+}
+
+test_windows_ancestry_start_falls_back_when_msys_table_lacks_self() {
+  local dir got
+  dir="$TMP_ROOT/win-fallback"
+  win_fixture "$dir"
+  # If the MSYS table cannot place this shell, fall back to its own winpid.
+  printf '%s\n' '      PID    PPID    PGID     WINPID   TTY   UID STIME COMMAND' > "$dir/msysps"
+  got=$(WIN_SELF=4242 win_eval '_fm_win_ancestry_start_winpid') \
+    || fail "windows: fallback did not produce a start winpid"
+  [ "$got" = 4242 ] \
+    || fail "windows: fallback resolved '$got', expected this shell's own winpid 4242"
+  pass "session-lock: on Windows the ancestry start falls back to the own winpid when the MSYS table lacks self"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +495,11 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_windows_harness_is_found_beyond_the_bash_hops
+test_windows_liveness_reads_the_native_process_table
+test_windows_lock_above_the_harness_is_not_owned
+test_windows_ancestry_start_bridges_msys_to_windows
+test_windows_ancestry_start_falls_back_when_msys_table_lacks_self
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

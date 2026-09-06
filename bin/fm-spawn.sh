@@ -2631,6 +2631,39 @@ spawn_current_path() {  # <target>
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
+
+# On Windows (Git Bash + psmux) `#{pane_current_path}` follows only the pane's
+# ROOT shell, never a subshell, and `treehouse get` opens a subshell in the
+# worktree - so the pane-path poll never sees the move and worktree discovery
+# times out though treehouse succeeded. Read the subshell's real $PWD instead:
+# have the pane print it wrapped in a unique marker and recover it from the
+# captured buffer. tmux-only, the sole Windows-capable backend.
+spawn_is_windows() {
+  case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; *) return 1 ;; esac
+}
+spawn_pane_pwd_sentinel() {  # <target> <nonce>
+  local target=$1 nonce=$2 cap marker path
+  spawn_send_text_line "$target" "printf '\\nFMWT${nonce}[%s]FMWT${nonce}\\n' \"\$PWD\""
+  sleep 0.4
+  cap=$(fm_backend_tmux_capture "$target" 50 2>/dev/null) || return 1
+  # The typed command line echoes back too, carrying a literal `[%s]`; keep only
+  # the resolved output marker, and the last of it if the pane scrolled.
+  marker=$(printf '%s\n' "$cap" | grep -oE "FMWT${nonce}\[[^]]*\]FMWT${nonce}" | grep -v '%s' | tail -1)
+  [ -n "$marker" ] || return 1
+  path=${marker#"FMWT${nonce}["}
+  path=${path%"]FMWT${nonce}"}
+  [ -n "$path" ] || return 1
+  printf '%s\n' "$path"
+}
+# The pane's effective worktree cwd: the sentinel read on Windows, the backend's
+# native current-path read everywhere else.
+spawn_worktree_probe_path() {  # <target> <nonce>
+  if spawn_is_windows && [ "$BACKEND" = tmux ]; then
+    spawn_pane_pwd_sentinel "$1" "$2"
+  else
+    spawn_current_path "$1"
+  fi
+}
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -2808,6 +2841,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # On Windows psmux implements `new-window -c <dir>` by sending a PowerShell cd
+  # to the pane, which errors in our bash pane and leaves it in the wrong repo -
+  # so `treehouse get` would worktree whatever repo the pane happened to land in.
+  # Put the pane in the project explicitly with a bash cd first.
+  if spawn_is_windows && [ "$BACKEND" = tmux ]; then
+    spawn_send_text_line "$WT_TARGET" "cd \"$PROJ_ABS\""
+  fi
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -2831,8 +2871,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
+  wt_nonce="wt$$"
   for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
+    p=$(spawn_worktree_probe_path "$WT_TARGET" "$wt_nonce" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
       if [ "$p_real" != "$PROJ_ABS_REAL" ]; then

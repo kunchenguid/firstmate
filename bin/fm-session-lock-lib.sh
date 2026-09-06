@@ -88,6 +88,147 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+# --- portable process inspection ---------------------------------------------
+#
+# The ancestry walk and the liveness predicate both need three facts about a
+# process - its command name, full argument string, and parent pid. On Linux and
+# macOS `ps -o comm=/args=/ppid= -p <pid>` supplies them. On Windows under Git
+# Bash / MSYS it does NOT: the bundled ps rejects -o and only knows Cygwin/MSYS
+# processes, so the Claude harness - a real ancestor two hops up the native
+# Windows process tree (bash -> bash -> claude.exe) - is invisible, the ancestry
+# walk finds nothing, and every session refuses the home's lock as read-only.
+#
+# The fix is to read the true tree from a Windows-aware source while keeping the
+# harness-identity policy below unchanged. On Windows the ancestry comes from
+# Win32_Process (fm-win-ancestry.ps1) and liveness from `ps -W`, which does list
+# native processes with their Windows pids. Pids are reported in the platform's
+# own space - Unix pids on Unix, Windows pids (WINPID) on Windows - and the lock
+# stores whatever this layer reports, so every consumer compares like with like.
+
+# Selected process-inspection platform: "windows" or "unix". FM_LOCK_PLATFORM
+# overrides detection so the Windows path is exercisable from a Unix test host.
+_fm_lock_platform() {
+  if [ -n "${FM_LOCK_PLATFORM:-}" ]; then printf '%s\n' "$FM_LOCK_PLATFORM"; return 0; fi
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) printf 'windows\n' ;;
+    *) printf 'unix\n' ;;
+  esac
+}
+
+# Windows data sources, each a single seam a test can shadow (as the suite
+# already shadows `kill`): this shell's MSYS pid and Windows pid, the MSYS
+# logical process table, the Win32_Process ancestry walk from a start pid, and
+# the native-process table.
+_fm_win_self_msyspid() { printf '%s\n' "$$"; }
+_fm_win_self_winpid() { cat "/proc/$$/winpid" 2>/dev/null; }
+_fm_win_ps() { ps 2>/dev/null; }
+_fm_win_walk_rows() {  # <start-winpid> -> pid<TAB>name<TAB>commandline, innermost first
+  local start=$1 script
+  script="$(dirname -- "${BASH_SOURCE[0]}")/fm-win-ancestry.ps1"
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$script" -Start "$start" 2>/dev/null | tr -d '\r'
+}
+_fm_win_ps_w() { ps -W 2>/dev/null; }
+
+# Emit the process ancestry innermost-first as: pid<TAB>comm<TAB>args, one row
+# per hop, bounded to 16 hops and stopping at the first unresolvable parent.
+# This is the only platform-specific step; the harness-identity policy in
+# fm_harness_ancestry_pids consumes these rows without caring which host they
+# came from.
+_fm_ancestry_rows() {
+  if [ "$(_fm_lock_platform)" = windows ]; then
+    _fm_win_ancestry_rows
+  else
+    _fm_unix_ancestry_rows
+  fi
+}
+
+_fm_unix_ancestry_rows() {
+  local pid=$$ comm args
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    printf '%s\t%s\t%s\n' "$pid" "$comm" "$args"
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    { [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; } || break
+  done
+}
+
+# The walker already emits pid<TAB>name<TAB>commandline innermost-first, with the
+# executable name playing the role of comm and the command line the role of args.
+# It must start from a shell with a valid Windows parent link (see
+# _fm_win_ancestry_start_winpid).
+_fm_win_ancestry_rows() {
+  local start
+  start=$(_fm_win_ancestry_start_winpid)
+  [ -n "$start" ] || return 0
+  _fm_win_walk_rows "$start"
+}
+
+# Print the Windows pid the ancestry walk must start from. Not simply this
+# shell's own winpid: an MSYS / Git Bash subprocess is fork/exec-orphaned - its
+# Windows ParentProcessId points at a launcher stub that has already exited - so
+# a Win32 walk from here stops at the first hop and never reaches the harness.
+# The MSYS ps table still records the logical parent chain though, and the
+# topmost MSYS shell in it was spawned directly by the harness (claude.exe ->
+# bash), so THAT shell keeps an intact Windows parent link. Climb the MSYS chain
+# to it and start the Win32 walk from its winpid. Fall back to this shell's own
+# winpid when the MSYS table cannot be read.
+_fm_win_ancestry_start_winpid() {
+  local top
+  top=$(_fm_win_top_msys_winpid)
+  if [ -n "$top" ]; then printf '%s\n' "$top"; return 0; fi
+  _fm_win_self_winpid | tr -d '[:space:]'
+}
+
+# Walk the MSYS logical process table from this shell to the topmost MSYS
+# ancestor (the one whose parent is not itself an MSYS process) and print that
+# ancestor's Windows pid. Columns are: PID PPID PGID WINPID ...
+_fm_win_top_msys_winpid() {
+  _fm_win_ps | awk -v self="$(_fm_win_self_msyspid)" '
+    NR == 1 { next }
+    { par[$1] = $2; win[$1] = $4 }
+    END {
+      if (!(self in win)) exit
+      cur = self; top = self
+      for (i = 0; i < 64 && (cur in par); i++) {
+        p = par[cur]
+        if (!(p in win)) break
+        top = p; cur = p
+      }
+      print win[top]
+    }
+  '
+}
+
+# Look up a live Windows process by its WINPID in the native-process table.
+# Prints comm<TAB>args - the executable path serving as both, which is all the
+# harness matcher needs - or returns 1 when the pid is not a live native process
+# with a resolvable executable path. `ps -W` columns are:
+#   PID PPID PGID WINPID TTY UID STIME COMMAND...
+# COMMAND is an absolute path that may contain spaces, and STIME is one token for
+# recent processes (HH:MM:SS) but two for older ones (MMM DD), so the column
+# offset of COMMAND is not fixed. Anchor on the first drive-letter or UNC path
+# token instead and rejoin to end of line. A native process whose COMMAND is a
+# bare name (System, Registry) has no such token and is never a harness, so it
+# is correctly reported as not found.
+_fm_win_proc_info() {  # <winpid>
+  _fm_win_ps_w | awk -v w="$1" '
+    $4 == w {
+      start = 0
+      for (i = 5; i <= NF; i++) {
+        if ($i ~ /^[A-Za-z]:[\\\/]/ || $i ~ /^\\\\/) { start = i; break }
+      }
+      if (start == 0) next
+      cmd = ""
+      for (i = start; i <= NF; i++) cmd = cmd (i > start ? " " : "") $i
+      printf "%s\t%s\n", cmd, cmd
+      found = 1
+      exit
+    }
+    END { if (!found) exit 1 }
+  '
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -107,10 +248,9 @@ fm_harness_process_matches() {  # <comm> <args>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
+  local pid comm args extending=0 printed=0
+  while IFS=$'\t' read -r pid comm args; do
+    [ -n "$pid" ] || continue
     if fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
       printed=1
@@ -119,9 +259,9 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
-  done
+  done <<EOF
+$(_fm_ancestry_rows)
+EOF
   [ "$printed" -eq 1 ]
 }
 
@@ -143,9 +283,19 @@ EOF
   printf '%s\n' "$outermost"
 }
 
-# True if $1 is a live process that looks like a verified harness.
+# True if $1 is a live process that looks like a verified harness. On Windows the
+# pid is a WINPID: `kill -0` would test the wrong (MSYS) pid space, so existence
+# and identity are read together from the native-process table instead.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
+  local pid=$1 comm args info
+  if [ "$(_fm_lock_platform)" = windows ]; then
+    info=$(_fm_win_proc_info "$pid") || return 1
+    [ -n "$info" ] || return 1
+    comm=${info%%$'\t'*}
+    args=${info#*$'\t'}
+    fm_harness_process_matches "$comm" "$args"
+    return
+  fi
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
