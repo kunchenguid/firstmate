@@ -969,10 +969,11 @@ test_unknown_backend_state_uses_capture_fallback() {
   local backend
   for backend in tmux zellij; do
     (
-      local home state corr rec sm_home
+      local home state corr rec sm_home bounded_log
       home=$(setup_parent "fallback-$backend")
       state="$home/state"
       sm_home="$home/sm"
+      bounded_log="$home/bounded-observation.log"
       mkdir -p "$sm_home/state"
       export FM_PENDING_REPLY_GRACE_SECS=10
       # These fixture overrides are intentionally scoped to the isolated subshell.
@@ -984,7 +985,11 @@ test_unknown_backend_state_uses_capture_fallback() {
       [ "$backend" = tmux ] || printf 'backend=%s\n' "$backend" >> "$state/hibit.meta"
       fm_backend_busy_state() { printf 'unknown'; }
       fm_backend_capture() { printf '%s' "$FM_PENDING_TEST_CAPTURE"; }
-      fm_backend_capture_bounded() { shift; fm_backend_capture "$@"; }
+      fm_pending_reply_backend_observation_bounded() {
+        : > "$bounded_log"
+        return 124
+      }
+      export FM_PENDING_REPLY_TICK_TIMEOUT=5
       # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
       # shellcheck disable=SC2329
       recovery_hook() { :; }
@@ -1010,9 +1015,11 @@ test_unknown_backend_state_uses_capture_fallback() {
       fm_pending_reply_tick "$state"
       [ "$(phase_of "$state" "$corr")" = escalated ] \
         || fail "$backend capture busy-to-idle should complete recovery turn"
+      [ ! -e "$bounded_log" ] \
+        || fail "$backend local observation spawned the Herdr-only timeout boundary"
     ) || fail "$backend unknown-state capture fallback failed"
   done
-  pass "tmux and zellij unknown states use bounded capture fallback"
+  pass "tmux and zellij observations stay local under watcher deadlines"
 }
 
 test_kimi_capture_fallback_uses_recorded_harness() (
