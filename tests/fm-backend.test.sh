@@ -1135,6 +1135,61 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+test_bounded_backend_reads_use_requested_deadline() {
+  local dir log status=0 started elapsed
+  dir="$TMP_ROOT/capture-timeout"
+  log="$dir/timeout"
+  mkdir -p "$dir"
+  fm_run_function_timed() {
+    printf '%s\n' "$1" > "$FM_TIMEOUT_LOG"
+    return 124
+  }
+  FM_TIMEOUT_LOG="$log" \
+    fm_backend_capture_bounded 5 herdr pane-1 40 >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 124 ] || fail "bounded backend capture returned $status instead of timeout"
+  [ "$(cat "$log" 2>/dev/null)" = 5 ] \
+    || fail "backend capture did not use its requested five-second deadline"
+  status=0
+  rm -f "$log"
+  FM_TIMEOUT_LOG="$log" \
+    fm_backend_busy_state_bounded 4 herdr pane-1 >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 124 ] || fail "bounded backend state returned $status instead of timeout"
+  [ "$(cat "$log" 2>/dev/null)" = 4 ] \
+    || fail "backend state did not use its requested four-second deadline"
+  status=0
+  rm -f "$log"
+  FM_TIMEOUT_LOG="$log" \
+    fm_backend_agent_alive_bounded 3 herdr pane-1 >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 124 ] || fail "bounded agent probe returned $status instead of timeout"
+  [ "$(cat "$log" 2>/dev/null)" = 3 ] \
+    || fail "agent probe did not use its requested three-second deadline"
+  status=0
+  rm -f "$log"
+  FM_TIMEOUT_LOG="$log" \
+    fm_backend_events_capable_bounded 2 herdr session >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 124 ] || fail "bounded event capability probe returned $status instead of timeout"
+  [ "$(cat "$log" 2>/dev/null)" = 2 ] \
+    || fail "event capability probe did not use its requested two-second deadline"
+  [ "$(fm_backend_agent_alive_bounded 3 tmux session:window)" = unknown ] \
+    || fail "bounded liveness accepted a local backend"
+  status=0
+  fm_backend_capture_bounded 5 tmux session:window 40 >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "bounded capture accepted a local backend"
+
+  unset -f fm_run_function_timed
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  fm_test_hung_backend_read() { sleep 5; }
+  status=0
+  started=$SECONDS
+  fm_run_function_timed 1 fm_test_hung_backend_read >/dev/null 2>&1 || status=$?
+  elapsed=$((SECONDS - started))
+  unset -f fm_test_hung_backend_read
+  [ "$status" -eq 124 ] || fail "a hung loaded function returned $status instead of timeout"
+  [ "$elapsed" -lt 4 ] || fail "loaded function exceeded its one-second deadline"
+  pass "bounded backend reads reuse loaded functions under requested deadlines"
+}
+
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id
@@ -1148,6 +1203,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_bounded_backend_reads_use_requested_deadline
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms

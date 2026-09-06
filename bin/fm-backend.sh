@@ -696,7 +696,7 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
 # at every call site. Each verified backend adds its own arm here, without
 # changing call sites.
 
-# fm_backend_capture: bounded plain-text session capture.
+# fm_backend_capture: plain-text session capture.
 fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   local backend=$1
   shift
@@ -709,6 +709,18 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     cmux) fm_backend_cmux_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
+}
+
+fm_backend_capture_bounded() {  # <seconds> <backend> <target> <lines> [expected-label]
+  local timeout=$1 backend=$2
+  shift
+  [ "$backend" = herdr ] || return 1
+  fm_backend_source "$backend" || return 1
+  if ! command -v fm_run_function_timed >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  fi
+  fm_run_function_timed "$timeout" fm_backend_capture "$@"
 }
 
 # fm_backend_send_key: one backend-supported named special key.
@@ -796,6 +808,18 @@ fm_backend_busy_state() {  # <backend> <target>
     herdr) fm_backend_herdr_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
+}
+
+fm_backend_busy_state_bounded() {  # <seconds> <backend> <target>
+  local timeout=$1 backend=$2
+  shift
+  [ "$backend" = herdr ] || { printf 'unknown'; return 0; }
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  if ! command -v fm_run_function_timed >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  fi
+  fm_run_function_timed "$timeout" fm_backend_busy_state "$@"
 }
 
 # fm_backend_composer_state: classify the composer/input area of <target> as
@@ -911,6 +935,18 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+fm_backend_agent_alive_bounded() {  # <seconds> <backend> <target>
+  local timeout=$1 backend=$2
+  shift
+  [ "$backend" = herdr ] || { printf 'unknown'; return 0; }
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  if ! command -v fm_run_function_timed >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  fi
+  fm_run_function_timed "$timeout" fm_backend_agent_alive "$@"
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks
@@ -944,6 +980,18 @@ fm_backend_events_capable() {  # <backend> <session>
     herdr) fm_backend_herdr_events_capable "$@" ;;
     *) return 1 ;;
   esac
+}
+
+fm_backend_events_capable_bounded() {  # <seconds> <backend> <session>
+  local timeout=$1 backend=$2
+  shift
+  fm_backend_has_push "$backend" || return 1
+  fm_backend_source "$backend" || return 1
+  if ! command -v fm_run_function_timed >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$FM_BACKEND_LIB_DIR/fm-timeout-lib.sh"
+  fi
+  fm_run_function_timed "$timeout" fm_backend_events_capable "$@"
 }
 
 # fm_backend_wait_transition: bounded wait for a fresh actionable (blocked)

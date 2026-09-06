@@ -138,7 +138,13 @@ mkdir -p "$STATE"
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
-WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+GUARD_GRACE=${FM_GUARD_GRACE:-300}
+WATCHER_EXTERNAL_TIMEOUT=$GUARD_GRACE
+case "$WATCHER_EXTERNAL_TIMEOUT" in ''|*[!0-9]*|0) WATCHER_EXTERNAL_TIMEOUT=300 ;; esac
+WATCHER_EXTERNAL_TIMEOUT=$((WATCHER_EXTERNAL_TIMEOUT / 2))
+[ "$WATCHER_EXTERNAL_TIMEOUT" -ge 1 ] || WATCHER_EXTERNAL_TIMEOUT=1
+[ "$WATCHER_EXTERNAL_TIMEOUT" -le 30 ] || WATCHER_EXTERNAL_TIMEOUT=30
+FM_CREW_STATE_TIMEOUT=$WATCHER_EXTERNAL_TIMEOUT
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
@@ -174,9 +180,41 @@ esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+case "$SIGNAL_GRACE" in ''|*[!0-9]*) SIGNAL_GRACE=30 ;; esac
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
+# Liveness beacon for the arm layer: a fresh mtime here means this watcher made
+# PROGRESS or remains inside an explicitly bounded wait, not merely that an
+# unbounded phase is still running. It is touched at poll phase boundaries,
+# between units of long scans, and during bounded waits, only by this watcher
+# process.
+#
+# Before the 2026-09-04 supervision investigation this was a single touch per
+# iteration, so the beacon measured a whole iteration rather than the current
+# phase. When one iteration on a busy home grew to 100-350s against a 300s grace
+# - dominated by an unbounded rescan of ~1,883 already-settled pending-reply
+# records - a perfectly healthy watcher read as dead, and the arm layer reported
+# a working fleet's supervision as broken.
+#
+# The invariant that makes the beacon mean anything: only the watcher process
+# touches it. There is no background ticker. Phase boundaries beat after real
+# progress, and bounded check captures beat while the watcher waits for their
+# enforced deadline; the parent enforces that same deadline so a broken timeout
+# child cannot keep the beacon fresh indefinitely. Every hang-capable external
+# phase is separately bounded so no such phase can outlive the grace.
+beat() {
+  touch "$STATE/.last-watcher-beat"
+}
+
+wait_with_beats() {
+  local deadline=$((SECONDS + $1))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 0.5
+    beat
+  done
+}
+
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only).
@@ -256,8 +294,8 @@ hash_pane() {
 # verdict returns 0: idle, unknown, and dead all return 1, so a converted
 # adapter whose semantic state is missing, malformed, stale, or unverified is
 # treated as not-provably-working and surfaces rather than being absorbed.
-# <tail40> is the same bounded capture already read for hashing and is
-# consumed only by the Grok-scoped fallback inside the contract.
+# <tail40> is the same watcher capture already read for hashing and is consumed
+# only by the Grok-scoped fallback inside the contract.
 window_is_busy() {  # <window> <tail40>
   local w=$1 tail40=$2 task meta verdict
   task=$(window_to_task "$w" "$STATE")
@@ -311,6 +349,25 @@ window_label() {
   [ -n "$task" ] && printf 'fm-%s' "$task"
 }
 
+# Herdr reads can block on its client/server boundary and retain the watcher
+# deadline. Local backend reads stay in-process so hot polling does not create a
+# timeout process group for every pane.
+watcher_backend_capture() {  # <backend> <target> <lines> [expected-label]
+  if [ "$1" = herdr ]; then
+    fm_backend_capture_bounded "$WATCHER_EXTERNAL_TIMEOUT" "$@"
+  else
+    fm_backend_capture "$@"
+  fi
+}
+
+watcher_backend_agent_alive() {  # <backend> <target>
+  if [ "$1" = herdr ]; then
+    fm_backend_agent_alive_bounded "$WATCHER_EXTERNAL_TIMEOUT" "$@"
+  else
+    fm_backend_agent_alive "$@"
+  fi
+}
+
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
@@ -356,6 +413,14 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # blocking. Runs for secondmates
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
+task_inbox_ring_bounded() {  # <backend> <target> <record-path> [expected-label]
+  local backend=$1
+  # Load the selected adapter once in the watcher. The bounded child inherits
+  # the complete ring implementation instead of re-sourcing its library graph.
+  fm_backend_source "$backend" || return 2
+  fm_run_function_timed "$WATCHER_EXTERNAL_TIMEOUT" fm_task_inbox_ring "$@"
+}
+
 inbox_steer_check() {  # <window> <task>
   local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
@@ -377,14 +442,16 @@ inbox_steer_check() {  # <window> <task>
       return 0
       ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
-  if window_is_busy "$w" "$tail40"; then
+  tail40=$(watcher_backend_capture \
+    "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
+  if FM_BUSY_NATIVE_TIMEOUT="$WATCHER_EXTERNAL_TIMEOUT" window_is_busy "$w" "$tail40"; then
     return 0
   fi
   case "$verb" in
     ring)
       ring_rc=0
-      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      task_inbox_ring_bounded "$backend" "$w" "$rec" \
+        "$(window_label "$w")" || ring_rc=$?
       if [ "$ring_rc" -eq 3 ]; then
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
@@ -465,7 +532,7 @@ inbox_steer_check() {  # <window> <task>
 # supervisor may need to read, so only the mechanical turn-end marker gets the
 # fallback.
 #
-# NOT a pure read: one bounded pane capture per referenced task that lacks
+# NOT a pure read: one pane capture per referenced task that lacks
 # authoritative proof. Once EVERY task passes, each churn-proven pane's prior
 # .stale- classification and wedge-escalation count are cleared because churn
 # begins a new quiet interval; retaining either would make the new interval
@@ -569,7 +636,8 @@ signal_turnend_panes_churned() {  # <file> ...
     [ "$hash_bytes" = 32 ] || return 1
     prev=$(cat "$hash_file" 2>/dev/null) || return 1
     [[ $prev =~ ^[0-9a-f]{32}$ ]] || return 1
-    now=$(fm_backend_capture "$backend" "$w" 40 "$label" 2>/dev/null) || return 1
+    now=$(watcher_backend_capture \
+      "$backend" "$w" 40 "$label" 2>/dev/null) || return 1
     [ -n "$now" ] || return 1
     [ "$(printf '%s' "$now" | hash_pane)" != "$prev" ] || return 1
     churned_keys+=("$key")
@@ -923,6 +991,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
         printf '%s' "$declared" > "$STATE/.stale-$key"
         wake "stale: $win"
       fi
+      triage_log "absorbed stale (away-mode declared wait already handed off): $win"
       return 0
     fi
     handle_paused_stale "$win" "$task" "$h"
@@ -973,7 +1042,8 @@ pause_state_class() {  # <window> <task>
   kind=$(window_kind "$win")
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$kind" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      agent_alive=$(watcher_backend_agent_alive \
+        "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
         printf 'none'
@@ -990,7 +1060,8 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ "$kind" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+    agent_alive=$(watcher_backend_agent_alive \
+      "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
       printf 'none'
@@ -1115,6 +1186,14 @@ procevent_surfaced_marker() {  # <queue-key>
   printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
 }
 
+procevent_source_registered() {
+  local source
+  for source in "$STATE/procevent"/*.source; do
+    [ -e "$source" ] && return 0
+  done
+  return 1
+}
+
 procevent_surface_after_output() {
   local output_status=$1 key marker tmp status=0
   if [ "$output_status" -eq 0 ]; then
@@ -1205,7 +1284,7 @@ fm_active_check_stop() {
 }
 
 run_check_capture() {
-  local pgid
+  local pgid deadline status
   fm_check_output_cleanup
   FM_CHECK_RESULT=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
@@ -1218,14 +1297,25 @@ run_check_capture() {
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
-  trap 'exit 1' HUP INT TERM
+  trap watcher_interrupt HUP INT TERM
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
     fm_check_output_cleanup
     return 1
   fi
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
+  deadline=$(( $(date +%s) + CHECK_TIMEOUT + 1 ))
+  while kill -0 "$FM_ACTIVE_CHECK_PID" 2>/dev/null; do
+    status=$(ps -o stat= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
+    case "$status" in *Z*) break ;; esac
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      fm_active_check_stop || return 1
+      break
+    fi
+    beat
+    sleep 1
+  done
+  [ -z "${FM_ACTIVE_CHECK_PID:-}" ] || wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
@@ -1379,7 +1469,8 @@ event_wait_or_sleep() {
   # read); re-probed only when the backend/session key changes.
   if [ "$_event_cap_key" != "$first_backend:$first_session" ]; then
     _event_cap_key="$first_backend:$first_session"
-    if fm_backend_events_capable "$first_backend" "$first_session"; then
+    if fm_backend_events_capable_bounded "$WATCHER_EXTERNAL_TIMEOUT" \
+      "$first_backend" "$first_session"; then
       _event_cap_ok=1
     else
       _event_cap_ok=0
@@ -1421,16 +1512,41 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
+# A live pid whose recorded process identity no longer matches is a reused-pid
+# stale lock, not a live watcher. Reclaim that watcher-specific shape without
+# signalling the unrelated process, then let the ordinary acquisition classify
+# the resulting free or concurrently replaced lock.
+fm_watcher_reclaim_reused_pid_lock "$STATE" "$WATCH_PATH" "$FM_HOME" || true
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+    # A live, identity-matched holder whose beacon has aged is a SUSPECTED STALL,
+    # not a proven wedge and not a failure. It leaves through its own typed exit
+    # status so the arm layer can wait for the holder to beat again rather than
+    # reporting a working fleet's supervision as broken - which is exactly what a
+    # bare exit 1 caused on 2026-09-04, when a healthy watcher's single poll
+    # iteration had simply outgrown the grace.
+    #
+    # Nothing on this path signals, kills or replaces that holder. Age alone
+    # cannot distinguish a slow phase from a stuck one, and the captain ruled on
+    # 2026-09-05 that a running monitor process is never terminated on age.
+    # The typed outcome is ONLY for a holder this home can positively identify as
+    # its own watcher. A proven reused-pid watcher lock was already reclaimed
+    # above without signalling its unrelated live process. Any remaining live
+    # lock that lacks matching watcher identity is unconfirmable, so the honest
+    # answer is still a loud failure. Without this gate the arm would wait on,
+    # and then quietly excuse, a lock no watcher can ever be confirmed behind.
+    if fm_watcher_busy_holder "$STATE" "$WATCH_PATH" "$GUARD_GRACE" "$FM_HOME"; then
+      echo "watcher: busy holder pid=$FM_WATCHER_BUSY_PID ${FM_WATCHER_BUSY_AGE_SOURCE}=${FM_WATCHER_BUSY_AGE}s (grace ${GUARD_GRACE}s)"
+      exit "$FM_WATCHER_BUSY_HOLDER_STATUS"
+    fi
     if [ -e "$BEAT" ]; then
       beat_age=$(fm_path_age "$BEAT")
-      if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
-        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
+      if [ "$beat_age" -ge "$GUARD_GRACE" ]; then
+        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${GUARD_GRACE}s); inspect or stop that watcher before re-arming." >&2
         exit 1
       fi
-    elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
+    elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$GUARD_GRACE" ]; then
       echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
       exit 1
     fi
@@ -1516,6 +1632,13 @@ reconcile_requests_detached() {
   RECONCILE_REQUEST_PID=$!
 }
 
+# A signal inside a recovery-marker critical section abandons that frame before
+# EXIT cleanup re-enters it, so release only that tracked lock before exiting.
+watcher_interrupt() {
+  fm_recovery_marker_interrupt_release
+  exit 1
+}
+
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
@@ -1536,7 +1659,7 @@ watcher_cleanup() {
   return "$cleanup_status"
 }
 trap watcher_cleanup EXIT
-trap 'exit 1' HUP INT TERM
+trap watcher_interrupt HUP INT TERM
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
@@ -1600,9 +1723,10 @@ while :; do
     exit 0
   fi
 
-  # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
-  # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # Start of an iteration is itself a progress boundary. Major phases below end
+  # with their own beat, and long scans or bounded waits publish intermediate
+  # progress, so the beacon ages only when watcher-owned progress stops.
+  beat
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
@@ -1619,7 +1743,14 @@ while :; do
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
-  fm_pending_reply_tick "$STATE" || true
+  # The tick beats between records through this callback, so a home with many
+  # open records stays visibly alive part-way through the phase rather than only
+  # at its end. beat runs in this process; the tick is called directly, never in
+  # a command substitution, so the beacon is still only ever touched here.
+  FM_PENDING_REPLY_TICK_BEAT=beat \
+    FM_PENDING_REPLY_TICK_TIMEOUT="$WATCHER_EXTERNAL_TIMEOUT" \
+    fm_pending_reply_tick "$STATE" || true
+  beat
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
@@ -1628,21 +1759,26 @@ while :; do
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
   }
+  beat
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
   # only republishes results already captured durably and restarts a source
-  # whose owner is gone. It is a no-op with nothing registered.
-  if [ -d "$STATE/procevent" ]; then
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+  # whose owner is gone. Skip the bounded child entirely when no source is
+  # registered; an empty registry has no reconciliation work.
+  if procevent_source_registered; then
+    fm_run_timed "$WATCHER_EXTERNAL_TIMEOUT" env FM_HOME="$FM_HOME" \
+      "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued
+  beat
 
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.
   resurface_after_downtime
+  beat
 
   # The existing poll loop also owns the bounded inactive-outcome cadence.
   # This is mechanical and silent unless a durable terminal-outcome obligation
@@ -1656,6 +1792,7 @@ while :; do
   else
     triage_log "inactive-outcome reconciliation unavailable"
   fi
+  beat
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
@@ -1668,6 +1805,10 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      # Each check is separately bounded by CHECK_TIMEOUT. run_check_capture
+      # beats while that enforced wait is making progress, and stops the process
+      # group itself if the child-side deadline does not return.
+      beat
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -1740,7 +1881,8 @@ while :; do
   # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
-    sleep "$SIGNAL_GRACE"
+    wait_with_beats "$SIGNAL_GRACE"
+    beat
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
@@ -1883,7 +2025,13 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # One beat per window: the stale scan reads every recorded window's pane, and
+    # on a large fleet that is the longest phase of the poll. Beating per window
+    # keeps the beacon measuring progress through the scan; hang-capable Herdr
+    # reads retain a deadline below the stale grace.
+    beat
+    tail40=$(watcher_backend_capture \
+      "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -1897,7 +2045,8 @@ EOF
     # harness renders its busy indicator) so busy-looking strings in displayed
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if FM_BUSY_NATIVE_TIMEOUT="$WATCHER_EXTERNAL_TIMEOUT" \
+      window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -2099,6 +2248,11 @@ EOF
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi
+
+  # Final phase boundary of the iteration: everything above completed, so record
+  # that progress before blocking. Without this the whole terminal wait would be
+  # charged to the last phase that happened to beat.
+  beat
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.

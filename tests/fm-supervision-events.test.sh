@@ -46,6 +46,27 @@ mkrec() {  # <pane_id> <status>
   fm_transition_record "$1" "wG" "" "$2" claude
 }
 
+(
+  routing_log="$TMP/backend-routing"
+  : > "$routing_log"
+  fm_backend_capture() { printf 'direct\n' >> "$routing_log"; printf direct; }
+  fm_backend_capture_bounded() { printf 'bounded\n' >> "$routing_log"; printf bounded; }
+  fm_backend_agent_alive() { printf 'direct\n' >> "$routing_log"; printf alive; }
+  fm_backend_agent_alive_bounded() { printf 'bounded\n' >> "$routing_log"; printf alive; }
+  [ "$(watcher_backend_capture tmux session:window 40)" = direct ] \
+    || fail "tmux capture did not stay on the direct watcher path"
+  [ "$(watcher_backend_capture herdr session:pane 40)" = bounded ] \
+    || fail "Herdr capture did not retain its timeout boundary"
+  [ "$(watcher_backend_agent_alive tmux session:window)" = alive ] \
+    || fail "tmux liveness did not stay on the direct watcher path"
+  [ "$(watcher_backend_agent_alive herdr session:pane)" = alive ] \
+    || fail "Herdr liveness did not retain its timeout boundary"
+  [ "$(grep -c '^direct$' "$routing_log")" = 2 ] \
+    && [ "$(grep -c '^bounded$' "$routing_log")" = 2 ] \
+    || fail "watcher backend routing did not split local and Herdr probes"
+) || exit 1
+pass "hot local probes stay direct while Herdr probes remain bounded"
+
 # --- handle_push_transition: enqueue + wake for a non-paused blocked crew -----
 
 reset_state
@@ -114,7 +135,7 @@ reset_state
 fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 CAP_CALLS=0
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
-fm_backend_events_capable() { CAP_CALLS=$((CAP_CALLS + 1)); return 0; }
+fm_backend_events_capable_bounded() { CAP_CALLS=$((CAP_CALLS + 1)); return 0; }
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_wait_transition() {
   [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" = 1 ] || fail "cached capability verdict was not passed to the wait"

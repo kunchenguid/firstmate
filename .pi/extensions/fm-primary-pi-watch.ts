@@ -49,9 +49,11 @@ type ArmResult = {
 type LockOwnership = "owned" | "missing" | "other";
 
 type CloseClassification = {
-  kind: "actionable" | "failure";
+  kind: "actionable" | "benign" | "failure";
   message: string;
 };
+
+type ArmReadiness = "ready" | "busy-holder-waiting" | "failed";
 
 type PendingActionableClose = {
   version: 1;
@@ -183,7 +185,7 @@ function replacementCoordinatorFor(handoff: string): ReplacementCoordinator {
   return created;
 }
 const replacementCoordinator = replacementCoordinatorFor(actionableHandoff);
-const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
+const armReadiness = new WeakMap<ChildProcess, Promise<ArmReadiness>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 // Children the extension itself asked to exit; their close is not a failure
 // of the successor and never earns a deferred retry.
@@ -400,6 +402,9 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
       kind: "failure",
       message: `watcher: FAILED - fm-watch-arm.sh exited ${code}${combined ? `\n${combined}` : ""}`,
     };
+  }
+  if (code === 0 && combined.split(/\r?\n/).includes("FM_WATCH_ARM_RESULT=busy-holder")) {
+    return { kind: "benign", message: "busy-holder" };
   }
   return {
     kind: "failure",
@@ -846,11 +851,11 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
+  function waitForReadiness(armChild: ChildProcess): Promise<ArmReadiness> {
     const readiness = armReadiness.get(armChild);
-    if (!readiness) return Promise.resolve(false);
+    if (!readiness) return Promise.resolve("failed");
     return new Promise((resolveReady) => {
-      const timer = setTimeout(() => resolveReady(false), armReadyTimeoutMs);
+      const timer = setTimeout(() => resolveReady("failed"), armReadyTimeoutMs);
       timer.unref();
       void readiness.then((ready) => {
         clearTimeout(timer);
@@ -884,8 +889,10 @@ export default function (pi: ExtensionAPI) {
       if (!generationIsLive(owner)) return { failure: "" };
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
-        return { failure: "", recovery: armRecovery.get(successorChild) };
+      if (replacement.ok && successorChild) {
+        const readiness = await waitForReadiness(successorChild);
+        if (readiness === "ready") return { failure: "", recovery: armRecovery.get(successorChild) };
+        if (readiness === "busy-holder-waiting") return { failure: "" };
       }
       if (replacement.ok) {
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
@@ -973,9 +980,10 @@ export default function (pi: ExtensionAPI) {
     let settled = false;
     let readinessSettled = false;
     let verified = false;
-    let resolveReadiness: (ready: boolean) => void = () => {};
+    let busyWaiting = false;
+    let resolveReadiness: (readiness: ArmReadiness) => void = () => {};
     let resolveClosed: () => void = () => {};
-    const readiness = new Promise<boolean>((resolveReady) => {
+    const readiness = new Promise<ArmReadiness>((resolveReady) => {
       resolveReadiness = resolveReady;
     });
     armReadiness.set(armChild, readiness);
@@ -983,18 +991,22 @@ export default function (pi: ExtensionAPI) {
       resolveClosed = resolveClosedChild;
     });
     armClose.set(armChild, closed);
-    const settleReadiness = (ready: boolean): void => {
+    const settleReadiness = (readinessState: ArmReadiness): void => {
       if (readinessSettled) return;
       readinessSettled = true;
-      verified = ready;
-      resolveReadiness(ready);
+      verified = readinessState === "ready";
+      resolveReadiness(readinessState);
     };
     const observeEstablishedArm = (): void => {
       const combined = `${stdout}\n${stderr}`;
       const recovery = combined.match(/^watcher: started pid=([0-9]+).* recovery-generation=([A-Za-z0-9._-]+)$/m);
       if (recovery) armRecovery.set(armChild, { watcherPid: recovery[1], generation: recovery[2] });
       if (/^watcher: (?:started|attached)\b/m.test(combined)) {
-        settleReadiness(true);
+        settleReadiness("ready");
+      }
+      if (combined.split(/\r?\n/).includes("FM_WATCH_ARM_STATE=busy-holder-waiting")) {
+        busyWaiting = true;
+        settleReadiness("busy-holder-waiting");
       }
       const reason = completedActionableLine(stdout) || completedActionableLine(stderr);
       if (reason && !armPendingActionable.has(armChild)) {
@@ -1018,7 +1030,7 @@ export default function (pi: ExtensionAPI) {
       if (settled) return;
       settled = true;
       resolveClosed();
-      settleReadiness(false);
+      settleReadiness("failed");
       releaseChild();
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
@@ -1031,12 +1043,16 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (!generationIsLive(owner)) return;
+      if (classification.kind === "benign") {
+        owner.retryFailures = 0;
+        return;
+      }
       if (owner.restoring) {
         // The pipeline is still delivering the wake this successor was
-        // started for. A verified successor that failed on its own keeps its
+        // started for. A preserved successor that failed on its own keeps its
         // bounded retry for the end of that delivery; an unready child closing
         // here was retired by the restoration itself.
-        if (verified && !armRetired.has(armChild)) {
+        if ((verified || busyWaiting) && !armRetired.has(armChild)) {
           owner.deferredClose = { message: classification.message, predecessorArmPid: predecessor };
         }
         return;
@@ -1047,11 +1063,17 @@ export default function (pi: ExtensionAPI) {
       if (settled) return;
       settled = true;
       resolveClosed();
-      settleReadiness(false);
+      settleReadiness("failed");
       releaseChild();
       if (!generationIsLive(owner)) return;
-      if (owner.restoring) return;
-      scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
+      const message = `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`;
+      if (owner.restoring) {
+        if (busyWaiting && !armRetired.has(armChild)) {
+          owner.deferredClose = { message, predecessorArmPid: String(armChild.pid ?? "") };
+        }
+        return;
+      }
+      scheduleRetry(owner, message, String(armChild.pid ?? ""));
     });
     return {
       ok: true,

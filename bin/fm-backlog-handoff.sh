@@ -467,6 +467,7 @@ wake_secondmate_receiver() { # <secondmate-id> <correlation-id>
 
 wake_pending_secondmate_receiver() { # <secondmate-id> [retain-confirmed]
   local id=$1 retain=${2:-0} marker="$STATE/.backlog-handoff-$1.wake-pending" value corr rec delivered
+  local lock hot phase valid=0 resolved=0
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   if [ ! -f "$marker" ] || [ -L "$marker" ]; then
     printf 'error: receiver wake state for secondmate %s is unsafe or invalid\n' "$id" >&2
@@ -489,16 +490,36 @@ wake_pending_secondmate_receiver() { # <secondmate-id> [retain-confirmed]
     return 1
     ;;
   esac
-  rec=$(fm_pending_reply_path "$STATE" "$corr")
-  [ -f "$rec" ] && [ ! -L "$rec" ] \
-    && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] || return 1
   fm_pending_reply_reconcile_delivery "$STATE" "$corr" >/dev/null 2>&1 || true
-  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
-  if [ -z "$delivered" ]; then
-    fm_pending_reply_corr_reusable "$STATE" "$corr" "$id" || {
+  lock="$STATE/.pending-reply-$corr.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  hot=$(fm_pending_reply_path "$STATE" "$corr")
+  if rec=$(fm_pending_reply_locate "$STATE" "$corr") \
+    && [ -f "$rec" ] && [ ! -L "$rec" ] \
+    && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ]; then
+    phase=$(fm_pending_reply_get "$rec" phase)
+    if [ "$rec" = "$hot" ] || [ "$phase" = resolved ]; then
+      delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+      valid=1
+    fi
+  fi
+  fm_lock_release "$lock"
+  [ "$valid" -eq 1 ] || return 1
+  if [ -z "$delivered" ] && ! fm_pending_reply_corr_reusable "$STATE" "$corr" "$id"; then
+    fm_lock_acquire_wait "$lock" || return 1
+    if rec=$(fm_pending_reply_locate "$STATE" "$corr") \
+      && [ -f "$rec" ] && [ ! -L "$rec" ] \
+      && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] \
+      && [ "$(fm_pending_reply_get "$rec" phase)" = resolved ]; then
+      resolved=1
+    fi
+    fm_lock_release "$lock"
+    if [ "$resolved" -eq 0 ]; then
       printf 'error: receiver wake delivery for secondmate %s is unresolved; refusing to resend correlation %s\n' "$id" "$corr" >&2
       return 1
-    }
+    fi
+  fi
+  if [ -z "$delivered" ] && [ "$resolved" -eq 0 ]; then
     wake_secondmate_receiver "$id" "$corr" || return 1
   fi
   if [ "$retain" = 1 ]; then

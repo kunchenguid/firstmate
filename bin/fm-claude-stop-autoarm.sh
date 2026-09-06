@@ -186,8 +186,8 @@ autoarm_commit() {  # <outcome> [marker-file]
 
 # Best-effort ownership-checked record for exit-0 paths, where supersession
 # changes nothing about the action taken.
-autoarm_record() {  # <outcome>
-  fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
+autoarm_record() {  # <outcome> [details]
+  fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" '' "${2:-}" >/dev/null 2>&1 || true
 }
 
 # X mode cadence: source the generated config so an X instance polls at its
@@ -205,6 +205,10 @@ autoarm_record() {  # <outcome>
 OUT=
 ACTIONABLE=0
 HEALTHY=0
+BUSY_HOLDER=0
+BUSY_HOLDER_PID=
+BUSY_HOLDER_AGE=
+BUSY_HOLDER_AGE_SOURCE=
 attempt=0
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # A superseded owner must not start or attach another watcher or mutate any
@@ -236,6 +240,21 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   fi
   [ "$ACTIONABLE" -eq 1 ] && break
 
+  # The arm entrypoint already performed the only bounded busy-holder wait.
+  # Consume that outcome before checking current health so a beat arriving after
+  # expiry cannot turn a detached arm close into a healthy attachment.
+  if [ -n "$OUT" ] \
+    && grep -Eq '^watcher: busy holder pid=[0-9]+ still running after [0-9]+s; left alone$' "$OUT" 2>/dev/null; then
+    BUSY_HOLDER_PID=$(sed -n 's/^watcher: busy holder pid=\([0-9][0-9]*\) [a-z][a-z]*=[0-9][0-9]*s .*$/\1/p' "$OUT" | head -1)
+    BUSY_HOLDER_AGE_SOURCE=$(sed -n 's/^watcher: busy holder pid=[0-9][0-9]* \([a-z][a-z]*\)=[0-9][0-9]*s .*$/\1/p' "$OUT" | head -1)
+    BUSY_HOLDER_AGE=$(sed -n 's/^watcher: busy holder pid=[0-9][0-9]* [a-z][a-z]*=\([0-9][0-9]*\)s .*$/\1/p' "$OUT" | head -1)
+    case "$BUSY_HOLDER_AGE_SOURCE" in beacon|lock) ;; *) BUSY_HOLDER_AGE_SOURCE= ;; esac
+    if [ -n "$BUSY_HOLDER_PID" ] && [ -n "$BUSY_HOLDER_AGE_SOURCE" ] && [ -n "$BUSY_HOLDER_AGE" ]; then
+      BUSY_HOLDER=1
+      break
+    fi
+  fi
+
   # A non-actionable close is benign when another verified watcher already owns
   # this home and is still beating within the shared grace window.
   if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
@@ -251,6 +270,20 @@ done
 # left to supervise, so close quietly instead of waking the model.
 if ! need_supervision; then
   autoarm_record clean
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 0
+fi
+
+# A live, identity-matched watcher still holds this home with a stale or absent
+# beacon. That is a suspected stall, not a broken auto-arm mechanism, so the
+# cycle closes quietly and the next turn end arms again. Reporting it as
+# "auto-arm FAILED" is the exact false alarm the 2026-09-04 investigation traced:
+# supervision was working, and the notice cost the main firstmate about four
+# recovery turns.
+# Nothing here signals, kills or replaces the holder.
+if [ "$BUSY_HOLDER" -eq 1 ]; then
+  fm_autoarm_reset_owned "$STATE" "$MY_GEN" >/dev/null 2>&1 || true
+  autoarm_record busy-holder "holder_pid=$BUSY_HOLDER_PID ${BUSY_HOLDER_AGE_SOURCE}_age=${BUSY_HOLDER_AGE}s"
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi

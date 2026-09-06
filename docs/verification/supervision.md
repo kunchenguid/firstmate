@@ -279,7 +279,7 @@ ok - cursor primary: an away-mode escalation is delivered, confirmed, and proces
 ```
 
 The live run proved that session start acquires the fleet lock through Cursor's structural process identity in `bin/fm-cursor-lib.sh`; `tests/fm-session-lock-ancestry.test.sh` pins the same ancestry path portably.
-It also proved that Cursor's `autoarm` supervision model lets the mid-turn pull guard accept a fresh beacon after the between-turn watcher closes; `tests/fm-guard-stale-banner.test.sh` pins that model-aware verdict.
+The model-aware mid-turn pull-guard behavior observed in that run was later superseded by the full watcher-liveness banner removal documented below.
 The baton is claimed only by the next `stop`, so an actionable close before that claim can still produce one real follow-up from the sole existing park; durable wake handling is idempotent, and any older park still running after the claim stands down.
 Cursor's `beforeSubmitPrompt` step could close that exact window because it fires once on a real captain message and not on hook-driven follow-ups, but registering it is deliberately deferred alongside `preCompact`.
 
@@ -392,6 +392,10 @@ fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 fm-doc-audience-check: ok surfaces=67 local_links=243
 FM_TEST_SUMMARY total=5 failed=0 skipped_gate=0 duration_ms=280160
 ```
+
+**Superseded on 2026-09-05:** the passive `WATCHER DOWN - SUPERVISION IS OFF` banner quoted in this section no longer exists.
+It was removed from `bin/fm-guard.sh` for every supervision model, so the observed output below records behavior that is no longer current.
+The output remains only as dated evidence of the superseded check; `tests/fm-guard-stale-banner.test.sh` now proves watcher-liveness silence and retention of the guard's independent alarms, while `tests/fm-secondmate-harness.test.sh` separately preserves harness-model resolution.
 
 The same correction was verified against a live Pi primary's own supervision evidence on 2026-08-13.
 The hand-off was captured live at beacon age 63s, then the home's `state/.lock`, `state/.last-watcher-beat`, both `state/.pi-*-extension-loaded` markers, and both `.pi/extensions/*.ts` builds were copied into an isolated fixture with no watcher lock.

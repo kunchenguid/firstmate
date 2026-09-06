@@ -1763,7 +1763,12 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 crew_absorb_class() {  # <id>
   local id=$1 line state src
   [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  if [ -n "${FM_CREW_STATE_TIMEOUT:-}" ]; then
+    line=$(fm_run_timed "$FM_CREW_STATE_TIMEOUT" \
+      "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  else
+    line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  fi
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi

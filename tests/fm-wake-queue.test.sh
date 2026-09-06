@@ -433,14 +433,30 @@ test_empty_prefix_mate_preserves_other_mate_receipt() {
   pass "empty prefix mate cleanup preserves another mate's stall receipt"
 }
 
-test_drain_asserts_watcher_liveness() {
+# The drain runs bin/fm-guard.sh, which no longer reports watcher liveness at
+# all: the passive "WATCHER DOWN - SUPERVISION IS OFF" banner was removed for
+# every supervision model after the 2026-09-04 investigation showed it could not
+# tell a working watcher from a stopped one, and nothing replaced it. What this
+# case pins is that the removal is complete on the drain path in BOTH directions,
+# and that it did not take the independent queued-wakes warning with it.
+test_drain_reports_no_watcher_liveness() {
   local dir state err identity
   dir=$(make_case drain-liveness)
   state="$dir/state"
   err="$dir/drain.err"
   printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || fail "drain failed while asserting liveness"
-  grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "drain did not surface the watcher-down banner with work in flight and no live watcher"
+
+  # Work in flight and no live watcher at all: the worst reading the old banner
+  # had, and the one it was wrong about nearly every time.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || fail "drain failed with no live watcher"
+  ! grep -F 'WATCHER DOWN' "$err" >/dev/null \
+    || fail "the removed watcher-down banner is back on the drain path"
+  ! grep -F 'SUPERVISION IS OFF' "$err" >/dev/null \
+    || fail "the removed supervision-off text is back on the drain path"
+  ! grep -F 'watcher still down' "$err" >/dev/null \
+    || fail "the removed episode reminder is back on the drain path"
+
+  # A live, identity-matched watcher with a fresh beacon: silent, as before.
   : > "$err"
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$") \
     || fail "could not identify the live watcher fixture"
@@ -452,10 +468,10 @@ test_drain_asserts_watcher_liveness() {
   touch "$state/.last-watcher-beat"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" \
     || fail "drain failed with a live watcher and fresh beacon"
-  if grep -F 'WATCHER DOWN' "$err" >/dev/null; then
-    fail "drain false-alarmed with a live watcher and fresh beacon"
-  fi
-  pass "drain asserts watcher liveness: warns on a lapse, stays silent for a live watcher with a fresh beacon"
+  ! grep -F 'WATCHER DOWN' "$err" >/dev/null \
+    || fail "drain false-alarmed with a live watcher and fresh beacon"
+
+  pass "the drain reports nothing about watcher liveness, in either direction"
 }
 
 test_structural_signal_enrichment_preserves_raw_rows() {
@@ -1216,36 +1232,92 @@ test_self_announced_append_guards() {
   pass "self-announced appends suppress only their own bytes and fail toward waking"
 }
 
-# A trap that fires inside a lock's critical section abandons the holding
-# frame, and the exit path then re-acquires the same lock (a TERM inside a
-# recovery-marker section is the reproduced case: the watcher's reap wedged
-# forever spinning against its own pid). The same-process re-acquire must
-# reclaim the abandoned hold, while a SUBSHELL still waits on its parent's
-# live hold exactly as before.
-test_self_held_lock_reclaims_instead_of_deadlocking() {
-  local dir state rc
+# Reproduce the watcher interruption inside recovery-marker publication. The
+# interrupt path must release that caller-owned lock before EXIT cleanup publishes
+# downtime, while ordinary nested and subshell acquisitions still preserve a live
+# outer critical section.
+test_watcher_interrupt_releases_recovery_marker_lock() {
+  local dir state fakebin out real_mv pid rc=0
   dir=$(make_case self-held-lock)
   state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "$FM_INTERRUPT_MARKER" ] && [ ! -e "$FM_INTERRUPT_ONCE" ]; then
+  : > "$FM_INTERRUPT_ONCE"
+  kill -TERM "$PPID"
+  exit 1
+fi
+exec "$FM_REAL_MV" "$@"
+SH
+  chmod +x "$fakebin/mv"
+  printf 'blocked: interrupt marker publication\n' > "$state/task.status"
+  PATH="$fakebin:$PATH" FM_REAL_MV="$real_mv" \
+    FM_INTERRUPT_MARKER="$state/.watcher-down" FM_INTERRUPT_ONCE="$dir/interrupted" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  wait_for_exit "$pid" 50 || rc=$?
+  [ "$rc" -ne 124 ] || fail "interrupted watcher wedged during EXIT cleanup"
+  [ -e "$dir/interrupted" ] || fail "watcher never entered recovery-marker publication"
+  [ ! -e "$state/.watcher-down.lock" ] && [ ! -L "$state/.watcher-down.lock" ] \
+    || fail "interrupted watcher retained its recovery-marker lock"
   rc=0
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     lock="$2/.fixture.lock"
     fm_lock_acquire_wait "$lock" || exit 10
-    fm_lock_try_acquire "$lock" || exit 11
-    fm_lock_release "$lock"
-    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 12
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
-  [ "$rc" -eq 0 ] || fail "self-held lock was not reclaimed cleanly (rc=$rc)"
-  rc=0
-  FM_STATE_OVERRIDE="$state" bash -c '
-    . "$1"
-    lock="$2/.fixture2.lock"
-    fm_lock_acquire_wait "$lock" || exit 10
+    fm_lock_try_acquire "$lock" && exit 11
+    [ -d "$lock" ] || exit 12
     ( fm_lock_try_acquire "$lock" && exit 13; exit 0 ) || exit 13
     fm_lock_release "$lock"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
-  [ "$rc" -eq 0 ] || fail "a subshell reclaimed its parent's live hold (rc=$rc)"
-  pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
+  [ "$rc" -eq 0 ] || fail "a nested acquisition disturbed its parent's live hold (rc=$rc)"
+  pass "watcher interruption releases only its recovery-marker lock"
+}
+
+test_watcher_interrupt_releases_arm_check_marker_lock() {
+  local dir state fakebin out real_mv pid i rc=0
+  dir=$(make_case arm-check-interrupt)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "$FM_INTERRUPT_MARKER" ] && [ ! -e "$FM_INTERRUPT_ONCE" ]; then
+  : > "$FM_INTERRUPT_ONCE"
+  kill -TERM "$PPID"
+  exit 1
+fi
+exec "$FM_REAL_MV" "$@"
+SH
+  chmod +x "$fakebin/mv"
+  PATH="$fakebin:$PATH" FM_REAL_MV="$real_mv" \
+    FM_INTERRUPT_MARKER="$state/.watcher-down" FM_INTERRUPT_ONCE="$dir/interrupted" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] \
+    || fail "watcher did not reach its polling loop before the arm-check fixture"
+  printf '1700000000\t1\tcheck\tfixture\tcheck: arm check interrupt\n' > "$state/.wake-queue"
+  wait_for_exit "$pid" 50 || rc=$?
+  [ "$rc" -ne 124 ] || fail "watcher interrupted during recovery arm-check wedged in EXIT cleanup"
+  [ -e "$dir/interrupted" ] || fail "watcher never entered recovery-marker arm-check"
+  [ ! -e "$state/.watcher-down.lock" ] && [ ! -L "$state/.watcher-down.lock" ] \
+    || fail "interrupted recovery arm-check retained its marker lock"
+  pass "watcher interruption releases the recovery arm-check marker lock"
 }
 
 test_subshell_lock_ownership_without_bashpid() {
@@ -1265,14 +1337,14 @@ test_subshell_lock_ownership_without_bashpid() {
     (
       fm_lock_acquire_wait "$lock" || exit 13
       [ "$(cat "$lock/pid")" != "$$" ] || exit 14
-      fm_lock_try_acquire "$lock" || exit 15
+      fm_lock_try_acquire "$lock" && exit 15
       fm_lock_set_role "$lock" terminal-check || exit 16
       fm_lock_release "$lock"
       [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 17
     ) || exit $?
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
   [ "$rc" -eq 0 ] || fail "subshell lock ownership without BASHPID failed (rc=$rc)"
-  pass "without BASHPID a subshell cannot release or reclaim its parent lock and owns its own hold"
+  pass "without BASHPID a subshell cannot disturb parent or nested live holds"
 }
 
 # A bounded waiter acquires in a helper process, but the caller must own the
@@ -1568,7 +1640,8 @@ test_historical_annotation_skips_announced_status() {
   pass "historical annotations replay nothing already announced and keep everything new"
 }
 
-test_self_held_lock_reclaims_instead_of_deadlocking
+test_watcher_interrupt_releases_recovery_marker_lock
+test_watcher_interrupt_releases_arm_check_marker_lock
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
@@ -1586,7 +1659,7 @@ test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
-test_drain_asserts_watcher_liveness
+test_drain_reports_no_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open

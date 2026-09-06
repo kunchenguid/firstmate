@@ -99,71 +99,113 @@ test_stale_watch_lock_reclaimed() {
   pass "killed watcher stale lock is reclaimed"
 }
 
-test_live_stale_watch_lock_is_actionable() {
-  local dir state fakebin out err status
+test_live_missing_beacon_lock_is_actionable() {
+  local dir state fakebin out err status typed_status identity live
   dir=$(make_case live-stale-lock)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   err="$dir/watch.err"
-  mkdir "$state/.watch.lock"
-  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  sleep 300 &
+  live=$!
+  # A live holder that this home can positively identify as ITS OWN watcher,
+  # whose beacon has aged. Recording the full identity is the whole point: it is
+  # what separates "my watcher is inside a long phase" from "something else holds
+  # this lock", and only the first of those may leave through the typed outcome.
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not record the holder identity"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=30 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
+  # This case used to leave through a bare exit 1 with "heartbeat is stale" on
+  # stderr, which reached the arm layer as "FAILED - exited 1 without an
+  # actionable reason" and reported a working fleet's supervision as broken
+  # (2026-09-04 supervision investigation). It now leaves through its own typed
+  # status carrying the holder and the beacon age, so the arm can wait for that
+  # holder instead. Still actionable, still not a failure.
+  typed_status=$(FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; printf %s "$FM_WATCHER_BUSY_HOLDER_STATUS"' _ "$LIB")
+  [ "$status" = "$typed_status" ] \
+    || fail "an identified live holder with a stale beacon exited $status, not the typed busy-holder status $typed_status"
+  grep -F 'busy holder' "$out" >/dev/null \
+    || fail "watcher did not name the busy holder: $(cat "$out" "$err" 2>/dev/null)"
+  grep -F "pid=$live" "$out" >/dev/null \
+    || fail "the typed busy-holder outcome did not name the holding pid"
+  grep -E 'lock=[0-9]+s' "$out" >/dev/null \
+    || fail "a missing beacon did not label its computed lock age truthfully: $(cat "$out")"
+  is_live_non_zombie "$live" || fail "the identified holder was not left alone"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "an identified live holder with a stale beacon leaves through the typed busy-holder outcome"
+}
+
+# The other half of that distinction, and the reason the typed outcome is gated
+# on identity at all: a live process holding the lock that this home CANNOT
+# identify as its own watcher is not a busy watcher. Nothing can ever be
+# confirmed behind that lock, so it must stay a loud failure rather than being
+# waited on and then quietly excused.
+test_unidentified_live_lock_holder_still_fails_loudly() {
+  local dir state fakebin out err status typed_status live
+  dir=$(make_case unidentified-live-lock)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  err="$dir/watch.err"
+  sleep 300 &
+  live=$!
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
   touch -t 200001010000 "$state/.last-watcher-beat"
   status=0
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
-  [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
-  grep -F 'heartbeat is stale' "$err" >/dev/null || fail "watcher did not explain the stale live lock"
-  pass "live watcher lock with stale heartbeat is actionable"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  typed_status=$(FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; printf %s "$FM_WATCHER_BUSY_HOLDER_STATUS"' _ "$LIB")
+  [ "$status" -ne 0 ] || fail "an unidentifiable live lock holder was treated as healthy"
+  [ "$status" != "$typed_status" ] \
+    || fail "an unidentifiable live holder used the typed busy-holder outcome; only an identity-matched watcher may"
+  grep -F 'heartbeat is stale' "$err" >/dev/null \
+    || fail "an unidentifiable live holder did not explain itself loudly: $(cat "$out" "$err" 2>/dev/null)"
+  is_live_non_zombie "$live" || fail "the unrelated live lock holder was signalled"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "an unidentifiable live lock holder stays a loud failure, never a busy holder"
 }
 
 test_guard_warnings() {
-  # The guard's two operator-visible states, with resilient substrings instead of
-  # four copy-coupled tests:
-  #   (1) watcher DOWN + queued wakes: a prominent no-watcher banner leads (alarm
-  #       title, in-flight count, beacon age, fix command), the queued-wakes
-  #       warning follows it, and the guidance is repair-after-drain (never the
-  #       old conflicting "restart NOW first").
-  #   (2) a fresh watcher and an empty queue: total silence.
-  local dir state err first banner_line queue_line pid identity
+  # The guard no longer reports watcher liveness at all: the passive
+  # "WATCHER DOWN - SUPERVISION IS OFF" banner was removed for every supervision
+  # model after the 2026-09-04 investigation showed it could not tell a working
+  # watcher from a stopped one. What this case pins now is that the removal was
+  # complete and did not take the independent queued-wakes warning with it:
+  #   (1) watcher down + queued wakes: the queue warning is the ONLY output, and
+  #       nothing describes watcher liveness, beacon age or supervision repair.
+  #   (2) a fresh watcher and an empty queue: total silence, as before.
+  local dir state err pid identity
   dir=$(make_case guard)
   state="$dir/state"
   err="$dir/guard.err"
 
   # (1) watcher down (no beacon) + two in-flight tasks + a queued wake.
   # FM_ROOT_OVERRIDE points the worktree-tangle check at a non-git dir so it stays
-  # inert here; this case is about the watcher-down banner, not the tangle guard.
-  # Pin Claude so the host test runner's harness ancestry cannot change this fixture.
+  # inert here. Pin Claude so the host runner's harness ancestry cannot change it.
   printf 'project=x\n' > "$state/task.meta"
   printf 'project=y\n' > "$state/task2.meta"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "guard heartbeat append failed"
   CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  first=$(grep -v '^[[:space:]]*$' "$err" | head -1)
-  case "$first" in
-    '●'*) ;;
-    *) fail "no-watcher banner is not the first thing the guard prints (got '$first')" ;;
-  esac
-  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null || fail "guard banner missing the alarm title"
-  grep -F '2 task(s) in flight' "$err" >/dev/null || fail "guard banner missing the in-flight count"
-  grep -F 'last beat: never' "$err" >/dev/null || fail "guard banner missing the beacon age"
-  grep -F 'guarded operation WILL still run' "$err" >/dev/null || fail "guard banner missing generic continuation wording"
-  ! grep -F 'requested message WILL still be sent' "$err" >/dev/null || fail "shared guard used send-specific continuation wording"
-  grep -F 'watcher supervision needs Stop-owned automatic recovery' "$err" >/dev/null || fail "guard banner missing neutral automatic-recovery guidance"
   grep -F 'queued wakes pending - drain them' "$err" >/dev/null || fail "guard did not warn about pending queue"
-  grep -F 'After draining queued wakes, watcher supervision needs Stop-owned automatic recovery' "$err" >/dev/null || fail "guard did not order neutral automatic recovery after drain"
-  ! grep -F 'Restart it NOW, before anything else' "$err" >/dev/null || fail "guard still gave conflicting restart-first instruction"
-  ! grep -F 'as the harness-tracked background task' "$err" >/dev/null || fail "guard still printed the old universal background-task repair text"
-  banner_line=$(grep -n 'WATCHER DOWN' "$err" | head -1 | cut -d: -f1)
-  queue_line=$(grep -n 'queued wakes pending - drain them' "$err" | head -1 | cut -d: -f1)
-  [ "$banner_line" -lt "$queue_line" ] || fail "queued-wakes warning printed before the no-watcher banner"
-
-  dir=$(make_case guard-xmode)
-  state="$dir/state"
-  err="$dir/guard.err"
-  mkdir -p "$dir/config"
-  printf 'project=x\n' > "$state/task.meta"
-  : > "$dir/config/x-mode.env"
-  CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null || fail "guard repair line did not source the X-mode cadence config"
+  ! grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "the removed watcher banner is back"
+  ! grep -F 'SUPERVISION IS OFF' "$err" >/dev/null || fail "the removed supervision-off text is back"
+  ! grep -F 'task(s) in flight' "$err" >/dev/null || fail "guard still reports an in-flight count for watcher liveness"
+  ! grep -F 'last beat' "$err" >/dev/null || fail "guard still reports beacon age"
+  ! grep -F 'watcher still down' "$err" >/dev/null || fail "the removed episode reminder is back"
+  # The queue warning must be the whole of it: one non-blank line.
+  [ "$(grep -c -v '^[[:space:]]*$' "$err")" -eq 1 ] \
+    || fail "guard printed more than the queued-wakes warning: $(cat "$err")"
 
   # (2) live watcher plus fresh beacon, empty queue -> silence.
   dir=$(make_case guard-fresh)
@@ -179,13 +221,13 @@ test_guard_warnings() {
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
-  # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
-  # total silence" stays a pure assertion about watcher state.
+  # Non-git FM_ROOT keeps the worktree-tangle check inert so this stays a pure
+  # assertion about guard output.
   FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   [ ! -s "$err" ] || fail "guard warned with a live watcher and fresh beacon: $(cat "$err")"
-  pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh"
+  pass "guard reports no watcher liveness, keeps the queued-wakes warning, and stays silent when live and fresh"
 }
 
 test_lock_single_winner_under_concurrency() {
@@ -418,35 +460,68 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
-test_watch_restart_rejects_reused_pid() {
-  local dir state fakebin out live pid i
-  dir=$(make_case restart-reused-pid)
+test_watch_restart_reclaims_dead_holder() {
+  local dir state fakebin out dead_pid armpid i lock_pid
+  dir=$(make_case restart-dead-holder)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
-  sleep 300 &
-  live=$!
+  dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid + 1)); done
   mkdir "$state/.watch.lock"
-  printf '%s\n' "$live" > "$state/.watch.lock/pid"
-  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
-  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
-  printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
-  pid=$!
+  printf '%s\n' "$dead_pid" > "$state/.watch.lock/pid"
+  FM_WATCH_PREDECESSOR_ARM_PID=fixture PATH="$fakebin:$PATH" FM_HOME="$dir" \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" --restart > "$out" &
+  armpid=$!
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$pid"; do
+  lock_pid=$dead_pid
+  while [ "$i" -lt 80 ]; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$lock_pid" ] && [ "$lock_pid" != "$dead_pid" ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  is_live_non_zombie "$pid" \
-    && fail "restart did not surface recovery after replacing a reused-pid lock"
-  wait "$pid" 2>/dev/null || true
-  grep -F 'check: rearm-resurface' "$out" >/dev/null \
-    || fail "restart replaced reused-pid lock without surfacing recovery: $(cat "$out")"
-  is_live_non_zombie "$live" || fail "restart killed a reused unrelated pid"
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
-  pass "watch restart preserves recovery without signaling a reused pid"
+  [ -n "$lock_pid" ] && [ "$lock_pid" != "$dead_pid" ] \
+    || fail "restart did not reclaim the dead holder's stale lock: $(cat "$out")"
+  is_live_non_zombie "$lock_pid" || fail "restart replacement watcher was not live"
+  kill "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "watch restart reclaims a dead holder without signalling it"
+}
+
+test_watch_restart_leaves_live_missing_beacon_holder_unsignalled() {
+  local dir state fakebin out ready signalled holder identity status held
+  dir=$(make_case restart-live-missing-beacon)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  ready="$dir/holder.ready"
+  signalled="$dir/holder.signalled"
+  node -e 'const fs=require("node:fs"); process.on("SIGTERM",()=>fs.writeFileSync(process.argv[2],"TERM\n")); process.on("SIGINT",()=>fs.writeFileSync(process.argv[2],"INT\n")); fs.writeFileSync(process.argv[1],"ready\n"); setTimeout(()=>{},300000)' "$ready" "$signalled" &
+  holder=$!
+  while [ ! -s "$ready" ]; do sleep 0.02; done
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder") \
+    || fail "could not identify the live restart holder"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_GUARD_GRACE=2 FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" --restart > "$out" 2>&1 || status=$?
+  held=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ "$status" -eq 0 ] || fail "restart failed instead of preserving its live holder: $(cat "$out")"
+  grep -F 'FM_WATCH_ARM_RESULT=busy-holder' "$out" >/dev/null \
+    || fail "restart did not return the typed busy-holder result: $(cat "$out")"
+  [ ! -e "$signalled" ] || fail "restart signalled its live missing-beacon holder: $(cat "$signalled")"
+  is_live_non_zombie "$holder" || fail "restart terminated its live missing-beacon holder"
+  [ "$held" = "$holder" ] || fail "restart replaced its live holder's lock"
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "watch restart classifies a live missing-beacon holder before acting"
 }
 
 test_watch_restart_attaches_to_healthy_peer() {
@@ -776,16 +851,18 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
   armpid=$!
   # Synchronize on the owned child declining the live peer lock before making
-  # the peer healthy. Sleeping for the same budget the arm spends made this
-  # regression fixture race the confirmation deadline under full-suite load,
-  # rather than testing the intended successor-handshake boundary.
+  # the peer healthy. A peer without its first beacon is the typed busy-holder
+  # state, so this also proves startup stand-down does not become a generic clean
+  # exit. Sleeping for the same budget the arm spends made this regression
+  # fixture race the confirmation deadline under full-suite load, rather than
+  # testing the intended successor-handshake boundary.
   i=0
   while [ "$i" -lt 80 ]; do
-    grep -qF "watcher: already running pid $peer" "$state"/.watch-arm-output.* 2>/dev/null && break
+    grep -qF "watcher: busy holder pid=$peer" "$state"/.watch-arm-output.* 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "watcher: already running pid $peer" "$state"/.watch-arm-output.* 2>/dev/null \
+  grep -qF "watcher: busy holder pid=$peer" "$state"/.watch-arm-output.* 2>/dev/null \
     || fail "arm child did not stand down behind the peer watcher"
   touch "$state/.last-watcher-beat"
   i=0
@@ -940,6 +1017,332 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   grep -Eq 'reason=(nonzero-exit|signal-exit)' "$state/.watch-cycle-exits.log" \
     || fail "terminated watcher exit was not classified in the lifecycle ledger"
   pass "SIGSTOP distinguishes live PID from stale beacon and termination records the exit class"
+}
+
+# Stop a fixture process and actually get rid of it. TERM first, then a hard stop
+# after a bounded wait: a SIGSTOPped fixture never handles TERM, and leaving one
+# behind strands the runner, because an orphan keeps its stdout open long after
+# the script that started it has finished.
+reap() {  # <pid>
+  local pid=$1 i=0
+  [ -n "$pid" ] || return 0
+  kill -CONT "$pid" 2>/dev/null || true
+  kill -TERM "$pid" 2>/dev/null || true
+  while [ "$i" -lt 30 ]; do
+    kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+# --- a live monitor process is never terminated on age ----------------------
+#
+# 2026-09-04 supervision investigation: a live, identity-matched watcher whose
+# beacon had aged was reported as "auto-arm FAILED - exited 1 without an
+# actionable reason", and the auto-arm re-ran the identical predicate one second
+# later (both refusals landed at epochs 1788501895 and 1788501896). The watcher
+# was working the whole time.
+#
+# The arm now waits for such a holder and attaches when it beats again. It does
+# NOT stop it, replace it, or start a second watcher beside it: an aged beacon is
+# a suspected stall, and identity proves only WHICH process holds the lock, never
+# that the process is stuck. The captain ruled on 2026-09-05 that a running
+# monitor process is never terminated on age, a missing heartbeat, or an expired
+# wait. The SIGSTOP fixture is the strongest stalled holder available, and is
+# used here precisely because even that one must survive.
+
+test_young_missing_beacon_holder_is_not_reported_as_a_failure() {
+  local dir state fakebin armout armpid watcher_pid i out second secondpid held blocked=0
+  dir=$(make_case busy-holder-typed)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  second="$dir/second.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -z "$watcher_pid" ]; then
+    reap "$armpid"
+    fail "no watcher started for the busy-holder fixture"
+  fi
+  # Stall it before its first beacon is observable. Then retire the
+  # arm that started it, so what follows observes ONE arm meeting one stalled
+  # holder. The first arm is a fixture, not a participant; left alive it reacts
+  # to its own stopped child and muddies the observation.
+  kill -STOP "$watcher_pid" 2>/dev/null || true
+  rm -f "$state/.last-watcher-beat"
+  kill -KILL "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+
+  # A second arm now meets a live holder with a young lock and no beacon. Run it in the
+  # BACKGROUND behind a bounded wait: blocking on the stalled holder is itself a
+  # failure, and a foreground call would hang the whole suite.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE=2 FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$second" 2>&1 &
+  secondpid=$!
+  i=0
+  while [ "$i" -lt 300 ]; do
+    kill -0 "$secondpid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$secondpid" 2>/dev/null && blocked=1
+  out=$(cat "$second" 2>/dev/null || true)
+  held=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  # Observations are complete: tear every fixture down BEFORE asserting, so no
+  # assertion can leave a stopped watcher holding the runner's stdout open.
+  reap "$secondpid"
+  reap "$watcher_pid"
+
+  [ "$blocked" -eq 0 ] \
+    || fail "the arm blocked indefinitely on a stalled holder instead of returning"
+  [ "$held" = "$watcher_pid" ] \
+    || fail "the live holder lost the lock (lock names '$held', holder was $watcher_pid)"
+  # The arm announces every watcher it starts, so its own output is the
+  # authoritative observable for "a successor was launched".
+  case "$out" in
+    *"watcher: started pid="*)
+      fail "a successor watcher was started alongside the live holder: $out" ;;
+  esac
+  case "$out" in
+    *"auto-arm FAILED"*|*"FAILED - watcher cycle exited"*)
+      fail "a live holder was reported as a failure: $out" ;;
+  esac
+  case "$out" in
+    *"busy holder"*) ;;
+    *) fail "a live holder with no beacon produced no typed outcome: $out" ;;
+  esac
+  case "$out" in
+    *"lock="*) ;;
+    *) fail "a missing beacon was not reported truthfully as lock age: $out" ;;
+  esac
+  pass "a young live holder without a beacon is left alone and not reported failed"
+}
+
+test_busy_holder_replacement_stays_a_loud_failure() {
+  local dir state arm out status first second identity held second_alive=0
+  dir=$(make_case busy-holder-replacement)
+  state="$dir/state"
+  mkdir -p "$dir/bin"
+  cp "$WATCH_ARM" "$dir/bin/fm-watch-arm.sh"
+  cp "$LIB" "$dir/bin/fm-wake-lib.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: busy holder pid=%s beacon=20s (grace 2s)\n' "$FM_TEST_FIRST"
+kill -TERM "$FM_TEST_FIRST" 2>/dev/null || true
+rm -rf "$FM_STATE_OVERRIDE/.watch.lock"
+mkdir "$FM_STATE_OVERRIDE/.watch.lock"
+printf '%s\n' "$FM_TEST_SECOND" > "$FM_STATE_OVERRIDE/.watch.lock/pid"
+touch -t 200001010000 "$FM_STATE_OVERRIDE/.last-watcher-beat"
+exit 64
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+  sleep 60 &
+  first=$!
+  sleep 60 &
+  second=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$first") \
+    || fail "could not identify the original busy holder"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$first" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$dir/bin/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  arm="$dir/bin/fm-watch-arm.sh"
+  status=0
+  FM_TEST_FIRST="$first" FM_TEST_SECOND="$second" FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=2 FM_ARM_CONFIRM_TIMEOUT=1 \
+    "$arm" > "$dir/arm.out" 2>&1 || status=$?
+  out=$(cat "$dir/arm.out")
+  held=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$second" && second_alive=1
+  kill "$first" "$second" 2>/dev/null || true
+  wait "$first" 2>/dev/null || true
+  wait "$second" 2>/dev/null || true
+  [ "$status" -ne 0 ] || fail "an unidentified replacement holder closed the arm quietly: $out"
+  case "$out" in
+    *"watcher: FAILED"*) ;;
+    *) fail "an unidentified replacement holder was not reported loudly: $out" ;;
+  esac
+  [ "$held" = "$second" ] && [ "$second_alive" -eq 1 ] \
+    || fail "the replacement holder was signalled or displaced"
+  pass "a replacement holder must be reverified before a busy wait can close quietly"
+}
+
+test_busy_holder_uses_shared_guard_grace() {
+  local dir state arm holder identity refresher armpid i out early_attach=0 attached=0
+  dir=$(make_case busy-holder-threshold)
+  state="$dir/state"
+  mkdir -p "$dir/bin"
+  cp "$WATCH_ARM" "$dir/bin/fm-watch-arm.sh"
+  cp "$LIB" "$dir/bin/fm-wake-lib.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+mkdir "$FM_STATE_OVERRIDE/.watch.lock"
+printf '%s\n' "$FM_TEST_HOLDER" > "$FM_STATE_OVERRIDE/.watch.lock/pid"
+printf '%s\n' "$FM_HOME" > "$FM_STATE_OVERRIDE/.watch.lock/fm-home"
+printf '%s\n' "$0" > "$FM_STATE_OVERRIDE/.watch.lock/watcher-path"
+printf '%s\n' "$FM_TEST_IDENTITY" > "$FM_STATE_OVERRIDE/.watch.lock/pid-identity"
+printf 'watcher: busy holder pid=%s beacon=2s (grace 1s)\n' "$FM_TEST_HOLDER"
+exit 64
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+  sleep 60 &
+  holder=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder") \
+    || fail "could not identify the threshold holder"
+  touch "$state/.last-watcher-beat"
+  sleep 2
+  (
+    i=0
+    while [ "$i" -lt 50 ] && [ ! -e "$state/.watch.lock/pid" ]; do
+      sleep 0.02
+      i=$((i + 1))
+    done
+    sleep 1
+    touch "$state/.last-watcher-beat"
+  ) &
+  refresher=$!
+  arm="$dir/bin/fm-watch-arm.sh"
+  FM_TEST_HOLDER="$holder" FM_TEST_IDENTITY="$identity" FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$arm" > "$dir/arm.out" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    grep -qF "watcher: busy holder pid=$holder" "$dir/arm.out" 2>/dev/null && break
+    kill -0 "$armpid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  sleep 0.2
+  grep -qF "watcher: attached pid=$holder" "$dir/arm.out" 2>/dev/null && early_attach=1
+  i=0
+  while [ "$i" -lt 50 ]; do
+    if grep -qF "watcher: attached pid=$holder" "$dir/arm.out" 2>/dev/null; then
+      attached=1
+      break
+    fi
+    kill -0 "$armpid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  out=$(cat "$dir/arm.out" 2>/dev/null || true)
+  reap "$armpid"
+  reap "$holder"
+  wait "$refresher" 2>/dev/null || true
+  [ "$early_attach" -eq 0 ] || fail "the arm attached while the watcher still classified its holder as stale: $out"
+  [ "$attached" -eq 1 ] || fail "the arm did not attach after the unchanged holder beat again: $out"
+  case "$out" in *"watcher: FAILED"*) fail "the unchanged holder was failed loudly: $out" ;; esac
+  pass "busy-holder validation and attachment use the shared guard grace"
+}
+
+test_initial_attachment_uses_shared_guard_grace() {
+  local dir state holder identity armpid i out held holder_alive=0 attached=0
+  dir=$(make_case initial-threshold-attach)
+  state="$dir/state"
+  sleep 60 &
+  holder=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder") \
+    || fail "could not identify the initial threshold holder"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  sleep 2
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE=1 FM_WATCHER_STALE_GRACE=30 FM_ARM_CONFIRM_TIMEOUT=1 \
+    "$WATCH_ARM" > "$dir/arm.out" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    if grep -qF "watcher: attached pid=$holder" "$dir/arm.out" 2>/dev/null; then
+      attached=1
+      break
+    fi
+    kill -0 "$armpid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  out=$(cat "$dir/arm.out" 2>/dev/null || true)
+  held=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$holder" && holder_alive=1
+  reap "$armpid"
+  reap "$holder"
+  [ "$attached" -eq 0 ] || fail "a removed stale-grace override displaced the shared guard grace: $out"
+  case "$out" in *"watcher: FAILED"*) fail "the live holder failed loudly under the shared grace: $out" ;; esac
+  case "$out" in *"busy holder"*) ;; *) fail "the shared grace did not classify the stale holder: $out" ;; esac
+  [ "$held" = "$holder" ] && [ "$holder_alive" -eq 1 ] \
+    || fail "the initial threshold holder was signalled or replaced"
+  pass "initial attachment uses only the shared guard grace"
+}
+
+test_recovering_holder_is_attached_to_not_replaced() {
+  local dir state fakebin armout armpid watcher_pid i out second secondpid
+  dir=$(make_case busy-holder-attach)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  second="$dir/second.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -z "$watcher_pid" ]; then
+    reap "$armpid"
+    fail "no watcher started for the attach fixture"
+  fi
+  # Age the beacon so the next arm sees a busy holder, then let the holder beat
+  # again mid-wait: the ordinary case of a slow phase completing. The holder is
+  # never stopped here, so nothing can block on it.
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  kill -KILL "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  ( sleep 2; touch "$state/.last-watcher-beat" ) >/dev/null 2>&1 &
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_GUARD_GRACE=8 FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$second" 2>&1 &
+  secondpid=$!
+  i=0
+  while [ "$i" -lt 300 ]; do
+    grep -qF "watcher: attached pid=$watcher_pid" "$second" 2>/dev/null && break
+    kill -0 "$secondpid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  out=$(cat "$second" 2>/dev/null || true)
+  reap "$secondpid"
+  reap "$watcher_pid"
+
+  case "$out" in
+    *"watcher: attached pid=$watcher_pid"*) ;;
+    *) fail "the arm did not attach to the holder that beat again: $out" ;;
+  esac
+  case "$out" in
+    *"watcher: started pid="*) fail "the arm replaced the recovering holder: $out" ;;
+    *FAILED*) fail "attaching to a recovered holder reported a failure: $out" ;;
+  esac
+  pass "a holder that beats again mid-wait is attached to, not replaced"
 }
 
 test_pid_identity_is_locale_invariant() {
@@ -1103,12 +1506,18 @@ test_msys_pid_identity_uses_proc() {
 }
 
 test_singleton_start
+test_young_missing_beacon_holder_is_not_reported_as_a_failure
+test_busy_holder_replacement_stays_a_loud_failure
+test_busy_holder_uses_shared_guard_grace
+test_initial_attachment_uses_shared_guard_grace
+test_recovering_holder_is_attached_to_not_replaced
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
-test_live_stale_watch_lock_is_actionable
+test_live_missing_beacon_lock_is_actionable
+test_unidentified_live_lock_holder_still_fails_loudly
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
@@ -1118,7 +1527,8 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
-test_watch_restart_rejects_reused_pid
+test_watch_restart_reclaims_dead_holder
+test_watch_restart_leaves_live_missing_beacon_holder_unsignalled
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor

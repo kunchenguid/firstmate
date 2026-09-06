@@ -672,8 +672,7 @@ remote_recovery_paths_validate() {
     fi
     for rec in "$pending_dir"/*; do
       [ -e "$rec" ] || [ -L "$rec" ] || continue
-      [ -f "$rec" ] && [ ! -L "$rec" ] \
-        || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+      remote_pending_entry_is_safe "$rec" || return 1
     done
   elif [ "$mode" != initial ] && [ "$REMOTE_PENDING_DIR_PRESENT" -ne 0 ]; then
     echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
@@ -681,16 +680,122 @@ remote_recovery_paths_validate() {
   fi
 }
 
+# One entry of state/pending-replies/ during remote-retirement validation.
+# bin/fm-pending-reply-lib.sh moves settled records into a real archive/
+# subdirectory, so that one name is a legitimate directory here while every other
+# entry, and everything inside the archive, must still be a plain file.
+remote_pending_resolution_stage_is_safe() {  # <entry-path>
+  local entry=$1 base corr
+  [ -f "$entry" ] && [ ! -L "$entry" ] || return 1
+  base=${entry##*/}
+  case "$base" in .*.resolving) ;; *) return 1 ;; esac
+  corr=${base#.}
+  corr=${corr%.resolving}
+  [ "${#corr}" -eq 16 ] || return 1
+  case "$corr" in *[!0-9a-f]*) return 1 ;; esac
+  [ "$(fm_meta_get "$entry" schema)" = fm-pending-reply.v1 ] || return 1
+  [ "$(fm_meta_get "$entry" corr_id)" = "$corr" ] || return 1
+  [ -n "$(fm_meta_get "$entry" task_id)" ]
+}
+
+remote_pending_entry_is_safe() {  # <entry-path>
+  local entry=$1 archived
+  if [ "${entry##*/}" = archive ]; then
+    [ -d "$entry" ] && [ ! -L "$entry" ] \
+      || { echo "REFUSED: pending-replies archive is unsafe" >&2; return 1; }
+    for archived in "$entry"/* "$entry"/.*.resolving; do
+      [ -e "$archived" ] || [ -L "$archived" ] || continue
+      case "${archived##*/}" in
+        .*.resolving)
+          remote_pending_resolution_stage_is_safe "$archived" \
+            || { echo "REFUSED: pending-replies archive contains an unsafe resolution stage" >&2; return 1; }
+          ;;
+        *)
+          [ -f "$archived" ] && [ ! -L "$archived" ] \
+            || { echo "REFUSED: pending-replies archive contains an unsafe recovery entry" >&2; return 1; }
+          ;;
+      esac
+    done
+    return 0
+  fi
+  [ -f "$entry" ] && [ ! -L "$entry" ] \
+    || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+}
+
+remote_pending_reply_belongs_to_retiring_task() {  # <correlation-id>
+  local corr=$1 hot archived staged rec task owner='' found=0
+  hot="$STATE/pending-replies/$corr"
+  archived="$STATE/pending-replies/archive/$corr"
+  staged="$STATE/pending-replies/archive/.$corr.resolving"
+  for rec in "$hot" "$archived" "$staged"; do
+    [ -e "$rec" ] || [ -L "$rec" ] || continue
+    case "$rec" in
+      "$staged") remote_pending_resolution_stage_is_safe "$rec" || return 2 ;;
+      *)
+        [ -f "$rec" ] && [ ! -L "$rec" ] \
+          && [ "$(fm_meta_get "$rec" corr_id)" = "$corr" ] || return 2
+        ;;
+    esac
+    task=$(fm_meta_get "$rec" task_id)
+    [ -n "$task" ] || return 2
+    [ -z "$owner" ] || [ "$owner" = "$task" ] || return 2
+    owner=$task
+    found=1
+  done
+  [ "$found" -eq 1 ] || return 1
+  [ "$owner" = "$ID" ]
+}
+
+remote_pending_reply_cleanup_corr() {  # <correlation-id>
+  local corr=$1 lock hot archived staged rec task rc=0
+  lock="$STATE/.pending-reply-$corr.lock"
+  if ! fm_lock_acquire_wait_bounded "$lock" 10; then
+    echo "REFUSED: pending reply $corr remained locked during remote retirement" >&2
+    return 1
+  fi
+  hot="$STATE/pending-replies/$corr"
+  archived="$STATE/pending-replies/archive/$corr"
+  staged="$STATE/pending-replies/archive/.$corr.resolving"
+  for rec in "$hot" "$archived" "$staged"; do
+    [ -e "$rec" ] || [ -L "$rec" ] || continue
+    case "$rec" in
+      "$staged") remote_pending_resolution_stage_is_safe "$rec" || { rc=1; break; } ;;
+      *)
+        [ -f "$rec" ] && [ ! -L "$rec" ] \
+          && [ "$(fm_meta_get "$rec" corr_id)" = "$corr" ] || { rc=1; break; }
+        ;;
+    esac
+    task=$(fm_meta_get "$rec" task_id)
+    if [ "$task" = "$ID" ]; then
+      rm -f -- "$rec" || { rc=1; break; }
+    fi
+  done
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
 remote_pending_replies_cleanup() {
-  local rec
+  local rec base corr rc
   [ "$REMOTE_PENDING_DIR_PRESENT" -eq 1 ] || return 0
   (
     CDPATH='' cd -- "$STATE/pending-replies" 2>/dev/null || exit 1
     [ "$(pwd -P)" = "$REMOTE_PENDING_DIR_REAL" ] || exit 1
-    for rec in ./*; do
+    for rec in ./* ./archive/* ./archive/.*.resolving; do
+      [ "$rec" = ./archive ] && continue
       [ -e "$rec" ] || [ -L "$rec" ] || continue
-      [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1
-      [ "$(fm_meta_get "$rec" task_id)" = "$ID" ] && rm -f -- "$rec"
+      base=${rec##*/}
+      case "$rec" in
+        ./archive/.*.resolving) corr=${base#.}; corr=${corr%.resolving} ;;
+        *) corr=$base ;;
+      esac
+      [ "${#corr}" -eq 16 ] || exit 1
+      case "$corr" in *[!0-9a-f]*) exit 1 ;; esac
+      if remote_pending_reply_belongs_to_retiring_task "$corr"; then
+        remote_pending_reply_cleanup_corr "$corr" || exit 1
+      else
+        rc=$?
+        [ "$rc" -eq 1 ] || exit 1
+      fi
     done
   )
 }

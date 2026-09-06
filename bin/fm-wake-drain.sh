@@ -3,7 +3,7 @@
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
 # newer branch outcome, OPEN DECISIONS, and captain-call record divergence,
-# then assert liveness.
+# then run the independent guard alarms.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -175,17 +175,10 @@ esac
 
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
-# Defense in depth for the supervision chain: this script runs at the top of
-# every wake-handling and recovery turn, so assert supervision health here too. A
-# lapsed supervision chain then surfaces on a plain drain-and-handle turn, not
-# only when a guarded supervision script (fm-peek/fm-send/...) happens to run.
-# Reuse fm-guard.sh's model-aware alarm and FM_GUARD_GRACE instead of duplicating
-# its supervision verdict. Under Claude's between-turns auto-arm model, a normal
-# fire leaves a recent beacon well inside grace and stays silent mid-turn. Under
-# the Pi extension model, a fresh beacon also stays silent during a genuinely
-# unheld-lock hand-off only while the live session proves extension ownership.
-# Persistent-watcher models still require the live identity-matched watcher.
-# Never let a guard hiccup change the drain's exit status.
+# Keep the pull guard's independent worktree-tangle and queued-wakes alarms on
+# every wake-handling and recovery turn. The guard deliberately does not inspect
+# watcher liveness; the turn-end guard owns that boundary. Never let a guard
+# hiccup change the drain's exit status.
 assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
 }

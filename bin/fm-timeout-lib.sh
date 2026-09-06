@@ -11,9 +11,14 @@
 #       to force the dependency-free fallback.
 #
 #   fm_run_timed <seconds> <command> [args...]
-#       Runs the command with a hard bound. Exit status is the command's own,
-#       except 124, which means the bound was hit (GNU timeout's convention,
+#       Runs an external command with a hard bound. Exit status is the command's
+#       own, except 124, which means the bound was hit (GNU timeout's convention,
 #       reproduced by the perl and bash fallbacks).
+#
+#   fm_run_function_timed <seconds> <function> [args...]
+#       Applies the same process-group deadline to an already-loaded shell
+#       function. The function runs in a child subshell, inheriting definitions
+#       without starting a fresh shell and re-sourcing its complete library.
 #
 # A non-positive bound is not a bound: `timeout 0` and the perl fallback's
 # `alarm 0` both disable the deadline, so callers must reject 0 before calling.
@@ -50,6 +55,10 @@ fm_run_bash_timeout() {
   set -m
   (
     set +m
+    # A caller (notably the watcher and test harnesses) may own cleanup traps.
+    # Timeout workers are implementation children and must never run that
+    # parent-only cleanup when they finish or are stopped by the deadline.
+    trap - EXIT HUP INT TERM
     "$@"
     command_rc=$?
     printf '%s\n' "$command_rc" > "$command_status"
@@ -58,10 +67,11 @@ fm_run_bash_timeout() {
   child_pid=$!
   (
     set +m
-    sleep "$seconds"
+    trap - EXIT HUP INT TERM
+    command sleep "$seconds"
     printf 'expired\n' > "$deadline_status"
     kill -TERM -- "-$child_pid" 2>/dev/null || true
-    sleep 0.2
+    command sleep 0.2
     kill -KILL -- "-$child_pid" 2>/dev/null || true
     exit 124
   ) &
@@ -123,6 +133,14 @@ fm_run_external_timeout() {
       ;;
     *) return "$runner_rc" ;;
   esac
+}
+
+fm_run_function_timed() {  # <seconds> <function> [args...]
+  local seconds=$1 function_name=$2
+  shift 2
+  case "$seconds" in ''|*[!0-9]*|0) return 124 ;; esac
+  declare -F "$function_name" >/dev/null 2>&1 || return 127
+  fm_run_bash_timeout "$seconds" "$function_name" "$@"
 }
 
 fm_run_timed() {  # <seconds> <command...>

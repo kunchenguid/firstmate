@@ -13,7 +13,7 @@ A shell background operator, pipeline, redirection, wrapper, or unrelated comman
 The seatbelt rejects those command shapes before execution.
 
 This policy is not a post-arm liveness guarantee.
-`bin/fm-guard.sh` and `bin/fm-turnend-guard.sh` apply their respective post-arm supervision predicates to the watcher lock and beacon after an allowed call.
+`bin/fm-turnend-guard.sh` applies the post-arm supervision predicate to the watcher lock and beacon at the turn boundary; `bin/fm-guard.sh` no longer reports watcher liveness.
 
 The classifier never executes, sources, evaluates, or expands any part of the submitted command.
 It tokenizes the bytes and classifies lexical execution positions only.
@@ -44,10 +44,10 @@ The quoting-decoder marker closes the case the byte strip cannot: `bin/fm-$'\x77
 This marker set is coupled to the classifier's decoder set in `bin/fm-arm-command-policy.mjs`: adding any new quote or expansion form the classifier decodes requires extending this marker set in the same change, or the prefilter stops being a strict superset.
 The prefilter owns no semantic exception: it can only ever fast-allow a command that is definitely not a watcher command, so it never flips a classification and the classifier remains the single owner of every decision.
 
-The seatbelt's threat model is agent mistakes: no one accidentally writes an ANSI-C- or locale-obfuscated watcher path, and deliberate obfuscation is the post-arm liveness guard's territory.
+The seatbelt's threat model is agent mistakes: no one accidentally writes an ANSI-C- or locale-obfuscated watcher path, and deliberate obfuscation is the turn-end liveness guard's territory.
 The marker guard closes the static gap anyway because it is cheap and provable per encoding class.
 Tripwire: if a third strict-superset gap is ever found after this marker generalization, that falsifies the "provable per encoding class" claim and the decision flips to Option B - drop the prefilter and always invoke the classifier.
-Deeper decode-required obfuscation beyond the coupled marker set stays the classifier's and the post-arm liveness guards' responsibility.
+Deeper decode-required obfuscation beyond the coupled marker set stays the classifier's and the turn-end liveness guard's responsibility.
 
 Malformed or empty stdin, invalid JSON, missing `jq` for stdin transport, missing Node, a missing classifier, or an invalid classifier response fail open with exit 0 and no output.
 This transport behavior prevents a broken hook from denying every shell tool call.

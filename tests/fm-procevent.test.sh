@@ -1311,14 +1311,23 @@ pass "healthy runtime behavior remains registration-only"
 # --- argv boundaries, stderr, exit status, bounds, malformed output ---------
 HD="$TMP_ROOT/hd"; new_home "$HD"
 TRIG3="$TMP_ROOT/trigger-three"
-pe_register "$HD" lavish argv-src -- "$BLOCKER" "$TRIG3" "one arg with spaces" "second; rm -rf /tmp/nope" >/dev/null
+# The canary an interpreted argument would destroy. It must EXIST before the
+# source runs and still exist afterwards: asserting its absence proved nothing,
+# because a path that is simply never created is absent whether or not the shell
+# interpreted anything - and if interpretation DID occur, `rm -rf` would delete
+# it and leave the assertion passing anyway. It also lived at a fixed /tmp path,
+# so an unrelated process on the host could decide the verdict; it belongs in
+# this run's own temp root.
+ARGV_CANARY="$TMP_ROOT/argv-canary"
+printf 'canary\n' > "$ARGV_CANARY"
+pe_register "$HD" lavish argv-src -- "$BLOCKER" "$TRIG3" "one arg with spaces" "second; rm -rf $ARGV_CANARY" >/dev/null
 pe "$HD" reconcile >/dev/null
 : > "$TRIG3"
 wait_for "$HD/state/.wake-queue" || fail "argv source published no event"
 R=$(first_result "$HD" argv-src || true)
 assert_grep 'one arg with spaces' "$R" "an argument containing spaces survives as one argument"
-assert_grep 'second; rm -rf /tmp/nope' "$R" "a shell-looking argument is passed literally, never interpreted"
-assert_absent /tmp/nope "no shell interpretation occurred"
+assert_grep "second; rm -rf $ARGV_CANARY" "$R" "a shell-looking argument is passed literally, never interpreted"
+assert_present "$ARGV_CANARY" "a shell-looking argument was interpreted and deleted its target"
 assert_not_contains "$(wake_payloads "$HD")" "rm -rf" "argv content never reaches the event line"
 
 newline_status=0
@@ -1409,13 +1418,26 @@ pass "the adapter derives physical identity without newline path corruption"
 HS="$TMP_ROOT/hs"; new_home "$HS"
 mkdir -p "$HS/state/procevent"
 : > "$HS/state/procevent/source-only.source"
+# fm-guard no longer reports watcher liveness (the passive banner was removed for
+# every supervision model), so the observable for "a registered source alone
+# still needs supervision" is the shared predicate that owns it rather than the
+# guard's output.
+sup_out=$(FM_STATE_OVERRIDE="$HS/state" bash -c '
+  . "$1"
+  fm_supervision_status "$2" 1
+  printf "needed=%s sources=%s in_flight=%s\n" "$FM_SUP_NEEDED" "$FM_SUP_SOURCES" "$FM_SUP_IN_FLIGHT"
+' _ "$ROOT/bin/fm-supervision-lib.sh" "$HS/state")
+assert_contains "$sup_out" "needed=true" \
+  "a registered process-event source alone must still require supervision"
+assert_contains "$sup_out" "sources=1" \
+  "the supervision predicate did not count the source-only need"
+assert_contains "$sup_out" "in_flight=0" \
+  "the source-only fixture must have no task in flight"
 guard_out=$(FM_ROOT_OVERRIDE="$TMP_ROOT/guard-root" FM_HOME="$HS" FM_GUARD_GRACE=1 \
   "$ROOT/bin/fm-guard.sh" 2>&1)
-assert_contains "$guard_out" "WATCHER DOWN - SUPERVISION IS OFF" \
-  "the general guard warns when only a process-event source needs supervision"
-assert_contains "$guard_out" "1 process-event source(s) registered" \
-  "the general guard identifies the source-only supervision need"
-pass "source-only homes trigger the general supervision guard"
+assert_not_contains "$guard_out" "SUPERVISION IS OFF" \
+  "the guard resurrected the removed watcher banner for a source-only home"
+pass "source-only homes still require supervision, with no watcher banner"
 
 CLS="$TMP_ROOT/cls"
 printf 'session:\n  file: /a.html\n  status: feedback\nprompts[1]{uid}:\n  p1\n' > "$CLS"
