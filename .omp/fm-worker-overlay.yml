@@ -25,7 +25,3 @@ retry:
   # `confirm` pops a dialog when a usage window runs low; `auto` lets omp fall
   # through the captain's own fallback chain without a keystroke.
   usageReservePolicy: auto
-# One-at-a-time delivery is omp's shipped default; pinned so a steer typed by
-# bin/fm-send.sh keeps the ordering the delivery guard expects.
-steeringMode: one-at-a-time
-followUpMode: one-at-a-time

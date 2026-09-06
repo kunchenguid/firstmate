@@ -246,6 +246,38 @@ test_secondmate_launch_relies_on_discovery() {
   pass "fm-spawn: a real omp secondmate launch relies on auto-discovery while crewmates load one -e"
 }
 
+test_secondmate_config_pinned_model_is_validated() {
+  # The same seeded secondmate home, but the harness and model come from the
+  # primary's config/secondmate-harness rather than the command line: the
+  # durable pin lands on MODEL after the harness case arm, so an unlisted id
+  # under a listed provider must still be refused before endpoint creation.
+  local world home fakebin launchlog out status
+  world="$TMP_ROOT/secondmate-config-model"
+  home="$world/sm"
+  mkdir -p "$world/home/state" "$world/home/data" "$world/home/config" "$home/bin" "$home/data"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'sm\n' > "$home/.fm-secondmate-home"
+  printf 'charter\n' > "$home/data/charter.md"
+  printf 'omp openai-codex/gpt-nope\n' > "$world/home/config/secondmate-harness"
+  fakebin=$(make_spawn_fakebin "$world/fake" claude)
+  make_fake_omp "$fakebin"
+  launchlog="$world/launch.log"
+  : > "$launchlog"
+  out=$(PATH="$fakebin:$PATH" TMUX='fake,1,0' FM_BACKEND=tmux CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE='' FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    "$ROOT/bin/fm-spawn.sh" sm "$home" --secondmate 2>&1)
+  status=$?
+  expect_code 1 "$status" "a config-pinned unlisted omp model must refuse the secondmate spawn: $out"
+  assert_contains "$out" "omp model 'openai-codex/gpt-nope' is not listed by 'omp models --json' although provider 'openai-codex' is" \
+    "the refusal did not name the config-pinned model under its listed provider: $out"
+  assert_absent "$world/home/state/sm.meta" "a refused secondmate spawn must publish no sm.meta"
+  [ ! -s "$launchlog" ] || fail "a refused secondmate spawn must record no launch: $(cat "$launchlog")"
+  pass "fm-spawn: the config/secondmate-harness model pin is validated against the omp catalog before launch"
+}
+
 # --- 3. Busy state -------------------------------------------------------------
 
 drive_omp_ext() {  # <ext-path> <mode>
@@ -546,6 +578,7 @@ test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery
+test_secondmate_config_pinned_model_is_validated
 test_busy_extension_lifecycle
 test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
