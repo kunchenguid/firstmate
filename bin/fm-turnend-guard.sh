@@ -77,8 +77,8 @@
 #      while later fresh failed epochs consume it instead of resetting it;
 #      if that wait does not prove recovery, this guard primes
 #      bin/fm-claude-stop-autoarm.sh --ensure-watcher as a handling successor
-#      immediately before refusing, with persisted start output, so a refusal
-#      cannot abort the only process that could restore a watcher (Claude Code
+#      immediately before refusing, so a refusal cannot abort the only process
+#      that could restore a watcher (Claude Code
 #      starts the registered asyncRewake hook in parallel, then cancels sibling
 #      hooks when a Stop is blocked). Priming is refusal-path only: doing it
 #      before the wait turned every ordinary Claude Stop into a handling
@@ -245,12 +245,6 @@ block_stop() {
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
-      if [ -s "$STATE/.claude-autoarm-prime.out" ]; then
-        printf '●  Primed watcher start output (%s):\n' "$STATE/.claude-autoarm-prime.out"
-        tail -n 5 "$STATE/.claude-autoarm-prime.out" | while IFS= read -r line || [ -n "$line" ]; do
-          printf '●    %s\n' "$line"
-        done
-      fi
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
@@ -486,8 +480,8 @@ fi
 # later Stop refused. --ensure-watcher uses this hook's harness ancestry,
 # detaches the bin/fm-watch-arm.sh owner as a handling successor so a primed
 # cycle is confirmed, ledgered, and not re-announced into a one-poll
-# resurface, persists that cycle's output, and takes no generation claim, so
-# the registered asyncRewake hook still owns rewake once a later Stop is
+# resurface, and takes no generation claim, so the registered asyncRewake hook
+# still owns rewake once a later Stop is
 # allowed. The primed process is already setsid-detached and survives this
 # refusal. Do not prime before the wait: that made every ordinary Claude Stop
 # start a handling successor and suppressed once-per-generation downtime

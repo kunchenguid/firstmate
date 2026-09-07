@@ -1263,14 +1263,7 @@ test_ensure_watcher_starts_detached_watcher_without_claim() {
     i=$((i + 1))
   done
   [ -n "$pid" ] || fail "--ensure-watcher did not start a detached watcher"
-  i=0
-  while [ "$i" -lt 50 ]; do
-    grep -F 'watcher: started pid=' "$dir/state/.claude-autoarm-prime.out" >/dev/null 2>&1 && break
-    sleep 0.1
-    i=$((i + 1))
-  done
-  grep -F 'watcher: started pid=' "$dir/state/.claude-autoarm-prime.out" >/dev/null \
-    || fail "primed start discarded its confirmation output"
+  kill -0 "$pid" 2>/dev/null || fail "--ensure-watcher's detached watcher did not outlive the hook"
   kill_ensure_watch_fixture "$dir"
   pass "auto-arm --ensure-watcher: starts a detached watcher and takes no generation claim"
 }
@@ -1340,10 +1333,6 @@ test_ensure_watcher_records_a_refused_primed_cycle() {
     *"lock_before=pid:$holder|"*) ;;
     *) fail "the primed cycle record did not name the lock holder that blocked it: $row" ;;
   esac
-  [ -s "$dir/state/.claude-autoarm-prime.out" ] \
-    || fail "a primed cycle that could not start discarded its output"
-  grep -F "live pid $holder" "$dir/state/.claude-autoarm-prime.out" >/dev/null \
-    || fail "primed start output did not name the lock holder that blocked it: $(cat "$dir/state/.claude-autoarm-prime.out")"
   pass "auto-arm --ensure-watcher: a refused primed cycle is recorded in the lifecycle ledger"
 }
 

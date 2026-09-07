@@ -1854,20 +1854,27 @@ await_real_primed_watcher() {
   return 1
 }
 
-# Stop a real primed cycle: its detached arm and the watcher that arm forked.
-# Both are matched by THIS fixture home's own bin/ path, which is a fresh
-# mktemp directory no other home can name, so the match is exact to this case
-# and can never reach another home's watcher. The wait keeps the arm's teardown
-# - its lifecycle row and its persisted start output - inside the fixture's
-# lifetime, so nothing is still writing when the temp root is removed.
+# The detached arm and the watcher it forks are the primed cycle's own
+# processes, and both are matched by THIS fixture home's bin/ path - a fresh
+# mktemp directory no other home can name - so the match is exact to one case
+# and can never reach another home's watcher. The arm is exec'd with the fork,
+# which makes this the earliest observable trace a primed cycle leaves.
+primed_cycle_pids() {  # <dir>
+  local dir=$1
+  pgrep -f "$dir/bin/fm-watch" 2>/dev/null || true
+}
+
+# Stop a real primed cycle. The wait keeps the arm's teardown - its lifecycle
+# row in state/.watch-cycle-exits.log - inside the fixture's lifetime, so
+# nothing is still writing when the temp root is removed.
 stop_real_primed_cycle() {  # <dir>
   local dir=$1 pid pids i=0
-  pids=$(pgrep -f "$dir/bin/fm-watch" 2>/dev/null || true)
+  pids=$(primed_cycle_pids "$dir")
   for pid in $pids; do
     kill "$pid" 2>/dev/null || true
   done
   while [ "$i" -lt 100 ]; do
-    pids=$(pgrep -f "$dir/bin/fm-watch" 2>/dev/null || true)
+    pids=$(primed_cycle_pids "$dir")
     [ -n "$pids" ] || return 0
     sleep 0.05
     i=$((i + 1))
@@ -1913,14 +1920,14 @@ test_hook_claude_mode_ordinary_stop_does_not_prime() {
   wait "$helper" 2>/dev/null || true
   expect_code 0 "$status" "an ordinary stop that the auto-arm claims must still allow"
   [ -z "$out" ] || fail "ordinary claimed stop produced output: $out"
-  # A primed cycle detaches, so its traces land after the hook has returned. Its
-  # output file appears with the fork, and the control phase below takes the
-  # lock and announces the episode about a second after its own refusal, so watch
-  # all three over that long and fail on the first one that shows up.
+  # A primed cycle detaches, so its traces land after the hook has returned: the
+  # arm process itself is exec'd with the fork, and the control phase below takes
+  # the lock and announces the episode about a second after its own refusal.
+  # Watch all three over that long and fail on the first one that shows up.
   i=0
   while [ "$i" -lt 10 ]; do
-    [ ! -e "$dir/state/.claude-autoarm-prime.out" ] \
-      || fail "an ordinary stop left a primed cycle behind: $(cat "$dir/state/.claude-autoarm-prime.out")"
+    [ -z "$(primed_cycle_pids "$dir")" ] \
+      || fail "an ordinary stop left a primed cycle behind: $(primed_cycle_pids "$dir")"
     [ ! -e "$dir/state/.watch.lock/pid" ] \
       || fail "an ordinary stop started a primed watcher"
     marker=
@@ -1935,7 +1942,7 @@ test_hook_claude_mode_ordinary_stop_does_not_prime() {
   expect_code 2 "$status" "the control stop must refuse once no auto-arm claims the home"
   assert_contains "$out" "TURN WOULD END BLIND" "the control refusal lost the blind-turn banner"
   await_real_primed_watcher "$dir" \
-    || fail "the watcher primed by the refused control stop never beat: $(cat "$dir/state/.claude-autoarm-prime.out" 2>/dev/null || true)"
+    || fail "the watcher primed by the refused control stop never beat: $(cat "$dir/state/.watch-cycle-exits.log" 2>/dev/null || true)"
   marker=$(cat "$dir/state/.watcher-down" 2>/dev/null || true)
   stop_real_primed_cycle "$dir"
   PRIMED_CYCLE_HOME=
@@ -2082,8 +2089,8 @@ test_hook_claude_mode_advancing_epoch_refusal_cannot_guarantee_a_second_refusal(
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
   expect_code 0 "$status" "the fresh failed epoch 166 must spend its one automatic handoff"
   [ -z "$out" ] || fail "the epoch-166 handoff stop produced output: $out"
-  [ ! -e "$dir/state/.claude-autoarm-prime.out" ] \
-    || fail "an allowed handoff stop primed a watcher: $(cat "$dir/state/.claude-autoarm-prime.out")"
+  [ -z "$(primed_cycle_pids "$dir")" ] \
+    || fail "an allowed handoff stop primed a watcher: $(primed_cycle_pids "$dir")"
 
   printf 'epoch=167 owner_pid=41746 outcome=rewake updated_at=2\n' \
     > "$dir/state/.claude-autoarm-epoch"

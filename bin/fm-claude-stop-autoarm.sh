@@ -74,10 +74,9 @@
 # registered asyncRewake firing remains the rewake owner once a later Stop is
 # allowed. The detached arm starts the watcher as a handling successor
 # (FM_WATCH_PREDECESSOR_ARM_PID) so a post-downtime start does not re-announce
-# and immediately resurface, and it persists that cycle's output on
-# state/.claude-autoarm-prime.out so a wake or a failed start still has a
-# consumer. The guard invokes this before a refusal so a blocked Stop cannot
-# abort the only process that could restore a watcher (docs/turnend-guard.md).
+# and immediately resurface. The guard invokes this before a refusal so a
+# blocked Stop cannot abort the only process that could restore a watcher
+# (docs/turnend-guard.md).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -176,15 +175,14 @@ fi
 # detached process is bin/fm-watch-arm.sh, the single owner of watcher start,
 # bounded confirmation, and the state/.watch-cycle-exits.log lifecycle ledger,
 # so a primed cycle that cannot start still records why and which lock holder
-# blocked it. Start that arm as a handling successor so a leftover downtime
-# marker is not re-announced into a one-poll resurface, and keep its stdout and
-# stderr on state/.claude-autoarm-prime.out so the wake or failure line has a
-# consumer after this hook has already exited. This path never holds a
+# blocked it there. Start that arm as a handling successor so a leftover
+# downtime marker is not re-announced into a one-poll resurface. Nothing reads
+# the detached cycle's stdout after this hook exits, so it goes to /dev/null and
+# the ledger stays the single record of the cycle. This path never holds a
 # generation claim: the registered asyncRewake hook attaches.
 if [ "$ENSURE_WATCHER" -eq 1 ]; then
   WATCH="$SCRIPT_DIR/fm-watch.sh"
   ARM="$SCRIPT_DIR/fm-watch-arm.sh"
-  PRIME_OUT="$STATE/.claude-autoarm-prime.out"
   predecessor=
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     exit 0
@@ -202,23 +200,20 @@ if [ "$ENSURE_WATCHER" -eq 1 ]; then
   if command -v python3 >/dev/null 2>&1; then
     FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" python3 -c '
 import os, sys
-if len(sys.argv) < 3:
+if len(sys.argv) < 2:
     os._exit(0)
 pid = os.fork()
 if pid > 0:
     os._exit(0)
 os.setsid()
 devnull = os.open(os.devnull, os.O_RDWR)
-out = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 os.dup2(devnull, 0)
-os.dup2(out, 1)
-os.dup2(out, 2)
+os.dup2(devnull, 1)
+os.dup2(devnull, 2)
 if devnull > 2:
     os.close(devnull)
-if out > 2:
-    os.close(out)
-os.execvp(sys.argv[2], sys.argv[2:])
-' "$PRIME_OUT" "$ARM" || true
+os.execvp(sys.argv[1], sys.argv[1:])
+' "$ARM" || true
   fi
   exit 0
 fi
