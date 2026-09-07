@@ -1567,14 +1567,14 @@ test_remote_observes_share_one_tick_budget() {
   cat > "$home/data/secondmates.md" <<'REG'
 # Secondmates
 
-- ios - iOS mate (host: remote-mac; root: /remote/root; home: /remote/ios; scope: ios; projects: none; added 2026-09-06)
-- android - Android mate (host: remote-mac; root: /remote/root; home: /remote/android; scope: android; projects: none; added 2026-09-06)
-- web - Web mate (host: remote-mac; root: /remote/root; home: /remote/web; scope: web; projects: none; added 2026-09-06)
+- ios - iOS mate (host: remote-ios; root: /remote/root; home: /remote/ios; scope: ios; projects: none; added 2026-09-06)
+- android - Android mate (host: remote-android; root: /remote/root; home: /remote/android; scope: android; projects: none; added 2026-09-06)
+- web - Web mate (host: remote-web; root: /remote/root; home: /remote/web; scope: web; projects: none; added 2026-09-06)
 REG
   for task in ios android web; do
     fm_write_meta "$state/$task.meta" \
       "window=fm-remote:w1:p1" "harness=claude" "kind=secondmate" "mode=secondmate" \
-      "home=/remote/$task" "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
+      "home=/remote/$task" "remote_host=remote-$task" "remote_root=/remote/root" "remote_backend=herdr"
     corr=$(fm_pending_reply_create "$home" "$state" "$task" "status of $task")
     fm_pending_reply_mark_delivered "$state" "$corr"
   done
@@ -1582,7 +1582,9 @@ REG
   sshbin="$dir/sshbin/stalled-ssh"
   cat > "$sshbin" <<'SH'
 #!/usr/bin/env bash
-printf 'called\n' >> "$FM_TEST_SSH_CALLS"
+for arg in "$@"; do
+  case "$arg" in remote-*) printf '%s\n' "$arg" >> "$FM_TEST_SSH_CALLS" ;; esac
+done
 cat > /dev/null
 sleep 30
 SH
@@ -1593,15 +1595,19 @@ SH
     export FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SSH_BIN="$sshbin" \
       FM_TEST_SSH_CALLS="$dir/ssh.calls" FM_PENDING_REPLY_OBSERVE_TIMEOUT=2
     fm_pending_reply_tick "$state"
-  ) || fail "the shared-budget tick failed"
+    fm_pending_reply_tick "$state"
+    fm_pending_reply_tick "$state"
+  ) || fail "the shared-budget ticks failed"
   elapsed=$(( $(date +%s) - started ))
   calls=$(wc -l < "$dir/ssh.calls" 2>/dev/null | tr -d '[:space:]')
 
-  [ "$calls" = 1 ] \
-    || fail "the tick spawned $calls stalled remote observes after exhausting its shared budget"
-  [ "$elapsed" -lt 8 ] \
-    || fail "distinct stalled remote observes stacked to ${elapsed}s instead of sharing one budget"
-  pass "pending-reply: remote observes share one per-tick deadline"
+  [ "$calls" = 3 ] \
+    || fail "three ticks spawned $calls stalled observes instead of one per shared budget"
+  [ "$(sort -u "$dir/ssh.calls" | wc -l | tr -d '[:space:]')" = 3 ] \
+    || fail "the observe cursor did not rotate fairly across all remote tasks"
+  [ "$elapsed" -lt 15 ] \
+    || fail "distinct stalled remote observes stacked to ${elapsed}s instead of one budget per tick"
+  pass "pending-reply: remote observes share a fair rotating per-tick deadline"
 }
 
 # --- run --------------------------------------------------------------------

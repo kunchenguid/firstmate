@@ -916,6 +916,77 @@ test_arm_recovers_a_wedged_watcher_via_sigkill() {
   pass "watch-arm: a frozen wedged watcher is evicted via bounded SIGKILL escalation and re-armed"
 }
 
+test_arm_rechecks_recovered_watcher_before_term() {
+  local dir state fakebin holder_script holder identity i
+  dir=$(make_case arm-rechecks-recovered-watcher)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  holder_script="$dir/watcher-holder"
+  cat > "$holder_script" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_TEST_HOLDER_READY"
+while :; do sleep 1; done
+SH
+  chmod +x "$holder_script"
+  FM_TEST_HOLDER_READY="$dir/holder.ready" "$holder_script" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -e "$dir/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$dir/holder.ready" ] || fail "recovering watcher fixture did not start"
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$holder") \
+    || fail "could not identify the recovering watcher fixture"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  : > "$state/.last-watcher-beat"
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "$FM_TEST_BEAT" ]; then
+  count=$(cat "$FM_TEST_STAT_COUNT" 2>/dev/null || echo 0)
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_TEST_STAT_COUNT"
+  now=$(date +%s)
+  if [ "$count" -le 2 ]; then printf '%s\n' "$((now - 1000))"; else printf '%s\n' "$now"; fi
+  exit 0
+fi
+exec /usr/bin/stat "$@"
+SH
+  chmod +x "$fakebin/stat"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=3 \
+    FM_TEST_BEAT="$state/.last-watcher-beat" FM_TEST_STAT_COUNT="$dir/stat.count" \
+    FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$dir/arm.out" 2>&1 &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$holder" "$dir/arm.out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$holder" "$dir/arm.out" \
+    || fail "arm did not attach after the watcher recovered: $(cat "$dir/arm.out")"
+  is_live_non_zombie "$holder" || fail "arm SIGTERM'd a watcher that recovered before eviction"
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=3 \
+    FM_TEST_BEAT="$state/.last-watcher-beat" FM_TEST_STAT_COUNT="$dir/stat.count" \
+    FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" --restart > "$dir/restart.out" 2>&1 &
+  ARM_PID=$!
+  wait_for_exit "$holder" 80
+  is_live_non_zombie "$holder" && fail "explicit restart did not stop the recovered watcher"
+  wait "$holder" 2>/dev/null || true
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: wedge recovery rechecks health while restart still stops"
+}
+
 test_sigkill_refuses_a_changed_lock_identity() {
   local dir state fakebin holder_script holder identity i
   dir=$(make_case sigkill-refuses-changed-identity)
@@ -1048,6 +1119,7 @@ test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
 test_arm_recovers_a_wedged_watcher
 test_arm_recovers_a_wedged_watcher_via_sigkill
+test_arm_rechecks_recovered_watcher_before_term
 test_sigkill_refuses_a_changed_lock_identity
 test_arm_attaches_to_a_healthy_watcher_without_evicting
 test_poll_blocked_watcher_is_term_interruptible

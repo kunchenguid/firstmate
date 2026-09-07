@@ -292,12 +292,18 @@ wedged_watcher_holds_lock() {
 # watcher crash. Returns 0 when the lock is clear to re-arm or a healthy holder
 # was left to be attached to, 1 when a wedged holder could not be removed.
 stop_this_home_watcher() {
-  local lock_pid deadline i
+  local stop_mode=${1:-restart} lock_pid deadline i
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   fm_pid_alive "$lock_pid" || return 0
   if ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
     clear_stale_recorded_watcher_lock || return 1
     return 0
+  fi
+  if [ "$stop_mode" = wedge ]; then
+    fm_pid_alive "$lock_pid" || return 0
+    [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$lock_pid" ] || return 0
+    fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME" || return 0
+    watcher_beacon_stale_past_grace || return 0
   fi
   kill -TERM "$lock_pid" 2>/dev/null || true
   deadline=$(( $(date +%s) + EVICT_TERM_GRACE ))
@@ -498,7 +504,7 @@ if [ "$mode" = restart ]; then
   # for it to actually exit (escalating a wedged one to SIGKILL) before we
   # relaunch, so the fresh watcher takes a released or now-dead-pid lock instead of
   # seeing the dying one as a live holder and no-opping.
-  if ! stop_this_home_watcher; then
+  if ! stop_this_home_watcher restart; then
     echo "watcher: FAILED - could not stop this home's watcher to restart it" >&2
     exit 1
   fi
@@ -514,7 +520,7 @@ fi
 # recovered in the race fails the beacon-stale check and is left to be attached
 # to below.
 if [ "$mode" = arm ] && ! healthy_watcher && wedged_watcher_holds_lock; then
-  if ! stop_this_home_watcher; then
+  if ! stop_this_home_watcher wedge; then
     echo "watcher: FAILED - could not evict a wedged watcher to re-arm" >&2
     exit 1
   fi

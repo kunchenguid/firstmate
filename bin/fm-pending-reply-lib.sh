@@ -1429,9 +1429,13 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i observe_deadline=0 observe_now observe_remaining
+  local observe_cursor_path observe_cursor_tmp observe_start remote_count=0 next_observe_start
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
+  observe_cursor_path="$dir/.observe-rotation"
+  observe_start=$(cat "$observe_cursor_path" 2>/dev/null || true)
+  case "$observe_start" in ''|*[!0-9]*) observe_start=0 ;; esac
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in
@@ -1522,19 +1526,24 @@ fm_pending_reply_tick() {  # <state-dir>
         done
         if [ "$found" = 0 ]; then
           if [ -n "$remote_host" ]; then
-            observe_now=$(date +%s)
-            if [ "$observe_deadline" -eq 0 ]; then
-              observe_deadline=$((observe_now + FM_PENDING_REPLY_OBSERVE_TIMEOUT))
-            fi
-            observe_remaining=$((observe_deadline - observe_now))
-            if [ "$observe_remaining" -gt 0 ]; then
-              observation=$(fm_run_timed "$observe_remaining" \
-                "$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
-                fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
-              case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
+            if [ "$remote_count" -ge "$observe_start" ]; then
+              observe_now=$(date +%s)
+              if [ "$observe_deadline" -eq 0 ]; then
+                observe_deadline=$((observe_now + FM_PENDING_REPLY_OBSERVE_TIMEOUT))
+              fi
+              observe_remaining=$((observe_deadline - observe_now))
+              if [ "$observe_remaining" -gt 0 ]; then
+                observation=$(fm_run_timed "$observe_remaining" \
+                  "$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
+                  fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
+                case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
+              else
+                observation=unknown
+              fi
             else
               observation=unknown
             fi
+            remote_count=$((remote_count + 1))
           else
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           fi
@@ -1546,6 +1555,15 @@ fm_pending_reply_tick() {  # <state-dir>
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
   done
+  if [ "$remote_count" -gt 0 ]; then
+    next_observe_start=$(( (observe_start + 1) % remote_count ))
+    observe_cursor_tmp=$(mktemp "$dir/.observe-rotation.XXXXXX" 2>/dev/null || true)
+    if [ -n "$observe_cursor_tmp" ]; then
+      (umask 077; printf '%s\n' "$next_observe_start" > "$observe_cursor_tmp") \
+        && mv -f "$observe_cursor_tmp" "$observe_cursor_path"
+      rm -f "$observe_cursor_tmp" 2>/dev/null || true
+    fi
+  fi
   return 0
 }
 
