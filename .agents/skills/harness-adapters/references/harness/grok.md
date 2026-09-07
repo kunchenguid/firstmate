@@ -8,9 +8,9 @@ Launch shape: `grok --always-approve "$(cat <brief>)"`.
 
 | Fact | Value |
 |---|---|
-| Busy state | The last rendered-tail fallback, isolated to Grok pending a semantic source: ASCII mid-turn `Ctrl+c:cancel`, absent from idle bar `Shift+Tab:mode │ Ctrl+.:shortcuts`, never the locale-fragile braille spinner. |
+| Busy state | The last rendered-tail fallback, isolated to Grok pending a semantic source: ASCII mid-turn `Ctrl+c:cancel`, absent from idle bar `Shift+Tab:mode │ Ctrl+.:shortcuts`, never the locale-fragile braille spinner. Known stale on 1.0.13, whose active footer is `Shift+Tab:mode │ Esc:cancel │ Ctrl+x:shortcuts` and idle bar `Shift+Tab:mode │ Ctrl+x:shortcuts`, so the fallback reports a genuinely busy 1.0.13 turn as idle until the signature is re-verified. See [`docs/verification/grok-interrupt.md`](../../../../../docs/verification/grok-interrupt.md). |
 | Exit | `/exit` prints `Resume this session with: grok --resume <session-id>`; fallback is `Ctrl+Q` twice within 1000ms, `Ctrl+D` quits in VS Code-family terminals, and `Ctrl+C` interrupts. |
-| Interrupt | Single `Ctrl+C` remains the production key; Escape is version- and mode-dependent, and the current 1.0.13 visible cancellation did not prove clean tool cancellation. See [`docs/verification/grok-interrupt.md`](../../../../../docs/verification/grok-interrupt.md). |
+| Interrupt | Single `Ctrl+C`, retained as the established path. Escape is version- and mode-dependent: on 1.0.13 one Escape also visibly cancels the turn, and neither key is proven to stop already-running tool work on that build. See [`docs/verification/grok-interrupt.md`](../../../../../docs/verification/grok-interrupt.md). |
 | Skill | `/<skill>`, for example `/no-mistakes`, with end-to-end user-skill discovery, invocation, and real `no-mistakes axi run` evidence; the popup may consume Enter and fill an argument placeholder, requiring a real second Enter. |
 | Autonomy | `--always-approve`, footer `· always-approve`, verified unattended; `--permission-mode bypassPermissions` is stronger equivalent. |
 | Marker | `GROK_AGENT=1` on child or tool processes in 0.2.73 and no `CLAUDECODE`; a 1.0.0 hook instead had `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`, and `GROK_WORKSPACE_ROOT` without `GROK_AGENT`, so ancestry guarantees identity. |

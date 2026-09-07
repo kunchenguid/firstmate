@@ -200,7 +200,6 @@ Zellij has no verified recovery-grade agent process probe, while Orca and cmux d
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
 Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
-[Grok 1.0.13 interrupt verification](grok-interrupt.md) records three qualifying Escape cancellations and a separate Ctrl+C control without changing the busy regex.
 Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-herdr.test.sh` and refreshed by `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh`.
 
 ### Cleanup endpoint identity

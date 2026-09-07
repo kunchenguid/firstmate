@@ -99,7 +99,10 @@ The current experiment does not establish that either key terminates an already-
 The old 0.2.73 adapter record was not treated as evidence about the installed 1.0.13 build.
 The earlier 1.0.13 ancillary Escape observation was not treated as complete until these repeated active-turn captures and the `C-c` control were collected.
 The separate queued-Enter experiment at `https://github.com/kunchenguid/firstmate/pull/3868` is not required for this result and is not causal evidence.
-The current active footer is `Esc:cancel`, but this verification does not widen or otherwise change the Grok busy regex.
+The captures also disconfirm the maintained Grok busy signature, which is a separate defect this interrupt-scoped verification records rather than fixes.
+`FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT` is `Ctrl\+c:cancel` in `bin/fm-composer-lib.sh`, grepped by `fm_busy_grok_tail_busy` in `bin/fm-busy-lib.sh` for the `grok*` classifier arm.
+That literal is absent from every 1.0.13 active footer captured above, so on this build the rendered-tail fallback prints `idle grok-regex` for a genuinely busy turn with no error, and the 1.0.13 idle bar is `Shift+Tab:mode │ Ctrl+x:shortcuts` rather than the recorded `Shift+Tab:mode │ Ctrl+.:shortcuts`.
+Grok busy detection is therefore known stale on 1.0.13; widening or version-scoping the signature needs its own busy-scoped live verification and regression coverage, and this verification does not change the busy regex.
 
 An Escape-is-safe conclusion would require repeated active-turn captures where one Escape cancels the turn and the active tool work also stops cleanly, the Grok process remains interactive, and a follow-up is accepted.
 It would be falsified by any repeatable capture where Escape only changes scrollback focus, leaves the turn generating, leaves active work running, exits or wedges the Grok process, fails to restore an interactive composer, or prevents a follow-up.
