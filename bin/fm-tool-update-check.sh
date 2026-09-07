@@ -277,7 +277,10 @@ EOF
 
 emit_update() {
   local name=$1 kind=$2 value=$3 text=$4 key
-  key=$(update_fingerprint "$kind|$name|$value")
+  if ! key=$(update_fingerprint "$kind|$name|$value") || [ -z "$key" ]; then
+    emit "$name check failed: could not fingerprint update identity"
+    return 1
+  fi
   current_update_add "$name|$key|$kind|$value"
   if [ "$SNOOZE_CAPTURE" -eq 0 ] && snooze_key_active "$name" "$key"; then
     return 0
