@@ -45,10 +45,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-COMPLETION_FILE="$STATE/.session-start-complete"
+SESSION_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -58,6 +55,12 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
+
+# Sets FM_ROOT, FM_HOME and STATE from this script's own checkout, ignoring an
+# inherited environment that names a foreign one: a child crew, scout, or
+# secondmate session must never act on the parent primary's home.
+fm_primary_scope_resolve_env "$SESSION_ROOT"
+COMPLETION_FILE="$STATE/.session-start-complete"
 
 SOURCE=
 PI_PREREQUISITE=0
@@ -87,7 +90,7 @@ stand_down() {
 # they do not own. Pi's preflight-only status preserves that intentional silence
 # without mistaking it for a failed eligible attempt that needs the manual nudge.
 fm_is_gate_agent "$FM_ROOT" && stand_down
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || stand_down
+fm_primary_scope_matches "$SESSION_ROOT" "$STATE" || stand_down
 
 session_start_completed() {
   local lock_pid completion_pid

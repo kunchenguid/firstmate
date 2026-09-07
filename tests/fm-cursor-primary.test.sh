@@ -146,9 +146,14 @@ PARK_CHILD='
 # Run the park as a child of the fake cursor harness that holds the home lock.
 # Clear PI_CODING_AGENT so a Pi host session running this suite cannot make the
 # Cursor park stand down before the fixture under test is exercised.
+park_payload() {  # [loop_count]
+  local loop=${1:-0}
+  printf '{"session_id":"sess-cursor","generation_id":"gen-%s","loop_count":%s,"status":"completed","hook_event_name":"stop","cursor_version":"2026.08.11-e8db854"}' "$loop" "$loop"
+}
+
 run_park() {  # <dir> [loop_count] [loop_ceiling]
   local dir=$1 loop=${2:-0} ceiling=${3:-} payload
-  payload=$(printf '{"session_id":"sess-cursor","generation_id":"gen-%s","loop_count":%s,"status":"completed","hook_event_name":"stop","cursor_version":"2026.08.11-e8db854"}' "$loop" "$loop")
+  payload=$(park_payload "$loop")
   if [ -n "$ceiling" ]; then
     printf '%s' "$payload" | env -u PI_CODING_AGENT FM_HOME="$dir" FM_CURSOR_PARK_POLL=1 \
       FM_CURSOR_TURNEND_LOOP_CEILING="$ceiling" "$FAKE_CURSOR" -c "$PARK_CHILD" 2>/dev/null
@@ -593,6 +598,35 @@ test_park_inert_in_child_worktree() {
   pass "cursor park: inert inside a child crewmate worktree"
 }
 
+# Spawned crew/scout sessions can inherit the parent primary's FM_ROOT_OVERRIDE
+# and FM_HOME. The adapter must still scope to the checkout it runs from;
+# otherwise it parks the child against the PARENT's state on every stop.
+test_park_inert_in_child_worktree_with_inherited_primary_env() {
+  local base child out
+  base=$(make_primary_dir "$TMP_ROOT/park-env-leak-base")
+  : > "$base/state/task1.meta"
+  write_arm_fixture "$base" actionable
+  child="$TMP_ROOT/park-env-leak-child"
+  fm_git_worktree "$base" "$child" fm/cursor-park-env-leak-child
+  mkdir -p "$child/state"
+  : > "$child/AGENTS.md"
+  install_scripts "$child"
+  : > "$child/state/task1.meta"
+  write_arm_fixture "$child" actionable
+  out=$(park_payload | env -u PI_CODING_AGENT \
+    FM_ROOT_OVERRIDE="$base" FM_HOME="$base" FM_CURSOR_PARK_POLL=1 \
+    FM_CHILD_PARK="$child/bin/fm-turnend-guard-cursor.sh" \
+    "$FAKE_CURSOR" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      "$FM_CHILD_PARK"
+    ' 2>/dev/null)
+  [ -z "$out" ] \
+    || fail "an inherited parent-primary FM_ROOT_OVERRIDE/FM_HOME must not park a child worktree: $out"
+  [ ! -e "$base/state/arm-ran" ] \
+    || fail "the child worktree armed the parent primary's watcher"
+  pass "cursor park: inert in a child worktree even when FM_ROOT_OVERRIDE and FM_HOME name a parent primary"
+}
+
 test_park_ignores_malformed_payload() {
   local dir out
   dir=$(make_primary_dir "$TMP_ROOT/park-malformed")
@@ -701,6 +735,7 @@ test_park_stands_down_when_away_mode_activates_before_commit
 test_park_inert_without_session_lock
 test_park_stands_down_after_session_takeover
 test_park_inert_in_child_worktree
+test_park_inert_in_child_worktree_with_inherited_primary_env
 test_park_ignores_malformed_payload
 test_sessionstart_emits_additional_context
 test_sessionstart_silent_in_child_worktree

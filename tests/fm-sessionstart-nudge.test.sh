@@ -29,8 +29,6 @@ fi
 unset NO_MISTAKES_GATE
 
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
-NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
-RUN="$ROOT/bin/fm-sessionstart-run.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
@@ -38,17 +36,45 @@ fm_operational_input_encode session-start "$NUDGE_TEXT" NUDGE_LINE \
   || fail "could not construct expected session-start nudge"
 fm_git_identity fmtest fmtest@example.invalid
 
+# Both wrappers scope to the checkout they run FROM, so every fixture home gets
+# its own copy under bin/ and is invoked through it - the shape a real home
+# registers with the harness. The nudge tier needs only its own dependency set;
+# the run tier reaches bin/fm-session-start.sh and its libraries, so it takes
+# the whole directory.
+install_nudge_bin() {
+  local dir=$1
+  mkdir -p "$dir/bin"
+  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
+    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$dir/bin/"
+  chmod +x "$dir/bin/fm-sessionstart-nudge.sh"
+}
+
+install_run_bin() {
+  local dir=$1
+  mkdir -p "$dir/bin"
+  cp -R "$ROOT/bin/." "$dir/bin/"
+}
+
+nudge_of() {  # <root>
+  printf '%s\n' "$1/bin/fm-sessionstart-nudge.sh"
+}
+
+run_of() {  # <root>
+  printf '%s\n' "$1/bin/fm-sessionstart-run.sh"
+}
+
 make_primary() {
   local dir=$1
-  mkdir -p "$dir/bin" "$dir/state"
+  mkdir -p "$dir/state"
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
+  install_nudge_bin "$dir"
 }
 
 run_nudge() {
   local root=$1
-  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+  FM_GATE_REFUSE_BYPASS=0 FM_HOME="$root" "$(nudge_of "$root")"
 }
 
 expect_silent_zero() {
@@ -75,7 +101,7 @@ test_gate_env_is_silent() {
   local root="$TMP_ROOT/gate-env"
   make_primary "$root"
   expect_silent_zero "gate env nudge" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+    FM_HOME="$root" "$(nudge_of "$root")"
   pass "fm-sessionstart-nudge: NO_MISTAKES_GATE is silent"
 }
 
@@ -86,19 +112,21 @@ test_gate_common_dir_is_silent() {
   mkdir -p "$(dirname "$bare")"
   git clone --quiet --bare "$source" "$bare"
   git --git-dir="$bare" worktree add --quiet -b gate-test "$root" HEAD
-  mkdir -p "$root/bin" "$root/state"
+  mkdir -p "$root/state"
   : > "$root/AGENTS.md"
   printf 'gate-test\n' > "$root/.fm-secondmate-home"
+  install_nudge_bin "$root"
   expect_silent_zero "gate common-dir nudge" env FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+    FM_HOME="$root" "$(nudge_of "$root")"
   pass "fm-sessionstart-nudge: .no-mistakes gate common-dir is silent"
 }
 
 test_unmarked_linked_worktree_is_silent() {
   local base="$TMP_ROOT/worktree-base" root="$TMP_ROOT/worktree-child"
   fm_git_worktree "$base" "$root" fm/sessionstart-linked
-  mkdir -p "$root/bin" "$root/state"
+  mkdir -p "$root/state"
   : > "$root/AGENTS.md"
+  install_nudge_bin "$root"
   expect_silent_zero "linked worktree nudge" run_nudge "$root"
   pass "fm-sessionstart-nudge: an unmarked linked task worktree is silent"
 }
@@ -106,9 +134,10 @@ test_unmarked_linked_worktree_is_silent() {
 test_linked_secondmate_primary_nudges() {
   local base="$TMP_ROOT/secondmate-base" root="$TMP_ROOT/secondmate-home" out status=0
   fm_git_worktree "$base" "$root" fm/sessionstart-secondmate
-  mkdir -p "$root/bin" "$root/state"
+  mkdir -p "$root/state"
   : > "$root/AGENTS.md"
   printf 'sessionstart-sm\n' > "$root/.fm-secondmate-home"
+  install_nudge_bin "$root"
   out=$(run_nudge "$root") || status=$?
   expect_code 0 "$status" "linked secondmate nudge"
   [ "$out" = "$NUDGE_LINE" ] || fail "linked secondmate printed unexpected output: $out"
@@ -134,9 +163,6 @@ test_owned_lock_is_silent() {
 test_opencode_plugin_delivers_exact_nudge_once() {
   local root="$TMP_ROOT/opencode-primary" out status=0
   make_primary "$root"
-  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
-  chmod +x "$root/bin/fm-sessionstart-nudge.sh"
   out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
     WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
@@ -181,24 +207,25 @@ RUN_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
 make_run_primary() {
   local dir=$1
-  mkdir -p "$dir/bin" "$dir/state" "$dir/data" "$dir/config"
+  mkdir -p "$dir/state" "$dir/data" "$dir/config"
   git init -q -b main "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
+  install_run_bin "$dir"
 }
 
 run_hook() {  # <root> [args...]
   local root=$1
   shift
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+    FM_GATE_REFUSE_BYPASS=0 FM_HOME="$root" PATH="$RUN_PATH" "$(run_of "$root")" "$@"
 }
 
 run_hook_pi() {  # <root> [args...]
   local root=$1
   shift
   env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
-    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+    FM_GATE_REFUSE_BYPASS=0 FM_HOME="$root" PATH="$RUN_PATH" "$(run_of "$root")" "$@"
 }
 
 # Every run-tier assertion keys off the digest banner, which fm-session-start.sh
@@ -983,17 +1010,18 @@ test_run_gate_and_scope_are_silent() {
   local out status=0
   make_run_primary "$root"
   expect_silent_zero "gate env run" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" --source startup
+    FM_HOME="$root" PATH="$RUN_PATH" "$(run_of "$root")" --source startup
   assert_absent "$root/state/.lock" "a gate agent's session open still took the fleet lock"
   out=$(env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" \
-    "$RUN" --source startup --pi-prerequisite 2>&1) || status=$?
+    FM_HOME="$root" PATH="$RUN_PATH" \
+    "$(run_of "$root")" --source startup --pi-prerequisite 2>&1) || status=$?
   expect_code 3 "$status" "gate env Pi prerequisite stand-down"
   [ -z "$out" ] || fail "gate env Pi prerequisite stand-down must be silent, got: $out"
 
   fm_git_worktree "$base" "$linked" fm/run-linked
-  mkdir -p "$linked/bin" "$linked/state"
+  mkdir -p "$linked/state"
   : > "$linked/AGENTS.md"
+  install_run_bin "$linked"
   expect_silent_zero "linked worktree run" run_hook "$linked" --source startup
   status=0
   out=$(run_hook "$linked" --source startup --pi-prerequisite 2>&1) || status=$?

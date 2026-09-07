@@ -69,10 +69,13 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+SESSION_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# Sets FM_ROOT, FM_HOME, STATE and CONFIG from this script's own checkout,
+# ignoring an inherited environment that names a foreign one: a child crew,
+# scout, or secondmate session must never act on the parent primary's home.
+fm_primary_scope_resolve_env "$SESSION_ROOT"
 GRACE=${FM_GUARD_GRACE:-300}
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
@@ -83,8 +86,6 @@ case "$AUTOARM_ATTEMPTS" in
   *) AUTOARM_ATTEMPTS=2 ;;
 esac
 
-# shellcheck source=bin/fm-primary-scope-lib.sh
-. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -108,7 +109,7 @@ PAYLOAD=$(cat 2>/dev/null || true)
 fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 
 # --- scope: genuine primary checkout only -----------------------------------
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+fm_primary_scope_matches "$SESSION_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its numeric harness pid in .lock.

@@ -17,11 +17,57 @@ fm_root_is_secondmate_home() {
   return 0
 }
 
+# Return 0 when the ambient FM_ROOT_OVERRIDE names a checkout other than $1.
+#
+# FM_ROOT_OVERRIDE is an operator-directed pointer at the checkout a process is
+# meant to run out of, and the one producer that sets it
+# (bin/fm-remote-entrypoint.sh) invokes commands from that very checkout's bin/,
+# so a credible override always resolves to the running script's own checkout.
+# A crew, scout, or secondmate session that merely INHERITED the parent
+# primary's environment carries an override naming a foreign checkout instead.
+# FM_HOME and the FM_*_OVERRIDE paths travel with it and describe the parent's
+# home too, so once the override is foreign none of them may scope this session.
+fm_primary_scope_env_is_foreign() {
+  local session_root=$1 override=${FM_ROOT_OVERRIDE:-} session_phys override_phys
+  [ -n "$override" ] || return 1
+  session_phys=$(CDPATH='' cd -- "$session_root" 2>/dev/null && pwd -P) || return 0
+  override_phys=$(CDPATH='' cd -- "$override" 2>/dev/null && pwd -P) || return 0
+  [ "$override_phys" != "$session_phys" ]
+}
+
+# Set FM_ROOT, FM_HOME, STATE and CONFIG for a primary-scoped hook whose own
+# checkout is $1, discarding an inherited foreign environment wholesale so root
+# and effective home can never come from different sessions. FM_ROOT is always
+# the running checkout afterwards, which is what fm_primary_scope_matches needs.
+#
+# A foreign environment is purged from the process environment too, not just
+# from these variables: hooks foreground helpers such as bin/fm-watch-arm.sh,
+# and those re-derive the same paths from the same names, so leaving the parent
+# primary's values in place would only move the cross-home action one process
+# down. This mirrors the reset bin/fm-spawn.sh already applies to a secondmate
+# launch.
+# shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+fm_primary_scope_resolve_env() {
+  local session_root=$1
+  if fm_primary_scope_env_is_foreign "$session_root"; then
+    unset FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE \
+      FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE
+    FM_ROOT=$session_root
+    FM_HOME=$session_root
+    export FM_HOME
+    STATE="$session_root/state"
+    CONFIG="$session_root/config"
+    return 0
+  fi
+  FM_ROOT=${FM_ROOT_OVERRIDE:-$session_root}
+  FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
+  STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  CONFIG=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+}
+
 # Return 0 when $1 is a genuine primary root whose effective state dir is $2.
-# Production turn-end hooks must pass the running script's checkout
-# (SCRIPT_DIR/..), not inherited FM_ROOT_OVERRIDE: a child crew or scout
-# session can inherit the parent primary's FM_ROOT_OVERRIDE and FM_HOME,
-# and those values would otherwise pass the plain-checkout test below.
+# Callers must pass the running script's checkout (fm_primary_scope_resolve_env
+# resolves exactly that into FM_ROOT), never a raw inherited FM_ROOT_OVERRIDE.
 # A valid secondmate marker force-includes a linked secondmate home.
 # Otherwise only a plain checkout is primary, never a linked task worktree.
 fm_primary_scope_matches() {

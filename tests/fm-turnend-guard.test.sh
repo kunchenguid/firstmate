@@ -16,6 +16,13 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-supervision-lib.sh"
 
+# Every hook case below invokes a guard by absolute path inside a fixture
+# checkout, and the guard resolves its own home from the environment. An ambient
+# FM_HOME/FM_ROOT_OVERRIDE/FM_STATE_OVERRIDE from the session running this suite
+# would silently point those invocations at a foreign state dir, so clear them
+# once here; every case that needs them sets them itself.
+unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE
+
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -717,6 +724,34 @@ test_hook_silent_in_child_worktree_with_inherited_primary_env() {
   pass "fm-turnend-guard: inert in child worktrees even when FM_ROOT_OVERRIDE and FM_HOME name a parent primary"
 }
 
+# A secondmate HOME is force-included by its marker, so the child-worktree
+# git-dir test can never save it. With a leaked parent-primary FM_ROOT_OVERRIDE
+# and FM_HOME it must still resolve its OWN state, not the parent's: otherwise a
+# healthy secondmate is wedged by the parent's in-flight work, and its
+# block/failure bookkeeping lands in a state dir it does not own.
+test_hook_scopes_secondmate_home_to_its_own_state_under_inherited_env() {
+  local primary home out status
+  primary=$(make_primary_dir "$TMP_ROOT/hook-env-leak-sm-primary")
+  : > "$primary/state/task1.meta"
+
+  home=$(make_secondmate_dir "$TMP_ROOT/hook-env-leak-sm-own-home")
+
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" \
+    bash "$home/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "a secondmate home with no in-flight work of its own must allow, not inherit the parent's"
+  [ -z "$out" ] || fail "secondmate home with inherited primary env produced output: $out"
+
+  : > "$home/state/task1.meta"
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" \
+    bash "$home/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 2 "$status" "a secondmate home with its OWN unsupervised work must still be guarded"
+  assert_contains "$out" "TURN WOULD END BLIND" "secondmate control must alarm on its own in-flight work"
+
+  pass "fm-turnend-guard: a secondmate home guards its own state, not a parent primary named by inherited env"
+}
+
 test_hook_silent_without_jq() {
   local dir out status fakebin tool tool_path
   dir=$(make_primary_dir "$TMP_ROOT/hook-nojq")
@@ -896,7 +931,7 @@ test_grok_adapter_missing_jq_and_no_supervision_allow() {
   [ ! -e "$log" ] || fail "missing jq started a resume process"
 
   dir=$(make_primary_dir "$TMP_ROOT/grok-native-no-work")
-  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | env -u FM_HOME -u FM_ROOT_OVERRIDE GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '%s' '{"sessionId":"x","stopHookActive":false}' | GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 0 "$status" "healthy no-supervision-needed native stop must allow"
   [ -z "$out" ] || fail "no-supervision-needed native stop produced output: $out"
   pass "fm-turnend-guard-grok: missing jq and no-supervision-needed stops stay silent and bounded"
@@ -2056,6 +2091,7 @@ test_hook_exempts_linked_worktree_with_stray_marker
 test_hook_exempts_linked_worktree_with_non_ascii_marker
 test_hook_silent_in_crewmate_worktree
 test_hook_silent_in_child_worktree_with_inherited_primary_env
+test_hook_scopes_secondmate_home_to_its_own_state_under_inherited_env
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast

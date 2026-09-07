@@ -6,9 +6,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+SESSION_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -17,8 +15,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-operational-input.sh
 . "$SCRIPT_DIR/fm-operational-input.sh"
 
+# Sets FM_ROOT, FM_HOME and STATE from this script's own checkout, ignoring an
+# inherited environment that names a foreign one: a child crew, scout, or
+# secondmate session must never act on the parent primary's home.
+fm_primary_scope_resolve_env "$SESSION_ROOT"
 fm_is_gate_agent "$FM_ROOT" && exit 0
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+fm_primary_scope_matches "$SESSION_ROOT" "$STATE" || exit 0
 
 lock_is_in_ancestry() {
   local lock_pid pid=$$ _

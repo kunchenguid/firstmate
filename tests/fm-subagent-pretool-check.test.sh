@@ -6,16 +6,28 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-CHECK="$ROOT/bin/fm-subagent-pretool-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-subagent-pretool-tests)
 PRIMARY="$TMP_ROOT/primary"
 STATE="$PRIMARY/state"
 OUT="$TMP_ROOT/out"
 ERR="$TMP_ROOT/err"
 
-mkdir -p "$PRIMARY/bin" "$STATE"
+# The guard scopes to the checkout it runs FROM, so every fixture gets its own
+# copy under bin/ and is invoked through it - the shape a real home registers.
+# Pointing the repo's own copy at a fixture home would only test the inherited
+# environment the guard is supposed to ignore.
+install_check() {
+  local dir=$1
+  mkdir -p "$dir/bin"
+  cp "$ROOT/bin/fm-subagent-pretool-check.sh" "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/"
+  chmod +x "$dir/bin/fm-subagent-pretool-check.sh"
+}
+
+mkdir -p "$STATE"
 printf '# fixture\n' > "$PRIMARY/AGENTS.md"
 git -C "$PRIMARY" init -q
+install_check "$PRIMARY"
+CHECK="$PRIMARY/bin/fm-subagent-pretool-check.sh"
 
 BRIEF_ONLY_ROUTE='first classify the work under the AGENTS.md intake contract, then use bin/fm-brief.sh followed by bin/fm-spawn.sh for dispatched work'
 SCOUT_ROUTE='first classify the work under the AGENTS.md intake contract: work already classified as a scout goes to bin/fm-scout.sh "<question>" [project], while authorized ship work and its bounded research go to bin/fm-brief.sh then bin/fm-spawn.sh'
@@ -46,7 +58,7 @@ run_tool() {
   shift
   : > "$OUT"
   : > "$ERR"
-  env FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" "$@" \
+  env FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" "$@" \
     "$CHECK" --claude --tool "$tool" > "$OUT" 2> "$ERR" || rc=$?
   return "$rc"
 }
@@ -186,21 +198,23 @@ test_task_worktree_and_non_firstmate_repo_are_inert() {
   git -C "$PRIMARY" add AGENTS.md
   git -C "$PRIMARY" commit -qm fixture
   git -C "$PRIMARY" worktree add -q -b fixture-child "$child"
-  mkdir -p "$child/bin" "$child/state"
+  mkdir -p "$child/state"
   printf '# fixture\n' > "$child/AGENTS.md"
+  install_check "$child"
   : > "$OUT"
   : > "$ERR"
-  FM_ROOT_OVERRIDE="$child" FM_HOME="$child" FM_STATE_OVERRIDE="$child/state" \
-    "$CHECK" --claude --tool Agent > "$OUT" 2> "$ERR" || rc=$?
+  FM_HOME="$child" FM_STATE_OVERRIDE="$child/state" \
+    "$child/bin/fm-subagent-pretool-check.sh" --claude --tool Agent > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 0 ] || fail "a crewmate task worktree must be out of scope, got exit $rc: $(cat "$ERR")"
   [ ! -s "$OUT" ] || fail "task-worktree no-op wrote stdout: $(cat "$OUT")"
   [ ! -s "$ERR" ] || fail "task-worktree no-op wrote stderr: $(cat "$ERR")"
 
-  mkdir -p "$plain/bin"
+  mkdir -p "$plain"
   git -C "$plain" init -q
+  install_check "$plain"
   rc=0
-  FM_ROOT_OVERRIDE="$plain" FM_HOME="$plain" FM_STATE_OVERRIDE="$plain/state" \
-    "$CHECK" --claude --tool Agent > "$OUT" 2> "$ERR" || rc=$?
+  FM_HOME="$plain" FM_STATE_OVERRIDE="$plain/state" \
+    "$plain/bin/fm-subagent-pretool-check.sh" --claude --tool Agent > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 0 ] || fail "a non-firstmate repo must be out of scope, got exit $rc"
   pass "the guard is inert in a crewmate task worktree and in a non-firstmate repo"
 }
@@ -208,11 +222,12 @@ test_task_worktree_and_non_firstmate_repo_are_inert() {
 test_secondmate_home_is_in_scope() {
   local second="$TMP_ROOT/second" rc=0
   git -C "$PRIMARY" worktree add -q -b fixture-second "$second"
-  mkdir -p "$second/bin" "$second/state"
+  mkdir -p "$second/state"
   printf '# fixture\n' > "$second/AGENTS.md"
   printf 'sm-fixture\n' > "$second/.fm-secondmate-home"
-  FM_ROOT_OVERRIDE="$second" FM_HOME="$second" FM_STATE_OVERRIDE="$second/state" \
-    "$CHECK" --claude --tool Agent > "$OUT" 2> "$ERR" || rc=$?
+  install_check "$second"
+  FM_HOME="$second" FM_STATE_OVERRIDE="$second/state" \
+    "$second/bin/fm-subagent-pretool-check.sh" --claude --tool Agent > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 2 ] || fail "a marked secondmate home operates a fleet and must be guarded, got exit $rc"
   pass "a marked secondmate home is guarded even though it is a linked worktree"
 }
@@ -221,7 +236,7 @@ test_stdin_transports_and_output_shapes() {
   local rc=0
   : > "$OUT"; : > "$ERR"
   printf '%s' '{"tool_name":"Agent","tool_input":{"prompt":"go"}}' \
-    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+    | FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
       "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 2 ] || fail "Claude-shaped stdin must deny, got exit $rc"
   [ ! -s "$OUT" ] || fail "Claude deny wrote stdout, which makes Claude ignore the deny: $(cat "$OUT")"
@@ -229,7 +244,7 @@ test_stdin_transports_and_output_shapes() {
   rc=0
   : > "$OUT"; : > "$ERR"
   printf '%s' '{"toolName":"Agent"}' \
-    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+    | FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
       "$CHECK" > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 2 ] || fail "Grok-shaped stdin must deny, got exit $rc"
   jq -e '.decision == "deny" and (.reason | startswith("[subagent-dispatch]"))' "$OUT" >/dev/null 2>&1 \
@@ -238,7 +253,7 @@ test_stdin_transports_and_output_shapes() {
   rc=0
   : > "$OUT"; : > "$ERR"
   printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' \
-    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+    | FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
       "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 0 ] || fail "Bash through stdin must allow, got exit $rc"
   [ ! -s "$OUT" ] && [ ! -s "$ERR" ] || fail "stdin allow wrote output"
@@ -251,7 +266,7 @@ test_malformed_transport_fails_open() {
     rc=0
     : > "$OUT"; : > "$ERR"
     printf '%s' "$payload" \
-      | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      | FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
         "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
     [ "$rc" -eq 0 ] || fail "malformed transport must fail open, payload '$payload' gave exit $rc"
     [ ! -s "$OUT" ] || fail "fail-open path wrote stdout for payload '$payload'"
@@ -268,7 +283,7 @@ test_missing_jq_stdin_transport_fails_open() {
   ln -sf "$cat_bin" "$fakebin/cat"
   : > "$OUT"; : > "$ERR"
   printf '%s' '{"tool_name":"Agent"}' \
-    | env PATH="$fakebin" FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+    | env PATH="$fakebin" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
       "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 0 ] || fail "missing jq transport must fail open, got exit $rc: $(cat "$ERR")"
   [ ! -s "$OUT" ] || fail "missing jq fail-open path wrote stdout: $(cat "$OUT")"

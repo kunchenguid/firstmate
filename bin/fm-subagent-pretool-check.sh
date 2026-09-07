@@ -171,9 +171,7 @@ done
 [ "${FM_ALLOW_SUBAGENT:-}" != "1" ] || exit 0
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
-FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
-FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
-STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+SESSION_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
 
 # Scope to a genuine primary home, exactly as the session-start nudge and the
 # turn-end guard do. fm_primary_scope_matches accepts a plain checkout or a
@@ -184,7 +182,11 @@ STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 # inert (exit 0), never a block, so a broken environment never denies a call.
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+# Sets FM_ROOT, FM_HOME and STATE from this script's own checkout, ignoring an
+# inherited environment that names a foreign one: a child crew, scout, or
+# secondmate session must never act on the parent primary's home.
+fm_primary_scope_resolve_env "$SESSION_ROOT"
+fm_primary_scope_matches "$SESSION_ROOT" "$STATE" || exit 0
 
 # Name the dedicated scout entry point only when this home carries it; degrade
 # to the two-step brief-then-spawn path when it does not, rather than naming a

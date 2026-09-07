@@ -59,10 +59,12 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SESSION_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$SESSION_ROOT}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# Sets FM_ROOT, FM_HOME, STATE and CONFIG from this script's own checkout,
+# ignoring an inherited environment that names a foreign one: a child crew,
+# scout, or secondmate session must never guard the parent primary's home.
+fm_primary_scope_resolve_env "$SESSION_ROOT"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 OWNER="$STATE/.cursor-park-owner"
@@ -80,8 +82,6 @@ case "$ARM_ATTEMPTS" in 1|2|3) : ;; *) ARM_ATTEMPTS=2 ;; esac
 case "$POLL" in ''|*[!0-9]*|0) POLL=2 ;; esac
 case "$LOCK_ATTEMPTS" in ''|*[!0-9]*|0) LOCK_ATTEMPTS=50 ;; esac
 
-# shellcheck source=bin/fm-primary-scope-lib.sh
-. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -108,8 +108,6 @@ case "$LOOP_COUNT" in ''|*[!0-9]*) exit 0 ;; esac
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 case "$SESSION_ID" in ''|*[!A-Za-z0-9._-]*) SESSION_ID=unknown ;; esac
 
-# Scope to this script's checkout, not inherited FM_ROOT_OVERRIDE: a child
-# worktree that inherited the parent primary's environment must stay exempt.
 fm_primary_scope_matches "$SESSION_ROOT" "$STATE" || exit 0
 
 # Pi-host stand-down: docs/turnend-guard.md owns the PI_CODING_AGENT /
