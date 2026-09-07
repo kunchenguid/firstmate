@@ -389,6 +389,16 @@ fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
     echo "error: could not seed .env.local in '$worktree'" >&2
     return 1
   fi
+  # Never let a reissue replace a file that may have been authored by the task.
+  # Refreshing an existing copy is allowed only when the seed record still proves
+  # that this library owns the untouched file.
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    if ! fm_env_local_seeded_copy_intact "$worktree"; then
+      rm -f "$tmp"
+      echo "error: refusing to replace '$target' because this seeding cannot prove it owns the existing .env.local; preserve the task's file and remove it by hand before reissuing the worktree" >&2
+      return 1
+    fi
+  fi
   if ! mv -f "$tmp" "$target"; then
     rm -f "$tmp"
     echo "error: could not publish the seeded .env.local in '$worktree'" >&2
