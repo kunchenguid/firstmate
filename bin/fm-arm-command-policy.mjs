@@ -752,7 +752,9 @@ function isPipelineDriveInvocation(position, context) {
   const invocation = [];
   for (const word of position.words.slice(position.index)) {
     const fields = resolvedInvocationFields(word, context);
-    if (fields === null) return false;
+    if (fields === null) {
+      return basename(invocation[0] || "") === "no-mistakes" && invocation[1] === "axi" && invocation.length === 2;
+    }
     invocation.push(...fields);
     if (invocation.length >= 3) break;
   }
@@ -837,7 +839,7 @@ function forLoopBinding(position, context, depth) {
       break;
     }
   }
-  return { name, selected };
+  return { name, selected, last: values.at(-1), bodyAssigned: false };
 }
 
 function conditionalExecution(separator, previousInfo) {
@@ -904,6 +906,7 @@ function analyzeProgram(command, context, depth = 0) {
     knownVariables: new Map(context.knownVariables || []),
   };
   let unclassifiableProtected = false;
+  const loopBindings = [];
 
   for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
     const tokens = program.nodes[nodeIndex];
@@ -1010,13 +1013,20 @@ function analyzeProgram(command, context, depth = 0) {
     nestedProtected ||= nodeNestedProtected;
     const loopBinding = forLoopBinding(position, nodeContext, depth);
     if (loopBinding) {
+      loopBindings.push(loopBinding);
       activeContext = contextWithBinding(activeContext, loopBinding.name, loopBinding.selected);
+    } else if (commandName === "done" && loopBindings.length > 0) {
+      const completedLoop = loopBindings.pop();
+      if (!completedLoop.bodyAssigned) activeContext = contextWithBinding(activeContext, completedLoop.name, completedLoop.last);
     } else if (!position.command) {
       const execution = conditionalExecution(precedingSeparator, nodeInfos.at(-1));
       if (execution === "always") activeContext = nodeContext;
       else if (execution === "maybe") activeContext = ["&&", "||"].includes(precedingSeparator)
         ? contextWithConditionalAssignments(activeContext, nodeContext, assignmentPrefixes, depth)
         : nodeContext;
+      for (const binding of loopBindings) {
+        if (assignmentPrefixes.some((word) => assignmentName(word) === binding.name) && execution !== "never") binding.bodyAssigned = true;
+      }
     } else if (commandName === "export") activeContext = contextWithAssignments(activeContext, args.filter((word) => isAssignment(word.value)));
     if (position.unresolvedWrapperOption) unsupported = true;
     nodeInfos.push({

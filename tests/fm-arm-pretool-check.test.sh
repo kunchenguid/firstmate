@@ -392,6 +392,7 @@ EOF
     'NM=no-mistakes; false && NM=echo; "$NM" axi respond --action fix' \
     "bash -c \"\$(printf '%s' 'no-mistakes axi respond --action fix')\"" \
     'bash -c '\''exec "$0" "$@"'\'' no-mistakes axi respond --action fix' \
+    'ACTION=$(printf respond); no-mistakes axi "$ACTION" --action fix' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
@@ -423,6 +424,7 @@ EOF
     'NM=no-mistakes; false && NM=echo; "$NM" axi respond --action fix' \
     "bash -c \"\$(printf '%s' 'no-mistakes axi respond --action fix')\"" \
     'bash -c '\''exec "$0" "$@"'\'' no-mistakes axi respond --action fix' \
+    'ACTION=$(printf respond); no-mistakes axi "$ACTION" --action fix' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
@@ -446,6 +448,7 @@ EOF
     "CMD='no-mistakes axi respond --action data'; echo \"\$CMD\"" \
     "CMD='no-mistakes axi respond --action data'; \"\$CMD\"" \
     'for NM in no-mistakes; do echo "$NM axi respond --action data"; done' \
+    'for NM in no-mistakes echo; do :; done; "$NM" axi respond --action data' \
     'NM=no-mistakes; true && NM=echo; "$NM" axi respond --action data' \
     "echo \"\$(printf '%s' 'no-mistakes axi respond --action data')\"" \
     'bash -c '\''echo "$0 $@"'\'' no-mistakes axi respond --action data' \
