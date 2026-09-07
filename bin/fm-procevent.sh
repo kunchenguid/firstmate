@@ -455,10 +455,6 @@ cmd_register() {
     fm_procevent_source_lock_release "$id"
     die "cannot publish the registration"
   fi
-  if ! fm_procevent_launch_floor_reset_locked "$STATE" "$id"; then
-    fm_procevent_source_lock_release "$id"
-    die "cannot reset source launch pacing"
-  fi
   fm_procevent_source_lock_release "$id"
   owner_lease_refresh
   printf 'registered: %s (%s)\n' "$id" "$adapter"
@@ -547,11 +543,6 @@ cmd_register_extension() {
     fm_procevent_source_lock_release "$id"
     extension_lifecycle_lock_release
     die "cannot publish the extension registration"
-  fi
-  if ! fm_procevent_launch_floor_reset_locked "$STATE" "$id"; then
-    fm_procevent_source_lock_release "$id"
-    extension_lifecycle_lock_release
-    die "cannot reset source launch pacing"
   fi
   fm_procevent_source_lock_release "$id"
   extension_lifecycle_lock_release
@@ -703,7 +694,7 @@ cmd_start_public() {
 
 cmd_start() {
   local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0
-  local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
+  local extension_owner=0 extension_load_state extension_sequence='' extension_request_id='' launch_generation=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
@@ -745,12 +736,15 @@ cmd_start() {
         --expect-capability-version "$FM_PROCEVENT_EXTENSION_CAPABILITY_VERSION" \
         --expect-package-digest "$FM_PROCEVENT_EXTENSION_PACKAGE_DIGEST" \
         --expect-binding-digest "$FM_PROCEVENT_EXTENSION_BINDING_DIGEST")
+      launch_generation=$FM_PROCEVENT_EXTENSION_REGISTRATION_TOKEN
       ;;
     1)
       if ! read_argv "$id"; then
         fm_procevent_source_lock_release "$id"
         die "registration argv is unreadable: $id"
       fi
+      launch_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id") \
+        || { fm_procevent_source_lock_release "$id"; die "registration generation is unreadable: $id"; }
       ;;
     *)
       fm_procevent_source_lock_release "$id"
@@ -787,8 +781,9 @@ cmd_start() {
     fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
   }
   trap release_start_claim EXIT
-  # Everything this runner spawns is inside the source, not inside the owning
-  # session, so none of it may refresh the lease that proves the owner is there.
+  # The inherited marker keeps the runner and its ordinary children from
+  # accidentally refreshing the owner lease. A source that deliberately strips
+  # it is outside this confused-agent-grade boundary.
   export FM_PROCEVENT_IN_RUNNER=1
   start_owner_guard "$id" || die "cannot bind the runner to its owning session: $id"
   local launch_floor runner inbox reservation_dir staging
@@ -830,7 +825,7 @@ cmd_start() {
   # Built-in adapters do not run the extension capture helper, so keep this
   # sentinel defined while sharing the no-result branch below under `set -u`.
   local truncated=0 capture_state='' durable='' reservation_terminal='' reservation_silent=''
-  fm_procevent_launch_floor_wait "$STATE" "$id" "$launch_floor" \
+  fm_procevent_launch_floor_wait "$STATE" "$id" "$launch_generation" "$launch_floor" \
     || die "cannot enforce the source launch floor: $id"
   if [ "$extension_owner" -eq 1 ]; then
     capture_state=$(perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \

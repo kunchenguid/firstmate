@@ -187,7 +187,7 @@ Three paths stop a runner generation through its verified process group:
 
 The owner guard and explicit cleanup paths reach the blocking source and its descendants through the runner's group.
 The launch floor independently bounds an immediately returning source while an owner-loss lease is still valid.
-An attached public `start` maintains the lease for its caller's lifetime, while detached runners and everything they spawn are forbidden from refreshing it.
+An attached public `start` maintains the lease for its caller's lifetime. At the accepted confused-agent/accidental grade, the inherited `FM_PROCEVENT_IN_RUNNER` marker prevents detached runners and their ordinary children from refreshing it; adversarial unforgeability against a source that deliberately strips that marker is out of scope.
 
 The same group rule decides when a claim may be reclaimed, not only when a runner may be signalled.
 A leader that died while its owned group kept running is not a gone generation, so `reconcile` stops that surviving group and releases its generation before starting any replacement, and preserves the claim for a later retry when it cannot prove the group stopped or another home owns it.

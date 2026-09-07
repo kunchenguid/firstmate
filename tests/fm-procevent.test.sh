@@ -1972,7 +1972,12 @@ fm_test_track_procevent_home "$HROLLBACK"
 ROLLBACK_LOG="$TMP_ROOT/rollback-pacing.log"
 pe_register "$HROLLBACK" lavish rollback-src -- "$FAST_SOURCE" "$ROLLBACK_LOG" >/dev/null
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 pe "$HROLLBACK" start rollback-src >/dev/null
-printf '%s\n' "$(( $(date +%s) + 3600 ))" > "$HROLLBACK/state/procevent/rollback-src.last-launch"
+ROLLBACK_STAMP=
+for candidate in "$HROLLBACK/state/procevent"/rollback-src.*.last-launch; do
+  [ -f "$candidate" ] && ROLLBACK_STAMP=$candidate
+done
+[ -n "$ROLLBACK_STAMP" ] || fail "the first launch did not persist its pacing state"
+printf '%s\n' "$(( $(date +%s) + 3600 ))" > "$ROLLBACK_STAMP"
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 pe "$HROLLBACK" start rollback-src > "$TMP_ROOT/rollback.out" 2>&1 &
 ROLLBACK_START_PID=$!
 rollback_deadline=$((SECONDS + 4))
