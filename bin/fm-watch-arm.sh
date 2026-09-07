@@ -36,11 +36,11 @@
 # A dead-pid holder self-heals (the fresh child steals the dead lock per the
 # singleton self-eviction/steal path and is confirmed). A WEDGED holder - THIS
 # home's own live watcher whose beacon is stale past grace, the "WATCHER DOWN"
-# condition fm-guard.sh reports - is EVICTED home-scoped (stop_this_home_watcher:
-# SIGTERM, then SIGKILL if it defers its TERM trap) and a fresh cycle is armed, so
-# the Claude Stop-hook auto-arm self-heals a wedged watcher at the next turn
-# boundary instead of only reporting the failure. Only a holder that can be
-# neither confirmed healthy, evicted, nor replaced yields the FAILED line.
+# condition fm-guard.sh reports - is asked to exit home-scoped with SIGTERM and a
+# fresh cycle is armed when it does, so the Claude Stop-hook auto-arm self-heals
+# the ordinary poll-blocked wedge at the next turn boundary. Automatic arm never
+# escalates to destructive SIGKILL; a TERM-deferring holder yields the FAILED line
+# and requires an explicitly requested --restart.
 # On started it waits the child and propagates the wake
 # reason; on attached it stays live across identity-matched successors. A cycle
 # that ends with no reason line and no healthy successor is resolved against the
@@ -59,10 +59,10 @@
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
-# wins the singleton while the duplicate child stands down. It
-# resolves and signals exactly that pid (through stop_this_home_watcher, the same
-# home-scoped SIGTERM-then-SIGKILL stop the arm-mode wedge recovery uses), so it
-# can never touch another home's watcher. NEVER `pkill -f
+# wins the singleton while the duplicate child stands down. It resolves and
+# signals exactly that pid through stop_this_home_watcher; this explicit restart
+# is the only mode allowed to escalate a stale, TERM-deferring watcher to
+# SIGKILL, and can never touch another home's watcher. NEVER `pkill -f
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
 set -u
@@ -76,12 +76,10 @@ WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
-# Seconds to let a SIGTERM'd watcher exit gracefully before escalating to
-# SIGKILL when evicting THIS home's own wedged watcher (see
-# stop_this_home_watcher). A poll-blocked watcher now exits on TERM at once
-# (fm-watch.sh interruptible_sleep); this grace only covers a watcher wedged in
-# an unbounded foreground syscall, which defers its TERM trap and must still be
-# removed so supervision can be re-armed.
+# Seconds to let a SIGTERM'd watcher exit gracefully. A poll-blocked watcher now
+# exits on TERM at once (fm-watch.sh interruptible_sleep). If a watcher wedged in
+# an unbounded foreground syscall defers its TERM trap, ordinary arm fails safely;
+# only an explicit --restart may escalate to SIGKILL after this grace.
 EVICT_TERM_GRACE=${FM_WATCH_EVICT_TERM_GRACE:-3}
 case "$EVICT_TERM_GRACE" in ''|*[!0-9]*|0) EVICT_TERM_GRACE=3 ;; esac
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
@@ -282,15 +280,14 @@ wedged_watcher_holds_lock() {
 # name-matching pkill, never a sibling home's watcher, never a live pid that is
 # not this home's watcher (that reused-pid case is left to the stale-lock
 # recovery path). SIGTERM first, which a poll-blocked watcher now honors at once.
-# If it has not exited within EVICT_TERM_GRACE, escalate to SIGKILL ONLY when it
-# is genuinely WEDGED (beacon stale past grace): a watcher wedged in an unbounded
-# foreground syscall defers its TERM trap and must still be removed. A watcher
-# that is still HEALTHY (fresh beacon) but resists SIGTERM is left alive to be
-# attached to, so a manual --restart against a verified live peer follows it
-# instead of force-killing a working supervisor. A SIGKILLed watcher leaves a
-# dead-pid lock, which a fresh watcher steals exactly as it does after any
-# watcher crash. Returns 0 when the lock is clear to re-arm or a healthy holder
-# was left to be attached to, 1 when a wedged holder could not be removed.
+# If it has not exited within EVICT_TERM_GRACE, ordinary arm stops safely and
+# reports failure rather than taking destructive action without authorization.
+# Only explicit --restart may escalate to SIGKILL, and only while the holder is
+# still genuinely WEDGED (beacon stale past grace). A watcher that is HEALTHY
+# again (fresh beacon) is left alive. A SIGKILLed watcher leaves a dead-pid lock,
+# which a fresh watcher steals exactly as it does after any watcher crash.
+# Returns 0 when the lock is clear to re-arm or a healthy holder was left alone,
+# 1 when a wedged holder could not be removed without unauthorized escalation.
 stop_this_home_watcher() {
   local stop_mode=${1:-restart} lock_pid deadline i
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
@@ -313,6 +310,7 @@ stop_this_home_watcher() {
   if fm_pid_alive "$lock_pid" && watcher_beacon_stale_past_grace; then
     [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$lock_pid" ] || return 0
     fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME" || return 0
+    [ "$stop_mode" = restart ] || return 1
     kill -KILL "$lock_pid" 2>/dev/null || true
     i=0
     while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
@@ -512,13 +510,11 @@ fi
 
 # A wedged watcher - this home's OWN watcher, alive, but with a beacon stale past
 # grace - still holds the lock. A fresh child refuses to steal a live-pid lock
-# ("inspect or stop that watcher before re-arming"), so without this the wedged
-# watcher would keep the lock and supervision would stay down until a manual
-# restart. Evict it home-scoped so the fresh start below can take the lock. This
-# is what lets the Claude Stop-hook auto-arm self-heal a wedged watcher at the
-# next turn boundary instead of only reporting the failure. A watcher that
-# recovered in the race fails the beacon-stale check and is left to be attached
-# to below.
+# ("inspect or stop that watcher before re-arming"), so ask it to exit home-scoped
+# before the fresh start below. The ordinary poll-blocked wedge exits promptly
+# because fm-watch.sh's sleep is interruptible. A watcher that recovered in the
+# race is attached instead; one that defers TERM is reported as FAILED rather
+# than being destructively killed without an explicit --restart request.
 if [ "$mode" = arm ] && ! healthy_watcher && wedged_watcher_holds_lock; then
   if ! stop_this_home_watcher wedge; then
     echo "watcher: FAILED - could not evict a wedged watcher to re-arm" >&2

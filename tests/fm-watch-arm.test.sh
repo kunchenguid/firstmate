@@ -882,38 +882,55 @@ test_arm_recovers_a_wedged_watcher() {
   pass "watch-arm: a wedged watcher (live pid, stale beacon) is evicted home-scoped and re-armed"
 }
 
-# A watcher wedged in a foreground syscall defers its TERM trap, so SIGTERM alone
-# cannot evict it (this is why the reported wedge could not be recovered without
-# a manual kill). A SIGSTOP'd watcher models that exactly: alive, unresponsive to
-# SIGTERM. The fix escalates to SIGKILL after a bounded grace, still strictly
-# home-scoped to this home's own recorded pid, so recovery cannot stall.
-test_arm_recovers_a_wedged_watcher_via_sigkill() {
-  local dir state fakebin armout wedged
-  dir=$(make_case arm-recovers-wedged-sigkill)
+# A watcher wedged in a foreground syscall defers its TERM trap. A SIGSTOP'd
+# watcher models that exactly: alive and unresponsive to SIGTERM. Ordinary
+# Stop-hook arm must fail safely rather than escalating to destructive SIGKILL;
+# the same stale holder may be force-stopped only by an explicit --restart.
+test_arm_requires_explicit_restart_for_sigkill() {
+  local dir state fakebin armout wedged restart_arm status i
+  dir=$(make_case arm-requires-explicit-restart-for-sigkill)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   start_wedged_seed_watcher "$dir" "$state" "$fakebin"
   wedged=$SEED_PID
-  # Freeze it so it cannot honor SIGTERM, forcing the SIGKILL escalation.
   kill -STOP "$wedged" 2>/dev/null || fail "could not freeze the wedged watcher"
   start_recovery_arm "$dir" "$state" "$fakebin" "$armout"
 
-  wait_for_exit "$wedged" 60
+  wait_for_exit "$ARM_PID" 80
+  status=$?
+  [ "$status" -ne 124 ] && [ "$status" -ne 0 ] \
+    || fail "ordinary arm did not stop with a typed failure after TERM grace (status $status)"
+  is_live_non_zombie "$wedged" \
+    || fail "ordinary arm escalated to SIGKILL without an explicit restart request"
+  grep -qF 'watcher: FAILED - could not evict a wedged watcher to re-arm' "$armout" \
+    || fail "ordinary arm did not report its safe refusal: $(cat "$armout")"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=3 \
+    FM_WATCH_EVICT_TERM_GRACE=2 FM_ARM_CONFIRM_TIMEOUT=8 \
+    FM_POLL=600 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" --restart > "$dir/restart.out" 2>&1 &
+  restart_arm=$!
+  wait_for_exit "$wedged" 80
   if is_live_non_zombie "$wedged"; then
     kill -CONT "$wedged" 2>/dev/null || true
     kill -KILL "$wedged" 2>/dev/null || true
-    fail "the frozen wedged watcher was not evicted via SIGKILL: $(cat "$armout")"
+    fail "explicit restart did not force-stop the frozen watcher: $(cat "$dir/restart.out")"
   fi
-  ! grep -qF 'watcher: FAILED' "$armout" \
-    || fail "arm reported failure instead of SIGKILL-recovering a frozen wedged watcher: $(cat "$armout")"
-  grep -Eq '^(watcher: started|check:|signal:|stale:|heartbeat)' "$armout" \
-    || fail "arm did not bring up a fresh supervision cycle after SIGKILL eviction: $(cat "$armout")"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -Eq '^(watcher: started|check:|signal:|stale:|heartbeat)' "$dir/restart.out" 2>/dev/null && break
+    is_live_non_zombie "$restart_arm" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -Eq '^(watcher: started|check:|signal:|stale:|heartbeat)' "$dir/restart.out" \
+    || fail "explicit restart did not bring up a fresh supervision cycle: $(cat "$dir/restart.out")"
 
-  kill "$ARM_PID" 2>/dev/null || true
-  wait "$ARM_PID" 2>/dev/null || true
+  kill "$restart_arm" 2>/dev/null || true
+  wait "$restart_arm" 2>/dev/null || true
   wait "$wedged" 2>/dev/null || true
-  pass "watch-arm: a frozen wedged watcher is evicted via bounded SIGKILL escalation and re-armed"
+  pass "watch-arm: SIGKILL requires explicit restart authorization"
 }
 
 test_arm_rechecks_recovered_watcher_before_term() {
@@ -1021,7 +1038,7 @@ SH
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=3 \
     FM_WATCH_EVICT_TERM_GRACE=3 FM_ARM_CONFIRM_TIMEOUT=8 \
     FM_POLL=600 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$WATCH_ARM" > "$dir/arm.out" 2>&1 &
+    "$WATCH_ARM" --restart > "$dir/arm.out" 2>&1 &
   ARM_PID=$!
   i=0
   while [ "$i" -lt 80 ] && [ ! -e "$dir/term.seen" ]; do
@@ -1118,7 +1135,7 @@ test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
 test_arm_recovers_a_wedged_watcher
-test_arm_recovers_a_wedged_watcher_via_sigkill
+test_arm_requires_explicit_restart_for_sigkill
 test_arm_rechecks_recovered_watcher_before_term
 test_sigkill_refuses_a_changed_lock_identity
 test_arm_attaches_to_a_healthy_watcher_without_evicting
