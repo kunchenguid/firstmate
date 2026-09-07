@@ -479,9 +479,15 @@ DOD=$(fm_dod_block "$MODE" "$ID" "$BASE") || exit 1
 
 # The branch step names this task's delivery target branch when it has one, so
 # the worker branches from the base it will land on instead of the default
-# branch the disposable worktree happens to sit on.
+# branch the disposable worktree happens to sit on. It resolves the LOCAL
+# refs/heads/<base> first, because that is the ref the landing measures: a
+# local-only task's own Rule 1 forbids pushing the base, so origin often does not
+# carry it at all, and where origin does carry it the local branch can be ahead -
+# branching from origin/<base> there produces a branch bin/fm-merge-local.sh
+# refuses as diverged. Fetching is the fallback for the one remaining shape, a
+# base that lives only on the remote, and it is a read, so it breaks no Rule 1.
 if [ -n "$BASE" ]; then
-  BRANCH_STEP="create your branch from this task's delivery target branch \`$BASE\`: \`git fetch origin $BASE && git checkout -b fm/$ID origin/$BASE\` (if the project has no remote, use \`git checkout -b fm/$ID $BASE\`)"
+  BRANCH_STEP="create your branch from this task's delivery target branch \`$BASE\`, resolving its LOCAL ref first: run \`git checkout -b fm/$ID refs/heads/$BASE\` when \`git rev-parse --verify --quiet refs/heads/$BASE\` resolves, and only otherwise fetch it with \`git fetch origin $BASE && git checkout -b fm/$ID FETCH_HEAD\`. Never branch from \`origin/$BASE\`: firstmate lands this work onto the local \`refs/heads/$BASE\`, so a branch cut from the remote-tracking ref while the local branch is ahead is not a fast-forward and the landing is refused"
 else
   BRANCH_STEP="create your branch: \`git checkout -b fm/$ID\`"
 fi

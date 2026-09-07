@@ -136,6 +136,36 @@ EOF
   pass "fm-spawn: scout and secondmate spawns refuse ship delivery flags"
 }
 
+# A relaunch reuses the task's own recorded delivery contract, so contradicting it
+# on the command line is a refusal rather than a silently-ignored flag - the rule
+# --backend, --scout/--secondmate, --mode and --yolo already follow. Without this,
+# --base parses, skips validation entirely, and is then overwritten from the task
+# record, dropping the operator's explicit delivery target branch in silence.
+test_relaunch_refuses_a_contradicting_delivery_target_branch() {
+  local rec home proj fakebin out status
+  rec=$(make_home relaunch-base)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  out=$(run_spawn "$home" "$fakebin" delivery-relaunch-g1 --relaunch --base feat/stack)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a relaunch carrying --base should exit non-zero"
+  assert_contains "$out" "--relaunch reuses the task's recorded delivery target branch" \
+    "relaunch did not refuse an explicit delivery target branch"
+  assert_absent "$home/state/delivery-relaunch-g1.meta" \
+    "a refused relaunch wrote task metadata"
+
+  # The same refusal covers a base the flag validator would have rejected, which
+  # a relaunch never even reaches: silently dropping THAT is the worst shape.
+  out=$(run_spawn "$home" "$fakebin" delivery-relaunch-g1 --relaunch --base 'feat/..bad')
+  status=$?
+  [ "$status" -ne 0 ] || fail "a relaunch carrying an invalid --base should exit non-zero"
+  assert_contains "$out" "--relaunch reuses the task's recorded delivery target branch" \
+    "relaunch silently dropped an invalid delivery target branch"
+  pass "fm-spawn --relaunch: an explicit --base is refused, never silently replaced from the record"
+}
+
 # The delivery target branch drifts exactly the way the mode does: the brief tells
 # the worker which branch to build on, the task record tells cleanup and the
 # guarded landing which branch to measure. A spawn whose --base disagrees would
@@ -933,6 +963,7 @@ test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_refuses_a_brief_base_mismatch
+test_relaunch_refuses_a_contradicting_delivery_target_branch
 test_spawn_records_the_delivery_target_branch_in_the_task_record
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture

@@ -1424,8 +1424,14 @@ work_is_landed() {
 }
 
 # The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
+# deliverable is its report, a local-only ship lands on the local branch it was
+# dispatched to land on, and every other ship carries the PR recorded on its own
+# record. The landing note names that recorded branch, so the permanent task
+# history never claims a task landed on main when it landed on a feature branch.
+# An absent base= still writes "local main" verbatim: that is the pre-existing
+# record for every task that targets the repo default branch, and this note is
+# durable history rather than a measurement, so it is never re-derived from the
+# project's git state.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
@@ -1437,7 +1443,7 @@ backlog_done_args() {
       ;;
     *)
       if [ "$MODE" = local-only ]; then
-        BACKLOG_DONE_ARGS=(--note "local main")
+        BACKLOG_DONE_ARGS=(--note "local ${TEARDOWN_RECORDED_BASE:-main}")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
       fi
@@ -1717,6 +1723,19 @@ validate_worktree_teardown_safety() {
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
     TARGET=$(delivery_target_branch) || { echo "REFUSED: cannot determine the delivery target branch for $PROJ; the task records none and origin/HEAD, main, and master are all absent." >&2; return 1; }
     target_desc=$(delivery_target_source)
+    # A base is recorded for its ref syntax alone and is never resolved at
+    # intake, so it can name a branch nobody has created here yet. `git log
+    # --not <missing-ref>` exits 128 exactly as an unreadable index does, and
+    # its stderr is discarded below, so without this the operator is told to
+    # restore the git index for a branch that is simply absent - a refusal that
+    # points straight at --force, which is the failure this check exists to end.
+    if ! git -C "$WT" rev-parse --verify --quiet "$TARGET^{commit}" >/dev/null 2>&1; then
+      echo "REFUSED: cannot measure this task's landing: the delivery target branch $TARGET ($target_desc) does not resolve in worktree $WT." >&2
+      echo "The git index is readable; the branch is what is missing." >&2
+      echo "Fetch or create $TARGET, or correct the recorded base= in $META, then re-run teardown." >&2
+      echo "--force does not answer this: it would discard this worktree's work without ever measuring it." >&2
+      return 1
+    fi
     if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$TARGET" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $TARGET"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"

@@ -1570,6 +1570,30 @@ test_completion_closes_a_local_only_ship_before_reporting_success() {
   pass "completion closes a local-only ship, with its landing note, before reporting success"
 }
 
+# A local-only task that ships onto a long-lived feature branch lands on THAT
+# branch, so the durable completion note must name it. Recording "local main" for
+# such a task writes a permanent history entry that never happened, and the note
+# is history rather than a measurement, so it comes from the task's own recorded
+# base and is never re-derived from the project's git state.
+test_completion_notes_the_recorded_delivery_target_branch() {
+  local case_dir id out
+  id=atomic-close-base-b8
+  case_dir=$(make_home close-local-only-base)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship local-only \
+    "spawn_gen=spawn-close-base" "base=feat/stack"
+
+  out=$(run_teardown "$case_dir" "$id") || fail "teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "teardown reported success with the item still $(row_state "$case_dir" "$id")"
+  assert_grep 'local feat/stack' "$(backlog_of "$case_dir")" \
+    "a landing on the recorded delivery target branch was noted as some other branch"
+  assert_no_grep 'local main' "$(backlog_of "$case_dir")" \
+    "the completion note claimed a landing on main for a task that targets feat/stack"
+  pass "completion notes the landing on the task's recorded delivery target branch"
+}
+
 test_completion_closes_a_scout_with_its_report() {
   local case_dir id out
   id=atomic-close-b6
@@ -2027,6 +2051,34 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   assert_not_contains "$out" "endpoint or local copy may remain" \
     "recovery claimed incomplete cleanup without task metadata"
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
+}
+
+# The landing note is the one recorded argument that carries a space, so it rides
+# the pending-close record as `%20` and must come back out as the branch it named.
+# A replay that decoded to a fixed "local main" would rewrite a feature-branch
+# landing into a default-branch one during recovery - the same false history the
+# writer stopped producing.
+test_recovery_replays_a_landing_note_naming_its_delivery_target_branch() {
+  local case_dir id marker out
+  id=atomic-heal-note-base-b9
+  case_dir=$(make_home heal-pending-note-base)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-note\narg=--note\narg=local%%20feat/stack\n' \
+    "$id" "$(home_of "$case_dir")/data" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left the interrupted close at $(row_state "$case_dir" "$id"): $out"
+  assert_grep 'local feat/stack' "$(backlog_of "$case_dir")" \
+    "the replayed close did not decode the landing note back to its delivery target branch"
+  assert_no_grep 'local%20feat/stack' "$(backlog_of "$case_dir")" \
+    "the replayed close wrote the marker's encoded form into the backlog"
+  assert_no_grep 'local main' "$(backlog_of "$case_dir")" \
+    "the replayed close rewrote a feature-branch landing as a default-branch one"
+  assert_absent "$marker" "a replayed close left its record behind"
+  pass "recovery replays a landing note naming the task's delivery target branch"
 }
 
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
@@ -3034,6 +3086,7 @@ test_dispatch_interruption_during_kimi_readiness_fails_before_commit
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
 test_completion_closes_a_local_only_ship_before_reporting_success
+test_completion_notes_the_recorded_delivery_target_branch
 test_completion_closes_a_scout_with_its_report
 test_completion_refuses_a_legacy_record_without_an_incarnation
 test_completion_refuses_ambiguous_incarnation_metadata
@@ -3053,6 +3106,7 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_replays_a_landing_note_naming_its_delivery_target_branch
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning

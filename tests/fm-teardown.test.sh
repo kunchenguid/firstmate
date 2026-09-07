@@ -52,6 +52,8 @@
 #   (z3) no base= + unlanded work                              -> REFUSE against the default branch
 #   (z4) base= + content squash-landed on that branch          -> ALLOW  (content fallback)
 #   (z5) base= + content landed only on the default branch     -> REFUSE, naming the base
+#   (z6) base= naming a branch that does not resolve here       -> REFUSE, naming the branch
+#        as the cause instead of blaming the git index
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -933,6 +935,36 @@ test_content_on_the_default_branch_is_not_landed_for_a_base_task() {
   assert_grep "Measured against feat/stack - this task's recorded delivery target branch." "$case_dir/stderr" \
     "base-wrong-branch: refusal did not explain where the measured branch came from"
   pass "content landed only on the default branch is still unlanded for a task targeting a feature branch"
+}
+
+# A base is recorded for its ref syntax alone and never resolved at intake, so it
+# can name a branch nobody has created in this worktree. git answers that with the
+# same exit 128 an unreadable index gives, so the refusal used to tell the operator
+# to "restore the git index state" - and then point at --force, the one flag that
+# discards real work. The refusal must name the real cause instead, and it must
+# stay a refusal.
+test_unresolvable_recorded_base_refuses_and_names_the_branch() {
+  local case_dir rc
+  case_dir=$(make_case base-unresolvable)
+  write_meta "$case_dir" local-only ship feat/never-created
+  wt_commit "$case_dir" "work for a branch nobody created"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-unresolvable: teardown must refuse when it cannot measure the landing"
+  assert_grep "does not resolve in worktree" "$case_dir/stderr" \
+    "base-unresolvable: refusal did not report that the delivery target branch is missing"
+  assert_grep "feat/never-created" "$case_dir/stderr" \
+    "base-unresolvable: refusal did not name the branch that failed to resolve"
+  assert_grep "The git index is readable" "$case_dir/stderr" \
+    "base-unresolvable: refusal still blamed the git index"
+  assert_no_grep "Restore the git index state" "$case_dir/stderr" \
+    "base-unresolvable: refusal steered at an index repair for a missing branch"
+  assert_present "$case_dir/wt" "base-unresolvable: a refusal removed the worktree"
+  pass "an unresolvable recorded delivery target branch is refused by name, not blamed on the git index"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -3830,6 +3862,7 @@ test_recorded_base_refuses_unlanded_work_and_names_the_branch
 test_absent_base_still_measures_the_default_branch
 test_recorded_base_content_fallback_allows
 test_content_on_the_default_branch_is_not_landed_for_a_base_task
+test_unresolvable_recorded_base_refuses_and_names_the_branch
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
