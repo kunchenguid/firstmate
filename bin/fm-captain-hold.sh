@@ -884,18 +884,25 @@ write_resolution_record() {  # <task-id> <mode> <shown-body>
   rm -f -- "$tmp"
 }
 
+report_retained_artifact_failure() {  # <task-id> <marker-path>
+  printf 'fm-captain-hold: cannot apply the artifact recorded for %s in %s: %s\n' \
+    "$1" "$2" "${FM_BACKLOG_TRANSITION_ERROR:-no reason reported}" >&2
+}
+
 apply_pending_retained_artifact() {  # <task-id>
   local id=$1 marker
   local -a args=()
   marker=$(fm_backlog_close_marker_path "$STATE" "$id") || return 1
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
-  fm_backlog_close_marker_validate "$marker" "$DATA" "$id" "$STATE" || return 1
+  fm_backlog_close_marker_validate "$marker" "$DATA" "$id" "$STATE" \
+    || { report_retained_artifact_failure "$id" "$marker"; return 1; }
   [ "$FM_BACKLOG_CLOSE_VALIDATED_MODE" = retain ] || return 0
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   case "${args[0]-}" in
     --pr|--report)
       fm_backlog_row_artifact_supported "$id" "${args[@]}" || return 0
-      fm_backlog_mutate "$DATA" update "$id" "${args[@]}"
+      fm_backlog_mutate "$DATA" update "$id" "${args[@]}" \
+        || { report_retained_artifact_failure "$id" "$marker"; return 1; }
       ;;
   esac
 }

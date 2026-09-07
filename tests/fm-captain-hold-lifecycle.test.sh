@@ -2869,6 +2869,56 @@ SH
   pass "an answer before cleanup replay preserves the retained report"
 }
 
+test_unusable_pending_close_record_names_its_reason() {
+  local home id wt rc err marker
+  home=$(make_home unusable-pending-close-reason)
+  id=sample-unusable-pending-close
+  wt="$home/projects/$id"
+  marker="$home/state/$id.backlog-close"
+  mkdir -p "$home/data/$id" "$wt" "$home/projects/sample" "$home/elsewhere"
+  tasks_in "$home" add "$id" "Investigate the unusable pending close" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the unusable pending-close fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$home/projects/sample" \
+    "harness=codex" "kind=scout" "mode=scout" "spawn_gen=fixture-$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Unusable pending close\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$id" --reason "captain must choose after interrupted cleanup" \
+    >/dev/null || fail "could not hold the unusable pending-close fixture"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the unusable pending-close fixture"
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/treehouse"
+
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite the failed worktree return"
+  assert_present "$marker" "the interrupted cleanup lost its retained-artifact record"
+  sed "s|^data=.*$|data=$home/elsewhere|" "$marker" > "$marker.rewritten" \
+    || fail "could not rewrite the pending-close record"
+  mv "$marker.rewritten" "$marker"
+
+  printf 'Proceed with the reported result.\n' > "$home/answer.txt"
+  set +e
+  err=$(run_captain "$home" answer "$id" --decision-file "$home/answer.txt" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the unusable pending-close record was answered as if it were valid"
+  assert_contains "$err" "$marker" \
+    "the refusal did not name the pending-close record the captain must repair"
+  assert_contains "$err" "foreign data directory" \
+    "the refusal did not name why the pending-close record could not be used"
+  pass "an unusable pending-close record names its reason instead of a bare refusal"
+}
+
 test_relocated_report_does_not_wedge_an_answer_before_replay() {
   local home data id wt rc show bootstrap json
   home=$(make_home relocated-answer-before-replay)
@@ -3659,6 +3709,7 @@ test_teardown_never_closes_a_captain_held_task
 test_retained_row_artifacts_survive_captain_answers
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_answer_before_cleanup_replay_preserves_the_retained_report
+test_unusable_pending_close_record_names_its_reason
 test_relocated_report_does_not_wedge_an_answer_before_replay
 test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention

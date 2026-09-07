@@ -1672,6 +1672,12 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
   "$TASKS_AXI_BIN" 'done' keyword-local --note "local main" \
     --file "$main_backlog" >/dev/null \
     || fail "could not complete the canonical keyword local delivery"
+  "$TASKS_AXI_BIN" add noted-local "Land the local-only change" --kind ship \
+    --repo firstmate --start --file "$main_backlog" >/dev/null \
+    || fail "could not create the recorded-note local delivery"
+  "$TASKS_AXI_BIN" 'done' noted-local --note "local main" \
+    --file "$main_backlog" >/dev/null \
+    || fail "could not complete the recorded-note local delivery"
   "$TASKS_AXI_BIN" add shipping-scout "SHIPPING parser boundary" --kind scout \
     --repo firstmate --start --file "$main_backlog" >/dev/null \
     || fail "could not create the longer-word scout"
@@ -1737,6 +1743,11 @@ EOF
   printf '%s' "$json" | jq -e \
     '.landed | any(.id == "keyword-local" and .artifact == "local main")' >/dev/null \
     || failures="${failures}canonical keyword local delivery was missing; "
+  # tasks-axi records `done --note` as an indented body line, so this artifact
+  # assertion fails whenever the note is read from the row title alone.
+  printf '%s' "$json" | jq -e \
+    '.landed | any(.id == "noted-local" and .artifact == "local main")' >/dev/null \
+    || failures="${failures}recorded-note local delivery artifact was missing; "
   printf '%s' "$json" | jq -e --arg report "$shipping_report" \
     '.landed | any(.id == "shipping-scout" and .artifact == $report)' >/dev/null \
     || failures="${failures}longer-word explicit scout kind was lost; "
