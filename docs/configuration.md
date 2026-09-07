@@ -297,7 +297,8 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## GitHub PR accounts (config/github-accounts)
 
 `config/github-accounts` optionally maps GitHub repository owners or individual repositories to already logged-in GitHub CLI accounts.
-It is local, gitignored, and contains account names only, never tokens:
+It is local, gitignored, and contains account names only, never tokens.
+Each nonempty, non-comment line contains a scope (`github.com/<owner>` or `github.com/<owner>/<repository>`) and a login, separated by spaces or tabs:
 
 ```text
 # Owner default, then a repository-specific override
@@ -305,14 +306,14 @@ github.com/example-org example-work-user
 github.com/example-org/shared-project example-personal-user
 ```
 
-The parser and command-scoped execution contract are owned by [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh).
+This section owns the account-mapping format and selection policy; [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) implements them and owns the command-scoped wrapper interface.
 Matching is case-insensitive and exact at the owner or repository boundary; a repository entry wins over its owner entry.
 Blank lines and full-line comments are allowed; extra fields, malformed entries, duplicate scopes (including case variants), unreadable files, and symlinks refuse selection rather than guessing.
-Only `github.com` is supported, matching the existing GitHub PR URL contract; GitLab and self-hosted GitLab behavior is unchanged.
-Absent or empty configuration and unmapped repositories keep the active-account flow without accessing another account's stored credential.
+Only `github.com` is supported, matching the existing GitHub PR URL contract; GitLab and self-hosted GitLab authentication is unchanged.
+Absent or empty configuration and repositories unmapped by a valid file keep the active-account flow without accessing another account's stored credential.
 A nonempty `GH_TOKEN` or `GITHUB_TOKEN` takes precedence over this mapping, retaining GitHub CLI's normal token precedence and intentionally bypassing mapping validation.
 Do not export one global token if you want the mapping to select different stored accounts concurrently.
-GitHub operations pin `GH_HOST=github.com`, so an ambient enterprise host cannot redirect a canonical GitHub PR operation.
+Operations routed through the wrapper pin `GH_HOST=github.com`, so an ambient enterprise host cannot redirect those canonical GitHub PR operations.
 
 Log in to each intended account with GitHub CLI on the machine performing the operation, then add only the desired scopes.
 Firstmate never discovers privileges, switches the global active account, or tries another login after a mapped credential fails.
@@ -320,19 +321,14 @@ It obtains the chosen login's credential for the relevant command only, without 
 The mapping applies to PR registration, authenticated merge monitoring, guarded merge calls and their verification, recorded-PR cleanup verification, and the optional live PR/check enrichment in bearings.
 Mapped registration requires a readable PR head and reports missing credentials or denied reads before arming; unmapped registration keeps its optional-head behavior.
 An already-armed poll remains silent on lookup failure and retains its evidence for a later retry, never treating an authentication failure as a merge.
-The static poll bytes and existing registrations are unchanged; credential selection happens in the trusted monitoring dispatch, not by executing additional state-file code.
-For a direct diagnostic or check, the existing PR owner can wrap `gh-axi` with the same selection, for example:
-
-```sh
-bash bin/fm-pr-lib.sh --github github.com example-org/shared-project gh-axi pr checks 7 --repo example-org/shared-project
-```
-
-This command entry point is for trusted callers; its command arguments must address the repository named for credential selection.
+The mapping and stored credential are resolved afresh for each command, so existing watches use changes without re-registration.
+The trusted dispatch boundary is documented beside `run_check_process` in [`bin/fm-watch.sh`](../bin/fm-watch.sh).
+For direct diagnostics or checks, follow the wrapper syntax, example, and trusted-caller constraints in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh).
 The mapping does not configure git transport, worker launch credentials, no-mistakes authentication, or unrecorded branch-based PR discovery.
 It grants no additional merge authority and changes no head-identity or trusted-poll safeguards.
 The primary-authoritative [secondmate inheritance owner](../.agents/skills/secondmate-provisioning/SKILL.md#charter-and-seed) propagates the mapping, including removal, through the ordinary local and remote paths.
 Credentials themselves are never inherited; remote secondmates must have the named login available on their own machine.
-The executable regression entry points are `tests/fm-pr-check-security.test.sh`, `tests/fm-pr-merge.test.sh`, `tests/fm-bearings-snapshot.test.sh`, and `tests/fm-secondmate-harness.test.sh`.
+Account-selection regression entry points are `tests/fm-pr-accounts-e2e.test.sh` (real CLI credential lookup with a fixture forge), `tests/fm-pr-check-security.test.sh`, `tests/fm-teardown.test.sh`, `tests/fm-bearings-snapshot.test.sh`, and `tests/fm-secondmate-harness.test.sh`.
 
 ## Harness support
 

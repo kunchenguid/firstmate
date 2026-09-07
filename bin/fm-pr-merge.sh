@@ -53,9 +53,10 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
-# Extra args must not include --repo or -R in any form, including a bundled
-# short-option cluster such as -yR, because the repository comes only from the
-# URL, nor --sha on GitLab because the head comes only from the live read.
+# Extra args must not include --repo, --hostname, or -R in any form, including
+# a bundled short-option cluster such as -yR, because the repository and host
+# come only from the URL, nor --sha on GitLab because the head comes only from
+# the live read.
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records

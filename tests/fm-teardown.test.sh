@@ -845,6 +845,47 @@ test_squash_merged_branch_deleted_allows() {
   pass "squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)"
 }
 
+# Run just this account-selection regression with --github-accounts.
+test_mapped_github_cleanup_requires_selected_account() {
+  local case_dir pr_head rc
+  case_dir=$(make_case mapped-github-cleanup)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  mv "$case_dir/fakebin/gh" "$case_dir/fakebin/gh-response"
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "$1 $2" = 'auth token' ]; then
+  [ "$*" = 'auth token --hostname github.com --user work-user' ] || exit 1
+  printf 'fixture-work\n'
+  exit 0
+fi
+[ "${GH_TOKEN:-}" = fixture-work ] && [ "${GH_HOST:-}" = github.com ] || exit 1
+printf 'selected work-user: %s\n' "$*" >> "$FM_TEST_ACCOUNT_LOG"
+exec "$(dirname "$0")/gh-response" "$@"
+SH
+  chmod +x "$case_dir/fakebin/gh"
+  mkdir -p "$case_dir/config"
+  printf 'github.com/example/repo missing-user\n' > "$case_dir/config/github-accounts"
+  rc=0
+  GH_TOKEN='' GITHUB_TOKEN='' FM_TEST_ACCOUNT_LOG="$case_dir/account.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "missing mapped credential allowed cleanup"
+  [ -f "$case_dir/state/task-x1.meta" ] && [ -d "$case_dir/wt" ] \
+    || fail "credential failure lost unverified work or metadata"
+  [ ! -s "$case_dir/account.log" ] || fail "missing credential fell back to another account"
+  printf 'github.com/example/repo work-user\n' > "$case_dir/config/github-accounts"
+  rc=0
+  GH_TOKEN='' GITHUB_TOKEN='' GH_HOST=enterprise.invalid FM_TEST_ACCOUNT_LOG="$case_dir/account.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "mapped account must verify the recorded merged PR and allow cleanup"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "verified cleanup retained task metadata"
+  assert_grep 'selected work-user: pr view' "$case_dir/account.log" "cleanup did not query the PR with its mapped account"
+  pass "recorded-PR cleanup retains work on credential failure and retries with the mapped identity"
+}
+
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   local case_dir rc local_head pr_head
   case_dir=$(make_case squash-ancestor)
@@ -3648,6 +3689,11 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+if [ "${1:-}" = --github-accounts ]; then
+  test_mapped_github_cleanup_requires_selected_account
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
@@ -3671,6 +3717,7 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
+test_mapped_github_cleanup_requires_selected_account
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch

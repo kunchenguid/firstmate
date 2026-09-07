@@ -6,6 +6,9 @@
 # Source this library for PR identity and artifact helpers.
 # Command-scoped GitHub credentials (also callable inside existing timeouts):
 #   bash bin/fm-pr-lib.sh --github <host> <owner/repository> <command> [args...]
+# Example direct PR check:
+#   bash bin/fm-pr-lib.sh --github github.com example-org/shared-project \
+#     gh-axi pr checks 7 --repo example-org/shared-project
 # Caller-supplied command arguments must address that same canonical repository;
 # this is a credential boundary for trusted callers, not a command sandbox.
 #
@@ -213,12 +216,8 @@ fm_pr_url_parse() {
   FM_PR_NUMBER=${BASH_REMATCH[3]}
 }
 
-# Select an explicitly configured GitHub login for one canonical repository.
-# config/github-accounts is whitespace-separated scope/login data (blank lines
-# and full-line # comments allowed). Scopes are github.com/owner[/repository].
-# Matching is case-insensitive, an exact repository wins over its owner, and
-# duplicate scopes or malformed rows refuse the entire file. Never probe access
-# or try another account. See docs/configuration.md for operator setup.
+# Account-mapping format and selection policy: docs/configuration.md, GitHub PR
+# accounts. Never probe privileges or try another account to resolve a mapping.
 fm_pr_github_account() {  # <host> <owner/repository>; prints login or nothing
   local host=$1 path=$2 config scope login extra key seen='|' owner_login='' repo_login=''
   local owner repo target LC_ALL=C
@@ -251,10 +250,9 @@ fm_pr_github_account() {  # <host> <owner/repository>; prints login or nothing
   printf '%s' "${repo_login:-$owner_login}"
 }
 
-# Run a GitHub operation in a subshell, never changing the caller's environment
-# or gh's active account. Explicit nonempty github.com tokens retain precedence;
-# otherwise only an opt-in mapping can select a stored login. Resolve afresh in
-# the command, never in metadata or poll sidecars. Disable tracing before token
+# Keep credential handling in a subshell to isolate the caller's environment.
+# Select credentials without mutating gh's active-account configuration, and
+# never cache them in metadata or poll sidecars. Disable tracing before token
 # retrieval and suppress credential-tool diagnostics, which may contain secrets.
 fm_pr_github_run() (  # <host> <owner/repository> <command> [args...]
   set +x
