@@ -425,6 +425,11 @@ assert_equals() {
   [ "$1" = "$2" ] || fail "$3 (expected '$1', got '$2')"
 }
 
+# assert_not_equals <unexpected> <actual> <msg>
+assert_not_equals() {
+  [ "$1" != "$2" ] || fail "$3 (unexpectedly got '$1')"
+}
+
 # assert_contains <haystack> <needle> <msg>
 assert_contains() {
   case "$1" in
