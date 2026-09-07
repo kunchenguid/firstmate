@@ -374,11 +374,12 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+    "$id" "$PROJ_DIR" --raw "custom-agent --flag" --harness custom-agent --model custom-model-1)
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
-  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report the stated raw harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent custom-model-1 default
+  assert_grep "launch=raw" "$HOME_DIR/state/$id.meta" "a raw launch must record its launch=raw marker"
   launch=$(cat "$LAUNCH_LOG")
   [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
@@ -831,7 +832,7 @@ printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "${FM_TEST_ALLOWED-unset}" \
 SH
     out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated \
       run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id" "$PROJ_DIR" --harness "/bin/sh '$probe'")
+      "$id" "$PROJ_DIR" --raw "/bin/sh '$probe'" --harness probe-sh --model default)
     status=$?
     expect_code 0 "$status" "allowlist=$setting spawn should succeed: $out"
     launch=$(cat "$LAUNCH_LOG")
@@ -1024,11 +1025,428 @@ SH
   done
 }
 
+# --- launch environment file (--env) ----------------------------------------
+#
+# The file's CONTENTS are the thing under test in the negative direction: they
+# must reach the worker's environment and nothing else. Every probe here uses a
+# synthetic non-secret value, and the assertions check the specific property
+# (the value in the executed command's environment, the value absent from the
+# launch text and the task record) rather than a proxy for it.
+
+# write_probe_env <path> <value>
+# A credential-shaped env file: plain NAME=value lines with no `export`, which
+# only reach the worker because the launch sources with allexport. The value is
+# written single-quoted, the way a credential file has to be written: the file
+# is SOURCED, so it is shell, and its own quoting - not Firstmate - is what
+# keeps a punctuation-heavy secret from being evaluated. Firstmate validates the
+# path and never parses the file, so this fixture writes it correctly rather
+# than pretending an unquoted value would survive.
+write_probe_env() {
+  local path=$1 value=$2 quoted
+  quoted=$(printf '%s' "$value" | sed "s/'/'\\\\''/g")
+  {
+    printf '# synthetic launch environment, no real credential\n'
+    printf "FM_TEST_GATEWAY_TOKEN='%s'\n" "$quoted"
+    printf 'export FM_TEST_GATEWAY_URL=https://synthetic.invalid/v1\n'
+  } > "$path"
+}
+
+# Emit an env-printing probe command whose output the test reads back.
+write_env_probe_script() {
+  local path=$1
+  cat > "$path" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FM_TEST_GATEWAY_TOKEN-unset}" "${FM_TEST_GATEWAY_URL-unset}" \
+  "${FM_TASK_ID-unset}" "${GOTMPDIR-unset}"
+SH
+  chmod +x "$path"
+}
+
+test_launch_env_file_grants_values_and_records_only_the_path() {
+  local setting rec id out status launch probe envfile result expected shell
+  # shellcheck disable=SC2016
+  local value='synthetic-token; $(touch SHOULD_NOT_EXIST) `false` "quoted"'
+  for setting in allowlist-absent allowlist-enabled; do
+    id="envfile-$setting"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    envfile="$CASE_DIR/gateway.env"
+    probe="$CASE_DIR/probe.sh"
+    write_probe_env "$envfile" "$value"
+    write_env_probe_script "$probe"
+    [ "$setting" != allowlist-enabled ] \
+      || printf '# nothing ambient is needed; the env file is the grant\n' \
+        > "$HOME_DIR/config/launch-env-allowlist"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --env "$envfile" \
+      --raw "/bin/sh '$probe'" --harness probe-sh --model synthetic-gateway-model)
+    status=$?
+    expect_code 0 "$status" "$setting: --env spawn should succeed: $out"
+
+    # The record carries the path and cannot carry the contents.
+    assert_grep "env=$envfile" "$HOME_DIR/state/$id.meta" \
+      "$setting: meta must record the launch environment path"
+    assert_no_grep "$value" "$HOME_DIR/state/$id.meta" \
+      "$setting: the env file's value must never appear in the task record"
+    assert_no_grep 'synthetic.invalid' "$HOME_DIR/state/$id.meta" \
+      "$setting: no env file value may appear in the task record"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" probe-sh synthetic-gateway-model default
+
+    # The launch text - which is typed into the pane, so it is also the
+    # scrollback - carries the path and cannot carry the contents.
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "$envfile" "$setting: launch must name the env file path"
+    assert_not_contains "$launch" "$value" \
+      "$setting: the env file's value must never appear in the launch text"
+    assert_not_contains "$launch" 'synthetic.invalid' \
+      "$setting: no env file value may appear in the launch text"
+
+    # And the values really do arrive, in a real pane shell, from the file.
+    for shell in /bin/sh /bin/bash /bin/zsh; do
+      [ -x "$shell" ] || continue
+      result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+        TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
+        "$shell" -c "$launch") \
+        || fail "$setting: emitted launch failed in $shell"
+      expected=$(printf '%s\n' "$value" 'https://synthetic.invalid/v1' "$id")
+      expected="$expected"$'\n'"$(grep "^tasktmp=" "$HOME_DIR/state/$id.meta" | cut -d= -f2-)/gotmp"
+      [ "$result" = "$expected" ] \
+        || fail "$setting: worker environment mismatch in $shell"$'\n'"got:      $result"$'\n'"expected: $expected"
+    done
+    assert_absent "$CASE_DIR/SHOULD_NOT_EXIST" "$setting: env value was evaluated as shell syntax"
+    assert_absent "$PWD/SHOULD_NOT_EXIST" "$setting: env value was evaluated as shell syntax"
+    pass "$setting: --env grants the file's values to the worker and records only its path"
+  done
+}
+
+# Every harness composes its own launch command, and --env wraps whatever that
+# command turned out to be in one && chain plus a brace group. A template shape
+# the wrap cannot hold would produce a launch that fails to parse in the pane -
+# a silent wedge rather than a refusal - so this executes the pane shell's own
+# parser over the emitted launch for every harness this suite can build one for.
+test_launch_env_file_wraps_every_harness_launch_validly() {
+  local harness rec id out status launch envfile shell
+  for harness in claude codex opencode grok pi pi-signed cursor; do
+    id="envfile-shape-$harness"
+    rec=$(make_spawn_case "$id" "$harness" "$id")
+    read_case_record "$rec"
+    envfile="$CASE_DIR/gateway.env"
+    write_probe_env "$envfile" synthetic-shape
+    out=$(FM_TEST_CURSOR_MODELS='Available models
+cursor-grok-4.5-high - Grok 4.5 High' \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness "$harness" --env "$envfile")
+    status=$?
+    expect_code 0 "$status" "$harness --env spawn should succeed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "$envfile" "$harness: launch must source the env file"
+    assert_not_contains "$launch" synthetic-shape \
+      "$harness: the env file's value must never appear in the launch text"
+    for shell in /bin/sh /bin/bash /bin/zsh; do
+      [ -x "$shell" ] || continue
+      "$shell" -n -c "$launch" 2>/dev/null \
+        || fail "$harness: the --env-wrapped launch does not parse in $shell"$'\n'"$launch"
+    done
+    assert_grep "env=$envfile" "$HOME_DIR/state/$id.meta" \
+      "$harness: meta must record the launch environment path"
+  done
+  pass "every harness's --env launch stays valid in the destination pane shell and records only the path"
+}
+
+test_launch_env_file_cannot_redefine_firstmate_operational_variables() {
+  local rec id out status launch probe envfile result shell
+  id='envfile-ops-reassert'
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  envfile="$CASE_DIR/hijack.env"
+  probe="$CASE_DIR/probe.sh"
+  # An env file that tries to take over the task marker gating
+  # bin/fm-test-run.sh's primary-checkout refusal, and the task temp root.
+  {
+    printf 'FM_TEST_GATEWAY_TOKEN=ops-case\n'
+    printf 'FM_TEST_GATEWAY_URL=ops-case\n'
+    printf 'FM_TASK_ID=hijacked-task-id\n'
+    printf 'GOTMPDIR=/hijacked/gotmp\n'
+  } > "$envfile"
+  write_env_probe_script "$probe"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --env "$envfile" \
+    --raw "/bin/sh '$probe'" --harness probe-sh --model default)
+  status=$?
+  expect_code 0 "$status" "operational re-assert spawn should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  for shell in /bin/sh /bin/bash /bin/zsh; do
+    [ -x "$shell" ] || continue
+    result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      TMUX=synthetic-pane "$shell" -c "$launch") \
+      || fail "operational re-assert launch failed in $shell"
+    case "$result" in
+      *"hijacked-task-id"*) fail "an env file redefined FM_TASK_ID in $shell"$'\n'"$result" ;;
+      *"/hijacked/gotmp"*) fail "an env file redefined GOTMPDIR in $shell"$'\n'"$result" ;;
+    esac
+    case "$result" in
+      *"$id"*) : ;;
+      *) fail "FM_TASK_ID did not survive the env file in $shell"$'\n'"$result" ;;
+    esac
+  done
+  pass "an --env file cannot silently redefine Firstmate's own operational variables"
+}
+
+# The path is the one part of an env file that DOES enter the launch text, so
+# it has to survive shell quoting intact: a credential file living under a
+# directory with an apostrophe or a dollar sign must still be the file the pane
+# sources, not a fragment the pane re-interprets.
+test_launch_env_file_path_survives_shell_quoting() {
+  local rec id out status launch probe envfile shell result
+  id='envfile-quoted-path'
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  # A deliberately hostile file name: apostrophe, double quotes, spaces, and a
+  # dollar sign. $'...' keeps it literal here rather than re-quoting it twice.
+  envfile="$CASE_DIR/"$'it\'s a "weird" $path.env'
+  probe="$CASE_DIR/probe.sh"
+  write_probe_env "$envfile" synthetic-quoted
+  write_env_probe_script "$probe"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --env "$envfile" \
+    --raw "/bin/sh '$probe'" --harness probe-sh --model default)
+  status=$?
+  expect_code 0 "$status" "an adversarially quoted --env path should spawn: $out"
+  assert_grep "env=$envfile" "$HOME_DIR/state/$id.meta" \
+    "the record must hold the path verbatim"
+  launch=$(cat "$LAUNCH_LOG")
+  for shell in /bin/sh /bin/bash /bin/zsh; do
+    [ -x "$shell" ] || continue
+    result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      "$shell" -c "$launch") || fail "quoted-path launch failed in $shell"
+    case "$result" in
+      synthetic-quoted*) : ;;
+      *) fail "the quoted env path did not deliver its values in $shell"$'\n'"$result" ;;
+    esac
+  done
+  pass "an --env path carrying quotes, spaces and a dollar sign reaches the pane intact"
+}
+
+test_launch_env_file_fail_closed_when_removed_after_validation() {
+  local rec id out status launch probe envfile marker shell
+  id='envfile-race'
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  envfile="$CASE_DIR/vanishes.env"
+  probe="$CASE_DIR/probe.sh"
+  marker="$CASE_DIR/probe-ran"
+  write_probe_env "$envfile" synthetic-race
+  cat > "$probe" <<SH
+#!/bin/sh
+: > '$marker'
+SH
+  chmod +x "$probe"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --env "$envfile" \
+    --raw "/bin/sh '$probe'" --harness probe-sh --model default)
+  status=$?
+  expect_code 0 "$status" "env-file spawn should succeed before the race: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  # The file disappears between validation and the pane running the launch.
+  rm -f "$envfile"
+  for shell in /bin/sh /bin/bash /bin/zsh; do
+    [ -x "$shell" ] || continue
+    rm -f "$marker"
+    flags=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      "$shell" -c "{ $launch; } >/dev/null 2>&1; printf 'FLAGS=%s\n' \"\$-\"")
+    assert_absent "$marker" \
+      "a launch whose env file vanished must not run the harness in $shell"
+    case "$flags" in
+      FLAGS=*a*) fail "a launch whose env file vanished left allexport (set -a) enabled afterward in $shell: $flags" ;;
+    esac
+  done
+  pass "--env fails closed: a file gone at launch time stops the launch instead of running without it, and does not leave allexport enabled"
+}
+
+test_launch_env_file_invalid_path_refuses_before_any_task_state() {
+  local rec id out status case_name envfile
+  for case_name in missing relative directory dangling unreadable; do
+    id="envfile-bad-$case_name"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    case "$case_name" in
+      missing) envfile="$CASE_DIR/absent.env" ;;
+      relative) envfile=gateway.env ;;
+      directory) envfile="$CASE_DIR/envdir"; mkdir -p "$envfile" ;;
+      dangling) envfile="$CASE_DIR/dangling.env"; ln -s "$CASE_DIR/no-such-target" "$envfile" ;;
+      unreadable)
+        if [ "$(id -u)" = 0 ]; then
+          printf '# skip - unreadable env file requires a non-root user\n'
+          continue
+        fi
+        envfile="$CASE_DIR/locked.env"
+        write_probe_env "$envfile" synthetic-locked
+        chmod 000 "$envfile"
+        ;;
+    esac
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --env "$envfile" --harness codex)
+    status=$?
+    [ "$case_name" != unreadable ] || chmod 600 "$envfile"
+    expect_code 1 "$status" "env=$case_name must refuse the spawn: $out"
+    assert_contains "$out" '--env' "env=$case_name refusal must name the flag"
+    [ ! -s "$LAUNCH_LOG" ] || fail "env=$case_name delivered a launch command"
+    assert_absent "$HOME_DIR/state/$id.meta" "env=$case_name published a task record"
+  done
+  pass "a missing, relative, non-regular, dangling, or unreadable --env path refuses before any task state exists"
+}
+
+test_remote_secondmate_env_route_refuses_before_local_env_resolution() {
+  local rec id out status envfile
+  id=profile-remote-secondmate-env-z9c
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  envfile="$CASE_DIR/only-on-remote-host.env"
+
+  printf -- '- %s - remote fixture (host: remote-host; root: %s; home: %s; scope: remote work; projects: ; added 2026-09-05)\n' \
+    "$id" "$CASE_DIR/remote-root" "$CASE_DIR/remote-home" > "$HOME_DIR/data/secondmates.md"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" --secondmate --env "$envfile")
+  status=$?
+  expect_code 1 "$status" "a remote secondmate route with --env should refuse: $out"
+  assert_contains "$out" "remote secondmate route cannot resolve" \
+    "the refusal must name the remote-route reason, not report the path missing on the primary"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused remote-route --env spawn delivered a launch command"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused remote-route --env spawn published a task record"
+  pass "a remote secondmate route refuses --env before resolving the path against this machine"
+}
+
+# --- the model/environment guard (the 2026-09-01 silent-fallback class) ------
+#
+# Reproduced on Claude Code 2.1.263 while this was written: `claude -p --model
+# openai/gpt-5.6-luna --output-format json` answered from claude-sonnet-5 with
+# canonicalModel claude-sonnet-5, provider firstParty, is_error false and exit
+# status 0. A standing profile naming such a model with no launch environment
+# would therefore have silently run a different model than it recorded, so the
+# spawn must refuse instead - and it must still launch when the environment
+# that serves the model is named.
+test_claude_qualified_model_requires_a_launch_environment() {
+  local rec id out status launch envfile model native
+  for model in openai/gpt-5.6-luna anthropic/claude-sonnet-5 \
+    'arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-5-v1:0' \
+    us.anthropic.claude-sonnet-5; do
+    id="guard-refuse-$(printf '%s' "$model" | tr -c 'a-z0-9' - | cut -c1-24)"
+    rec=$(make_spawn_case "$id" claude "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness claude --model "$model")
+    status=$?
+    expect_code 1 "$status" "claude --model $model without --env must refuse: $out"
+    assert_contains "$out" 'routing qualifier' \
+      "the refusal must say why claude cannot serve '$model'"
+    assert_contains "$out" '--env' "the refusal must name the way forward"
+    [ ! -s "$LAUNCH_LOG" ] || fail "claude --model $model launched without an environment"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "claude --model $model published a task record with no environment to serve it"
+  done
+
+  # Named environment: the same profile becomes an ordinary guarded launch.
+  id='guard-allow-with-env'
+  rec=$(make_spawn_case guard-allow claude "$id")
+  read_case_record "$rec"
+  envfile="$CASE_DIR/gateway.env"
+  write_probe_env "$envfile" synthetic-guard
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model openai/gpt-5.6-luna --env "$envfile")
+  status=$?
+  expect_code 0 "$status" "a named launch environment must make the gateway model launchable: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude openai/gpt-5.6-luna default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'openai/gpt-5.6-luna'" \
+    "the gateway model must reach the claude launch"
+  assert_contains "$launch" "$envfile" "the launch must source the named environment"
+  assert_not_contains "$launch" synthetic-guard \
+    "the environment file's value must never appear in the launch text"
+
+  # First-party ids and aliases stay ordinary, including shapes claude's own
+  # help documents and future aliases this table must not pre-refuse.
+  for native in sonnet claude-sonnet-5 fable opusplan 'sonnet[1m]' default; do
+    id="guard-native-$(printf '%s' "$native" | tr -c 'a-z0-9' - | cut -c1-20)"
+    rec=$(make_spawn_case "$id" claude "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness claude --model "$native")
+    status=$?
+    expect_code 0 "$status" "claude --model $native must not need an environment: $out"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" claude "$native" default
+  done
+  pass "a claude model claude cannot serve without an environment refuses instead of silently running another model"
+}
+
+# --- the raw escape hatch must state what it records ------------------------
+
+test_raw_launch_requires_stated_harness_and_model() {
+  local rec id out status
+  id='raw-statements'
+  rec=$(make_spawn_case raw-statements codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --raw "custom-agent --flag" --model m1)
+  status=$?
+  expect_code 1 "$status" "--raw without --harness must refuse: $out"
+  assert_contains "$out" '--harness' "the refusal must name the missing statement"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --raw "custom-agent --flag" --harness custom-agent)
+  status=$?
+  expect_code 1 "$status" "--raw without --model must refuse: $out"
+  assert_contains "$out" '--model' "the refusal must name the missing statement"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --raw "claude --dangerously-skip-permissions" --harness claude --model m1)
+  status=$?
+  expect_code 1 "$status" "--raw naming a verified adapter must refuse: $out"
+  assert_contains "$out" '--env' "the refusal must point at the first-class environment axis"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness "custom-agent --flag")
+  status=$?
+  expect_code 1 "$status" "a whitespace --harness value must refuse: $out"
+  assert_contains "$out" '--raw' "the refusal must point at the explicit escape hatch"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "custom-agent --flag")
+  status=$?
+  expect_code 1 "$status" "a whitespace positional harness must refuse: $out"
+  assert_contains "$out" '--raw' "the positional refusal must point at the explicit escape hatch"
+
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused raw launch delivered a launch command"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused raw launch published a task record"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --raw "custom-agent --flag" --harness custom-agent --model gw/model-7)
+  status=$?
+  expect_code 0 "$status" "a fully stated raw launch should succeed: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent gw/model-7 default
+  assert_grep "launch=raw" "$HOME_DIR/state/$id.meta" "a raw launch must record launch=raw"
+  pass "the raw escape hatch refuses unless it states the harness and model it records"
+}
+
 test_launch_environment_allowlist
 test_launch_environment_invalid_config_refuses
 test_launch_environment_inaccessible_config_refuses
 test_launch_environment_inherited_by_secondmate
 test_launch_environment_inheritance_preserves_on_source_errors
+test_launch_env_file_grants_values_and_records_only_the_path
+test_launch_env_file_cannot_redefine_firstmate_operational_variables
+test_launch_env_file_wraps_every_harness_launch_validly
+test_launch_env_file_path_survives_shell_quoting
+test_launch_env_file_fail_closed_when_removed_after_validation
+test_launch_env_file_invalid_path_refuses_before_any_task_state
+test_remote_secondmate_env_route_refuses_before_local_env_resolution
+test_claude_qualified_model_requires_a_launch_environment
+test_raw_launch_requires_stated_harness_and_model
 
 test_worker_launch_delivers_role_scope() {
   local rec id out launch kind prompt brief_kind brief content

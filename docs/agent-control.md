@@ -23,7 +23,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
   `bin/fm-send.sh`'s `--key` path reads the composer-clear table from this owner too, rather than keeping a second copy of it.
 - **Per-backend capability**: which named keys a runtime backend can deliver, and whether it has a recovery-grade agent-state classifier able to prove an agent stopped.
 
-A recorded `harness=` is not always an exact adapter name: a task launched from a raw command records that command's basename instead.
+A recorded `harness=` is not always an exact adapter name: a `--raw` launch records the name its caller stated, and a task launched before that flag existed records the basename of its command's first word.
 `fm_control_harness_family` is the one place that prefix rule is stated, and an unrecognized value resolves to no adapter rather than being guessed into one.
 
 ## Verbs
@@ -60,7 +60,9 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
    Otherwise a `kind=secondmate` task re-resolves its durable `config/secondmate-harness` pin, including that file's optional model and effort tokens, exactly as every other respawn does - so setting the pin and relaunching is the ordinary way to move a secondmate's runtime.
    A ship or scout keeps the harness already recorded for it, because that harness comes from firstmate's dispatch-profile judgment at intake and must not be silently re-read from configuration.
    A recorded raw-command basename that differs from its resolved adapter cannot reproduce the command actually running, so relaunch refuses before the checkpoint unless the caller passes an explicit `--harness` to choose the replacement runtime deliberately.
-   A harness change resets model and effort unless they are named too, because a model chosen for one adapter does not transfer to another.
+   A task launched from a raw command is refused outright in this step, before the checkpoint, whatever harness is named, because that command is deliberately not recorded and so cannot be reproduced; the launch owner in step 5 repeats the same refusal as its own independent guard.
+   A harness change resets model, effort, and the recorded launch environment unless they are named too, because a model, an effort, or a launch environment chosen for one adapter does not transfer to another.
+   An unchanged harness re-applies the recorded launch environment path rather than re-chooses it, and refuses both an `--env` override and a file that is no longer usable; a changed harness resets it and accepts an explicit `--env` on that same relaunch to re-supply it for the new adapter.
 2. **Safe checkpoint.**
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.

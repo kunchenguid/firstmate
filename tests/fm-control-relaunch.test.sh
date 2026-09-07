@@ -136,10 +136,13 @@ new_case() {
   printf '%s\n' "$dir"
 }
 
-# add_ship_task <case-dir> <id> [harness]
+# add_ship_task <case-dir> <id> [harness] [extra-meta-line...]
+# Extra lines are appended verbatim to the task record, for the fields a
+# particular case needs to already be recorded (env=, launch=, ...).
 add_ship_task() {
-  local dir=$1 id=$2 harness=${3:-claude}
+  local dir=$1 id=$2 harness=${3:-claude} extra
   local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
+  if [ "$#" -gt 3 ]; then shift 3; else set --; fi
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
@@ -162,6 +165,9 @@ EOF
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
     echo "effort=default"
+    for extra in "$@"; do
+      printf '%s\n' "$extra"
+    done
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
@@ -216,6 +222,17 @@ case "${FM_FAKE_GIT_FAILURE:-}:$*" in
   status:*' status --porcelain') exit 128 ;;
 esac
 exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$1/fakebin/git"
+}
+
+make_git_env_race_stub() {  # <case-dir> <path-to-remove-during-checkpoint>
+  cat > "$1/fakebin/git" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *' status --porcelain') rm -f "$2" ;;
+esac
+exec "\$FM_REAL_GIT" "\$@"
 SH
   chmod +x "$1/fakebin/git"
 }
@@ -742,6 +759,43 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
     || fail "the configured effort token should come with the pin"
   assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
+}
+
+# A secondmate's model and effort are a durable configured pin re-resolved on
+# every respawn, so a pin naming no model must RESET the axis rather than let
+# the previous incarnation's model survive. The launch owner keeps a recorded
+# model when no flag is passed - that is what makes a plain relaunch reproduce
+# the launch it replaces - so this transaction has to state `default` rather
+# than omit the flag, and this test is what holds it to that.
+test_secondmate_relaunch_resets_axes_the_configured_pin_does_not_name() {
+  local dir home out rc
+  dir=$(new_case smreset sm9)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm9"
+  printf 'codex\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sm9/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm9\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm9"; echo "endpoint_task_id=sm9"
+    echo "worktree=$dir/smhome"; echo "project=$dir/smhome"
+    echo "harness=codex"; echo "kind=secondmate"; echo "mode=secondmate"
+    echo "yolo=off"; echo "model=gpt-5-previous"; echo "effort=xhigh"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm9.meta"
+  printf '%s\n' "fm-sm9" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sm9 relaunch); rc=$?
+  expect_code 0 "$rc" "a secondmate relaunch with a bare pin should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" sm9 model)" = default ] \
+    || fail "a bare secondmate pin must reset the model, got '$(meta_field "$dir" sm9 model)'"
+  [ "$(meta_field "$dir" sm9 effort)" = default ] \
+    || fail "a bare secondmate pin must reset the effort, got '$(meta_field "$dir" sm9 effort)'"
+  pass "fm-control relaunch: a secondmate pin naming no model or effort resets both instead of inheriting them"
 }
 
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
@@ -1542,7 +1596,281 @@ test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
+# --- 7. the recorded launch environment ------------------------------------
+#
+# A task's recorded model may only be servable with the launch environment it
+# was dispatched with, so a relaunch has exactly two acceptable outcomes:
+# reproduce that environment, or refuse. Quietly dropping it would relaunch the
+# recorded model onto an endpoint that cannot serve it - which does not fail,
+# it silently answers from a different model.
+
+# write_gateway_env <path>
+write_gateway_env() {
+  {
+    printf '# synthetic launch environment, no real credential\n'
+    printf "FM_TEST_GATEWAY_TOKEN='synthetic-relaunch-token'\n"
+  } > "$1"
+}
+
+test_spawn_relaunch_reproduces_the_recorded_launch_environment() {
+  local dir envfile out pass_no
+  dir=$(new_case relaunchenv rl40)
+  envfile="$dir/gateway.env"
+  write_gateway_env "$envfile"
+  add_ship_task "$dir" rl40 claude "env=$envfile"
+  # The record must claim the qualified model too, so this also pins that a
+  # relaunch of such a task is possible at all rather than blocked by the guard.
+  sed -i.bak 's/^model=default$/model=openai\/gpt-5.6-luna/' "$dir/home/state/rl40.meta"
+  rm -f "$dir/home/state/rl40.meta.bak"
+  for pass_no in 1 2; do
+    printf 'zsh' > "$dir/fake/command"
+    out=$(run_spawn "$dir" rl40 --relaunch)
+    assert_contains "$out" "spawned rl40 harness=claude" "relaunch pass $pass_no should succeed"$'\n'"$out"
+    [ "$(meta_field "$dir" rl40 env)" = "$envfile" ] \
+      || fail "relaunch pass $pass_no dropped the recorded launch environment (got '$(meta_field "$dir" rl40 env)')"
+    [ "$(grep -c '^env=' "$dir/home/state/rl40.meta")" = 1 ] \
+      || fail "relaunch pass $pass_no wrote a duplicate env= line"
+    [ "$(meta_field "$dir" rl40 model)" = openai/gpt-5.6-luna ] \
+      || fail "relaunch pass $pass_no changed the recorded model"
+    assert_grep "$envfile" "$dir/fake/literal" \
+      "relaunch pass $pass_no did not source the recorded launch environment"
+    assert_no_grep synthetic-relaunch-token "$dir/fake/literal" \
+      "relaunch pass $pass_no leaked an environment value into the launch text"
+    assert_no_grep synthetic-relaunch-token "$dir/home/state/rl40.meta" \
+      "relaunch pass $pass_no leaked an environment value into the task record"
+  done
+  pass "fm-spawn --relaunch: the recorded launch environment survives repeated relaunches, path only"
+}
+
+test_spawn_relaunch_refuses_an_unusable_recorded_environment() {
+  local dir envfile out rc before
+  dir=$(new_case relaunchenvgone rl41)
+  envfile="$dir/gateway.env"
+  write_gateway_env "$envfile"
+  add_ship_task "$dir" rl41 claude "env=$envfile"
+  printf 'zsh' > "$dir/fake/command"
+  before=$(cat "$dir/home/state/rl41.meta")
+  rm -f "$envfile"
+  out=$(run_spawn "$dir" rl41 --relaunch); rc=$?
+  expect_code 1 "$rc" "a relaunch whose recorded environment is gone must refuse"
+  assert_contains "$out" 'no longer usable' "the refusal must say the recorded environment cannot be reproduced"
+  [ "$(cat "$dir/home/state/rl41.meta")" = "$before" ] \
+    || fail "a refused relaunch changed the task record"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch delivered a launch command"
+  pass "fm-spawn --relaunch: an unusable recorded environment refuses rather than launching without it"
+}
+
+test_spawn_relaunch_refuses_environment_and_raw_overrides() {
+  local dir envfile out rc
+  dir=$(new_case relaunchenvflag rl42)
+  envfile="$dir/gateway.env"
+  write_gateway_env "$envfile"
+  add_ship_task "$dir" rl42 claude
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl42 --relaunch --env "$envfile"); rc=$?
+  expect_code 1 "$rc" "--env should be refused alongside --relaunch"
+  assert_contains "$out" "recorded launch environment" "the refusal should name the recorded-environment rule"
+  out=$(run_spawn "$dir" rl42 --relaunch --raw "custom-agent --flag" --harness custom-agent --model m1); rc=$?
+  expect_code 1 "$rc" "--raw should be refused alongside --relaunch"
+  assert_contains "$out" '--raw is refused' "the refusal should name the raw rule"
+  pass "fm-spawn --relaunch: the launch environment and a raw command come from the record or not at all"
+}
+
+test_spawn_relaunch_refuses_a_raw_launched_task() {
+  local dir out rc
+  dir=$(new_case relaunchraw rl43)
+  add_ship_task "$dir" rl43 custom-agent "launch=raw"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl43 --relaunch --harness custom-agent); rc=$?
+  expect_code 1 "$rc" "a relaunch of a raw-launched task must refuse"
+  assert_contains "$out" 'raw command' "the refusal must say the original launch is not recorded"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused raw relaunch delivered a launch command"
+  pass "fm-spawn --relaunch: a raw-launched task refuses instead of launching a canonical adapter instead"
+}
+
+test_spawn_relaunch_refuses_a_qualified_model_without_an_environment() {
+  local dir out rc before
+  dir=$(new_case relaunchguard rl44)
+  add_ship_task "$dir" rl44 claude
+  printf 'zsh' > "$dir/fake/command"
+  before=$(cat "$dir/home/state/rl44.meta")
+  out=$(run_spawn "$dir" rl44 --relaunch --model openai/gpt-5.6-luna); rc=$?
+  expect_code 1 "$rc" "a relaunch onto a qualified model with no recorded environment must refuse"
+  assert_contains "$out" 'routing qualifier' "the refusal must explain why claude cannot serve it"
+  [ "$(cat "$dir/home/state/rl44.meta")" = "$before" ] \
+    || fail "a refused relaunch changed the task record"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch delivered a launch command"
+  pass "fm-spawn --relaunch: moving a task onto a model its environment cannot serve refuses"
+}
+
+test_control_harness_switch_resets_the_recorded_launch_environment() {
+  local dir out rc envfile
+  dir=$(new_case profileenvreset rl45)
+  envfile="$dir/gateway.env"
+  write_gateway_env "$envfile"
+  add_ship_task "$dir" rl45 claude "env=$envfile"
+  sed -i.bak 's/^model=default$/model=openai\/gpt-5.6-luna/' "$dir/home/state/rl45.meta"
+  rm -f "$dir/home/state/rl45.meta.bak"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl45 relaunch --harness codex --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl45 env)" ] \
+    || fail "a launch environment chosen for the old harness must not carry to a different one, got '$(meta_field "$dir" rl45 env)'"
+  [ "$(meta_field "$dir" rl45 model)" = default ] \
+    || fail "a model chosen for the old harness must not carry to a different one"
+  pass "fm-control relaunch: a harness switch resets the recorded launch environment unless --env names it too"
+}
+
+test_control_harness_switch_with_explicit_env_resupplies_it() {
+  local dir out rc oldenvfile newenvfile
+  dir=$(new_case profileenvresupply rl46)
+  oldenvfile="$dir/old-gateway.env"
+  newenvfile="$dir/new-gateway.env"
+  write_gateway_env "$oldenvfile"
+  {
+    printf '# synthetic launch environment, no real credential\n'
+    printf "FM_TEST_GATEWAY_TOKEN='synthetic-resupply-token'\n"
+  } > "$newenvfile"
+  add_ship_task "$dir" rl46 claude "env=$oldenvfile"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl46 relaunch --harness codex --env "$newenvfile" --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "a harness switch with an explicit --env should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl46 env)" = "$newenvfile" ] \
+    || fail "an explicit --env on a harness switch should record the new environment, got '$(meta_field "$dir" rl46 env)'"
+  assert_no_grep synthetic-resupply-token "$dir/home/state/rl46.meta" \
+    "the harness switch leaked an environment value into the task record"
+  assert_no_grep synthetic-resupply-token "$dir/fake/literal" \
+    "the harness switch leaked an environment value into the launch text"
+  pass "fm-control relaunch: an explicit --env on a harness switch re-supplies the launch environment, path only"
+}
+
+test_control_env_override_without_a_harness_switch_is_refused() {
+  local dir out rc envfile meta
+  dir=$(new_case profileenvnoswitch rl47)
+  envfile="$dir/gateway.env"
+  write_gateway_env "$envfile"
+  add_ship_task "$dir" rl47 claude "env=$envfile"
+  meta="$dir/home/state/rl47.meta"
+  cp "$meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl47 relaunch --env "$envfile" --note "no harness change"); rc=$?
+  expect_code 1 "$rc" "--env without a harness switch should be refused"
+  assert_contains "$out" "harness is not changing" "the refusal should name the unchanged-harness rule"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a refused --env override must leave metadata byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a refused --env override must leave the original agent alive"
+  [ ! -e "$dir/home/state/rl47.control-relaunch" ] \
+    || fail "a refused --env override must not create a durable journal"
+  pass "fm-control relaunch: --env cannot override the recorded launch environment without a harness switch"
+}
+
+# do_relaunch stops the running agent (do_exit) BEFORE fm-spawn.sh is ever
+# invoked, so a launch prerequisite fm-spawn.sh would refuse on its own -
+# an unusable recorded environment file, or a claude model that needs one it
+# does not have - must be caught in resolve_relaunch_profile, on the pre-stop
+# side of the transaction, or a predictably refused replacement strands the
+# task with no agent running at all.
+test_control_relaunch_refuses_an_unusable_recorded_environment_before_stop() {
+  local dir out rc envfile meta
+  dir=$(new_case profileenvgone rl48)
+  envfile="$dir/gateway.env"
+  write_gateway_env "$envfile"
+  add_ship_task "$dir" rl48 claude "env=$envfile"
+  meta="$dir/home/state/rl48.meta"
+  cp "$meta" "$dir/meta.before"
+  rm -f "$envfile"
+  out=$(run_control "$dir" rl48 relaunch --note "recorded env vanished"); rc=$?
+  expect_code 1 "$rc" "a relaunch whose recorded environment is gone must refuse"
+  assert_contains "$out" 'no longer usable' "the refusal must say the recorded environment cannot be reproduced"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a refused relaunch must leave metadata byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a relaunch refused for an unusable environment must not stop the running agent"
+  [ ! -e "$dir/home/state/rl48.control-relaunch" ] \
+    || fail "a refused relaunch must not create a durable journal"
+  pass "fm-control relaunch: an unusable recorded launch environment refuses before the agent is stopped"
+}
+
+test_control_relaunch_refuses_a_qualified_model_without_an_environment_before_stop() {
+  local dir out rc meta
+  dir=$(new_case profileguard rl49)
+  add_ship_task "$dir" rl49 claude
+  meta="$dir/home/state/rl49.meta"
+  cp "$meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl49 relaunch --model openai/gpt-5.6-luna --note "moving models"); rc=$?
+  expect_code 1 "$rc" "a relaunch onto a qualified model with no environment must refuse"
+  assert_contains "$out" 'routing qualifier' "the refusal must explain why claude cannot serve it"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a refused relaunch must leave metadata byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a relaunch refused for a missing launch environment must not stop the running agent"
+  [ ! -e "$dir/home/state/rl49.control-relaunch" ] \
+    || fail "a refused relaunch must not create a durable journal"
+  pass "fm-control relaunch: moving a task onto a model its environment cannot serve refuses before the agent is stopped"
+}
+
+test_control_relaunch_refuses_a_raw_launched_task_before_stop() {
+  local dir out rc meta
+  dir=$(new_case profilerawguard rl50)
+  add_ship_task "$dir" rl50 claude "launch=raw"
+  meta="$dir/home/state/rl50.meta"
+  cp "$meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl50 relaunch --note "continue anyway"); rc=$?
+  expect_code 1 "$rc" "a relaunch of a raw-launched task must refuse"
+  assert_contains "$out" 'raw command' "the refusal must say the original launch is not recorded"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a refused relaunch must leave metadata byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a relaunch refused for a raw-launched task must not stop the running agent"
+  [ ! -e "$dir/home/state/rl50.control-relaunch" ] \
+    || fail "a refused relaunch must not create a durable journal"
+  pass "fm-control relaunch: a raw-launched task refuses before the agent is stopped"
+}
+
+# resolve_relaunch_profile's environment check runs before safe_checkpoint and
+# record_note, which do real filesystem and git work of their own. If the
+# recorded environment file is removed during that window - after the
+# pre-stop check passed, but before the agent is actually stopped - a
+# recheck must catch it immediately before do_exit runs, or the agent is
+# stopped for a replacement fm-spawn.sh is certain to refuse. The git shim
+# below deletes the file exactly inside that window (safe_checkpoint's own
+# `git status --porcelain` call), reproducing the race deterministically
+# instead of racing a background process against a microsecond gap.
+test_control_relaunch_refuses_an_environment_removed_during_checkpoint() {
+  local dir out rc envfile meta brief real_git
+  real_git=$(command -v git)
+  dir=$(new_case profileenvrace rl51)
+  envfile="$dir/gateway.env"
+  write_gateway_env "$envfile"
+  add_ship_task "$dir" rl51 claude "env=$envfile"
+  meta="$dir/home/state/rl51.meta"
+  cp "$meta" "$dir/meta.before"
+  brief="$dir/home/data/rl51/brief.md"
+  cp "$brief" "$dir/brief.before"
+  make_git_env_race_stub "$dir" "$envfile"
+  out=$(FM_REAL_GIT="$real_git" \
+    run_control "$dir" rl51 relaunch --note "racing environment"); rc=$?
+  expect_code 1 "$rc" "an environment removed after the pre-stop check but before the stop must still refuse"
+  assert_contains "$out" 'no longer usable' "the refusal must say the environment cannot be reproduced"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a refused relaunch must leave metadata byte-identical"
+  cmp -s "$brief" "$dir/brief.before" \
+    || fail "a refused relaunch must restore the instructions byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an environment that breaks between the pre-stop check and the actual stop must not stop the running agent"
+  [ "$(journal_field "$dir" rl51 phase)" = failed:noted ] \
+    || fail "the journal must show the refusal landed before stopping (phase=failed:noted), not during or after it"
+  pass "fm-control relaunch: an environment removed between the pre-stop check and the stop still refuses before the agent is touched"
+}
+
 test_prefixed_recorded_harness_requires_explicit_replacement
+test_control_harness_switch_resets_the_recorded_launch_environment
+test_control_harness_switch_with_explicit_env_resupplies_it
+test_control_env_override_without_a_harness_switch_is_refused
+test_control_relaunch_refuses_an_unusable_recorded_environment_before_stop
+test_control_relaunch_refuses_a_qualified_model_without_an_environment_before_stop
+test_control_relaunch_refuses_a_raw_launched_task_before_stop
+test_control_relaunch_refuses_an_environment_removed_during_checkpoint
 test_same_harness_relaunch_keeps_the_profile_axes
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
@@ -1550,6 +1878,7 @@ test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_secondmate_relaunch_resets_axes_the_configured_pin_does_not_name
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
@@ -1584,3 +1913,8 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_spawn_relaunch_reproduces_the_recorded_launch_environment
+test_spawn_relaunch_refuses_an_unusable_recorded_environment
+test_spawn_relaunch_refuses_environment_and_raw_overrides
+test_spawn_relaunch_refuses_a_raw_launched_task
+test_spawn_relaunch_refuses_a_qualified_model_without_an_environment

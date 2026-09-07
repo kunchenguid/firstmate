@@ -325,8 +325,8 @@ When the harness token is absent or `default`, secondmate launch falls back thro
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
 Changing this pin affects the next secondmate spawn or control-plane relaunch; the relaunch profile rules are owned by [`docs/agent-control.md`](agent-control.md#transactional-relaunch).
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
-An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
-Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
+An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or `--raw` launch starts with clean model and effort defaults unless those flags are also passed.
+Remote secondmate routes accept verified harness adapters only and reject `--raw` launches; see "Named environment file (--env)" below for the matching `--env` refusal on that route.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
@@ -339,7 +339,15 @@ Its `remove` action excises only the marker-delimited Firstmate region and remov
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
-## Worker launch environment (config/launch-env-allowlist)
+## Worker launch environment (config/launch-env-allowlist and --env)
+
+A worker's launch environment has two independent axes.
+`config/launch-env-allowlist` limits which ambient variables survive into the launch, and `fm-spawn.sh --env` names a file of variables to add.
+The allowlist is a home-wide filter; `--env` is a per-launch grant, and a crew dispatch profile can carry it as a standing rule.
+The two compose as filter-then-grant: the filter drops the ambient environment first, then the file is sourced inside the filtered launch, so a name the file sets does not need to appear in the allowlist and a name in both is set by the file.
+Neither option can silently defeat the other.
+
+### Ambient filter (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
 With no file, launch behavior is unchanged: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
@@ -385,11 +393,48 @@ The filter runs at the worker command boundary, after the terminal daemon and pa
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
 Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
 
+### Named environment file (--env)
+
+`fm-spawn.sh --env <path>` names one file of environment variables that the destination pane sources immediately before the worker command runs.
+It exists so a worker can be dispatched onto a gateway-routed or otherwise endpoint-redirected model as an ordinary guarded launch instead of a raw command.
+A crew dispatch profile carries the same axis as an optional `env` field, so it can be a standing rule; that schema is owned by "Crew dispatch profiles" below.
+
+The value is a path, never inline values, because these files hold live credentials.
+Firstmate validates the path and never opens the file, so its contents cannot reach the task's durable record, the launch command, the pane's visible history, or any log.
+Only the path is recorded; how a relaunch treats that recorded path is owned by [transactional relaunch](agent-control.md#transactional-relaunch).
+The path must be absolute, because the destination pane resolves it rather than the invoking Firstmate process.
+A missing, unreadable, non-regular, or relative path stops the launch before any endpoint, local copy, or durable record exists, and a file that disappears between that check and the launch stops the launch rather than starting the worker without its environment.
+
+Write the file as shell assignments, one per line; `export` is optional because the launch sources it with allexport.
+The file is sourced, so it is shell: quote values that contain punctuation, and treat the file as code Firstmate runs on your behalf in that pane rather than as data it parses.
+Firstmate's own operational variables cannot be silently redefined by it; every other name the file sets is granted.
+
+```text
+# synthetic example, not a real endpoint or credential
+ANTHROPIC_BASE_URL=https://llm-gateway.internal.example/v1
+ANTHROPIC_AUTH_TOKEN='replace-me'
+```
+
+Firstmate does not check that the file actually redirects the endpoint, because that would mean reading its contents.
+A file that fails to route is surfaced by the worker's own first turn, not by a launch check.
+
+What the launch does check is the pairing.
+Claude serves a model id from its own native space: a short alias such as `opus` or `sonnet`, or a full `claude-*` name.
+An id carrying a routing qualifier instead - a provider or path segment such as `openai/gpt-5.6-luna`, a resource qualifier such as a Bedrock inference-profile ARN, or a vendor-dotted prefix such as `us.anthropic.claude-sonnet-5` - names a target Claude's default first-party endpoint cannot serve, and asking for one anyway does not fail: Claude answers from its own default model instead, with a success status and nothing on error output.
+A claude launch naming such a model therefore requires `--env` (or a profile `env` field) and is refused without one, on a fresh dispatch and on a relaunch alike.
+That check covers the launches Firstmate composes the model flag for; the raw launch-command escape hatch is not covered, because the command is the caller's own.
+It cannot tell a real first-party id from a plausible one, because Claude publishes no local catalog to check against.
+Other harnesses are unchanged: `opencode` names models as `<provider>/<id>` natively and has its own local catalog, `omp` and `cursor` already validate model ids against theirs, and the remaining adapters were not verified for this failure mode.
+Every runtime backend delivers the same launch text through one code path in `fm-spawn.sh`, so this axis is backend-independent.
+
+Like the ambient filter, this is not a sandbox: it cannot revoke same-user access to the file, and the pane's own shell startup may set variables of its own.
+[`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact flag, refusal, and launch mechanics.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
-When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
+The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, `--effort`, and `--env` flags to `fm-spawn.sh`.
+When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness` or a positional adapter; a `--raw` launch satisfies it through the `--harness` name it is required to state).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics.
@@ -401,13 +446,13 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>" }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>", "env": "<optional absolute path>" }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
   ],
   "default": [
-    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
+    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>", "env": "<optional absolute path>" }
   ]
 }
 ```
@@ -415,7 +460,11 @@ This section is the single owner of the canonical schema and its per-field seman
 Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
-Profile `model` and `effort` fields and rule `why` are optional.
+Profile `model`, `effort`, and `env` fields and rule `why` are optional.
+A profile `env` field is an optional absolute path to a launch environment file.
+Firstmate validates the path and never reads the file.
+The path is resolved on whichever machine runs the crewmate.
+See "Worker launch environment" above for the launch-time contract that field maps to.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
@@ -426,6 +475,8 @@ Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstr
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+A profile `env` path is resolved on whichever machine runs the crewmate, so an inherited rule naming a path that exists only on the primary refuses on a home on another machine rather than launching without that environment.
+Give such a home its own file, or keep the environment axis out of the inherited rules and pass it per task.
 
 ## Toolchain
 

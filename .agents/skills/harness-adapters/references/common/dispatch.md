@@ -25,7 +25,7 @@ Tool references record empirical knowledge for those executable owners.
 
 ## Adapter verification
 
-For an approved new adapter check, use the spawn owner's raw-launch escape hatch only for a trivial supervised task.
+For an approved new adapter check, use the spawn owner's `--raw` escape hatch only for a trivial supervised task, stating the harness name and model it should record; it refuses to name an already-verified adapter, arms no per-harness wiring, and records `launch=raw` so the task cannot later be relaunched onto a different launch.
 Verify detection in `../../../bin/fm-harness.sh`, launch in `../../../bin/fm-spawn.sh`, busy state in `../../../bin/fm-busy-lib.sh`, shared composer behavior in `../../../bin/fm-composer-lib.sh`, lifecycle in `../../../bin/fm-control-lib.sh`, and tmux liveness in `../../../bin/backends/tmux.sh` when secondmate use is supported.
 Also verify primary integration through `references/common/primary-hooks.md`, model discovery through `references/common/model-and-effort.md`, and one tool record.
 A value remains unreachable until its executable owner, portable regression, applicable credentialed live guard, and verification record land together.

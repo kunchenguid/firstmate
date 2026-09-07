@@ -1137,13 +1137,18 @@ default array is accepted^{"default":[{"harness":"pi","model":"anthropic/claude-
 one-element default array is accepted^{"default":[{"harness":"codex"}]}^empty^
 empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each rule needs at least one use profile
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
-array profile with malformed model is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","model":5}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model and effort must be non-empty strings when present
+array profile with malformed model is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","model":5}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model, effort and env must be non-empty strings when present
 unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
 array profile unsupported effort is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 empty default array is flagged^{"default":[]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default needs at least one profile
 non-object default array entry is flagged^{"default":["codex"]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile must be an object
 default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile needs harness
-default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings when present
+default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model, effort and env must be non-empty strings when present
+absolute profile env is accepted^{"rules":[{"when":"gateway work","use":{"harness":"claude","model":"openai/gpt-5.6-luna","env":"/etc/firstmate/gateway.env"}}]}^empty^
+relative profile env is flagged^{"rules":[{"when":"gateway work","use":{"harness":"claude","env":"gateway.env"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - env must be an absolute path: gateway.env
+empty profile env is flagged^{"rules":[{"when":"gateway work","use":{"harness":"claude","env":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model, effort and env must be non-empty strings when present
+non-string profile env is flagged^{"default":[{"harness":"codex","env":7}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model, effort and env must be non-empty strings when present
+relative default env is flagged^{"default":{"harness":"codex","env":"./gw.env"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - env must be an absolute path: ./gw.env
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
