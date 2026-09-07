@@ -2129,6 +2129,41 @@ while kill -0 "$GROUP_LEAK_PID" 2>/dev/null; do
 done
 pass "the owner guard immediately reaps a runner's leftover process group"
 
+HREUSED_GROUP="$TMP_ROOT/reused-runner-group"; new_home "$HREUSED_GROUP"
+fm_test_track_procevent_home "$HREUSED_GROUP"
+REUSED_GROUP_MARKER="$TMP_ROOT/reused-runner-group.marker"
+REUSED_GROUP_TRIGGER="$TMP_ROOT/reused-runner-group.trigger"
+REUSED_GROUP_BIN=$(fm_fakebin "$TMP_ROOT/reused-runner-group-bin")
+REAL_PS=$(command -v ps) || fail "the reused-group fixture requires ps"
+cat > "$REUSED_GROUP_BIN/ps" <<SH
+#!/usr/bin/env bash
+if [ -e "$REUSED_GROUP_MARKER" ] && [ "\${1-}" = -p ] \
+  && [ "\${3-}" = -o ] && [ "\${4-}" = lstart= ]; then
+  printf 'reused runner identity\n'
+  exit 0
+fi
+exec "$REAL_PS" "\$@"
+SH
+chmod +x "$REUSED_GROUP_BIN/ps"
+pe_register "$HREUSED_GROUP" lavish reused-runner-group-src -- \
+  "$BLOCKER" "$REUSED_GROUP_TRIGGER" "reused group payload" >/dev/null
+PATH="$REUSED_GROUP_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-reused-group-proc" \
+  FM_PROCEVENT_OWNER_LEASE_SECONDS=30 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+  pe "$HREUSED_GROUP" reconcile >/dev/null
+wait_for "$HREUSED_GROUP/state/procevent/reused-runner-group-src.runner" \
+  || fail "the reused-group fixture runner did not start"
+REUSED_GROUP_RUNNER=$(cat "$HREUSED_GROUP/state/procevent/reused-runner-group-src.runner")
+touch "$REUSED_GROUP_MARKER"
+reused_group_deadline=$((SECONDS + 6))
+while kill -0 -"$REUSED_GROUP_RUNNER" 2>/dev/null; do
+  if [ "$SECONDS" -ge "$reused_group_deadline" ]; then
+    pe "$HREUSED_GROUP" retire reused-runner-group-src >/dev/null 2>&1 || true
+    fail "a reused runner identity made the guard abandon its source group"
+  fi
+  sleep 0.1
+done
+pass "registration generation evidence reaps a reused runner group"
+
 # --- a runner cannot outlive the session that owns it -----------------------
 #
 # Reproduces the shape that wedged a host: a listener detached into its own
