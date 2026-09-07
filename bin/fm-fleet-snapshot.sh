@@ -499,6 +499,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     | .records |= map(
         if (.body_lines | length) > 0 then
           .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
+          | .local_note = (.local_note
+              // ([.body_lines[] | cap(.; "^(?<v>local main)$")]
+                  | map(select(. != null))
+                  | .[0] // null))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
     | .records as $records
