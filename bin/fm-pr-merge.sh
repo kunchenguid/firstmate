@@ -527,6 +527,18 @@ if [ "$PROVIDER" = gitlab ]; then
   fi
 fi
 
+# The three GitHub reads every gate binds to - the pull request identity, the
+# review evidence and the mergeability verdict - are parsed field by field, and
+# only gh prints the selected payload raw. gh-axi wraps the same selection
+# differently depending on the value's type and size, so a merge that cannot
+# use gh refuses here, before anything is recorded and before the forge is
+# asked to mutate anything, rather than reading a shape it would have to guess
+# at. An irreversible merge binds to raw data or it does not run.
+if [ "$PROVIDER" = github ] && ! command -v gh >/dev/null 2>&1; then
+  echo "error: merging a GitHub pull request requires gh on PATH" >&2
+  exit 1
+fi
+
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
 # because that script re-records pr= and drops a pr_head= it cannot resolve.
 RECORDED_HEAD=
@@ -838,7 +850,7 @@ github_read_pr_identity() {
   local head='' author='' merged='' ref='' head_repo='' base_repo=''
 
   # shellcheck disable=SC2016  # The jq program is literal, not a shell string.
-  if ! fields=$(gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" --jq \
+  if ! fields=$(gh api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" --jq \
     '"head=" + ((.head.sha // "") | tostring), "author=" + ((.user.login // "") | tostring), "merged=" + (.merged | tostring), "ref=" + ((.head.ref // "") | tostring), "headrepo=" + ((.head.repo.full_name // "") | tostring), "baserepo=" + ((.base.repo.full_name // "") | tostring)' \
     2>/dev/null) || [ -z "$fields" ]; then
     echo "error: could not read the GitHub pull request head commit and author before merging" >&2
@@ -991,7 +1003,7 @@ firstmate_review_verdict_recorded() {
   local _fm_login _fm_state _fm_at _fm_id _fm_verdict _fm_scope _fm_commit
   FM_REVIEW_ADJUDICATION=invalid
   canonical_url="https://api.github.com/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER"
-  records=$(gh-axi api --paginate "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/reviews" --jq "
+  records=$(gh api --paginate "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/reviews" --jq "
     if type != \"array\" then
       error(\"reviews payload is not an array\")
     else
@@ -1333,7 +1345,7 @@ case "$PROVIDER" in
         CHECKS_GREEN=1
       fi
     fi
-    if MERGEABLE_OUTPUT=$(gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" \
+    if MERGEABLE_OUTPUT=$(gh api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" \
       --jq '.mergeable == true and .mergeable_state == "clean"' 2>&1); then
       if printf '%s\n' "$MERGEABLE_OUTPUT" | grep -qx true; then
         MERGEABLE_GREEN=1

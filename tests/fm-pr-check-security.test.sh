@@ -146,6 +146,37 @@ case "${1:-} ${2:-}" in
     exit 0
     ;;
 esac
+if [ "${1:-}" = api ]; then
+  # The merge gate reads the pull request identity, its review evidence and its
+  # mergeability here, as the raw payload gh api prints.
+  case "$*" in
+    */reviews*)
+      # One independent approval at the head, in the record shape the merge
+      # gate's own review query emits.
+      printf 'reviewer-one\tAPPROVED\t2026-09-05T10:00:00Z\t1\tverdict\tscope\t%s\n' \
+        "${FM_TEST_GH_PR_HEAD:-1111111111111111111111111111111111111111}"
+      exit 0
+      ;;
+    *'"head="'*)
+      # The base repository is the one the request path already named, so a
+      # case reading any pull request URL gets that URL's own identity back.
+      api_repo=$*
+      api_repo=${api_repo#*/repos/}
+      api_repo=${api_repo%%/pulls/*}
+      printf 'head=%s\nauthor=%s\nmerged=false\nref=%s\nheadrepo=%s\nbaserepo=%s\n' \
+        "${FM_TEST_GH_PR_HEAD:-1111111111111111111111111111111111111111}" \
+        "${FM_TEST_GH_PR_AUTHOR:-pr-author}" \
+        "${FM_TEST_GH_PR_HEAD_REF:-fm/task-branch}" \
+        "${FM_TEST_GH_PR_HEAD_REPO:-example/repo}" \
+        "${FM_TEST_GH_PR_BASE_REPO-$api_repo}"
+      exit 0
+      ;;
+    *mergeable_state*)
+      printf '%s\n' true
+      exit 0
+      ;;
+  esac
+fi
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
@@ -160,31 +191,7 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr checks") printf '%s\n' 'summary: "2 passed, 0 failed, 2 total"' ;;
-  api\ *)
-    # The merge gate reads one live pull request identity before merging.
-    case "$*" in
-      */reviews*)
-        # One independent approval at the head, in the record shape the merge
-        # gate's own review query emits.
-        printf 'reviewer-one\tAPPROVED\t2026-09-05T10:00:00Z\t1\tverdict\tscope\t%s\n' \
-          "${FM_TEST_GH_PR_HEAD:-1111111111111111111111111111111111111111}"
-        ;;
-      *'"head="'*)
-        # The base repository is the one the request path already named, so a
-        # case reading any pull request URL gets that URL's own identity back.
-        api_repo=$*
-        api_repo=${api_repo#*/repos/}
-        api_repo=${api_repo%%/pulls/*}
-        printf 'head=%s\nauthor=%s\nmerged=false\nref=%s\nheadrepo=%s\nbaserepo=%s\n' \
-          "${FM_TEST_GH_PR_HEAD:-1111111111111111111111111111111111111111}" \
-          "${FM_TEST_GH_PR_AUTHOR:-pr-author}" \
-          "${FM_TEST_GH_PR_HEAD_REF:-fm/task-branch}" \
-          "${FM_TEST_GH_PR_HEAD_REPO:-example/repo}" \
-          "${FM_TEST_GH_PR_BASE_REPO-$api_repo}"
-        ;;
-      *) printf '%s\n' true ;;
-    esac
-    ;;
+  api\ *) ;;
   "pr view")
     [ "$#" -eq 5 ] && [ "${4:-}" = --repo ] || exit 2
     printf 'pull_request:\n  number: %s\n  state: %s\n' "$3" "${FM_TEST_GH_MERGE_STATE:-merged}"

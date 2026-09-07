@@ -188,11 +188,11 @@ make_case() {
   fakebin="$case_dir/fakebin"
   policybin="$case_dir/policybin"
   mkdir -p "$case_dir/state" "$fakebin" "$policybin"
-  cat > "$policybin/gh-axi" <<'SH'
+  cat > "$policybin/gh" <<'SH'
 #!/usr/bin/env bash
-# The forge reads this wrapper answers itself: PR checks, and every GET the
-# merge gates issue. A non-GET api call is the merge seam and goes to the
-# case's own gh-axi mock, which logs it like any other merge invocation.
+# The machine-parsed forge reads this wrapper answers itself, as the raw
+# payload `gh api --jq` prints. Every other gh call is the case's own mock.
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 head_default=$(cat "$FM_TEST_CASE_DIR/pr-head" 2>/dev/null || true)
 if [ "${1:-}" = api ]; then
   args=("$@")
@@ -204,59 +204,74 @@ if [ "${1:-}" = api ]; then
     case "${args[$i]}" in
       GET|PUT|POST|PATCH|DELETE|HEAD) method=${args[$i]} ;;
       --jq) i=$((i + 1)); filter=${args[$i]} ;;
-      --field|--header|--template) i=$((i + 1)) ;;
+      --field|-F|-f|--header|--template) i=$((i + 1)) ;;
       --paginate) ;;
       -*) ;;
       *) path=${args[$i]} ;;
     esac
     i=$((i + 1))
   done
-  if [ "$method" != GET ]; then
-    exec "$FM_TEST_GH_AXI_DELEGATE" "$@"
+  if [ "$method" = GET ]; then
+    case "$path" in
+      */pulls/*/reviews)
+        [ -z "${FM_FAKE_GH_REVIEWS_UNREADABLE:-}" ] || {
+          echo 'gh: could not read the pull request reviews' >&2
+          exit 1
+        }
+        jq -rn --argjson reviews "${FM_FAKE_GH_REVIEWS:-[]}" "\$reviews | $filter"
+        exit
+        ;;
+      /repos/*/pulls/*)
+        case "$filter" in
+          *mergeable_state*)
+            printf '%s\n' "${FM_FAKE_GH_MERGEABLE:-true}"
+            exit
+            ;;
+          *head=*)
+            [ -z "${FM_FAKE_GH_PR_UNREADABLE:-}" ] || {
+              echo 'gh: could not read the pull request' >&2
+              exit 1
+            }
+            # A same-repository head branch is the ordinary case, so the head
+            # repository defaults to the one the request path already named.
+            path_repo=${path#/repos/}
+            path_repo=${path_repo%/pulls/*}
+            jq -rn \
+              --arg head "${FM_FAKE_GH_PR_HEAD-$head_default}" \
+              --arg author "${FM_FAKE_GH_PR_AUTHOR-pr-author}" \
+              --arg body "${FM_FAKE_GH_PR_BODY:-}" \
+              --arg ref "${FM_FAKE_GH_PR_HEAD_REF-fm/task-branch}" \
+              --arg headrepo "${FM_FAKE_GH_PR_HEAD_REPO-$path_repo}" \
+              --argjson merged "${FM_FAKE_GH_PR_MERGED:-false}" \
+              --arg baserepo "${FM_FAKE_GH_PR_BASE_REPO-$path_repo}" \
+              "{head: {sha: \$head, ref: \$ref, repo: {full_name: \$headrepo}}, base: {repo: {full_name: \$baserepo}}, user: {login: \$author}, merged: \$merged, body: \$body} | $filter"
+            exit
+            ;;
+        esac
+        ;;
+    esac
   fi
-  case "$path" in
-    */reviews)
-      [ -z "${FM_FAKE_GH_REVIEWS_UNREADABLE:-}" ] || {
-        echo 'gh: could not read the pull request reviews' >&2
-        exit 1
-      }
-      jq -rn --argjson reviews "${FM_FAKE_GH_REVIEWS:-[]}" "\$reviews | $filter"
-      ;;
-    *)
-      case "$filter" in
-        *mergeable_state*) printf '%s\n' "${FM_FAKE_GH_MERGEABLE:-true}" ;;
-        *head=*)
-          [ -z "${FM_FAKE_GH_PR_UNREADABLE:-}" ] || {
-            echo 'gh: could not read the pull request' >&2
-            exit 1
-          }
-          # A same-repository head branch is the ordinary case, so the head
-          # repository defaults to the one the request path already named.
-          path_repo=${path#/repos/}
-          path_repo=${path_repo%/pulls/*}
-          jq -rn \
-            --arg head "${FM_FAKE_GH_PR_HEAD-$head_default}" \
-            --arg author "${FM_FAKE_GH_PR_AUTHOR-pr-author}" \
-            --arg body "${FM_FAKE_GH_PR_BODY:-}" \
-            --arg ref "${FM_FAKE_GH_PR_HEAD_REF-fm/task-branch}" \
-            --arg headrepo "${FM_FAKE_GH_PR_HEAD_REPO-$path_repo}" \
-            --argjson merged "${FM_FAKE_GH_PR_MERGED:-false}" \
-            --arg baserepo "${FM_FAKE_GH_PR_BASE_REPO-$path_repo}" \
-            "{head: {sha: \$head, ref: \$ref, repo: {full_name: \$headrepo}}, base: {repo: {full_name: \$baserepo}}, user: {login: \$author}, merged: \$merged, body: \$body} | $filter"
-          ;;
-      esac
-      ;;
-  esac
-  exit
 fi
+exec "$FM_TEST_GH_DELEGATE" "$@"
+SH
+  cat > "$policybin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+# gh-axi still answers the PR check summary and every merge-side write; the
+# machine-parsed reads are gh's now, so an api call reaching here is a read
+# that regressed back onto the wrapper's conditional envelopes.
 case "${1:-} ${2:-}" in
   "pr checks")
     printf 'summary: "%s"\n' "${FM_FAKE_GH_CHECKS_SUMMARY:-2 passed, 0 failed, 2 total}"
     ;;
+  "api GET"|"api /"*|"api repos"*)
+    printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+    echo 'gh-axi: this machine-parsed read must not go through gh-axi' >&2
+    exit 1
+    ;;
   *) exec "$FM_TEST_GH_AXI_DELEGATE" "$@" ;;
 esac
 SH
-  chmod +x "$policybin/gh-axi"
+  chmod +x "$policybin/gh" "$policybin/gh-axi"
   # Initialize the project as a git repo whose remote names the repository its
   # cases merge into, because the review gate is skipped only for a task whose
   # own project provably owns the pull request being merged.
@@ -646,6 +661,7 @@ run_pr_merge() {
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_AXI_DELEGATE="$case_dir/fakebin/gh-axi" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
+  FM_TEST_GH_DELEGATE="$case_dir/fakebin/gh" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
   FM_TEST_CASE_DIR="$case_dir" \
@@ -674,6 +690,7 @@ run_pr_merge_unset_home() {
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_AXI_DELEGATE="$case_dir/fakebin/gh-axi" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
+  FM_TEST_GH_DELEGATE="$case_dir/fakebin/gh" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
   FM_TEST_CASE_DIR="$case_dir" \
@@ -696,6 +713,7 @@ run_pr_merge_without_overrides() {
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_AXI_DELEGATE="$case_dir/fakebin/gh-axi" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
+  FM_TEST_GH_DELEGATE="$case_dir/fakebin/gh" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
   FM_TEST_CASE_DIR="$case_dir" \
@@ -719,6 +737,7 @@ run_pr_merge_data_override_only() {
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_AXI_DELEGATE="$case_dir/fakebin/gh-axi" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
+  FM_TEST_GH_DELEGATE="$case_dir/fakebin/gh" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
   FM_TEST_CASE_DIR="$case_dir" \
@@ -1065,25 +1084,14 @@ test_github_no_queue_rule_says_nothing_about_a_queue() {
   pass "fm-pr-merge says nothing about a merge queue when the base branch has no queue rule"
 }
 
-test_github_fallback_view_refusal_says_the_queue_was_unobservable() {
+test_github_without_gh_refuses_before_the_forge_write() {
   local case_dir ghless_path rc
-  case_dir=$(make_case github-fallback-unobservable-queue)
+  case_dir=$(make_case github-without-gh-no-write)
   mkdir -p "$case_dir/wt"
+  # A gh-axi that would merge on request, so the refusal below is this script
+  # declining to reach the forge rather than the forge declining the merge.
   add_gh_mocks "$case_dir" 8686868686868686868686868686868686868686
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-# The exact-head merge seam and the CLI merge are the same merge call here.
-merge_op="${1:-} ${2:-}"
-[ "$merge_op" != "api PUT" ] || merge_op="pr merge"
-case "$merge_op" in
-  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
-  "pr view") printf 'pull_request:\n  number: %s\n  state: open\n' "$3" ;;
-esac
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/gh-axi"
-  rm "$case_dir/fakebin/gh"
+  rm "$case_dir/fakebin/gh" "$case_dir/policybin/gh"
   ghless_path="$case_dir/path-without-gh"
   mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
   : > "$case_dir/gh-axi.log"
@@ -1095,21 +1103,12 @@ SH
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "github-fallback-unobservable-queue: an unproved merge must fail"
-  assert_grep 'isInMergeQueue=unknown' "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: refusal did not name the concrete observed state"
-  assert_grep 'the merge queue could not be observed for https://github.com/example/repo/pull/73' \
-    "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: the refusal implied an unqueued PR it could not see"
-  assert_grep "re-check the pull request's merge queue state" "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: the refusal named no concrete next step"
-  # The lowercase state the fallback view reports must be judged the same way
-  # the queue-aware read's uppercase enum is, or every explanation is skipped.
-  assert_grep 'GitHub merge outcome was not successful' "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: the fallback view's state was not judged like the queue-aware one"
-  assert_no_grep 'verified: ' "$case_dir/stdout" \
-    "github-fallback-unobservable-queue: an unproved merge was reported as verified"
-  pass "fm-pr-merge says the merge queue was unobservable when only the gh-axi view answered"
+  expect_code 1 "$rc" "github-without-gh-no-write: a merge without gh must fail"
+  assert_grep 'error: merging a GitHub pull request requires gh on PATH' \
+    "$case_dir/stderr" "github-without-gh-no-write: the refusal did not name gh"
+  assert_no_merge_call "$case_dir" \
+    "github-without-gh-no-write: the forge was asked to merge without a raw read to bind it to"
+  pass "fm-pr-merge refuses without gh before asking the forge to mutate anything"
 }
 
 test_github_unreadable_outcome_refusal_quotes_the_forge_output() {
@@ -1209,12 +1208,12 @@ test_github_failed_merge_names_an_observed_landed_state() {
   pass "fm-pr-merge names a landed state hiding behind a failed GitHub merge command"
 }
 
-test_github_without_gh_still_uses_gh_axi_merge() {
+test_github_without_gh_records_nothing() {
   local case_dir ghless_path rc
   case_dir=$(make_case github-without-gh)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 4141414141414141414141414141414141414141
-  rm "$case_dir/fakebin/gh"
+  rm "$case_dir/fakebin/gh" "$case_dir/policybin/gh"
   ghless_path="$case_dir/path-without-gh"
   mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
   : > "$case_dir/gh-axi.log"
@@ -1226,20 +1225,24 @@ test_github_without_gh_still_uses_gh_axi_merge() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "github-without-gh: gh-axi can prove a landed merge without gh"
-  assert_merge_call "$case_dir" 60 example/repo \
-    "github-without-gh: the configured merge abstraction was not invoked"
-  assert_grep 'pr view 60 --repo example/repo' "$case_dir/gh-axi.log" \
-    "github-without-gh: the gh-axi fallback did not verify the landed state"
-  assert_grep 'verified: https://github.com/example/repo/pull/60 is merged' \
-    "$case_dir/stdout" "github-without-gh: the fallback did not report the proven merge"
-  pass "fm-pr-merge reaches and verifies the gh-axi merge path without gh"
+  expect_code 1 "$rc" "github-without-gh: a merge without gh must fail"
+  assert_grep 'error: merging a GitHub pull request requires gh on PATH' \
+    "$case_dir/stderr" "github-without-gh: the refusal did not name the missing dependency"
+  assert_no_merge_call "$case_dir" \
+    "github-without-gh: a merge ran without the raw read every gate binds to"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/60' "$case_dir/state/task-x1.meta" \
+    "github-without-gh: a PR reference was recorded despite the missing dependency"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "github-without-gh: a merge poll was armed despite the missing dependency"
+  pass "fm-pr-merge names gh as the missing dependency and records nothing without it"
 }
 
-test_github_without_gh_failed_read_keeps_bookkeeping() {
+test_github_without_gh_never_degrades_to_gh_axi() {
   local case_dir ghless_path rc
   case_dir=$(make_case github-without-gh-read-fails)
   mkdir -p "$case_dir/wt"
+  # Before gh was required these reads degraded onto gh-axi. The refusal must
+  # now name gh instead of asking gh-axi anything at all.
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -1253,6 +1256,7 @@ esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi"
+  rm -f "$case_dir/policybin/gh"
   ghless_path="$case_dir/path-without-gh"
   mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
   : > "$case_dir/gh-axi.log"
@@ -1264,16 +1268,14 @@ SH
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "github-without-gh-read-fails: an unreadable outcome must fail"
-  assert_merge_call "$case_dir" 61 example/repo \
-    "github-without-gh-read-fails: the merge call did not happen before the failed read"
-  assert_grep 'could not read the GitHub pull request outcome after the merge attempt' \
-    "$case_dir/stderr" "github-without-gh-read-fails: the failed read was not reported"
-  assert_grep 'pr=https://github.com/example/repo/pull/61' "$case_dir/state/task-x1.meta" \
-    "github-without-gh-read-fails: a landed merge lost its PR metadata"
-  assert_present "$case_dir/state/task-x1.check.sh" \
-    "github-without-gh-read-fails: a landed merge lost its merge poll"
-  pass "fm-pr-merge preserves bookkeeping when gh is absent and the fallback read fails"
+  expect_code 1 "$rc" "github-without-gh-read-fails: a merge without gh must fail"
+  assert_grep 'error: merging a GitHub pull request requires gh on PATH' \
+    "$case_dir/stderr" "github-without-gh-read-fails: the refusal did not name gh"
+  assert_no_grep 'could not read the GitHub pull request' "$case_dir/stderr" \
+    "github-without-gh-read-fails: the merge tried a read instead of naming the missing dependency"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "github-without-gh-read-fails: gh-axi was called at all without gh"
+  pass "fm-pr-merge never degrades a machine-parsed read onto gh-axi when gh is absent"
 }
 
 test_github_zero_exit_queue_required_refuses_with_exact_retry() {
@@ -3023,6 +3025,36 @@ test_github_merge_carries_the_live_head_for_any_project() {
   pass "fm-pr-merge binds every GitHub merge it performs to the live head"
 }
 
+# --- machine-parsed forge reads --------------------------------------------
+# gh-axi's api output is conditional: the same --jq selection comes back bare,
+# or inside a TOON envelope whose body may or may not be JSON-quoted. The
+# identity, review and mergeability reads are parsed field by field, so they
+# read gh's raw payload instead and never see an envelope.
+
+test_github_machine_reads_come_from_raw_gh() {
+  local case_dir
+  case_dir=$(make_firstmate_review_case gh-raw-machine-reads)
+
+  FM_FAKE_GH_REVIEWS="$(review_payload reviewer-one "$FM_REVIEW_HEAD" "$FM_REVIEW_LGTM")" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/firstmate/pull/127 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "gh-raw-machine-reads: the merge could not read the pull request through gh"
+
+  assert_merge_seam_call "$case_dir" 127 example/firstmate "$FM_REVIEW_HEAD" \
+    "gh-raw-machine-reads: the merge did not carry the head the identity read named"
+  # The author comes out of that same read, and it is what makes reviewer-one
+  # independent, so a merge needing no override proves both reads parsed.
+  assert_no_grep 'missing_review_override_ts=' "$case_dir/state/task-x1.meta" \
+    "gh-raw-machine-reads: the review gate did not adjudicate the evidence it read"
+  assert_grep 'api /repos/example/firstmate/pulls/127' "$case_dir/gh.log" \
+    "gh-raw-machine-reads: the identity read did not go to gh"
+  assert_grep 'api --paginate /repos/example/firstmate/pulls/127/reviews' "$case_dir/gh.log" \
+    "gh-raw-machine-reads: the review evidence read did not go to gh"
+  assert_no_grep '^api ' "$case_dir/gh-axi.log" \
+    "gh-raw-machine-reads: a machine-parsed read still went through gh-axi"
+  pass "fm-pr-merge parses pull request identity and review evidence from raw gh output"
+}
+
 test_github_merge_refuses_an_unreadable_head() {
   local case_dir rc
   case_dir=$(make_case github-head-unreadable)
@@ -4714,11 +4746,11 @@ test_github_unreadable_outcome_refusal_quotes_the_forge_output
 test_github_unrecognised_queue_method_still_names_the_queue
 test_github_unreadable_queue_rules_are_not_reported_as_no_queue
 test_github_no_queue_rule_says_nothing_about_a_queue
-test_github_fallback_view_refusal_says_the_queue_was_unobservable
+test_github_without_gh_refuses_before_the_forge_write
 test_github_failed_gh_read_falls_back_to_gh_axi
 test_github_failed_merge_names_an_observed_landed_state
-test_github_without_gh_still_uses_gh_axi_merge
-test_github_without_gh_failed_read_keeps_bookkeeping
+test_github_without_gh_records_nothing
+test_github_without_gh_never_degrades_to_gh_axi
 test_github_merged_outcome_is_verified
 test_github_verified_merge_requires_poll_recording
 test_github_queued_outcome_is_refused
@@ -4782,6 +4814,7 @@ test_firstmate_merge_missing_review_override_still_escapes
 test_github_merge_refuses_a_head_that_moved_after_the_verdict
 test_github_merge_carries_the_live_head_for_any_project
 test_github_merge_refuses_an_unreadable_head
+test_github_machine_reads_come_from_raw_gh
 test_allow_red_records_a_bound_override_receipt_before_the_merge
 test_allow_red_refuses_when_the_receipt_cannot_be_written
 test_green_merge_clears_a_stale_red_override_receipt
