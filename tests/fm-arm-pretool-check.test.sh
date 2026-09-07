@@ -384,6 +384,9 @@ EOF
     'coproc JOB env no-mistakes axi respond --action fix' \
     'coproc JOB { no-mistakes axi respond --action fix; }' \
     "bash -o posix -c 'no-mistakes axi respond --action fix'" \
+    "CMD='no-mistakes axi respond --action fix'; bash -c \"\$CMD\"" \
+    "CMD='no-mistakes axi respond --action fix'; eval \"\$CMD\"" \
+    'NM=no-mistakes; $NM axi respond --action fix' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
@@ -407,6 +410,9 @@ EOF
     'coproc JOB env no-mistakes axi respond --action fix' \
     'coproc JOB { no-mistakes axi respond --action fix; }' \
     "bash -o posix -c 'no-mistakes axi respond --action fix'" \
+    "CMD='no-mistakes axi respond --action fix'; bash -c \"\$CMD\"" \
+    "CMD='no-mistakes axi respond --action fix'; eval \"\$CMD\"" \
+    'NM=no-mistakes; $NM axi respond --action fix' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
@@ -427,6 +433,8 @@ EOF
     "/usr/bin/time -l echo 'no-mistakes axi run --intent data'" \
     "coproc echo 'no-mistakes axi respond --action data'" \
     "bash -c -- 'no-mistakes axi respond --action data'" \
+    "CMD='no-mistakes axi respond --action data'; echo \"\$CMD\"" \
+    "CMD='no-mistakes axi respond --action data'; \"\$CMD\"" \
     "if echo 'no-mistakes axi respond --action data'; then echo done; fi" \
     "case \"\$x\" in *) echo 'no-mistakes axi run';; esac"; do
     FM_HOME="$primary" "$check" --command "$payload" >/dev/null 2>&1 \

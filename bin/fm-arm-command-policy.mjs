@@ -699,19 +699,51 @@ function sourcedScript(position) {
   return position.words[position.index + 1] || null;
 }
 
-function evalPayload(position) {
-  if (!position.command || basename(position.command.value) !== "eval") return null;
-  const payloads = position.words.slice(position.index + 1);
-  if (payloads.length === 0 || payloads.some((payload) => !payload.literal || payload.subs.length > 0)) return null;
-  return payloads.map((payload) => payload.value).join(" ");
-}
-
 function wordReferencesAny(word, names) {
   if (!word || names.size === 0) return false;
   for (const match of word.value.matchAll(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g)) {
     if (names.has(match[1] || match[2])) return true;
   }
   return false;
+}
+
+function resolveKnownWord(word, knownVariables) {
+  if (!word || word.subs.length > 0) return null;
+  if (word.literal) return word.value;
+  let matched = false;
+  let unresolved = false;
+  const value = word.value.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (reference, braced, plain) => {
+    matched = true;
+    const name = braced || plain;
+    if (!knownVariables.has(name)) {
+      unresolved = true;
+      return reference;
+    }
+    return knownVariables.get(name);
+  });
+  return matched && !unresolved ? value : null;
+}
+
+function evalPayload(position, context) {
+  if (!position.command || basename(position.command.value) !== "eval") return null;
+  const payloads = position.words.slice(position.index + 1);
+  if (payloads.length === 0) return null;
+  const resolved = payloads.map((payload) => resolveKnownWord(payload, context.knownVariables));
+  if (resolved.some((payload) => payload === null)) return null;
+  return resolved.join(" ");
+}
+
+function isPipelineDriveInvocation(position, context) {
+  if (!position.command) return false;
+  const invocation = [];
+  for (const word of position.words.slice(position.index)) {
+    const resolved = resolveKnownWord(word, context.knownVariables);
+    if (resolved === null) return false;
+    if (word.quoted) invocation.push(resolved);
+    else invocation.push(...resolved.trim().split(/\s+/).filter(Boolean));
+    if (invocation.length >= 3) break;
+  }
+  return basename(invocation[0] || "") === "no-mistakes" && invocation[1] === "axi" && ["run", "respond"].includes(invocation[2]);
 }
 
 function hasDynamicExecutionPayload(position, context) {
@@ -739,6 +771,7 @@ function contextWithAssignments(context, words) {
   const protectedVariables = new Set(context.protectedVariables || []);
   const watcherPatterns = new Set(context.watcherPatterns || []);
   const watcherPids = new Set(context.watcherPids || []);
+  const knownVariables = new Map(context.knownVariables || []);
   for (const word of words) {
     const name = assignmentName(word);
     if (!name) continue;
@@ -749,8 +782,11 @@ function contextWithAssignments(context, words) {
     else watcherPatterns.delete(name);
     if (wordReferencesAny(word, watcherPids)) watcherPids.add(name);
     else watcherPids.delete(name);
+    const resolved = resolveKnownWord(word, knownVariables);
+    if (resolved === null) knownVariables.delete(name);
+    else knownVariables.set(name, resolved.slice(resolved.indexOf("=") + 1));
   }
-  return { ...context, protectedVariables, watcherPatterns, watcherPids };
+  return { ...context, protectedVariables, watcherPatterns, watcherPids, knownVariables };
 }
 
 function nodeHasRedirection(tokens) {
@@ -786,12 +822,14 @@ function analyzeProgram(command, context, depth = 0) {
     protectedVariables: new Set(context.protectedVariables || []),
     watcherPatterns: new Set(context.watcherPatterns || []),
     watcherPids: new Set(context.watcherPids || []),
+    knownVariables: new Map(context.knownVariables || []),
   };
   let unclassifiableProtected = false;
 
   for (const tokens of program.nodes) {
     const position = commandPosition(tokens);
-    const nodeContext = contextWithAssignments(activeContext, position.words);
+    const assignmentPrefixes = position.words.slice(0, position.index).filter((word) => isAssignment(word.value));
+    const nodeContext = contextWithAssignments(activeContext, assignmentPrefixes);
     const firstName = basename(position.words[0]?.value || "");
     if (["if", "then", "else", "elif", "fi", "for", "while", "until", "case", "esac", "do", "done", "function"].includes(firstName)) {
       unsupported = true;
@@ -834,7 +872,7 @@ function analyzeProgram(command, context, depth = 0) {
     const shellPayload = shell?.kind === "command" ? shell.payload : null;
     const shellScript = shell?.kind === "script" ? shell.payload : null;
     const sourceScript = sourcedScript(position);
-    const literalEvalPayload = evalPayload(position);
+    const resolvedEvalPayload = evalPayload(position, nodeContext);
     const heredocPayloads = shellHeredocPayloads(tokens, position);
     const hereStringPayloads = shellHereStringPayloads(tokens, position);
     for (const script of [shellScript, sourceScript]) {
@@ -842,17 +880,20 @@ function analyzeProgram(command, context, depth = 0) {
       nodeNestedProtected ||= Boolean(protectedIdentity(script.value, context.root)) || wordReferencesAny(script, nodeContext.protectedVariables);
       unclassifiableProtected ||= hasUnclassifiableProtectedExpansion(script, context.root);
     }
-    if (shellPayload && (!shellPayload.literal || shellPayload.subs.length > 0)) {
-      if (wordReferencesAny(shellPayload, nodeContext.protectedVariables)) nodeNestedProtected = true;
-    } else if (shellPayload) {
-      const nested = analyzeProgram(shellPayload.value, nodeContext, depth + 1);
-      nodeNestedProtected ||= nested.protectedFound;
-      broadKill ||= nested.broadKill;
-      pipelineDrive ||= nested.pipelineDrive;
-      nodePgrepWatcher ||= nested.pgrepWatcher;
-      if (nested.error && rawMentionsProtected(shellPayload.value)) unsupported = true;
+    if (shellPayload) {
+      const resolvedShellPayload = resolveKnownWord(shellPayload, nodeContext.knownVariables);
+      if (resolvedShellPayload === null) {
+        if (wordReferencesAny(shellPayload, nodeContext.protectedVariables)) nodeNestedProtected = true;
+      } else {
+        const nested = analyzeProgram(resolvedShellPayload, nodeContext, depth + 1);
+        nodeNestedProtected ||= nested.protectedFound;
+        broadKill ||= nested.broadKill;
+        pipelineDrive ||= nested.pipelineDrive;
+        nodePgrepWatcher ||= nested.pgrepWatcher;
+        if (nested.error && rawMentionsProtected(resolvedShellPayload)) unsupported = true;
+      }
     }
-    for (const payload of [literalEvalPayload, ...heredocPayloads, ...hereStringPayloads]) {
+    for (const payload of [resolvedEvalPayload, ...heredocPayloads, ...hereStringPayloads]) {
       if (payload === null) continue;
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
@@ -867,7 +908,7 @@ function analyzeProgram(command, context, depth = 0) {
     if (hasUnclassifiableProtectedExpansion(position.command, context.root)) unclassifiableProtected = true;
     const commandName = basename(executable);
     const args = position.words.slice(position.index + 1);
-    if (commandName === "no-mistakes" && args[0]?.value === "axi" && ["run", "respond"].includes(args[1]?.value)) pipelineDrive = true;
+    if (isPipelineDriveInvocation(position, nodeContext)) pipelineDrive = true;
     if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, nodeContext.watcherPatterns))) broadKill = true;
     if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, nodeContext.watcherPids)))) broadKill = true;
     if (isWatcherPgrep(position, nodeContext)) pgrepWatcher = true;
@@ -879,7 +920,8 @@ function analyzeProgram(command, context, depth = 0) {
     }
     pgrepWatcher ||= nodePgrepWatcher;
     nestedProtected ||= nodeNestedProtected;
-    activeContext = nodeContext;
+    if (!position.command) activeContext = nodeContext;
+    else if (commandName === "export") activeContext = contextWithAssignments(activeContext, args.filter((word) => isAssignment(word.value)));
     if (position.unresolvedWrapperOption) unsupported = true;
     nodeInfos.push({
       tokens,
@@ -947,7 +989,7 @@ function blessedProgram(analysis, context) {
 }
 
 function decision(command, root, home, primary) {
-  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
+  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set(), knownVariables: new Map() };
   const analysis = analyzeProgram(command, context);
   if (primary && analysis.pipelineDrive) return deny("primary-pipeline-drive");
   if (analysis.broadKill) return deny("broad-watcher-kill");
