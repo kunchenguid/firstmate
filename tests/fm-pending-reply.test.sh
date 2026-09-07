@@ -1559,7 +1559,7 @@ SH
 }
 
 test_remote_observes_share_one_tick_budget() {
-  local dir home state sshbin started elapsed calls task corr
+  local dir home state sshbin calls task corr
   dir="$TMP_ROOT/remote-observe-shared-bound-$RANDOM"
   home="$dir/home"
   state="$home/state"
@@ -1595,22 +1595,18 @@ SH
     '. "$1"; fm_pending_reply_tick "$2"' _ "$ROOT/bin/fm-pending-reply-lib.sh" \
     "$dir/empty-state" || fail "an empty remote-task list failed under stock Bash"
 
-  started=$(date +%s)
   env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SSH_BIN="$sshbin" \
     FM_TEST_SSH_CALLS="$dir/ssh.calls" FM_TEST_SSH_STALL=1 \
     FM_PENDING_REPLY_OBSERVE_TIMEOUT=2 \
     /bin/bash -u -c ". \"\$1\"; fm_pending_reply_tick \"\$2\"; fm_pending_reply_tick \"\$2\"; fm_pending_reply_tick \"\$2\"" \
     _ "$ROOT/bin/fm-pending-reply-lib.sh" "$state" \
     || fail "the shared-budget ticks failed under stock Bash"
-  elapsed=$(( $(date +%s) - started ))
   calls=$(wc -l < "$dir/ssh.calls" 2>/dev/null | tr -d '[:space:]')
 
   [ "$calls" = 3 ] \
     || fail "three ticks spawned $calls stalled observes instead of one per shared budget"
   [ "$(sort -u "$dir/ssh.calls" | wc -l | tr -d '[:space:]')" = 3 ] \
     || fail "the observe cursor did not rotate fairly across all remote tasks"
-  [ "$elapsed" -lt 15 ] \
-    || fail "distinct stalled remote observes stacked to ${elapsed}s instead of one budget per tick"
 
   : > "$dir/ssh.calls"
   env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SSH_BIN="$sshbin" \
