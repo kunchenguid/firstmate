@@ -103,7 +103,7 @@ test_backend_source_nested_failure_refuses() {
   mkdir -p "$fixture/bin/backends"
   cp "$ROOT/bin/fm-backend.sh" "$fixture/bin/fm-backend.sh"
   cp "$ROOT"/bin/backends/*.sh "$fixture/bin/backends/"
-  printf '%s\n' '. "$FM_BACKEND_LIB_DIR/missing-nested-library.sh"' ':' \
+  printf '%s\n' ". \"\$FM_BACKEND_LIB_DIR/missing-nested-library.sh\"" ':' \
     > "$fixture/bin/backends/herdr.sh"
 
   set +e
