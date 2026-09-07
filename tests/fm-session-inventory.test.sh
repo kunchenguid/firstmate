@@ -551,6 +551,45 @@ test_view_refuses_a_cadence_below_the_floor() {
   pass "view: refuses a redraw cadence that would poll harder than supervision"
 }
 
+# The read-only, no-network promise is the reason this is safe both on the
+# blocking session-start path and in a pane that redraws on a timer. The
+# snapshot underneath reads remote secondmate ledgers over the network and
+# refreshes a parent-side cache unless it is told not to, so the guard is that
+# the inventory asks for local-only collection and that a remote home is then
+# reported unread rather than quietly treated as absent.
+test_inventory_makes_no_cross_home_network_read() {
+  local home json cache
+  home=$(make_home local-only)
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  cat > "$home/data/secondmates.md" <<'EOF'
+# Secondmates
+
+- remote-mate - remote helper (host: unreachable.invalid; root: /srv/fm; home: /srv/fm/home; scope: nothing; projects: none; added 2026-01-01)
+EOF
+  cache="$home/state/secondmate-summary-cache"
+
+  json=$(run_inventory "$home" --json) || fail "inventory failed with a remote secondmate registered"
+  [ ! -e "$cache" ] \
+    || fail "the inventory must not refresh the cross-home summary cache; it runs on the blocking startup path"
+
+  # And the same collection, asked for directly, must say plainly that it did
+  # not read the remote home rather than reporting it as absent.
+  local snap
+  snap=$(FM_HOME="$home" FM_SNAPSHOT_LOCAL_ONLY=1 "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "the local-only fleet snapshot failed"
+  [ "$(printf '%s' "$snap" | jq -r '[.secondmate_current.records[]? | select(.id == "remote-mate")] | length')" = 1 ] \
+    || fail "a registered remote home must still appear, so it is never silently dropped"
+  printf '%s' "$snap" | jq -e '.secondmate_current.records[]
+    | select(.id == "remote-mate")
+    | select(.current.state == "unknown")
+    | select((.current.reason // "") | test("cross-home collection was not run"))' >/dev/null \
+    || fail "a remote home that was deliberately not read must be unknown, with that reason"
+  [ ! -e "$cache" ] || fail "local-only collection must refresh no cache"
+
+  pass "inventory: no cross-home network read, and an unread remote home says so"
+}
+
 test_inventory_closes_nothing_it_reports() {
   local home spec daemon children pid
   home=$(make_home read-only)
@@ -594,4 +633,5 @@ test_review_page_with_queued_notes_needs_confirmation
 test_unreadable_source_is_disclosed_not_counted_as_zero
 test_view_is_readable_narrow_and_without_colour
 test_view_refuses_a_cadence_below_the_floor
+test_inventory_makes_no_cross_home_network_read
 test_inventory_closes_nothing_it_reports

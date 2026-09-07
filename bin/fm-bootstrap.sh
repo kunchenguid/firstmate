@@ -54,7 +54,7 @@
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          SESSIONS_STALE lines name every worker, review page, background
 #          harness session, or listener that has been running at or beyond the
-#          stale threshold and has a close command, bounded and newest-last;
+#          stale threshold and has a close command, oldest first and bounded;
 #          bin/fm-session-inventory.sh owns the inventory and the threshold, and
 #          silence means nothing is old. FM_BOOTSTRAP_STALE_SESSIONS=0 opts out.
 #          treehouse is also MISSING when its installed version lacks

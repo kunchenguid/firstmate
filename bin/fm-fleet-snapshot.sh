@@ -100,6 +100,11 @@
 #     with the bearings projection so one Recently Landed section has one owner.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
+#   FM_SNAPSHOT_LOCAL_ONLY=1 makes this command touch no network at all: no
+#   remote secondmate ledger is read and no cached copy is refreshed, so the
+#   command performs no fleet-state mutation whatsoever. Each remote home is
+#   reported unreadable with the reason that cross-home collection was not run.
+#
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
 set -u
@@ -138,6 +143,21 @@ esac
 
 # Cross-home bounds are explicit so one broken or unexpectedly large home cannot
 # hang or explode the parent snapshot.
+# Cross-home collection is the snapshot's ONE network-touching path: it reads
+# each registered remote secondmate's ledger over the remote transport. A caller
+# that must not leave this machine - anything on the blocking session-start path,
+# or a display that redraws on a timer - sets FM_SNAPSHOT_LOCAL_ONLY=1. That
+# skips the remote reads and the parent-side cache refresh entirely, and every
+# remote home is then reported unreadable with that exact reason, never as an
+# absent or empty one.
+FM_SNAPSHOT_LOCAL_ONLY=${FM_SNAPSHOT_LOCAL_ONLY:-0}
+case "$FM_SNAPSHOT_LOCAL_ONLY" in
+  0|1) ;;
+  *)
+    echo "fm-fleet-snapshot: FM_SNAPSHOT_LOCAL_ONLY must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-10}
 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=${FM_SNAPSHOT_LOCAL_READ_CONCURRENCY:-8}
@@ -237,6 +257,9 @@ projections. A captain hold is actionable only when every blocker is Done, any
 hold-until date has arrived, and an undated hold remains below the aging threshold.
 Cross-home collection uses FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the
 count bound) and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
+FM_SNAPSHOT_LOCAL_ONLY=1 skips cross-home collection outright, so the command
+makes no network call and refreshes no cache; each remote home is then reported
+unreadable with that reason rather than as absent.
 Every sampled remote home's state/home-summary.json is fetched concurrently
 under one FM_SNAPSHOT_BUDGET (default 5 seconds), with a valid prior copy under
 FM_SNAPSHOT_CACHE_DIR used when the live read fails, is invalid, or consumes the
@@ -1342,9 +1365,13 @@ length == 1 and (.[0] |
   and (.counts | type) == "object" and (.omitted | type) == "array"
 )
 JQ
-  snapshot_cache_prepare || true
   manifest="$SNAPSHOT_COLLECT_DIR/manifest.jsonl"
   : > "$manifest"
+  # Local-only: no remote read is attempted and no cached copy is refreshed, so
+  # the manifest stays empty and every remote row falls through to the explicit
+  # not-collected reason below.
+  [ "$FM_SNAPSHOT_LOCAL_ONLY" -eq 1 ] && return 0
+  snapshot_cache_prepare || true
   remote_rows=$(printf '%s\n' "$rows" | jq -c '
     select(.registered == true and .remote == true and (.registry_error // "") == "")
     | select((.id | type) == "string" and (.id | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")))
@@ -1768,7 +1795,9 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
     summary_observed=$SNAPSHOT_NOW
     summary_freshness=fresh
     if [ -z "$reason" ]; then
-      if [ "$remote" = true ]; then
+      if [ "$remote" = true ] && [ "$FM_SNAPSHOT_LOCAL_ONLY" -eq 1 ]; then
+        reason="cross-home collection was not run, so this remote home was not read"
+      elif [ "$remote" = true ]; then
         cache_path=$(snapshot_route_cache_path "$id" "$host" "$home" 2>/dev/null || true)
         collection_slot=$(jq -r --arg id "$id" 'select(.id == $id) | .slot' "$SNAPSHOT_COLLECT_DIR/manifest.jsonl" 2>/dev/null | head -1)
         collection_status=$(cat "$SNAPSHOT_COLLECT_DIR/$collection_slot.status" 2>/dev/null || true)

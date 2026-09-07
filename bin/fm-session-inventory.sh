@@ -77,6 +77,13 @@
 # so a renamed vendor flag surfaces loudly instead of silently reclassifying a
 # live session as an idle pool process.
 #
+# NO NETWORK, NO WRITES. The fleet snapshot underneath is run with
+# FM_SNAPSHOT_LOCAL_ONLY=1, which is what makes the read-only promise above
+# true: cross-home secondmate ledgers are the snapshot's only network path and
+# its only state write, this overview uses none of that data, and this command
+# sits both on the blocking session-start path and in a pane that redraws on a
+# timer - neither may leave the machine or touch a state record.
+#
 # Bounds. FM_SESSION_INVENTORY_FLEET_TIMEOUT (default 20s) bounds the fleet
 # snapshot and FM_SESSION_INVENTORY_LAVISH_TIMEOUT (default 8s) bounds the Lavish
 # listing; a bound that is hit is reported as an unreadable source, never as an
@@ -209,7 +216,14 @@ file_age_seconds() {  # <path>
 # --- 1. workers, from the fleet snapshot (the single owner of fleet state) ----
 collect_workers() {
   local snapshot_file="$WORK/fleet.json" rc=0
-  fm_run_timed "$FLEET_TIMEOUT" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json \
+  # FM_SNAPSHOT_LOCAL_ONLY is what keeps this command's read-only, no-network
+  # promise honest. Without it the snapshot reads every registered REMOTE
+  # secondmate ledger over the network and refreshes a parent-side cache - a
+  # network call and a state write. Neither is acceptable here: this runs on the
+  # blocking session-start path, where nothing may leave the machine, and in a
+  # display that redraws on a timer. The overview uses no cross-home ledger data
+  # at all, so nothing it shows is lost.
+  FM_SNAPSHOT_LOCAL_ONLY=1 fm_run_timed "$FLEET_TIMEOUT" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json \
     > "$snapshot_file" 2>"$WORK/fleet.err" || rc=$?
   if [ "$rc" = 124 ]; then
     note_source fleet-snapshot 0 "fleet snapshot exceeded ${FLEET_TIMEOUT}s"
