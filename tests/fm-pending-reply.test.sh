@@ -1543,12 +1543,12 @@ SH
   chmod +x "$sshbin"
 
   started=$(date +%s)
-  (
-    export FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-      FM_SSH_BIN="$sshbin" FM_TEST_SSH_CALLED="$dir/ssh.called" \
-      FM_PENDING_REPLY_OBSERVE_TIMEOUT=2
-    fm_pending_reply_tick "$state"
-  ) || fail "the tick must not fail merely because a remote observe was bounded"
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SSH_BIN="$sshbin" FM_TEST_SSH_CALLED="$dir/ssh.called" \
+    FM_PENDING_REPLY_OBSERVE_TIMEOUT=2 \
+    /bin/bash -u -c ". \"\$1\"; fm_pending_reply_tick \"\$2\"" \
+    _ "$ROOT/bin/fm-pending-reply-lib.sh" "$state" \
+    || fail "the tick must not fail merely because a remote observe was bounded"
   elapsed=$(( $(date +%s) - started ))
 
   [ -e "$dir/ssh.called" ] \
@@ -1596,13 +1596,12 @@ SH
     "$dir/empty-state" || fail "an empty remote-task list failed under stock Bash"
 
   started=$(date +%s)
-  (
-    export FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SSH_BIN="$sshbin" \
-      FM_TEST_SSH_CALLS="$dir/ssh.calls" FM_TEST_SSH_STALL=1 \
-      FM_PENDING_REPLY_OBSERVE_TIMEOUT=2
-    /bin/bash -u -c '. "$1"; fm_pending_reply_tick "$2"; fm_pending_reply_tick "$2"; fm_pending_reply_tick "$2"' \
-      _ "$ROOT/bin/fm-pending-reply-lib.sh" "$state"
-  ) || fail "the shared-budget ticks failed under stock Bash"
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SSH_BIN="$sshbin" \
+    FM_TEST_SSH_CALLS="$dir/ssh.calls" FM_TEST_SSH_STALL=1 \
+    FM_PENDING_REPLY_OBSERVE_TIMEOUT=2 \
+    /bin/bash -u -c ". \"\$1\"; fm_pending_reply_tick \"\$2\"; fm_pending_reply_tick \"\$2\"; fm_pending_reply_tick \"\$2\"" \
+    _ "$ROOT/bin/fm-pending-reply-lib.sh" "$state" \
+    || fail "the shared-budget ticks failed under stock Bash"
   elapsed=$(( $(date +%s) - started ))
   calls=$(wc -l < "$dir/ssh.calls" 2>/dev/null | tr -d '[:space:]')
 
@@ -1614,13 +1613,12 @@ SH
     || fail "distinct stalled remote observes stacked to ${elapsed}s instead of one budget per tick"
 
   : > "$dir/ssh.calls"
-  (
-    export FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SSH_BIN="$sshbin" \
-      FM_TEST_SSH_CALLS="$dir/ssh.calls" FM_TEST_SSH_STALL=0 \
-      FM_PENDING_REPLY_OBSERVE_TIMEOUT=5
-    /bin/bash -u -c '. "$1"; fm_pending_reply_tick "$2"; fm_pending_reply_tick "$2"; fm_pending_reply_tick "$2"' \
-      _ "$ROOT/bin/fm-pending-reply-lib.sh" "$state"
-  ) || fail "the ample-budget ticks failed under stock Bash"
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SSH_BIN="$sshbin" \
+    FM_TEST_SSH_CALLS="$dir/ssh.calls" FM_TEST_SSH_STALL=0 \
+    FM_PENDING_REPLY_OBSERVE_TIMEOUT=5 \
+    /bin/bash -u -c ". \"\$1\"; fm_pending_reply_tick \"\$2\"; fm_pending_reply_tick \"\$2\"; fm_pending_reply_tick \"\$2\"" \
+    _ "$ROOT/bin/fm-pending-reply-lib.sh" "$state" \
+    || fail "the ample-budget ticks failed under stock Bash"
   [ "$(wc -l < "$dir/ssh.calls" | tr -d '[:space:]')" = 9 ] \
     || fail "ample budget did not observe every remote task on every rotated tick"
   for task in ios android web; do
