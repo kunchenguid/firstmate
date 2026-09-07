@@ -1761,6 +1761,13 @@ if [ -n "$CODEX_HOME_ARG" ]; then
 fi
 
 if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  if fm_dispatch_harness_receipt_required "$CONFIG/crew-dispatch.json" "$HARNESS"; then
+    echo "error: raw launch commands for configured receipt-gated harnesses are not inspectable for selection receipts; use the verified harness and --model instead" >&2
+    exit 1
+  else
+    receipt_requirement_rc=$?
+    [ "$receipt_requirement_rc" -eq 1 ] || exit "$receipt_requirement_rc"
+  fi
   case "$LAUNCH" in
     *gpt-6-astra*)
       echo "error: raw launch commands selecting Astra are not inspectable for selection receipts; use the verified harness and --model instead" >&2

@@ -34,7 +34,7 @@
 # single-home measurement.
 #
 # Multi-provider limitation: this helper maps each harness to ONE primary
-# provider family (see provider_for_harness below) and checks quota for that
+# provider family (see fm_quota_provider_for_harness) and checks quota for that
 # family only. Some harnesses can run models from several providers - for
 # example, Pi and OpenCode may dispatch xAI, Anthropic, or other models - so a
 # candidate whose established provider differs from the harness's primary family
@@ -328,34 +328,6 @@ if [ "$NORMALIZE" -eq 1 ]; then
   exit 0
 fi
 
-# provider_for_harness <harness> [<model>]
-# Map a firstmate harness name to its primary quota-axi provider family.
-# Multi-provider harnesses (Pi, OpenCode) map to their primary family only; see
-# the header limitation note. omp is keyed on the candidate model prefix instead
-# and has no family for any other prefix (see the header). Authoritative
-# multi-provider routing is owned by AGENTS.md section 4 and the
-# quota-array-dispatch skill, not this helper.
-provider_for_harness() {
-  case "$1" in
-    omp)
-      case "${2:-}" in
-        openai-codex/*)  printf 'codex\n' ;;
-        claude-bridge/*) printf 'claude\n' ;;
-        *)               return 1 ;;
-      esac
-      ;;
-    claude)       printf 'claude\n' ;;
-    codex)        printf 'codex\n' ;;
-    opencode)     printf 'codex\n' ;;
-    pi|pi-signed) printf 'pi\n' ;;
-    grok)         printf 'grok\n' ;;
-    kimi)         printf 'kimi\n' ;;
-    cursor)       printf 'cursor\n' ;;
-    muse)         printf 'meta\n' ;;
-    *)            return 1 ;;
-  esac
-}
-
 # effective_for_provider_model <provider> <model>
 # Print the most constraining applicable quota evidence for the provider/model
 # tuple, including provider-wide and exact model or product scopes.
@@ -391,7 +363,7 @@ for c in "${CANDIDATES[@]}"; do
   [ "$model" = "$c" ] && model="default"
   [ -n "$model" ] || die "invalid candidate: $c"
   fm_control_harness_supported "$harness" || die "unknown harness: $harness"
-  provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
+  fm_quota_provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
     omp) die "omp quota mapping covers only the openai-codex and claude-bridge prefixes: $model" ;;
     *) die "unknown harness: $harness" ;;
   esac
@@ -402,7 +374,7 @@ for c in "${CANDIDATES[@]}"; do
   harness=${c%%:*}
   model=${c#*:}
   [ "$model" = "$c" ] && model="default"
-  provider=$(provider_for_harness "$harness" "$model")
+  provider=$(fm_quota_provider_for_harness "$harness" "$model")
   scope_model=$model
   [ "$harness" != omp ] || scope_model=${model#*/}
   effective=$(effective_for_provider_model "$provider" "$scope_model")

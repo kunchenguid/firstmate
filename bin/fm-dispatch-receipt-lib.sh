@@ -7,9 +7,9 @@
 # infer providers, rank candidates, or choose a route: those remain the
 # firstmate seat's quota-array-dispatch judgment.
 #
-# Receipt schema (version 3):
+# Receipt schema (version 4):
 # {
-#   "version": 3,
+#   "version": 4,
 #   "createdAt": "2026-09-06T15:04:05Z",
 #   "task": "task-id", "harness": "codex", "model": "gpt-6-astra",
 #   "effort": "high", "effectiveWorkerModel": "gpt-6-astra",
@@ -20,7 +20,7 @@
 #   "codexHome":"/absolute/path/to/codex-home-or-null",
 #   "quotaEvidence": {"source":"quota-axi", "model":"gpt-6-astra",
 #                     "codexHome":"/absolute/path/to/codex-home-or-null",
-#                     "snapshotSha256":"..."},
+#                     "snapshotSha256":"...", "accountSha256":"...|null"},
 #   "quotaSnapshot": {"path":"/absolute/path/to/snapshot", "sha256":"..."}
 # }
 #
@@ -70,15 +70,61 @@ fm_dispatch_selection_receipt_required() {  # <crew-dispatch.json> <harness> <mo
   return 2
 }
 
-fm_dispatch_snapshot_generated_at() {  # <TOON or JSON snapshot> -> strict timestamp
-  local snapshot=$1 value normalized
+fm_dispatch_harness_receipt_required() {
+  local config=$1 harness=$2 rc
+  [ -f "$config" ] || return 1
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: jq is required to evaluate a configured selection-receipt requirement" >&2
+    return 2
+  }
+  if jq -e --arg h "$harness" '
+    def profiles($value):
+      if ($value | type) == "array" then $value
+      elif ($value | type) == "object" then [$value]
+      else []
+      end;
+    ([(.rules // [])[]? | profiles(.use?)[]?]
+      + (if has("default") then profiles(.default) else [] end))
+    | any(.[]; .requiresSelectionReceipt == true and .harness == $h)
+  ' "$config" >/dev/null 2>&1; then
+    return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 1 ] && return 1
+  echo "error: config/crew-dispatch.json could not be read while evaluating selection-receipt requirements" >&2
+  return 2
+}
+
+fm_dispatch_snapshot_normalized_json() {
+  local snapshot=$1
   if jq -e . "$snapshot" >/dev/null 2>&1; then
     fm_quota_json_valid < "$snapshot" || return 1
-    jq -er '.generatedAt | strings' "$snapshot" 2>/dev/null
+    cat "$snapshot"
     return
   fi
-  normalized=$("$FM_DISPATCH_RECEIPT_LIB_DIR/fm-quota-choose.sh" --normalize --snapshot "$snapshot") || return 1
-  printf '%s\n' "$normalized" | fm_quota_json_valid || return 1
+  "$FM_DISPATCH_RECEIPT_LIB_DIR/fm-quota-choose.sh" --normalize --snapshot "$snapshot" \
+    | fm_quota_json_valid >/dev/null || return 1
+  "$FM_DISPATCH_RECEIPT_LIB_DIR/fm-quota-choose.sh" --normalize --snapshot "$snapshot"
+}
+
+fm_dispatch_quota_account_hash() {
+  local snapshot=$1 provider=$2 account
+  account=$(printf '%s\n' "$snapshot" | jq -cer --arg provider "$provider" '
+    [.providers[]? | select(.provider == $provider) | .account
+      | select(type == "object" and length > 0)] as $accounts |
+    if ($accounts | length) == 1 then $accounts[0] else empty end
+  ' 2>/dev/null) || return 1
+  printf '%s\n' "$account" | jq -cS . | shasum -a 256 | awk '{print $1}'
+}
+
+fm_dispatch_snapshot_generated_at() {  # <TOON or JSON snapshot> -> strict timestamp
+  local snapshot=$1 value normalized
+  normalized=$(fm_dispatch_snapshot_normalized_json "$snapshot") || return 1
+  if jq -e . "$snapshot" >/dev/null 2>&1; then
+    printf '%s\n' "$normalized" | jq -er '.generatedAt | strings' 2>/dev/null
+    return
+  fi
   value=$(awk '
     /^generatedAt: "[^"]+"$/ {
       count += 1
@@ -110,7 +156,7 @@ fm_dispatch_receipt_epoch() {  # strict UTC timestamp -> epoch
 
 fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model> <effort> [codex-home]
   local receipt=$1 task=$2 harness=$3 model=$4 effort=$5 codex_home=${6:-} max_age now created_at created_epoch
-  local snapshot expected actual receipt_digest snapshot_generated_at snapshot_epoch
+  local snapshot expected actual receipt_digest snapshot_generated_at snapshot_epoch normalized_snapshot expected_account_hash snapshot_account_hash live_account_hash live_snapshot
   FM_DISPATCH_RECEIPT_PATH=
   FM_DISPATCH_RECEIPT_SHA256=
   FM_DISPATCH_RECEIPT_CREATED_AT=
@@ -133,7 +179,7 @@ fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model>
     return 1
   }
   jq -e --arg task "$task" --arg harness "$harness" --arg model "$model" --arg effort "$effort" --arg codex_home "$codex_home" '
-    (.version == 3)
+    (.version == 4)
     and (.createdAt | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
     and (.task == $task) and (.harness == $harness) and (.model == $model) and (.effort == $effort)
     and (.effectiveWorkerModel == $model)
@@ -162,7 +208,12 @@ fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model>
          and (.source == "quota-axi")
          and (.model == $model)
          and has("codexHome")
-         and (.snapshotSha256 | type == "string" and test("^[a-f0-9]{64}$")))
+         and (.snapshotSha256 | type == "string" and test("^[a-f0-9]{64}$"))
+         and has("accountSha256")
+         and (if $harness == "codex" and $codex_home != "" then
+                (.accountSha256 | type == "string" and test("^[a-f0-9]{64}$"))
+              else .accountSha256 == null
+              end))
     and ([.candidates[] | select(.disposition == "selected")][0].home == .codexHome)
     and (.quotaEvidence.codexHome == .codexHome)
     and (.quotaEvidence.snapshotSha256 as $quota_snapshot_sha256
@@ -171,7 +222,7 @@ fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model>
             and (.sha256 | type == "string" and test("^[a-f0-9]{64}$"))
             and (.sha256 == $quota_snapshot_sha256)))
   ' "$receipt" >/dev/null 2>&1 || {
-    echo "error: --selection-receipt is not a valid version 3 primary selection receipt for $harness/$model/$effort task $task" >&2
+    echo "error: --selection-receipt is not a valid version 4 primary selection receipt for $harness/$model/$effort task $task" >&2
     return 1
   }
   created_at=$(jq -r '.createdAt' "$receipt")
@@ -205,8 +256,12 @@ fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model>
     echo "error: --selection-receipt quota snapshot digest does not match; obtain a current primary selection receipt before dispatch" >&2
     return 1
   }
-  snapshot_generated_at=$(fm_dispatch_snapshot_generated_at "$snapshot") || {
+  normalized_snapshot=$(fm_dispatch_snapshot_normalized_json "$snapshot") || {
     echo "error: --selection-receipt quota snapshot is not valid quota-axi TOON or JSON evidence" >&2
+    return 1
+  }
+  snapshot_generated_at=$(fm_dispatch_snapshot_generated_at "$snapshot") || {
+    echo "error: --selection-receipt quota snapshot has no valid generatedAt timestamp" >&2
     return 1
   }
   snapshot_epoch=$(fm_dispatch_receipt_epoch "$snapshot_generated_at") || {
@@ -216,6 +271,33 @@ fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model>
   if [ "$snapshot_epoch" -gt "$now" ] || [ $((now - snapshot_epoch)) -gt "$max_age" ]; then
     echo "error: --selection-receipt quota snapshot is stale or future-dated (maximum age ${max_age}s); obtain a current primary selection receipt before dispatch" >&2
     return 1
+  fi
+  fm_quota_snapshot_has_candidate_availability "$normalized_snapshot" "$harness" "$model" || {
+    echo "error: --selection-receipt quota snapshot does not contain current quota-axi availability for $harness/$model" >&2
+    return 1
+  }
+  if [ -n "$codex_home" ]; then
+    expected_account_hash=$(jq -r '.quotaEvidence.accountSha256' "$receipt")
+    snapshot_account_hash=$(fm_dispatch_quota_account_hash "$normalized_snapshot" codex) || {
+      echo "error: --selection-receipt quota snapshot has no source-owned Codex account evidence" >&2
+      return 1
+    }
+    [ "$snapshot_account_hash" = "$expected_account_hash" ] || {
+      echo "error: --selection-receipt Codex account evidence does not match its quota snapshot" >&2
+      return 1
+    }
+    live_snapshot=$(CODEX_HOME="$codex_home" quota-axi --provider codex --full --json --no-credential-refresh 2>/dev/null) || {
+      echo "error: selected Codex home could not provide source-owned quota-axi account evidence" >&2
+      return 1
+    }
+    live_account_hash=$(fm_dispatch_quota_account_hash "$live_snapshot" codex) || {
+      echo "error: selected Codex home could not provide source-owned quota-axi account evidence" >&2
+      return 1
+    }
+    [ "$live_account_hash" = "$expected_account_hash" ] || {
+      echo "error: --selection-receipt Codex account evidence does not match the selected Codex home" >&2
+      return 1
+    }
   fi
   receipt_digest=$(shasum -a 256 "$receipt" | awk '{print $1}') || {
     echo "error: --selection-receipt could not be hashed: $receipt" >&2

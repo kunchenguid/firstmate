@@ -234,14 +234,14 @@ make_control_selection_receipt() {  # <case-dir> <task-id>
   printf 'generatedAt: "%s"\nquota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:\n  codex,all_models,50,0,through_reset,established,weekly,"%s"\nexhaustion[0]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:\nattention[0]:\n' "$created_at" "$created_at" > "$snapshot"
   digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
   jq -n --arg id "$id" --arg created_at "$created_at" --arg snapshot "$snapshot" --arg digest "$digest" '
-    {version: 3, createdAt: $created_at, task: $id, harness: "codex",
+    {version: 4, createdAt: $created_at, task: $id, harness: "codex",
      model: "gpt-6-astra", effort: "high", effectiveWorkerModel: "gpt-6-astra",
      taskFit: "relaunch remains in scope",
      candidates: [{harness: "codex", model: "gpt-6-astra", effort: "high", home: null,
                    disposition: "selected", rationale: "current primary evidence"}],
      catalogEvidence: ["synthetic catalog evidence"],
      codexHome: null,
-     quotaEvidence: {source: "quota-axi", model: "gpt-6-astra", codexHome: null, snapshotSha256: $digest},
+     quotaEvidence: {source: "quota-axi", model: "gpt-6-astra", codexHome: null, snapshotSha256: $digest, accountSha256: null},
      quotaSnapshot: {path: $snapshot, sha256: $digest}}' > "$receipt"
   printf '%s\n' "$receipt"
 }
