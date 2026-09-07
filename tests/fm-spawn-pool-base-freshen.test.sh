@@ -266,6 +266,26 @@ test_origin_config_without_url_refuses_pool() {
   pass "an origin configuration without a URL refuses the pooled worktree"
 }
 
+test_empty_origin_config_section_refuses_pool() {
+  local rec id out status before config
+  id='pool-empty-origin-section-r1'
+  rec=$(make_originless_case empty-origin-section "$id")
+  read_case_record "$rec"
+  config=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-path config)
+  printf '\n[remote "origin"]\n' >> "$config"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an empty origin configuration section"
+  assert_contains "$out" "could not fetch origin" \
+    "spawn did not refuse an empty origin configuration section as unusable"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after finding an empty origin configuration section"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an empty origin configuration section refuses the pooled worktree"
+}
+
 test_unreachable_origin_refuses_stale_pool_base() {
   local rec id out status before after
   id='pool-unreachable-origin-r2'
@@ -589,6 +609,7 @@ test_unreachable_origin_refuses_stale_pool_base
 test_originless_pool_launches_without_a_freshness_fetch
 test_originless_dirty_pool_refuses_without_discarding_work
 test_origin_config_without_url_refuses_pool
+test_empty_origin_config_section_refuses_pool
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work

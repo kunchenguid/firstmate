@@ -2370,6 +2370,19 @@ EOF
   printf '%s' "$lines" >&2
 }
 
+spawn_worktree_has_origin_config() {  # <worktree>
+  local worktree=$1 config
+  git -C "$worktree" config --get-regexp '^remote\.origin\.' >/dev/null 2>&1 && return 0
+  for config in \
+    "$(git -C "$worktree" rev-parse --path-format=absolute --git-path config 2>/dev/null)" \
+    "$(git -C "$worktree" rev-parse --path-format=absolute --git-path config.worktree 2>/dev/null)"
+  do
+    [ -f "$config" ] || continue
+    awk '/^[[:space:]]*\[[[:space:]]*[Rr][Ee][Mm][Oo][Tt][Ee][[:space:]]+"origin"[[:space:]]*\][[:space:]]*([#;].*)?$/ || /^[[:space:]]*\[[[:space:]]*[Rr][Ee][Mm][Oo][Tt][Ee]\.origin[[:space:]]*\][[:space:]]*([#;].*)?$/ { found=1 } END { exit !found }' "$config" && return 0
+  done
+  return 1
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
@@ -2384,7 +2397,7 @@ freshen_spawn_worktree_base() {  # <worktree>
     fi
     return 1
   fi
-  if ! git -C "$worktree" config --get-regexp '^remote\.origin\.' >/dev/null 2>&1; then
+  if ! spawn_worktree_has_origin_config "$worktree"; then
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
