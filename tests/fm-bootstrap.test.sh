@@ -487,6 +487,7 @@ ROWS
 
 test_perl_json_pp_dependency_is_detected_installed_and_used() {
   local case_dir home fakebin marker manager_log real_perl real_tasks_axi out rc show
+  local detected installed answered decoded held
   case_dir="$TMP_ROOT/perl-json-pp"
   home="$case_dir/home"
   marker="$case_dir/json-pp-installed"
@@ -585,6 +586,7 @@ EOF
     || fail "could not inspect the captain-held task after the missing-module failure"
   assert_contains "$show" "state: queued" "missing JSON::PP closed the captain-held task"
   assert_contains "$show" "held: yes" "missing JSON::PP released the captain-held task"
+  held=$show
 
   if PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-procevent-lavish.sh" \
     answers "$case_dir/lavish.result" > "$case_dir/lavish-missing.out" \
@@ -606,6 +608,7 @@ EOF
     || fail "bootstrap did not report the missing Fedora split package exactly: $out"
   assert_absent "$marker" "dependency detection installed JSON::PP before explicit consent"
   assert_absent "$manager_log" "dependency detection invoked the package manager before explicit consent"
+  detected=$out
 
   if PATH="$fakebin:$BASE_PATH" FM_FAKE_DNF_EXIT=23 "$ROOT/bin/fm-bootstrap.sh" \
     install perl-JSON-PP perl-JSON-PP < /dev/null \
@@ -626,6 +629,7 @@ EOF
     || fail "the approved JSON::PP installation path failed"
   [ "$out" = "installing perl-JSON-PP: sudo dnf install -y perl-JSON-PP" ] \
     || fail "the JSON::PP installation path reported an unexpected command: $out"
+  installed=$out
   assert_present "$marker" "the explicit install did not make JSON::PP available"
   assert_grep 'install -y perl-JSON-PP' "$manager_log" \
     "the Fedora install path did not request the split JSON::PP package"
@@ -644,6 +648,7 @@ EOF
     || fail "captain-answer decoding failed after JSON::PP installation"
   [ "$out" = "answered: sample-json-call" ] \
     || fail "captain-answer decoding returned an unexpected result: $out"
+  answered=$out
   show=$(cd "$home" && "$real_tasks_axi" show sample-json-call --full) \
     || fail "could not inspect the answered captain-held task"
   assert_contains "$show" "state: done" "the decoded captain answer did not close the task"
@@ -656,7 +661,137 @@ EOF
     answers "$case_dir/lavish.result") || fail "Lavish answer decoding failed after JSON::PP installation"
   [ "$out" = "$(printf 'sample-json-call\tyes\tApprove')" ] \
     || fail "Lavish answer decoding returned an unexpected result: $out"
+  decoded=$out
+  # Optional product evidence: actual CLI output and persisted task state, not
+  # test pass/fail output. The caller owns the external publication directory.
+  if [ -n "${FM_JSON_PP_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FM_JSON_PP_EVIDENCE_DIR" || fail "cannot create JSON::PP evidence directory"
+    {
+      printf '%s\n' 'Split-package regression: real Perl, tasks-axi, captain-answer and Lavish decoder.' \
+        'Only JSON::PP absence, DNF, sudo and unrelated bootstrap tools are simulated.' \
+        'No system packages are installed. Lavish input below is a protocol fixture.' '' \
+        '$ fm-captain-hold.sh answer sample-json-call --decision-file decision.txt (module absent)'
+      cat "$case_dir/answer-missing.err"
+      printf '\n%s\n%s\n' '$ tasks-axi show sample-json-call --full (after failed answer)' "$held"
+      printf '\n%s\n' '$ fm-procevent-lavish.sh answers lavish.result (module absent)'
+      cat "$case_dir/lavish-missing.err"
+      printf '\n%s\n%s\n' '$ fm-bootstrap.sh (detect-only; package-manager log and installed marker absent)' "$detected"
+      printf '\n%s\n' '$ fm-bootstrap.sh install perl-JSON-PP perl-JSON-PP </dev/null (injected DNF failure)'
+      cat "$case_dir/install-failed.out" "$case_dir/install-failed.err"
+      printf '%s\n' 'exit: 23; second installation not attempted; module still absent'
+      printf '\n%s\n%s\n' '$ fm-bootstrap.sh install perl-JSON-PP </dev/null (explicit approval)' "$installed"
+      printf '\n%s\n' '$ fm-bootstrap.sh (after installation)' '[silent; exit 0]'
+      printf '\n%s\n%s\n' '$ fm-captain-hold.sh answer sample-json-call --decision-file decision.txt' "$answered"
+      printf '\n%s\n%s\n' '$ tasks-axi show sample-json-call --full' "$show"
+      printf '\n%s\n' 'Lavish captured-result protocol fixture:'
+      cat "$case_dir/lavish.result"
+      printf '\n%s\n%s\n' '$ fm-procevent-lavish.sh answers lavish.result' "$decoded"
+    } > "$FM_JSON_PP_EVIDENCE_DIR/json-pp-cli-transcript.txt" || fail "cannot write JSON::PP CLI evidence"
+    cp "$home/data/backlog.md" "$FM_JSON_PP_EVIDENCE_DIR/json-pp-backlog.md" \
+      || fail "cannot publish persisted captain-answer evidence"
+  fi
   pass "bootstrap detects and installs Fedora JSON::PP before captain-answer and Lavish decoding"
+}
+
+test_perl_json_pp_platform_install_paths() {
+  local case_dir fakebin bash_env manager os uid sudo_available expected out rc tool label
+  case_dir="$TMP_ROOT/json-pp-platforms"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  bash_env="$case_dir/platform.bash"
+  if [ -n "${FM_JSON_PP_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FM_JSON_PP_EVIDENCE_DIR" || fail "cannot create platform evidence directory"
+    printf '%s\n' 'Real bootstrap CLI with simulated platform, package managers and sudo; no system changes.' \
+      > "$FM_JSON_PP_EVIDENCE_DIR/json-pp-platforms.txt"
+  fi
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ]; then
+    case "${2:-}" in
+      dnf|yum|apt-get|apk|zypper|pkg|brew)
+        [ "$2" = "$FM_TEST_JSON_MANAGER" ] || return 1 ;;
+      sudo) [ "$FM_TEST_JSON_SUDO" = yes ] || return 1 ;;
+    esac
+  fi
+  builtin command "$@"
+}
+id() {
+  if [ "${1:-}" = -u ]; then printf '%s\n' "$FM_TEST_JSON_UID"; else command id "$@"; fi
+}
+uname() {
+  if [ "${1:-}" = -s ]; then printf '%s\n' "$FM_TEST_JSON_OS"; else command uname "$@"; fi
+}
+perl() {
+  case " $* " in *' -MJSON::PP '*) return 2 ;; esac
+  command perl "$@"
+}
+SH
+  # Shadow every installer, including hidden ones, so even an incorrect
+  # dispatch cannot reach a host package manager or privilege escalation.
+  for tool in dnf yum apt-get apk zypper pkg brew; do
+    cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "${0##*/}" "$*" >> "$FM_TEST_JSON_LOG"
+SH
+    chmod +x "$fakebin/$tool"
+  done
+  cat > "$fakebin/sudo" <<'SH'
+#!/usr/bin/env bash
+printf 'sudo ' >> "$FM_TEST_JSON_LOG"
+exec "$@"
+SH
+  chmod +x "$fakebin/sudo"
+  while IFS='|' read -r manager os uid sudo_available expected; do
+    label="$manager/$os/uid=$uid/sudo=$sudo_available"
+    rm -f "$case_dir/manager.log"
+    export FM_TEST_JSON_MANAGER="$manager" FM_TEST_JSON_OS="$os" FM_TEST_JSON_UID="$uid" \
+      FM_TEST_JSON_SUDO="$sudo_available" FM_TEST_JSON_LOG="$case_dir/manager.log"
+    out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" \
+      FM_ROOT_OVERRIDE="$case_dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh") \
+      || fail "$label: detection failed"
+    assert_absent "$case_dir/manager.log" "$label: detection installed without consent"
+    if [ "$expected" = manual ]; then
+      [ "$out" = 'MISSING_MANUAL: perl-JSON-PP (instructions: https://metacpan.org/pod/JSON::PP)' ] \
+        || fail "$label: missing manual diagnostic: $out"
+    else
+      [ "$out" = "MISSING: perl-JSON-PP (install: $expected)" ] \
+        || fail "$label: unexpected install diagnostic: $out"
+    fi
+    if [ -n "${FM_JSON_PP_EVIDENCE_DIR:-}" ]; then
+      printf '\n%s\n$ fm-bootstrap.sh (detect-only)\n%s\n' "$label" "$out" \
+        >> "$FM_JSON_PP_EVIDENCE_DIR/json-pp-platforms.txt"
+    fi
+    out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" \
+      "$ROOT/bin/fm-bootstrap.sh" install perl-JSON-PP </dev/null 2>&1) && rc=0 || rc=$?
+    if [ "$expected" = manual ]; then
+      [ "$rc" -eq 1 ] || fail "$label: manual install did not refuse"
+      assert_absent "$case_dir/manager.log" "$label: manual fallback invoked an installer"
+    else
+      [ "$rc" -eq 0 ] || fail "$label: approved installation failed: $out"
+      [ "$(cat "$case_dir/manager.log")" = "$expected" ] \
+        || fail "$label: executed the wrong package transaction"
+    fi
+    if [ -n "${FM_JSON_PP_EVIDENCE_DIR:-}" ]; then
+      printf '$ fm-bootstrap.sh install perl-JSON-PP </dev/null\n%s\nexit: %s\n' "$out" "$rc" \
+        >> "$FM_JSON_PP_EVIDENCE_DIR/json-pp-platforms.txt"
+    fi
+  done <<'ROWS'
+dnf|Linux|1000|yes|sudo dnf install -y perl-JSON-PP
+dnf|Linux|0|no|dnf install -y perl-JSON-PP
+yum|Linux|1000|yes|sudo yum install -y perl-JSON-PP
+apt-get|Linux|1000|yes|sudo apt-get install -y libjson-pp-perl
+apk|Linux|1000|yes|sudo apk add perl-json-pp
+zypper|Linux|1000|yes|sudo zypper --non-interactive install perl-JSON-PP
+pkg|FreeBSD|1000|yes|sudo pkg install -y p5-JSON-PP
+brew|Darwin|1000|no|brew install perl
+dnf|Linux|1000|no|manual
+none|Linux|1000|yes|manual
+pkg|Linux|1000|yes|manual
+ROWS
+  unset FM_TEST_JSON_MANAGER FM_TEST_JSON_OS FM_TEST_JSON_UID FM_TEST_JSON_SUDO FM_TEST_JSON_LOG
+  pass "bootstrap selects platform JSON::PP transactions and refuses unavailable privilege or managers"
 }
 
 test_git_is_required_with_supported_install_instruction() {
@@ -1362,6 +1497,7 @@ test_lavish_axi_min_version
 test_tasks_axi_min_version
 test_quota_axi_min_version
 test_perl_json_pp_dependency_is_detected_installed_and_used
+test_perl_json_pp_platform_install_paths
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux

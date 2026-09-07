@@ -6,8 +6,6 @@
 #          exits 0.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
-#                 including "MISSING: perl-JSON-PP (...)" when the Perl
-#                 interpreter cannot load JSON::PP,
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
@@ -62,6 +60,9 @@
 #          build below its floor reports MISSING like no-mistakes, so the operator
 #          is asked to upgrade rather than silently running an older tool.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
+#          JSON::PP load failures use perl-JSON-PP as the tool name in either
+#          missing-tool diagnostic; perl_json_pp_install_cmd below owns the
+#          platform package-manager selection.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -146,6 +147,10 @@
 #          keeps detect-only meaning unlocked, exactly as before.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
+#          The caller must obtain approval before invocation; this subcommand
+#          does not prompt (see .agents/skills/bootstrap-diagnostics/SKILL.md).
+#          Stop at the first failed install command and return its exit status;
+#          later tools are not attempted.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -444,8 +444,9 @@ A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
-When Perl cannot load JSON::PP, bootstrap reports `MISSING: perl-JSON-PP` with the current platform's supported package-manager command, or manual CPAN instructions when no supported package manager is available.
-The explicit `bin/fm-bootstrap.sh install perl-JSON-PP` path runs that command only after the ordinary install-consent step, preventing captain-answer and Lavish decoding from discovering a split Perl package in the middle of an operation.
+JSON::PP is used for captain-answer and captured Lavish choice decoding; some distributions package it separately from Perl.
+Bootstrap offers a platform package-manager command, or manual installation guidance if no supported manager is found or a non-root account lacks `sudo` for the selected system manager.
+The [bootstrap diagnostic procedure](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns consent and installation; [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the diagnostic names and install interface.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual`, a home with a backlog refuses lifecycle mutation until compatible `tasks-axi` is on `PATH`, while a manual-backend home keeps its backlog hand-edited.
 An absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
 An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: npm install -g lavish-axi && lavish-axi setup hooks)`.
