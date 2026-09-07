@@ -18,6 +18,10 @@ fm_root_is_secondmate_home() {
 }
 
 # Return 0 when $1 is a genuine primary root whose effective state dir is $2.
+# Production turn-end hooks must pass the running script's checkout
+# (SCRIPT_DIR/..), not inherited FM_ROOT_OVERRIDE: a child crew or scout
+# session can inherit the parent primary's FM_ROOT_OVERRIDE and FM_HOME,
+# and those values would otherwise pass the plain-checkout test below.
 # A valid secondmate marker force-includes a linked secondmate home.
 # Otherwise only a plain checkout is primary, never a linked task worktree.
 fm_primary_scope_matches() {

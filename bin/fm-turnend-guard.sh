@@ -75,7 +75,8 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+SESSION_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$SESSION_ROOT}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
@@ -149,7 +150,9 @@ fi
 # and differs from the common (shared) git-dir, while a main, non-worktree
 # checkout has the two equal. Child worktrees never carry the gitignored marker,
 # so this exempts them while guarding every real secondmate home.
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+# Scope to this script's checkout, not inherited FM_ROOT_OVERRIDE: a child
+# worktree that inherited the parent primary's environment must stay exempt.
+fm_primary_scope_matches "$SESSION_ROOT" "$STATE" || exit 0
 
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh

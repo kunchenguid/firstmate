@@ -58,7 +58,8 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+SESSION_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$SESSION_ROOT}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
@@ -107,7 +108,9 @@ case "$LOOP_COUNT" in ''|*[!0-9]*) exit 0 ;; esac
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 case "$SESSION_ID" in ''|*[!A-Za-z0-9._-]*) SESSION_ID=unknown ;; esac
 
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+# Scope to this script's checkout, not inherited FM_ROOT_OVERRIDE: a child
+# worktree that inherited the parent primary's environment must stay exempt.
+fm_primary_scope_matches "$SESSION_ROOT" "$STATE" || exit 0
 
 # Pi-host stand-down: docs/turnend-guard.md owns the PI_CODING_AGENT /
 # CURSOR_AGENT / CURSOR_INVOKED_AS contract summarized in this script's header.
