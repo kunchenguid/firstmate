@@ -29,7 +29,7 @@
 #                         [--set KEY=VALUE]... [--set-file KEY=<path>]...
 #   fm-pr-body.sh check --file <path>
 #   fm-pr-body.sh check                 (reads the body from stdin)
-#   fm-pr-body.sh publish --file <path> -- <forge command> [args...]
+#   fm-pr-body.sh publish [--task <id>] [--expect-key <key>] --file <path> -- <forge command> [args...]
 #   fm-pr-body.sh has-template --project <name> --repo-dir <path>
 #
 # render fills only named {{PLACEHOLDER}} slots explicitly supplied via --set
@@ -66,13 +66,11 @@
 # publish is the executable publication boundary for every colleague-facing
 # text surface a direct-PR worker owns - the PR body (templated or
 # untemplated), a PR comment, or a review reply. It applies the same refusal
-# as check to the --file content and execs the forge command after `--`
-# verbatim only when the text is safe, propagating that command's own exit
-# status. This makes the safe path one command instead of a remembered
-# manual `check && gh-axi ...` chain, and unsafe text never reaches the
-# network even when a worker would otherwise invoke the forge command
-# directly. publish never guesses the forge command: a missing or empty
-# command after `--` is a usage error.
+# as check to the --file content. Unkeyed calls exec the forge command after
+# `--` verbatim; keyed PR-comment calls use the durable effect slot and bounded
+# readback seam instead, with no exactly-once guarantee. Unsafe text never
+# reaches the network. publish never guesses the forge command: a missing or
+# empty command after `--` is a usage error.
 #
 # render, check, and publish also refuse (exit 1) a body that contains a
 # local home or temporary-directory path (e.g. /home/<user>/...,
@@ -96,10 +94,10 @@
 # scaffold requirement) never hand-rolls a second detector that can drift
 # from render's real behavior.
 #
-# Exit codes: 0 ok (publish propagates the forge command's own exit status);
-# 1 refusal (unresolved placeholders or a local-path leak) or an I/O failure;
-# 2 usage error; 3 render found no private or repository template (step-aside
-# signal); 4 template inspection was unreadable or unsafe.
+# Exit codes: 0 ok (unkeyed publish propagates the forge command's own exit
+# status); 1 refusal, unresolved publication, or an I/O failure; 2 usage error;
+# 3 render found no private or repository template (step-aside signal); 4
+# template inspection was unreadable or unsafe.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -119,6 +117,11 @@ esac
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 die_usage() {
   echo "error: $1" >&2
@@ -717,35 +720,264 @@ cmd_check() {
   exit 0
 }
 
+publication_sha256_file() {
+  fm_pr_sha256 "$1"
+}
+
+publication_key() {  # <task-id> <generation> <target> <payload>
+  local id=$1 gen=$2 target=$3 payload=$4
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s\n%s\n%s\ncomment\n%s' "$id" "$gen" "$target" "$payload" \
+      | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s\n%s\n%s\ncomment\n%s' "$id" "$gen" "$target" "$payload" \
+      | sha256sum | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+KEYED_PUBLICATION_TARGET=
+KEYED_PUBLICATION_NUMBER=
+KEYED_PUBLICATION_REPO=
+KEYED_PUBLICATION_HOST=
+
+classify_keyed_publication() {  # <body-file> <forge argv...>
+  local file=$1 body_file repo host file_real body_real
+  shift
+  [ "$#" -eq 8 ] || return 1
+  [ "$1" = gh-axi ] && [ "$2" = pr ] && [ "$3" = comment ] || return 1
+  [[ "$4" =~ ^[1-9][0-9]*$ ]] || return 1
+  [ "$5" = -R ] || return 1
+  repo=$6
+  [[ "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+  [ "$7" = --body-file ] || return 1
+  body_file=$8
+  [ -f "$body_file" ] || return 1
+  file_real=$(canonical_existing_path "$file") || return 1
+  body_real=$(canonical_existing_path "$body_file") || return 1
+  [ "$file_real" = "$body_real" ] || return 1
+  host=${GH_HOST:-github.com}
+  [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+  KEYED_PUBLICATION_NUMBER=$4
+  KEYED_PUBLICATION_REPO=$repo
+  KEYED_PUBLICATION_HOST=$host
+  KEYED_PUBLICATION_TARGET="$host/$repo#$4"
+}
+
+normalize_publication_file() {  # <snapshot> <destination>
+  local snapshot=$1 destination=$2
+  if command -v perl >/dev/null 2>&1; then
+    perl -0777 -pe 's/(?:\r?\n)*\z/\n/' "$snapshot" > "$destination"
+  else
+    local content
+    content=$(cat -- "$snapshot") || return 1
+    printf '%s\n' "$content" > "$destination"
+  fi
+}
+
+publication_wire_file() {  # <snapshot> <key> <destination>
+  local snapshot=$1 key=$2 destination=$3
+  normalize_publication_file "$snapshot" "$destination" || return 1
+  printf '<!-- fm-effect:%s -->\n' "$key" >> "$destination"
+}
+
+readback_output_parse() {  # <gh-axi TOON output>, sets READBACK_ITEMS/ID
+  local output=$1
+  READBACK_ITEMS=0
+  READBACK_ID=0
+  [[ "$output" =~ ^\[2\]:[[:space:]]([0-9]+),([0-9]+)$ ]] || return 1
+  READBACK_ITEMS=${BASH_REMATCH[1]}
+  READBACK_ID=${BASH_REMATCH[2]}
+}
+
+READBACK_ITEMS=0
+READBACK_ID=0
+
+publication_readback() {  # <wire> <host> <repo> <number>
+  local wire=$1 host=$2 repo=$3 number=$4 page output rc=0 wire_json jq_program
+  READBACK_ITEMS=0
+  READBACK_ID=0
+  wire_json=$(jq -Rs . < "$wire") || return 1
+  jq_program='[length, (map(select((((.body // "") | gsub("\\r\\n"; "\\n") | sub("\\n+$"; "")) == ('"$wire_json"' | gsub("\\r\\n"; "\\n") | sub("\\n+$"; ""))))) | .[0].id // 0)]'
+  page=1
+  while [ "$page" -le 10 ]; do
+    output=$(fm_run_timed 5 env GH_HOST="$host" gh-axi api \
+      "/repos/$repo/issues/$number/comments?per_page=100&page=$page" \
+      --jq "$jq_program" 2>/dev/null) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      return 1
+    fi
+    readback_output_parse "$output" || return 1
+    if [ "$READBACK_ID" -ne 0 ]; then
+      return 0
+    fi
+    if [ "$READBACK_ITEMS" -lt 100 ]; then
+      return 1
+    fi
+    page=$((page + 1))
+    rc=0
+  done
+  return 1
+}
+
+publication_unresolved() {  # <key> <task-id> <generation>
+  echo "publication unresolved for key $1: no automatic retry; inspect the PR, then rerun this publish with --expect-key $1 and the same body to read back again, or run fm-pipeline.sh effect abandon $2 $1 --gen $3" >&2
+}
+
+pipeline_effect_call() {
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$FM_ROOT/bin/fm-pipeline.sh" effect "$@"
+}
+
+publication_forward_lock_refusal() {  # <owner-exit> <owner-output>
+  local owner_rc=$1 owner_output=$2
+  case "$owner_rc:$owner_output" in
+    3:*refused:lock-held*|3:*refused:lock-unavailable*)
+      printf '%s\n' "$owner_output" >&2
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 cmd_publish() {
-  local file='' forge_argv=()
+  local file='' task='' expect_key='' task_seen=0 expect_key_seen=0 forge_argv=() content snapshot wire gen payload key claim_output claim_rc=0 publish_allowed=0 verify_output verify_rc=0 deliver_output deliver_rc=0
   while [ $# -gt 0 ]; do
     case "$1" in
+      --task)
+        [ $# -ge 2 ] || die_usage "--task requires a non-empty value"
+        task=$2; task_seen=1; shift 2
+        ;;
+      --task=*) task=${1#--task=}; task_seen=1; shift ;;
+      --expect-key)
+        [ $# -ge 2 ] || die_usage "--expect-key requires a non-empty value"
+        expect_key=$2; expect_key_seen=1; shift 2
+        ;;
+      --expect-key=*) expect_key=${1#--expect-key=}; expect_key_seen=1; shift ;;
       --file) file=${2:?--file requires a value}; shift 2 ;;
       --file=*) file=${1#--file=}; shift ;;
       --) shift; break ;;
-      *) die_usage "unknown publish argument: $1 (expected: publish --file <path> -- <forge command> [args...])" ;;
+      *) die_usage "unknown publish argument: $1 (expected: publish [--task <id>] [--expect-key <key>] --file <path> -- <forge command> [args...])" ;;
     esac
   done
   [ -n "$file" ] || die_usage "publish requires --file <path>"
   [ -f "$file" ] || die_usage "--file not found: $file"
   [ $# -gt 0 ] || die_usage "publish requires the forge command after --"
   forge_argv=("$@")
-  local content
   content=$(cat -- "$file") || { echo "error: could not read: $file" >&2; exit 1; }
-  refuse_unsafe_publication "$content" || exit 1
-  # shellcheck source=bin/fm-pr-comment-watch-lib.sh
-  . "$SCRIPT_DIR/fm-pr-comment-watch-lib.sh"
-  if fm_pcw_forge_command_is_rereview_request "${forge_argv[@]}"; then
-    if fm_pcw_extract_pr_url_from_forge_argv "${forge_argv[@]}"; then
-      "$SCRIPT_DIR/fm-pr-comment-watch.sh" rereview-ready --url "$FM_PCW_PR_URL" || exit 1
-    else
-      echo "error: could not resolve the pull request URL for re-review readiness" >&2
+  if [ "$task_seen" -eq 0 ]; then
+    [ "$expect_key_seen" -eq 0 ] || die_usage "--expect-key requires --task"
+    refuse_unsafe_publication "$content" || exit 1
+    # shellcheck source=bin/fm-pr-comment-watch-lib.sh
+    . "$SCRIPT_DIR/fm-pr-comment-watch-lib.sh"
+    if fm_pcw_forge_command_is_rereview_request "${forge_argv[@]}"; then
+      if fm_pcw_extract_pr_url_from_forge_argv "${forge_argv[@]}"; then
+        "$SCRIPT_DIR/fm-pr-comment-watch.sh" rereview-ready --url "$FM_PCW_PR_URL" || exit 1
+      else
+        echo "error: could not resolve the pull request URL for re-review readiness" >&2
+        exit 1
+      fi
+    fi
+    exec "${forge_argv[@]}"
+  fi
+
+  [ -n "$task" ] || die_usage "--task requires a non-empty value"
+  if [ "$expect_key_seen" -eq 1 ] && [ -z "$expect_key" ]; then
+    die_usage "--expect-key requires a non-empty value"
+  fi
+  fm_task_id_path_safe "$task" || die_usage "--task must be a safe task id"
+  classify_keyed_publication "$file" "${forge_argv[@]}" || {
+    echo "publish --task: unsupported argv shape for a keyed publication" >&2
+    exit 2
+  }
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "publish --task: state directory is unavailable" >&2; exit 1; }
+  snapshot=$(umask 077; mktemp "$STATE/.fm-effect-body.XXXXXX") || exit 1
+  wire=
+  # Invoked indirectly by the EXIT trap below.
+  # shellcheck disable=SC2329
+  cleanup_publication() { rm -f -- "$snapshot" "$wire"; }
+  trap cleanup_publication EXIT
+  cp -- "$file" "$snapshot" || exit 1
+  chmod 0600 "$snapshot" || exit 1
+  fm_pr_private_file_valid "$snapshot" 600 "$(fm_pr_file_device "$STATE")" || exit 1
+  gen=$(awk 'index($0, "spawn_gen=") == 1 { print substr($0, 11); exit }' "$STATE/$task.meta" 2>/dev/null) || gen=
+  case "$gen" in ''|*[[:space:]=]*) echo "publish --task: metadata generation is unavailable" >&2; exit 1 ;; esac
+  payload=$(publication_sha256_file "$snapshot") || exit 1
+  key=$(publication_key "$task" "$gen" "$KEYED_PUBLICATION_TARGET" "$payload") || exit 1
+  if [ -n "$expect_key" ] && [ "$expect_key" != "$key" ]; then
+    echo "refused:repair-key-mismatch" >&2
+    exit 1
+  fi
+  wire=$(umask 077; mktemp "$STATE/.fm-effect-wire.XXXXXX") || exit 1
+  publication_wire_file "$snapshot" "$key" "$wire" || exit 1
+  chmod 0600 "$wire" || exit 1
+  refuse_unsafe_publication "$(cat -- "$wire")" || exit 1
+  if [ -n "$expect_key" ]; then
+    verify_output=$(pipeline_effect_call verify "$task" "$key" --gen "$gen" \
+      --target "$KEYED_PUBLICATION_TARGET" --payload "$payload" 2>&1) || verify_rc=$?
+    if [ "$verify_rc" -ne 0 ]; then
+      if publication_forward_lock_refusal "$verify_rc" "$verify_output"; then
+        exit 3
+      fi
+      case "$verify_output" in
+        *refused:slot-missing*) echo "refused:repair-slot-missing" >&2 ;;
+        '') echo "refused:repair-verify" >&2 ;;
+        *) printf '%s\n' "$verify_output" >&2 ;;
+      esac
       exit 1
     fi
+  else
+    claim_output=$(pipeline_effect_call claim "$task" --gen "$gen" --target "$KEYED_PUBLICATION_TARGET" \
+      --payload "$payload" 2>&1) || claim_rc=$?
+    case "$claim_output" in
+      delivered\ *) printf '%s\n' "$claim_output"; exit 0 ;;
+      unresolved\ *) ;;
+      claimed\ *) publish_allowed=1 ;;
+      refused:*) printf '%s\n' "$claim_output" >&2; exit 1 ;;
+      *)
+        if publication_forward_lock_refusal "$claim_rc" "$claim_output"; then
+          exit 3
+        fi
+        if [ "$claim_rc" -eq 0 ]; then
+          echo "refused:effect-claim" >&2
+        else
+          echo "refused:effect-claim-failed" >&2
+        fi
+        exit 1
+        ;;
+    esac
   fi
-  exec "${forge_argv[@]}"
+  if [ "$publish_allowed" -eq 1 ]; then
+    forge_argv[7]=$wire
+    if "${forge_argv[@]}" >/dev/null 2>&1; then
+      :
+    else
+      pipeline_effect_call ambiguous "$task" "$key" --gen "$gen" >/dev/null 2>&1 || true
+    fi
+  fi
+  if publication_readback "$wire" "$KEYED_PUBLICATION_HOST" "$KEYED_PUBLICATION_REPO" "$KEYED_PUBLICATION_NUMBER"; then
+    deliver_output=$(pipeline_effect_call deliver "$task" "$key" --gen "$gen" --receipt "$READBACK_ID" \
+      --target "$KEYED_PUBLICATION_TARGET" --payload "$payload" 2>&1) || deliver_rc=$?
+    if [ "$deliver_rc" -eq 0 ]; then
+      printf 'delivered %s\n' "$READBACK_ID"
+      exit 0
+    fi
+    if publication_forward_lock_refusal "$deliver_rc" "$deliver_output"; then
+      exit 3
+    fi
+    case "$deliver_output" in
+      refused:*) printf '%s\n' "$deliver_output" >&2 ;;
+      '') echo "refused:effect-deliver" >&2 ;;
+      *) printf '%s\n' "$deliver_output" >&2 ;;
+    esac
+    exit 1
+  elif [ "$publish_allowed" -eq 1 ]; then
+    pipeline_effect_call ambiguous "$task" "$key" --gen "$gen" >/dev/null 2>&1 || true
+  fi
+  publication_unresolved "$key" "$task" "$gen"
+  exit 1
 }
+
 
 cmd_has_template() {
   local project='' repo_dir=''

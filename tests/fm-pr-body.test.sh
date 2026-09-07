@@ -16,6 +16,16 @@ mkhome() {
   printf '%s\n' "$dir"
 }
 
+wait_for_file() {
+  local path=$1 i=0
+  while [ "$i" -lt 500 ]; do
+    [ -e "$path" ] && return 0
+    sleep 0.01
+    i=$((i + 1))
+  done
+  return 1
+}
+
 test_script_parses() {
   local out rc
   out=$(bash -n "$TOOL" 2>&1); rc=$?
@@ -566,5 +576,760 @@ test_render_rejects_project_path_traversal
 test_render_refuses_local_home_path
 test_render_refuses_local_temp_path
 test_template_symlink_escape_is_refused_and_in_root_symlink_is_allowed
+test_keyed_publication_attempts_once_and_preserves_wire_identity() {
+  local root first_output second_output wire key expected_wire
+  # Use one persistent fixture so the owner slot survives the second call.
+  root="$TMP_ROOT/publication-happy-persistent"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'hello\n\n' > "$root/body.md"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = pr ]; then cp -- "$7" "$FAKE_LAST_BODY"; printf '%s\n' post >> "$FAKE_LOG"; printf 'commented: number/status: ok\n'; exit 0; fi
+printf '%s\n' api >> "$FAKE_LOG"; printf '[2]: 1,77\n'
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  first_output=$(FAKE_LOG="$root/log" FAKE_LAST_BODY="$root/last-body" PATH="$root/fakebin:$PATH" \
+    FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --file "$root/body.md" -- \
+    gh-axi pr comment 7 -R o/r --body-file "$root/body.md") \
+    || fail "keyed publication failed on first invocation: $first_output"
+  [ "$first_output" = 'delivered 77' ] || fail "first invocation returned: $first_output"
+  second_output=$(FAKE_LOG="$root/log" FAKE_LAST_BODY="$root/last-body" PATH="$root/fakebin:$PATH" \
+    FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --file "$root/body.md" -- \
+    gh-axi pr comment 7 -R o/r --body-file "$root/body.md") \
+    || fail "keyed publication failed on replay: $second_output"
+  [ "$second_output" = 'delivered 77' ] || fail "replay returned: $second_output"
+  [ "$(rg -c '^post$' "$root/log")" -eq 1 ] || fail "keyed publication posted more than once"
+  [ "$(rg -c '^api$' "$root/log")" -eq 1 ] || fail "delivered replay unexpectedly read back"
+  wire=$(find "$root/state" -name 'task.effect-*' -type f -print -quit)
+  key=${wire##*-}
+  assert_contains "$(cat "$root/body.md")" hello "source body was changed"
+  assert_contains "$(cat "$root/last-body")" 'hello' "publisher lost the source body"
+  assert_contains "$(cat "$root/last-body")" "<!-- fm-effect:$key -->" \
+    "publisher did not receive the keyed wire marker"
+  expected_wire=$(printf 'hello\n<!-- fm-effect:%s -->' "$key")
+  [ "$(cat "$root/last-body")" = "$expected_wire" ] || fail "wire body did not normalize trailing newlines"
+  assert_contains "$(cat "$wire")" "state=delivered receipt=77" "happy path did not deliver its slot"
+  pass "fm-pr-body.sh: keyed publication attempts once and records a readback receipt"
+}
+
+test_keyed_publication_response_loss_is_confirmed_without_retry() {
+  local root output rc
+  root="$TMP_ROOT/publication-loss"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'lost' > "$root/body.md"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG"
+if [ "$1" = pr ]; then
+  if [ -e "$FAKE_OWNER_LOCK" ]; then printf '%s\n' lock-held > "$FAKE_VIOLATION"; fi
+  printf '%s\n' post >> "$FAKE_LOG"; exit 1
+fi
+if [ -e "$FAKE_OWNER_LOCK" ]; then printf '%s\n' lock-held > "$FAKE_VIOLATION"; fi
+printf '%s\n' api >> "$FAKE_LOG"; printf '[2]: 1,88\n'
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  rc=0
+  output=$(FAKE_LOG="$root/log" FAKE_OWNER_LOCK="$root/state/pipeline-events.log.lock" \
+    FAKE_VIOLATION="$root/lock-violation" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+    FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --file "$root/body.md" -- \
+    gh-axi pr comment 7 -R o/r --body-file "$root/body.md") || rc=$?
+  expect_code 0 "$rc" "response loss with a matching readback should deliver"
+  [ ! -e "$root/lock-violation" ] || fail "publisher ran while the owner lock was held"
+  [ "$(rg -c '^post$' "$root/log")" -eq 1 ] || fail "response loss retried publication"
+  [ "$(rg -c '^api$' "$root/log")" -eq 1 ] || fail "response loss did not read back once"
+  assert_contains "$output" 'delivered 88' "response loss did not report its receipt"
+  pass "fm-pr-body.sh: a failed publisher is confirmed by one bounded readback"
+}
+
+test_keyed_publication_snapshots_before_body_and_generation_changes() {
+  local root output rc=0 real_cp real_shasum slot payload candidate
+  root="$TMP_ROOT/publication-races"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'original' > "$root/body.md"
+  printf 'original' > "$root/body.original"
+  real_cp=$(command -v cp)
+  cat > "$root/fakebin/cp" <<'EOF'
+#!/usr/bin/env bash
+"$FAKE_REAL_CP" "$@"
+rc=$?
+if [ "$rc" -eq 0 ] && [ ! -e "$FAKE_CP_MARKER" ] && [ "${2:-}" = "$FAKE_SOURCE" ]; then
+  printf 'changed' > "$FAKE_SOURCE"
+  : > "$FAKE_CP_MARKER"
+fi
+exit "$rc"
+EOF
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = pr ]; then
+  cp -- "$7" "$FAKE_LAST_BODY"
+  printf '%s\n' post >> "$FAKE_LOG"
+  exit 0
+fi
+printf '%s\n' api >> "$FAKE_LOG"
+printf '[2]: 1,77\n'
+EOF
+  chmod +x "$root/fakebin/cp" "$root/fakebin/gh-axi"
+  output=$(FAKE_REAL_CP="$real_cp" FAKE_CP_MARKER="$root/cp-once" FAKE_LAST_BODY="$root/last-body" \
+    FAKE_SOURCE="$root/body.md" FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" \
+    FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task \
+      --file "$root/body.md" -- gh-axi pr comment 7 -R o/r --body-file "$root/body.md") || rc=$?
+  expect_code 0 "$rc" "a body mutation between snapshot and wire read must not change the wire body"
+  assert_contains "$(cat "$root/last-body")" original "publisher did not receive the snapshot"
+  [ "$(cat "$root/body.md")" = changed ] || fail "snapshot race fixture did not mutate the source body"
+  slot=$(find "$root/state" -name 'task.effect-*' -type f -print -quit)
+  payload=$(shasum -a 256 "$root/body.original" | awk '{print $1}')
+  assert_contains "$(cat "$slot")" "payload=$payload" "effect slot did not retain the original snapshot payload"
+  rm -f "$root/fakebin/cp"
+
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'generation' > "$root/body.md"
+  rm -f "$root/log" "$root/last-body"
+  real_shasum=$(command -v shasum)
+  cat > "$root/fakebin/shasum" <<'EOF'
+#!/usr/bin/env bash
+n=0
+[ -f "$FAKE_HASH_COUNT" ] && n=$(cat "$FAKE_HASH_COUNT")
+n=$((n + 1))
+printf '%s\n' "$n" > "$FAKE_HASH_COUNT"
+"$FAKE_REAL_SHASUM" "$@"
+rc=$?
+if [ "$n" -eq 1 ]; then
+  printf 'kind=ship\nspawn_gen=gen-2\n' > "$FAKE_META"
+fi
+exit "$rc"
+EOF
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = pr ]; then printf '%s\n' post >> "$FAKE_LOG"; exit 0; fi
+printf '%s\n' api >> "$FAKE_LOG"
+printf '[2]: 1,78\n'
+EOF
+  chmod +x "$root/fakebin/shasum" "$root/fakebin/gh-axi"
+  rc=0
+  output=$(FAKE_META="$root/state/task.meta" FAKE_HASH_COUNT="$root/hash-count" FAKE_REAL_SHASUM="$real_shasum" \
+    FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" \
+    "$TOOL" publish --task task --file "$root/body.md" -- gh-axi pr comment 7 -R o/r \
+      --body-file "$root/body.md" 2>&1) || rc=$?
+  expect_code 1 "$rc" "a generation change before claim must refuse"
+  assert_contains "$output" 'refused:foreign-gen' "generation race refusal was hidden"
+  [ ! -e "$root/log" ] || fail "generation race reached publication"
+
+  rm -f "$root/fakebin/shasum"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'before-delivery' > "$root/body.md"
+  rm -f "$root/log" "$root/last-body"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = pr ]; then
+  printf 'kind=ship\nspawn_gen=gen-2\n' > "$FAKE_META"
+  printf '%s\n' post >> "$FAKE_LOG"
+  exit 0
+fi
+printf '%s\n' api >> "$FAKE_LOG"
+printf '[2]: 1,79\n'
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  rc=0
+  output=$(FAKE_META="$root/state/task.meta" FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" \
+    FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task \
+      --file "$root/body.md" -- gh-axi pr comment 7 -R o/r --body-file "$root/body.md" 2>&1) || rc=$?
+  expect_code 1 "$rc" "a generation change before delivery must refuse"
+  assert_contains "$output" 'refused:foreign-gen' "before-delivery generation refusal was hidden"
+  [ "$(rg -c '^post$' "$root/log")" -eq 1 ] || fail "before-delivery generation race retried publication"
+  [ "$(rg -c '^api$' "$root/log")" -eq 1 ] || fail "before-delivery generation race skipped readback"
+  slot=
+  for candidate in "$root/state"/task.effect-*; do
+    [ -f "$candidate" ] || continue
+    if rg -q ' state=requested ' "$candidate"; then slot=$candidate; break; fi
+  done
+  [ -n "$slot" ] || fail "before-delivery generation race did not retain the claimed slot"
+  assert_contains "$(cat "$slot")" 'receipt=-' "before-delivery refusal changed the slot receipt"
+  pass "fm-pr-body.sh: publication snapshots bytes and fences both generation boundaries"
+}
+
+test_keyed_publication_full_seam_races_are_once_only() {
+  local root pid1 pid2 pid3 rc1 rc2 rc3 slot key slot_bytes_file output1 output2 output3
+
+  root="$TMP_ROOT/publication-full-seam"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'competing' > "$root/body.md"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = pr ]; then
+  printf '%s\n' publisher-entry >> "$FAKE_LOG"
+  if [ ! -e "$FAKE_PUBLISHER_START" ]; then
+    : > "$FAKE_PUBLISHER_START"
+    i=0
+    while [ ! -e "$FAKE_LOSER_READY" ] && [ "$i" -lt 500 ]; do sleep 0.01; i=$((i + 1)); done
+    [ -e "$FAKE_LOSER_READY" ] || exit 98
+    printf '%s\n' post >> "$FAKE_LOG"
+    : > "$FAKE_POST_DONE"
+    exit 0
+  fi
+  exit 97
+fi
+printf '%s\n' api >> "$FAKE_LOG"
+if [ ! -e "$FAKE_POST_DONE" ]; then
+  : > "$FAKE_LOSER_READY"
+  printf '[2]: 0,0\n'
+else
+  printf '[2]: 1,101\n'
+fi
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  (
+    FAKE_PUBLISHER_START="$root/publisher-start" FAKE_LOSER_READY="$root/loser-ready" \
+      FAKE_POST_DONE="$root/post-done" FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" \
+      FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task \
+      --file "$root/body.md" -- gh-axi pr comment 7 -R o/r --body-file "$root/body.md"
+    rc=$?
+    printf '%s\n' "$rc" > "$root/one.rc"
+    exit "$rc"
+  ) > "$root/one.out" 2>&1 &
+  pid1=$!
+  wait_for_file "$root/publisher-start" || { kill "$pid1" 2>/dev/null || true; wait "$pid1" 2>/dev/null || true; fail "winner did not reach the publisher"; }
+  (
+    FAKE_PUBLISHER_START="$root/publisher-start" FAKE_LOSER_READY="$root/loser-ready" \
+      FAKE_POST_DONE="$root/post-done" FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" \
+      FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task \
+      --file "$root/body.md" -- gh-axi pr comment 7 -R o/r --body-file "$root/body.md"
+    rc=$?
+    printf '%s\n' "$rc" > "$root/two.rc"
+    exit "$rc"
+  ) > "$root/two.out" 2>&1 &
+  pid2=$!
+  wait "$pid1" || true
+  wait "$pid2" || true
+  rc1=$(cat "$root/one.rc")
+  rc2=$(cat "$root/two.rc")
+  output1=$(cat "$root/one.out")
+  output2=$(cat "$root/two.out")
+  expect_code 0 "$rc1" "the winning full-seam publication must deliver"
+  expect_code 1 "$rc2" "the losing full-seam readback must remain unresolved before visibility"
+  [ "$output1" = 'delivered 101' ] || fail "winning full-seam publication returned: $output1"
+  assert_contains "$output2" 'publication unresolved' "early losing readback was not unresolved"
+  slot=$(find "$root/state" -name 'task.effect-*' -type f -print -quit)
+  key=${slot##*-}
+  output3=$(FAKE_PUBLISHER_START="$root/publisher-start" FAKE_LOSER_READY="$root/loser-ready" \
+    FAKE_POST_DONE="$root/post-done" FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+    FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --expect-key "$key" \
+    --file "$root/body.md" -- gh-axi pr comment 7 -R o/r --body-file "$root/body.md") \
+    || fail "the later same-key readback refused"
+  [ "$output3" = 'delivered 101' ] || fail "later same-key readback returned: $output3"
+  [ "$(rg -c '^publisher-entry$' "$root/log")" -eq 1 ] || fail "an injected double claim reached the publisher more than once"
+  [ "$(rg -c '^post$' "$root/log")" -eq 1 ] || fail "competing publications posted more than once"
+  [ "$(rg -c '^api$' "$root/log")" -eq 3 ] || fail "full-seam race/readback used the wrong confirmation count"
+  pass "fm-pr-body.sh: loser-before-visibility and later same-key readback publish once"
+
+  root="$TMP_ROOT/publication-repair-race"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin" "$root/api-markers"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'repair-race' > "$root/body.md"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = pr ]; then
+  printf '%s\n' publisher-entry >> "$FAKE_LOG"
+  : > "$FAKE_PUBLISHER_START"
+  i=0
+  while [ ! -e "$FAKE_REPAIRS_COMPLETE" ] && [ "$i" -lt 500 ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$FAKE_REPAIRS_COMPLETE" ] || exit 98
+  exit 1
+fi
+printf '%s\n' api >> "$FAKE_LOG"
+if [ ! -e "$FAKE_REPAIRS_COMPLETE" ]; then
+  : > "$FAKE_API_MARKERS/$BASHPID"
+  i=0
+  while [ "$(find "$FAKE_API_MARKERS" -type f | wc -l | tr -d ' ')" -lt 2 ] && [ "$i" -lt 500 ]; do sleep 0.01; i=$((i + 1)); done
+  [ "$(find "$FAKE_API_MARKERS" -type f | wc -l | tr -d ' ')" -ge 2 ] || exit 98
+  : > "$FAKE_REPAIRS_READY"
+  printf '[2]: 1,102\n'
+else
+  printf '[2]: 0,0\n'
+fi
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  (
+    FAKE_PUBLISHER_START="$root/publisher-start" FAKE_REPAIRS_READY="$root/repairs-ready" \
+      FAKE_REPAIRS_COMPLETE="$root/repairs-complete" FAKE_API_MARKERS="$root/api-markers" \
+      FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+      FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --file "$root/body.md" -- \
+      gh-axi pr comment 7 -R o/r --body-file "$root/body.md"
+    rc=$?
+    printf '%s\n' "$rc" > "$root/one.rc"
+    exit "$rc"
+  ) > "$root/one.out" 2>&1 &
+  pid1=$!
+  wait_for_file "$root/publisher-start" || { kill "$pid1" 2>/dev/null || true; wait "$pid1" 2>/dev/null || true; fail "late publisher did not enter"; }
+  slot=$(find "$root/state" -name 'task.effect-*' -type f -print -quit)
+  [ -n "$slot" ] || fail "late publisher did not create an effect slot"
+  key=${slot##*-}
+  (
+    FAKE_PUBLISHER_START="$root/publisher-start" FAKE_REPAIRS_READY="$root/repairs-ready" \
+      FAKE_REPAIRS_COMPLETE="$root/repairs-complete" FAKE_API_MARKERS="$root/api-markers" \
+      FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+      FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --expect-key "$key" \
+      --file "$root/body.md" -- gh-axi pr comment 7 -R o/r --body-file "$root/body.md"
+    rc=$?
+    printf '%s\n' "$rc" > "$root/two.rc"
+    exit "$rc"
+  ) > "$root/two.out" 2>&1 &
+  pid2=$!
+  (
+    FAKE_PUBLISHER_START="$root/publisher-start" FAKE_REPAIRS_READY="$root/repairs-ready" \
+      FAKE_REPAIRS_COMPLETE="$root/repairs-complete" FAKE_API_MARKERS="$root/api-markers" \
+      FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+      FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --expect-key "$key" \
+      --file "$root/body.md" -- gh-axi pr comment 7 -R o/r --body-file "$root/body.md"
+    rc=$?
+    printf '%s\n' "$rc" > "$root/three.rc"
+    exit "$rc"
+  ) > "$root/three.out" 2>&1 &
+  pid3=$!
+  wait "$pid2" || true
+  wait "$pid3" || true
+  rc2=$(cat "$root/two.rc")
+  rc3=$(cat "$root/three.rc")
+  output2=$(cat "$root/two.out")
+  output3=$(cat "$root/three.out")
+  expect_code 0 "$rc2" "the first concurrent repair must deliver"
+  expect_code 0 "$rc3" "the second concurrent repair must deliver"
+  [ "$output2" = 'delivered 102' ] || fail "first repair returned: $output2"
+  [ "$output3" = 'delivered 102' ] || fail "second repair returned: $output3"
+  slot_bytes_file="$root/delivered.slot"
+  cp -- "$slot" "$slot_bytes_file"
+  : > "$root/repairs-complete"
+  wait "$pid1" || true
+  rc1=$(cat "$root/one.rc")
+  output1=$(cat "$root/one.out")
+  expect_code 1 "$rc1" "the late ambiguous publication must remain unresolved"
+  assert_contains "$output1" 'publication unresolved' "late ambiguous publication was not unresolved"
+  cmp -s "$slot" "$slot_bytes_file" || fail "late ambiguous changed delivered slot bytes"
+  [ "$(rg -c '^publisher-entry$' "$root/log")" -eq 1 ] || fail "late publication entry count changed"
+  [ "$(rg -c '^api$' "$root/log")" -eq 3 ] || fail "repair confirmation/readback count was wrong"
+  pass "fm-pr-body.sh: concurrent repair confirmations survive a late ambiguous attempt"
+}
+
+test_keyed_publication_repair_reads_without_publishing() {
+  local root output rc wire key saved_slot
+  root="$TMP_ROOT/publication-repair"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'repair' > "$root/body.md"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG"
+if [ "$1" = pr ]; then printf '%s\n' post >> "$FAKE_LOG"; exit 99; fi
+printf '%s\n' api >> "$FAKE_LOG"; printf '%s\n' "${FAKE_API_OUTPUT:-[2]: 0,0}"
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  rc=0
+  output=$(FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+    FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --file "$root/body.md" -- \
+    gh-axi pr comment 7 -R o/r --body-file "$root/body.md") || rc=$?
+  expect_code 1 "$rc" "a missing readback must leave an unresolved publication"
+  wire=$(find "$root/state" -name 'task.effect-*' -type f -print -quit)
+  key=${wire##*-}
+  printf 'changed' > "$root/changed.md"
+  rc=0
+  output=$(FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+    FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --expect-key "$key" \
+      --file "$root/changed.md" -- gh-axi pr comment 7 -R o/r --body-file "$root/changed.md" 2>&1) || rc=$?
+  expect_code 1 "$rc" "repair with a changed body must refuse"
+  assert_contains "$output" 'refused:repair-key-mismatch' "changed-body repair refusal was not named"
+  printf 'kind=ship\nspawn_gen=gen-2\n' > "$root/state/task.meta"
+  rc=0
+  output=$(FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+    FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --expect-key "$key" \
+      --file "$root/body.md" -- gh-axi pr comment 7 -R o/r --body-file "$root/body.md" 2>&1) || rc=$?
+  expect_code 1 "$rc" "repair with a changed generation must refuse"
+  assert_contains "$output" 'refused:repair-key-mismatch' "changed-generation repair refusal was not named"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  saved_slot=$(cat "$wire")
+  rm -f "$wire"
+  rc=0
+  output=$(FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+    FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --expect-key "$key" \
+      --file "$root/body.md" -- gh-axi pr comment 7 -R o/r --body-file "$root/body.md" 2>&1) || rc=$?
+  expect_code 1 "$rc" "repair with a missing slot must refuse"
+  assert_contains "$output" 'refused:repair-slot-missing' "missing-slot repair refusal was not named"
+  printf '%s\n' "$saved_slot" > "$wire"
+  chmod 600 "$wire"
+  rc=0
+  output=$(FAKE_LOG="$root/log" FAKE_API_OUTPUT='[2]: 1,91' PATH="$root/fakebin:$PATH" \
+    FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task \
+      --expect-key "$key" --file "$root/body.md" -- gh-axi pr comment 7 -R o/r \
+      --body-file "$root/body.md") || rc=$?
+  expect_code 0 "$rc" "repair mode should deliver a matching existing comment"
+  assert_contains "$output" 'delivered 91' "repair mode did not report its receipt"
+  [ "$(rg -c '^post$' "$root/log")" -eq 1 ] || fail "repair mode published a second comment"
+  pass "fm-pr-body.sh: --expect-key rejects changed or missing slots and reads only"
+}
+
+test_unkeyed_publication_remains_unchanged_baseline() {
+  local root output
+  root="$TMP_ROOT/publication-unkeyed-baseline"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'plain body' > "$root/body.md"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG"
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  output=$(FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+    FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --file "$root/body.md" -- \
+    gh-axi pr comment 7 -R o/r --body-file "$root/body.md") \
+    || fail "unkeyed baseline publication failed: $output"
+  output=$(FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+    FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --file "$root/body.md" -- \
+    gh-axi pr comment 7 -R o/r --body-file "$root/body.md") \
+    || fail "unkeyed baseline replay failed: $output"
+  [ "$(wc -l < "$root/log" | tr -d ' ')" -eq 2 ] || fail "unkeyed publication did not run twice"
+  [ "$(cat "$root/body.md")" = 'plain body' ] || fail "unkeyed publication changed the source body"
+  [ ! -e "$root/state/task.effect" ] || fail "unkeyed publication created an effect slot"
+  pass "fm-pr-body.sh: unkeyed publication remains a two-post baseline"
+}
+
+test_keyed_publication_rejects_empty_selectors() {
+  local root output rc label
+  root="$TMP_ROOT/publication-empty-selectors"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'empty' > "$root/body.md"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' called >> "$FAKE_LOG"
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  run_usage() {
+    label=$1
+    shift
+    rc=0
+    output=$(FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+      FM_STATE_OVERRIDE="$root/state" "$TOOL" publish "$@" --file "$root/body.md" -- \
+      gh-axi pr comment 7 -R o/r --body-file "$root/body.md" 2>&1) || rc=$?
+    expect_code 2 "$rc" "$label"
+    [ ! -e "$root/log" ] || fail "$label reached the forge: $(cat "$root/log")"
+  }
+  run_usage 'empty --task= must refuse' --task=
+  run_usage 'empty --task value must refuse' --task ''
+  run_usage 'empty --expect-key= without task must refuse' --expect-key=
+  run_usage 'empty --expect-key value without task must refuse' --expect-key ''
+  run_usage 'empty --expect-key= with task must refuse' --task task --expect-key=
+  run_usage 'empty --expect-key value with task must refuse' --task task --expect-key ''
+  pass "fm-pr-body.sh: keyed selectors reject present-but-empty values"
+}
+
+test_keyed_publication_forwards_lock_refusal() {
+  local root output rc=0 holder
+  root="$TMP_ROOT/publication-lock-refusal"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'locked' > "$root/body.md"
+  : > "$root/forge-calls"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG"
+exit 99
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  (while [ -d "$root" ] && [ ! -e "$root/release-holder" ]; do sleep 0.05; done) &
+  holder=$!
+  kill -0 "$holder" 2>/dev/null || fail "lock holder exited before the refusal probe"
+  mkdir "$root/state/pipeline-events.log.lock"
+  printf '%s\n' "$holder" > "$root/state/pipeline-events.log.lock/pid"
+  output=$(FAKE_LOG="$root/forge-calls" FM_PIPELINE_LOCK_TIMEOUT=1 PATH="$root/fakebin:$PATH" \
+    FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task \
+    --file "$root/body.md" -- gh-axi pr comment 7 -R o/r --body-file "$root/body.md" 2>&1) || rc=$?
+  kill -0 "$holder" 2>/dev/null || fail "lock holder expired during the refusal probe"
+  : > "$root/release-holder"
+  wait "$holder" 2>/dev/null || true
+  expect_code 3 "$rc" "a live owner lock refusal must preserve its retryable exit"
+  assert_contains "$output" 'refused:lock-held' "owner lock refusal was not forwarded"
+  assert_not_contains "$output" 'refused:effect-claim-failed' "owner lock refusal became a generic claim failure"
+  [ ! -s "$root/forge-calls" ] || fail "lock refusal reached the local forge fake"
+  for slot in "$root/state/task.effect-"*; do
+    [ -e "$slot" ] || [ -L "$slot" ] || continue
+    fail "lock refusal created an effect slot: $slot"
+  done
+  pass "fm-pr-body.sh: keyed publication forwards retryable owner lock refusals"
+}
+
+test_keyed_publication_repair_forwards_lock_refusal() {
+  local root output rc=0 holder payload key slot
+  root="$TMP_ROOT/publication-repair-lock-refusal"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'repair-lock' > "$root/body.md"
+  payload=$(shasum -a 256 "$root/body.md" | awk '{print $1}')
+  output=$(FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$ROOT/bin/fm-pipeline.sh" effect claim task \
+    --gen gen-1 --target github.com/o/r#7 --payload "$payload") || fail "repair lock fixture claim refused"
+  key=${output#claimed }
+  slot="$root/state/task.effect-$key"
+  [ -f "$slot" ] || fail "repair lock fixture did not create its effect slot"
+  : > "$root/forge-calls"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG"
+exit 99
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  (while [ -d "$root" ] && [ ! -e "$root/release-holder" ]; do sleep 0.05; done) &
+  holder=$!
+  kill -0 "$holder" 2>/dev/null || fail "repair lock holder exited before the refusal probe"
+  mkdir "$root/state/pipeline-events.log.lock"
+  printf '%s\n' "$holder" > "$root/state/pipeline-events.log.lock/pid"
+  output=$(FAKE_LOG="$root/forge-calls" FM_PIPELINE_LOCK_TIMEOUT=1 PATH="$root/fakebin:$PATH" \
+    FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task \
+    --expect-key "$key" --file "$root/body.md" -- gh-axi pr comment 7 -R o/r \
+    --body-file "$root/body.md" 2>&1) || rc=$?
+  kill -0 "$holder" 2>/dev/null || fail "repair lock holder expired during the refusal probe"
+  : > "$root/release-holder"
+  wait "$holder" 2>/dev/null || true
+  expect_code 3 "$rc" "a repair owner lock refusal must preserve its retryable exit"
+  assert_contains "$output" 'refused:lock-held' "repair owner lock refusal was not forwarded"
+  [ ! -s "$root/forge-calls" ] || fail "repair lock refusal reached the local forge fake"
+  [ -f "$slot" ] || fail "repair lock refusal removed the effect slot"
+  pass "fm-pr-body.sh: repair publication forwards retryable owner lock refusals"
+}
+
+test_keyed_publication_deliver_forwards_lock_refusal() {
+  local root output rc=0 payload key slot holder pr_calls
+  root="$TMP_ROOT/publication-deliver-lock-refusal"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'deliver-lock' > "$root/body.md"
+  payload=$(shasum -a 256 "$root/body.md" | awk '{print $1}')
+  output=$(FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$ROOT/bin/fm-pipeline.sh" effect claim task \
+    --gen gen-1 --target github.com/o/r#7 --payload "$payload") || fail "deliver lock fixture claim refused"
+  key=${output#claimed }
+  slot="$root/state/task.effect-$key"
+  [ -f "$slot" ] || fail "deliver lock fixture did not create its effect slot"
+  (while [ -d "$root" ] && [ ! -e "$root/deliver-trigger" ]; do sleep 0.05; done
+    if [ -e "$root/deliver-trigger" ]; then
+      mkdir "$root/state/pipeline-events.log.lock"
+      while [ ! -e "$root/holder-pid-written" ]; do sleep 0.05; done
+      cat "$root/holder-pid" > "$root/state/pipeline-events.log.lock/pid"
+      : > "$root/deliver-holder-ready"
+      while [ -d "$root" ] && [ ! -e "$root/release-holder" ]; do sleep 0.05; done
+    fi
+  ) >/dev/null 2>&1 &
+  holder=$!
+  printf '%s\n' "$holder" > "$root/holder-pid"
+  : > "$root/holder-pid-written"
+  kill -0 "$holder" 2>/dev/null || fail "deliver lock holder exited before the readback"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG"
+if [ "$1" = api ]; then
+  : > "$FAKE_TRIGGER"
+  i=0
+  while [ ! -e "$FAKE_HOLDER_READY" ] && [ "$i" -lt 500 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$FAKE_HOLDER_READY" ] || exit 98
+  printf '[2]: 1,77\n'
+  exit 0
+fi
+printf 'unexpected forge publish\n' >&2
+exit 99
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  : > "$root/forge-calls"
+  output=$(FAKE_LOG="$root/forge-calls" FAKE_TRIGGER="$root/deliver-trigger" \
+    FAKE_HOLDER_READY="$root/deliver-holder-ready" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+    FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --expect-key "$key" \
+    --file "$root/body.md" -- gh-axi pr comment 7 -R o/r --body-file "$root/body.md" 2>&1) || rc=$?
+  wait_for_file "$root/deliver-holder-ready" || fail "deliver lock fake did not hold the owner lock"
+  kill -0 "$holder" 2>/dev/null || fail "deliver lock holder exited before the refusal assertion"
+  : > "$root/release-holder"
+  wait "$holder" 2>/dev/null || true
+  expect_code 3 "$rc" "a deliver owner lock refusal must preserve its retryable exit"
+  assert_contains "$output" 'refused:lock-held' "deliver owner lock refusal was not forwarded"
+  [ "$(rg -c '^api ' "$root/forge-calls")" -eq 1 ] || fail "deliver lock fixture did not read back once"
+  pr_calls=$(rg -c '^pr ' "$root/forge-calls" 2>/dev/null || true)
+  [ "${pr_calls:-0}" -eq 0 ] || fail "deliver lock fixture reached the forge publisher"
+  assert_contains "$(cat "$slot")" 'state=requested' "deliver lock refusal changed the effect slot"
+  pass "fm-pr-body.sh: deliver publication forwards retryable owner lock refusals"
+}
+
+test_keyed_publication_reports_owner_refusal() {
+  local root output rc=0 payload key slot
+  root="$TMP_ROOT/publication-owner-refusal"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'corrupt' > "$root/body.md"
+  payload=$(shasum -a 256 "$root/body.md" | awk '{print $1}')
+  key=$(FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$ROOT/bin/fm-pipeline.sh" effect claim task \
+    --gen gen-1 --target github.com/o/r#7 --payload "$payload") \
+    || fail "owner refusal fixture claim refused"
+  key=${key#claimed }
+  slot="$root/state/task.effect-$key"
+  sed 's/state=requested receipt=-/state=delivered receipt=-/' "$slot" > "$slot.tmp"
+  chmod 600 "$slot.tmp"
+  mv "$slot.tmp" "$slot"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' called >> "$FAKE_LOG"
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  output=$(FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+    FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --file "$root/body.md" -- \
+    gh-axi pr comment 7 -R o/r --body-file "$root/body.md" 2>&1) || rc=$?
+  expect_code 1 "$rc" "a corrupt owner slot must refuse the keyed publication"
+  assert_contains "$output" 'refused:corrupt-slot' "owner refusal was swallowed by the publication seam"
+  [ ! -e "$root/log" ] || fail "owner refusal reached the forge"
+  pass "fm-pr-body.sh: keyed owner refusals remain named at the publication boundary"
+}
+
+test_real_gh_axi_toon_readback_boundary() {
+  local root output rc
+  root="$TMP_ROOT/publication-real-axi"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf '%02500d' 0 | tr '0' x > "$root/body.md"
+  cat > "$root/fakebin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+if [ "${1:-}" = pr ] && [ "${2:-}" = comment ]; then
+  body=
+  previous=
+  for arg in "$@"; do
+    if [ "$previous" = --body ]; then body=$arg; break; fi
+    previous=$arg
+  done
+  jq -n --arg body "$body" '[{id:303, body:$body}, {id:404, body:$body}]' > "$FAKE_COMMENTS"
+  exit 0
+fi
+if [ "${1:-}" = api ]; then
+  jq_program=
+  previous=
+  for arg in "$@"; do
+    if [ "$previous" = --jq ]; then jq_program=$arg; break; fi
+    previous=$arg
+  done
+  jq "$jq_program" "$FAKE_COMMENTS"
+  exit 0
+fi
+exit 2
+EOF
+  chmod +x "$root/fakebin/gh"
+  rc=0
+  output=$(FAKE_GH_LOG="$root/gh-log" FAKE_COMMENTS="$root/comments.json" \
+    PATH="$root/fakebin:$PATH" FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" \
+    "$TOOL" publish --task task --file "$root/body.md" -- \
+      gh-axi pr comment 7 -R o/r --body-file "$root/body.md") || rc=$?
+  expect_code 0 "$rc" "real gh-axi boundary should parse its TOON readback"
+  assert_contains "$output" 'delivered 303' "real gh-axi boundary lost the comment receipt"
+  assert_contains "$(cat "$root/gh-log")" 'api /repos/o/r/issues/7/comments' \
+    "real gh-axi boundary did not query the comments endpoint"
+  FAKE_GH_LOG="$root/gh-log-direct" FAKE_COMMENTS="$root/comments.json" \
+    PATH="$root/fakebin:$PATH" gh-axi api /repos/o/r/issues/7/comments --jq '[length, .[0].id]' > "$root/toon.out" \
+    || fail "real gh-axi direct TOON control failed"
+  [ "$(tail -c 1 "$root/toon.out" | od -An -tx1 | tr -d '[:space:]')" = 0a ] \
+    || fail "real gh-axi TOON control did not return a trailing newline"
+  assert_contains "$(cat "$root/toon.out")" '[2]:' \
+    "real gh-axi TOON control did not return its frozen array shape"
+  [ "$(wc -c < "$root/body.md" | tr -d ' ')" -eq 2500 ] \
+    || fail "real boundary fixture was not exactly 2,500 bytes"
+  pass "fm-pr-body.sh: real gh-axi TOON output parses a 2,500-byte first matching result"
+}
+
+test_keyed_publication_malformed_short_and_bounded_readback() {
+  local mode root output rc api_count expected
+  for mode in malformed short bounded; do
+    root="$TMP_ROOT/publication-readback-$mode"
+    mkdir -p "$root/home" "$root/state" "$root/fakebin"
+    printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+    printf 'readback' > "$root/body.md"
+    case "$mode" in
+      malformed) expected=not-toon ;;
+      short) expected='[2]: 1,0' ;;
+      bounded) expected='[2]: 100,0' ;;
+    esac
+    cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = pr ]; then printf '%s\n' post >> "$FAKE_LOG"; exit 0; fi
+printf '%s\n' api >> "$FAKE_LOG"
+printf '%s\n' "$FAKE_API_OUTPUT"
+EOF
+    chmod +x "$root/fakebin/gh-axi"
+    rc=0
+    output=$(FAKE_LOG="$root/log" FAKE_API_OUTPUT="$expected" PATH="$root/fakebin:$PATH" \
+      FM_HOME="$root/home" FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --file "$root/body.md" -- \
+      gh-axi pr comment 7 -R o/r --body-file "$root/body.md" 2>&1) || rc=$?
+    expect_code 1 "$rc" "$mode readback must remain unresolved"
+    assert_contains "$output" 'publication unresolved' "$mode readback refusal was not named"
+    [ "$(rg -c '^post$' "$root/log")" -eq 1 ] || fail "$mode readback retried publication"
+    api_count=$(rg -c '^api$' "$root/log")
+    case "$mode" in
+      bounded) [ "$api_count" -eq 10 ] || fail "bounded readback used $api_count pages" ;;
+      *) [ "$api_count" -eq 1 ] || fail "$mode readback used $api_count pages" ;;
+    esac
+  done
+  pass "fm-pr-body.sh: malformed, short, and ten-page readback walks stay unresolved"
+}
+
+test_keyed_publication_rejects_unsupported_shape() {
+  local root output rc
+  root="$TMP_ROOT/publication-shape"
+  mkdir -p "$root/home" "$root/state" "$root/fakebin"
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  printf 'shape' > "$root/body.md"
+  cat > "$root/fakebin/gh-axi" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' called >> "$FAKE_LOG"
+EOF
+  chmod +x "$root/fakebin/gh-axi"
+  rc=0
+  output=$(FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+    FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --file "$root/body.md" -- \
+    gh-axi pr comment 7 -R o/r --body 'inline' 2>&1) || rc=$?
+  expect_code 2 "$rc" "an inline keyed publication must be refused"
+  assert_contains "$output" 'unsupported argv shape' "keyed shape refusal was not named"
+  [ ! -e "$root/log" ] || fail "unsupported keyed publication reached the forge"
+  printf 'different' > "$root/other.md"
+  for label in url-operand edit-subcommand different-body-file; do
+    rm -f "$root/log"
+    case "$label" in
+      url-operand)
+        set -- gh-axi pr comment https://github.com/o/r/pull/7 -R o/r --body-file "$root/body.md"
+        ;;
+      edit-subcommand)
+        set -- gh-axi pr edit 7 -R o/r --body-file "$root/body.md"
+        ;;
+      different-body-file)
+        set -- gh-axi pr comment 7 -R o/r --body-file "$root/other.md"
+        ;;
+    esac
+    rc=0
+    output=$(FAKE_LOG="$root/log" PATH="$root/fakebin:$PATH" FM_HOME="$root/home" \
+      FM_STATE_OVERRIDE="$root/state" "$TOOL" publish --task task --file "$root/body.md" -- "$@" 2>&1) || rc=$?
+    expect_code 2 "$rc" "$label keyed publication must be refused"
+    assert_contains "$output" 'unsupported argv shape' "$label refusal was not named"
+    [ ! -e "$root/log" ] || fail "$label keyed publication reached the forge"
+  done
+  pass "fm-pr-body.sh: keyed publication refuses all unsupported forge shapes"
+}
+
 test_render_allows_repo_relative_paths_and_urls
+ test_keyed_publication_attempts_once_and_preserves_wire_identity
+ test_keyed_publication_response_loss_is_confirmed_without_retry
+ test_keyed_publication_snapshots_before_body_and_generation_changes
+ test_keyed_publication_full_seam_races_are_once_only
+ test_keyed_publication_repair_reads_without_publishing
+ test_unkeyed_publication_remains_unchanged_baseline
+ test_keyed_publication_rejects_empty_selectors
+ test_keyed_publication_forwards_lock_refusal
+ test_keyed_publication_repair_forwards_lock_refusal
+ test_keyed_publication_deliver_forwards_lock_refusal
+ test_keyed_publication_reports_owner_refusal
+ test_real_gh_axi_toon_readback_boundary
+ test_keyed_publication_malformed_short_and_bounded_readback
+ test_keyed_publication_rejects_unsupported_shape
 test_check_refuses_local_path

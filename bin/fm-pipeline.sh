@@ -6,6 +6,7 @@
 # Usage:
 #   fm-pipeline.sh reconcile <task-id>
 #   fm-pipeline.sh retire <task-id>
+#   fm-pipeline.sh effect <claim|verify|deliver|ambiguous|abandon> ...
 #   fm-pipeline.sh board-json
 #   fm-pipeline.sh steps <kind>
 #   fm-pipeline.sh probe [--task <id>]
@@ -1195,8 +1196,328 @@ EOF
   [ "$quiet" = probe ] || printf 'reconciled: %s step=%s rev=%s\n' "$id" "$step" "$PIPELINE_RECORD_REV"
 }
 
+pipeline_effect_key() {  # <task-id> <generation> <target> <payload>
+  local id=$1 gen=$2 target=$3 payload=$4
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s\n%s\n%s\ncomment\n%s' "$id" "$gen" "$target" "$payload" \
+      | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s\n%s\n%s\ncomment\n%s' "$id" "$gen" "$target" "$payload" \
+      | sha256sum | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+PIPELINE_EFFECT_STATE=
+PIPELINE_EFFECT_GEN=
+PIPELINE_EFFECT_TARGET=
+PIPELINE_EFFECT_PAYLOAD=
+PIPELINE_EFFECT_RECEIPT=
+
+pipeline_effect_slot_read() {  # <slot> <task-id>
+  local slot=$1 id=$2 raw line schema task gen target kind payload state receipt ts
+  local -a fields
+  PIPELINE_EFFECT_STATE=absent
+  PIPELINE_EFFECT_GEN=
+  PIPELINE_EFFECT_TARGET=
+  PIPELINE_EFFECT_PAYLOAD=
+  PIPELINE_EFFECT_RECEIPT=
+  if [ ! -e "$slot" ] && [ ! -L "$slot" ]; then
+    return 0
+  fi
+  [ -f "$slot" ] && [ ! -L "$slot" ] || return 1
+  [ "$(fm_pr_file_link_count "$slot")" = 1 ] || return 1
+  raw=$(cat -- "$slot" 2>/dev/null) || return 1
+  [ "$(printf '%s' "$raw" | awk 'END { print NR }')" -eq 1 ] || return 1
+  IFS=' ' read -r -a fields <<EOF
+$raw
+EOF
+  [ "${#fields[@]}" -eq 9 ] || return 1
+  schema=${fields[0]#schema=}; task=${fields[1]#task=}; gen=${fields[2]#gen=}
+  target=${fields[3]#target=}; kind=${fields[4]#kind=}; payload=${fields[5]#payload=}
+  state=${fields[6]#state=}; receipt=${fields[7]#receipt=}; ts=${fields[8]#ts=}
+  [ "${fields[0]}" = "schema=$schema" ] && [ "${fields[1]}" = "task=$task" ] \
+    && [ "${fields[2]}" = "gen=$gen" ] && [ "${fields[3]}" = "target=$target" ] \
+    && [ "${fields[4]}" = "kind=$kind" ] && [ "${fields[5]}" = "payload=$payload" ] \
+    && [ "${fields[6]}" = "state=$state" ] && [ "${fields[7]}" = "receipt=$receipt" ] \
+    && [ "${fields[8]}" = "ts=$ts" ] || return 1
+  [ "$schema" = fm-effect.v1 ] && [ "$task" = "$id" ] && [ "$kind" = comment ] || return 1
+  case "$gen" in ''|*[[:space:]=:]*) return 1 ;; esac
+  case "$target" in ''|*[[:space:]=:]*) return 1 ;; esac
+  [[ "$payload" =~ ^[0-9a-f]{64}$ ]] || return 1
+  case "$state" in requested|ambiguous|delivered|abandoned) ;; *) return 1 ;; esac
+  case "$receipt" in ''|*[[:space:]=]*) return 1 ;; esac
+  case "$state" in
+    requested|ambiguous|abandoned)
+      [ "$receipt" = - ] || return 1
+      ;;
+    delivered)
+      [[ "$receipt" =~ ^[1-9][0-9]*$ ]] || return 1
+      ;;
+  esac
+  [[ "$ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+  [ "$(fm_pr_file_mode "$slot")" = 600 ] || return 1
+  PIPELINE_EFFECT_STATE=$state
+  PIPELINE_EFFECT_GEN=$gen
+  PIPELINE_EFFECT_TARGET=$target
+  PIPELINE_EFFECT_PAYLOAD=$payload
+  PIPELINE_EFFECT_RECEIPT=$receipt
+}
+
+pipeline_effect_slot_path() {  # <task-id> <key>
+  local id=$1 key=$2
+  fm_task_id_path_safe "$id" || return 1
+  [[ "$key" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s/%s.effect-%s\n' "$STATE" "$id" "$key"
+}
+
+pipeline_effect_tuple_valid() {  # <generation> <target> <payload>
+  local gen=$1 target=$2 payload=$3
+  case "$gen" in ''|*[[:space:]=:]*) return 1 ;; esac
+  case "$target" in ''|*[[:space:]=:]*) return 1 ;; esac
+  [[ "$payload" =~ ^[0-9a-f]{64}$ ]] || return 1
+}
+
+pipeline_effect_meta_current() {  # <task-id> <generation>
+  local id=$1 expected_gen=$2 cache_rc=0
+  pipeline_meta_cache_load "$STATE/$id.meta" 1 || cache_rc=$?
+  [ "$cache_rc" -eq 0 ] || return 1
+  [ "$PIPELINE_META_GEN" = "$expected_gen" ] || return 2
+}
+
+pipeline_effect_meta_guard() {  # <task-id> <generation>, while locked
+  local rc=0
+  pipeline_effect_meta_current "$1" "$2" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2) pipeline_effect_refuse foreign-gen ;;
+    *) pipeline_effect_refuse malformed-meta ;;
+  esac
+}
+
+pipeline_effect_slot_write() {  # <slot> <task-id> <gen> <target> <payload> <state> <receipt>
+  local slot=$1 id=$2 gen=$3 target=$4 payload=$5 state=$6 receipt=$7
+  local tmp device ts
+  device=$(fm_pr_file_device "$STATE") || return 1
+  tmp=$(umask 077; mktemp "$STATE/.fm-effect.XXXXXX") || return 1
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) || { rm -f -- "$tmp"; return 1; }
+  if ! printf 'schema=fm-effect.v1 task=%s gen=%s target=%s kind=comment payload=%s state=%s receipt=%s ts=%s\n' \
+    "$id" "$gen" "$target" "$payload" "$state" "$receipt" "$ts" > "$tmp" \
+    || ! chmod 0600 "$tmp" || ! fm_pr_private_file_valid "$tmp" 600 "$device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! fm_pr_regular_destination_on_device_or_absent "$slot" "$device" \
+    || ! mv -f -- "$tmp" "$slot"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+pipeline_effect_slot_create() {  # <slot> <task-id> <gen> <target> <payload>
+  local slot=$1 id=$2 gen=$3 target=$4 payload=$5 tmp device ts
+  device=$(fm_pr_file_device "$STATE") || return 1
+  fm_pr_regular_destination_on_device_or_absent "$slot" "$device" || return 1
+  tmp=$(umask 077; mktemp "$STATE/.fm-effect.XXXXXX") || return 1
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) || { rm -f -- "$tmp"; return 1; }
+  if ! printf 'schema=fm-effect.v1 task=%s gen=%s target=%s kind=comment payload=%s state=requested receipt=- ts=%s\n' \
+    "$id" "$gen" "$target" "$payload" "$ts" > "$tmp" \
+    || ! chmod 0600 "$tmp" || ! fm_pr_private_file_valid "$tmp" 600 "$device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ln "$tmp" "$slot" 2>/dev/null; then
+    rm -f -- "$tmp"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 2
+}
+
+pipeline_effect_unlock() {
+  fm_lock_release "$PIPELINE_LOCK_DIR" || true
+  trap - EXIT
+  PIPELINE_LOCK_DIR=
+}
+
+pipeline_effect_refuse() {  # <reason>
+  local reason=$1
+  pipeline_effect_unlock
+  printf 'refused:%s\n' "$reason" >&2
+  return 1
+}
+
+pipeline_effect_claim() {  # <task-id> <gen> <target> <payload>
+  local id=$1 gen=$2 target=$3 payload=$4 key slot create_rc=0
+  fm_task_id_path_safe "$id" || { printf 'refused:invalid-task-id\n' >&2; return 1; }
+  pipeline_effect_tuple_valid "$gen" "$target" "$payload" || { printf 'refused:invalid-tuple\n' >&2; return 1; }
+  key=$(pipeline_effect_key "$id" "$gen" "$target" "$payload") || return 1
+  slot=$(pipeline_effect_slot_path "$id" "$key") || return 1
+  lock_log
+  pipeline_effect_meta_guard "$id" "$gen" || return 1
+  pipeline_effect_slot_read "$slot" "$id" || { pipeline_effect_refuse corrupt-slot; return 1; }
+  case "$PIPELINE_EFFECT_STATE" in
+    absent)
+      pipeline_effect_slot_create "$slot" "$id" "$gen" "$target" "$payload" || create_rc=$?
+      case "$create_rc" in
+        0) pipeline_effect_unlock; printf 'claimed %s\n' "$key"; return 0 ;;
+        2) pipeline_effect_slot_read "$slot" "$id" || { pipeline_effect_refuse corrupt-slot; return 1; } ;;
+        *) pipeline_effect_refuse slot-create; return 1 ;;
+      esac
+      ;;
+  esac
+  [ "$PIPELINE_EFFECT_GEN" = "$gen" ] && [ "$PIPELINE_EFFECT_TARGET" = "$target" ] \
+    && [ "$PIPELINE_EFFECT_PAYLOAD" = "$payload" ] || { pipeline_effect_refuse tuple-mismatch; return 1; }
+  case "$PIPELINE_EFFECT_STATE" in
+    delivered) pipeline_effect_unlock; printf 'delivered %s\n' "$PIPELINE_EFFECT_RECEIPT"; return 0 ;;
+    requested|ambiguous) pipeline_effect_unlock; printf 'unresolved %s\n' "$PIPELINE_EFFECT_STATE"; return 3 ;;
+    abandoned) pipeline_effect_refuse abandoned ;;
+    *) pipeline_effect_refuse corrupt-slot ;;
+  esac
+}
+
+pipeline_effect_verify() {  # <task-id> <key> <gen> <target> <payload>
+  local id=$1 key=$2 gen=$3 target=$4 payload=$5 slot
+  fm_task_id_path_safe "$id" || { printf 'refused:invalid-task-id\n' >&2; return 1; }
+  pipeline_effect_tuple_valid "$gen" "$target" "$payload" || { printf 'refused:invalid-tuple\n' >&2; return 1; }
+  [ "$(pipeline_effect_key "$id" "$gen" "$target" "$payload")" = "$key" ] || {
+    printf 'refused:tuple-mismatch\n' >&2
+    return 1
+  }
+  slot=$(pipeline_effect_slot_path "$id" "$key") || return 1
+  lock_log
+  pipeline_effect_meta_guard "$id" "$gen" || return 1
+  pipeline_effect_slot_read "$slot" "$id" || { pipeline_effect_refuse corrupt-slot; return 1; }
+  [ "$PIPELINE_EFFECT_STATE" != absent ] || { pipeline_effect_refuse slot-missing; return 1; }
+  [ "$PIPELINE_EFFECT_GEN" = "$gen" ] && [ "$PIPELINE_EFFECT_TARGET" = "$target" ] \
+    && [ "$PIPELINE_EFFECT_PAYLOAD" = "$payload" ] || { pipeline_effect_refuse tuple-mismatch; return 1; }
+  pipeline_effect_unlock
+  printf 'verified %s %s\n' "$PIPELINE_EFFECT_STATE" "$PIPELINE_EFFECT_RECEIPT"
+}
+
+pipeline_effect_deliver() {  # <task-id> <key> <gen> <receipt> <target> <payload>
+  local id=$1 key=$2 gen=$3 receipt=$4 target=$5 payload=$6 slot
+  fm_task_id_path_safe "$id" || { printf 'refused:invalid-task-id\n' >&2; return 1; }
+  [[ "$receipt" =~ ^[1-9][0-9]*$ ]] || { printf 'refused:invalid-receipt\n' >&2; return 1; }
+  pipeline_effect_tuple_valid "$gen" "$target" "$payload" || { printf 'refused:invalid-tuple\n' >&2; return 1; }
+  [ "$(pipeline_effect_key "$id" "$gen" "$target" "$payload")" = "$key" ] || {
+    printf 'refused:tuple-mismatch\n' >&2
+    return 1
+  }
+  slot=$(pipeline_effect_slot_path "$id" "$key") || return 1
+  lock_log
+  pipeline_effect_meta_guard "$id" "$gen" || return 1
+  pipeline_effect_slot_read "$slot" "$id" || { pipeline_effect_refuse corrupt-slot; return 1; }
+  [ "$PIPELINE_EFFECT_STATE" != absent ] || { pipeline_effect_refuse missing-slot; return 1; }
+  [ "$PIPELINE_EFFECT_GEN" = "$gen" ] && [ "$PIPELINE_EFFECT_TARGET" = "$target" ] \
+    && [ "$PIPELINE_EFFECT_PAYLOAD" = "$payload" ] || { pipeline_effect_refuse tuple-mismatch; return 1; }
+  case "$PIPELINE_EFFECT_STATE" in
+    requested|ambiguous)
+      pipeline_effect_slot_write "$slot" "$id" "$gen" "$target" "$payload" delivered "$receipt" \
+        || { pipeline_effect_refuse slot-write; return 1; }
+      pipeline_effect_unlock
+      printf 'delivered %s\n' "$receipt"
+      ;;
+    delivered)
+      [ "$PIPELINE_EFFECT_RECEIPT" = "$receipt" ] || { pipeline_effect_refuse receipt-mismatch; return 1; }
+      pipeline_effect_unlock
+      printf 'delivered %s\n' "$receipt"
+      ;;
+    abandoned) pipeline_effect_refuse abandoned ;;
+    *) pipeline_effect_refuse corrupt-slot ;;
+  esac
+}
+
+pipeline_effect_ambiguous() {  # <task-id> <key> <gen>
+  local id=$1 key=$2 gen=$3 slot
+  fm_task_id_path_safe "$id" || { printf 'refused:invalid-task-id\n' >&2; return 1; }
+  slot=$(pipeline_effect_slot_path "$id" "$key") || { printf 'refused:invalid-key\n' >&2; return 1; }
+  lock_log
+  pipeline_effect_meta_guard "$id" "$gen" || return 1
+  pipeline_effect_slot_read "$slot" "$id" || { pipeline_effect_refuse corrupt-slot; return 1; }
+  [ "$PIPELINE_EFFECT_STATE" != absent ] || { pipeline_effect_refuse missing-slot; return 1; }
+  [ "$PIPELINE_EFFECT_GEN" = "$gen" ] || { pipeline_effect_refuse foreign-gen; return 1; }
+  case "$PIPELINE_EFFECT_STATE" in
+    requested)
+      pipeline_effect_slot_write "$slot" "$id" "$gen" "$PIPELINE_EFFECT_TARGET" "$PIPELINE_EFFECT_PAYLOAD" ambiguous - \
+        || { pipeline_effect_refuse slot-write; return 1; }
+      PIPELINE_EFFECT_STATE=ambiguous
+      ;;
+    ambiguous|delivered|abandoned) ;;
+    *) pipeline_effect_refuse corrupt-slot; return 1 ;;
+  esac
+  pipeline_effect_unlock
+  printf 'ambiguous %s\n' "$PIPELINE_EFFECT_STATE"
+}
+
+pipeline_effect_abandon() {  # <task-id> <key> <gen>
+  local id=$1 key=$2 gen=$3 slot
+  fm_task_id_path_safe "$id" || { printf 'refused:invalid-task-id\n' >&2; return 1; }
+  slot=$(pipeline_effect_slot_path "$id" "$key") || { printf 'refused:invalid-key\n' >&2; return 1; }
+  lock_log
+  pipeline_effect_meta_guard "$id" "$gen" || return 1
+  pipeline_effect_slot_read "$slot" "$id" || { pipeline_effect_refuse corrupt-slot; return 1; }
+  [ "$PIPELINE_EFFECT_STATE" != absent ] || { pipeline_effect_refuse missing-slot; return 1; }
+  [ "$PIPELINE_EFFECT_GEN" = "$gen" ] || { pipeline_effect_refuse foreign-gen; return 1; }
+  case "$PIPELINE_EFFECT_STATE" in
+    requested|ambiguous)
+      pipeline_effect_slot_write "$slot" "$id" "$gen" "$PIPELINE_EFFECT_TARGET" "$PIPELINE_EFFECT_PAYLOAD" abandoned - \
+        || { pipeline_effect_refuse slot-write; return 1; }
+      PIPELINE_EFFECT_STATE=abandoned
+      ;;
+    abandoned) ;;
+    delivered) pipeline_effect_refuse delivered; return 1 ;;
+    *) pipeline_effect_refuse corrupt-slot; return 1 ;;
+  esac
+  pipeline_effect_unlock
+  printf 'abandoned\n'
+}
+
+pipeline_effect_dispatch() {
+  local verb=${1-} id gen target payload key receipt
+  shift || true
+  case "$verb" in
+    claim)
+      [ "$#" -eq 7 ] || die 'effect claim requires <id> --gen <g> --target <t> --payload <p>'
+      id=$1; [ "$2" = --gen ] || die 'effect claim requires --gen'; gen=$3
+      [ "$4" = --target ] || die 'effect claim requires --target'; target=$5
+      [ "$6" = --payload ] || die 'effect claim requires --payload'; payload=$7
+      pipeline_effect_claim "$id" "$gen" "$target" "$payload"
+      return $?
+      ;;
+    verify)
+      [ "$#" -eq 8 ] || die 'effect verify requires <id> <key> --gen <g> --target <t> --payload <p>'
+      id=$1; key=$2; [ "$3" = --gen ] || die 'effect verify requires --gen'; gen=$4
+      [ "$5" = --target ] || die 'effect verify requires --target'; target=$6
+      [ "$7" = --payload ] || die 'effect verify requires --payload'; payload=$8
+      pipeline_effect_verify "$id" "$key" "$gen" "$target" "$payload"
+      return $?
+      ;;
+    deliver)
+      [ "$#" -eq 10 ] || die 'effect deliver requires <id> <key> --gen <g> --receipt <id> --target <t> --payload <p>'
+      id=$1; key=$2; [ "$3" = --gen ] || die 'effect deliver requires --gen'; gen=$4
+      [ "$5" = --receipt ] || die 'effect deliver requires --receipt'; receipt=$6
+      [ "$7" = --target ] || die 'effect deliver requires --target'; target=$8
+      [ "$9" = --payload ] || die 'effect deliver requires --payload'; payload=${10}
+      pipeline_effect_deliver "$id" "$key" "$gen" "$receipt" "$target" "$payload"
+      return $?
+      ;;
+    ambiguous|abandon)
+      [ "$#" -eq 4 ] || die "effect $verb requires <id> <key> --gen <g>"
+      id=$1; key=$2; [ "$3" = --gen ] || die "effect $verb requires --gen"; gen=$4
+      ;;
+    *) die 'effect requires claim, verify, deliver, ambiguous, or abandon' ;;
+  esac
+  case "$verb" in
+    ambiguous) pipeline_effect_ambiguous "$id" "$key" "$gen" ;;
+    abandon) pipeline_effect_abandon "$id" "$key" "$gen" ;;
+  esac
+}
+
 pipeline_retire() {  # <id>
   local id=$1 meta pipeline="$STATE/$1.pipeline" seen="$STATE/$1.pipeline-seen" path
+  local -a effect_paths=()
   fm_task_id_path_safe "$id" || { printf 'refused:invalid-task-id\n' >&2; return 1; }
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || { printf 'refused:unsafe-record-path\n' >&2; return 1; }
   meta="$STATE/$id.meta"
@@ -1210,6 +1531,14 @@ pipeline_retire() {  # <id>
       return 1
     }
   done
+  for path in "$STATE/$id.effect-"*; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    pipeline_state_file_valid "$path" || {
+      printf 'refused:unsafe-record-path\n' >&2
+      return 1
+    }
+    effect_paths[${#effect_paths[@]}]=$path
+  done
   lock_log
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     fm_lock_release "$PIPELINE_LOCK_DIR" || true
@@ -1217,7 +1546,11 @@ pipeline_retire() {  # <id>
     printf 'refused:live-meta\n' >&2
     return 1
   fi
-  rm -f -- "$pipeline" "$seen" || {
+  if [ "${#effect_paths[@]}" -gt 0 ]; then
+    rm -f -- "$pipeline" "$seen" "${effect_paths[@]}"
+  else
+    rm -f -- "$pipeline" "$seen"
+  fi || {
     fm_lock_release "$PIPELINE_LOCK_DIR" || true
     trap - EXIT
     printf 'refused:record-retire\n' >&2
@@ -1680,6 +2013,10 @@ case "$command" in
   retire)
     [ "$#" -eq 1 ] || die 'retire requires a task id'
     pipeline_retire "$1"
+    ;;
+  effect)
+    [ "$#" -gt 0 ] || die 'effect requires a verb'
+    pipeline_effect_dispatch "$@"
     ;;
   board-json)
     [ "$#" -eq 0 ] || die 'board-json takes no arguments'

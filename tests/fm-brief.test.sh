@@ -842,6 +842,16 @@ test_publish_rule_covers_crewmate_briefs() {
       "$mode ship publication rule must give the role-neutral wording to use instead"
     assert_grep "does not change how this brief addresses you" "$brief" \
       "$mode ship publication rule must be scoped to published text, not the status protocol"
+    if [ "$mode" = direct-PR ]; then
+      assert_grep 'publish --task <id> --file <path>' "$brief" \
+        "$mode ship brief must use the keyed publication seam"
+      assert_grep 'gh-axi pr comment <number> -R <owner/repo> --body-file <path>' "$brief" \
+        "$mode ship brief must use the numeric repository-qualified comment form"
+      assert_grep 'For a review reply, use the unkeyed' "$brief" \
+        "$mode ship brief must keep review replies on the unkeyed publication form"
+      assert_no_grep 'or the equivalent review reply command' "$brief" \
+        "$mode ship brief must not attach review replies to the keyed comment form"
+    fi
     heading_line=$(grep -n -Fx "# What you publish" "$brief" | head -n 1 | cut -d: -f1)
     task_line=$(grep -n -Fx "# Task" "$brief" | head -n 1 | cut -d: -f1)
     [ -n "$heading_line" ] && [ -n "$task_line" ] && [ "$heading_line" -lt "$task_line" ] \

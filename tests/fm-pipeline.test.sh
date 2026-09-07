@@ -2198,4 +2198,195 @@ test_arm_disarm_serialize_against_concurrent_contention
 test_arm_reports_unknown_holder_for_live_steal_reclaim
 test_arm_reclaims_a_dead_pid_lock
 test_arm_takes_lock_before_marker_check
+test_effect_owner_claim_deliver_and_terminal_guards() {
+  local root payload key output rc slot before after deliver_out1 deliver_out2 deliver_pid1 deliver_pid2
+  root=$(new_state effect-owner)
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  payload=$(printf '%064d' 0)
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect claim task \
+    --gen gen-1 --target github.com/o/r#7 --payload "$payload") || fail "initial effect claim refused"
+  key=${output#claimed }
+  [ "${#key}" -eq 64 ] || fail "effect key was not a sha256"
+  [ "$key" = 91c48c5adb89b07f0f3ed377f013a0ff4f73e9b4cdd4400cfc70cb2813c27c25 ] \
+    || fail "effect key changed for the fixed tuple"
+  slot="$root/state/task.effect-$key"
+  [ -f "$slot" ] || fail "effect claim did not create its dedicated slot"
+  assert_contains "$(cat "$slot")" 'schema=fm-effect.v1' "effect slot lost its schema"
+  assert_contains "$(cat "$slot")" 'state=requested' "effect claim did not record requested"
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect claim task \
+    --gen gen-1 --target github.com/o/r#7 --payload "$payload" 2>&1) || rc=$?
+  expect_code 3 "$rc" "a requested effect must not be claimed a second time"
+  assert_contains "$output" 'unresolved requested' "repeat claim did not remain unresolved"
+  (FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect deliver task "$key" \
+    --gen gen-1 --receipt 42 --target github.com/o/r#7 --payload "$payload" > "$root/deliver-1") &
+  deliver_pid1=$!
+  (FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect deliver task "$key" \
+    --gen gen-1 --receipt 42 --target github.com/o/r#7 --payload "$payload" > "$root/deliver-2") &
+  deliver_pid2=$!
+  wait "$deliver_pid1" || fail "first concurrent effect delivery refused"
+  wait "$deliver_pid2" || fail "second concurrent effect delivery refused"
+  deliver_out1=$(cat "$root/deliver-1")
+  deliver_out2=$(cat "$root/deliver-2")
+  [ "$deliver_out1" = 'delivered 42' ] || fail "first concurrent delivery returned: $deliver_out1"
+  [ "$deliver_out2" = 'delivered 42' ] || fail "second concurrent delivery returned: $deliver_out2"
+  before=$(cat "$slot")
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect deliver task "$key" \
+    --gen gen-1 --receipt 42 --target github.com/o/r#7 --payload "$payload") \
+    || fail "idempotent effect delivery refused"
+  after=$(cat "$slot")
+  [ "$before" = "$after" ] || fail "idempotent delivery rewrote a terminal slot"
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect deliver task "$key" \
+    --gen gen-1 --receipt 41 --target github.com/o/r#7 --payload "$payload" 2>&1) || rc=$?
+  expect_code 1 "$rc" "a different receipt must be refused"
+  assert_contains "$output" 'refused:receipt-mismatch' "receipt mismatch was not named"
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect ambiguous task "$key" --gen gen-1 \
+    >/dev/null || fail "late ambiguous transition refused"
+  [ "$(cat "$slot")" = "$before" ] || fail "late ambiguous downgraded delivered slot"
+  pass "fm-pipeline.sh: keyed effect slots claim once, deliver idempotently, and keep terminal state"
+}
+
+test_effect_owner_refuses_foreign_generation_and_corrupt_slots() {
+  local root payload output rc key slot
+  root=$(new_state effect-refusals)
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  payload=$(printf '%064d' 1)
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect claim task \
+    --gen gen-2 --target github.com/o/r#7 --payload "$payload" 2>&1) || rc=$?
+  expect_code 1 "$rc" "foreign generation claim must refuse"
+  assert_contains "$output" 'refused:foreign-gen' "foreign generation refusal was not named"
+  [ ! -e "$root/state/task.effect" ] || fail "foreign generation claim wrote an effect"
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect claim task \
+    --gen gen-1 --target github.com/o/r#7 --payload "$payload") || fail "valid effect claim refused"
+  key=${output#claimed }
+  slot="$root/state/task.effect-$key"
+  rm -f "$slot"
+  mkdir "$slot"
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect claim task \
+    --gen gen-1 --target github.com/o/r#7 --payload "$payload" 2>&1) || rc=$?
+  expect_code 1 "$rc" "a directory at the effect slot must refuse"
+  assert_contains "$output" 'refused:corrupt-slot' "corrupt effect slot was not named"
+  [ -d "$slot" ] || fail "corrupt effect slot was changed"
+  for effect in "$root/state/task.effect-"*; do
+    [ -e "$effect" ] || [ -L "$effect" ] || continue
+    [ "$effect" = "$slot" ] || fail "foreign generation claim wrote an effect outside the keyed namespace"
+  done
+  pass "fm-pipeline.sh: effect mutations fence generations and refuse corrupt slots"
+}
+
+test_effect_owner_rejects_invalid_receipts_and_stock_bash_retire() {
+  local root payload target key slot before_file invalid_file output rc=0
+  root=$(new_state effect-receipts)
+  payload=$(printf '%064d' 2)
+  target=github.com/o/r#7
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect claim task \
+    --gen gen-1 --target "$target" --payload "$payload") || fail "receipt fixture claim refused"
+  key=${output#claimed }
+  slot="$root/state/task.effect-$key"
+  before_file="$root/pristine.slot"
+  invalid_file="$root/invalid.slot"
+  cp -- "$slot" "$before_file"
+  local bad positive
+  for bad in - 0 007 77junk 12.3; do
+    sed "s/state=requested receipt=-/state=delivered receipt=$bad/" "$before_file" > "$slot.tmp"
+    chmod 600 "$slot.tmp"
+    mv "$slot.tmp" "$slot"
+    cp -- "$slot" "$invalid_file"
+    assert_contains "$(cat "$slot")" "state=delivered receipt=$bad" "invalid receipt fixture did not install receipt $bad"
+    rc=0
+    output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect claim task \
+      --gen gen-1 --target "$target" --payload "$payload" 2>&1) || rc=$?
+    expect_code 1 "$rc" "delivered receipt $bad must refuse"
+    assert_contains "$output" 'refused:corrupt-slot' "invalid delivered receipt $bad was not named"
+    cmp -s "$slot" "$invalid_file" || fail "invalid delivered receipt $bad refusal changed the slot bytes"
+  done
+  for positive in 1 7 42; do
+    sed "s/state=requested receipt=-/state=delivered receipt=$positive/" "$before_file" > "$slot"
+    chmod 600 "$slot"
+    rc=0
+    output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect claim task \
+      --gen gen-1 --target "$target" --payload "$payload" 2>&1) || rc=$?
+    expect_code 0 "$rc" "positive delivered receipt $positive must verify"
+    [ "$output" = "delivered $positive" ] || fail "positive receipt $positive returned: $output"
+  done
+  cp -- "$before_file" "$slot"
+  local bad_write
+  for bad_write in 0 007 77junk 12.3 -; do
+    cp -- "$before_file" "$slot"
+    rc=0
+    output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect deliver task "$key" \
+      --gen gen-1 --receipt "$bad_write" --target "$target" --payload "$payload" 2>&1) || rc=$?
+    expect_code 1 "$rc" "effect deliver receipt $bad_write must refuse"
+    assert_contains "$output" 'refused:invalid-receipt' "effect deliver receipt $bad_write refusal was not named"
+    cmp -s "$slot" "$before_file" || fail "effect deliver receipt $bad_write changed the slot bytes"
+  done
+  printf 'kind=ship\nspawn_gen=gen-retire-effect\n' > "$root/state/retire-with-effect.meta"
+  printf 'schema=fm-pipeline.v3 task=retire-with-effect kind=ship gen=gen-retire-effect rev=1 ts=2026-01-01T00:00:00Z step=working evidence=meta:state/retire-with-effect.meta\n' > "$root/state/retire-with-effect.pipeline"
+  cp -- "$before_file" "$root/state/retire-with-effect.effect-$key"
+  rm -f "$root/state/retire-with-effect.meta"
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" /bin/bash "$SCRIPT" retire retire-with-effect 2>&1) || rc=$?
+  expect_code 0 "$rc" "stock Bash must retire a task with effect slots"
+  assert_contains "$output" 'retired: retire-with-effect' "stock Bash effect-slot retire did not report success"
+  [ ! -e "$root/state/retire-with-effect.pipeline" ] || fail "stock Bash effect-slot retire left the record behind"
+  [ ! -e "$root/state/retire-with-effect.effect-$key" ] || fail "stock Bash effect-slot retire left the effect slot behind"
+  [ -e "$slot" ] || fail "retiring one task removed another task's effect slot"
+
+  printf 'kind=ship\nspawn_gen=gen-retire\n' > "$root/state/retire.meta"
+  printf 'schema=fm-pipeline.v3 task=retire kind=ship gen=gen-retire rev=1 ts=2026-01-01T00:00:00Z step=working evidence=meta:state/retire.meta\n' > "$root/state/retire.pipeline"
+  rm -f "$root/state/retire.meta"
+  rc=0
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" /bin/bash "$SCRIPT" retire retire 2>&1) || rc=$?
+  expect_code 0 "$rc" "stock Bash must retire a task without effect slots"
+  assert_contains "$output" 'retired: retire' "stock Bash retire did not report success"
+  [ ! -e "$root/state/retire.pipeline" ] || fail "stock Bash retire left the record behind"
+  pass "fm-pipeline.sh: invalid receipts refuse and stock Bash retires empty effect sets"
+}
+
 test_arm_lock_create_failure_watcher_reaches_supervision
+ test_effect_owner_claim_deliver_and_terminal_guards
+ test_effect_owner_refuses_foreign_generation_and_corrupt_slots
+test_effect_owner_competing_claims_and_abandonment() {
+  local root payload target out1 out2 key claimed unresolved output rc=0
+  root=$(new_state effect-competing)
+  payload=$(printf '%064d' 3)
+  target=github.com/o/r#7
+  printf 'kind=ship\nspawn_gen=gen-1\n' > "$root/state/task.meta"
+  (
+    FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect claim task \
+      --gen gen-1 --target "$target" --payload "$payload" > "$root/out1" 2>&1
+    printf '%s\n' "$?" > "$root/rc1"
+  ) &
+  local pid1=$!
+  (
+    FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect claim task \
+      --gen gen-1 --target "$target" --payload "$payload" > "$root/out2" 2>&1
+    printf '%s\n' "$?" > "$root/rc2"
+  ) &
+  local pid2=$!
+  wait "$pid1" || true
+  wait "$pid2" || true
+  out1=$(cat "$root/out1")
+  out2=$(cat "$root/out2")
+  claimed=$(printf '%s\n%s\n' "$out1" "$out2" | rg -c '^claimed ' || true)
+  unresolved=$(printf '%s\n%s\n' "$out1" "$out2" | rg -c '^unresolved requested$' || true)
+  [ "$claimed" -eq 1 ] || fail "competing claims produced $claimed claim results: $out1 / $out2"
+  [ "$unresolved" -eq 1 ] || fail "competing claims produced $unresolved unresolved results: $out1 / $out2"
+  case "$out1" in claimed\ *) key=${out1#claimed } ;; *) key=${out2#claimed } ;; esac
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect ambiguous task "$key" --gen gen-1 \
+    >/dev/null || fail "open effect did not become ambiguous"
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect abandon task "$key" --gen gen-1 \
+    >/dev/null || fail "ambiguous effect did not become abandoned"
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" effect claim task \
+    --gen gen-1 --target "$target" --payload "$payload" 2>&1) || rc=$?
+  expect_code 1 "$rc" "an abandoned effect must not reopen"
+  assert_contains "$output" 'refused:abandoned' "abandoned effect reopening was not refused"
+  pass "fm-pipeline.sh: competing claims serialize and abandonment is terminal"
+}
+
+test_effect_owner_competing_claims_and_abandonment
+ test_effect_owner_rejects_invalid_receipts_and_stock_bash_retire

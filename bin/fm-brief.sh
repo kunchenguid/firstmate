@@ -1047,7 +1047,7 @@ PR_BODY_EOF
     if [ "$MODE" = direct-PR ]; then
       PR_PUBLICATION_HELPER=$(shell_quote "$FM_ROOT/bin/fm-pr-body.sh")
       IFS= read -r -d '' PR_PUBLICATION_ADDENDUM <<EOF || true
-Publish every colleague-facing summary - the PR body (templated or untemplated), a PR comment, or a review reply - through the helper's executable seam: write the text to a file, then run \`$PR_PUBLICATION_HELPER publish --file <path> -- <forge command>\` with the real publication command after the \`--\`, for example \`$PR_PUBLICATION_HELPER publish --file <path> -- gh-axi pr comment <pr> --body-file <path>\` or the equivalent review reply command.
+Publish every colleague-facing summary - the PR body (templated or untemplated), a PR comment, or a review reply - through the helper's executable seam: write the text to a file, then run \`$PR_PUBLICATION_HELPER publish --file <path> -- <forge command>\` with the real publication command after the \`--\`. For a PR comment, use the keyed form \`$PR_PUBLICATION_HELPER publish --task <id> --file <path> -- gh-axi pr comment <number> -R <owner/repo> --body-file <path>\`. For a review reply, use the unkeyed \`$PR_PUBLICATION_HELPER publish --file <path> -- <forge command>\` form.
 The seam refuses unresolved \`{{PLACEHOLDER}}\` tokens and local filesystem paths and never invokes the forge command on a refusal, so unsafe text cannot reach the network; never invoke \`gh-axi pr create\`, \`gh-axi pr comment\`, or a review reply command directly to publish.
 Never copy private status or report paths into public text; reviewer-facing evidence is an uploaded URL, or a \`pending upload\` marker plus a description and who must upload it - never a local path as the fallback.
 EOF
