@@ -301,7 +301,7 @@ ID=$RAW_ID
 fm_lease_guard "$ID" "lifecycle control (fm-control)"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
-fm_lock_try_acquire "$CONTROL_LOCK" \
+fm_lock_acquire_task_control "$CONTROL_LOCK" \
   || die "another lifecycle action is already running for task $ID"
 CONTROL_LOCK_HELD=1
 META="$STATE/$ID.meta"
@@ -425,6 +425,63 @@ control_herdr_pi_session_generation_valid() {  # <kind> <value>
       ;;
     *) return 1 ;;
   esac
+}
+
+# The Pi engine's process-name vocabulary, kept identical to the single-owner
+# classifier in bin/backends/tmux.sh: the launcher, the signed wrapper and the
+# engine itself all name a running Pi.
+control_herdr_pi_engine_process_name() {  # <name-or-path>
+  local base=${1##*/}
+  base=${base#-}
+  case "$base" in
+    pi|pi-signed|pi-launcher|Pi) return 0 ;;
+  esac
+  return 1
+}
+
+# Positive-only liveness probe for the pane's Pi engine, read BEFORE any
+# identity, cwd or Treehouse-ownership gate. A Pi that is visibly running keeps
+# the ordinary lifecycle path (exit interrupts busy workers on purpose), so a
+# tool child holding the pane's foreground process group, a `pi-launcher` or
+# `Pi` process name, or a foreground cwd below the worktree must never become a
+# refusal. Returns 0 only on positive evidence; every other outcome falls
+# through to the conservative stale-exit proof below.
+control_herdr_pi_live_engine_present() {
+  local session pane process_json shell_pid names name
+  session=$(fm_backend_meta_exact_value "$META" herdr_session) || return 1
+  pane=$(fm_backend_meta_exact_value "$META" herdr_pane_id) || return 1
+  process_json=$(control_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  names=$(printf '%s' "$process_json" | jq -r --arg pane "$pane" '
+    .result
+    | select(.type == "pane_process_info" and .process_info.pane_id == $pane)
+    | .process_info.foreground_processes[]?
+    | (.name // empty), (.argv0 // empty), (.argv[0]? // empty)
+  ' 2>/dev/null) || names=
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if control_herdr_pi_engine_process_name "$name"; then
+      return 0
+    fi
+  done <<EOF
+$names
+EOF
+  shell_pid=$(printf '%s' "$process_json" | jq -er --arg pane "$pane" '
+    .result
+    | select(.type == "pane_process_info" and .process_info.pane_id == $pane)
+    | .process_info.shell_pid
+    | select(type == "number" and . > 1)
+    | floor
+  ' 2>/dev/null) || return 1
+  names=$(fm_herdr_pi_descendant_commands "$shell_pid") || return 1
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if control_herdr_pi_engine_process_name "$name"; then
+      return 0
+    fi
+  done <<EOF
+$names
+EOF
+  return 1
 }
 
 # One complete read-only sample for the narrow stale-Pi recovery predicate.
@@ -681,9 +738,18 @@ control_herdr_pi_recovery_applicable() {
 # stop for the caller: once a non-working registered Pi cannot be attributed to
 # either a visible Pi process or the exact stable nested-shell exit, terminal
 # input could land in an ordinary shell.
+#
+# Liveness is decided first and on its own evidence. Treehouse ownership is a
+# precondition for RELEASING someone else's authority, not for typing into a
+# pane that provably still hosts Pi, so an unprovable copy must never take the
+# ordinary exit path away from a healthy worker.
 control_maybe_release_stale_herdr_pi() {
   local first second sample_status session pane kind generation authority_seq released schema socket clearer
   control_herdr_pi_recovery_applicable || { printf 'not-applicable'; return 0; }
+  if control_herdr_pi_live_engine_present; then
+    printf 'live'
+    return 0
+  fi
   fm_herdr_pi_treehouse_copy_matches "$(fm_meta_get "$META" project)" "$WT" \
     || { printf 'refused'; return 0; }
   sample_status=0
@@ -782,9 +848,14 @@ control_accept_recovered_herdr_pi() {
 # accepting it only while exactly one Pi engine exists at or below that shell.
 # The caller samples this twice so a transient registration or process cannot
 # satisfy the relaunch postcondition.
-control_herdr_pi_authority_snapshot() {  # [<prior-session-ref>]
+# <prior-session-ref> is REQUIRED and carries the pre-relaunch generation, or
+# the literal `none` when the pane provably had none. An empty value is an
+# unread prior, which would make the distinctness test below vacuous, so it
+# refuses instead.
+control_herdr_pi_authority_snapshot() {  # <prior-session-ref>
   local prior=${1:-} session workspace tab pane agent_json fields status source kind value cwd state_seq wt_real
   local process_json shell_pid ps_bin rows counts pi_count signed_count pi_pid signed_pid pi_parent
+  [ -n "$prior" ] || return 1
   session=$(fm_backend_meta_exact_value "$META" herdr_session) || return 1
   workspace=$(fm_backend_meta_exact_value "$META" herdr_workspace_id) || return 1
   tab=$(fm_backend_meta_exact_value "$META" herdr_tab_id) || return 1
@@ -862,21 +933,47 @@ EOF
   printf '%s:%s\t%s:%s:%s:%s' "$kind" "$value" "$state_seq" "$shell_pid" "$pi_pid" "$signed_pid"
 }
 
+# Read the pane's CURRENT herdr:pi session generation as a three-way answer, so
+# the relaunch postcondition can never silently degrade from "a DISTINCT valid
+# generation" to "any valid generation".
+#   0  prints `<kind>:<value>` - a readable, valid generation is registered.
+#   2  prints `none` - the pane's own agent record positively proves no
+#      herdr:pi generation is registered (a plain dead pane, or another
+#      harness's agent), which the caller may safely compare against.
+#   1  prints nothing - unreadable or ambiguous; the caller must refuse.
+# The selector deliberately reads the same agent-level `agent == "pi"` and
+# `agent_session.source == "herdr:pi"` fields as
+# control_herdr_pi_authority_snapshot, so the before and after halves of the
+# distinctness proof can never disagree about which field carries the identity.
 control_current_herdr_pi_session_ref() {
-  local session pane out kind value
+  local session pane out rc=0 fields kind value
   [ "$BACKEND" = herdr ] || return 1
-  case "$HARNESS" in pi|pi-signed) ;; *) return 1 ;; esac
   session=$(fm_backend_meta_exact_value "$META" herdr_session) || return 1
   pane=$(fm_backend_meta_exact_value "$META" herdr_pane_id) || return 1
-  out=$(control_herdr_cli "$session" agent get "$pane" 2>/dev/null) || return 1
-  out=$(printf '%s' "$out" | jq -er '
-    .result.agent.agent_session
-    | select(.agent == "pi" and .source == "herdr:pi")
-    | select((.kind | type) == "string" and (.value | type) == "string")
-    | [ .kind, .value ] | @tsv
+  out=$(control_herdr_cli "$session" agent get "$pane" 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ "$(fm_backend_agent_state herdr "$session:$pane" 2>/dev/null)" = dead ] || return 1
+    printf 'none'
+    return 2
+  fi
+  printf '%s' "$out" | jq -e '
+    .result.type == "agent_info" and (.result.agent | type) == "object"
+  ' >/dev/null 2>&1 || return 1
+  fields=$(printf '%s' "$out" | jq -er '
+    [ .result.agent
+      | select(.agent == "pi")
+      | .agent_session
+      | select(type == "object" and .source == "herdr:pi")
+      | select((.kind | type) == "string" and (.value | type) == "string")
+      | [ .kind, .value ] | @tsv
+    ] | .[0] // ""
   ' 2>/dev/null) || return 1
+  if [ -z "$fields" ]; then
+    printf 'none'
+    return 2
+  fi
   IFS=$'\t' read -r kind value <<EOF
-$out
+$fields
 EOF
   control_herdr_pi_session_generation_valid "$kind" "$value" || return 1
   printf '%s:%s' "$kind" "$value"
@@ -884,6 +981,7 @@ EOF
 
 wait_new_herdr_pi_authority() {  # <prior-session-ref>
   local prior=${1:-} elapsed=0 sample previous='' stable=0
+  [ -n "$prior" ] || return 1
   while :; do
     sample=$(control_herdr_pi_authority_snapshot "$prior" 2>/dev/null) || sample=
     if [ -n "$sample" ] && [ "$sample" = "$previous" ]; then
@@ -1372,6 +1470,7 @@ record_note() {
 
 do_relaunch() {
   local exit_result state note_line prior_herdr_pi_session='' authority_line='' release_capability=''
+  local prior_session_rc=0
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -1410,8 +1509,21 @@ do_relaunch() {
 
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
-  if control_herdr_pi_recovery_applicable; then
-    prior_herdr_pi_session=$(control_current_herdr_pi_session_ref 2>/dev/null || true)
+  # Read the identity the postcondition will have to differ from, under exactly
+  # the condition that runs that postcondition, and before do_exit can retire
+  # it. An unreadable answer refuses here rather than degrading the proof to
+  # "any valid generation".
+  if [ "$BACKEND" = herdr ]; then
+    case "$TARGET_HARNESS" in
+      pi|pi-signed)
+        prior_session_rc=0
+        prior_herdr_pi_session=$(control_current_herdr_pi_session_ref) || prior_session_rc=$?
+        case "$prior_session_rc" in
+          0|2) ;;
+          *) die "task $ID's current Herdr Pi session identity could not be read, so a relaunch could not prove the replacement anchors a DISTINCT herdr:pi generation; refusing rather than accepting any session as new" ;;
+        esac
+        ;;
+    esac
   fi
   exit_result=$(do_exit)
   if [ -f "$HERDR_PI_RELEASE_PROOF" ] && [ ! -L "$HERDR_PI_RELEASE_PROOF" ] \

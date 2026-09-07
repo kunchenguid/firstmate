@@ -1149,7 +1149,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # this entrypoint directly (contract: bin/fm-lease-lib.sh).
     echo "error: relaunch (fm-spawn) refused - the supervision branch must relaunch through fm-control" >&2
     exit "$FM_LEASE_REFUSE_EXIT"
-  elif fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
+  elif fm_lock_acquire_task_control "$SPAWN_CONTROL_LOCK"; then
     SPAWN_CONTROL_LOCK_HELD=1
   else
     echo "error: another lifecycle action is already running for task $ID" >&2
@@ -1273,7 +1273,11 @@ fm_spawn_released_herdr_pi_proof_valid() {  # <task-meta> <target>
   project_real=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P) || return 1
   [ "$(fm_backend_meta_exact_value "$proof" project 2>/dev/null)" = "$project_real" ] || return 1
   fm_herdr_pi_treehouse_copy_matches "$project_real" "$wt_real" || return 1
-  harness=$(fm_backend_meta_exact_value "$meta" harness 2>/dev/null) || return 1
+  # The PRIOR harness, captured before this run republishes the record with the
+  # target harness. A supported cross-runtime relaunch (pi -> pi-signed, or
+  # pi -> another family) must still be able to consume a Pi release proof, so
+  # the proof is validated against what was released, never against the target.
+  harness=$RELAUNCH_PRIOR_HARNESS
   case "$harness" in pi|pi-signed) ;; *) return 1 ;; esac
   [ "$(fm_backend_meta_exact_value "$proof" harness 2>/dev/null)" = "$harness" ] || return 1
   kind=$(fm_backend_meta_exact_value "$meta" kind 2>/dev/null || true)
@@ -1393,6 +1397,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
+  # Captured BEFORE the endpoint check and never re-read: this record is
+  # republished with the TARGET harness further down, and the released-authority
+  # proof describes the harness that was released, not the one being launched.
+  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   if [ "$RELAUNCH_STATE" != dead ]; then
     if [ "$RELAUNCH_STATE" = alive ] \
@@ -1403,7 +1411,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
       exit 1
     fi
   fi
-  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -3989,7 +3996,7 @@ fi
 sleep 0.3
 if [ "$RELAUNCH_RELEASED_HERDR_PI" = 1 ] \
    && ! fm_spawn_released_herdr_pi_proof_valid "$RELAUNCH_META" "$RELAUNCH_TARGET"; then
-  echo "error: task $ID's released Herdr Pi endpoint changed before replacement launch; refusing rather than risking a duplicate worker" >&2
+  echo "error: task $ID's released Herdr Pi nested-shell proof no longer holds at the replacement launch boundary; refusing rather than risking a duplicate worker" >&2
   exit 1
 fi
 spawn_send_literal "$T" "$LAUNCH"

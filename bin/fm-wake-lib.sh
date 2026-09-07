@@ -1078,6 +1078,21 @@ fm_lock_acquire_wait_bounded() {
   return "$rc"
 }
 
+# fm_lock_acquire_task_control <lockdir>
+#
+# The single owner of how a lifecycle entry point (fm-control, fm-spawn
+# --relaunch, fm-teardown, fm-promote) takes a task's .control-<id>.lock.
+# The doorbell in fm-task-inbox-lib.sh holds that same lock across one liveness
+# read and one terminal submission so a steer cannot land in the nested shell an
+# exit or relaunch briefly exposes. That hold is short and bounded, but a plain
+# non-blocking try would report "another lifecycle action is already running"
+# for an ordinary steer, naming an action that is not running. Waiting it out
+# keeps the serialization and the honest message; the bound keeps a genuinely
+# concurrent lifecycle action a fast, legible refusal rather than a wedge.
+fm_lock_acquire_task_control() {  # <lockdir>
+  fm_lock_acquire_wait_bounded "$1" "${FM_TASK_CONTROL_LOCK_WAIT:-5}"
+}
+
 fm_lock_release() {
   local lockdir=$1 pid current ownerdir
   fm_current_pid current || return 1

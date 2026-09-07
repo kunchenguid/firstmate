@@ -77,3 +77,44 @@ fm_herdr_pi_nested_shell_process_fingerprint() {  # <pane-shell-pid> <foreground
     }
   '
 }
+
+# Print one command value per process strictly below <pane-shell-pid>, one per
+# line, skipping exited rows. This is the positive-evidence half of the same
+# proof: the fingerprint above refuses on any descendant it cannot name, while
+# this names them so a caller can recognize a still-running engine instead of
+# reading an unrecognized descendant as ambiguity. The ps format keeps `comm`
+# last so a process name containing spaces survives as one whole value.
+fm_herdr_pi_descendant_commands() {  # <pane-shell-pid>
+  local shell_pid=${1:-} ps_bin rows
+  case "$shell_pid" in ''|*[!0-9]*) return 1 ;; esac
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  rows=$("$ps_bin" -axo pid=,ppid=,stat=,comm= 2>/dev/null) || return 1
+  printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
+    {
+      if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || NF < 4 || seen[$1]++) next
+      pid = $1
+      parent[pid] = $2
+      state[pid] = $3
+      line = $0
+      sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "", line)
+      command[pid] = line
+      present[pid] = 1
+    }
+    END {
+      if (!present[shell]) exit 1
+      owned[shell] = 1
+      do {
+        changed = 0
+        for (pid in present) if (owned[pid] != 1 && owned[parent[pid]] == 1) {
+          owned[pid] = 1
+          changed = 1
+        }
+      } while (changed)
+      for (pid in owned) {
+        if (owned[pid] != 1 || pid == shell || state[pid] ~ /^Z/) continue
+        print command[pid]
+      }
+    }
+  '
+}

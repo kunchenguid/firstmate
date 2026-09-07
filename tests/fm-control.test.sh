@@ -545,6 +545,40 @@ hold_lifecycle_lock() {  # <lock-path>
   sleep 30
 }
 
+# The doorbell (fm_task_inbox_ring) holds this same lock across one liveness
+# read and one submission, so a hold of that length is an ordinary steer, not a
+# concurrent lifecycle action.
+hold_lifecycle_lock_briefly() {  # <lock-path> <seconds>
+  local lifecycle_lock_path=$1
+  . "$ROOT/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire "$lifecycle_lock_path" || return 1
+  sleep "$2"
+  fm_lock_release "$lifecycle_lock_path"
+}
+
+test_lifecycle_waits_out_a_doorbell_length_lock_hold() {
+  local case_dir out rc lifecycle_lock_path holder i=0
+  case_dir=$(new_case waited-lock)
+  add_task "$case_dir" t1 claude
+  alive_as "$case_dir" claude
+  lifecycle_lock_path="$case_dir/home/state/.control-t1.lock"
+  hold_lifecycle_lock_briefly "$lifecycle_lock_path" 1 &
+  holder=$!
+  while [ ! -e "$lifecycle_lock_path" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$lifecycle_lock_path" ] || { kill "$holder" 2>/dev/null || true; fail "could not stage the brief lifecycle lock"; }
+  out=$(run_control "$case_dir" t1 interrupt); rc=$?
+  wait "$holder" 2>/dev/null || true
+  expect_code 0 "$rc" "a doorbell-length control-lock hold should be waited out, not refused"$'\n'"$out"
+  assert_not_contains "$out" "another lifecycle action is already running" \
+    "a bounded doorbell hold was reported as a concurrent lifecycle action"
+  [ "$(keys_sent "$case_dir")" = Escape ] \
+    || fail "the waited-out interrupt never reached the endpoint"
+  pass "fm-control: a doorbell-length control-lock hold is waited out instead of refused"
+}
+
 test_interrupt_and_exit_lock_before_task_state_resolution() {
   local case_dir out rc verb lifecycle_lock_path holder i
   for verb in interrupt exit; do
@@ -896,6 +930,7 @@ test_unknown_task_is_refused
 test_record_bound_to_another_task_is_refused
 test_remote_secondmate_is_refused_by_placement
 test_interrupt_and_exit_lock_before_task_state_resolution
+test_lifecycle_waits_out_a_doorbell_length_lock_hold
 test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs

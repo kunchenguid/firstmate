@@ -385,7 +385,7 @@ teardown_release_locks() {
   return "$status"
 }
 trap teardown_release_locks EXIT
-fm_lock_try_acquire "$CONTROL_LOCK" || {
+fm_lock_acquire_task_control "$CONTROL_LOCK" || {
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
   exit 1
 }

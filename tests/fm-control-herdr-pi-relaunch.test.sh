@@ -7,10 +7,13 @@
 # samples of pane-shell -> treehouse get -> nested shell release only the exact
 # stale herdr:pi authority, then the existing relaunch transaction reuses the
 # endpoint and managed Treehouse copy, rotates generations, starts one Pi, and
-# verifies a distinct authority. Negative cases prove changing process evidence,
-# an unknown descendant, a live Pi with a foreground child, a working authority,
-# a different cwd, and endpoint/session identity mismatches all refuse before
-# release or terminal input. The real-Herdr counterpart is
+# verifies a distinct authority. Liveness cases prove a Pi that is positively
+# running keeps the ORDINARY exit path - even when a tool child owns the pane's
+# foreground process group, the engine presents as `pi-launcher`, the reported
+# cwd is below the worktree, or the Treehouse copy cannot be proved. Negative
+# cases prove changing process evidence, an unknown descendant, a working
+# authority, a different cwd, and endpoint/session identity mismatches all
+# refuse before release or terminal input. The real-Herdr counterpart is
 # tests/fm-control-herdr-pi-relaunch-live-e2e.test.sh.
 set -u
 
@@ -41,11 +44,20 @@ phase=$(cat "$state")
   printf '\n'
 } >> "$log"
 
+# The pane's reported cwd, decided once so pane/agent/process views agree.
+cwd=$FM_FAKE_WT
+if [ "$phase" = stale ]; then
+  case "$scenario" in
+    wrong-cwd) cwd=$FM_FAKE_PROJECT ;;
+    live-subdir-cwd) cwd=$FM_FAKE_WT/sub ;;
+  esac
+fi
+
 json_agent() {
   local status=$1 session=$2 source=${3:-herdr:pi}
   jq -cn \
     --arg pane w1:p2 --arg tab w1:t2 --arg workspace w1 \
-    --arg cwd "$FM_FAKE_WT" --arg status "$status" --arg session "$session" --arg source "$source" '
+    --arg cwd "$cwd" --arg status "$status" --arg session "$session" --arg source "$source" '
       {id:"cli:agent:get",result:{type:"agent_info",agent:{
         agent:"pi",agent_status:$status,state_change_seq:7,pane_id:$pane,tab_id:$tab,workspace_id:$workspace,
         foreground_cwd:$cwd,agent_session:{agent:"pi",kind:"id",source:$source,value:$session}
@@ -85,8 +97,6 @@ case "${1:-} ${2:-}" in
         ;;
       new) status=idle; session=$FM_FAKE_NEW_SESSION ;;
     esac
-    cwd=$FM_FAKE_WT
-    [ "$scenario" != wrong-cwd ] || cwd=$FM_FAKE_PROJECT
     jq -cn \
       --arg cwd "$cwd" --arg status "$status" --arg session "$session" --arg source "$source" '
         {id:"cli:pane:get",result:{type:"pane_info",pane:{
@@ -107,6 +117,7 @@ case "${1:-} ${2:-}" in
     ;;
   "agent get")
     case "$phase" in
+      quit) printf '%s\n' '{"id":"cli:agent:get","error":{"code":"agent_not_found","message":"no agent in pane"}}' ;;
       released) json_released_agent ;;
       stale)
         status=idle
@@ -129,15 +140,16 @@ case "${1:-} ${2:-}" in
       foreground=404
       name=pi
       argv0=pi
-    elif [ "$scenario" = changing-process ] && [ "$count" -ge 2 ]; then
-      foreground=304
-    elif [ "$scenario" = live-child ]; then
-      foreground=505
-      name=bash
-      argv0=/bin/bash
+    else
+      case "$scenario" in
+        # A fresh nested-shell pid on every sample, so the churn refusal never
+        # depends on how many times the proof happens to read the pane.
+        changing-process) foreground=$((300 + count)) ;;
+        live-child) foreground=505; name=bash; argv0=/bin/bash ;;
+        live-launcher) foreground=404; name=pi-launcher; argv0=pi-launcher ;;
+        live-subdir-cwd) foreground=505; name=git; argv0=/usr/bin/git ;;
+      esac
     fi
-    cwd=$FM_FAKE_WT
-    [ "$scenario" != wrong-cwd ] || cwd=$FM_FAKE_PROJECT
     jq -cn \
       --argjson shell "$shell" --argjson foreground "$foreground" \
       --arg name "$name" --arg argv0 "$argv0" --arg cwd "$cwd" '
@@ -152,7 +164,10 @@ case "${1:-} ${2:-}" in
     ;;
   "pane send-keys")
     if [ "${4:-}" = enter ] && [ -s "$FM_FAKE_PENDING_LAUNCH" ]; then
-      printf '%s\n' new > "$state"
+      case "$(cat "$FM_FAKE_PENDING_LAUNCH")" in
+        /quit*) printf '%s\n' quit > "$state" ;;
+        *) printf '%s\n' new > "$state" ;;
+      esac
     fi
     ;;
   "pane run") : ;;
@@ -169,7 +184,11 @@ scenario=$(cat "$FM_FAKE_SCENARIO")
 phase=$(cat "$FM_FAKE_HERDR_STATE")
 ps_count=$(($(cat "$FM_FAKE_PS_COUNT" 2>/dev/null || echo 0) + 1))
 printf '%s\n' "$ps_count" > "$FM_FAKE_PS_COUNT"
-if printf '%s\n' "$*" | grep -Fq 'args='; then
+
+# One row set (pid ppid pgid stat comm args) projected into whichever columns
+# the caller asked for, so every ps view of this fixture agrees with the pane
+# process-info the herdr fixture reports for the same sample.
+rows() {
   if [ "$phase" = new ] && [ "$scenario" = signed ]; then
     cat <<'EOF'
 101 1 101 S zsh -zsh
@@ -185,7 +204,7 @@ EOF
 303 202 303 S zsh /bin/zsh
 404 303 404 S pi pi
 EOF
-  elif [ "$scenario" = live-child ]; then
+  elif [ "$phase" = stale ] && [ "$scenario" = live-child ]; then
     cat <<'EOF'
 101 1 101 S zsh -zsh
 202 101 202 S treehouse treehouse get
@@ -193,7 +212,25 @@ EOF
 404 303 404 S pi pi
 505 404 505 S bash /bin/bash
 EOF
-  elif [ "$scenario" = late-descendant ] && [ "$phase" = released ] && [ "$ps_count" -ge 8 ]; then
+  elif [ "$phase" = stale ] && [ "$scenario" = live-launcher ]; then
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S pi-launcher /opt/pi/bin/pi-launcher
+EOF
+  elif [ "$phase" = stale ] && [ "$scenario" = live-subdir-cwd ]; then
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S pi pi
+505 404 505 S git /usr/bin/git status
+EOF
+  elif [ "$scenario" = late-descendant ] && [ "$phase" = released ] \
+       && grep -q '^control_relaunch_tx=' "$FM_FAKE_META" 2>/dev/null; then
+    # The replacement record is published, so this is the launch-boundary
+    # recheck rather than the pre-launch admission read.
     cat <<'EOF'
 101 1 101 S zsh -zsh
 202 101 202 S treehouse treehouse get
@@ -207,12 +244,12 @@ EOF
 303 202 303 S zsh /bin/zsh
 999 303 999 S mystery mystery
 EOF
-  elif [ "$scenario" = changing-process ] \
-       && [ "$(cat "$FM_FAKE_PROCESS_COUNT" 2>/dev/null || echo 0)" -ge 2 ]; then
-    cat <<'EOF'
+  elif [ "$scenario" = changing-process ]; then
+    nested=$((300 + $(cat "$FM_FAKE_PROCESS_COUNT" 2>/dev/null || echo 0)))
+    cat <<EOF
 101 1 101 S zsh -zsh
 202 101 202 S treehouse treehouse get
-304 202 304 S zsh /bin/zsh
+$nested 202 $nested S zsh /bin/zsh
 EOF
   else
     cat <<'EOF'
@@ -221,21 +258,14 @@ EOF
 303 202 303 S zsh /bin/zsh
 EOF
   fi
+}
+
+if printf '%s\n' "$*" | grep -Fq 'args='; then
+  rows
+elif printf '%s\n' "$*" | grep -Fq 'stat=,comm='; then
+  rows | awk '{ print $1, $2, $4, $5 }'
 else
-  if [ "$phase" = new ]; then
-    cat <<'EOF'
-101 1 zsh
-202 101 treehouse
-303 202 zsh
-404 303 pi
-EOF
-  else
-    cat <<'EOF'
-101 1 zsh
-202 101 treehouse
-303 202 zsh
-EOF
-  fi
+  rows | awk '{ print $1, $2, $5 }'
 fi
 SH
   chmod +x "$fb/ps-fixture"
@@ -273,6 +303,7 @@ new_case() {  # <name> <scenario> [harness]
   git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
   git -C "$project" worktree add --quiet -b "case-$name" "$wt"
   printf '%s\n' '{}' > "$pool/treehouse-state.json"
+  mkdir -p "$wt/sub"
   printf '%s\n' "$scenario" > "$dir/scenario"
   printf '%s\n' stale > "$dir/herdr-state"
   : > "$dir/herdr.log"
@@ -327,6 +358,7 @@ run_control() {  # <case-dir> <control args...>
     FM_FAKE_PS_COUNT="$dir/ps-count" \
     FM_FAKE_PENDING_LAUNCH="$dir/pending-launch" FM_FAKE_SOCKET="$dir/herdr.sock" \
     FM_FAKE_PROJECT="$dir/project" FM_FAKE_WT="$dir/pool/1/repo" \
+    FM_FAKE_META="$dir/home/state/rp1.meta" \
     FM_FAKE_OLD_SESSION="$(cat "$dir/old-session-id")" FM_FAKE_NEW_SESSION="$(cat "$dir/new-session-id")" \
     FM_HERDR_PS_BIN="$dir/fakebin/ps-fixture" \
     FM_CONTROL_HERDR_PI_AUTHORITY_CLEARER="$dir/fakebin/authority-clear" \
@@ -379,7 +411,36 @@ assert_contains "$out" 'relaunched rp1 harness=pi-signed from=pi-signed' "the si
   || fail "the signed relaunch should start exactly one replacement"
 pass "fm-control Herdr/Pi: pi-signed replacement requires one signed wrapper and one Pi engine"
 
-for scenario in changing-process unknown-descendant live-child working wrong-cwd identity-source identity-tab identity-workspace; do
+# A recovered stale Pi may be relaunched onto another supported runtime. The
+# release proof describes the harness that was RELEASED, so it must keep
+# validating against that after fm-spawn republishes the record on the target.
+dir=$(new_case cross-harness signed pi)
+out=$(run_control "$dir" rp1 relaunch --harness pi-signed --note 'resume on the signed wrapper')
+rc=$?
+expect_code 0 "$rc" "a released Pi should relaunch onto another supported harness"$'\n'"$out"
+assert_contains "$out" 'relaunched rp1 harness=pi-signed from=pi' "the cross-harness relaunch did not retarget the adapter"
+[ "$(grep '^harness=' "$dir/home/state/rp1.meta" | cut -d= -f2-)" = pi-signed ] \
+  || fail "the cross-harness relaunch did not republish the target harness"
+[ "$(grep -c '^authority-clear' "$dir/herdr.log" || true)" -eq 1 ] \
+  || fail "the cross-harness relaunch should release exactly one stale authority"
+[ "$(grep -c 'encode launch-brief' "$dir/herdr.log" || true)" -eq 1 ] \
+  || fail "the cross-harness relaunch should start exactly one replacement"
+pass "fm-control Herdr/Pi: a released stale authority still admits a relaunch onto another supported harness"
+
+# The relaunch postcondition is "a DISTINCT valid herdr:pi generation". An
+# unreadable or invalid prior identity makes that test vacuous, so it refuses
+# before the endpoint is touched rather than accepting any session as new.
+dir=$(new_case negative-unreadable-prior-session stable)
+printf '%s\n' 'not-a-valid-generation' > "$dir/old-session-id"
+out=$(run_control "$dir" rp1 relaunch --note 'exercise the ambiguous prior identity')
+rc=$?
+[ "$rc" -ne 0 ] || fail "an unreadable prior Pi session identity should refuse: $out"
+assert_contains "$out" 'DISTINCT herdr:pi generation' \
+  "the refusal did not name the postcondition it could not have proved"
+assert_no_terminal_or_release "$dir" "unreadable-prior-session"
+pass "fm-control Herdr/Pi: an unreadable prior Pi session identity refuses instead of weakening the distinctness proof"
+
+for scenario in changing-process unknown-descendant working wrong-cwd identity-source identity-tab identity-workspace; do
   dir=$(new_case "negative-$scenario" "$scenario")
   out=$(run_control "$dir" rp1 exit)
   rc=$?
@@ -387,7 +448,39 @@ for scenario in changing-process unknown-descendant live-child working wrong-cwd
   assert_contains "$out" 'could not be proved stable' "$scenario refusal did not name the conservative proof"
   assert_no_terminal_or_release "$dir" "$scenario"
 done
-pass "fm-control Herdr/Pi: churn, unknown/live descendants, working state, cwd drift, and identity mismatches all refuse without mutation or terminal input"
+pass "fm-control Herdr/Pi: churn, an unknown descendant, working state, cwd drift, and identity mismatches all refuse without mutation or terminal input"
+
+# A Pi engine that is positively running keeps the ORDINARY exit path. The
+# recovery exception only ever replaces a refusal it would otherwise have to
+# make, so none of these shapes may turn `exit` into a hard stop: a tool child
+# owning the pane's foreground process group, an engine that presents as
+# `pi-launcher`, or a reported cwd below the worktree because that child holds
+# the foreground group.
+for scenario in live-child live-launcher live-subdir-cwd; do
+  dir=$(new_case "live-$scenario" "$scenario")
+  out=$(run_control "$dir" rp1 exit)
+  rc=$?
+  expect_code 0 "$rc" "a visibly running Pi ($scenario) should take the ordinary exit path"$'\n'"$out"
+  assert_contains "$out" 'stopped rp1' "$scenario did not report an ordinary stop"
+  assert_contains "$(cat "$dir/herdr.log")" '/quit' "$scenario never submitted the harness exit command"
+  assert_not_contains "$(cat "$dir/herdr.log")" 'authority-clear' \
+    "$scenario released Herdr authority for a Pi that is still running"
+done
+pass "fm-control Herdr/Pi: a foreground tool child, a pi-launcher process name, and a nested foreground cwd all keep the ordinary live exit"
+
+# Treehouse ownership is a precondition for RELEASING someone else's authority,
+# never for typing into a pane that provably still hosts Pi. A copy whose
+# managed identity cannot be proved must not take ordinary exit away from a
+# worker that is running normally.
+dir=$(new_case live-unprovable-copy live-child)
+rm "$dir/pool/treehouse-state.json"
+out=$(run_control "$dir" rp1 exit)
+rc=$?
+expect_code 0 "$rc" "an unprovable Treehouse copy must not block a live Pi's ordinary exit"$'\n'"$out"
+assert_contains "$out" 'stopped rp1' "the live worker did not report an ordinary stop"
+assert_not_contains "$(cat "$dir/herdr.log")" 'authority-clear' \
+  "an unprovable copy gained stale-authority release rights"
+pass "fm-control Herdr/Pi: ownership is proved before release, not before ordinary lifecycle control"
 
 # The launch half re-runs the complete process proof after the release proof is
 # published. A descendant that appears in that final gap prevents terminal
