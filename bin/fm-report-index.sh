@@ -78,9 +78,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 INDEX_FILE="$DATA/report-index.md"
 SKIPPED_FILE="$DATA/report-index.skipped"
+REBUILD_LOCK="$STATE/.report-index.lock"
+REBUILD_LOCK_HELD=0
+REBUILD_TMP_INDEX=
+REBUILD_TMP_SKIPPED=
 
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
@@ -109,17 +114,25 @@ usage() {
 report_date() {
   local report=$1 date
   date=$(head -n "$DATE_HEAD_LINES" "$report" 2>/dev/null \
-    | grep -m1 -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' || true)
+    | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' \
+    | head -n 1 || true)
   if [ -n "$date" ]; then
     printf '%s\n' "$date"
     return 0
   fi
-  date=$(date -r "$report" '+%Y-%m-%d' 2>/dev/null || true)
+  if ! date=$(date -r "$report" '+%Y-%m-%d' 2>/dev/null); then
+    date=
+  fi
   if [ -z "$date" ]; then
     # GNU coreutils date lacks -r's file form on some builds; stat is the
     # portable fallback. Either way, never fail the entry over a date.
-    date=$(stat -f '%Sm' -t '%Y-%m-%d' "$report" 2>/dev/null \
-      || stat -c '%y' "$report" 2>/dev/null | cut -c1-10 || true)
+    if date=$(stat -f '%Sm' -t '%Y-%m-%d' "$report" 2>/dev/null); then
+      :
+    elif date=$(stat -c '%y' "$report" 2>/dev/null); then
+      date=${date%% *}
+    else
+      date=
+    fi
   fi
   printf '%s\n' "${date:-unknown}"
 }
@@ -199,8 +212,11 @@ index_entry() {
   [ -f "$report" ] || { SKIP_REASON=missing; return 1; }
   # stat reports size without opening the file, so an unreadable report's
   # permission error never leaks here; the head gate below owns readability.
-  size=$(stat -f%z "$report" 2>/dev/null || stat -c%s "$report" 2>/dev/null || true)
-  if [ -n "$size" ] && [ "$size" -gt "$MAX_REPORT_BYTES" ]; then
+  if ! size=$(stat -f%z "$report" 2>/dev/null || stat -c%s "$report" 2>/dev/null); then
+    SKIP_REASON=unreadable
+    return 1
+  fi
+  if [ "$size" -gt "$MAX_REPORT_BYTES" ]; then
     SKIP_REASON=oversized
     return 1
   fi
@@ -224,37 +240,104 @@ index_entry() {
   return 0
 }
 
+rebuild_cleanup() {
+  local status=0
+  if [ -n "$REBUILD_TMP_INDEX" ]; then
+    rm -f -- "$REBUILD_TMP_INDEX" 2>/dev/null || status=1
+    REBUILD_TMP_INDEX=
+  fi
+  if [ -n "$REBUILD_TMP_SKIPPED" ]; then
+    rm -f -- "$REBUILD_TMP_SKIPPED" 2>/dev/null || status=1
+    REBUILD_TMP_SKIPPED=
+  fi
+  if [ "$REBUILD_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$REBUILD_LOCK" || status=1
+    REBUILD_LOCK_HELD=0
+  fi
+  return "$status"
+}
+
 # rebuild: scan data/*/report.md, write the index and skipped files atomically.
 rebuild() {
-  local report tmp_index tmp_skipped id line entry_count=0 skipped_count=0
+  local report id entry_count=0 skipped_count=0
   [ -d "$DATA" ] || { echo "error: data directory not found: $DATA" >&2; return 1; }
-  tmp_index=$(mktemp 2>/dev/null) || { echo "error: mktemp failed" >&2; return 1; }
-  tmp_skipped=$(mktemp 2>/dev/null) || { rm -f "$tmp_index"; echo "error: mktemp failed" >&2; return 1; }
-  {
+  if ! mkdir -p "$STATE" 2>/dev/null; then
+    echo "error: state directory unavailable: $STATE" >&2
+    return 1
+  fi
+  # shellcheck source=bin/fm-wake-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  if ! fm_lock_acquire_wait "$REBUILD_LOCK"; then
+    echo "error: could not acquire report index lock: $REBUILD_LOCK" >&2
+    return 1
+  fi
+  REBUILD_LOCK_HELD=1
+  trap rebuild_cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  REBUILD_TMP_INDEX=$(umask 077; mktemp "$DATA/.report-index.md.XXXXXX" 2>/dev/null) || {
+    echo "error: could not stage report index in $DATA" >&2
+    return 1
+  }
+  REBUILD_TMP_SKIPPED=$(umask 077; mktemp "$DATA/.report-index.skipped.XXXXXX" 2>/dev/null) || {
+    echo "error: could not stage skipped report index in $DATA" >&2
+    return 1
+  }
+  if ! {
     printf '# Scout report index. Schema owner: bin/fm-report-index.sh.\n'
     printf '# One line per report: id | date | project | title | summary | path.\n'
     printf '# Rebuild: bin/fm-report-index.sh rebuild. No report bodies here; read <path> for content.\n'
-  } > "$tmp_index"
-  : > "$tmp_skipped"
+  } > "$REBUILD_TMP_INDEX"; then
+    echo "error: could not write staged report index" >&2
+    return 1
+  fi
+  if ! : > "$REBUILD_TMP_SKIPPED"; then
+    echo "error: could not write staged skipped report index" >&2
+    return 1
+  fi
   # Deterministic lexical order so re-runs reproduce the same bytes.
   while IFS= read -r report; do
     [ -f "$report" ] || continue
     id=$(basename "$(dirname "$report")") || continue
     if index_entry "$id" "$report"; then
-      printf '%s\n' "$INDEX_ENTRY_LINE" >> "$tmp_index"
+      if ! printf '%s\n' "$INDEX_ENTRY_LINE" >> "$REBUILD_TMP_INDEX"; then
+        echo "error: could not write staged report index" >&2
+        return 1
+      fi
       entry_count=$((entry_count + 1))
     else
       [ -n "${SKIP_REASON:-}" ] || SKIP_REASON=unreadable
-      printf '%s | %s\n' "$id" "$SKIP_REASON" >> "$tmp_skipped"
+      if ! printf '%s | %s\n' "$id" "$SKIP_REASON" >> "$REBUILD_TMP_SKIPPED"; then
+        echo "error: could not write staged skipped report index" >&2
+        return 1
+      fi
       skipped_count=$((skipped_count + 1))
     fi
   done < <(find "$DATA" -mindepth 2 -maxdepth 2 -name report.md 2>/dev/null | LC_ALL=C sort)
-  mv -f "$tmp_index" "$INDEX_FILE"
-  if [ -s "$tmp_skipped" ]; then
-    mv -f "$tmp_skipped" "$SKIPPED_FILE"
-  else
-    rm -f "$tmp_skipped" "$SKIPPED_FILE"
+  if ! mv -f -- "$REBUILD_TMP_INDEX" "$INDEX_FILE"; then
+    echo "error: could not publish report index: $INDEX_FILE" >&2
+    return 1
   fi
+  REBUILD_TMP_INDEX=
+  if [ -s "$REBUILD_TMP_SKIPPED" ]; then
+    if ! mv -f -- "$REBUILD_TMP_SKIPPED" "$SKIPPED_FILE"; then
+      echo "error: could not publish skipped report index: $SKIPPED_FILE" >&2
+      return 1
+    fi
+    REBUILD_TMP_SKIPPED=
+  elif ! rm -f -- "$REBUILD_TMP_SKIPPED" "$SKIPPED_FILE"; then
+    echo "error: could not clear skipped report index: $SKIPPED_FILE" >&2
+    return 1
+  else
+    REBUILD_TMP_SKIPPED=
+  fi
+  if ! rebuild_cleanup; then
+    echo "error: could not release report index rebuild resources" >&2
+    return 1
+  fi
+  trap - EXIT HUP INT TERM
   printf 'indexed %d report(s), skipped %d; index: %s\n' \
     "$entry_count" "$skipped_count" "$INDEX_FILE"
 }

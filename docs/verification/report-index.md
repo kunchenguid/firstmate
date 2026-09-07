@@ -28,7 +28,8 @@ $ FM_HOME=<home> bin/fm-report-index.sh show --tail 3
 ```
 
 Each summary is the report's own first TL;DR/summary line (or, when no summary heading exists, the first content line after the H1), with list markers and markdown bold stripped and capped at 140 characters; a line over the shared 220-character digest cap ends with the ` [truncated]` marker from `bin/fm-line-cap-lib.sh`.
-Three independent `rebuild` runs on identical input produced byte-identical output, which is the observable proof that no second LLM is consulted: a stochastic model could not reproduce the same bytes.
+Three independent `rebuild` runs on identical input produced byte-identical output, which verifies observable determinism only.
+The no-second-LLM guarantee is a source and runtime contract fact, not a conclusion drawn from repeated output.
 
 The privacy boundary was pinned by placing a distinctive marker string only in a report body (well past the bounded head) and asserting it appears in neither the index nor the skipped file.
 The body marker never reached either file across the rebuild, confirming extraction reads only each report's bounded head and stores only the catalog fields.
@@ -66,7 +67,7 @@ The portable regression in `tests/fm-report-index.test.sh` pins the behavior wit
 ## Reproduction
 
 ```text
-bin/fm-test-run.sh tests/fm-report-index.test.sh        # 13 portable assertions
+bin/fm-test-run.sh tests/fm-report-index.test.sh        # 15 portable assertions
 bin/fm-test-run.sh tests/fm-teardown.test.sh            # scout teardown rebuilds the index (case: test_scout_teardown_rebuilds_report_index)
 bin/fm-test-run.sh --check-coverage                     # coverage guard: the new test is accounted for
 ```

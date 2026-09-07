@@ -49,7 +49,7 @@ test_rebuild_extracts_all_fields_deterministically() {
   write_report "$home" alpha-probe firstmate <<'EOF'
 # Alpha probe report
 
-- 访问日期：2026-09-07
+- 访问日期：2026-09-07 至 2026-09-09
 - 范围：a focused scout
 
 ---
@@ -60,11 +60,10 @@ test_rebuild_extracts_all_fields_deterministically() {
 2. Secondary finding is out of scope here.
 
 ## 1. Body
-
-Far below the head: ZZPRIVACYBODYMARKER should never reach the index.
 EOF
-  # Pad so the body marker is well past SUMMARY_HEAD_LINES.
   for _ in $(seq 1 90); do printf 'padding line %s\n' "$_"; done >> "$home/data/alpha-probe/report.md"
+  printf 'Far below the head: ZZPRIVACYBODYMARKER should never reach the index.\n' \
+    >> "$home/data/alpha-probe/report.md"
   out=$(FM_HOME="$home" "$SCRIPT" rebuild)
   assert_contains "$out" "indexed 1 report(s)" "rebuild reported one indexed report"
   line=$(grep -v '^#' "$home/data/report-index.md" | grep 'alpha-probe')
@@ -72,6 +71,10 @@ EOF
   assert_contains "$line" "Alpha probe report" "title extracted"
   assert_contains "$line" "The probe confirms the hypothesis holds under load." "summary is the TL;DR first content line"
   assert_contains "$line" "data/alpha-probe/report.md" "path recorded"
+  [ "$(grep -vc '^#' "$home/data/report-index.md")" -eq 1 ] \
+    || fail "a date-range line split one report across multiple index lines"
+  ! grep -q '2026-09-09' "$home/data/report-index.md" \
+    || fail "date extraction retained more than the first date match"
   pass "rebuild extracts id/date/project/title/summary/path deterministically"
 }
 
@@ -86,10 +89,10 @@ test_report_body_never_enters_index_or_skipped() {
 Benign summary line.
 
 ## Body
-
-ZZPRIVACYBODYMARKER secret finding detail that must never be cataloged.
 EOF
   for _ in $(seq 1 90); do printf 'pad %s\n' "$_"; done >> "$home/data/secret-scout/report.md"
+  printf 'ZZPRIVACYBODYMARKER secret finding detail that must never be cataloged.\n' \
+    >> "$home/data/secret-scout/report.md"
   FM_HOME="$home" "$SCRIPT" rebuild >/dev/null
   ! grep -q 'ZZPRIVACYBODYMARKER' "$home/data/report-index.md" \
     || fail "report body leaked into the index"
@@ -217,12 +220,9 @@ test_session_start_digest_reports_absent_without_rebuild() {
   pass "digest reports ABSENT without rebuilding"
 }
 
-test_rebuild_uses_no_second_llm() {
-  # The determinism assertion is the observable proof that extraction involves
-  # no second LLM: a stochastic model would not produce byte-identical output
-  # across three independent runs on identical input.
+test_rebuild_output_is_deterministic() {
   local home a b c
-  home=$(make_home no-llm)
+  home=$(make_home deterministic)
   write_report "$home" det firstmate <<'EOF'
 # Det
 
@@ -236,7 +236,80 @@ EOF
   b=$(FM_HOME="$home" "$SCRIPT" rebuild >/dev/null; cat "$home/data/report-index.md")
   c=$(FM_HOME="$home" "$SCRIPT" rebuild >/dev/null; cat "$home/data/report-index.md")
   [ "$a" = "$b" ] && [ "$b" = "$c" ] || fail "extraction is not deterministic across runs"
-  pass "rebuild is deterministic (no second LLM at runtime)"
+  pass "rebuild output is identical across repeated runs"
+}
+
+test_rebuild_serializes_scan_through_publication() {
+  local home held release holder_pid rebuild_pid blocked=1 published=0 rc
+  home=$(make_home serialized)
+  held="$home/lock-held"
+  release="$home/release-lock"
+  write_report "$home" serialized-report firstmate <<'EOF'
+# Serialized report
+
+## TL;DR
+
+serialized summary.
+EOF
+  FM_HOME="$home" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 1
+    : > "$3"
+    while [ ! -f "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/.report-index.lock" "$held" "$release" &
+  holder_pid=$!
+  for _ in $(seq 1 100); do
+    [ -f "$held" ] && break
+    sleep 0.02
+  done
+  [ -f "$held" ] || { : > "$release"; wait "$holder_pid" 2>/dev/null; fail "lock holder did not start"; }
+  FM_HOME="$home" "$SCRIPT" rebuild > "$home/rebuild.out" 2>&1 &
+  rebuild_pid=$!
+  sleep 0.2
+  kill -0 "$rebuild_pid" 2>/dev/null || blocked=0
+  [ ! -e "$home/data/report-index.md" ] || published=1
+  : > "$release"
+  wait "$holder_pid" || fail "lock holder failed"
+  wait "$rebuild_pid"; rc=$?
+  expect_code 0 "$rc" "serialized rebuild failed"
+  [ "$blocked" -eq 1 ] || fail "rebuild did not wait for the shared report-index lock"
+  [ "$published" -eq 0 ] || fail "rebuild published while another rebuild held the lock"
+  assert_grep 'serialized-report | ' "$home/data/report-index.md" "serialized rebuild published after lock release"
+  pass "rebuild serializes scan through publication"
+}
+
+test_rebuild_reports_publication_failure_and_cleans_staging() {
+  local home rc leftovers
+  home=$(make_home publish-failure)
+  write_report "$home" publish-report firstmate <<'EOF'
+# Publish report
+
+## TL;DR
+
+publish summary.
+EOF
+  mkdir -p "$home/fake-bin"
+  cat > "$home/fake-bin/mv" <<'EOF'
+#!/usr/bin/env bash
+destination=
+for argument in "$@"; do destination=$argument; done
+case "$destination" in
+  */report-index.md) exit 73 ;;
+esac
+exec /bin/mv "$@"
+EOF
+  chmod +x "$home/fake-bin/mv"
+  PATH="$home/fake-bin:$PATH" FM_HOME="$home" "$SCRIPT" rebuild \
+    > "$home/rebuild.out" 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "publication failure was reported as success"
+  assert_grep 'could not publish report index' "$home/rebuild.out" "publication failure was diagnosable"
+  [ ! -e "$home/data/report-index.md" ] || fail "failed publication left an index behind"
+  leftovers=$(find "$home/data" -maxdepth 1 \
+    \( -name '.report-index.md.*' -o -name '.report-index.skipped.*' \) -print)
+  [ -z "$leftovers" ] || fail "failed publication left staging files behind: $leftovers"
+  pass "publication failure returns nonzero and cleans staging files"
 }
 
 test_rebuild_handles_empty_home() {
@@ -309,7 +382,9 @@ test_report_body_never_enters_index_or_skipped
 test_rebuild_is_idempotent
 test_skip_cases_record_reasons_without_body
 test_show_bounded_tail_and_absent
-test_rebuild_uses_no_second_llm
+test_rebuild_output_is_deterministic
+test_rebuild_serializes_scan_through_publication
+test_rebuild_reports_publication_failure_and_cleans_staging
 test_rebuild_handles_empty_home
 test_rebuild_resolves_home_via_FM_HOME
 test_rebuild_project_falls_back_when_no_brief
