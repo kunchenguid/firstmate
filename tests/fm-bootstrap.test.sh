@@ -1295,6 +1295,8 @@ Match host github-work
   HostName github.com
 Match exec "touch $marker"
   HostName should-not-be-used.example
+Match EXEC "touch $marker"
+  HostName should-not-be-used-case-variant.example
 EOF
   cat > "$config_dir/included.conf" <<'EOF'
   Host github-work
@@ -1303,7 +1305,8 @@ EOF
   cat > "$fakebin/ssh" <<'SH'
 #!/usr/bin/env bash
 config=$(cat)
-if grep -F -q 'HostName should-not-be-used.example' <<<"$config"; then
+if grep -F -q 'HostName should-not-be-used.example' <<<"$config" \
+  || grep -F -q 'HostName should-not-be-used-case-variant.example' <<<"$config"; then
   printf '%s\n' 'hostname should-not-be-used.example'
 elif grep -F -q 'Match host github-work' <<<"$config" \
   && grep -F -q 'HostName github.com' <<<"$config"; then
