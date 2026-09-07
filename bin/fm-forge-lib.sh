@@ -97,9 +97,9 @@ fm_forge_safe_ssh_config_file() {
         in_match=1
         match_safe=1
         for pattern in $rest; do
-          [ "$pattern" = exec ] || continue
-          match_safe=0
-          break
+          case "$pattern" in
+            [Ee][Xx][Ee][Cc]) match_safe=0; break ;;
+          esac
         done
         [ "$match_safe" -eq 1 ] && printf '%s\n' "$line"
         ;;
