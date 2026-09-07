@@ -1254,6 +1254,8 @@ test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy() {
   expect_code 2 "$status" "--claude mode must re-block a stop_hook_active=true stop while unhealthy with no auto-arm claim"
   assert_contains "$out" "TURN WOULD END BLIND" "--claude re-block must carry the blind-turn banner"
   assert_contains "$out" "Stop-owned auto-arm did not claim" "--claude re-block must explain the missing auto-arm claim"
+  assert_contains "$out" "recovery is NOT already under way" "a refusal with no auto-arm to prime must still say nothing is recovering"
+  assert_not_contains "$out" "primed a detached watcher start" "a refusal that primed nothing must not claim it primed a watcher"
   pass "fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)"
 }
 
@@ -2034,6 +2036,8 @@ test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal() {
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
   expect_code 2 "$status" "first unprimed-window stop must still refuse while the watcher is not yet healthy"
   assert_contains "$out" "TURN WOULD END BLIND" "first refused stop lost the blind-turn banner"
+  assert_contains "$out" "primed a detached watcher start" "a refusal that primed a cycle must say so instead of sending the model to diagnose it"
+  assert_not_contains "$out" "recovery is NOT already under way" "a refusal that primed a cycle must not deny that recovery started"
   release_and_await_primed_watcher "$dir" \
     || fail "the watcher primed by the refused stop never claimed the home lock"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?

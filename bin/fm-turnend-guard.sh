@@ -222,6 +222,11 @@ if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
   allow_supervised_stop
 fi
 
+# Set by the refusal-path priming below, so the banner reports what this hook
+# actually did rather than inferring from the absent generation claim that
+# nothing is recovering.
+PRIMED_RECOVERY=0
+
 block_stop() {
   local afk x_mode reason rule
   afk=0
@@ -244,7 +249,12 @@ block_stop() {
       printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
-      printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
+      if [ "$PRIMED_RECOVERY" -eq 1 ]; then
+        printf '●  The Stop-owned auto-arm did not claim this home, so no generation claim owns recovery yet.\n'
+        printf '●  This refusal primed a detached watcher start that survives it, so it cannot guarantee the next refusal - verify whether a watcher took the home lock before treating the Stop hook as broken.\n'
+      else
+        printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
+      fi
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
@@ -493,6 +503,7 @@ if ! fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" \
   printf '%s' "$PAYLOAD" \
     | "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" --ensure-watcher \
     || true
+  PRIMED_RECOVERY=1
 fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
