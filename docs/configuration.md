@@ -739,7 +739,9 @@ Every failure path - a mutated spec or action executable, a condition error past
 The adapter automates only the exact deterministic subset: anything needing judgment, and anything destructive, irreversible, or security-sensitive, keeps the ordinary check-fires-then-firstmate-decides flow, and the adapter's header and `--help` own its commands, flags, and outcome document.
 
 This section is the single owner of the runner's operating contract.
-Process-event commands resolve the state root to its physical directory before validating it and deriving paths, so a home reached through a symlinked ancestor behaves like its physical spelling while an unsafe target directory remains refused.
+Process-event commands resolve the state root to its physical directory before validating it and deriving paths, so a home reached through a symlinked ancestor behaves like its physical spelling.
+Because the state root is shared with the rest of firstmate and whichever script creates it first does so under the host's umask, a same-user root that arrives group- or other-writable is established private by clearing those write bits rather than refused, and the tightening converges on repeat.
+A root owned by another user, or one that cannot be tightened, remains refused.
 Registration writes one private record under `state/procevent/`, and a completed result plus its immutable adapter identity are captured under `state/procevent-inbox/` before any announcement or event can reference it.
 By default, results are published as ordinary `check` wakes carrying the source id and committed result sequence through the existing durable wake queue, so the runner adds no second notification control plane.
 The self-announcing adapter exception and its fail-safe ordering are defined below.

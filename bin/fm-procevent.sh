@@ -154,6 +154,13 @@
 # relax ownership cleanup. Reconcile stops a safely identified surviving group
 # before replacement and keeps the claim for a later retry when it cannot.
 #
+# The state root this module operates on is shared with the rest of firstmate,
+# and whichever script creates $FM_HOME/state first does so under the host's
+# umask, so on a umask-002 host it arrives group-writable. This runner clears the
+# group and other write bits on a root it owns before using it, rather than
+# refusing the home; a root owned by another user, or one that cannot be
+# tightened, is still refused.
+#
 # Durability boundary: see bin/fm-procevent-lib.sh. This runner proves capture
 # before publication and bounded re-announcement until handled, and nothing
 # about the source side of the handoff.
