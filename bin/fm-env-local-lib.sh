@@ -154,7 +154,13 @@ fm_env_local_file_identity() {  # <file>
   # Include ctime so an in-place rewrite is not mistaken for the untouched
   # seeded file merely because it preserved the inode and bytes.
   if [ "$(uname)" = Darwin ]; then
-    stat -f '%d:%i:%c' "$1" 2>/dev/null
+    if command -v gstat >/dev/null 2>&1; then
+      gstat -c '%d:%i:%z' "$1" 2>/dev/null
+    elif command -v python3 >/dev/null 2>&1; then
+      python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print(f"{s.st_dev}:{s.st_ino}:{s.st_ctime_ns}")' "$1" 2>/dev/null
+    else
+      return 1
+    fi
   else
     # `%Z` is whole-second ctime; `%z` preserves the filesystem timestamp's
     # sub-second precision so a same-second in-place rewrite cannot retain the
