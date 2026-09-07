@@ -207,7 +207,7 @@ test_secondmate_launch_never_gets_the_prefix() {
   w="$TMP_ROOT/secondmate-unaffected"
   prim="$w/primary"
   sm="$w/sm"
-  id=sm-noautocompact
+  id="sm-noautocompact"
   launchlog="$w/launch.log"
   mkdir -p "$prim/config" "$prim/data/$id" "$prim/state" "$prim/projects"
   printf '60\n' > "$prim/config/crew-autocompact-pct"
