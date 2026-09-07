@@ -712,6 +712,16 @@ test_remote_seeded_home_returns_its_uncontested_slot() {
   assert_absent "$dir/home/state/$id.meta" "remote-seeded teardown left the task record"
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "remote-seeded teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# remote-seeded Treehouse teardown command\n'
+    printf '$ FM_HOME=%s bin/fm-teardown.sh %s --force\n' "$dir/home" "$id"
+    printf 'stdout:\n'; cat "$dir/stdout"
+    printf 'stderr:\n'; cat "$dir/stderr"
+    printf 'exit=%s\nruntime calls:\n' "$rc"; cat "$dir/runtime.log"
+    printf 'task metadata=%s\nslot sentinel=%s\n' \
+      "$([ -e "$dir/home/state/$id.meta" ] && printf present || printf removed)" \
+      "$([ -e "$dir/worktree/sentinel" ] && printf present || printf removed)"
+  fi
 
   pass "fm-teardown: a remote-seeded secondmate home returns its own uncontested pool slot"
 }
@@ -749,6 +759,17 @@ test_remote_seeded_home_still_refuses_a_slot_its_child_holds() {
   assert_present "$dir/worktree/sentinel" "remote-layout collision reset the shared slot"
   assert_contains "$(cat "$dir/stderr")" "$other" \
     "remote-layout refusal should name the task holding the slot"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# remote-seeded cross-home collision command\n'
+    printf '$ FM_HOME=%s bin/fm-teardown.sh %s --force\n' "$dir/home" "$id"
+    printf 'stderr:\n'; cat "$dir/stderr"
+    printf 'exit=%s\nruntime calls=%s\n' "$rc" \
+      "$([ -s "$dir/runtime.log" ] && cat "$dir/runtime.log" || printf none)"
+    printf 'remote metadata=%s\nchild metadata=%s\nslot sentinel=%s\n' \
+      "$([ -e "$dir/home/state/$id.meta" ] && printf preserved || printf removed)" \
+      "$([ -e "$child_home/state/$other.meta" ] && printf preserved || printf removed)" \
+      "$([ -e "$dir/worktree/sentinel" ] && printf preserved || printf removed)"
+  fi
 
   pass "fm-teardown: slot ownership across a remote-seeded home and its local child still refuses"
 }
