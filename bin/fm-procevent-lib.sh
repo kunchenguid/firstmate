@@ -702,6 +702,11 @@ fm_procevent_claim_acquire_locked() {
     if [ "$status" -eq 0 ]; then
       FM_PROCEVENT_CLAIM_TOKEN=$token
       FM_PROCEVENT_CLAIM_REG_IDENTITY=$reg_identity
+      FM_PROCEVENT_CLAIM_STATE_ROOT=$state_root
+      FM_PROCEVENT_CLAIM_STATE_DEVICE=$state_device
+      FM_PROCEVENT_CLAIM_STATE_INODE=$state_inode
+      FM_PROCEVENT_CLAIM_STATE_OWNER=$state_owner
+      FM_PROCEVENT_CLAIM_STATE_MODE=$state_mode
     fi
   fi
   [ "$status" -eq 0 ] || { [ -z "${tmp:-}" ] || rm -f -- "$tmp"; }

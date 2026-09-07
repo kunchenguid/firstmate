@@ -765,6 +765,8 @@ cmd_start() {
   CLAIM_PID=$$
   CLAIM_TOKEN=$FM_PROCEVENT_CLAIM_TOKEN
   CLAIM_REG_IDENTITY=$FM_PROCEVENT_CLAIM_REG_IDENTITY
+  CLAIM_STATE_DEVICE=$FM_PROCEVENT_CLAIM_STATE_DEVICE
+  CLAIM_STATE_INODE=$FM_PROCEVENT_CLAIM_STATE_INODE
   STAGED_OUTPUT=
   release_start_claim() {
     extension_lifecycle_lock_release 2>/dev/null || true
@@ -1015,7 +1017,7 @@ start_owner_guard() {  # <source-id>
   identity=$(fm_pid_identity "$$" 2>/dev/null) || return 1
   ready=$(umask 077; mktemp "$REG/.owner-guard-ready.XXXXXX") || return 1
   if ! isolate_process detach "$SCRIPT_DIR/fm-procevent.sh" _owner-watchdog \
-      "$1" "$$" "$identity" "$ready"; then
+      "$1" "$$" "$identity" "$ready" "$CLAIM_STATE_DEVICE" "$CLAIM_STATE_INODE"; then
     rm -f -- "$ready"
     return 1
   fi
@@ -1043,12 +1045,15 @@ start_owner_guard() {  # <source-id>
 # matches on a script name, a command line, or a process name: those are shared
 # by every home running the same adapter, and a live source in another home
 # proves its own owner through that home's own lease.
-cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file>
-  local id=${1-} pid=${2-} identity=${3-} ready=${4-} lease tick misses=0 pid_state
-  [ "$#" -eq 4 ] || usage
+cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file> <state-device> <state-inode>
+  local id=${1-} pid=${2-} identity=${3-} ready=${4-} state_device=${5-} state_inode=${6-}
+  local lease tick misses=0 pid_state state_identity current_root current_device current_inode current_owner current_mode
+  [ "$#" -eq 6 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$pid" in ''|*[!0-9]*) die "runner pid must be a positive integer: $pid" ;; esac
   [ -n "$identity" ] || die "runner identity is required"
+  case "$state_device" in ''|*[!0-9]*) die "state device must be an integer" ;; esac
+  case "$state_inode" in ''|*[!0-9]*) die "state inode must be an integer" ;; esac
   [ "${ready%/*}" = "$REG" ] && [ -f "$ready" ] && [ ! -L "$ready" ] \
     || die "owner guard readiness boundary is invalid"
   trap 'printf "failed\n" > "$ready" 2>/dev/null || true' EXIT
@@ -1060,6 +1065,11 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
   fm_procevent_pid_state "$pid" "$identity"
   pid_state=$?
   [ "$pid_state" -eq 0 ] || die "runner identity changed before owner guard initialization"
+  state_identity=$(fm_procevent_claim_state_root_identity "$STATE") \
+    || die "owning state root identity is unreadable at owner guard initialization"
+  IFS=$'\t' read -r current_root current_device current_inode current_owner current_mode <<< "$state_identity"
+  [ "$current_device" = "$state_device" ] && [ "$current_inode" = "$state_inode" ] \
+    || die "owning state root identity changed before owner guard initialization"
   fm_procevent_owner_alive "$STATE" "$lease" \
     || die "owning session lease is not fresh at owner guard initialization"
   printf 'ready\n' > "$ready" || die "cannot confirm owner guard initialization"
@@ -1073,7 +1083,14 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
       0) ;;
       *) continue ;;
     esac
-    if fm_procevent_owner_alive "$STATE" "$lease"; then
+    state_identity=$(fm_procevent_claim_state_root_identity "$STATE" 2>/dev/null || true)
+    current_device=
+    current_inode=
+    [ -z "$state_identity" ] \
+      || IFS=$'\t' read -r current_root current_device current_inode current_owner current_mode <<< "$state_identity"
+    if [ "$current_device" = "$state_device" ] \
+      && [ "$current_inode" = "$state_inode" ] \
+      && fm_procevent_owner_alive "$STATE" "$lease"; then
       misses=0
       continue
     fi

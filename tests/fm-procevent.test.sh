@@ -2059,6 +2059,29 @@ while :; do
 done
 pass "an expired owner lease stops a self-relaunching source generation"
 
+HRECREATED="$TMP_ROOT/recreated-owner"; new_home "$HRECREATED"
+fm_test_track_procevent_home "$HRECREATED"
+RECREATED_TRIGGER="$TMP_ROOT/recreated-owner.trigger"
+pe_register "$HRECREATED" lavish recreated-src -- \
+  "$BLOCKER" "$RECREATED_TRIGGER" "recreated payload" >/dev/null
+FM_PROCEVENT_OWNER_LEASE_SECONDS=30 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+  pe "$HRECREATED" reconcile >/dev/null
+wait_for "$HRECREATED/state/procevent/recreated-src.runner" \
+  || fail "the recreated-path fixture never launched its source"
+RECREATED_RUNNER_PID=$(cat "$HRECREATED/state/procevent/recreated-src.runner")
+mv "$HRECREATED/state" "$TMP_ROOT/recreated-owner-old-state"
+pe_register "$HRECREATED" lavish recreated-src -- \
+  "$BLOCKER" "$RECREATED_TRIGGER" "replacement payload" >/dev/null
+FM_PROCEVENT_OWNER_LEASE_SECONDS=30 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+  pe "$HRECREATED" reconcile >/dev/null
+recreated_deadline=$((SECONDS + 8))
+while kill -0 "$RECREATED_RUNNER_PID" 2>/dev/null; do
+  [ "$SECONDS" -lt "$recreated_deadline" ] \
+    || fail "a fresh lease at a recreated state path preserved the old runner"
+  sleep 0.1
+done
+pass "a recreated state path does not preserve the old runner"
+
 HGUARDFAIL="$TMP_ROOT/guard-failure"; new_home "$HGUARDFAIL"
 fm_test_track_procevent_home "$HGUARDFAIL"
 pe_register "$HGUARDFAIL" lavish guard-fail-src -- "$FAST_SOURCE" "$TMP_ROOT/unguarded-launches"
