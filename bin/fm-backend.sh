@@ -617,8 +617,10 @@ fm_backend_source_file() {  # <path>
   set +e
   set -E
   trap 'source_failed=1' ERR
-  # shellcheck source=/dev/null
-  . "$source_path"
+  # Keep the source operation behind eval so bash reports failures from nested
+  # source commands through the ERR trap even when this helper is called in a
+  # conditional refusal branch.
+  eval ". \"$source_path\""
   source_rc=$?
   if [ -n "$saved_err_trap" ]; then
     eval "$saved_err_trap"
