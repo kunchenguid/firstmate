@@ -157,6 +157,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-herdr-pi-recovery-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -998,6 +1000,152 @@ wait_new_herdr_pi_authority() {  # <prior-session-ref>
   return 1
 }
 
+# True when the fleet's exact harness-name owner (bin/fm-session-lock-lib.sh)
+# can recognize <harness> in a process path, which is what the non-Pi
+# replacement proof below reads. Asking that owner rather than growing a second
+# harness-name table here is what keeps the two from disagreeing; an adapter it
+# cannot name positively is ambiguity, and the caller refuses.
+control_herdr_target_engine_nameable() {  # <harness>
+  local harness=${1:-} name
+  [ -n "$harness" ] || return 1
+  name=$(fm_harness_path_name "$harness" 2>/dev/null) || return 1
+  [ "$name" = "$harness" ]
+}
+
+# True when the process described by <comm>/<argv0> is the named harness,
+# asking the same single owner control_herdr_target_engine_nameable asks. Pi
+# is not routed through here: it keeps its own vocabulary above, because the
+# launcher and the signed wrapper both name a running Pi.
+control_herdr_process_names_harness() {  # <harness> <comm> <argv0>
+  local harness=${1:-} comm=${2:-} argv0=${3:-} name
+  name=$(fm_harness_path_name "$comm" 2>/dev/null) \
+    || name=$(fm_harness_path_name "$argv0" 2>/dev/null) \
+    || return 1
+  [ "$name" = "$harness" ]
+}
+
+# One sample of a NON-Pi replacement running in the task's own endpoint after a
+# released stale Pi authority. Herdr keeps exposing its cached process-detected
+# `pi` label in that state, so the backend's `alive` verdict is a statement
+# about the agent that already exited and can never prove the target runtime
+# started. The pane's own process tree is the authority instead: exactly one
+# independent target-harness process below the recorded pane shell, and no Pi
+# engine left anywhere under it. Prints a stable fingerprint on success.
+control_herdr_target_engine_snapshot() {  # <target-harness>
+  local harness=${1:-} session workspace tab pane wt_real pane_json pane_cwd process_json shell_pid
+  local ps_bin rows descendants pid ppid comm argv0 target_pids=' ' target_rows='' root_pid='' roots=0
+  [ -n "$harness" ] || return 1
+  control_herdr_target_engine_nameable "$harness" || return 1
+  session=$(fm_backend_meta_exact_value "$META" herdr_session) || return 1
+  workspace=$(fm_backend_meta_exact_value "$META" herdr_workspace_id) || return 1
+  tab=$(fm_backend_meta_exact_value "$META" herdr_tab_id) || return 1
+  pane=$(fm_backend_meta_exact_value "$META" herdr_pane_id) || return 1
+  [ "$T" = "$session:$pane" ] || return 1
+  wt_real=$(control_real_dir "$WT") || return 1
+  pane_json=$(control_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  pane_cwd=$(printf '%s' "$pane_json" | jq -er \
+    --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+      .result as $result
+      | select($result.type == "pane_info")
+      | $result.pane
+      | select(.pane_id == $pane and .tab_id == $tab and .workspace_id == $workspace)
+      | select((.foreground_cwd | type) == "string" and (.foreground_cwd | length) > 0)
+      | .foreground_cwd
+    ' 2>/dev/null) || return 1
+  pane_cwd=$(control_real_dir "$pane_cwd") || return 1
+  [ "$pane_cwd" = "$wt_real" ] || return 1
+
+  process_json=$(control_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  shell_pid=$(printf '%s' "$process_json" | jq -er --arg pane "$pane" '
+    .result
+    | select(.type == "pane_process_info" and .process_info.pane_id == $pane)
+    | .process_info.shell_pid
+    | select(type == "number" and . > 1)
+    | floor
+  ' 2>/dev/null) || return 1
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  rows=$("$ps_bin" -axo pid=,ppid=,pgid=,stat=,comm=,args= 2>/dev/null) || return 1
+  descendants=$(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
+    {
+      if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || NF < 5 || seen[$1]++) {
+        bad = 1
+        next
+      }
+      parent[$1] = $2
+      state[$1] = $4
+      command[$1] = $5
+      argv0[$1] = (NF >= 6 ? $6 : "")
+      present[$1] = 1
+    }
+    END {
+      if (bad || !present[shell]) exit 1
+      owned[shell] = 1
+      do {
+        changed = 0
+        for (pid in present) if (owned[pid] != 1 && owned[parent[pid]] == 1) {
+          owned[pid] = 1
+          changed = 1
+        }
+      } while (changed)
+      for (pid in owned) {
+        if (owned[pid] != 1 || pid == shell || state[pid] ~ /^Z/) continue
+        printf "%s\t%s\t%s\t%s\n", pid, parent[pid], command[pid], argv0[pid]
+      }
+    }
+  ') || return 1
+
+  while IFS=$'\t' read -r pid ppid comm argv0; do
+    [ -n "$pid" ] || continue
+    if control_herdr_pi_engine_process_name "$comm" \
+       || { [ -n "$argv0" ] && control_herdr_pi_engine_process_name "$argv0"; }; then
+      return 1
+    fi
+    if control_herdr_process_names_harness "$harness" "$comm" "$argv0"; then
+      target_pids="$target_pids$pid "
+      target_rows="$target_rows$pid $ppid"$'\n'
+    fi
+  done <<EOF
+$descendants
+EOF
+
+  # A harness may run its own nested worker chain (Claude Code's bg-pty-host
+  # tree is contiguous), so "exactly one replacement" counts INDEPENDENT target
+  # processes - those whose parent is not itself the same harness - never raw
+  # process instances.
+  while read -r pid ppid; do
+    [ -n "$pid" ] || continue
+    case "$target_pids" in
+      *" $ppid "*) continue ;;
+    esac
+    roots=$((roots + 1))
+    root_pid=$pid
+  done <<EOF
+$target_rows
+EOF
+  [ "$roots" -eq 1 ] || return 1
+  printf '%s:%s' "$shell_pid" "$root_pid"
+}
+
+wait_new_herdr_target_engine() {  # <target-harness>
+  local harness=${1:-} elapsed=0 sample previous='' stable=0
+  [ -n "$harness" ] || return 1
+  while :; do
+    sample=$(control_herdr_target_engine_snapshot "$harness" 2>/dev/null) || sample=
+    if [ -n "$sample" ] && [ "$sample" = "$previous" ]; then
+      stable=$((stable + 1))
+      [ "$stable" -ge 1 ] && return 0
+    else
+      stable=0
+    fi
+    previous=$sample
+    awk -v e="$elapsed" -v t="$LAUNCH_WAIT" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  return 1
+}
+
 # send_interrupt_keys: deliver the harness's interrupt key the verified number
 # of times, then the composer-clear key when the adapter needs one. Refuses
 # before sending anything when the backend cannot deliver either key, because
@@ -1559,6 +1707,22 @@ do_relaunch() {
           die "the replacement agent for $ID appeared, but a distinct stable herdr:pi session with exactly one Pi engine could not be verified on its recorded endpoint and worktree"
         }
         authority_line=herdr_pi_authority=new-session
+        ;;
+      *)
+        # A released stale Pi authority leaves Herdr exposing its cached
+        # process-detected `pi` label, so wait_agent_state's `alive` verdict
+        # above describes the agent that already exited. It can never prove a
+        # non-Pi target started, and this is the only state where that gap
+        # exists - so the target runtime proves itself here or the relaunch
+        # refuses.
+        if [ "$HERDR_PI_STALE_RELEASED" = 1 ]; then
+          control_herdr_target_engine_nameable "$TARGET_HARNESS" \
+            || die "the replacement agent for $ID was launched on $TARGET_HARNESS, but the released stale Herdr Pi label is still the only thing its endpoint reports, and $TARGET_HARNESS has no process identity this proof can read; refusing to report a relaunch that cached label alone would have proved"
+          wait_new_herdr_target_engine "$TARGET_HARNESS" || {
+            die "the replacement agent for $ID could not be verified as exactly one stable $TARGET_HARNESS process, with no Pi engine left, on its recorded endpoint and worktree within ${LAUNCH_WAIT}s after its stale Herdr Pi authority was released"
+          }
+          authority_line=herdr_pi_authority=released-target-engine
+        fi
         ;;
     esac
   fi

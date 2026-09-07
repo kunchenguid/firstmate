@@ -13,7 +13,11 @@
 # cwd is below the worktree, or the Treehouse copy cannot be proved. Negative
 # cases prove changing process evidence, an unknown descendant, a working
 # authority, a different cwd, and endpoint/session identity mismatches all
-# refuse before release or terminal input. The real-Herdr counterpart is
+# refuse before release or terminal input. Cross-runtime cases prove the
+# cached Pi label Herdr keeps after the release can never stand in for the
+# target runtime: a replacement on another harness is reported only once
+# exactly one independent target process, with no Pi engine left, is stable
+# below the same pane shell. The real-Herdr counterpart is
 # tests/fm-control-herdr-pi-relaunch-live-e2e.test.sh.
 set -u
 
@@ -197,6 +201,37 @@ rows() {
 404 303 404 S pi-signed pi-signed
 405 404 404 S pi pi
 EOF
+  elif [ "$phase" = new ] && [ "$scenario" = cross-target ]; then
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S codex /usr/local/bin/codex
+EOF
+  elif [ "$phase" = new ] && [ "$scenario" = cross-target-nested ]; then
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S codex /usr/local/bin/codex
+405 404 404 S codex /usr/local/bin/codex
+EOF
+  elif [ "$phase" = new ] && [ "$scenario" = cross-target-duplicate ]; then
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S codex /usr/local/bin/codex
+406 303 406 S codex /usr/local/bin/codex
+EOF
+  elif [ "$phase" = new ] && [ "$scenario" = cross-lingering-pi ]; then
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S codex /usr/local/bin/codex
+405 303 405 S pi pi
+EOF
   elif [ "$phase" = new ]; then
     cat <<'EOF'
 101 1 101 S zsh -zsh
@@ -287,6 +322,8 @@ exit 0
 SH
   chmod +x "$fb/pi"
   cp "$fb/pi" "$fb/pi-signed"
+  cp "$fb/pi" "$fb/codex"
+  cp "$fb/pi" "$fb/muse"
 }
 
 new_case() {  # <name> <scenario> [harness]
@@ -362,7 +399,8 @@ run_control() {  # <case-dir> <control args...>
     FM_FAKE_OLD_SESSION="$(cat "$dir/old-session-id")" FM_FAKE_NEW_SESSION="$(cat "$dir/new-session-id")" \
     FM_HERDR_PS_BIN="$dir/fakebin/ps-fixture" \
     FM_CONTROL_HERDR_PI_AUTHORITY_CLEARER="$dir/fakebin/authority-clear" \
-    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.03 FM_CONTROL_LAUNCH_WAIT=1 \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.03 \
+    FM_CONTROL_LAUNCH_WAIT="${FM_TEST_LAUNCH_WAIT:-1}" \
     FM_CONTROL_HERDR_SAMPLE_WAIT=0 \
     "$CONTROL" "$@" 2>&1
 }
@@ -426,6 +464,72 @@ assert_contains "$out" 'relaunched rp1 harness=pi-signed from=pi' "the cross-har
 [ "$(grep -c 'encode launch-brief' "$dir/herdr.log" || true)" -eq 1 ] \
   || fail "the cross-harness relaunch should start exactly one replacement"
 pass "fm-control Herdr/Pi: a released stale authority still admits a relaunch onto another supported harness"
+
+# Releasing the authority leaves Herdr's cached process-detected `pi` label in
+# place, so the generic `alive` verdict describes the agent that already
+# exited. A cross-runtime replacement is reported only once the TARGET runtime
+# itself is stable in the recorded pane and copy.
+dir=$(new_case cross-runtime-verified cross-target pi)
+out=$(run_control "$dir" rp1 relaunch --harness codex --note 'resume on another runtime')
+rc=$?
+expect_code 0 "$rc" "a proven target-runtime replacement should relaunch"$'\n'"$out"
+assert_contains "$out" 'relaunched rp1 harness=codex from=pi' "the cross-runtime relaunch did not retarget the adapter"
+assert_contains "$(cat "$dir/home/state/rp1.control-relaunch")" 'herdr_pi_authority=released-target-engine' \
+  "the completed transaction did not record which proof accepted the replacement"
+
+# The same shape with the harness running its own nested worker chain: two
+# contiguous target processes are ONE replacement, not two.
+dir=$(new_case cross-runtime-nested cross-target-nested pi)
+out=$(run_control "$dir" rp1 relaunch --harness codex --note 'resume on another runtime')
+rc=$?
+expect_code 0 "$rc" "a target runtime's own nested worker chain is one replacement"$'\n'"$out"
+assert_contains "$out" 'relaunched rp1 harness=codex from=pi' "the nested-chain replacement was not accepted"
+pass "fm-control Herdr/Pi: a cross-runtime replacement is proved from the target runtime's own processes, nested chain included"
+
+# The regression this proof exists for: nothing started, but Herdr still
+# reports the released Pi label as `alive`. Reporting that as a relaunch would
+# leave the record published on the new harness with no agent.
+# These three proofs can never succeed, so they only need long enough to prove
+# they time out rather than the full default launch budget.
+FM_TEST_LAUNCH_WAIT=0.05
+dir=$(new_case cross-runtime-vacuous cross-none pi)
+out=$(run_control "$dir" rp1 relaunch --harness codex --note 'resume on another runtime')
+rc=$?
+[ "$rc" -ne 0 ] || fail "a cached Pi label must not prove a codex replacement launched: $out"
+assert_contains "$out" 'could not be verified as exactly one stable codex process' \
+  "the refusal did not name the postcondition it could not prove"
+assert_not_contains "$out" 'relaunched rp1' "an unproven replacement was reported as relaunched"
+
+# A Pi engine still running below the pane shell is a duplicate-worker risk,
+# never evidence for the target runtime.
+dir=$(new_case cross-runtime-lingering-pi cross-lingering-pi pi)
+out=$(run_control "$dir" rp1 relaunch --harness codex --note 'resume on another runtime')
+rc=$?
+[ "$rc" -ne 0 ] || fail "a surviving Pi engine must refuse the cross-runtime replacement: $out"
+assert_not_contains "$out" 'relaunched rp1' "a surviving Pi engine was reported as a completed relaunch"
+
+# Two independent target processes in one pane is exactly the duplicate worker
+# this whole recovery exists to prevent.
+dir=$(new_case cross-runtime-duplicate cross-target-duplicate pi)
+out=$(run_control "$dir" rp1 relaunch --harness codex --note 'resume on another runtime')
+rc=$?
+[ "$rc" -ne 0 ] || fail "two independent target processes must refuse: $out"
+assert_not_contains "$out" 'relaunched rp1' "a duplicated replacement was reported as a completed relaunch"
+pass "fm-control Herdr/Pi: no replacement, a surviving Pi engine, and a duplicated target all refuse instead of riding the cached Pi label"
+FM_TEST_LAUNCH_WAIT=
+
+# An adapter whose process identity the proof cannot read is ambiguity, so the
+# relaunch refuses rather than accepting the cached Pi label as evidence.
+dir=$(new_case cross-runtime-unnameable cross-target pi)
+mkdir -p "$dir/user-home/.config/muse"
+printf '%s\n' '{"api_key":"fixture"}' > "$dir/user-home/.config/muse/auth.json"
+out=$(run_control "$dir" rp1 relaunch --harness muse --note 'resume on an unreadable runtime')
+rc=$?
+[ "$rc" -ne 0 ] || fail "an unnameable target runtime must refuse: $out"
+assert_contains "$out" 'no process identity this proof can read' \
+  "the refusal did not name why the target runtime could not be proved"
+assert_not_contains "$out" 'relaunched rp1' "an unprovable target runtime was reported as relaunched"
+pass "fm-control Herdr/Pi: a target runtime with no readable process identity refuses instead of being reported as relaunched"
 
 # The relaunch postcondition is "a DISTINCT valid herdr:pi generation". An
 # unreadable or invalid prior identity makes that test vacuous, so it refuses
