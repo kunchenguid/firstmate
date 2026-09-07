@@ -753,7 +753,7 @@ test_main_is_never_told_to_drain_rows_only_the_branch_owns() {
     || fail "acknowledgement of the released row failed"
   [ ! -s "$state/.wake-queue" ] || fail "the acknowledged row stayed queued"
 
-  pass "a branch-held row warns only its own owner, and the same row is presented and acknowledged once the grant clears"
+  pass "a branch-held row raises no queued-wake warning for main, and the same row is presented and acknowledged once the grant clears"
 }
 
 # A row that lost its structure can never be claimed, presented, or named by an

@@ -28,9 +28,11 @@
 # suppressed by that dedup. Normal wake handling (watcher briefly down between a
 # wake and the next supervision resume) stays inside the grace window and stays
 # silent. The queued-wakes warning counts only the rows the calling actor can
-# itself present or retire (fm_wake_actor_pending_count), so a row reserved by a
-# live supervision-branch grant warns nobody but that grant's own owner, and the
-# warning is never an instruction to run a drain with nothing to present.
+# itself present or retire (fm_wake_actor_pending_count), so it is never an
+# instruction to run a drain with nothing to present. A row reserved by a live
+# supervision-branch grant therefore warns no actor here at all - main cannot
+# present it and the branch is never warned about queued rows anyway - and is
+# surfaced only by the held notice a main drain prints.
 # It also stays silent for the supervision branch
 # actor (FM_SUPERVISION_ACTOR=branch), because that actor runs guarded commands
 # while handling exactly the queued rows its grant covers and can drain nothing

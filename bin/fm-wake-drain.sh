@@ -84,18 +84,26 @@ reclaim_stale_branch_grant_locked() {
 # wedges the queue for good. Main owns that repair - a branch grant can only
 # name sequences that were structurally valid when it was published - and it
 # runs under the queue lock, so no concurrent append is observed half-written.
+# A repair that cannot be written (state/ full, unwritable, unreadable) is
+# reported and never fatal: the usable rows are still presentable and
+# acknowledgeable, and failing the whole drain would strand them too.
 retire_unconsumable_rows_locked() {
   local invalid
   [ -f "$FM_WAKE_QUEUE" ] || return 0
-  invalid=$(fm_wake_queue_rows_invalid_count "$FM_WAKE_QUEUE") || return 1
-  [ "$invalid" -gt 0 ] || return 0
-  DRAIN_TMP=$(mktemp "$STATE/.wake-queue.retire.XXXXXX") || return 1
-  chmod 0600 "$DRAIN_TMP" || return 1
-  awk -F '\t' 'NF >= 5 && $2 ~ /^[0-9]+$/ { print }' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || return 1
-  _fm_atomic_replace "$DRAIN_TMP" "$FM_WAKE_QUEUE" || return 1
-  DRAIN_TMP=
-  printf 'wake drain: retired %s unusable queue row(s) that carried no sequence to present or acknowledge\n' \
-    "$invalid" >&2
+  if invalid=$(fm_wake_queue_rows_invalid_count "$FM_WAKE_QUEUE"); then
+    [ "$invalid" -gt 0 ] || return 0
+    if DRAIN_TMP=$(mktemp "$STATE/.wake-queue.retire.XXXXXX") \
+      && chmod 0600 "$DRAIN_TMP" \
+      && awk -F '\t' 'NF >= 5 && $2 ~ /^[0-9]+$/ { print }' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" \
+      && _fm_atomic_replace "$DRAIN_TMP" "$FM_WAKE_QUEUE"; then
+      DRAIN_TMP=
+      printf 'wake drain: retired %s unusable queue row(s) that carried no sequence to present or acknowledge\n' \
+        "$invalid" >&2
+      return 0
+    fi
+  fi
+  printf 'wake drain: unusable queue row(s) could not be retired (check that %s is readable and %s is writable); continuing with the rows that remain usable\n' \
+    "$FM_WAKE_QUEUE" "$STATE" >&2
 }
 
 # One bounded line naming the rows a live branch grant is holding, so a main
@@ -622,7 +630,7 @@ else
 fi
 DRAIN_LOCK_HELD=true
 reclaim_stale_branch_grant_locked || exit 1
-[ "$ACTOR" != main ] || retire_unconsumable_rows_locked || exit 1
+[ "$ACTOR" != main ] || retire_unconsumable_rows_locked
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
 if [ -n "$ACK_THROUGH" ]; then

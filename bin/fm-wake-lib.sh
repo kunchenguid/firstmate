@@ -1807,26 +1807,31 @@ fm_wake_queue_rows_invalid_count() {  # [<queue-file>]
 # the lock before it presents or mutates anything.
 fm_wake_actor_pending_count() {  # <actor> [<rows-file> <owner-file>]
   local actor=${1:-main} rows=${2:-$STATE/.branch-eligible-rows}
-  local owner=${3:-$STATE/.branch-eligible-owner} grant=
+  local owner=${3:-$STATE/.branch-eligible-owner} grant='' count=''
   [ -f "$FM_WAKE_QUEUE" ] || { printf '0\n'; return 0; }
   if fm_wake_branch_grant_live "$rows" "$owner"; then
     grant=$rows
   fi
   if [ "$actor" = branch ]; then
     [ -n "$grant" ] || { printf '0\n'; return 0; }
-    awk -F '\t' -v seqs="$grant" '
+    count=$(awk -F '\t' -v seqs="$grant" '
       BEGIN { while ((getline line < seqs) > 0) keep[line] = 1 }
       NF >= 5 && $2 ~ /^[0-9]+$/ && ($2 in keep) { n++ }
       END { print n + 0 }
-    ' "$FM_WAKE_QUEUE"
-    return 0
+    ' "$FM_WAKE_QUEUE")
+  else
+    count=$(awk -F '\t' -v seqs="$grant" '
+      BEGIN { if (seqs != "") while ((getline line < seqs) > 0) reserved[line] = 1 }
+      NF < 5 || $2 !~ /^[0-9]+$/ { n++; next }
+      !($2 in reserved) { n++ }
+      END { print n + 0 }
+    ' "$FM_WAKE_QUEUE")
   fi
-  awk -F '\t' -v seqs="$grant" '
-    BEGIN { if (seqs != "") while ((getline line < seqs) > 0) reserved[line] = 1 }
-    NF < 5 || $2 !~ /^[0-9]+$/ { n++; next }
-    !($2 in reserved) { n++ }
-    END { print n + 0 }
-  ' "$FM_WAKE_QUEUE"
+  # A queue that exists but cannot be counted (unreadable file, unreadable
+  # state/) is not evidence of an empty queue: report a pending row so callers
+  # still raise the alarm on a queue nobody can prove is drained.
+  case "$count" in ''|*[!0-9]*) count=1 ;; esac
+  printf '%s\n' "$count"
 }
 
 # --- signal announcement signatures -----------------------------------------
