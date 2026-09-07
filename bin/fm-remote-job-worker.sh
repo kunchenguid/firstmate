@@ -213,6 +213,7 @@ worker_recover_quarantine() { # <account-home>
 # unsafe or conflicting shape. Ordinary locks with no staging candidate retain
 # the established acquisition path below.
 worker_staged_quarantine_inventory() {
+  local LC_ALL=C
   local entry base staged_count=0 owner_fields=0 unsafe=0
   WORKER_STAGED_QUARANTINE=
   WORKER_STAGED_OWNER_FIELDS=0

@@ -830,6 +830,57 @@ expect_code 1 "$QUARANTINE_TEST_RC" "a malformed quarantine staging name was rec
 assert_present "$QUARANTINE_TEST_STATE/worker.lock/.quarantine.short" \
   "malformed quarantine staging was removed"
 
+LOCALE_RANGE_TEST_SHELL=(bash)
+if bash -c 'shopt -u globasciiranges' >/dev/null 2>&1; then
+  LOCALE_RANGE_TEST_SHELL=(bash +O globasciiranges)
+fi
+LOCALE_RANGE_TEST_LOCALE=$(
+  "${LOCALE_RANGE_TEST_SHELL[@]}" -c '
+    while IFS= read -r candidate; do
+      LC_ALL=$candidate
+      export LC_ALL
+      case é in [A-Za-z0-9]) printf "%s\n" "$candidate"; exit 0 ;; esac
+    done
+    exit 1
+  ' < <(locale -a 2>/dev/null)
+) || LOCALE_RANGE_TEST_LOCALE=
+if [ -n "$LOCALE_RANGE_TEST_LOCALE" ]; then
+  new_staged_quarantine_fixture locale-expanded-name
+  LOCALE_EXPANDED_STAGE="$QUARANTINE_TEST_STATE/worker.lock/.quarantine.é12345"
+  mv "$QUARANTINE_TEST_STAGE" "$LOCALE_EXPANDED_STAGE"
+  QUARANTINE_TEST_STAGE=$LOCALE_EXPANDED_STAGE
+  touch -t 200001010000 "$QUARANTINE_TEST_STATE/worker.lock"
+  set +e
+  HOME="$QUARANTINE_TEST_HOME" PATH="$PATH" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+    FM_REMOTE_JOB_STATE_ROOT="$QUARANTINE_TEST_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    LC_ALL="$LOCALE_RANGE_TEST_LOCALE" "${LOCALE_RANGE_TEST_SHELL[@]}" \
+    "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+    > "$QUARANTINE_TEST_DIR/worker.out" 2> "$QUARANTINE_TEST_DIR/worker.err"
+  QUARANTINE_TEST_RC=$?
+  set -e
+  expect_code 1 "$QUARANTINE_TEST_RC" \
+    "a locale-expanded malformed quarantine staging name was recovered"
+  assert_present "$QUARANTINE_TEST_STAGE" \
+    "locale-expanded malformed quarantine staging was removed"
+  pass "locale-expanded malformed quarantine staging remains untouched"
+else
+  pass "skipped: no installed locale expands the quarantine suffix range"
+fi
+
+new_staged_quarantine_fixture conflicting-official
+printf '%s\n' "$QUARANTINE_SENTINEL" > "$QUARANTINE_TEST_STATE/worker.lock/quarantine"
+chmod 600 "$QUARANTINE_TEST_STATE/worker.lock/quarantine"
+run_staged_quarantine_worker
+expect_code 1 "$QUARANTINE_TEST_RC" "conflicting official and staged quarantine markers were recovered"
+assert_present "$QUARANTINE_TEST_STAGE" "a conflicting official marker displaced quarantine staging"
+assert_present "$QUARANTINE_TEST_STATE/worker.lock/quarantine" \
+  "staged quarantine recovery removed a conflicting official marker"
+cmp -s "$QUARANTINE_TEST_STAGE" <(printf '%s\n' "$QUARANTINE_SENTINEL") \
+  || fail "a conflicting staged quarantine marker changed"
+cmp -s "$QUARANTINE_TEST_STATE/worker.lock/quarantine" <(printf '%s\n' "$QUARANTINE_SENTINEL") \
+  || fail "a conflicting official quarantine marker changed"
+pass "conflicting official and staged quarantine markers remain untouched"
+
 new_staged_quarantine_fixture ambiguous-owner
 sleep 30 &
 QUARANTINE_TEST_AUX_PID=$!
@@ -980,6 +1031,24 @@ exit 0
 SH
 done
 chmod +x "$DOCTOR_BIN/herdr" "$DOCTOR_BIN/tasks-axi" "$DOCTOR_BIN/treehouse" "$DOCTOR_BIN/claude"
+set +e
+DOCTOR_CHECK_OUT=$(
+  HOME="$QUARANTINE_TEST_HOME" FM_HOME="$DOCTOR_FM_HOME" \
+    PATH="$ROOT/bin:$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_REMOTE_JOB_STATE_ROOT="$QUARANTINE_TEST_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    "$ROOT/bin/fm-remote-doctor.sh" 2>&1
+)
+DOCTOR_CHECK_RC=$?
+set -e
+expect_code 1 "$DOCTOR_CHECK_RC" \
+  "read-only doctor unexpectedly accepted interrupted quarantine publication: $DOCTOR_CHECK_OUT"
+assert_contains "$DOCTOR_CHECK_OUT" \
+  'check remote-job-probe=fixable: the remote job worker has not reported a fresh probe' \
+  "read-only doctor did not report the missing fresh worker probe"
+assert_present "$QUARANTINE_TEST_STAGE" "read-only doctor removed quarantine staging"
+assert_absent "$QUARANTINE_TEST_STATE/worker.lock/quarantine" \
+  "read-only doctor promoted quarantine staging"
+
 set +e
 DOCTOR_RECOVERY_OUT=$(
   HOME="$QUARANTINE_TEST_HOME" FM_HOME="$DOCTOR_FM_HOME" \
