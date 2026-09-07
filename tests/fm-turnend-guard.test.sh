@@ -1813,6 +1813,44 @@ test_hook_claude_mode_waits_for_late_claim() {
   pass "fm-turnend-guard --claude: bounded claim wait avoids a token-consuming forced continuation"
 }
 
+# Priming on every ordinary Claude Stop made the normal cycle a handling
+# successor, which consumed pending:downtime and skipped rearm-resurface.
+# An allowed Stop after a late auto-arm claim must not leave a primed cycle
+# and must leave an unacknowledged downtime episode unconsumed so the
+# ordinary asyncRewake cycle can still re-present it once.
+test_hook_claude_mode_ordinary_stop_does_not_prime() {
+  local dir helper out status holder
+  command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach a primed watcher"
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-ordinary-does-not-prime")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_gated_watch_fixture "$dir"
+  printf 'pending:downtime:prime.1.aaa\n' > "$dir/state/.watcher-down"
+  chmod 600 "$dir/state/.watcher-down"
+  (
+    sleep 0.4
+    sleep 60 &
+    record_autoarm_owner "$dir" $!
+    printf '%s\n' $! > "$dir/holder.pid"
+    wait
+  ) &
+  helper=$!
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=3000 run_hook_claude_owned "$dir" true); status=$?
+  holder=$(cat "$dir/holder.pid" 2>/dev/null || true)
+  kill "$holder" 2>/dev/null || true
+  kill "$helper" 2>/dev/null || true
+  wait "$helper" 2>/dev/null || true
+  expect_code 0 "$status" "an ordinary stop that the auto-arm claims must still allow"
+  [ -z "$out" ] || fail "ordinary claimed stop produced output: $out"
+  [ ! -e "$dir/state/.claude-autoarm-prime.out" ] \
+    || fail "an ordinary stop left a primed cycle behind: $(cat "$dir/state/.claude-autoarm-prime.out")"
+  [ ! -e "$dir/state/.watch.lock/pid" ] \
+    || fail "an ordinary stop started a primed watcher"
+  grep -F 'pending:downtime:prime.1.aaa' "$dir/state/.watcher-down" >/dev/null \
+    || fail "an ordinary stop consumed the unacknowledged downtime episode: $(cat "$dir/state/.watcher-down" 2>/dev/null || true)"
+  pass "fm-turnend-guard --claude: an ordinary stop does not prime and leaves downtime unconsumed"
+}
+
 # The 2026-09-06 deadlock: a refused Stop aborted Claude's in-flight asyncRewake
 # arm, so the next Stop was guaranteed to refuse as well. Priming
 # --ensure-watcher before the refusal must leave a path for a watcher to come
@@ -2288,6 +2326,7 @@ test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
+test_hook_claude_mode_ordinary_stop_does_not_prime
 test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal
 test_hook_claude_mode_refused_stop_recovers_without_epoch_progress
 test_hook_claude_mode_frozen_epoch_still_reaches_the_bounded_fail_open
