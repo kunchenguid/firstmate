@@ -1138,6 +1138,7 @@ fm_firstmate_root_home() {
 fm_treehouse_project_lock_path() {  # <project-dir>
   local project=$1 root origin identity hash top
   [ -d "$project" ] || return 1
+  project=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P) || return 1
   root=$(fm_firstmate_root_home "$FM_HOME") || return 1
   origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
   if [ -n "$origin" ]; then
