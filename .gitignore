@@ -4,6 +4,7 @@ data/
 scratchpad*
 .no-mistakes/
 .lavish/
+.squish/
 .fm-secondmate-home
 .fm-secondmate-parent
 .DS_Store

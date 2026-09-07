@@ -752,6 +752,27 @@ test_hook_scopes_secondmate_home_to_its_own_state_under_inherited_env() {
   pass "fm-turnend-guard: a secondmate home guards its own state, not a parent primary named by inherited env"
 }
 
+# An FM_ROOT_OVERRIDE that does not resolve proves nothing about whose session
+# this is, so it must not be read as a leaked parent environment. Discarding the
+# rest of the environment on that evidence rebinds the hook to its own
+# checkout's state while the watcher and spawn keep using the real FM_HOME, and
+# the guard then sees no in-flight work and waves a blind turn through.
+test_hook_keeps_split_home_when_root_override_is_unresolvable() {
+  local dir home out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-broken-override-root")
+  home="$TMP_ROOT/hook-broken-override-home"
+  mkdir -p "$home/state"
+  : > "$home/state/task1.meta"
+
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$TMP_ROOT/hook-broken-override-gone" FM_HOME="$home" \
+    bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 2 "$status" "an unresolvable FM_ROOT_OVERRIDE must not discard a valid FM_HOME and its in-flight work"
+  assert_contains "$out" "TURN WOULD END BLIND" "the split home's unsupervised work must still alarm"
+
+  pass "fm-turnend-guard: an unresolvable FM_ROOT_OVERRIDE leaves the effective home intact instead of rebinding to the checkout"
+}
+
 test_hook_silent_without_jq() {
   local dir out status fakebin tool tool_path
   dir=$(make_primary_dir "$TMP_ROOT/hook-nojq")
@@ -2092,6 +2113,7 @@ test_hook_exempts_linked_worktree_with_non_ascii_marker
 test_hook_silent_in_crewmate_worktree
 test_hook_silent_in_child_worktree_with_inherited_primary_env
 test_hook_scopes_secondmate_home_to_its_own_state_under_inherited_env
+test_hook_keeps_split_home_when_root_override_is_unresolvable
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast
