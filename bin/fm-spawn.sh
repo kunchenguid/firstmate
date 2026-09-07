@@ -418,6 +418,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-herdr-pi-recovery-lib.sh
+. "$SCRIPT_DIR/fm-herdr-pi-recovery-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -1240,6 +1242,124 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_RELEASED_HERDR_PI=0
+
+# fm-control may have just released a proven-stale herdr:pi hook while Herdr
+# 0.8.2 still conservatively exposes its cached process-detected `pi` label.
+# Accept that one state only from this process's verified fm-control parent,
+# under its still-held lifecycle lock, with a transaction-bound private proof,
+# and after re-reading the exact pane as authority-free nested-shell state.
+# Every direct fm-spawn call and every mismatch keeps the ordinary duplicate-
+# worker refusal below.
+fm_spawn_released_herdr_pi_proof_valid() {  # <task-meta> <target>
+  local meta=$1 target=$2 proof="$STATE/$ID.herdr-pi-release-proof" tx worktree project project_real harness kind
+  local session workspace tab pane process current_process wt_real proof_shell proof_foreground
+  local pane_json tab_json agent_json agent_rc=0 process_json fields cwd shell_pid foreground_pgid foreground_pid name argv0
+  [ "$SPAWN_CONTROL_PARENT" = 1 ] || return 1
+  [ "$BACKEND" = herdr ] || return 1
+  [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ] \
+    && [ "${FM_CONTROL_HERDR_PI_RELEASE_PROOF:-}" = "$FM_CONTROL_RELAUNCH_TX" ] || return 1
+  [ -f "$proof" ] && [ ! -L "$proof" ] || return 1
+  [ "$(fm_backend_meta_exact_value "$proof" v 2>/dev/null)" = 1 ] || return 1
+  [ "$(fm_backend_meta_exact_value "$proof" task 2>/dev/null)" = "$ID" ] || return 1
+  [ "$(fm_backend_meta_exact_value "$proof" control_pid 2>/dev/null)" = "$PPID" ] || return 1
+  tx=$(fm_backend_meta_exact_value "$proof" tx 2>/dev/null) || return 1
+  [ "$tx" = "$FM_CONTROL_RELAUNCH_TX" ] || return 1
+  [ "$(fm_backend_meta_exact_value "$proof" endpoint 2>/dev/null)" = "$target" ] || return 1
+  worktree=$(fm_backend_meta_exact_value "$meta" worktree 2>/dev/null) || return 1
+  wt_real=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  [ "$(fm_backend_meta_exact_value "$proof" worktree 2>/dev/null)" = "$wt_real" ] || return 1
+  project=$(fm_backend_meta_exact_value "$meta" project 2>/dev/null) || return 1
+  project_real=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P) || return 1
+  [ "$(fm_backend_meta_exact_value "$proof" project 2>/dev/null)" = "$project_real" ] || return 1
+  fm_herdr_pi_treehouse_copy_matches "$project_real" "$wt_real" || return 1
+  harness=$(fm_backend_meta_exact_value "$meta" harness 2>/dev/null) || return 1
+  case "$harness" in pi|pi-signed) ;; *) return 1 ;; esac
+  [ "$(fm_backend_meta_exact_value "$proof" harness 2>/dev/null)" = "$harness" ] || return 1
+  kind=$(fm_backend_meta_exact_value "$meta" kind 2>/dev/null || true)
+  [ -n "$kind" ] || kind=ship
+  case "$kind" in ship|scout) ;; *) return 1 ;; esac
+  [ "$(fm_backend_meta_exact_value "$proof" kind 2>/dev/null)" = "$kind" ] || return 1
+  session=$(fm_backend_meta_exact_value "$meta" herdr_session 2>/dev/null) || return 1
+  workspace=$(fm_backend_meta_exact_value "$meta" herdr_workspace_id 2>/dev/null) || return 1
+  tab=$(fm_backend_meta_exact_value "$meta" herdr_tab_id 2>/dev/null) || return 1
+  pane=$(fm_backend_meta_exact_value "$meta" herdr_pane_id 2>/dev/null) || return 1
+  [ "$(fm_backend_meta_exact_value "$proof" session 2>/dev/null)" = "$session" ] || return 1
+  [ "$(fm_backend_meta_exact_value "$proof" workspace 2>/dev/null)" = "$workspace" ] || return 1
+  [ "$(fm_backend_meta_exact_value "$proof" tab 2>/dev/null)" = "$tab" ] || return 1
+  [ "$(fm_backend_meta_exact_value "$proof" pane 2>/dev/null)" = "$pane" ] || return 1
+  process=$(fm_backend_meta_exact_value "$proof" process 2>/dev/null) || return 1
+  IFS=: read -r proof_shell _ _ proof_foreground <<EOF
+$process
+EOF
+  case "$proof_shell:$proof_foreground" in *[!0-9:]*) return 1 ;; esac
+
+  pane_json=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  cwd=$(printf '%s' "$pane_json" | jq -er \
+    --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+      .result as $result
+      | select($result.type == "pane_info")
+      | $result.pane
+      | select(.pane_id == $pane and .tab_id == $tab and .workspace_id == $workspace)
+      | select(.agent_session == null)
+      | select(.agent_status == "unknown" or .agent_status == "idle" or .agent_status == "done" or .agent_status == "blocked")
+      | .foreground_cwd
+    ' 2>/dev/null) || return 1
+  cwd=$(CDPATH='' cd -- "$cwd" 2>/dev/null && pwd -P) || return 1
+  [ "$cwd" = "$wt_real" ] || return 1
+  tab_json=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  printf '%s' "$tab_json" | jq -e \
+    --arg tab "$tab" --arg workspace "$workspace" --arg label "fm-$ID" '
+      .result.type == "tab_info"
+      and .result.tab.tab_id == $tab
+      and .result.tab.workspace_id == $workspace
+      and .result.tab.label == $label
+    ' >/dev/null 2>&1 || return 1
+
+  agent_json=$(fm_backend_herdr_cli "$session" agent get "$pane" 2>/dev/null) || agent_rc=$?
+  if [ "$agent_rc" -eq 0 ]; then
+    cwd=$(printf '%s' "$agent_json" | jq -er \
+      --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+        .result as $result
+        | select($result.type == "agent_info")
+        | $result.agent
+        | select(.agent == "pi" and .pane_id == $pane and .tab_id == $tab and .workspace_id == $workspace)
+        | select(.agent_session == null and .screen_detection_skipped == false)
+        | select(.agent_status == "idle" or .agent_status == "done" or .agent_status == "blocked")
+        | .foreground_cwd
+      ' 2>/dev/null) || return 1
+    cwd=$(CDPATH='' cd -- "$cwd" 2>/dev/null && pwd -P) || return 1
+    [ "$cwd" = "$wt_real" ] || return 1
+  else
+    [ "$(fm_backend_agent_state herdr "$session:$pane" 2>/dev/null)" = dead ] || return 1
+  fi
+
+  process_json=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  fields=$(printf '%s' "$process_json" | jq -er --arg pane "$pane" '
+    .result as $result
+    | select($result.type == "pane_process_info" and $result.process_info.pane_id == $pane)
+    | $result.process_info as $process
+    | select(($process.foreground_processes | type) == "array" and ($process.foreground_processes | length) == 1)
+    | $process.foreground_processes[0] as $foreground
+    | (($foreground.argv0 // $foreground.argv[0]) // "") as $argv0
+    | [ $process.shell_pid, $process.foreground_process_group_id, $foreground.pid, $foreground.name, $argv0, $foreground.cwd ]
+    | @tsv
+  ' 2>/dev/null) || return 1
+  IFS=$'\t' read -r shell_pid foreground_pgid foreground_pid name argv0 cwd <<EOF
+$fields
+EOF
+  case "$shell_pid:$foreground_pgid:$foreground_pid" in *[!0-9:]*) return 1 ;; esac
+  [ "$shell_pid" = "$proof_shell" ] && [ "$foreground_pid" = "$proof_foreground" ] || return 1
+  [ "$shell_pid" != "$foreground_pid" ] && [ "$foreground_pgid" = "$foreground_pid" ] || return 1
+  name=${name#-}; name=${name##*/}; argv0=${argv0#-}; argv0=${argv0##*/}
+  [ "$name" = "$argv0" ] || return 1
+  case "$name" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
+  cwd=$(CDPATH='' cd -- "$cwd" 2>/dev/null && pwd -P) || return 1
+  [ "$cwd" = "$wt_real" ] || return 1
+  current_process=$(fm_herdr_pi_nested_shell_process_fingerprint "$shell_pid" "$foreground_pgid") || return 1
+  [ "$current_process" = "$process" ]
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1274,10 +1394,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  if [ "$RELAUNCH_STATE" != dead ]; then
+    if [ "$RELAUNCH_STATE" = alive ] \
+       && fm_spawn_released_herdr_pi_proof_valid "$RELAUNCH_META" "$RELAUNCH_TARGET"; then
+      RELAUNCH_RELEASED_HERDR_PI=1
+    else
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+    fi
+  fi
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -3862,6 +3987,11 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
 sleep 0.3
+if [ "$RELAUNCH_RELEASED_HERDR_PI" = 1 ] \
+   && ! fm_spawn_released_herdr_pi_proof_valid "$RELAUNCH_META" "$RELAUNCH_TARGET"; then
+  echo "error: task $ID's released Herdr Pi endpoint changed before replacement launch; refusing rather than risking a duplicate worker" >&2
+  exit 1
+fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

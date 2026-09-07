@@ -21,6 +21,9 @@
 # A positively dead or missing endpoint bypasses that schedule without being
 # typed into, and its unhandled record surfaces through the ordinary stale wake
 # into stuck-crewmate-recovery.
+# Ring delivery also holds the task's lifecycle lock from the liveness read
+# through terminal submission, so it cannot overlap an exit or relaunch and be
+# interpreted by the nested shell exposed while that lifecycle changes.
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
@@ -271,11 +274,11 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
 # composer pre-check, then the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed, 3 skipped because
-# the endpoint is positively dead or missing (nothing typed; recovery owns the
-# record). No return value is delivery proof; the acknowledgement move is the
-# only delivery signal.
+# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text or
+# lifecycle control owns the task (the watcher re-rings later), 2 the backend
+# send failed, 3 skipped because the endpoint is positively dead or missing
+# (nothing typed; recovery owns the record). No return value is delivery proof;
+# the acknowledgement move is the only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
@@ -284,27 +287,51 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # positively identify (that classifier is advisory here by design).
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local inbox_dir inbox_name id state control_lock='' result=0
+  inbox_dir=${rec%/*}
+  inbox_name=${inbox_dir##*/}
+  case "$inbox_name" in
+    *.inbox)
+      id=${inbox_name%.inbox}
+      state=${inbox_dir%/*}
+      case "$id" in
+        ''|*[!A-Za-z0-9._-]*) return 2 ;;
+      esac
+      [ "$(fm_task_inbox_dir "$state" "$id")" = "$inbox_dir" ] || return 2
+      control_lock="$state/.control-$id.lock"
+      fm_lock_try_acquire "$control_lock" || return 1
+      ;;
+    *) return 2 ;;
+  esac
+
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
-    dead|missing) return 3 ;;
+    dead|missing) result=3 ;;
   esac
-  if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
-    return 2
+  if [ "$result" -eq 0 ] && ! line=$(fm_task_inbox_doorbell_line "$rec"); then
+    result=2
   fi
-  cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
-  case "$cstate" in
-    pending) return 1 ;;
-  esac
+  if [ "$result" -eq 0 ]; then
+    cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+    case "$cstate" in
+      pending) result=1 ;;
+    esac
+  fi
   # Accepted residual race: terminal input and Enter are separate delivery
   # steps, so an agent exiting after the liveness check could leave a bare
-  # shell only a suffix; the `: ` prefix protects complete lines only. Do not
-  # add process-bound atomic delivery here unless an incident reopens this.
-  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
-    return 2
+  # shell only a suffix; the `: ` prefix protects complete lines only. Holding
+  # the lifecycle lock closes the larger exit/relaunch overlap without adding
+  # a process-bound transport protocol here.
+  if [ "$result" -eq 0 ]; then
+    if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
+      result=2
+    elif [ "$verdict" = send-failed ]; then
+      # The verdict is read only to report a failed keystroke; every other value
+      # (empty, pending, unknown, ...) is deliberately ignored, never proof.
+      result=2
+    fi
   fi
-  # The verdict is read only to report a failed keystroke; every other value
-  # (empty, pending, unknown, ...) is deliberately ignored, never proof.
-  [ "$verdict" != send-failed ] || return 2
-  return 0
+  [ -z "$control_lock" ] || fm_lock_release "$control_lock" || result=2
+  return "$result"
 }
 
 fm_task_inbox_is_fire_and_forget() {  # <record-path>

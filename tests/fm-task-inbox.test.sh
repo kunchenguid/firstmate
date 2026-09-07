@@ -26,6 +26,9 @@
 #   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
 #      shell, the ring skips an agent the backend classifies dead, and the
 #      watcher surfaces such a record exactly once instead of re-ringing.
+#   7. Lifecycle serialization: a held task control lock defers a doorbell
+#      before any endpoint read or terminal input, so an exit/relaunch cannot
+#      expose its nested shell to a concurrent ring.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -277,6 +280,26 @@ test_ring_skips_dead_agent() {
   [ "$rc" = 0 ] || fail "an endpoint the classifier cannot see should still be rung, got $rc"
   grep -qF 'Firstmate instruction waiting' "$log" || fail "an unclassifiable endpoint did not receive the doorbell"
   pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
+}
+
+test_ring_defers_while_lifecycle_control_owns_task() {
+  local dir state rec log rc
+  dir="$TMP_ROOT/ring-control-lock"
+  state="$dir/state"
+  mkdir -p "$state/.control-t1.lock"
+  printf '%s\n' "$$" > "$state/.control-t1.lock/pid"
+  make_watch_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  log="$dir/send.log"
+  : > "$log"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "a lifecycle-owned task should defer its doorbell with status 1, got $rc"
+  [ ! -s "$log" ] || fail "a lifecycle-owned task received terminal input:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "deferring a lifecycle-overlapping ring removed its durable record"
+  rm -rf "$state/.control-t1.lock"
+  pass "inbox: lifecycle control serializes the liveness read and doorbell delivery"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -696,6 +719,7 @@ test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
+test_ring_defers_while_lifecycle_control_owns_task
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence

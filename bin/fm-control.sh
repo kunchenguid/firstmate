@@ -29,7 +29,8 @@
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
-#              the backend's recovery-grade classifier reports the agent gone.
+#              the backend's recovery-grade classifier reports the agent gone,
+#              except for the exact released Herdr/Pi cache case proved below.
 #              Already-stopped is success (idempotent).
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
@@ -84,6 +85,25 @@
 #     than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
+#   - One task-scoped exception repairs Herdr's stale Pi authority after a real
+#     Treehouse nested-shell exit. It applies only to an ordinary pi/pi-signed
+#     worker whose exact recorded pane, tab, workspace, task label, managed
+#     Treehouse copy, Pi session source, foreground cwd, and two stable process
+#     samples all agree. The samples must show only pane-shell -> treehouse get
+#     -> nested shell, with no Pi process below the pane shell. After verifying
+#     protocol support and the named session's owner-only socket, the fixed-
+#     method `pane.clear_agent_authority` transport clears only `herdr:pi`; the
+#     generic release command is intentionally not used because Herdr 0.8.2
+#     ignores it for official integrations while reporting success. Two more
+#     samples must prove the session and full-lifecycle authority disappeared
+#     and the exact no-Pi process generation stayed unchanged. Herdr may still
+#     expose its conservative cached Pi label, so relaunch crosses that state
+#     only through a private transaction proof rechecked by the verified parent
+#     immediately before launch. Any process, process-group, identity, session,
+#     ownership, transport, or parse ambiguity refuses without terminal input.
+#     The fleet-wide Herdr classifier remains conservative. A replacement is
+#     accepted only after a distinct valid `herdr:pi` generation and exactly one
+#     new Pi engine are observed stably on the same pane and copy.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -91,6 +111,7 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+#   FM_CONTROL_HERDR_SAMPLE_WAIT delay between the two stale-process samples (0.2)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -132,6 +153,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-herdr-pi-recovery-lib.sh
+. "$SCRIPT_DIR/fm-herdr-pi-recovery-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -142,6 +165,7 @@ SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+HERDR_SAMPLE_WAIT=${FM_CONTROL_HERDR_SAMPLE_WAIT:-0.2}
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -158,6 +182,14 @@ control_cleanup() {
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
+  fi
+  if [ -n "${HERDR_PI_RELEASE_PROOF:-}" ] && [ -n "${RELAUNCH_TX:-}" ] \
+     && [ -f "$HERDR_PI_RELEASE_PROOF" ] && [ ! -L "$HERDR_PI_RELEASE_PROOF" ] \
+     && [ "$(fm_backend_meta_exact_value "$HERDR_PI_RELEASE_PROOF" tx 2>/dev/null || true)" = "$RELAUNCH_TX" ]; then
+    if ! rm -f "$HERDR_PI_RELEASE_PROOF"; then
+      echo "error: could not retire task $ID's stale Herdr Pi release proof" >&2
+      [ "$status" -ne 0 ] || status=1
+    fi
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
@@ -304,6 +336,8 @@ LABEL="fm-$ID"
 RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
+HERDR_PI_RELEASE_PROOF="$STATE/$ID.herdr-pi-release-proof"
+HERDR_PI_STALE_RELEASED=0
 [ -n "$KIND" ] || KIND=ship
 
 HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
@@ -347,6 +381,523 @@ wait_agent_state() {  # <timeout> <wanted>...
 require_state_verified_backend() {  # <verb>
   fm_control_backend_state_verified "$BACKEND" && return 0
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
+}
+
+control_real_dir() {  # <directory>
+  CDPATH='' cd -- "$1" 2>/dev/null && pwd -P
+}
+
+# Backend adapters are sourced lazily inside fm_backend_* calls. Those calls
+# commonly run in command substitutions, whose sourced functions do not leak
+# back into this shell. Recovery therefore enters Herdr through this local
+# adapter-loading boundary on every direct CLI call.
+control_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
+  fm_backend_source herdr || return 1
+  fm_backend_herdr_cli "$@"
+}
+
+control_herdr_pi_session_generation_valid() {  # <kind> <value>
+  local kind=$1 value=$2 owner expected_owner base platform
+  case "$kind" in
+    id)
+      printf '%s\n' "$value" \
+        | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      ;;
+    path)
+      case "$value" in /*) ;; *) return 1 ;; esac
+      [ ! -L "$value" ] || return 1
+      base=${value##*/}
+      printf '%s\n' "$base" \
+        | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{3}Z_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$' \
+        || return 1
+      if [ -e "$value" ]; then
+        [ -f "$value" ] || return 1
+        expected_owner=$(id -u 2>/dev/null) || return 1
+        platform=$(uname -s 2>/dev/null) || return 1
+        case "$platform" in
+          Darwin) owner=$(stat -f %u "$value" 2>/dev/null) || return 1 ;;
+          Linux) owner=$(stat -c %u "$value" 2>/dev/null) || return 1 ;;
+          *) return 1 ;;
+        esac
+        [ "$owner" = "$expected_owner" ] || return 1
+      fi
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# One complete read-only sample for the narrow stale-Pi recovery predicate.
+# Return 0 is the exact nested-shell candidate and prints its stable identity
+# fingerprint. Return 10 means a Pi process is positively visible, so ordinary
+# lifecycle control remains applicable. Return 20 means unreadable or refused;
+# callers must not fall through to terminal input.
+control_herdr_pi_nested_shell_sample() {
+  local session workspace tab pane endpoint_task pane_json tab_json agent_json process_json
+  local pane_fields agent_fields process_fields pane_cwd pane_status pane_source pane_session_kind pane_session
+  local agent_status agent_source agent_session_kind agent_session_value agent_state_seq shell_pid foreground_pgid
+  local foreground_pid foreground_name foreground_argv0 foreground_cwd process_fingerprint wt_real
+  session=$(fm_backend_meta_exact_value "$META" herdr_session) || return 20
+  workspace=$(fm_backend_meta_exact_value "$META" herdr_workspace_id) || return 20
+  tab=$(fm_backend_meta_exact_value "$META" herdr_tab_id) || return 20
+  pane=$(fm_backend_meta_exact_value "$META" herdr_pane_id) || return 20
+  endpoint_task=$(fm_backend_meta_exact_value "$META" endpoint_task_id) || return 20
+  [ "$endpoint_task" = "$ID" ] && [ "$T" = "$session:$pane" ] || return 20
+  wt_real=$(control_real_dir "$WT") || return 20
+
+  pane_json=$(control_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 20
+  pane_fields=$(printf '%s' "$pane_json" | jq -er \
+    --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+      .result as $result
+      | select($result.type == "pane_info")
+      | $result.pane
+      | select(.pane_id == $pane and .tab_id == $tab and .workspace_id == $workspace)
+      | select((.foreground_cwd | type) == "string" and (.foreground_cwd | length) > 0)
+      | [ .foreground_cwd, (.agent_status // ""), (.agent_session.source // ""), (.agent_session.kind // ""), (.agent_session.value // "") ]
+      | @tsv
+    ' 2>/dev/null) || return 20
+  IFS=$'\t' read -r pane_cwd pane_status pane_source pane_session_kind pane_session <<EOF
+$pane_fields
+EOF
+  pane_cwd=$(control_real_dir "$pane_cwd") || return 20
+  [ "$pane_cwd" = "$wt_real" ] || return 20
+
+  tab_json=$(control_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 20
+  printf '%s' "$tab_json" | jq -e \
+    --arg tab "$tab" --arg workspace "$workspace" --arg label "fm-$ID" '
+      .result.type == "tab_info"
+      and .result.tab.tab_id == $tab
+      and .result.tab.workspace_id == $workspace
+      and .result.tab.label == $label
+    ' >/dev/null 2>&1 || return 20
+
+  agent_json=$(control_herdr_cli "$session" agent get "$pane" 2>/dev/null) || return 20
+  agent_fields=$(printf '%s' "$agent_json" | jq -er \
+    --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+      .result as $result
+      | select($result.type == "agent_info")
+      | $result.agent
+      | select(.agent == "pi" and .pane_id == $pane and .tab_id == $tab and .workspace_id == $workspace)
+      | select((.foreground_cwd | type) == "string" and (.foreground_cwd | length) > 0)
+      | select((.state_change_seq | type) == "number" and .state_change_seq >= 0 and (.state_change_seq | floor) == .state_change_seq)
+      | [ .agent_status, (.agent_session.source // ""), (.agent_session.kind // ""), (.agent_session.value // ""), .foreground_cwd, .state_change_seq ]
+      | @tsv
+    ' 2>/dev/null) || return 20
+  IFS=$'\t' read -r agent_status agent_source agent_session_kind agent_session_value foreground_cwd agent_state_seq <<EOF
+$agent_fields
+EOF
+  foreground_cwd=$(control_real_dir "$foreground_cwd") || return 20
+  [ "$foreground_cwd" = "$wt_real" ] || return 20
+
+  process_json=$(control_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 20
+  printf '%s' "$process_json" | jq -e --arg pane "$pane" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and (.result.process_info.shell_pid | type) == "number"
+    and .result.process_info.shell_pid > 1
+    and (.result.process_info.foreground_process_group_id | type) == "number"
+    and .result.process_info.foreground_process_group_id > 1
+    and (.result.process_info.foreground_processes | type) == "array"
+  ' >/dev/null 2>&1 || return 20
+  if printf '%s' "$process_json" | jq -e '
+    def base:
+      sub("^-"; "") | split("/")[-1];
+    any(.result.process_info.foreground_processes[]?;
+      (((.argv0 // .argv[0] // .name // "") | base) == "pi")
+      or (((.argv0 // .argv[0] // .name // "") | base) == "pi-signed"))
+  ' >/dev/null 2>&1; then
+    return 10
+  fi
+  process_fields=$(printf '%s' "$process_json" | jq -er '
+    .result.process_info as $process
+    | select(($process.foreground_processes | length) == 1)
+    | $process.foreground_processes[0] as $foreground
+    | select(($foreground.pid | type) == "number" and $foreground.pid > 1)
+    | select(($foreground.name | type) == "string" and ($foreground.name | length) > 0)
+    | (($foreground.argv0 // $foreground.argv[0]) // "") as $argv0
+    | select(($argv0 | type) == "string" and ($argv0 | length) > 0)
+    | select(($foreground.cwd | type) == "string" and ($foreground.cwd | length) > 0)
+    | [ $process.shell_pid, $process.foreground_process_group_id, $foreground.pid, $foreground.name, $argv0, $foreground.cwd ]
+    | @tsv
+  ' 2>/dev/null) || return 20
+  IFS=$'\t' read -r shell_pid foreground_pgid foreground_pid foreground_name foreground_argv0 foreground_cwd <<EOF
+$process_fields
+EOF
+  [ "$shell_pid" != "$foreground_pid" ] && [ "$foreground_pgid" = "$foreground_pid" ] || return 20
+  foreground_name=${foreground_name#-}
+  foreground_name=${foreground_name##*/}
+  foreground_argv0=${foreground_argv0#-}
+  foreground_argv0=${foreground_argv0##*/}
+  [ "$foreground_name" = "$foreground_argv0" ] || return 20
+  case "$foreground_name" in sh|bash|zsh|dash|ksh|fish) ;; *) return 20 ;; esac
+  foreground_cwd=$(control_real_dir "$foreground_cwd") || return 20
+  [ "$foreground_cwd" = "$wt_real" ] || return 20
+
+  case "$agent_status" in idle|done|blocked) ;; *) return 20 ;; esac
+  [ "$pane_status" = "$agent_status" ] \
+    && [ "$agent_source" = herdr:pi ] \
+    && [ "$pane_source" = "$agent_source" ] \
+    && [ "$pane_session_kind" = "$agent_session_kind" ] \
+    && [ "$pane_session" = "$agent_session_value" ] \
+    || return 20
+  control_herdr_pi_session_generation_valid "$agent_session_kind" "$agent_session_value" || return 20
+
+  process_fingerprint=$(fm_herdr_pi_nested_shell_process_fingerprint "$shell_pid" "$foreground_pgid") || return 20
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "$session" "$workspace" "$tab" "$pane" "$agent_status" \
+    "$agent_session_kind" "$agent_session_value" "$agent_state_seq" "$process_fingerprint"
+}
+
+# Print a stable fingerprint only after the exact old herdr:pi authority is
+# gone. Herdr 0.8.2 can conservatively retain its process-detected Pi label
+# after releasing full-lifecycle hook authority, so agent=pi alone is not an
+# ambiguity here: the session must be absent, screen detection must no longer
+# be skipped, and the same no-Pi nested-shell process proof must still hold.
+control_herdr_pi_released_shell_sample() {
+  local session workspace tab pane endpoint_task wt_real pane_json pane_fields pane_cwd pane_status
+  local tab_json agent_json agent_rc=0 agent_fields agent_cwd process_json process_fields
+  local shell_pid foreground_pgid foreground_pid foreground_name foreground_argv0 foreground_cwd process_fingerprint
+  session=$(fm_backend_meta_exact_value "$META" herdr_session) || return 1
+  workspace=$(fm_backend_meta_exact_value "$META" herdr_workspace_id) || return 1
+  tab=$(fm_backend_meta_exact_value "$META" herdr_tab_id) || return 1
+  pane=$(fm_backend_meta_exact_value "$META" herdr_pane_id) || return 1
+  endpoint_task=$(fm_backend_meta_exact_value "$META" endpoint_task_id) || return 1
+  [ "$endpoint_task" = "$ID" ] && [ "$T" = "$session:$pane" ] || return 1
+  wt_real=$(control_real_dir "$WT") || return 1
+
+  pane_json=$(control_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  pane_fields=$(printf '%s' "$pane_json" | jq -er \
+    --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+      .result as $result
+      | select($result.type == "pane_info")
+      | $result.pane
+      | select(.pane_id == $pane and .tab_id == $tab and .workspace_id == $workspace)
+      | select(.agent_session == null)
+      | select((.foreground_cwd | type) == "string" and (.foreground_cwd | length) > 0)
+      | [ .foreground_cwd, (.agent_status // "unknown") ]
+      | @tsv
+    ' 2>/dev/null) || return 1
+  IFS=$'\t' read -r pane_cwd pane_status <<EOF
+$pane_fields
+EOF
+  case "$pane_status" in unknown|idle|done|blocked) ;; *) return 1 ;; esac
+  pane_cwd=$(control_real_dir "$pane_cwd") || return 1
+  [ "$pane_cwd" = "$wt_real" ] || return 1
+
+  tab_json=$(control_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  printf '%s' "$tab_json" | jq -e \
+    --arg tab "$tab" --arg workspace "$workspace" --arg label "fm-$ID" '
+      .result.type == "tab_info"
+      and .result.tab.tab_id == $tab
+      and .result.tab.workspace_id == $workspace
+      and .result.tab.label == $label
+    ' >/dev/null 2>&1 || return 1
+
+  agent_json=$(control_herdr_cli "$session" agent get "$pane" 2>/dev/null) || agent_rc=$?
+  if [ "$agent_rc" -eq 0 ]; then
+    agent_fields=$(printf '%s' "$agent_json" | jq -er \
+      --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+        .result as $result
+        | select($result.type == "agent_info")
+        | $result.agent
+        | select(.agent == "pi" and .pane_id == $pane and .tab_id == $tab and .workspace_id == $workspace)
+        | select(.agent_session == null and .screen_detection_skipped == false)
+        | select(.agent_status == "idle" or .agent_status == "done" or .agent_status == "blocked")
+        | select((.foreground_cwd | type) == "string" and (.foreground_cwd | length) > 0)
+        | .foreground_cwd
+      ' 2>/dev/null) || return 1
+    agent_cwd=$(control_real_dir "$agent_fields") || return 1
+    [ "$agent_cwd" = "$wt_real" ] || return 1
+  else
+    [ "$(fm_backend_agent_state herdr "$session:$pane" 2>/dev/null)" = dead ] || return 1
+  fi
+
+  process_json=$(control_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  process_fields=$(printf '%s' "$process_json" | jq -er --arg pane "$pane" '
+    .result as $result
+    | select($result.type == "pane_process_info" and $result.process_info.pane_id == $pane)
+    | $result.process_info as $process
+    | select(($process.shell_pid | type) == "number" and $process.shell_pid > 1)
+    | select(($process.foreground_process_group_id | type) == "number" and $process.foreground_process_group_id > 1)
+    | select(($process.foreground_processes | type) == "array" and ($process.foreground_processes | length) == 1)
+    | $process.foreground_processes[0] as $foreground
+    | select(($foreground.pid | type) == "number" and $foreground.pid > 1)
+    | select(($foreground.name | type) == "string" and ($foreground.name | length) > 0)
+    | (($foreground.argv0 // $foreground.argv[0]) // "") as $argv0
+    | select(($argv0 | type) == "string" and ($argv0 | length) > 0)
+    | select(($foreground.cwd | type) == "string" and ($foreground.cwd | length) > 0)
+    | [ $process.shell_pid, $process.foreground_process_group_id, $foreground.pid, $foreground.name, $argv0, $foreground.cwd ]
+    | @tsv
+  ' 2>/dev/null) || return 1
+  IFS=$'\t' read -r shell_pid foreground_pgid foreground_pid foreground_name foreground_argv0 foreground_cwd <<EOF
+$process_fields
+EOF
+  [ "$shell_pid" != "$foreground_pid" ] && [ "$foreground_pgid" = "$foreground_pid" ] || return 1
+  foreground_name=${foreground_name#-}; foreground_name=${foreground_name##*/}
+  foreground_argv0=${foreground_argv0#-}; foreground_argv0=${foreground_argv0##*/}
+  [ "$foreground_name" = "$foreground_argv0" ] || return 1
+  case "$foreground_name" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
+  foreground_cwd=$(control_real_dir "$foreground_cwd") || return 1
+  [ "$foreground_cwd" = "$wt_real" ] || return 1
+  process_fingerprint=$(fm_herdr_pi_nested_shell_process_fingerprint "$shell_pid" "$foreground_pgid") || return 1
+  printf '%s\t%s\t%s\t%s\t%s' "$session" "$workspace" "$tab" "$pane" "$process_fingerprint"
+}
+
+control_stable_released_herdr_pi_now() {
+  local first second
+  first=$(control_herdr_pi_released_shell_sample) || return 1
+  sleep "$HERDR_SAMPLE_WAIT"
+  second=$(control_herdr_pi_released_shell_sample) || return 1
+  [ "$first" = "$second" ] || return 1
+  printf '%s' "$first"
+}
+
+control_wait_stable_released_herdr_pi() {
+  local elapsed=0 sample previous='' stable=0
+  while :; do
+    sample=$(control_herdr_pi_released_shell_sample 2>/dev/null) || sample=
+    if [ -n "$sample" ] && [ "$sample" = "$previous" ]; then
+      stable=$((stable + 1))
+      [ "$stable" -ge 1 ] && { printf '%s' "$sample"; return 0; }
+    else
+      stable=0
+    fi
+    previous=$sample
+    awk -v e="$elapsed" -v t="$EXIT_WAIT" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  return 1
+}
+
+control_herdr_pi_recovery_applicable() {
+  [ "$BACKEND" = herdr ] || return 1
+  case "$HARNESS" in pi|pi-signed) ;; *) return 1 ;; esac
+  case "$KIND" in ship|scout) ;; *) return 1 ;; esac
+  return 0
+}
+
+# Print recovered, live, not-applicable, or refused. A refused result is a hard
+# stop for the caller: once a non-working registered Pi cannot be attributed to
+# either a visible Pi process or the exact stable nested-shell exit, terminal
+# input could land in an ordinary shell.
+control_maybe_release_stale_herdr_pi() {
+  local first second sample_status session pane kind generation authority_seq released schema socket clearer
+  control_herdr_pi_recovery_applicable || { printf 'not-applicable'; return 0; }
+  fm_herdr_pi_treehouse_copy_matches "$(fm_meta_get "$META" project)" "$WT" \
+    || { printf 'refused'; return 0; }
+  sample_status=0
+  first=$(control_herdr_pi_nested_shell_sample) || sample_status=$?
+  case "$sample_status" in
+    0) ;;
+    10) printf 'live'; return 0 ;;
+    *)
+      released=$(control_stable_released_herdr_pi_now 2>/dev/null) \
+        || { printf 'refused'; return 0; }
+      [ -n "$released" ] || { printf 'refused'; return 0; }
+      printf 'recovered'
+      return 0
+      ;;
+  esac
+  sleep "$HERDR_SAMPLE_WAIT"
+  sample_status=0
+  second=$(control_herdr_pi_nested_shell_sample) || sample_status=$?
+  [ "$sample_status" -eq 0 ] && [ "$second" = "$first" ] \
+    || { printf 'refused'; return 0; }
+
+  IFS=$'\t' read -r session _ _ pane _ kind generation _ _ <<EOF
+$first
+EOF
+  control_herdr_pi_session_generation_valid "$kind" "$generation" \
+    || { printf 'refused'; return 0; }
+  command -v node >/dev/null 2>&1 || { printf 'refused'; return 0; }
+  command -v python3 >/dev/null 2>&1 || { printf 'refused'; return 0; }
+  schema=$(control_herdr_cli "$session" api schema --json 2>/dev/null) \
+    || { printf 'refused'; return 0; }
+  printf '%s' "$schema" | jq -e '
+    any(.schemas.request.oneOf[]?; .properties.method.const == "pane.clear_agent_authority")
+  ' >/dev/null 2>&1 || { printf 'refused'; return 0; }
+  fm_backend_source herdr || { printf 'refused'; return 0; }
+  socket=$(fm_backend_herdr_presentation_session_socket_path "$session" 2>/dev/null) \
+    || { printf 'refused'; return 0; }
+  authority_seq=$(node -e 'process.stdout.write(String(Date.now() * 1000))' 2>/dev/null) \
+    || { printf 'refused'; return 0; }
+  case "$authority_seq" in ''|*[!0-9]*) printf 'refused'; return 0 ;; esac
+  clearer=${FM_CONTROL_HERDR_PI_AUTHORITY_CLEARER:-$SCRIPT_DIR/backends/herdr-clear-agent-authority.py}
+  [ -x "$clearer" ] || { printf 'refused'; return 0; }
+  "$clearer" "$socket" "$pane" "$authority_seq" >/dev/null 2>&1 \
+    || { printf 'refused'; return 0; }
+  released=$(control_wait_stable_released_herdr_pi) \
+    || { printf 'refused'; return 0; }
+  [ -n "$released" ] || { printf 'refused'; return 0; }
+  printf 'recovered'
+}
+
+control_write_herdr_pi_release_proof() {
+  local sample session workspace tab pane process wt_real project_real tmp old_umask
+  [ -n "$RELAUNCH_TX" ] || return 1
+  [ ! -L "$HERDR_PI_RELEASE_PROOF" ] || return 1
+  sample=$(control_stable_released_herdr_pi_now) || return 1
+  IFS=$'\t' read -r session workspace tab pane process <<EOF
+$sample
+EOF
+  wt_real=$(control_real_dir "$WT") || return 1
+  project_real=$(control_real_dir "$(fm_meta_get "$META" project)") || return 1
+  fm_herdr_pi_treehouse_copy_matches "$project_real" "$wt_real" || return 1
+  tmp="$HERDR_PI_RELEASE_PROOF.tmp.${BASHPID:-$$}"
+  old_umask=$(umask)
+  umask 077
+  if {
+    printf '%s\n' 'v=1'
+    printf 'task=%s\n' "$ID"
+    printf 'control_pid=%s\n' "${BASHPID:-$$}"
+    printf 'tx=%s\n' "$RELAUNCH_TX"
+    printf 'endpoint=%s\n' "$T"
+    printf 'worktree=%s\n' "$wt_real"
+    printf 'project=%s\n' "$project_real"
+    printf 'harness=%s\n' "$HARNESS"
+    printf 'kind=%s\n' "$KIND"
+    printf 'session=%s\n' "$session"
+    printf 'workspace=%s\n' "$workspace"
+    printf 'tab=%s\n' "$tab"
+    printf 'pane=%s\n' "$pane"
+    printf 'process=%s\n' "$process"
+  } > "$tmp" && chmod 0600 "$tmp" && mv -f "$tmp" "$HERDR_PI_RELEASE_PROOF"; then
+    umask "$old_umask"
+    return 0
+  fi
+  umask "$old_umask"
+  rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
+control_accept_recovered_herdr_pi() {
+  HERDR_PI_STALE_RELEASED=1
+  [ "$RELAUNCH_ACTIVE" = 1 ] || return 0
+  control_write_herdr_pi_release_proof \
+    || die "the stale Herdr Pi authority was released, but the transaction proof for guarded replacement launch could not be persisted"
+}
+
+# Snapshot a newly anchored Herdr Pi authority together with its pane-shell pid,
+# accepting it only while exactly one Pi engine exists at or below that shell.
+# The caller samples this twice so a transient registration or process cannot
+# satisfy the relaunch postcondition.
+control_herdr_pi_authority_snapshot() {  # [<prior-session-ref>]
+  local prior=${1:-} session workspace tab pane agent_json fields status source kind value cwd state_seq wt_real
+  local process_json shell_pid ps_bin rows counts pi_count signed_count pi_pid signed_pid pi_parent
+  session=$(fm_backend_meta_exact_value "$META" herdr_session) || return 1
+  workspace=$(fm_backend_meta_exact_value "$META" herdr_workspace_id) || return 1
+  tab=$(fm_backend_meta_exact_value "$META" herdr_tab_id) || return 1
+  pane=$(fm_backend_meta_exact_value "$META" herdr_pane_id) || return 1
+  wt_real=$(control_real_dir "$WT") || return 1
+  agent_json=$(control_herdr_cli "$session" agent get "$pane" 2>/dev/null) || return 1
+  fields=$(printf '%s' "$agent_json" | jq -er \
+    --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+      .result as $result
+      | select($result.type == "agent_info")
+      | $result.agent
+      | select(.agent == "pi" and .pane_id == $pane and .tab_id == $tab and .workspace_id == $workspace)
+      | select((.state_change_seq | type) == "number" and .state_change_seq >= 0 and (.state_change_seq | floor) == .state_change_seq)
+      | [ .agent_status, (.agent_session.source // ""), (.agent_session.kind // ""), (.agent_session.value // ""), .foreground_cwd, .state_change_seq ]
+      | @tsv
+    ' 2>/dev/null) || return 1
+  IFS=$'\t' read -r status source kind value cwd state_seq <<EOF
+$fields
+EOF
+  case "$status" in working|idle|done|blocked) ;; *) return 1 ;; esac
+  [ "$source" = herdr:pi ] || return 1
+  control_herdr_pi_session_generation_valid "$kind" "$value" || return 1
+  [ "$kind:$value" != "$prior" ] || return 1
+  cwd=$(control_real_dir "$cwd") || return 1
+  [ "$cwd" = "$wt_real" ] || return 1
+
+  process_json=$(control_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  shell_pid=$(printf '%s' "$process_json" | jq -er --arg pane "$pane" '
+    .result
+    | select(.type == "pane_process_info" and .process_info.pane_id == $pane)
+    | .process_info.shell_pid
+    | select(type == "number" and . > 1)
+    | floor
+  ' 2>/dev/null) || return 1
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  rows=$("$ps_bin" -axo pid=,ppid=,pgid=,stat=,comm=,args= 2>/dev/null) || return 1
+  counts=$(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
+    function base(value, count, parts) {
+      sub(/^-/, "", value)
+      count = split(value, parts, "/")
+      return parts[count]
+    }
+    {
+      if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || NF < 5 || seen[$1]++) { bad = 1; next }
+      parent[$1] = $2
+      command[$1] = $5
+      present[$1] = 1
+      rows++
+    }
+    END {
+      if (bad || !present[shell]) exit 1
+      owned[shell] = 1
+      for (pass = 0; pass <= rows; pass++) {
+        for (pid in present) if (owned[parent[pid]]) owned[pid] = 1
+      }
+      for (pid in owned) if (owned[pid]) {
+        name = base(command[pid])
+        if (name == "pi") { pi++; pi_pid = pid }
+        else if (name == "pi-signed") { signed++; signed_pid = pid }
+      }
+      printf "%d %d %d %d %d", pi, signed, pi_pid, signed_pid, parent[pi_pid]
+    }
+  ') || return 1
+  read -r pi_count signed_count pi_pid signed_pid pi_parent <<EOF
+$counts
+EOF
+  [ "$pi_count" -eq 1 ] || return 1
+  [ "$signed_count" -eq 0 ] || [ "$pi_parent" = "$signed_pid" ] || return 1
+  case "$TARGET_HARNESS" in
+    pi) [ "$signed_count" -le 1 ] || return 1 ;;
+    pi-signed) [ "$signed_count" -eq 1 ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  printf '%s:%s\t%s:%s:%s:%s' "$kind" "$value" "$state_seq" "$shell_pid" "$pi_pid" "$signed_pid"
+}
+
+control_current_herdr_pi_session_ref() {
+  local session pane out kind value
+  [ "$BACKEND" = herdr ] || return 1
+  case "$HARNESS" in pi|pi-signed) ;; *) return 1 ;; esac
+  session=$(fm_backend_meta_exact_value "$META" herdr_session) || return 1
+  pane=$(fm_backend_meta_exact_value "$META" herdr_pane_id) || return 1
+  out=$(control_herdr_cli "$session" agent get "$pane" 2>/dev/null) || return 1
+  out=$(printf '%s' "$out" | jq -er '
+    .result.agent.agent_session
+    | select(.agent == "pi" and .source == "herdr:pi")
+    | select((.kind | type) == "string" and (.value | type) == "string")
+    | [ .kind, .value ] | @tsv
+  ' 2>/dev/null) || return 1
+  IFS=$'\t' read -r kind value <<EOF
+$out
+EOF
+  control_herdr_pi_session_generation_valid "$kind" "$value" || return 1
+  printf '%s:%s' "$kind" "$value"
+}
+
+wait_new_herdr_pi_authority() {  # <prior-session-ref>
+  local prior=${1:-} elapsed=0 sample previous='' stable=0
+  while :; do
+    sample=$(control_herdr_pi_authority_snapshot "$prior" 2>/dev/null) || sample=
+    if [ -n "$sample" ] && [ "$sample" = "$previous" ]; then
+      stable=$((stable + 1))
+      [ "$stable" -ge 1 ] && return 0
+    else
+      stable=0
+    fi
+    previous=$sample
+    awk -v e="$elapsed" -v t="$LAUNCH_WAIT" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  return 1
 }
 
 # send_interrupt_keys: deliver the harness's interrupt key the verified number
@@ -447,7 +998,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
-  local state cmd verdict cancel interrupt_result=not-needed
+  local state cmd verdict cancel interrupt_result=not-needed stale_pi
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -459,6 +1010,27 @@ do_exit() {
     missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
+
+  # Herdr can retain Pi's old full-lifecycle authority after Pi exits back into
+  # Treehouse's nested shell. Check that exact task-scoped shape before typing:
+  # recovered means the supported release boundary made the endpoint positively
+  # agent-free; live means a Pi process is visibly present and ordinary exit is
+  # still correct; refused means terminal input could hit an unattributed shell.
+  stale_pi=not-applicable
+  if control_herdr_pi_recovery_applicable; then
+    stale_pi=$(control_maybe_release_stale_herdr_pi)
+  fi
+  case "$stale_pi" in
+    recovered)
+      control_accept_recovered_herdr_pi
+      retire_busy_incarnation
+      printf 'stopped'
+      return 0
+      ;;
+    live|not-applicable) ;;
+    *) die "task $ID has a non-working Herdr Pi registration, but its exact Treehouse nested-shell exit, process generation, or ownership could not be proved stable; refusing to send a lifecycle command or launch a replacement" ;;
+  esac
+
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)
@@ -487,9 +1059,24 @@ do_exit() {
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
-    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
-  }
+  if ! state=$(wait_agent_state "$EXIT_WAIT" dead); then
+    # The normal Pi exit may have landed while Herdr retained the old authority.
+    # Re-run the same exact proof now that control returned from the TUI. This is
+    # the only post-submit recovery and never retries the lifecycle command.
+    stale_pi=not-applicable
+    if control_herdr_pi_recovery_applicable; then
+      stale_pi=$(control_maybe_release_stale_herdr_pi)
+    fi
+    case "$stale_pi" in
+      recovered)
+        control_accept_recovered_herdr_pi
+        state=dead
+        ;;
+      *)
+        die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s and no exact stable Herdr Pi nested-shell exit could be proved"
+        ;;
+    esac
+  fi
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
@@ -784,7 +1371,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line prior_herdr_pi_session='' authority_line='' release_capability=''
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -821,18 +1408,27 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
+  RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
+  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
+  if control_herdr_pi_recovery_applicable; then
+    prior_herdr_pi_session=$(control_current_herdr_pi_session_ref 2>/dev/null || true)
+  fi
   exit_result=$(do_exit)
+  if [ -f "$HERDR_PI_RELEASE_PROOF" ] && [ ! -L "$HERDR_PI_RELEASE_PROOF" ] \
+     && [ "$(fm_backend_meta_exact_value "$HERDR_PI_RELEASE_PROOF" tx 2>/dev/null)" = "$RELAUNCH_TX" ]; then
+    HERDR_PI_STALE_RELEASED=1
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
-  RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  [ "$HERDR_PI_STALE_RELEASED" = 0 ] || release_capability=$RELAUNCH_TX
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+      FM_CONTROL_HERDR_PI_RELEASE_PROOF="$release_capability" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
   else
@@ -844,9 +1440,31 @@ do_relaunch() {
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
+  if [ "$BACKEND" = herdr ]; then
+    case "$TARGET_HARNESS" in
+      pi|pi-signed)
+        wait_new_herdr_pi_authority "$prior_herdr_pi_session" || {
+          die "the replacement agent for $ID appeared, but a distinct stable herdr:pi session with exactly one Pi engine could not be verified on its recorded endpoint and worktree"
+        }
+        authority_line=herdr_pi_authority=new-session
+        ;;
+    esac
+  fi
   RELAUNCH_AGENT_CONFIRMED=1
+  if [ "$HERDR_PI_STALE_RELEASED" = 1 ]; then
+    if [ -f "$HERDR_PI_RELEASE_PROOF" ] && [ ! -L "$HERDR_PI_RELEASE_PROOF" ]; then
+      rm -f "$HERDR_PI_RELEASE_PROOF" \
+        || die "the replacement agent is running, but its consumed stale-authority proof could not be retired"
+    else
+      die "the replacement agent is running, but its consumed stale-authority proof could not be retired"
+    fi
+  fi
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  if [ -n "$authority_line" ]; then
+    journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result" "$authority_line"
+  else
+    journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  fi
   RELAUNCH_ACTIVE=0
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }

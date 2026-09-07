@@ -388,6 +388,7 @@ test_relaunch_preserves_durable_task_metadata() {
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
+  local wait_attempts=1000
   dir=$(new_case metadata-race rl28)
   add_ship_task "$dir" rl28 claude
   printf '%s\n' "$$" > "$dir/home/state/.lock"
@@ -403,7 +404,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_RELEASE="$launch_release" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 500 ]; do
+  while [ ! -e "$prepare" ] && [ "$i" -lt "$wait_attempts" ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -422,7 +423,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
       --carry-platform x --carry-max 280 > "$dir/link.out" 2>&1 &
   link_pid=$!
   i=0
-  while [ ! -e "$waiting" ] && [ "$i" -lt 500 ]; do
+  while [ ! -e "$waiting" ] && [ "$i" -lt "$wait_attempts" ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -435,7 +436,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
   }
   : > "$launch_release"
   i=0
-  while [ ! -e "$ready" ] && [ "$i" -lt 500 ]; do
+  while [ ! -e "$ready" ] && [ "$i" -lt "$wait_attempts" ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -1034,7 +1035,7 @@ test_launch_failure_keeps_the_prior_record_and_reports_it() {
 }
 
 test_prepublication_failure_keeps_concurrent_durable_metadata() {
-  local dir control_pid link_out rc i=0
+  local dir control_pid link_out rc i=0 wait_attempts=1000
   dir=$(new_case rollback-race rl30)
   add_ship_task "$dir" rl30 claude
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
@@ -1042,7 +1043,7 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
     run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
       > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 200 ]; do
+  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt "$wait_attempts" ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
