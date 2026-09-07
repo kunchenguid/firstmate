@@ -3739,7 +3739,7 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
   pass "an idle-window timer repair drops a finished write-deferral chain, so the next deferral gets a fresh re-surface window"
 }
 
-test_fresh_pause_recheck_yields_to_authoritative_working() {
+test_pause_recheck_yields_to_authoritative_working() {
   local dir state fakebin out capture_file statusf window key pane_hash pid
   dir=$(make_case fresh-pause-recheck-working); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/resumed.status"
@@ -3753,7 +3753,7 @@ test_fresh_pause_recheck_yields_to_authoritative_working() {
   printf '%s\n' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   : > "$state/.paused-$key"
-  : > "$state/.paused-rechecked-$key"
+  set_mtime $(( $(date +%s) - 5000 )) "$state/.paused-rechecked-$key"
   printf '%s\n' "$pane_hash" > "$state/.stale-$key"
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
@@ -4408,7 +4408,7 @@ test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
-test_fresh_pause_recheck_yields_to_authoritative_working
+test_pause_recheck_yields_to_authoritative_working
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
