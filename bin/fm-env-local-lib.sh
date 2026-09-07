@@ -329,19 +329,14 @@ fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
   fi
   if [ ! -e "$source" ] && [ ! -L "$source" ]; then
     # The captain's copy is gone, so the slot's copy is a revoked credential the
-    # next task must not inherit. Only a positively established deletion may remove
-    # it: an unreadable source is not a deletion, so when the primary checkout
-    # cannot even be searched, absence and failure are indistinguishable and the
-    # copy stays put while the spawn stops.
+    # next task must not inherit. Preserve it and refuse this acquisition; teardown
+    # removes it later after the task has been reaped and ownership is revalidated.
     if [ ! -d "$project" ] || [ ! -x "$project" ]; then
       echo "error: cannot tell whether '$source' was deleted or is unreadable because '$project' is not a searchable directory; leaving '$target' in place" >&2
       return 1
     fi
-    if ! fm_env_local_retire_seeded_copy "$worktree"; then
-      echo "error: could not retire the stale .env.local in '$worktree' after it disappeared from '$project'" >&2
-      return 1
-    fi
-    return 0
+    echo "error: '$source' was deleted; leaving the pooled '$target' in place and refusing to reissue the worktree" >&2
+    return 1
   fi
   if [ ! -f "$source" ]; then
     # Not a positively established deletion (a broken symlink lands here too), so
