@@ -23,6 +23,8 @@ This record preserves the live evidence gathered before deciding whether to chan
 The PATH inventory was captured with `type -a grok`, `readlink -f`, and each candidate's `--version` output before the live trials.
 The live session invoked the PATH winner through `exec grok`, which resolved to the 1.0.13 native executable shown above.
 The `--no-alt-screen` flag was accepted by the installed CLI and made pane capture deterministic.
+Firstmate's own spawn shape in `bin/fm-spawn.sh` omits that flag, so these trials differ from the fleet launch in exactly one flag.
+Key delivery is `tmux send-keys` either way, so the interrupt verdict below is unaffected; the footer literals are not, and must be re-captured under the production launch shape before they justify any busy-signature repair.
 
 ## Method and expected behavior
 
@@ -32,7 +34,7 @@ The initiating trigger was exactly one `tmux send-keys ... Escape` or `C-c` whil
 The masking condition was the TUI's active-turn mode, identified by the `Esc:cancel` footer, rather than an idle composer or an approval dialog.
 The visible symptom was `Turn cancelled by user in <seconds>.` followed by the normal composer footer.
 
-The owned tmux launch used this production-shaped command from the isolated repository root:
+The owned tmux launch used this command from the isolated repository root, production-shaped apart from `--no-alt-screen`:
 
 ```sh
 cd "$PWD" && exec grok --always-approve --no-alt-screen "Use the bash tool to execute exactly the foreground command sleep 30. Do not respond or claim completion until the command has actually exited."
