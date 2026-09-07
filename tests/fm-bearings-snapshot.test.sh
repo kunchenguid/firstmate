@@ -2759,6 +2759,56 @@ SH
   pass "large local snapshot overlaps local reads with byte-identical serial and concurrent projections"
 }
 
+test_local_snapshot_advances_open_decisions_without_refolding_lifetime_history() {
+  local home fakebin worktree probe json i appended bytes
+  home=$(make_home incremental-local-decisions)
+  worktree="$home/projects/incremental-local-decisions"
+  fm_git_init_commit "$worktree"
+  git -C "$worktree" checkout -qb fm/incremental-local-decisions
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] incremental-local-decisions - Incremental decision fixture (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/incremental-local-decisions.meta" \
+    "worktree=$worktree" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  i=1
+  while [ "$i" -le 2000 ]; do
+    printf 'working: historical line %s with enough content to represent an old routed secondmate log\n' "$i"
+    i=$((i + 1))
+  done > "$home/state/incremental-local-decisions.status"
+  printf 'needs-decision [key=kept]: captain choice remains open\n' >> "$home/state/incremental-local-decisions.status"
+
+  probe="$home/open-decision-read-probe"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_OPEN_DECISIONS_READ_PROBE="$probe" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json >/dev/null \
+    || fail "initial fleet snapshot did not establish the open-decision cursor"
+  [ -f "$home/state/.incremental-local-decisions.open-decisions-cursor" ] \
+    || fail "initial fleet snapshot did not persist its open-decision cursor: $(cat "$probe" 2>/dev/null || true)"
+  : > "$probe"
+  appended='working: one new observation after the cursor'
+  printf '%s\n' "$appended" >> "$home/state/incremental-local-decisions.status"
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_OPEN_DECISIONS_READ_PROBE="$probe" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "incremental fleet snapshot failed"
+  bytes=$(awk -F '\t' '$1 ~ /incremental-local-decisions.status$/ {print $2}' "$probe")
+  [ "$bytes" = "$(( ${#appended} + 1 ))" ] \
+    || fail "fleet snapshot refolded lifetime status history instead of the appended bytes: ${bytes:-none}"
+  printf '%s' "$json" | jq -e '
+    .tasks[] | select(.id == "incremental-local-decisions")
+    | .hints.pending_decision == true
+      and (.hints.open_decisions | any(.key == "kept" and .verb == "needs-decision"))
+  ' >/dev/null || fail "incremental fleet snapshot lost the existing open decision: $json"
+  pass "fleet snapshots advance only new decision-log bytes while preserving the durable open set"
+}
+
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
   local parent fakebin json i remote_home pid collector_pid sleeper_pid duplicate_base cache_file candidate tmp
   parent=$(make_home concurrent-remote-ledgers)
@@ -2925,6 +2975,7 @@ test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state
 test_large_local_snapshot_overlaps_local_reads_without_projection_drift
+test_local_snapshot_advances_open_decisions_without_refolding_lifetime_history
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
 test_domain_alpha_stale_parent_event_does_not_become_current_work

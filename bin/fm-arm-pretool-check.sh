@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Stable PreToolUse transport for the watcher-arm command policy.
+# Stable PreToolUse transport for primary shell-command safety.
 #
-# A firstmate primary must arm the watcher or run a Codex checkpoint as a
-# standalone verified harness call.
+# A firstmate primary must leave worker-owned no-mistakes runs with their worker,
+# and must arm the watcher or run a Codex checkpoint as a standalone verified
+# harness call.
 # bin/fm-arm-command-policy.mjs is the sole owner of shell classification,
 # protected execution identity, the blessed setup tree, and deny reason codes.
 # This wrapper only acquires the harness payload, discovers the active roots,
@@ -128,9 +129,10 @@ fi
 
 # Strict-superset prefilter (transport only; owns zero classification semantics).
 # Every protected watcher execution and every broad watcher kill resolves to the
-# fm-watch byte sequence AFTER the classifier's byte normalization, so a command
-# that cannot contain fm-watch even after that normalization can never be a
-# deniable watcher command and is fast-allowed without the Node policy owner.
+# fm-watch byte sequence, and every primary pipeline drive resolves to the
+# no-mistakes byte sequence, AFTER the classifier's byte normalization.
+# A command that cannot contain either sequence can never be denied and is
+# fast-allowed without the Node policy owner.
 # We mirror the classifier's cheapest byte transforms here (drop line-
 # continuation and escape backslashes, quotes, and newlines) so obfuscated
 # protected paths such as fm-watc\<newline>h-arm.sh or fm-"watch"-arm.sh still
@@ -159,7 +161,7 @@ case "$CMD" in
   *"\$'"*|*'$"'*) ;;
   *)
     case "$PREFILTER" in
-      *fm-watch*) ;;
+      *fm-watch*|*no-mistakes*) ;;
       *) exit 0 ;;
     esac
     ;;
@@ -168,12 +170,29 @@ esac
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
 ACTIVE_HOME=${FM_HOME:-$ROOT}
+ACTIVE_STATE=${FM_STATE_OVERRIDE:-$ACTIVE_HOME/state}
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
+PRIMARY_SCOPE=false
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh" || exit 0
+if fm_primary_scope_matches "$ROOT" "$ACTIVE_STATE"; then
+  PRIMARY_SCOPE=true
+  # A secondmate marker force-includes its persistent linked home in the shared
+  # primary predicate, but pooled task worktrees inherit that local marker too.
+  # Spawned ship branches have the required fm/<task> shape, so the linked
+  # feature checkout remains the worker-owned pipeline surface.
+  GIT_DIR=$(git -C "$ROOT" rev-parse --git-dir 2>/dev/null || true)
+  GIT_COMMON_DIR=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)
+  GIT_BRANCH=$(git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [ -n "$GIT_DIR" ] && [ "$GIT_DIR" != "$GIT_COMMON_DIR" ]; then
+    case "$GIT_BRANCH" in fm/*) PRIMARY_SCOPE=false ;; esac
+  fi
+fi
 
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 
-POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || exit 0
+POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" --primary "$PRIMARY_SCOPE" 2>/dev/null) || exit 0
 [ -n "$POLICY_OUTPUT" ] || exit 0
 
 TAB=$(printf '\t')

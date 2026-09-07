@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC1091,SC2016,SC2088
-# Behavior tests for the watcher-arm PreToolUse seatbelt (docs/arm-pretool-check.md).
+# Behavior tests for the primary shell PreToolUse seatbelt (docs/arm-pretool-check.md).
 #
 # bin/fm-arm-command-policy.mjs is the single owner of command classification.
 # This suite drives the stable shell transport through all five harness entry
@@ -299,10 +299,93 @@ test_stdin_unrelated_command_allowed() {
   pass "stdin: unrelated command is a fast allow"
 }
 
+test_primary_pipeline_drive_is_denied_without_blocking_workers() {
+  local dir primary worker check payload out err rc entry
+  dir=$(fm_test_tmproot fm-primary-pipeline-drive)
+  primary="$dir/primary"
+  worker="$dir/worker"
+  mkdir -p "$primary/bin" "$primary/state"
+  cp "$ROOT/bin/fm-arm-pretool-check.sh" "$ROOT/bin/fm-arm-command-policy.mjs" \
+    "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-hook-host-lib.sh" "$primary/bin/"
+  chmod +x "$primary/bin/fm-arm-pretool-check.sh" "$primary/bin/fm-arm-command-policy.mjs"
+  printf '# fixture\n' > "$primary/AGENTS.md"
+  printf 'fixture-secondmate\n' > "$primary/.fm-secondmate-home"
+  git -C "$primary" init -q
+  git -C "$primary" add AGENTS.md .fm-secondmate-home bin
+  git -C "$primary" -c user.name=test -c user.email=test@example.com commit -qm fixture
+  git -C "$primary" worktree add -q --detach "$worker"
+  git -C "$worker" checkout -qb fm/fixture-worker
+  mkdir -p "$worker/state"
+  check="$primary/bin/fm-arm-pretool-check.sh"
+
+  # This reproduces the incident path through every supported shell-hook
+  # transport. OMP and pi-signed share Pi's CLI form, while OpenCode also uses
+  # it; Cursor has its distinct successful-deny JSON shape.
+  for entry in codex claude grok opencode pi omp pi-signed cursor; do
+    out="$dir/$entry.out"
+    err="$dir/$entry.err"
+    case "$entry" in
+      codex)
+        payload='{"tool_name":"Bash","tool_input":{"command":"no-mistakes axi respond --action fix"}}'
+        printf '%s' "$payload" | FM_HOME="$primary" "$check" >"$out" 2>"$err"; rc=$?
+        ;;
+      claude)
+        payload='{"tool_name":"Bash","tool_input":{"command":"no-mistakes axi respond --action fix"}}'
+        printf '%s' "$payload" | FM_HOME="$primary" "$check" --claude >"$out" 2>"$err"; rc=$?
+        ;;
+      grok)
+        payload='{"toolName":"run_terminal_command","toolInput":{"command":"no-mistakes axi respond --action fix"}}'
+        printf '%s' "$payload" | FM_HOME="$primary" "$check" >"$out" 2>"$err"; rc=$?
+        ;;
+      cursor)
+        payload='{"tool_name":"Shell","tool_input":{"command":"no-mistakes axi respond --action fix"}}'
+        printf '%s' "$payload" | FM_HOME="$primary" "$check" --cursor >"$out" 2>"$err"; rc=$?
+        ;;
+      *)
+        FM_HOME="$primary" "$check" --command 'no-mistakes axi respond --action fix' >"$out" 2>"$err"; rc=$?
+        ;;
+    esac
+    if [ "$entry" = cursor ]; then
+      [ "$rc" -eq 0 ] || fail "$entry primary pipeline deny must use its successful response shape, got $rc"
+      jq -e '.permission == "deny" and (.user_message | contains("[primary-pipeline-drive]"))' "$out" >/dev/null \
+        || fail "$entry primary pipeline deny omitted its reason: $(cat "$out")"
+    else
+      [ "$rc" -eq 2 ] || fail "$entry primary pipeline drive must deny, got $rc"
+      jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | contains("[primary-pipeline-drive]"))' "$err" >/dev/null \
+        || fail "$entry primary pipeline deny omitted its reason: $(cat "$err")"
+    fi
+  done
+
+  FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
+    --command 'no-mistakes axi respond --action fix' >"$dir/worker.out" 2>"$dir/worker.err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a task worker must retain its pipeline drive call, got $rc: $(cat "$dir/worker.err")"
+  [ ! -s "$dir/worker.out" ] && [ ! -s "$dir/worker.err" ] \
+    || fail "an allowed task-worker pipeline drive must stay silent"
+
+  for payload in \
+    'no-mistakes axi run --intent test' \
+    'env NO_COLOR=1 no-mistakes axi respond --action fix' \
+    "bash -lc 'no-mistakes axi respond --action fix'"; do
+    FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
+    rc=$?
+    [ "$rc" -eq 2 ] || fail "the primary pipeline drive must deny through recognized execution wrappers, got $rc for: $payload"
+    jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | contains("[primary-pipeline-drive]"))' "$dir/run.err" >/dev/null \
+      || fail "the primary pipeline-run deny omitted its stable reason"
+  done
+  FM_HOME="$primary" "$check" --command "echo 'no-mistakes axi respond --action fix'" >/dev/null 2>&1 \
+    || fail "a pipeline command mentioned only as data must remain allowed"
+  FM_HOME="$primary" "$check" --command 'no-mistakes axi status' >/dev/null 2>&1 \
+    || fail "the primary must retain read-only pipeline status"
+  FM_HOME="$primary" "$check" --command 'no-mistakes axi abort --run 01RUN' >/dev/null 2>&1 \
+    || fail "the primary must retain explicit recovery controls"
+  pass "foreground pipeline drives are denied across primary harness transports while workers retain ownership"
+}
+
 test_prefilter_is_strict_superset() {
   local rc
-  # A command with no fm-watch substring is fast-allowed by the transport
-  # prefilter without ever invoking the classifier.
+  # A command with neither protected substring is fast-allowed by the
+  # transport prefilter without ever invoking the classifier.
   "$CHECK" --command 'ls -la /bin && echo done' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "a command with no fm-watch substring must be fast-allowed, got exit $rc"
@@ -348,7 +431,7 @@ test_prefilter_is_strict_superset() {
   "$CHECK" --command "echo 'pkill -f fm-watch'" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "a benign fm-watch-substring command must be classified and allowed, got exit $rc"
-  pass "transport prefilter is a strict superset: non-fm-watch fast-allows, every fm-watch and quoting-decoder-marker command reaches the classifier"
+  pass "transport prefilter is a strict superset: unrelated commands fast-allow, protected commands reach the classifier"
 }
 
 # --- fail-open ----------------------------------------------------------------
@@ -463,6 +546,7 @@ test_stdin_grok_schema_deny
 test_stdin_claude_codex_schema_allow
 test_stdin_claude_codex_schema_deny
 test_stdin_unrelated_command_allowed
+test_primary_pipeline_drive_is_denied_without_blocking_workers
 test_prefilter_is_strict_superset
 test_failopen_empty_stdin
 test_failopen_garbage_stdin

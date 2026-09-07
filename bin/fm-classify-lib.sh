@@ -460,8 +460,10 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Pure read of
 # the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
-# is the durable open-set the fleet snapshot and any point-in-time consumer must use
-# instead of trusting the last status line.
+# is the pure-read durable open-set a one-shot historical consumer uses instead of
+# trusting the last status line. Repeated fleet views use the incremental sibling
+# with a captured endpoint so their cost follows new appends instead of lifetime
+# status history.
 # The scan_open_decisions wrapper below enumerates a whole directory rather than
 # a single caller-chosen path, so a status file that is itself a symlink (e.g.
 # escaping the state directory) is rejected outright with a plain [ -L ] check
@@ -579,7 +581,8 @@ EOF
 # fleet-wide scan using that whole-file function would pay that cost for every
 # task on every wake, which grows unbounded as tasks run longer and accumulate
 # status history. status_open_decisions_incremental and scan_open_decisions_incremental
-# below are the bounded-cost siblings used for that per-drain path: each call
+# below are the bounded-cost siblings used for per-drain and repeated fleet-view
+# paths: each call
 # reads only the bytes appended to a status file since its own last call (a
 # persisted per-file byte cursor) and folds just those new lines into a
 # persisted running open-set, via the exact same _fm_decision_fold_line rule
@@ -619,10 +622,11 @@ EOF
 #
 # Not a pure status-file read: this writes/rewrites the sibling cursor file as a
 # side effect (state/.<task>.open-decisions-cursor), the library's second
-# documented exception to the pure-read rule after crew_absorb_class. The write
-# is atomic (temp file + rename), so a crash between calls leaves either the
-# prior cursor or the new one, never a partial one. bin/fm-wake-drain.sh calls
-# this only after releasing the wake-queue lock, so a hypothetical race between
+# documented exception to the pure-read rule after crew_absorb_class. Wake drains
+# and fleet snapshots share this observational cache. The write is atomic (temp
+# file + rename), so a crash between calls leaves either the prior cursor or the
+# new one, never a partial one. bin/fm-wake-drain.sh calls this only after
+# releasing the wake-queue lock, so a hypothetical race between
 # two overlapping drains can at worst redo a little folding work twice - never
 # drop an open decision - because a losing writer's offset can only ever be
 # equal to or behind an already-recorded byte position, and the next call
@@ -782,7 +786,8 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     size=$actual_size
   fi
 
-  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
+  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || \
+     [ "$offset" -gt "$actual_size" ] || [ "$offset" -gt "$size" ]; then
     offset=0
     open=''
     trusted_open=''

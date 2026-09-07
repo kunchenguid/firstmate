@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Semantic policy for watcher arm and checkpoint shell commands.
+// Semantic policy for primary shell safety commands.
 //
 // This parser is deliberately narrow.
 // It recognizes executed command positions without evaluating, expanding,
@@ -9,7 +9,7 @@
 // The tokenizer and command-position analysis (Lexer, splitProgram,
 // commandPosition) are exported so the sibling cd-guard policy
 // (bin/fm-cd-command-policy.mjs) reuses the same proven parser instead of
-// duplicating shell lexing; see docs/cd-guard.md. The watcher-arm decision
+// duplicating shell lexing; see docs/cd-guard.md. The primary-shell decision
 // procedure below stays private to this file. The CLI entry point at the bottom
 // runs only when this module is invoked directly, never on import.
 
@@ -18,6 +18,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const REASONS = {
+  "primary-pipeline-drive": "the firstmate primary must not drive a no-mistakes run itself because the call can block captain input; send the decision to the task worker that owns the run",
   "watcher-background": "a protected watcher command cannot run in an asynchronous shell list or through nohup/disown",
   "watcher-pipeline": "a protected watcher command must not participate in a pipeline",
   "watcher-redirection": "a protected watcher command must not use shell redirection",
@@ -29,12 +30,17 @@ const REASONS = {
 };
 
 function parseArguments(argv) {
-  const result = { command: "", root: "", home: "" };
+  const result = { command: "", root: "", home: "", primary: false };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
-    if (name === "--command" || name === "--root" || name === "--home") {
+    if (name === "--command" || name === "--root" || name === "--home" || name === "--primary") {
       if (i + 1 >= argv.length) throw new Error(`${name} requires a value`);
-      result[name.slice(2)] = argv[i + 1];
+      if (name === "--primary") {
+        if (!["true", "false"].includes(argv[i + 1])) throw new Error("--primary must be true or false");
+        result.primary = argv[i + 1] === "true";
+      } else {
+        result[name.slice(2)] = argv[i + 1];
+      }
       i += 1;
       continue;
     }
@@ -50,6 +56,11 @@ function rawMentionsProtected(command) {
 function rawMentionsBroadKill(command) {
   const normalized = normalizeLineContinuations(command);
   return /fm-watch/.test(normalized) && /\b(?:pkill|kill)\b/.test(normalized);
+}
+
+function rawMentionsPipelineDrive(command) {
+  const normalized = normalizeLineContinuations(command);
+  return /\bno-mistakes\s+axi\s+(?:run|respond)\b/.test(normalized);
 }
 
 function normalizeLineContinuations(source) {
@@ -728,16 +739,17 @@ function isWatcherPgrep(position, context) {
 
 function analyzeProgram(command, context, depth = 0) {
   if (depth > 12) {
-    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pipelineDrive: rawMentionsPipelineDrive(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const lexed = new Lexer(command).tokenize();
   if (lexed.error) {
-    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pipelineDrive: rawMentionsPipelineDrive(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const program = splitProgram(lexed.tokens);
   const nodeInfos = [];
   let nestedProtected = false;
   let broadKill = false;
+  let pipelineDrive = false;
   let pgrepWatcher = false;
   let unsupported = false;
   let activeContext = {
@@ -763,6 +775,7 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      pipelineDrive ||= nested.pipelineDrive;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -771,6 +784,7 @@ function analyzeProgram(command, context, depth = 0) {
         const nested = analyzeProgram(token.content, nodeContext, depth + 1);
         nodeNestedProtected ||= nested.protectedFound;
         broadKill ||= nested.broadKill;
+        pipelineDrive ||= nested.pipelineDrive;
         nodePgrepWatcher ||= nested.pgrepWatcher;
         if (nested.error && rawMentionsProtected(token.content)) unsupported = true;
       }
@@ -780,6 +794,7 @@ function analyzeProgram(command, context, depth = 0) {
           substitutionResults.set(substitution, nested);
           nodeNestedProtected ||= nested.protectedFound;
           broadKill ||= nested.broadKill;
+          pipelineDrive ||= nested.pipelineDrive;
           nodePgrepWatcher ||= nested.pgrepWatcher;
           if (nested.error && rawMentionsProtected(substitution.content)) unsupported = true;
         }
@@ -804,6 +819,7 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(shellPayload.value, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      pipelineDrive ||= nested.pipelineDrive;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(shellPayload.value)) unsupported = true;
     }
@@ -812,6 +828,7 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      pipelineDrive ||= nested.pipelineDrive;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -821,6 +838,7 @@ function analyzeProgram(command, context, depth = 0) {
     if (hasUnclassifiableProtectedExpansion(position.command, context.root)) unclassifiableProtected = true;
     const commandName = basename(executable);
     const args = position.words.slice(position.index + 1);
+    if (commandName === "no-mistakes" && args[0]?.value === "axi" && ["run", "respond"].includes(args[1]?.value)) pipelineDrive = true;
     if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, nodeContext.watcherPatterns))) broadKill = true;
     if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, nodeContext.watcherPids)))) broadKill = true;
     if (isWatcherPgrep(position, nodeContext)) pgrepWatcher = true;
@@ -849,9 +867,9 @@ function analyzeProgram(command, context, depth = 0) {
   if (unclassifiableProtected) unsupported = true;
   const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
   if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound)) {
-    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pipelineDrive: pipelineDrive || rawMentionsPipelineDrive(command), pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
   }
-  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pipelineDrive, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
 function xModePathAllowed(value, home) {
@@ -899,9 +917,10 @@ function blessedProgram(analysis, context) {
   return true;
 }
 
-function decision(command, root, home) {
+function decision(command, root, home, primary) {
   const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
+  if (primary && analysis.pipelineDrive) return deny("primary-pipeline-drive");
   if (analysis.broadKill) return deny("broad-watcher-kill");
   if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
   if (!analysis.protectedFound) return { decision: "allow" };
@@ -946,7 +965,7 @@ if (invokedDirectly()) {
     if (!args.command) {
       process.stdout.write("allow\n");
     } else {
-      const result = decision(args.command, args.root, args.home);
+      const result = decision(args.command, args.root, args.home, args.primary);
       if (result.decision === "allow") {
         process.stdout.write("allow\n");
       } else {

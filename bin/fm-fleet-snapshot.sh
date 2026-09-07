@@ -58,7 +58,7 @@
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
-#     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
+#     fm-classify-lib.sh's authoritative incremental open-decision fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
@@ -215,7 +215,7 @@ usage: fm-fleet-snapshot.sh --json
 
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract. The default snapshot
-refreshes only its parent-side remote-summary cache as an observational side effect.
+refreshes its parent-side remote-summary cache and open-decision cursors as observational side effects.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -692,7 +692,7 @@ task_json_lines() {
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json captured_status_size
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -743,9 +743,10 @@ task_json_lines() {
       printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
     )
 
-    # Durable keyed open-decision set: fold the WHOLE status stream
-    # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
-    # never mask a still-open captain decision. The set is derived purely from the
+    # Durable keyed open-decision set: advance the shared cursor-backed fold
+    # (fm-classify-lib.sh's status_open_decisions_incremental) so a later unrelated
+    # event can never mask a still-open captain decision without re-reading a
+    # secondmate's lifetime status history on every fleet view. The set is derived purely from the
     # keyed fold - never from report bodies or decision-like prose - and then
     # reconciled against the crew LIFECYCLE, which only clears a stale decision the
     # crew has provably moved past. Two lifecycle signals clear it, neither of which
@@ -760,7 +761,10 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
-    open_decisions_tsv=$(status_open_decisions "$status_log")
+    captured_status_size=$(_fm_status_file_size "$status_log" 2>/dev/null || printf 0)
+    captured_status_size=${captured_status_size//[[:space:]]/}
+    case "$captured_status_size" in ''|*[!0-9]*) captured_status_size=0 ;; esac
+    open_decisions_tsv=$(status_open_decisions_incremental "$STATE/$id.status" "$captured_status_size")
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \

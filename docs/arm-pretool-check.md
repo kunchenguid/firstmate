@@ -1,6 +1,6 @@
-# Watcher arm PreToolUse seatbelt
+# Primary shell PreToolUse seatbelt
 
-This document is the authoritative human-readable contract for the watcher arm PreToolUse seatbelt.
+This document is the authoritative human-readable contract for the primary shell PreToolUse seatbelt.
 `bin/fm-arm-command-policy.mjs` is the single semantic owner.
 `bin/fm-arm-pretool-check.sh` is only the stable harness transport and output renderer.
 The tracked harness adapters forward command text without classifying it.
@@ -8,7 +8,12 @@ The tracked harness adapters forward command text without classifying it.
 
 ## Purpose and boundary
 
-A firstmate primary must arm `bin/fm-watch-arm.sh` or run `bin/fm-watch-checkpoint.sh` through an observable harness call.
+A firstmate primary leaves `no-mistakes axi run` and `no-mistakes axi respond` with the task worker that owns the run.
+Those commands block until the next decision or outcome, so running either in the primary conversation prevents captain input for the whole wait and violates pipeline ownership.
+The seatbelt denies both commands in a genuine primary home and tells the primary to send the decision to the worker.
+It stays inert in a linked task worktree, where the worker must retain both commands, and it leaves read-only status and explicit recovery commands available to the primary.
+
+A firstmate primary must also arm `bin/fm-watch-arm.sh` or run `bin/fm-watch-checkpoint.sh` through an observable harness call.
 A shell background operator, pipeline, redirection, wrapper, or unrelated command list can hide failure or let the watcher child die with the tool call.
 The seatbelt rejects those command shapes before execution.
 
@@ -30,19 +35,19 @@ It tokenizes the bytes and classifies lexical execution positions only.
 
 The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
-It passes both roots and the exact command string to the Node policy owner.
+It uses `bin/fm-primary-scope-lib.sh` to classify that root as a genuine primary or a linked task worktree, then passes the scope, both roots, and the exact command string to the Node policy owner.
 
-The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch` byte sequence even after the classifier's decoders run.
+The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch` or `no-mistakes` byte sequence even after the classifier's decoders run.
 The fast path may allow only when both of these hold:
 
-1. The stripped text lacks the `fm-watch` watcher substring, after mirroring the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, and newlines.
+1. The stripped text lacks both the `fm-watch` watcher substring and the `no-mistakes` pipeline substring, after mirroring the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, and newlines.
 2. The raw command carries no quoting-decoder marker: a `$` immediately followed by a single quote (ANSI-C `$'...'`) or a double quote (bash locale `$"..."`).
 
-Any `fm-watch` match or any quoting-decoder marker delegates to the classifier.
+Any `fm-watch` or `no-mistakes` match, or any quoting-decoder marker, delegates to the classifier.
 Normalizing first keeps this a strict superset: a protected watcher path obfuscated as `fm-watc\<newline>h-arm.sh` or `fm-"watch"-arm.sh` still delegates, and stripping only those non-alphanumeric bytes can never destroy an existing `fm-watch` run.
 The quoting-decoder marker closes the case the byte strip cannot: `bin/fm-$'\x77'atch-arm.sh` and `bin/fm-$"watch"-arm.sh` both resolve to `bin/fm-watch-arm.sh` only after the classifier decodes the encoded character, so a cheap byte strip would otherwise lose the `fm-watch` bytes and fast-allow them.
 This marker set is coupled to the classifier's decoder set in `bin/fm-arm-command-policy.mjs`: adding any new quote or expansion form the classifier decodes requires extending this marker set in the same change, or the prefilter stops being a strict superset.
-The prefilter owns no semantic exception: it can only ever fast-allow a command that is definitely not a watcher command, so it never flips a classification and the classifier remains the single owner of every decision.
+The prefilter owns no semantic exception: it can only ever fast-allow a command that is definitely not a watcher or pipeline-drive command, so it never flips a classification and the classifier remains the single owner of every decision.
 
 The seatbelt's threat model is agent mistakes: no one accidentally writes an ANSI-C- or locale-obfuscated watcher path, and deliberate obfuscation is the post-arm liveness guard's territory.
 The marker guard closes the static gap anyway because it is cheap and provable per encoding class.
@@ -52,6 +57,19 @@ Deeper decode-required obfuscation beyond the coupled marker set stays the class
 Malformed or empty stdin, invalid JSON, missing `jq` for stdin transport, missing Node, a missing classifier, or an invalid classifier response fail open with exit 0 and no output.
 This transport behavior prevents a broken hook from denying every shell tool call.
 Malformed or unsupported shell syntax that contains a protected command is a semantic classification result and fails closed.
+
+## Primary pipeline ownership
+
+An executed `no-mistakes` command whose first two arguments are `axi run` or `axi respond` is a pipeline drive.
+The classifier follows the same recognized wrapper and literal nested-shell execution positions used for watcher commands, so `env no-mistakes axi respond ...` and `bash -lc 'no-mistakes axi run ...'` cannot evade the ownership boundary.
+A pipeline drive denies with `primary-pipeline-drive` only when `bin/fm-primary-scope-lib.sh` proved the checker is running in a genuine primary home.
+The identical command is allowed from a linked task worktree because that worker owns the run.
+Commands such as `no-mistakes axi status` and `no-mistakes axi abort` remain available in the primary for supervision and explicit recovery.
+A data mention in an argument to `echo`, `rg`, or another non-execution command remains allowed.
+
+This ownership check is independent of Calm mode, the supervision branch, and the runtime backend.
+Calm mode hid the initiating model's working narration during the reported call, and the supervision branch could trigger the main conversation to process an outcome, but neither component executes the primary's tool call or blocks Pi's input loop.
+The foreground pipeline drive was the visible blocking mechanism; the branch changed when a main turn could begin, not how that call behaved.
 
 ## Command-position classification
 
@@ -131,6 +149,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 
 | Code | Meaning |
 | --- | --- |
+| `primary-pipeline-drive` | A genuine primary tried to drive a worker-owned no-mistakes run. |
 | `watcher-background` | A protected execution is in an asynchronous list or uses `nohup` or `disown`. |
 | `watcher-pipeline` | A protected execution participates in any pipeline. |
 | `watcher-redirection` | A protected execution uses shell redirection. |
@@ -234,7 +253,8 @@ Every native-path automatic marker was present and every deny sentinel remained 
 ## Automated validation
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
-Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
+Every watcher row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
+The incident regression creates a real plain primary checkout plus a linked task worktree, denies the foreground `no-mistakes axi respond` call through the Codex, Claude, Grok, OpenCode, Pi, pi-signed, omp, and Cursor transport shapes, and proves that the same call remains available to the task worker.
 The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
 
 Run:
