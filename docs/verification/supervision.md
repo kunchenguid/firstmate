@@ -230,6 +230,9 @@ In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycl
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
+The 2026-09-07 live read-only Herdr observation covered owned, record-free Codex endpoint `default:w8Z:p1` at spawn generation `s1788822981.81404.30965`: native `agent get` reported `working`, and the candidate classified `working herdr-native`; before this repair, the same candidate classified `unknown`.
+Native idle, malformed records, generation or source mismatches, and non-Herdr Codex remain unknown.
+
 Deterministic entry points:
 
 ```sh
