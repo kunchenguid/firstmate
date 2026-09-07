@@ -55,6 +55,14 @@ default_branch() {
       return 0
     fi
   done
+  # A local-only primary has no remote HEAD; its checked-out branch is the only available default marker.
+  if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
+    branch=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if [ -n "$branch" ] && git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
+      echo "$branch"
+      return 0
+    fi
+  fi
   return 1
 }
 
