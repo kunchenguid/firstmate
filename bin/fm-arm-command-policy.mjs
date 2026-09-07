@@ -789,6 +789,28 @@ function contextWithAssignments(context, words) {
   return { ...context, protectedVariables, watcherPatterns, watcherPids, knownVariables };
 }
 
+function contextWithBinding(context, name, value) {
+  return contextWithAssignments(context, [{ value: `${name}=${value}`, literal: true, subs: [] }]);
+}
+
+function forLoopBinding(position, context, depth) {
+  const words = position.words;
+  if (basename(position.command?.value || "") !== "for" || words[2]?.value !== "in") return null;
+  const name = words[1]?.value || "";
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || words.length < 4) return null;
+  const values = words.slice(3).map((word) => resolveKnownWord(word, context.knownVariables));
+  if (values.some((value) => value === null)) return null;
+  let selected = values[0];
+  for (const value of values) {
+    const nested = analyzeProgram(value, context, depth + 1);
+    if (basename(value) === "no-mistakes" || nested.pipelineDrive || nested.protectedFound) {
+      selected = value;
+      break;
+    }
+  }
+  return { name, selected, last: values.at(-1) };
+}
+
 function nodeHasRedirection(tokens) {
   return tokens.some((token) => token.type === "redir");
 }
@@ -825,6 +847,7 @@ function analyzeProgram(command, context, depth = 0) {
     knownVariables: new Map(context.knownVariables || []),
   };
   let unclassifiableProtected = false;
+  const loopBindings = [];
 
   for (const tokens of program.nodes) {
     const position = commandPosition(tokens);
@@ -920,7 +943,14 @@ function analyzeProgram(command, context, depth = 0) {
     }
     pgrepWatcher ||= nodePgrepWatcher;
     nestedProtected ||= nodeNestedProtected;
-    if (!position.command) activeContext = nodeContext;
+    const loopBinding = forLoopBinding(position, nodeContext, depth);
+    if (loopBinding) {
+      loopBindings.push(loopBinding);
+      activeContext = contextWithBinding(activeContext, loopBinding.name, loopBinding.selected);
+    } else if (commandName === "done" && loopBindings.length > 0) {
+      const completedLoop = loopBindings.pop();
+      activeContext = contextWithBinding(activeContext, completedLoop.name, completedLoop.last);
+    } else if (!position.command) activeContext = nodeContext;
     else if (commandName === "export") activeContext = contextWithAssignments(activeContext, args.filter((word) => isAssignment(word.value)));
     if (position.unresolvedWrapperOption) unsupported = true;
     nodeInfos.push({
