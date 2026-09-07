@@ -1016,9 +1016,7 @@ compat_source_root=${FM_PI_CODEX_COMPAT_NODE_MODULES:-"$PI_AGENT_DIR/npm/node_mo
 compat_package_dir="$compat_source_root/pi-openai-codex-compat"
 for package_path in \
   "$compat_package_dir/package.json" \
-  "$compat_package_dir/extensions/index.ts" \
-  "$compat_source_root/@2h2d/tree-sitter-wasms/package.json" \
-  "$compat_source_root/web-tree-sitter/package.json"; do
+  "$compat_package_dir/extensions/index.ts"; do
   if [ ! -f "$package_path" ]; then
     fail "installed Pi compatibility resource absent: $package_path"
   fi
@@ -1027,10 +1025,33 @@ compat_version=$(jq -r '.version' "$compat_package_dir/package.json" 2>/dev/null
 compathome="$TMP_ROOT/compat-home"
 compatagentdir="$TMP_ROOT/compat-agent-dir"
 compatmodules="$compatagentdir/npm/node_modules"
-mkdir -p "$compathome/state/branch-session" "$compathome/config" "$compatmodules/@2h2d"
-cp -R "$compat_package_dir" "$compatmodules/"
-cp -R "$compat_source_root/@2h2d/tree-sitter-wasms" "$compatmodules/@2h2d/"
-cp -R "$compat_source_root/web-tree-sitter" "$compatmodules/"
+mkdir -p "$compathome/state/branch-session" "$compathome/config" "$compatmodules"
+# Copy the installed package's declared dependency closure, including locally
+# built native binaries. Different supported releases own different parsers;
+# the live guard must neither install packages nor assume the 0.0.9 WASM tree.
+if ! COMPAT_PACKAGE_DIR="$compat_package_dir" COMPAT_MODULES="$compatmodules" node --input-type=module <<'EOF'
+import { cpSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+function copyPackage(source, destination, ancestors = new Map()) {
+  mkdirSync(dirname(destination), { recursive: true });
+  cpSync(source, destination, { recursive: true });
+  const manifest = JSON.parse(readFileSync(join(source, "package.json"), "utf8"));
+  const require = createRequire(join(source, "package.json"));
+  const chain = new Map(ancestors).set(manifest.name, source);
+  for (const name of Object.keys(manifest.dependencies ?? {})) {
+    const dependency = require.resolve.paths(name).map((path) => join(path, name))
+      .find((path) => existsSync(join(path, "package.json")));
+    if (!dependency) throw new Error(`installed compatibility dependency absent: ${name}`);
+    if (chain.get(name) === dependency) continue;
+    copyPackage(dependency, join(destination, "node_modules", name), chain);
+  }
+}
+copyPackage(process.env.COMPAT_PACKAGE_DIR, join(process.env.COMPAT_MODULES, "pi-openai-codex-compat"));
+EOF
+then
+  fail "could not isolate the installed compatibility dependency tree"
+fi
 
 PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$compathome" FM_ROOT_OVERRIDE="$ROOT" \
   PI_CODING_AGENT_DIR="$compatagentdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
