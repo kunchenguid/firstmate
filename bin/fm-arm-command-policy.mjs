@@ -656,9 +656,10 @@ function hasUnclassifiableProtectedExpansion(word, root) {
   return /(?:^|\/)fm-watch/.test(word.value);
 }
 
-function shellInvocation(position) {
+function shellInvocation(position, context) {
   if (!position.command) return null;
-  const name = basename(position.command.value);
+  const resolvedCommand = context ? resolveKnownWord(position.command, context.knownVariables) : null;
+  const name = basename(resolvedCommand || position.command.value);
   if (!["sh", "bash", "zsh"].includes(name)) return null;
   const words = position.words;
   for (let i = position.index + 1; i < words.length; i += 1) {
@@ -676,14 +677,14 @@ function shellInvocation(position) {
   return { kind: "stdin", payload: null };
 }
 
-function shellHeredocPayloads(tokens, position) {
-  if (shellInvocation(position)?.kind !== "stdin") return [];
+function shellHeredocPayloads(tokens, position, context) {
+  if (shellInvocation(position, context)?.kind !== "stdin") return [];
   const heredocs = tokens.filter((token) => token.type === "redir" && token.fd === 0 && typeof token.heredoc === "string");
   return heredocs.length === 0 ? [] : [heredocs.at(-1).heredoc];
 }
 
-function shellHereStringPayloads(tokens, position) {
-  if (shellInvocation(position)?.kind !== "stdin") return [];
+function shellHereStringPayloads(tokens, position, context) {
+  if (shellInvocation(position, context)?.kind !== "stdin") return [];
   const payloads = [];
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
@@ -804,7 +805,7 @@ function unresolvedExecutionPayloadMentionsPipelineDrive(words) {
 
 function hasDynamicExecutionPayload(position, context) {
   if (!position.command) return false;
-  const name = basename(position.command.value);
+  const name = basename(resolveKnownWord(position.command, context.knownVariables) || position.command.value);
   if (["sh", "bash", "zsh"].includes(name)) {
     for (let i = position.index + 1; i < position.words.length; i += 1) {
       if (!/^-[A-Za-z]*c[A-Za-z]*$/.test(position.words[i].value)) continue;
@@ -895,6 +896,22 @@ function contextWithConditionalAssignments(previous, assigned, words, depth) {
   return merged;
 }
 
+function mergeReachableContexts(first, second, depth) {
+  let merged = second;
+  for (const [name, firstValue] of first.knownVariables) {
+    const secondValue = second.knownVariables.get(name);
+    const firstAnalysis = analyzeProgram(firstValue, first, depth + 1);
+    const firstIsProtected = basename(firstValue) === "no-mistakes" || firstAnalysis.pipelineDrive || firstAnalysis.protectedFound;
+    let secondIsProtected = false;
+    if (secondValue !== undefined) {
+      const secondAnalysis = analyzeProgram(secondValue, second, depth + 1);
+      secondIsProtected = basename(secondValue) === "no-mistakes" || secondAnalysis.pipelineDrive || secondAnalysis.protectedFound;
+    }
+    if (firstIsProtected && !secondIsProtected) merged = contextWithBinding(merged, name, firstValue);
+  }
+  return merged;
+}
+
 function nodeHasRedirection(tokens) {
   return tokens.some((token) => token.type === "redir");
 }
@@ -932,14 +949,30 @@ function analyzeProgram(command, context, depth = 0) {
   };
   let unclassifiableProtected = false;
   const loopBindings = [];
+  const conditionalBindings = [];
 
   for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
     const tokens = program.nodes[nodeIndex];
     const precedingSeparator = nodeIndex > 0 ? program.separators[nodeIndex - 1] : "";
     const position = commandPosition(tokens);
+    const firstName = basename(position.words[0]?.value || "");
+    if (firstName === "else" && conditionalBindings.length > 0) {
+      const branch = conditionalBindings.at(-1);
+      branch.thenContext = activeContext;
+      branch.hasElse = true;
+      activeContext = branch.entryContext;
+    }
+    if (firstName === "if") {
+      const conditionName = basename(position.command?.value || "");
+      conditionalBindings.push({
+        entryContext: activeContext,
+        condition: conditionName === "true" || conditionName === ":" ? true : conditionName === "false" ? false : null,
+        thenContext: null,
+        hasElse: false,
+      });
+    }
     const assignmentPrefixes = position.words.slice(0, position.index).filter((word) => isAssignment(word.value));
     const nodeContext = contextWithAssignments(activeContext, assignmentPrefixes);
-    const firstName = basename(position.words[0]?.value || "");
     if (["if", "then", "else", "elif", "fi", "for", "while", "until", "case", "esac", "do", "done", "function"].includes(firstName)) {
       unsupported = true;
     }
@@ -977,13 +1010,13 @@ function analyzeProgram(command, context, depth = 0) {
       }
     }
 
-    const shell = shellInvocation(position);
+    const shell = shellInvocation(position, nodeContext);
     const shellPayload = shell?.kind === "command" ? shell.payload : null;
     const shellScript = shell?.kind === "script" ? shell.payload : null;
     const sourceScript = sourcedScript(position);
     const resolvedEvalPayload = evalPayload(position, nodeContext);
-    const heredocPayloads = shellHeredocPayloads(tokens, position);
-    const hereStringPayloads = shellHereStringPayloads(tokens, position);
+    const heredocPayloads = shellHeredocPayloads(tokens, position, nodeContext);
+    const hereStringPayloads = shellHereStringPayloads(tokens, position, nodeContext);
     for (const script of [shellScript, sourceScript]) {
       if (!script) continue;
       nodeNestedProtected ||= Boolean(protectedIdentity(script.value, context.root)) || wordReferencesAny(script, nodeContext.protectedVariables);
@@ -1053,6 +1086,14 @@ function analyzeProgram(command, context, depth = 0) {
         if (assignmentPrefixes.some((word) => assignmentName(word) === binding.name) && execution !== "never") binding.bodyAssigned = true;
       }
     } else if (commandName === "export") activeContext = contextWithAssignments(activeContext, args.filter((word) => isAssignment(word.value)));
+    if (firstName === "fi" && conditionalBindings.length > 0) {
+      const branch = conditionalBindings.pop();
+      const thenContext = branch.thenContext || activeContext;
+      const elseContext = branch.hasElse ? activeContext : branch.entryContext;
+      activeContext = branch.condition === true ? thenContext
+        : branch.condition === false ? elseContext
+          : mergeReachableContexts(thenContext, elseContext, depth);
+    }
     if (position.unresolvedWrapperOption) unsupported = true;
     nodeInfos.push({
       tokens,
