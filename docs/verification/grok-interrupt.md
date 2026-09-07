@@ -24,7 +24,8 @@ The PATH inventory was captured with `type -a grok`, `readlink -f`, and each can
 The live session invoked the PATH winner through `exec grok`, which resolved to the 1.0.13 native executable shown above.
 The `--no-alt-screen` flag was accepted by the installed CLI and made pane capture deterministic.
 Firstmate's own spawn shape in `bin/fm-spawn.sh` omits that flag, so these trials differ from the fleet launch in exactly one flag.
-Key delivery is `tmux send-keys` either way, so the interrupt verdict below is unaffected; the footer literals are not, and must be re-captured under the production launch shape before they justify any busy-signature repair.
+Key delivery is `tmux send-keys` either way, but identical delivery does not establish identical handling: the 0.2.73 premise under revision is precisely that Escape focused the scrollback, and scrollback ownership is what the alternate screen changes hands over.
+Both the Escape observations and the footer literals below are therefore scoped to the `--no-alt-screen` capture shape, and each must be re-captured under the production launch shape before it justifies a key switch or a busy-signature repair.
 
 ## Method and expected behavior
 
@@ -111,7 +112,7 @@ The crewmate consequence runs through the classifier instead: `stale_window_is_b
 The tmux and herdr submit readers never select the grok literal because their call sites pass no harness, but the `FM_DELIVERY_BUSY_REGEX_DEFAULT` union they fall back to matches none of the captured 1.0.13 rows either, so grok submit acknowledgement is equally stale on this build.
 Grok busy detection is therefore known stale on 1.0.13; widening or version-scoping the signature needs its own busy-scoped live verification and regression coverage, and this verification does not change the busy regex.
 
-An Escape-is-safe conclusion would require repeated active-turn captures where one Escape cancels the turn and the active tool work also stops cleanly, the Grok process remains interactive, and a follow-up is accepted.
+An Escape-is-safe conclusion would require repeated active-turn captures under the production launch shape, without `--no-alt-screen`, where one Escape cancels the turn and the active tool work also stops cleanly, the Grok process remains interactive, and a follow-up is accepted.
 It would be falsified by any repeatable capture where Escape only changes scrollback focus, leaves the turn generating, leaves active work running, exits or wedges the Grok process, fails to restore an interactive composer, or prevents a follow-up.
 The retained raw captures include the active-command result and therefore do not meet that stronger conclusion.
 

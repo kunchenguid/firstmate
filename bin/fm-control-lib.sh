@@ -111,8 +111,9 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 
 # The key that cancels a running turn. Escape for every adapter except grok,
 # which cancels on Ctrl+C. That premise was verified on grok 0.2.73, where Esc
-# only moved focus to the scrollback; on 1.0.13 a single Esc does visibly cancel
-# the turn, but neither key was proven to stop already-running tool work, so
+# only moved focus to the scrollback; on 1.0.13 a single Esc visibly cancelled
+# the turn in --no-alt-screen trials, which the spawn shape does not use, and
+# neither key was proven to stop already-running tool work, so
 # Ctrl+C is retained as the established path. See
 # docs/verification/grok-interrupt.md.
 # gemini names its own key in the running turn's status row
