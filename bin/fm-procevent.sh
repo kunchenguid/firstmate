@@ -156,9 +156,13 @@
 # group once that lease can no longer be proved fresh. Owner-presence operations
 # refresh the lease, an attached public start keeps it fresh while its caller
 # remains attached, and the watcher's reconcile cycle keeps it fresh in a live
-# home. Nothing a runner spawns can refresh it, so a source cannot certify its
-# own owner. Scope is the owning state root and one runner generation, never a
-# script or process name, so a live source in
+# home. A runner exports the inherited FM_PROCEVENT_IN_RUNNER marker and every
+# refresh is skipped under it, so a runner and its ordinary children do not
+# certify their own owner. That rule is CONFUSED-AGENT-GRADE, the grade
+# bin/fm-lease-lib.sh documents: a source that DELIBERATELY strips the marker
+# can still refresh, and adversarial-grade unforgeability is out of scope (see
+# docs/configuration.md). Scope is the owning state root and one runner
+# generation, never a script or process name, so a live source in
 # another home is untouched. See bin/fm-procevent-lib.sh for the lease itself.
 #
 # Ownership is machine-wide per canonical source, because separate Firstmate
@@ -649,9 +653,11 @@ require_isolated_group() {  # <role>
 
 require_runner_group() { require_isolated_group runner; }
 
-# Record that an owning session is still here. Skipped inside a runner and
-# everything it spawns, so a source cannot keep refreshing its own owner's lease
-# and outlive the session that armed it.
+# Record that an owning session is still here. Skipped under the inherited
+# FM_PROCEVENT_IN_RUNNER marker, so a runner and its ordinary children do not
+# keep refreshing their own owner's lease and outlive the session that armed it.
+# Confused-agent-grade: a source that deliberately unsets the marker can still
+# refresh, and that is out of scope (see docs/configuration.md).
 owner_lease_refresh() {
   [ "${FM_PROCEVENT_IN_RUNNER:-0}" = 1 ] && return 0
   fm_procevent_owner_lease_touch "$STATE" 2>/dev/null || true
