@@ -121,6 +121,61 @@ SH
   pass "fm-harness detects only Cursor Agent CLI's exact invocation marker"
 }
 
+test_codex_pid_one_detection() {
+  local dir fakebin got other
+  dir="$TMP_ROOT/codex-pid-one"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  1:comm=) printf '%s\n' "${FM_FAKE_PID_ONE_COMM:-codex-linux-sandbox}" ;;
+  1:args=) printf '%s\n' "${FM_FAKE_PID_ONE_ARGS:-${FM_FAKE_PID_ONE_COMM:-codex-linux-sandbox}}" ;;
+  1:ppid=) printf '%s\n' 0 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-harness.sh")
+  [ "$got" = codex ] || fail "PID-1 Codex sandbox resolved '$got', expected codex"
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_FAKE_PID_ONE_COMM=codex-linux-san \
+    FM_FAKE_PID_ONE_ARGS='/usr/local/bin/codex-linux-sandbox --sandbox-policy-cwd /repo' \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = codex ] \
+    || fail "truncated PID-1 Codex sandbox command resolved '$got', expected codex"
+
+  for other in codex codex-helper mycodex claude opencode grok kimi muse pi pi-signed cursor-agent; do
+    got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_FAKE_PID_ONE_COMM="$other" \
+      PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+    [ "$got" = unknown ] \
+      || fail "PID-1 $other resolved '$got', expected preserved unknown classification"
+  done
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_FAKE_PID_ONE_COMM=claude \
+    FM_FAKE_PID_ONE_ARGS='/usr/local/bin/codex-linux-sandbox --sandbox-policy-cwd /repo' \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = unknown ] \
+    || fail "a non-truncated PID-1 command borrowed Codex sandbox argv[0]: $got"
+  pass "fm-harness classifies only the verified Codex sandbox identity at PID 1"
+}
+
 # ===========================================================================
 # C) fm-harness.sh secondmate-model / secondmate-effort token resolution
 # ===========================================================================
@@ -2154,7 +2209,8 @@ SH
       "$ROOT/bin/fm-config-push.sh" > "$first_out" 2>&1
   ) &
   first_pid=$!
-  for _ in $(seq 1 100); do
+  # Allow slow filesystems enough time to reach the controlled delivery rendezvous.
+  for _ in $(seq 1 300); do
     [ -e "$entered" ] && break
     sleep 0.02
   done
@@ -2562,6 +2618,7 @@ SH
 
 test_harness_resolution
 test_cursor_marker_detection
+test_codex_pid_one_detection
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands

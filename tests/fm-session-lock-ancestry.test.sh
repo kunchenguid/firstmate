@@ -134,6 +134,54 @@ SH
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
 }
 
+test_pid_one_codex_classification_never_owns_session_lock() {
+  local dir fakebin detected out status=0
+  dir="$TMP_ROOT/pid-one-codex"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  1:comm=) printf '%s\n' /usr/local/bin/codex-linux-sandbox ;;
+  1:args=) printf '%s\n' 'codex-linux-sandbox --sandbox-policy-cwd /repo' ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  detected=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-harness.sh")
+  [ "$detected" = codex ] \
+    || fail "PID-1 Codex classification resolved '$detected', expected codex"
+
+  out=$(FM_HOME="$dir" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" 2>&1) || status=$?
+  expect_code 1 "$status" "PID-1 Codex session-lock acquisition"
+  assert_contains "$out" "cannot locate harness process in ancestry" \
+    "the session lock did not fail closed at PID 1"
+  assert_absent "$dir/state/.lock" \
+    "the session lock persisted namespace-local PID 1 as authoritative ownership"
+
+  # A stale PID-1 lock from an earlier process must not continue to block the
+  # home as if the namespace-local sandbox were authoritative ownership.
+  printf '1\n' > "$dir/state/.lock"
+  out=$(FM_HOME="$dir" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" status)
+  [ "$out" = 'lock: stale (pid 1 dead or not a harness)' ] \
+    || fail "PID-1 lock status resolved '$out', expected a stale lock"
+  pass "session-lock: PID 1 classifies Codex but never becomes authoritative ownership"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -358,6 +406,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
+test_pid_one_codex_classification_never_owns_session_lock
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home
