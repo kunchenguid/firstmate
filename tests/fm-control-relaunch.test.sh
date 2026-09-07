@@ -325,17 +325,31 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
-test_relaunch_succeeds_from_a_missing_endpoint() {
+test_relaunch_reaches_the_launch_attempt_from_a_missing_endpoint() {
   local dir out rc
   dir=$(new_case gone rl41)
   add_ship_task "$dir" rl41 claude
   : > "$dir/fake/windows"
   out=$(run_control "$dir" rl41 relaunch --note "endpoint vanished, resuming"); rc=$?
-  expect_code 0 "$rc" "relaunching a task whose endpoint vanished should succeed"$'\n'"$out"
-  assert_contains "$out" "relaunched rl41 harness=claude from=claude" "the outcome should name the transition"
-  [ "$(journal_field "$dir" rl41 phase)" = complete ] \
-    || fail "the transaction journal should end complete"
-  pass "fm-control relaunch: a vanished endpoint is recovered exactly like a positively dead one"
+  # The fixture's fake tmux never repopulates its window list once emptied, so
+  # a launch into a target list-windows still reports absent cannot be
+  # confirmed alive here - that confirmation is the untouched postcondition
+  # this fix deliberately leaves alone. What this pins is the actual bug: the
+  # OLD code dead-ended at do_exit with "recorded endpoint is gone... reconcile
+  # the task" before ever attempting a launch. The fix must reach the launch
+  # attempt instead, landing on the pipeline's existing graceful outcome for
+  # an unconfirmed replacement rather than refusing outright.
+  assert_not_contains "$out" "recorded endpoint is gone" \
+    "a vanished endpoint must not hit the old dead-end refusal"
+  assert_contains "$out" "no running agent could be confirmed" \
+    "the relaunch should reach the launch attempt rather than refusing before it"
+  assert_contains "$out" "its work is preserved" \
+    "an unconfirmed replacement must still report where the work lives"
+  [ "$(journal_field "$dir" rl41 phase)" = "failed:launching" ] \
+    || fail "the transaction journal should record the launch phase, got '$(journal_field "$dir" rl41 phase)'"
+  assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement launch should have been attempted"
+  pass "fm-control relaunch: a vanished endpoint reaches the launch attempt instead of the old dead-end refusal"
 }
 
 test_relaunch_from_linked_home_preserves_recorded_worktree() {
@@ -1558,7 +1572,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
-test_relaunch_succeeds_from_a_missing_endpoint
+test_relaunch_reaches_the_launch_attempt_from_a_missing_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
