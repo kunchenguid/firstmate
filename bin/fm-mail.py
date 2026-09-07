@@ -218,10 +218,8 @@ def load_retry_pos(pos_path, n):
 
 def retry_scan_window(order, pos, window):
     """Take the bounded retry scan starting at the durable position, wrapping
-    around the end of the retry file so every retry uid is examined within
-    ceil(len/window) polls. The caller advances the position by the window,
-    making the scan a cursor over the whole retry set: a recovered uid can
-    never be stranded behind a persistent-failure prefix."""
+    around the end of the retry file. cmd_poll_list owns when and by how much
+    the durable position advances after this window is considered."""
     if not order:
         return []
     if len(order) <= window:
@@ -305,11 +303,8 @@ def cmd_poll_list():
             retry_order = []
         # Bound the expensive fetch work with a window, applied to each class
         # separately so a large new-mail backlog cannot slice retry candidates
-        # out of the scan. The retry scan starts at a durable position and the
-        # position advances by the window each poll, so it is a cursor over the
-        # whole retry set: every retry uid is examined within ceil(N/window)
-        # polls and a recovered uid can never be stranded behind a persistent-
-        # failure prefix.
+        # out of the scan. The retry scan starts at a durable position; the
+        # persist block below owns when that position advances.
         window = max(cap * 4, cap + 10)
         new_candidates = new_uids[:window]
         # Only a retry uid that is already surfaced (in the cursor) is a pure
