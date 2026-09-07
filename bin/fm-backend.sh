@@ -27,11 +27,13 @@
 # never-auto-detected because it also owns the task worktree; see
 # docs/cmux-backend.md for its empirical basis. P6 REGISTERS paseo as an
 # EXPERIMENTAL backend NAME and lands its safety boundary - detection ordering
-# and endpoint-record validation - BEFORE any lifecycle code exists. paseo is
+# and endpoint-record refusal - BEFORE any lifecycle code exists. paseo is
 # deliberately NOT spawn-capable: there is no bin/backends/paseo.sh yet, so
 # fm_backend_validate_spawn refuses it at the single boundary every spawn caller
-# already shares, and every other runtime operation refuses through the
-# unimplemented-backend arms below rather than degrading.
+# already shares, fm_backend_validate_task_endpoint refuses every backend=paseo
+# cleanup record at the single boundary every teardown caller already shares,
+# and every other runtime operation refuses through the unimplemented-backend
+# arms below rather than degrading.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -71,10 +73,11 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
-# paseo is EXPERIMENTAL and KNOWN-ONLY for now: the name, its detection
-# ordering, and its endpoint-record validation exist, but the lifecycle adapter
-# does not, so paseo is absent from FM_BACKEND_SPAWN and every spawn refuses at
-# fm_backend_validate_spawn. It joins the spawn set when that adapter lands.
+# paseo is EXPERIMENTAL and KNOWN-ONLY for now: the name and its detection
+# ordering exist, but the lifecycle adapter does not, so paseo is absent from
+# FM_BACKEND_SPAWN, every spawn refuses at fm_backend_validate_spawn, and every
+# cleanup record refuses at fm_backend_validate_task_endpoint. It joins the
+# spawn set - and gets a record-shape check - when that adapter lands.
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
@@ -584,27 +587,19 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       fi
       ;;
     paseo)
-      # No "legacy record" wording, unlike every other non-tmux arm: paseo is
-      # new, so no metadata predates the endpoint_task_id binding and the
-      # binding is simply required. Paseo terminal ids are opaque UUIDs that do
-      # not encode the task label, so the binding is the ONLY thing tying this
-      # record to this task. window= carries the composite <workspace>:<terminal>
-      # target and the two dedicated fields let it be cross-checked against its
-      # own parts, which is what catches a truncated or hand-edited record.
-      # Metadata-only, before any runtime command: a down Paseo daemon can never
-      # turn a valid cleanup record into a refusal, or the reverse.
-      [ "$binding" = "$id" ] || {
-        echo "REFUSED: paseo endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
-        return 1
-      }
-      workspace=$(fm_backend_meta_exact_value "$meta" paseo_workspace_id) || workspace=
-      terminal=$(fm_backend_meta_exact_value "$meta" paseo_terminal_id) || terminal=
-      if [ -z "$workspace" ] || [ -z "$terminal" ] || [ "$window" != "$workspace:$terminal" ] \
-        || ! fm_backend_endpoint_atom_valid "$workspace" \
-        || ! fm_backend_endpoint_atom_valid "$terminal"; then
-        echo "REFUSED: paseo endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
-        return 1
-      fi
+      # paseo refuses at THIS boundary for the same reason it refuses at
+      # fm_backend_validate_spawn: it has no lifecycle adapter. fm_backend_kill
+      # has no paseo arm, and every kill caller swallows failures because an
+      # already-gone endpoint is legitimately not an error. So accepting a paseo
+      # record here would let teardown return the worktree, delete the durable
+      # metadata, and report completion while the Paseo terminal is still
+      # running - destroying the only record of the endpoint it had left. No
+      # firstmate path writes a backend=paseo record while the adapter is
+      # absent, so any such record is unintended and its task state must be
+      # preserved. Per-field record-shape validation lands with the adapter that
+      # can actually act on the record.
+      echo "REFUSED: the EXPERIMENTAL paseo backend has no lifecycle adapter, so task $id's endpoint cannot be closed; preserving task state." >&2
+      return 1
       ;;
   esac
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.

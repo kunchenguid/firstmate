@@ -2,7 +2,7 @@
 # tests/fm-backend-paseo.test.sh - portable regressions for the paseo backend's
 # SAFETY BOUNDARY, which lands before any lifecycle code exists: registration
 # as a known-but-not-spawn-capable name, runtime-detection ordering, the spawn
-# refusal, and endpoint-record validation.
+# refusal, and the cleanup-record refusal.
 #
 # Nothing here runs a real `paseo`, and nothing here can. That is the point of
 # doing this stage first: every behavior below is decided from environment
@@ -265,7 +265,7 @@ test_spawn_refuses_paseo_at_the_shared_boundary() {
   pass "fm-spawn.sh: every paseo spawn kind refuses at the shared fm_backend_validate_spawn boundary, before any task record"
 }
 
-# --- endpoint-record validation ---------------------------------------------
+# --- endpoint-record refusal -------------------------------------------------
 
 # paseo_meta: write one meta file into its OWN mktemp -d directory under this
 # suite's scratch root and echo the path. Each case therefore gets a fresh
@@ -278,90 +278,77 @@ paseo_meta() {  # <task-id> <meta lines...> -> echoes meta path
   printf '%s\n' "$dir/$id.meta"
 }
 
-test_paseo_endpoint_validation_accepts_a_consistent_record() {
-  local meta id=paseo-ok
+test_paseo_endpoint_records_refuse_while_no_adapter_can_close_them() {
+  local meta out rc errfile id=paseo-shaped
+  # The record below is as well-formed as a paseo cleanup record can be: exact
+  # task binding, composite window= target, and both parts recorded separately.
+  # It must STILL refuse, because fm_backend_kill has no paseo arm and every
+  # kill caller swallows failures - so accepting it would authorize teardown to
+  # delete the endpoint identity of a terminal that is still running.
   meta=$(paseo_meta "$id" \
     "window=$PASEO_WS:$PASEO_TERM" "endpoint_task_id=$id" \
     "worktree=/tmp/wt" "project=/tmp/proj" "backend=paseo" \
     "paseo_workspace_id=$PASEO_WS" "paseo_terminal_id=$PASEO_TERM")
-  fm_backend_validate_task_endpoint "$meta" "$id" \
-    || fail "a consistent paseo endpoint record should validate"
-  [ "$FM_BACKEND_VALIDATED_BACKEND" = paseo ] \
-    || fail "validation should report paseo as the backend, got '$FM_BACKEND_VALIDATED_BACKEND'"
-  [ "$FM_BACKEND_VALIDATED_TARGET" = "$PASEO_WS:$PASEO_TERM" ] \
-    || fail "validation should report the composite workspace:terminal target, got '$FM_BACKEND_VALIDATED_TARGET'"
-  [ "$(fm_backend_of_meta "$meta")" = paseo ] \
-    || fail "fm_backend_of_meta should read backend=paseo from the record"
-  [ "$(fm_backend_target_of_meta "$meta")" = "$PASEO_WS:$PASEO_TERM" ] \
-    || fail "fm_backend_target_of_meta should return the recorded window= composite for paseo"
-  pass "paseo endpoint validation: a consistent record validates and resolves to its composite workspace:terminal target"
-}
-
-# assert_paseo_refusal <case-name> <expect-substring> <meta lines...>
-assert_paseo_refusal() {
-  local case_name=$1 expect=$2 meta out rc id=paseo-bad
-  shift 2
-  meta=$(paseo_meta "$id" "$@")
+  # Called directly, not in a command substitution, so the refusal's effect on
+  # the FM_BACKEND_VALIDATED_* output globals is observable in THIS shell.
+  errfile="$meta.err"
   set +e
-  out=$(fm_backend_validate_task_endpoint "$meta" "$id" 2>&1)
+  fm_backend_validate_task_endpoint "$meta" "$id" 2>"$errfile"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "paseo validation should refuse: $case_name"
-  assert_contains "$out" "$expect" "the $case_name refusal did not name the problem"
+  out=$(cat "$errfile")
+  [ "$rc" -ne 0 ] \
+    || fail "a backend=paseo endpoint record must refuse while paseo has no lifecycle adapter"
+  assert_contains "$out" "no lifecycle adapter" \
+    "the paseo endpoint refusal should name the missing adapter as the reason"
   assert_contains "$out" "preserving task state" \
-    "the $case_name refusal must say task state is preserved"
+    "the paseo endpoint refusal must say task state is preserved"
+  [ -z "$FM_BACKEND_VALIDATED_BACKEND" ] && [ -z "$FM_BACKEND_VALIDATED_TARGET" ] \
+    || fail "a refused paseo record must not publish a validated backend or target"
+  pass "paseo endpoint validation: every backend=paseo cleanup record refuses and preserves task state"
 }
 
-test_paseo_endpoint_validation_refuses_malformed_records() {
-  # Each case is one way a paseo record can be wrong. Every one must REFUSE and
-  # say it is preserving task state, because the caller's next step is teardown.
-  # Paseo terminal ids are opaque UUIDs that do not encode the task label, so
-  # the endpoint_task_id binding is the ONLY thing tying a record to its task.
-  assert_paseo_refusal missing-binding "lacks an exact task binding" \
-    "window=$PASEO_WS:$PASEO_TERM" "worktree=/tmp/wt" "project=/tmp/proj" \
-    "backend=paseo" "paseo_workspace_id=$PASEO_WS" "paseo_terminal_id=$PASEO_TERM"
-
-  assert_paseo_refusal foreign-binding "belongs to task some-other-task" \
-    "window=$PASEO_WS:$PASEO_TERM" "endpoint_task_id=some-other-task" \
-    "worktree=/tmp/wt" "project=/tmp/proj" "backend=paseo" \
-    "paseo_workspace_id=$PASEO_WS" "paseo_terminal_id=$PASEO_TERM"
-
-  assert_paseo_refusal missing-workspace "malformed or inconsistent" \
-    "window=$PASEO_WS:$PASEO_TERM" "endpoint_task_id=paseo-bad" \
-    "worktree=/tmp/wt" "project=/tmp/proj" "backend=paseo" \
-    "paseo_terminal_id=$PASEO_TERM"
-
-  assert_paseo_refusal missing-terminal "malformed or inconsistent" \
-    "window=$PASEO_WS:$PASEO_TERM" "endpoint_task_id=paseo-bad" \
-    "worktree=/tmp/wt" "project=/tmp/proj" "backend=paseo" \
-    "paseo_workspace_id=$PASEO_WS"
-
-  # The composite target and its parts disagree: exactly what a truncated or
-  # hand-edited record looks like, and the reason both parts are recorded.
-  assert_paseo_refusal composite-mismatch "malformed or inconsistent" \
-    "window=$PASEO_WS:99999999-9999-9999-9999-999999999999" "endpoint_task_id=paseo-bad" \
-    "worktree=/tmp/wt" "project=/tmp/proj" "backend=paseo" \
-    "paseo_workspace_id=$PASEO_WS" "paseo_terminal_id=$PASEO_TERM"
-
-  assert_paseo_refusal unsafe-atom "malformed or inconsistent" \
-    "window=$PASEO_WS:term;rm -rf /" "endpoint_task_id=paseo-bad" \
-    "worktree=/tmp/wt" "project=/tmp/proj" "backend=paseo" \
-    "paseo_workspace_id=$PASEO_WS" "paseo_terminal_id=term;rm -rf /"
-
-  assert_paseo_refusal ambiguous-workspace "malformed or inconsistent" \
-    "window=$PASEO_WS:$PASEO_TERM" "endpoint_task_id=paseo-bad" \
-    "worktree=/tmp/wt" "project=/tmp/proj" "backend=paseo" \
-    "paseo_workspace_id=$PASEO_WS" "paseo_workspace_id=wks_other" \
-    "paseo_terminal_id=$PASEO_TERM"
-
-  pass "paseo endpoint validation: a missing, foreign, incomplete, mismatched, unsafe, or ambiguous record refuses and preserves task state"
+test_every_endpoint_backend_teardown_accepts_can_be_closed() {
+  # The invariant the paseo refusal exists to keep: validation is what
+  # authorizes teardown to destroy durable state, and teardown's close is
+  # best-effort, so a backend may only pass validation if fm_backend_kill can
+  # actually act on it. Drives both real functions rather than reading either.
+  local backend meta out rc target fb tool id=endpoint-reach
+  # Stub every session-provider CLI so a backend that DOES dispatch a close
+  # never reaches a real multiplexer on the developer's machine. Only the
+  # presence of a dispatch arm is under test; what the arm then runs is each
+  # backend's own suite's business.
+  fb=$(mktemp -d "$TMP_ROOT/kill-reach.XXXXXX")
+  for tool in $FM_BACKEND_KNOWN jq; do
+    printf '#!/bin/sh\nexit 0\n' > "$fb/$tool"
+    chmod +x "$fb/$tool"
+  done
+  for backend in $FM_BACKEND_KNOWN; do
+    meta=$(paseo_meta "$id" "window=sess:fm-$id" "endpoint_task_id=$id" \
+      "worktree=/tmp/wt" "project=/tmp/proj" "backend=$backend")
+    set +e
+    fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || continue
+    target=$FM_BACKEND_VALIDATED_TARGET
+    set +e
+    out=$(PATH="$fb:$PATH" fm_backend_kill "$backend" "$target" 2>&1)
+    set -e
+    case "$out" in
+      *"no kill implementation"*)
+        fail "$backend endpoint records validate but fm_backend_kill cannot close them: teardown would delete task state while the session lives"
+        ;;
+    esac
+  done
+  pass "endpoint identity: no known backend can pass cleanup validation without a reachable fm_backend_kill implementation"
 }
 
-test_paseo_endpoint_validation_refuses_before_any_runtime_call() {
+test_paseo_endpoint_refusal_refuses_before_any_runtime_call() {
   local dir meta fb id=paseo-inert rc
-  # Validation is metadata-only, so a down or unreachable Paseo daemon can never
-  # turn a valid cleanup record into a refusal, or the reverse. Proven by putting
-  # a `paseo` on PATH that records the fact if it is ever executed.
+  # Refusal is metadata-only, so a down or unreachable Paseo daemon can never
+  # change the verdict. Proven by putting a `paseo` on PATH that records the
+  # fact if it is ever executed.
   dir=$(mktemp -d "$TMP_ROOT/endpoint-inert.XXXXXX")
   fb="$dir/fakebin"
   mkdir -p "$fb"
@@ -381,7 +368,7 @@ TRIPWIRE
     _ "$ROOT" "$meta" "$id" >/dev/null 2>&1
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "a valid paseo record should validate with no daemon reachable"
+  [ "$rc" -ne 0 ] || fail "a paseo record should refuse with no daemon reachable"
   [ ! -e "$dir/tripwire" ] || fail "paseo endpoint validation invoked a runtime command: $(cat "$dir/tripwire")"
   pass "paseo endpoint validation: decides entirely from durable metadata, never invoking Paseo"
 }
@@ -394,6 +381,6 @@ test_paseo_cli_is_not_a_detection_marker
 test_paseo_detect_is_ordered_last
 test_paseo_autodetect_notice_and_explicit_override
 test_spawn_refuses_paseo_at_the_shared_boundary
-test_paseo_endpoint_validation_accepts_a_consistent_record
-test_paseo_endpoint_validation_refuses_malformed_records
-test_paseo_endpoint_validation_refuses_before_any_runtime_call
+test_paseo_endpoint_records_refuse_while_no_adapter_can_close_them
+test_every_endpoint_backend_teardown_accepts_can_be_closed
+test_paseo_endpoint_refusal_refuses_before_any_runtime_call
