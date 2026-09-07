@@ -782,7 +782,7 @@ PYEOF
   assert_contains "$out2" $'71\t\ta@b.c\tgood\tretry' "the unexamined retry window is scanned from the start"
   assert_not_contains "$out2" $'82\t' "the scan must not wrap over the unexamined window"
   pos2=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
-  assert_equals "11" "$pos2" "the retry-scan position advances only after a retry budget is spent"
+  assert_equals "1" "$pos2" "the retry-scan position advances by the examined candidate only"
   pass "fm-mail: a zero retry budget leaves the retry-scan position unchanged"
 }
 
@@ -1270,7 +1270,7 @@ PYEOF
   expect_code 0 "$rc2" "second retry poll must succeed"
   assert_contains "$out2" $'82\t\ta@b.c\tgood\tretry' "the cursor wraps and the recovered uid surfaces on the next poll"
   pos2=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
-  assert_equals "10" "$pos2" "the retry-scan position keeps advancing around the set"
+  assert_equals "0" "$pos2" "the retry-scan position advances only past candidates examined within budget"
   pass "fm-mail: the retry-scan cursor advances past persistent failures"
 }
 
@@ -1352,8 +1352,80 @@ PYEOF
   assert_contains "$out" $'82\t\tbob@x.com\trecovered\tretry' \
     "recovered row surfaces once the position write succeeds"
   pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
-  assert_equals "1" "$pos" "position advances by the window after emission and save"
+  assert_equals "0" "$pos" "position advances past the candidates examined within budget (wrapped in the two-uid set)"
   pass "fm-mail: retry-scan position is saved only after rows are emitted"
+}
+
+test_poll_retry_budget_advances_by_examined_not_window() {
+  # Greptile regression: when the retry window holds more uids than the
+  # reserved retry budget, the durable position must advance by the candidates
+  # actually examined within budget - never by the full window. Advancing by
+  # the full window while emitting only the budgeted prefix revisits the same
+  # prefix every poll and strands later recovered uids.
+  local harness out pos rc=0
+  harness="$TMP_ROOT/retry-budget-cursor-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_RETRY_POS': sys.argv[3],
+    # cap=4 -> retry_budget = max(1, 4//4) = 1, so only one retry uid may
+    # emit per poll while the window (max(4*4, 4+10) = 16) holds all 12.
+    'FM_MAIL_POLL_MAX_WAKES': '4',
+})
+RETRY = sys.argv[5].split(',') if len(sys.argv) > 5 else []
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'101 102 103 104 105 106 107 108 109 110 111 112'])
+        if cmd == 'fetch':
+            # Every retry candidate is fetchable, so the emit loop must
+            # respect the retry budget (cap=4 -> budget=1): it emits the first
+            # in-budget candidate and leaves the rest in the scan, so the
+            # durable position advances by the examined count, never the full
+            # window.
+            return ('OK', [(b'', b'Subject: r\r\nFrom: a@b.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[4])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  # All 12 uids are cursor-recorded and in the retry set; none has recovered
+  # yet so the first poll emits nothing but must still examine candidates
+  # within budget and leave the position pointing past them.
+  mkdir -p "$HOME_DIR/state"
+  {
+    printf 'uidvalidity=90009\n'
+    for u in 101 102 103 104 105 106 107 108 109 110 111 112; do
+      printf '%s\n' "$u"
+    done
+  } > "$HOME_DIR/state/.mail-seen"
+  printf '101\n102\n103\n104\n105\n106\n107\n108\n109\n110\n111\n112\n' > "$HOME_DIR/state/.mail-retry"
+  : > "$HOME_DIR/state/.mail-retry-pos"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" "101,102,103,104,105,106,107,108,109,110,111,112" 2>&1) || rc=$?
+  expect_code 0 "$rc" "first retry poll must succeed"
+  pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "1" "$pos" \
+    "position advances by the budget-examined count, never the full window"
+  pass "fm-mail: retry budget advances the scan by examined candidates, not the window"
 }
 
 test_poll_retry_logout_before_emit_and_position_save() {
@@ -1474,7 +1546,7 @@ PYEOF
   assert_contains "$out" $'82\t\tbob@x.com\trecovered\tretry' \
     "flushed rows survive a kill immediately after the position write"
   pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
-  assert_equals "1" "$pos" "position write completed before the kill"
+  assert_equals "0" "$pos" "position write completes before the kill (advanced by examined count, wrapped)"
   pass "fm-mail: stdout is flushed before the retry-scan position is saved"
 }
 
@@ -2034,6 +2106,7 @@ test_poll_skips_unfetchable_uid_but_keeps_progress
 test_poll_retries_transient_fetch_and_surfaces_real_metadata
 test_poll_retry_cursor_advances_past_failures
 test_poll_retry_emission_precedes_position_save
+test_poll_retry_budget_advances_by_examined_not_window
 test_poll_retry_logout_before_emit_and_position_save
 test_poll_retry_flush_before_position_save
 test_poll_retry_surfaces_under_new_mail_flood
