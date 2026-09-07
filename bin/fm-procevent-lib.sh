@@ -210,6 +210,12 @@ fm_procevent_launch_floor_seconds() {
   printf '%s\n' "$value"
 }
 
+fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id>
+  local reg
+  reg=$(fm_procevent_registry_dir "$1") || return 1
+  rm -f -- "$reg/$2.last-launch"
+}
+
 fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <seconds>
   local reg stamp
   reg=$(fm_procevent_registry_dir "$1") || return 1
@@ -229,7 +235,8 @@ fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <seconds>
       $previous = 0 + $1;
     }
     my $now = time;
-    sleep($floor - ($now - $previous)) if defined($previous) && $now - $previous < $floor;
+    my $elapsed = defined($previous) && $now >= $previous ? $now - $previous : 0;
+    sleep($floor - $elapsed) if defined($previous) && $elapsed < $floor;
     $now = time;
     my $tmp = "$path.$$";
     sysopen(my $out, $tmp, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 1;

@@ -1944,6 +1944,51 @@ perl -e 'exit($ARGV[0] >= ($ARGV[1] - 1) * 0.8 ? 0 : 1)' "$launch_span" "$launch
   || fail "an orphaned source stormed $launch_count launches during its owner-dead grace window"
 pass "an orphaned source command obeys the launch floor during its grace window"
 
+HPACE="$TMP_ROOT/registration-pacing"; new_home "$HPACE"
+fm_test_track_procevent_home "$HPACE"
+PACE_LOG="$TMP_ROOT/registration-pacing.log"
+pe_register "$HPACE" lavish pace-src -- "$FAST_SOURCE" "$PACE_LOG" >/dev/null
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3600 pe "$HPACE" start pace-src >/dev/null
+pe "$HPACE" retire pace-src >/dev/null
+pe_register "$HPACE" lavish pace-src -- "$FAST_SOURCE" "$PACE_LOG" >/dev/null
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3600 pe "$HPACE" start pace-src > "$TMP_ROOT/replacement-pacing.out" 2>&1 &
+PACE_START_PID=$!
+pace_deadline=$((SECONDS + 4))
+while kill -0 "$PACE_START_PID" 2>/dev/null; do
+  if [ "$SECONDS" -ge "$pace_deadline" ]; then
+    pe "$HPACE" retire pace-src >/dev/null 2>&1 || true
+    wait "$PACE_START_PID" 2>/dev/null || true
+    fail "a replacement registration inherited the prior launch floor"
+  fi
+  sleep 0.1
+done
+wait "$PACE_START_PID" || fail "the replacement registration failed"
+[ "$(wc -l < "$PACE_LOG" | tr -d ' ')" = 2 ] \
+  || fail "a replacement registration did not launch immediately"
+pass "a replacement registration starts with a fresh launch floor"
+
+HROLLBACK="$TMP_ROOT/rollback-pacing"; new_home "$HROLLBACK"
+fm_test_track_procevent_home "$HROLLBACK"
+ROLLBACK_LOG="$TMP_ROOT/rollback-pacing.log"
+pe_register "$HROLLBACK" lavish rollback-src -- "$FAST_SOURCE" "$ROLLBACK_LOG" >/dev/null
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 pe "$HROLLBACK" start rollback-src >/dev/null
+printf '%s\n' "$(( $(date +%s) + 3600 ))" > "$HROLLBACK/state/procevent/rollback-src.last-launch"
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 pe "$HROLLBACK" start rollback-src > "$TMP_ROOT/rollback.out" 2>&1 &
+ROLLBACK_START_PID=$!
+rollback_deadline=$((SECONDS + 4))
+while kill -0 "$ROLLBACK_START_PID" 2>/dev/null; do
+  if [ "$SECONDS" -ge "$rollback_deadline" ]; then
+    pe "$HROLLBACK" retire rollback-src >/dev/null 2>&1 || true
+    wait "$ROLLBACK_START_PID" 2>/dev/null || true
+    fail "a backward clock correction extended the launch floor"
+  fi
+  sleep 0.1
+done
+wait "$ROLLBACK_START_PID" || fail "the rollback-paced source failed"
+[ "$(wc -l < "$ROLLBACK_LOG" | tr -d ' ')" = 2 ] \
+  || fail "the rollback-paced source did not invoke twice"
+pass "a backward clock correction cannot extend the launch floor"
+
 storm_deadline=$((SECONDS + 15))
 while :; do
   storm_before=$(wc -l < "$TMP_ROOT/launch-times" | tr -d ' ')
@@ -1985,6 +2030,31 @@ wait "$ATTACHED_START_PID" || fail "the attached start did not complete after it
 assert_contains "$(cat "$TMP_ROOT/attached.out")" "captured:" \
   "the attached source result was not captured"
 pass "a foreground start refreshes its lease while its caller remains attached"
+
+HDETACHED="$TMP_ROOT/detached-attached-owner"; new_home "$HDETACHED"
+fm_test_track_procevent_home "$HDETACHED"
+DETACHED_TRIGGER="$TMP_ROOT/detached-attached.trigger"
+pe_register "$HDETACHED" lavish detached-attached-src -- \
+  "$BLOCKER" "$DETACHED_TRIGGER" "detached attached payload"
+FM_PROCEVENT_OWNER_LEASE_SECONDS=1 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 FM_HOME="$HDETACHED" \
+  perl -MPOSIX=setsid -e 'setsid() >= 0 or exit 1; exec @ARGV' \
+    "$ROOT/bin/fm-procevent.sh" start detached-attached-src \
+    > "$TMP_ROOT/detached-attached.out" 2>&1 &
+DETACHED_START_PID=$!
+wait_for "$HDETACHED/state/procevent/detached-attached-src.runner" \
+  || fail "the detachable foreground start never launched its source"
+DETACHED_RUNNER_PID=$(cat "$HDETACHED/state/procevent/detached-attached-src.runner")
+kill "$DETACHED_START_PID"
+wait "$DETACHED_START_PID" 2>/dev/null || true
+detached_deadline=$((SECONDS + 8))
+while kill -0 "$DETACHED_RUNNER_PID" 2>/dev/null; do
+  if [ "$SECONDS" -ge "$detached_deadline" ]; then
+    pe "$HDETACHED" retire detached-attached-src >/dev/null 2>&1 || true
+    fail "an orphaned attached-start keeper preserved its owner's lease"
+  fi
+  sleep 0.1
+done
+pass "an attached-start keeper stops refreshing after its parent exits"
 
 # --- a runner cannot outlive the session that owns it -----------------------
 #

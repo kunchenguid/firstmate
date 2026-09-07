@@ -455,6 +455,10 @@ cmd_register() {
     fm_procevent_source_lock_release "$id"
     die "cannot publish the registration"
   fi
+  if ! fm_procevent_launch_floor_reset_locked "$STATE" "$id"; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot reset source launch pacing"
+  fi
   fm_procevent_source_lock_release "$id"
   owner_lease_refresh
   printf 'registered: %s (%s)\n' "$id" "$adapter"
@@ -543,6 +547,11 @@ cmd_register_extension() {
     fm_procevent_source_lock_release "$id"
     extension_lifecycle_lock_release
     die "cannot publish the extension registration"
+  fi
+  if ! fm_procevent_launch_floor_reset_locked "$STATE" "$id"; then
+    fm_procevent_source_lock_release "$id"
+    extension_lifecycle_lock_release
+    die "cannot reset source launch pacing"
   fi
   fm_procevent_source_lock_release "$id"
   extension_lifecycle_lock_release
@@ -669,8 +678,11 @@ owner_lease_keepalive() {  # <parent-pid> <parent-identity>
     sleep 1
     fm_procevent_pid_state "$parent" "$identity"
     state=$?
-    [ "$state" -eq 0 ] || [ "$state" -eq 3 ] || return 0
-    owner_lease_refresh
+    case "$state" in
+      0) owner_lease_refresh ;;
+      2) ;;
+      *) return 0 ;;
+    esac
   done
 }
 
