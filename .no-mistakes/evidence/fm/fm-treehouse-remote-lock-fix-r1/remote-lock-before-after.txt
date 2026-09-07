@@ -1,0 +1,9 @@
+# Remote-boundary Treehouse lock regression: executable before/after comparison
+fixture parent binding:
+schema=fm-secondmate-parent.v1
+route=remote
+parent_host=parent-machine
+
+base 29015a2 result: exit=1 output=<none>
+fixed 5ebf85b result: exit=0 output=/private/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/fm-remote-lock-before-after.s4q1pK/remote-home/state/.treehouse-project-301eabc8091173ae630ea5dfc8e6023bb43857cf.lock
+observable result: lock anchored in remote-seeded home state

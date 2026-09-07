@@ -1,0 +1,7 @@
+# remote-seeded Treehouse spawn command
+$ FM_HOME=/private/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/fm-spawn-pool-base-freshen.tX7id0/remote-seeded/home bin/fm-spawn.sh pool-remote-seeded-r13 /private/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/fm-spawn-pool-base-freshen.tX7id0/remote-seeded/project --scout
+spawned pool-remote-seeded-r13 harness=codex kind=scout window=firstmate:fm-pool-remote-seeded-r13 worktree=/private/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/fm-spawn-pool-base-freshen.tX7id0/remote-seeded/pool
+exit=0
+published worktree=/private/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/fm-spawn-pool-base-freshen.tX7id0/remote-seeded/pool
+resolved project lock=/private/var/folders/0k/bf8mwt2n5qddzk24r20gfk0c0000gn/T/fm-spawn-pool-base-freshen.tX7id0/remote-seeded/home/state/.treehouse-project-54ac1ebe2805f8d49f40cee3f8f57ec9c82a5a3c.lock
+ok - a remote-seeded secondmate home allocates and launches from its Treehouse pool
