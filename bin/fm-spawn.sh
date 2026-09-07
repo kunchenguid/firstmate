@@ -2371,38 +2371,16 @@ EOF
 }
 
 spawn_worktree_has_origin_config() {  # <worktree>
-  # Inactive conditional includes are intentionally over-classified as configured so uncertainty fails closed.
-  local worktree=$1 config include key origin matched index=0 seen=$'\n' config_dir
-  local -a configs
+  # Any origin evidence in Git's effective config is classified conservatively so uncertainty fails closed.
+  local worktree=$1 config origin key seen=$'\n'
   git -C "$worktree" config --get-regexp '^remote\.origin\.' >/dev/null 2>&1 && return 0
-  configs=("$(git -C "$worktree" rev-parse --path-format=absolute --git-path config 2>/dev/null)")
-  if [ "$(git -C "$worktree" config --bool --get extensions.worktreeConfig 2>/dev/null || true)" = true ]; then
-    configs+=("$(git -C "$worktree" rev-parse --path-format=absolute --git-path config.worktree 2>/dev/null)")
-  fi
   while IFS=$'\t' read -r origin key; do
-    case $origin in file:*) configs+=("${origin#file:}") ;; esac
-  done < <(git -C "$worktree" config --list --show-origin 2>/dev/null || true)
-  while [ "$index" -lt "${#configs[@]}" ]; do
-    config=${configs[$index]}
-    index=$((index + 1))
-    [ -n "$config" ] && [ -f "$config" ] || continue
+    case $origin in file:*) config=${origin#file:} ;; *) continue ;; esac
+    [ -f "$config" ] || continue
     case $seen in *$'\n'"$config"$'\n'*) continue ;; esac
     seen+="$config"$'\n'
     awk '/^[[:space:]]*\[[[:space:]]*[Rr][Ee][Mm][Oo][Tt][Ee][[:space:]]+"origin"[[:space:]]*\][[:space:]]*([#;].*)?$/ || /^[[:space:]]*\[[[:space:]]*[Rr][Ee][Mm][Oo][Tt][Ee]\.origin[[:space:]]*\][[:space:]]*([#;].*)?$/ { found=1 } END { exit !found }' "$config" && return 0
-    config_dir=$(cd "$(dirname "$config")" 2>/dev/null && pwd -P) || continue
-    while IFS=' ' read -r key include; do
-      [ -n "$include" ] || continue
-      case $include in
-        '~/'*) include=${HOME:?}/${include#'~/'} ;;
-        /*) ;;
-        *) include=$config_dir/$include ;;
-      esac
-      configs+=("$include")
-      while IFS= read -r matched; do
-        [ -n "$matched" ] && configs+=("$matched")
-      done < <(compgen -G "$include" || true)
-    done < <(git config --file "$config" --get-regexp '^[iI][nN][cC][lL][uU][dD][eE]([iI][fF]\..*)?\.path$' 2>/dev/null || true)
-  done
+  done < <(git -C "$worktree" config --list --show-origin 2>/dev/null || true)
   return 1
 }
 
