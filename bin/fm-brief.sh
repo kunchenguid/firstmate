@@ -111,6 +111,7 @@ esac
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 CREWMATE_PAUSE_WAIT_EXAMPLES='an upstream release, a rate-limit reset, a scheduled window, or your own validation round'
+RESOLVE_VERB=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -328,7 +329,7 @@ Report only true captain-relevant outcomes or a declared external wait by append
    \`echo "{state} [at=<epoch>]: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
-Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own, naming when it clears with \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know; use \`blocked:\` when you are stuck and need firstmate to act.
+Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own, naming when it clears with \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know; that declaration stands until you retract it with \`$RESOLVE_VERB: {how it cleared}\` (or end the task with \`done:\`/\`failed:\`/\`blocked:\`/\`needs-decision:\`); a later \`working:\` line does not cancel it. Use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
 Work you landed includes a merge you performed yourself under standing merge authority and one the captain merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the captain as silence.
 This is also how you return the answer to a marked from-firstmate request above.
@@ -437,8 +438,12 @@ The report is the only thing that survives, so anything worth keeping must be in
    known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
    treating it as a possible wedge. When you know when the wait clears, say so in the line with
-   \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) and firstmate rechecks at that time instead.
-   Use \`blocked:\` when you are stuck and need help.
+   \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) and firstmate rechecks at that time instead. That declaration
+   STANDS until you retract it with \`$RESOLVE_VERB: {how it cleared}\` (or end the task with
+   \`done:\`/\`failed:\`/\`blocked:\`/\`needs-decision:\`), so a later \`working:\` line - yours or one from
+   a reporter you armed - neither cancels it nor needs you to re-issue it. Append that
+   \`$RESOLVE_VERB:\` line when the wait clears and you resume, or firstmate keeps treating your idle
+   pane as an expected wait. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -528,7 +533,12 @@ $RULE1
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
    firstmate then leaves your idle pane alone and rechecks it on a long
-   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   cadence instead of treating it as a possible wedge. That declaration STANDS until you retract it
+   with \`$RESOLVE_VERB: {how it cleared}\` (or end the task with \`done:\`/\`failed:\`/\`blocked:\`/\`needs-decision:\`),
+   so a later \`working:\` line - yours or one from a reporter you armed - neither cancels it nor
+   needs you to re-issue it. Append that \`$RESOLVE_VERB:\` line when the wait clears and you resume,
+   or firstmate keeps treating your idle pane as an expected wait. Use \`blocked:\` when you are
+   stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
    append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.

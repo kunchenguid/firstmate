@@ -82,6 +82,42 @@ fi
 grep -q 'absorbed push' "$STATE_DIR/.watch-triage.log" 2>/dev/null || fail "the paused absorb should be logged to the triage log"
 pass "handle_push_transition: a declared-pause crew is absorbed (no fast wake), left to the poll loop's long cadence"
 
+# --- handle_push_transition: the declared pause is STANDING, not the last line -
+#
+# The same masking defect this fast path used to share with the poll loop: it read
+# the log's last line, so any later append by any producer - here the crew's own
+# armed step reporter - cancelled a live declaration and turned an absorbed
+# transition back into an immediate escalation. bin/fm-classify-lib.sh's
+# status_standing_wait_line owns the fold; this pins that this path reads it.
+
+reset_state
+fm_write_meta "$STATE_DIR/tk2m.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+{
+  printf 'paused: waiting on the upstream release\n'
+  printf 'working: run 01M1T9RF188DHFWHN5YRQVXZ8Q step ci,failed\n'
+} > "$STATE_DIR/tk2m.status"
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+if [ -e "$STATE_DIR/.wake-queue" ] && grep -q 'stale' "$STATE_DIR/.wake-queue"; then
+  fail "an append after a declared pause fast-escalated the crew: $(cat "$STATE_DIR/.wake-queue")"
+fi
+[ ! -s "$WAKE_LOG" ] || fail "an append after a declared pause woke the supervisor from the event fast-path"
+grep -q 'absorbed push' "$STATE_DIR/.watch-triage.log" 2>/dev/null || fail "the masked-pause absorb should be logged to the triage log"
+pass "handle_push_transition: a declared pause masked by a later append is still absorbed"
+
+# The disconfirming half: the crew's own terminal line DOES retract, so the
+# transition escalates immediately again.
+reset_state
+fm_write_meta "$STATE_DIR/tk2r.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
+{
+  printf 'paused: waiting on the upstream release\n'
+  printf 'done: the upstream release landed\n'
+} > "$STATE_DIR/tk2r.status"
+handle_push_transition herdr default "$(mkrec wG:pQ blocked)"
+[ -e "$STATE_DIR/.wake-queue" ] || fail "a retracted declaration must no longer absorb the transition"
+grep -q 'stale' "$STATE_DIR/.wake-queue" || fail "a retracted declaration must enqueue the stale wake: $(cat "$STATE_DIR/.wake-queue")"
+[ -s "$WAKE_LOG" ] || fail "a retracted declaration must wake the supervisor"
+pass "handle_push_transition: the crew's own terminal line retracts the declaration and escalation resumes"
+
 # --- handle_push_transition: absorb for a verified captain-held transfer -------
 
 reset_state

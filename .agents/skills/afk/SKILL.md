@@ -158,11 +158,13 @@ Classify each wake this way:
 - `signal` whose newly classified status span contains captain-relevant events -> escalate every event in source order.
   A nonterminal progress verb remains nonterminal even when its prose contains a legacy free-text token such as `PR ready`, `checks green`, `ready in branch`, or `merged`; only a bare legacy line with such a token escalates.
   Other signals with no captain-relevant event in the span -> self-handle.
-- `signal` or `stale` whose latest status declares a wait, either a `paused:` external wait or a verified `captain-held` transfer, tracks the pause rather than a wedge whether its pane reads idle or busy.
+- `signal` or `stale` whose status carries a standing declared wait, either a `paused:` external wait or a verified `captain-held` transfer, tracks the pause rather than a wedge whether its pane reads idle or busy.
+  The declaration stands until the crew retracts it with `resolved:` or a terminal line, so a later progress append from another producer does not turn a declared wait back into a wedge suspect.
   An unreported captain-relevant event in the newly classified span still escalates immediately while the current declaration independently keeps the pause cadence.
   With no unreported actionable event, the wake self-handles, and the current declaration outranks an enriched possible-wedge reason so it never escalates on the `FM_STALE_ESCALATE_SECS` cadence.
   If a declared external wait is still declared past `FM_PAUSE_RESURFACE_SECS` (default four hours), housekeeping sends one recheck and resets the pause window; a captain-held transfer is never rechecked while the posture record exists.
-  The window ages against the crew's own latest status line, so only a status append that stops declaring the wait ends this routing and restores wedge detection.
+  The window ages against the crew's own standing declaration, so only a line the crew writes to retract the wait ends this routing and restores wedge detection.
+  That recheck names which human the wait is on: the external dependency for `paused:`, and the captain themself for a `captain-held` transfer, who can answer the held decision or release the hold.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
