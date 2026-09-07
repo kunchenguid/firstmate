@@ -2009,6 +2009,18 @@ PACE_STAMPS=$(find "$HPACE/state/procevent" -maxdepth 1 -type f \
 [ "$PACE_STAMPS" = 1 ] || fail "replacement registrations accumulated stale pacing state"
 pass "a replacement registration starts with one fresh launch floor"
 
+HCOMMIT="$TMP_ROOT/registration-commit"; new_home "$HCOMMIT"
+fm_test_track_procevent_home "$HCOMMIT"
+COMMIT_LOG="$TMP_ROOT/registration-commit.log"
+mkdir -p "$HCOMMIT/state/procevent/commit-src.1-2.last-launch"
+pe_register "$HCOMMIT" lavish commit-src -- "$FAST_SOURCE" "$COMMIT_LOG" >/dev/null \
+  || fail "post-commit pacing cleanup made registration report failure"
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 pe "$HCOMMIT" start commit-src >/dev/null \
+  || fail "a successfully published registration was not executable"
+[ "$(wc -l < "$COMMIT_LOG" | tr -d ' ')" = 1 ] \
+  || fail "the committed registration did not invoke its source"
+pass "post-commit pacing cleanup cannot veto registration publication"
+
 HROLLBACK="$TMP_ROOT/rollback-pacing"; new_home "$HROLLBACK"
 fm_test_track_procevent_home "$HROLLBACK"
 ROLLBACK_LOG="$TMP_ROOT/rollback-pacing.log"
@@ -2020,21 +2032,21 @@ for candidate in "$HROLLBACK/state/procevent"/rollback-src.*.last-launch; do
 done
 [ -n "$ROLLBACK_STAMP" ] || fail "the first launch did not persist its pacing state"
 printf '%s\n' "$(( $(date +%s) + 3600 ))" > "$ROLLBACK_STAMP"
-FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 pe "$HROLLBACK" start rollback-src > "$TMP_ROOT/rollback.out" 2>&1 &
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3600 pe "$HROLLBACK" start rollback-src > "$TMP_ROOT/rollback.out" 2>&1 &
 ROLLBACK_START_PID=$!
 rollback_deadline=$((SECONDS + 4))
 while kill -0 "$ROLLBACK_START_PID" 2>/dev/null; do
   if [ "$SECONDS" -ge "$rollback_deadline" ]; then
     pe "$HROLLBACK" retire rollback-src >/dev/null 2>&1 || true
     wait "$ROLLBACK_START_PID" 2>/dev/null || true
-    fail "a backward clock correction extended the launch floor"
+    fail "a pre-reboot monotonic stamp delayed the first launch"
   fi
   sleep 0.1
 done
 wait "$ROLLBACK_START_PID" || fail "the rollback-paced source failed"
 [ "$(wc -l < "$ROLLBACK_LOG" | tr -d ' ')" = 2 ] \
   || fail "the rollback-paced source did not invoke twice"
-pass "a backward clock correction cannot extend the launch floor"
+pass "a pre-reboot monotonic stamp is treated as expired"
 
 storm_deadline=$((SECONDS + 15))
 while :; do

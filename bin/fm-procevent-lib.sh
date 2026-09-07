@@ -257,8 +257,8 @@ fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-ide
       $previous = 0 + $1;
     }
     my $now = clock_gettime(CLOCK_MONOTONIC);
-    my $elapsed = defined($previous) && $now >= $previous ? $now - $previous : 0;
-    sleep($floor - $elapsed) if defined($previous) && $elapsed < $floor;
+    my $elapsed = defined($previous) && $now >= $previous ? $now - $previous : undef;
+    sleep($floor - $elapsed) if defined($elapsed) && $elapsed < $floor;
     $now = clock_gettime(CLOCK_MONOTONIC);
     my $tmp = "$path.$$";
     sysopen(my $out, $tmp, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 1;
@@ -323,8 +323,8 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
   } > "$tmp" && chmod 0600 "$tmp" \
     && identity=$(fm_pr_file_identity "$tmp") \
     && fm_procevent_launch_floor_reset_locked "$state" "$id" "$identity" \
-    && mv -f -- "$tmp" "$dest" \
-    && fm_procevent_launch_floor_prune_locked "$state" "$id" "$identity"; then
+    && mv -f -- "$tmp" "$dest"; then
+    fm_procevent_launch_floor_prune_locked "$state" "$id" "$identity" 2>/dev/null || :
     return 0
   fi
   rm -f -- "$tmp"
@@ -367,8 +367,8 @@ fm_procevent_extension_registration_publish_locked() {  # <state> <adapter> <sou
   } > "$tmp" && chmod 0600 "$tmp" \
     && identity=$(fm_pr_file_identity "$tmp") \
     && fm_procevent_launch_floor_reset_locked "$state" "$id" "$identity" \
-    && mv -f -- "$tmp" "$dest" \
-    && fm_procevent_launch_floor_prune_locked "$state" "$id" "$identity"; then
+    && mv -f -- "$tmp" "$dest"; then
+    fm_procevent_launch_floor_prune_locked "$state" "$id" "$identity" 2>/dev/null || :
     return 0
   fi
   rm -f -- "$tmp"
