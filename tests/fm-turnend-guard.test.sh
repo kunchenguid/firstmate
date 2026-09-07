@@ -1818,27 +1818,49 @@ test_hook_claude_mode_waits_for_late_claim() {
 # --ensure-watcher before the refusal must leave a path for a watcher to come
 # up, even when the current epoch is frozen (variant 1) or free to advance
 # (variant 2).
-write_slow_watch_fixture() {
-  local dir=$1 delay=${2:-1}
-  cat > "$dir/bin/fm-watch.sh" <<SH
+# The primed watcher stays gated on state/release-watch rather than a wall-clock
+# delay, so "the watcher is not healthy yet" and "the watcher is healthy now" are
+# both states the test establishes rather than races it has to win under load.
+write_gated_watch_fixture() {
+  local dir=$1
+  cp "$ROOT/bin/fm-watch-arm.sh" "$dir/bin/fm-watch-arm.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
-STATE="\${FM_STATE_OVERRIDE:-\$FM_HOME/state}"
-WATCH_PATH="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)/fm-watch.sh"
-sleep $delay
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+WATCH_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-watch.sh"
+while [ ! -e "$STATE/release-watch" ]; do
+  sleep 0.05
+done
 # shellcheck source=/dev/null
-. "\$FM_HOME/bin/fm-wake-lib.sh"
-pid=\${BASHPID:-\$\$}
-identity=\$(fm_pid_identity "\$pid") || identity="slow-watch-\$pid"
-mkdir -p "\$STATE/.watch.lock"
-printf '%s\\n' "\$pid" > "\$STATE/.watch.lock/pid"
-printf '%s\\n' "\$FM_HOME" > "\$STATE/.watch.lock/fm-home"
-printf '%s\\n' "\$WATCH_PATH" > "\$STATE/.watch.lock/watcher-path"
-printf '%s\\n' "\$identity" > "\$STATE/.watch.lock/pid-identity"
-touch "\$STATE/.last-watcher-beat"
+. "$FM_HOME/bin/fm-wake-lib.sh"
+pid=${BASHPID:-$$}
+identity=$(fm_pid_identity "$pid") || identity="gated-watch-$pid"
+mkdir -p "$STATE/.watch.lock"
+printf '%s\n' "$pid" > "$STATE/.watch.lock/pid"
+printf '%s\n' "$FM_HOME" > "$STATE/.watch.lock/fm-home"
+printf '%s\n' "$WATCH_PATH" > "$STATE/.watch.lock/watcher-path"
+printf '%s\n' "$identity" > "$STATE/.watch.lock/pid-identity"
+touch "$STATE/.last-watcher-beat"
 sleep 60
 SH
   chmod +x "$dir/bin/fm-watch.sh"
+}
+
+release_and_await_primed_watcher() {
+  local dir=$1 i=0 pid
+  : > "$dir/state/release-watch"
+  while [ "$i" -lt 200 ]; do
+    pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+      && [ -e "$dir/state/.last-watcher-beat" ]; then
+      return 0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
 }
 
 run_hook_claude_owned() {
@@ -1846,7 +1868,7 @@ run_hook_claude_owned() {
   home=$(cd "$dir" && pwd)
   # shellcheck disable=SC2016 # fake harness expands FM_HOME inside its child shell.
   printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" \
-    | CLAUDECODE=1 FM_HOME="$home" "$dir/fake-claude" -c '
+    | CLAUDECODE=1 FM_ARM_CONFIRM_TIMEOUT=30 FM_HOME="$home" "$dir/fake-claude" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         bash "$FM_HOME/bin/fm-turnend-guard.sh" --claude
       ' 2>&1
@@ -1867,14 +1889,15 @@ test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal() {
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-refused-still-primes")
   : > "$dir/state/task1.meta"
   install_integrated_autoarm "$dir"
-  write_slow_watch_fixture "$dir" 1
+  write_gated_watch_fixture "$dir"
   # Variant 1: frozen rewake epoch that cannot advance on its own.
   printf 'epoch=165 owner_pid=41746 outcome=rewake updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
   expect_code 2 "$status" "first unprimed-window stop must still refuse while the watcher is not yet healthy"
   assert_contains "$out" "TURN WOULD END BLIND" "first refused stop lost the blind-turn banner"
-  sleep 1.5
+  release_and_await_primed_watcher "$dir" \
+    || fail "the watcher primed by the refused stop never claimed the home lock"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
   kill_fixture_watcher "$dir"
   expect_code 0 "$status" "a stop refused by the guard must still leave a path for the primed watcher to claim the home"
@@ -1891,14 +1914,15 @@ test_hook_claude_mode_refused_stop_recovers_without_epoch_progress() {
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-refused-primes-no-epoch")
   : > "$dir/state/task1.meta"
   install_integrated_autoarm "$dir"
-  write_slow_watch_fixture "$dir" 1
+  write_gated_watch_fixture "$dir"
   # Variant 2: no live claim, epoch free to advance, but the first Stop still
   # refuses before the watcher is healthy.
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
   expect_code 2 "$status" "first stop with no claim must still refuse while the primed watcher is starting"
   epoch=$(sed -n '1p' "$dir/state/.claude-autoarm-epoch" 2>/dev/null || true)
   [ -z "$epoch" ] || fail "--ensure-watcher took a generation claim: $epoch"
-  sleep 1.5
+  release_and_await_primed_watcher "$dir" \
+    || fail "the watcher primed by the refused stop never claimed the home lock"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
   epoch=$(sed -n '1p' "$dir/state/.claude-autoarm-epoch" 2>/dev/null || true)
   kill_fixture_watcher "$dir"
@@ -1906,6 +1930,31 @@ test_hook_claude_mode_refused_stop_recovers_without_epoch_progress() {
   [ -z "$out" ] || fail "recovery allow without epoch progress produced output: $out"
   [ -z "$epoch" ] || fail "recovery wrote an auto-arm epoch instead of leaving rewake to the registered hook: $epoch"
   pass "fm-turnend-guard --claude: a refused stop still recovers when the epoch does not advance"
+}
+
+# The 2026-09-06 budget half of the same deadlock: state/.turnend-claude-blocks
+# stayed count=1 epoch=165 for forty minutes because the epoch identity that
+# deduplicates one Stop's several observations also suppressed the count across
+# Stops. A frozen auto-arm epoch must not pin the bound.
+test_hook_claude_mode_frozen_epoch_still_reaches_the_bounded_fail_open() {
+  local dir out status i count
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-frozen-epoch-budget")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=165 owner_pid=41746 outcome=failed updated_at=1788664081\n' > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  for i in 0 1 2 3; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+    expect_code 2 "$status" "a frozen-epoch stop must still refuse while the block budget is unspent"
+    assert_not_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the frozen-epoch fail-open fired before the bounded progression ended"
+    count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+    [ "$count" = "$i" ] || fail "a frozen-epoch block did not advance the bounded count to $i, got $count"
+  done
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "a frozen auto-arm epoch must not pin the bounded fail-open forever"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the frozen-epoch progression never reached its attended fail-open"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the frozen-epoch fail-open did not consume its episode alarm"
+  pass "fm-turnend-guard --claude: a frozen auto-arm epoch still reaches the bounded attended fail-open"
 }
 
 test_hook_claude_mode_secondmate_reblocks_like_primary() {
@@ -2241,6 +2290,7 @@ test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal
 test_hook_claude_mode_refused_stop_recovers_without_epoch_progress
+test_hook_claude_mode_frozen_epoch_still_reaches_the_bounded_fail_open
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_away_daemon_allows_between_watcher_cycles
 test_hook_away_daemon_allows_over_dead_watcher_lock

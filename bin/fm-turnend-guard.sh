@@ -257,8 +257,15 @@ fi
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
-budget_account_current_epoch() {
-  local current_epoch outcome old_session old_count old_epoch tmp initialized
+# The epoch identity deduplicates the several observations one Stop makes of the
+# same auto-arm generation. It must not also pin the bound: a Stop that reaches
+# the refusal with no epoch progress is still a consecutive block, and accounting
+# it as a no-op is what froze state/.turnend-claude-blocks at count=1 while the
+# auto-arm was unable to publish a new epoch at all.
+BUDGET_ACCOUNTED=0
+budget_account_current_epoch() {  # [blocked-stop]
+  local current_epoch outcome old_session old_count old_epoch tmp initialized blocked=0
+  [ "${1:-}" = blocked-stop ] && blocked=1
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
   current_epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
@@ -273,7 +280,8 @@ budget_account_current_epoch() {
     esac
     if [ "$old_session" = "$SESSION_ID" ]; then
       COUNT=$old_count
-      if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ]; then
+      if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ] \
+        && { [ "$blocked" -eq 0 ] || [ "$BUDGET_ACCOUNTED" -eq 1 ]; }; then
         :
       else
         COUNT=$((COUNT + 1))
@@ -302,6 +310,7 @@ budget_account_current_epoch() {
   fi
   rm -f "$tmp" 2>/dev/null || true
   BUDGET_INITIALIZED_FAILURE=$initialized
+  BUDGET_ACCOUNTED=1
   fm_lock_release "$BUDGET_LOCK"
   return 0
 }
@@ -447,9 +456,10 @@ failure_episode_verified() {
 # Prime recovery before the wait/refuse path. A blocked Stop aborts Claude's
 # in-flight asyncRewake hook, which is what turned one missed claim into a
 # deadlock: the arm never ran, the epoch could freeze or advance, and every
-# later Stop refused. --ensure-watcher uses this hook's harness ancestry, starts
-# a session-detached watcher, and takes no generation claim, so the registered
-# asyncRewake hook still owns rewake once a Stop is allowed.
+# later Stop refused. --ensure-watcher uses this hook's harness ancestry,
+# detaches the bin/fm-watch-arm.sh owner so a primed cycle is confirmed and
+# ledgered like every other arm, and takes no generation claim, so the
+# registered asyncRewake hook still owns rewake once a Stop is allowed.
 # Do not call autoarm_owns_recovery here: that accounts the failed-epoch budget.
 if ! fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" \
   && ! fm_autoarm_claim_open "$STATE" "$GRACE" \
@@ -479,7 +489,7 @@ fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.
-budget_account_current_epoch || block_stop
+budget_account_current_epoch blocked-stop || block_stop
 terminal_fail_open
 terminal_status=$?
 if [ "$terminal_status" -eq 0 ]; then

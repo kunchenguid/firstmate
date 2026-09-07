@@ -69,11 +69,11 @@
 # the model.
 #
 # --ensure-watcher is the Stop-guard priming path: the same identity, AFK, and
-# need gates, then a session-detached watcher and an immediate exit 0. It does
-# not take a generation claim and does not exit 2, so the registered asyncRewake
-# firing remains the rewake owner once a later Stop is allowed. The guard
-# invokes this before a refusal so a blocked Stop cannot abort the only process
-# that could restore a watcher (docs/turnend-guard.md).
+# need gates, then a session-detached bin/fm-watch-arm.sh cycle and an immediate
+# exit 0. It does not take a generation claim and does not exit 2, so the
+# registered asyncRewake firing remains the rewake owner once a later Stop is
+# allowed. The guard invokes this before a refusal so a blocked Stop cannot
+# abort the only process that could restore a watcher (docs/turnend-guard.md).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -166,16 +166,21 @@ if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
 fi
 
 # --- guard priming: restore a watcher without taking the rewake claim ----------
-# Double-fork through python3 so the watcher is a session leader. A refused Stop
-# hook is a session leader on Darwin (Claude spawns command hooks detached);
-# SIGHUP from that session must not tear the primed watcher down. This path
-# never holds a generation claim: the registered asyncRewake hook attaches.
+# Double-fork through python3 so the primed cycle is a session leader. A refused
+# Stop hook is a session leader on Darwin (Claude spawns command hooks
+# detached); SIGHUP from that session must not tear the primed cycle down. The
+# detached process is bin/fm-watch-arm.sh, the single owner of watcher start,
+# bounded confirmation, and the state/.watch-cycle-exits.log lifecycle ledger,
+# so a primed cycle that cannot start still records why and which lock holder
+# blocked it. This path never holds a generation claim: the registered
+# asyncRewake hook attaches.
 if [ "$ENSURE_WATCHER" -eq 1 ]; then
   WATCH="$SCRIPT_DIR/fm-watch.sh"
+  ARM="$SCRIPT_DIR/fm-watch-arm.sh"
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     exit 0
   fi
-  [ -x "$WATCH" ] || exit 0
+  [ -x "$ARM" ] || exit 0
   if command -v python3 >/dev/null 2>&1; then
     python3 -c '
 import os, sys
@@ -192,7 +197,7 @@ os.dup2(devnull, 2)
 if devnull > 2:
     os.close(devnull)
 os.execvp(sys.argv[1], sys.argv[1:])
-' "$WATCH" || true
+' "$ARM" || true
   fi
   exit 0
 fi

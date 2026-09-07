@@ -1202,8 +1202,15 @@ test_long_poll_grace_reaches_arm_wrapper() {
   pass "auto-arm: a long FM_POLL with FM_GUARD_GRACE unset reaches fm-watch-arm.sh with the derived grace"
 }
 
+install_primed_arm_owner() {
+  local dir=$1
+  cp "$ROOT/bin/fm-watch-arm.sh" "$dir/bin/fm-watch-arm.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
 write_ensure_watch_fixture() {
   local dir=$1
+  install_primed_arm_owner "$dir"
   cat > "$dir/bin/fm-watch.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -1272,6 +1279,62 @@ test_ensure_watcher_inert_without_session_lock() {
   pass "auto-arm --ensure-watcher: inert with no session lock"
 }
 
+# A primed cycle that cannot start must still leave the arm layer's bounded
+# lifecycle evidence, so the holder that blocked it is named instead of being
+# swallowed by the detached process's discarded output.
+write_ensure_watch_refusing_fixture() {
+  local dir=$1
+  install_primed_arm_owner "$dir"
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+held=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
+echo "watcher: lock held by live pid $held but heartbeat is stale; inspect or stop that watcher before re-arming." >&2
+exit 1
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+}
+
+test_ensure_watcher_records_a_refused_primed_cycle() {
+  local dir status holder identity i row
+  command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach the primed cycle"
+  dir=$(make_primary_dir "$TMP_ROOT/ensure-watcher-wedged")
+  : > "$dir/state/task.meta"
+  write_ensure_watch_refusing_fixture "$dir"
+  sleep 60 &
+  holder=$!
+  identity=$(watcher_identity "$dir" "$holder") || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "could not identify the wedged watcher lock holder"
+  }
+  record_watcher_lock "$dir" "$holder" "$identity"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  run_autoarm_ensure_watcher "$dir" >/dev/null 2>&1; status=$?
+  i=0
+  row=
+  while [ "$i" -lt 100 ]; do
+    row=$(grep -F 'origin=started' "$dir/state/.watch-cycle-exits.log" 2>/dev/null | tail -1 || true)
+    [ -n "$row" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 0 "$status" "--ensure-watcher must exit 0 even when the primed cycle cannot start"
+  [ -n "$row" ] || fail "a primed cycle that could not start left no lifecycle record"
+  case "$row" in
+    *"exit_code=1"*) ;;
+    *) fail "the primed cycle record did not classify the failed start: $row" ;;
+  esac
+  case "$row" in
+    *"lock_before=pid:$holder|"*) ;;
+    *) fail "the primed cycle record did not name the lock holder that blocked it: $row" ;;
+  esac
+  pass "auto-arm --ensure-watcher: a refused primed cycle is recorded in the lifecycle ledger"
+}
+
 test_ensure_watcher_inert_when_afk() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/ensure-watcher-afk")
@@ -1332,6 +1395,7 @@ test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
 test_ensure_watcher_starts_detached_watcher_without_claim
+test_ensure_watcher_records_a_refused_primed_cycle
 test_ensure_watcher_inert_without_session_lock
 test_ensure_watcher_inert_when_afk
 test_fm_lock_status_still_works_with_shared_lib

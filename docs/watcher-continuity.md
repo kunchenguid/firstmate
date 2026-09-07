@@ -35,7 +35,7 @@ This is deliberate Option B ordering: the fleet is protected before the model ha
 
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi, omp, and OpenCode do.
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher is live and no open generation claim is still deciding, so a finished, hung, or identity-mismatched claim cannot suppress it ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
-When that Stop would otherwise refuse, the guard first primes `bin/fm-claude-stop-autoarm.sh --ensure-watcher` so aborting the registered `asyncRewake` hook cannot starve the watcher back into existence.
+When that Stop would otherwise refuse, the guard first primes `bin/fm-claude-stop-autoarm.sh --ensure-watcher`, which detaches the same `bin/fm-watch-arm.sh` owner every other arm path uses, so aborting the registered `asyncRewake` hook cannot starve the watcher back into existence and a primed cycle that fails still leaves its lifecycle record.
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce; it enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
 The model no longer re-arms after ordinary wakes.
@@ -120,7 +120,7 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
-It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, the legacy upgrade shim, and `--ensure-watcher` priming that starts a detached watcher without taking a generation claim; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
+It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, the legacy upgrade shim, and `--ensure-watcher` priming that detaches the arm owner without taking a generation claim, including the lifecycle record left by a primed cycle a wedged lock holder refuses; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset; [`turnend-guard.md`](turnend-guard.md#regression-coverage) lists that suite's full generation and legacy claim coverage.
 
