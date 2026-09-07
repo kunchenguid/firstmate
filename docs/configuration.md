@@ -518,7 +518,7 @@ See [`docs/examples/watched-tools.json`](examples/watched-tools.json) for a star
 
 Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 That writes `state/tool-updates.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal cadence and turns its one line into a `check:` wake; no separate schedule is involved.
-The armed check runs whenever that home has a watcher running, and arming alone does not make watcher supervision required, so a home with no in-flight work and no other reason to watch does not start a watcher just for this check.
+Registering the check is itself a reason to watch, so the home keeps a watcher for it after the last task is torn down, and `disarm` is what ends that need.
 `bin/fm-tool-update-check.sh disarm` removes the shim, its trust binding, and the report record.
 The check prints nothing when everything is current, and `state/.tool-updates` records the findings the last report was made from so the same pending update is reported once instead of on every poll.
 A changed or returning condition is reported again.

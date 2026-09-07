@@ -415,8 +415,8 @@ jobs:
           adapter_source_output=$(/bin/bash tests/fm-backend-adapter-source.test.sh)
           printf '%s\n' "$adapter_source_output"
           adapter_source_count=$(printf '%s\n' "$adapter_source_output" | grep -c '^ok - ')
-          [ "$adapter_source_count" -eq 2 ] || {
-            echo "::error::expected 2 adapter-source tests, got $adapter_source_count"
+          [ "$adapter_source_count" -eq 3 ] || {
+            echo "::error::expected 3 adapter-source tests, got $adapter_source_count"
             exit 1
           }
 
@@ -427,8 +427,8 @@ jobs:
           teardown_output=$(/bin/bash tests/fm-teardown.test.sh)
           printf '%s\n' "$teardown_output"
           teardown_count=$(printf '%s\n' "$teardown_output" | grep -c '^ok - ')
-          [ "$teardown_count" -eq 58 ] || {
-            echo "::error::expected 58 teardown tests, got $teardown_count"
+          [ "$teardown_count" -eq 84 ] || {
+            echo "::error::expected 84 teardown tests, got $teardown_count"
             exit 1
           }
 

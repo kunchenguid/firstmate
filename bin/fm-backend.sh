@@ -604,6 +604,28 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 # the check turns a missing adapter into a silent abort that an EXIT trap can
 # publish as success. Newer bash returns normally there, so this divergence is
 # invisible to any lane that does not run on bash 3.2.
+fm_backend_source_file() {  # <path>
+  local source_path=$1 source_rc had_errexit=0 had_errtrace=0 source_failed=0 saved_err_trap
+  case $- in *e*) had_errexit=1 ;; esac
+  case $- in *E*) had_errtrace=1 ;; esac
+  saved_err_trap=$(trap -p ERR)
+  set +e
+  set -E
+  trap 'source_failed=1' ERR
+  # shellcheck source=/dev/null
+  . "$source_path"
+  source_rc=$?
+  if [ -n "$saved_err_trap" ]; then
+    eval "$saved_err_trap"
+  else
+    trap - ERR
+  fi
+  [ "$had_errexit" -eq 1 ] && set -e
+  [ "$had_errtrace" -eq 0 ] && set +E
+  [ "$source_failed" -eq 0 ] || source_rc=1
+  return "$source_rc"
+}
+
 fm_backend_source() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
@@ -611,40 +633,35 @@ fm_backend_source() {  # <name>
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
         [ -r "$FM_BACKEND_LIB_DIR/backends/tmux.sh" ] || return 1
-        # shellcheck source=/dev/null
-        . "$FM_BACKEND_LIB_DIR/backends/tmux.sh" || return 1
+        fm_backend_source_file "$FM_BACKEND_LIB_DIR/backends/tmux.sh" || return 1
         _FM_BACKEND_TMUX_SOURCED=1
       fi
       ;;
     herdr)
       if [ -z "${_FM_BACKEND_HERDR_SOURCED:-}" ]; then
         [ -r "$FM_BACKEND_LIB_DIR/backends/herdr.sh" ] || return 1
-        # shellcheck source=/dev/null
-        . "$FM_BACKEND_LIB_DIR/backends/herdr.sh" || return 1
+        fm_backend_source_file "$FM_BACKEND_LIB_DIR/backends/herdr.sh" || return 1
         _FM_BACKEND_HERDR_SOURCED=1
       fi
       ;;
     zellij)
       if [ -z "${_FM_BACKEND_ZELLIJ_SOURCED:-}" ]; then
         [ -r "$FM_BACKEND_LIB_DIR/backends/zellij.sh" ] || return 1
-        # shellcheck source=/dev/null
-        . "$FM_BACKEND_LIB_DIR/backends/zellij.sh" || return 1
+        fm_backend_source_file "$FM_BACKEND_LIB_DIR/backends/zellij.sh" || return 1
         _FM_BACKEND_ZELLIJ_SOURCED=1
       fi
       ;;
     orca)
       if [ -z "${_FM_BACKEND_ORCA_SOURCED:-}" ]; then
         [ -r "$FM_BACKEND_LIB_DIR/backends/orca.sh" ] || return 1
-        # shellcheck source=/dev/null
-        . "$FM_BACKEND_LIB_DIR/backends/orca.sh" || return 1
+        fm_backend_source_file "$FM_BACKEND_LIB_DIR/backends/orca.sh" || return 1
         _FM_BACKEND_ORCA_SOURCED=1
       fi
       ;;
     cmux)
       if [ -z "${_FM_BACKEND_CMUX_SOURCED:-}" ]; then
         [ -r "$FM_BACKEND_LIB_DIR/backends/cmux.sh" ] || return 1
-        # shellcheck source=/dev/null
-        . "$FM_BACKEND_LIB_DIR/backends/cmux.sh" || return 1
+        fm_backend_source_file "$FM_BACKEND_LIB_DIR/backends/cmux.sh" || return 1
         _FM_BACKEND_CMUX_SOURCED=1
       fi
       ;;

@@ -610,6 +610,7 @@ tests/fm-pi-branch-live-e2e.test.sh 56
 tests/fm-pi-branch-responsiveness-live-e2e.test.sh 21
 tests/fm-pi-primary-live-e2e.test.sh 20
 tests/fm-pi-watch-extension.test.sh 42970
+tests/fm-pi-windows-shell-invocation.test.sh 5121
 tests/fm-pr-check-security.test.sh 160475
 tests/fm-procevent-quota.test.sh 1949
 tests/fm-procevent-when.test.sh 17392
@@ -1262,6 +1263,7 @@ families_for_changed_path() {
     .pi/extensions/lib/fm-operational-input.ts)
       # The same rule for the operational-input library, whose reach is wider:
       # every Pi extension that classifies or encodes operational text.
+      printf '%s\n' __script__:fm-pi-windows-shell-invocation.test.sh
       printf '%s\n' __script__:fm-pi-branch-extension.test.sh
       printf '%s\n' __script__:fm-pi-watch-extension.test.sh
       printf '%s\n' __script__:fm-calm-pi-extension.test.sh
@@ -1275,6 +1277,7 @@ families_for_changed_path() {
     .pi/extensions/fm-primary-turnend-guard.ts)
       # The run tier's two harness-supplied facts (source vocabulary and
       # context-reset stdout injection) only show up against a real harness.
+      printf '%s\n' __script__:fm-pi-windows-shell-invocation.test.sh
       printf '%s\n' session-bootstrap
       printf '%s\n' live-harness-optin
       ;;
@@ -1374,7 +1377,7 @@ families_for_changed_path() {
     docs/fm-test-isolation-proof.json)
       printf '%s\n' pure-contract-unit
       ;;
-    .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
+    .github/*|.gitattributes|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;
@@ -1409,8 +1412,15 @@ families_for_changed_path() {
     README.md|LICENSE|assets/*|docs/*|.gitignore)
       ;;
     *)
-      families_for_test_reference "$path" \
-        || printf '%s\n' "__unmapped__:$path"
+      if [ -e "$path" ]; then
+        families_for_test_reference "$path" \
+          || printf '%s\n' "__unmapped__:$path"
+      else
+        # A retired source path with no remaining test consumer cannot select
+        # a runnable suite. Known source paths above retain their mappings,
+        # and a still-referenced removal is found by the same reference scan.
+        families_for_test_reference "$path" || true
+      fi
       ;;
   esac
 }
@@ -2155,10 +2165,19 @@ if [ "$JOBS" -eq 1 ]; then
   done
 else
   # Bounded concurrent execution for admitted scripts. Each worker gets a
-  # private mode-0700 TMPDIR so mktemp roots cannot collide. Retries are never
-  # used as a green strategy.
+  # private mode-0700 TMPDIR so mktemp roots cannot collide. Native Windows
+  # Bash layers report synthetic POSIX modes, so retain chmod there but enforce
+  # its observed mode only where the host reports real POSIX permissions.
+  # Retries are never used as a green strategy.
   worker_n=0
   active_workers=0
+
+  worker_root_mode_is_enforceable() {
+    case "$(uname -s)" in
+      MINGW*|MSYS*) return 1 ;;
+      *) return 0 ;;
+    esac
+  }
 
   wait_one_job_worker() {
     local slot=$1 pid idx work script rc duration mode out end_iso
@@ -2181,14 +2200,16 @@ else
     if [ -s "$out" ]; then
       cat "$out"
     fi
-    mode=$(stat -c %a "$work" 2>/dev/null || stat -f %Lp "$work" 2>/dev/null || echo unknown)
-    case "$mode" in
-      700|0700) ;;
-      *)
-        log "isolation failure: worker root mode is $mode, expected 0700 ($work)"
-        rc=1
-        ;;
-    esac
+    if worker_root_mode_is_enforceable; then
+      mode=$(stat -c %a "$work" 2>/dev/null || stat -f %Lp "$work" 2>/dev/null || echo unknown)
+      case "$mode" in
+        700|0700) ;;
+        *)
+          log "isolation failure: worker root mode is $mode, expected 0700 ($work)"
+          rc=1
+          ;;
+      esac
+    fi
     record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
   }
 
