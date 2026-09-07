@@ -286,26 +286,26 @@ test_empty_origin_config_section_refuses_pool() {
   pass "an empty origin configuration section refuses the pooled worktree"
 }
 
-test_included_empty_origin_config_section_refuses_pool() {
+test_empty_only_included_origin_config_section_launches_pool() {
   local rec id out status before config included
-  id='pool-included-empty-origin-section-r1'
-  rec=$(make_originless_case included-empty-origin-section "$id")
+  id='pool-empty-only-included-origin-section-r1'
+  rec=$(make_originless_case empty-only-included-origin-section "$id")
   read_case_record "$rec"
   config=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-path config)
   included=$(dirname "$config")/empty-origin.inc
-  printf '[fm-test]\n\tmarker = true\n[remote "origin"]\n' > "$included"
+  printf '[remote "origin"]\n' > "$included"
   git -C "$POOL_DIR" config include.path "$(basename "$included")"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "spawn succeeded despite an included empty origin configuration section"
-  assert_contains "$out" "could not fetch origin" \
-    "spawn did not refuse an included empty origin configuration section as unusable"
+  expect_code 0 "$status" "spawn should proceed when an included empty origin section is not enumerable"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "spawn did not report success for the undetectable included section"
+  assert_not_contains "$out" "could not fetch origin" \
+    "spawn treated an undetectable included empty section as a configured origin"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD after finding an included empty origin configuration section"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
-  pass "an included empty origin configuration section refuses the pooled worktree"
+    || fail "spawn moved HEAD despite treating the included empty section as origin-less"
+  pass "an empty-only included origin section documents the accepted detection boundary"
 }
 
 test_inactive_conditional_origin_include_launches_pool() {
@@ -652,7 +652,7 @@ test_originless_pool_launches_without_a_freshness_fetch
 test_originless_dirty_pool_refuses_without_discarding_work
 test_origin_config_without_url_refuses_pool
 test_empty_origin_config_section_refuses_pool
-test_included_empty_origin_config_section_refuses_pool
+test_empty_only_included_origin_config_section_launches_pool
 test_inactive_conditional_origin_include_launches_pool
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
