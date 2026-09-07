@@ -53,7 +53,8 @@
 #   (z4) base= + content squash-landed on that branch          -> ALLOW  (content fallback)
 #   (z5) base= + content landed only on the default branch     -> REFUSE, naming the base
 #   (z6) base= naming a branch that does not resolve here       -> REFUSE, naming the branch
-#        as the cause instead of blaming the git index
+#        as the cause instead of blaming the git index; the local-only and the
+#        ship path answer it identically, so neither reads as unlanded work
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -965,6 +966,32 @@ test_unresolvable_recorded_base_refuses_and_names_the_branch() {
     "base-unresolvable: refusal steered at an index repair for a missing branch"
   assert_present "$case_dir/wt" "base-unresolvable: a refusal removed the worktree"
   pass "an unresolvable recorded delivery target branch is refused by name, not blamed on the git index"
+}
+
+# The ship path reaches the same unresolvable base, by a different route: the
+# content check simply reports "not landed", which reads as a genuine unlanded-work
+# refusal for a branch that exists nowhere - the same false positive that trains
+# the operator to reach for --force. Both paths must name the real cause.
+test_unresolvable_recorded_base_refuses_on_the_ship_path_too() {
+  local case_dir rc
+  case_dir=$(make_case base-unresolvable-ship)
+  write_meta "$case_dir" no-mistakes ship feat/never-created
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-unresolvable-ship: teardown must refuse when it cannot measure the landing"
+  assert_grep "does not resolve in worktree" "$case_dir/stderr" \
+    "base-unresolvable-ship: refusal did not report that the delivery target branch is missing"
+  assert_grep "feat/never-created" "$case_dir/stderr" \
+    "base-unresolvable-ship: refusal did not name the branch that failed to resolve"
+  assert_no_grep "not landed on feat/never-created" "$case_dir/stderr" \
+    "base-unresolvable-ship: a branch that exists nowhere was still reported as unlanded work"
+  assert_present "$case_dir/wt" "base-unresolvable-ship: a refusal removed the worktree"
+  pass "the ship path answers an unresolvable delivery target branch exactly as the local-only path does"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -3863,6 +3890,7 @@ test_absent_base_still_measures_the_default_branch
 test_recorded_base_content_fallback_allows
 test_content_on_the_default_branch_is_not_landed_for_a_base_task
 test_unresolvable_recorded_base_refuses_and_names_the_branch
+test_unresolvable_recorded_base_refuses_on_the_ship_path_too
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses

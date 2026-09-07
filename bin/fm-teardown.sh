@@ -1168,6 +1168,38 @@ delivery_target_source() {
   fi
 }
 
+# The ref this worktree can actually measure the target branch against: the
+# local branch first, because that is the ref bin/fm-merge-local.sh lands onto,
+# then the remote-tracking copy. Prints the ref and returns 0, or returns 1 when
+# the branch resolves nowhere. A base is recorded for its ref syntax alone and
+# is never resolved at intake, so it can name a branch nobody has created here -
+# and both landed checks answer that unresolvable case with a failure that looks
+# exactly like a real one: `git log --not <missing-ref>` exits 128 as an
+# unreadable index does, and content_in_target_branch just reports "not landed".
+# Classifying it once here is what lets both refusals name the real cause.
+delivery_target_ref() {  # <branch>
+  local name=$1
+  if git -C "$WT" rev-parse --verify --quiet "refs/heads/$name^{commit}" >/dev/null 2>&1; then
+    printf 'refs/heads/%s\n' "$name"
+    return 0
+  fi
+  if git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$name^{commit}" >/dev/null 2>&1; then
+    printf 'refs/remotes/origin/%s\n' "$name"
+    return 0
+  fi
+  return 1
+}
+
+# One refusal for that one cause, so the local-only and ship paths report an
+# unresolvable delivery target branch identically. It stays a refusal: --force
+# is named only to say it is not the answer here.
+delivery_target_unresolvable_refusal() {  # <branch> <source-description>
+  echo "REFUSED: cannot measure this task's landing: the delivery target branch $1 ($2) does not resolve in worktree $WT." >&2
+  echo "The git index is readable; the branch is what is missing." >&2
+  echo "Fetch or create $1, or correct the recorded base= in $META, then re-run teardown." >&2
+  echo "--force does not answer this: it would discard this worktree's work without ever measuring it." >&2
+}
+
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
@@ -1693,7 +1725,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed TARGET unmerged_raw unmerged branch target_desc
+  local dirty_raw dirty unpushed_raw unpushed TARGET unmerged_raw unmerged branch target_desc target_ref
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1723,20 +1755,11 @@ validate_worktree_teardown_safety() {
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
     TARGET=$(delivery_target_branch) || { echo "REFUSED: cannot determine the delivery target branch for $PROJ; the task records none and origin/HEAD, main, and master are all absent." >&2; return 1; }
     target_desc=$(delivery_target_source)
-    # A base is recorded for its ref syntax alone and is never resolved at
-    # intake, so it can name a branch nobody has created here yet. `git log
-    # --not <missing-ref>` exits 128 exactly as an unreadable index does, and
-    # its stderr is discarded below, so without this the operator is told to
-    # restore the git index for a branch that is simply absent - a refusal that
-    # points straight at --force, which is the failure this check exists to end.
-    if ! git -C "$WT" rev-parse --verify --quiet "$TARGET^{commit}" >/dev/null 2>&1; then
-      echo "REFUSED: cannot measure this task's landing: the delivery target branch $TARGET ($target_desc) does not resolve in worktree $WT." >&2
-      echo "The git index is readable; the branch is what is missing." >&2
-      echo "Fetch or create $TARGET, or correct the recorded base= in $META, then re-run teardown." >&2
-      echo "--force does not answer this: it would discard this worktree's work without ever measuring it." >&2
+    if ! target_ref=$(delivery_target_ref "$TARGET"); then
+      delivery_target_unresolvable_refusal "$TARGET" "$target_desc"
       return 1
     fi
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$TARGET" -- 2>/dev/null); then
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$target_ref" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $TARGET"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
@@ -1767,6 +1790,14 @@ validate_worktree_teardown_safety() {
     if ! work_is_landed "$branch"; then
       if TARGET=$(delivery_target_branch); then
         target_desc=$(delivery_target_source)
+        # work_is_landed has already fetched the target's remote copy, so a
+        # branch that resolves nowhere by now resolves nowhere at all, and
+        # reporting that as unlanded work would be the same false positive on
+        # the ship path that this refusal exists to stop on the local-only one.
+        if ! delivery_target_ref "$TARGET" >/dev/null; then
+          delivery_target_unresolvable_refusal "$TARGET" "$target_desc"
+          return 1
+        fi
         echo "REFUSED: worktree $WT has work not on any remote and not landed on $TARGET." >&2
         echo "Measured against $TARGET - $target_desc." >&2
       else
