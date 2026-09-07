@@ -221,6 +221,20 @@ fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id> <registra
   rm -f -- "$reg/$2.$identity.last-launch"
 }
 
+fm_procevent_launch_floor_prune_locked() {  # <state-root> <source-id> <registration-identity>
+  local reg identity keep stamp
+  case "$3" in *:*) ;; *) return 1 ;; esac
+  case "$3" in ''|*[!0-9:]*) return 1 ;; esac
+  reg=$(fm_procevent_registry_dir "$1") || return 1
+  identity=${3//:/-}
+  keep="$reg/$2.$identity.last-launch"
+  for stamp in "$reg/$2".*.last-launch "$reg/$2.last-launch"; do
+    [ "$stamp" = "$keep" ] && continue
+    [ -e "$stamp" ] || [ -L "$stamp" ] || continue
+    rm -f -- "$stamp" || return 1
+  done
+}
+
 fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-identity> <seconds>
   local reg stamp identity
   case "$3" in *:*) ;; *) return 1 ;; esac
@@ -309,7 +323,8 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
   } > "$tmp" && chmod 0600 "$tmp" \
     && identity=$(fm_pr_file_identity "$tmp") \
     && fm_procevent_launch_floor_reset_locked "$state" "$id" "$identity" \
-    && mv -f -- "$tmp" "$dest"; then
+    && mv -f -- "$tmp" "$dest" \
+    && fm_procevent_launch_floor_prune_locked "$state" "$id" "$identity"; then
     return 0
   fi
   rm -f -- "$tmp"
@@ -352,7 +367,8 @@ fm_procevent_extension_registration_publish_locked() {  # <state> <adapter> <sou
   } > "$tmp" && chmod 0600 "$tmp" \
     && identity=$(fm_pr_file_identity "$tmp") \
     && fm_procevent_launch_floor_reset_locked "$state" "$id" "$identity" \
-    && mv -f -- "$tmp" "$dest"; then
+    && mv -f -- "$tmp" "$dest" \
+    && fm_procevent_launch_floor_prune_locked "$state" "$id" "$identity"; then
     return 0
   fi
   rm -f -- "$tmp"

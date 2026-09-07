@@ -1069,18 +1069,7 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
     fm_procevent_pid_state "$pid" "$identity"
     pid_state=$?
     case "$pid_state" in
-      1)
-        # KNOWN LIMIT: a reused PID makes group ownership ambiguous, so the
-        # reaper does not signal it. Launch pacing, lease expiry, and ordinary
-        # reconcile cleanup remain the confused-agent-grade backstop.
-        exit 0
-        ;;
-      3)
-        if stop_runner_pid "$pid" "$identity"; then
-          exit 0
-        fi
-        continue
-        ;;
+      1|3) exit 0 ;;
       0) ;;
       *) continue ;;
     esac
@@ -1224,56 +1213,38 @@ cmd_reconcile() {
 # its own process group leader, so the group signal is what actually reaches the
 # blocking child - signalling only the runner would leave that child alive and
 # reparented, which is exactly how a source that never completes leaks.
-stop_runner_pid() {  # <pid> <identity>
-  local pid=${1-} identity=${2-} state pgid process_state i=0
-  case "$pid" in ''|*[!0-9]*) return 2 ;; esac
-  [ -n "$identity" ] || return 2
+runner_group_signal() {  # <signal> <pid> <identity>
+  local signal=$1 pid=$2 identity=$3 state pgid
+  # KNOWN LIMIT: only an alive identity-matched leader proves group ownership.
+  # Reused PIDs and absent leaders are never signalled; launch pacing, leases,
+  # and reconcile cleanup are the confused-agent-grade backstop.
   fm_procevent_pid_state "$pid" "$identity"
   state=$?
   case "$state" in
-    0)
-      # A live identity-matched leader still owns its group, so prove the group
-      # really is the one this pid leads before signalling it.
-      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
-      [ "$pgid" = "$pid" ] || return 2
-      ;;
-    3)
-      # The leader crashed but its owned group is still running. Its pgid cannot
-      # be read from the dead leader, and it does not need to be: only an absent
-      # leader reaches this state, so the group cannot belong to a reused pid.
-      ;;
-    *) return "$state" ;;
+    0) ;;
+    1) fm_procevent_group_alive "$pid" && return 2; return 1 ;;
+    *) return 2 ;;
   esac
-  kill -TERM -"$pid" 2>/dev/null || return 2
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
+  [ "$pgid" = "$pid" ] || return 2
+  kill -"$signal" -"$pid" 2>/dev/null || return 2
+}
+
+stop_runner_pid() {  # <pid> <identity>
+  local pid=${1-} identity=${2-} signal_state i=0
+  case "$pid" in ''|*[!0-9]*) return 2 ;; esac
+  [ -n "$identity" ] || return 2
+  runner_group_signal TERM "$pid" "$identity"
+  signal_state=$?
+  [ "$signal_state" -eq 0 ] || return "$signal_state"
   while [ "$i" -lt 20 ]; do
     kill -0 -"$pid" 2>/dev/null || return 0
-    if kill -0 "$pid" 2>/dev/null; then
-      fm_procevent_pid_state "$pid" "$identity"
-      state=$?
-      case "$state" in
-        0|3) ;;
-        1)
-          process_state=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
-          case "$process_state" in Z*) ;; *) return 2 ;; esac
-          ;;
-        *) return 2 ;;
-      esac
-    fi
     sleep 0.1
     i=$((i + 1))
   done
-  fm_procevent_pid_state "$pid" "$identity"
-  state=$?
-  case "$state" in
-    0|3) ;;
-    1)
-      fm_pid_alive "$pid" && return 2
-      fm_procevent_group_alive "$pid" || return 0
-      return 2
-      ;;
-    *) return 2 ;;
-  esac
-  kill -KILL -"$pid" 2>/dev/null || return 2
+  runner_group_signal KILL "$pid" "$identity"
+  signal_state=$?
+  [ "$signal_state" -eq 0 ] || return "$signal_state"
   i=0
   while [ "$i" -lt 20 ]; do
     kill -0 -"$pid" 2>/dev/null || return 0

@@ -1098,32 +1098,19 @@ kill -0 -"$orphan_leader" 2>/dev/null || fail "fixture invalid: the owned child 
 
 orphan_out=$(pe "$HG" reconcile)
 kill -0 -"$orphan_leader" 2>/dev/null \
-  && fail "reconcile left the crashed generation's process group alive: $orphan_out"
-sleep 0.5
-assert_absent "$ORPHAN_OVERLAP" "no replacement source starts while the crashed generation remains alive"
-case "$orphan_out" in
-  *"started=1"*)
-    # The replacement is detached: it records its own claim and execs its source
-    # after reconcile has already returned, so both effects must be waited for
-    # rather than snapshotted behind the settle window above.
-    wait_for "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" \
-      || fail "a replacement runner started without recording its own claim"
-    wait_for_lines "$ORPHAN_LOG" 2 \
-      || fail "the replacement runner never started its source: $(cat "$ORPHAN_LOG")"
-    [ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 2 ] \
-      || fail "reconcile did not start exactly one replacement source: $(cat "$ORPHAN_LOG")"
-    ;;
-  *"started=0"*)
-    [ -e "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" ] \
-      || fail "refusing to replace must preserve the claim for retry: $orphan_out"
-    [ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 1 ] \
-      || fail "reconcile started a source while refusing replacement: $(cat "$ORPHAN_LOG")"
-    ;;
-  *) fail "unexpected reconcile result for a crashed leader: $orphan_out" ;;
-esac
-: > "$ORPHAN_TRIGGER"
+  || fail "reconcile signalled an ambiguous leaderless process group: $orphan_out"
+assert_contains "$orphan_out" "started=0" \
+  "reconcile does not replace an ambiguous leaderless generation"
+[ -e "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" ] \
+  || fail "refusing ambiguous cleanup must preserve the claim"
+[ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 1 ] \
+  || fail "reconcile started a source beside an ambiguous leaderless group"
+assert_absent "$ORPHAN_OVERLAP" "no replacement source starts while the leaderless group remains"
+kill -KILL -"$orphan_leader" 2>/dev/null || true
+for _ in $(seq 1 50); do kill -0 -"$orphan_leader" 2>/dev/null || break; sleep 0.1; done
+kill -0 -"$orphan_leader" 2>/dev/null && fail "could not clean up the leaderless fixture group"
 pe "$HG" retire orphan-src >/dev/null
-pass "a crashed runner leader never lets a live owned group be reclaimed as stale"
+pass "an ambiguous leaderless group is preserved without replacement"
 
 # Counterexample: a genuinely dead generation - no leader and no surviving
 # group - must still be reclaimable, or crash recovery would deadlock.
@@ -1548,6 +1535,9 @@ PATH="$POST_TERM_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" 
   || fail "the post-TERM identity transition did not occur"
 kill -0 -"$POST_TERM_RUNNER" 2>/dev/null \
   || fail "an ambiguous reused-PID group was killed during escalation"
+kill -KILL -"$POST_TERM_RUNNER" 2>/dev/null || true
+for _ in $(seq 1 50); do kill -0 -"$POST_TERM_RUNNER" 2>/dev/null || break; sleep 0.1; done
+kill -0 -"$POST_TERM_RUNNER" 2>/dev/null && fail "could not clean up the post-TERM fixture group"
 pe "$HPOST_TERM" retire post-term-src >/dev/null
 pass "cleanup aborts escalation after runner identity becomes ambiguous"
 
@@ -2014,7 +2004,10 @@ done
 wait "$PACE_START_PID" || fail "the replacement registration failed"
 [ "$(wc -l < "$PACE_LOG" | tr -d ' ')" = 2 ] \
   || fail "a replacement registration did not launch immediately"
-pass "a replacement registration starts with a fresh launch floor"
+PACE_STAMPS=$(find "$HPACE/state/procevent" -maxdepth 1 -type f \
+  -name 'pace-src.*.last-launch' | wc -l | tr -d ' ')
+[ "$PACE_STAMPS" = 1 ] || fail "replacement registrations accumulated stale pacing state"
+pass "a replacement registration starts with one fresh launch floor"
 
 HROLLBACK="$TMP_ROOT/rollback-pacing"; new_home "$HROLLBACK"
 fm_test_track_procevent_home "$HROLLBACK"
@@ -2144,39 +2137,6 @@ while kill -0 "$DETACHED_RUNNER_PID" 2>/dev/null; do
   sleep 0.1
 done
 pass "an attached-start keeper stops refreshing after its parent exits"
-
-GROUP_LEAK_SOURCE="$TMP_ROOT/group-leak-source.sh"
-cat > "$GROUP_LEAK_SOURCE" <<'SH'
-#!/usr/bin/env bash
-marker=$1
-(
-  trap '' HUP
-  exec </dev/null >/dev/null 2>&1
-  printf '%s\n' "$BASHPID" > "$marker.pid"
-  while :; do sleep 1; done
-) &
-while [ ! -s "$marker.pid" ]; do sleep 0.01; done
-exit 1
-SH
-chmod +x "$GROUP_LEAK_SOURCE"
-HGROUP_LEAK="$TMP_ROOT/group-leak"; new_home "$HGROUP_LEAK"
-fm_test_track_procevent_home "$HGROUP_LEAK"
-GROUP_LEAK_MARKER="$TMP_ROOT/group-leak-child"
-pe_register "$HGROUP_LEAK" lavish group-leak-src -- \
-  "$GROUP_LEAK_SOURCE" "$GROUP_LEAK_MARKER" >/dev/null
-FM_PROCEVENT_OWNER_LEASE_SECONDS=30 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
-  pe "$HGROUP_LEAK" reconcile >/dev/null
-wait_for "$GROUP_LEAK_MARKER.pid" || fail "the source did not leave its same-group child"
-GROUP_LEAK_PID=$(cat "$GROUP_LEAK_MARKER.pid")
-group_leak_deadline=$((SECONDS + 6))
-while kill -0 "$GROUP_LEAK_PID" 2>/dev/null; do
-  if [ "$SECONDS" -ge "$group_leak_deadline" ]; then
-    pe "$HGROUP_LEAK" retire group-leak-src >/dev/null 2>&1 || true
-    fail "a same-group child survived its runner under a fresh owner lease"
-  fi
-  sleep 0.1
-done
-pass "the owner guard immediately reaps a runner's leftover process group"
 
 HREUSED_GROUP="$TMP_ROOT/reused-runner-group"; new_home "$HREUSED_GROUP"
 fm_test_track_procevent_home "$HREUSED_GROUP"
