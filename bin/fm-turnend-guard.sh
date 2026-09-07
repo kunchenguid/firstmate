@@ -236,10 +236,56 @@ fi
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
+
+# Legacy shim proof, stated once for its three users below: a pre-generation
+# build's claim holds the owner lock with the autoarm role for its whole cycle,
+# so a live role-carrying holder that is not provably abandoned is a genuine
+# concurrent claimant (fm_autoarm_claim_abandoned in bin/fm-wake-lib.sh owns
+# the abandonment half).
+autoarm_legacy_claim_live() {
+  local pid role
+  pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
+  role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
+  fm_pid_alive "$pid" && [ "$role" = autoarm ] \
+    && ! fm_autoarm_claim_abandoned "$STATE" "$GRACE"
+}
+
+# True while the ledger's current generation is a LIVE signal for THIS Stop
+# event: an open generation claim, a live legacy claimant, or a TERMINAL
+# outcome young enough to belong to the event being decided. The epoch de-dup
+# in budget_account_current_epoch keys on this rather than on the raw
+# generation number, because a superseded ledger entry is frozen forever - a
+# dead or identity-mismatched owner still reading "arming", or a terminal
+# outcome from an earlier episode - and a frozen generation made every later
+# firing look like a repeat observation of the same event. That pinned the
+# bounded block counter (observed at count=1 across six consecutive Stop
+# firings behind a two-day-old orphaned claim, and at count=0 behind a stale
+# terminal one, where the documented attended fail-open could never be
+# reached). A stale entry is therefore accounted as no generation at all,
+# exactly like an absent ledger, so each genuinely blind turn counts once.
+#
+# The freshness window below applies only to non-"arming" (terminal) outcomes.
+# fm_autoarm_claim_open already gives a conclusive, immediate answer for
+# "arming": a dead or identity-mismatched owner is never open, grace or no
+# grace. Letting such a claim ride the freshness window too would revive it as
+# a live signal for up to FM_CLAUDE_AUTOARM_EPOCH_FRESH seconds after it was
+# written, even though it was already proven dead.
+autoarm_epoch_signal_live() {
+  local outcome
+  fm_autoarm_claim_open "$STATE" "$GRACE" && return 0
+  autoarm_legacy_claim_live && return 0
+  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  [ -n "$outcome" ] || return 1
+  [ "$outcome" != arming ] || return 1
+  [ "$(fm_path_age "$STATE/.claude-autoarm-epoch")" -lt "$EPOCH_FRESH" ] || return 1
+  return 0
+}
+
 budget_account_current_epoch() {
   local current_epoch outcome old_session old_count old_epoch tmp initialized
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
   current_epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  autoarm_epoch_signal_live || current_epoch=
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   initialized=0
   COUNT=0
@@ -286,7 +332,7 @@ budget_account_current_epoch() {
 }
 
 autoarm_owns_recovery() {
-  local pid role outcome age
+  local outcome age
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
   # A live OPEN generation claim owns recovery: the ledger names a live,
   # identity-matched owner still arming that is not stuck (fm_autoarm_claim_open
@@ -300,13 +346,8 @@ autoarm_owns_recovery() {
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
-  # Legacy shim: a pre-generation build's claim holds the owner lock with the
-  # autoarm role for its whole cycle; defer to it under the legacy abandonment
-  # proof so an upgrade mid-session cannot double-arm.
-  pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
-  role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
-  if fm_pid_alive "$pid" && [ "$role" = autoarm ] \
-    && ! fm_autoarm_claim_abandoned "$STATE" "$GRACE"; then
+  # Defer to a live legacy claimant so an upgrade mid-session cannot double-arm.
+  if autoarm_legacy_claim_live; then
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
@@ -338,7 +379,7 @@ autoarm_owns_recovery() {
 }
 
 terminal_fail_open() {
-  local pid role old_session old_count
+  local role old_session old_count
   [ "$COUNT" -gt "$BLOCK_BUDGET" ] || return 1
   failure_episode_verified || return 1
   [ ! -e "$FAILURE_ALARM" ] || return 1
@@ -346,17 +387,13 @@ terminal_fail_open() {
   # aside for, exactly like the legacy live-owner case below.
   fm_autoarm_claim_open "$STATE" "$GRACE" && return 2
   if ! fm_lock_try_acquire "$OWNER_LOCK"; then
-    pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
-    role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
-    # Same legacy abandonment test as autoarm_owns_recovery: a claim whose
-    # ledger entry is already terminal, or whose recorded pid-identity no
-    # longer matches the live pid, is not a concurrent owner to step aside
-    # for. Stepping aside for one here allows the stop silently, and the
-    # episode's one attended alarm would never fire, so clear the abandoned
-    # claim and let this decision finish instead. Failing to clear it
-    # re-blocks rather than allowing.
-    if fm_pid_alive "$pid" && [ "$role" = autoarm ] \
-      && ! fm_autoarm_claim_abandoned "$STATE" "$GRACE"; then
+    # Same legacy proof as autoarm_owns_recovery: a claim whose ledger entry is
+    # already terminal, or whose recorded pid-identity no longer matches the
+    # live pid, is not a concurrent owner to step aside for. Stepping aside for
+    # one here allows the stop silently, and the episode's one attended alarm
+    # would never fire, so clear the abandoned claim and let this decision
+    # finish instead. Failing to clear it re-blocks rather than allowing.
+    if autoarm_legacy_claim_live; then
       return 2
     fi
     fm_autoarm_release_abandoned "$STATE" "$GRACE" || return 1
