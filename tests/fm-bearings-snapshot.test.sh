@@ -2809,6 +2809,49 @@ EOF
   pass "fleet snapshots advance only new decision-log bytes while preserving the durable open set"
 }
 
+test_local_snapshot_preserves_decisions_when_cursor_publish_fails() {
+  local home fakebin worktree real_mv probe json
+  home=$(make_home decision-cursor-publish-failure)
+  worktree="$home/projects/decision-cursor-publish-failure"
+  fm_git_init_commit "$worktree"
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] decision-cursor-publish-failure - Cursor failure fixture (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/decision-cursor-publish-failure.meta" \
+    "worktree=$worktree" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  printf 'needs-decision [key=survives-cache-failure]: captain choice remains open\n' \
+    > "$home/state/decision-cursor-publish-failure.status"
+
+  real_mv=$(command -v mv)
+  probe="$home/cursor-publish-failure"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'dest=\nfor arg in "$@"; do dest=$arg; done\n'
+    printf 'case "$dest" in *.open-decisions-cursor) printf failed > "$FM_MV_FAIL_PROBE"; exit 1 ;; esac\n'
+    printf 'exec %q "$@"\n' "$real_mv"
+  } > "$fakebin/mv"
+  chmod +x "$fakebin/mv"
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_MV_FAIL_PROBE="$probe" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot failed instead of falling back after cursor publication failed"
+  [ -f "$probe" ] || fail "cursor publication failure fixture did not reach the failing mv"
+  printf '%s' "$json" | jq -e '
+    .tasks[] | select(.id == "decision-cursor-publish-failure")
+    | .hints.pending_decision == true
+      and (.hints.open_decisions | any(.key == "survives-cache-failure" and .verb == "needs-decision"))
+  ' >/dev/null || fail "fleet snapshot hid an open decision after cursor publication failed: $json"
+  pass "fleet snapshots preserve open decisions when cursor publication fails"
+}
+
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
   local parent fakebin json i remote_home pid collector_pid sleeper_pid duplicate_base cache_file candidate tmp
   parent=$(make_home concurrent-remote-ledgers)
@@ -2976,6 +3019,7 @@ test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state
 test_large_local_snapshot_overlaps_local_reads_without_projection_drift
 test_local_snapshot_advances_open_decisions_without_refolding_lifetime_history
+test_local_snapshot_preserves_decisions_when_cursor_publish_fails
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
 test_domain_alpha_stale_parent_event_does_not_become_current_work

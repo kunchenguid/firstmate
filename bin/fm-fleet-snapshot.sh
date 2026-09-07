@@ -764,7 +764,9 @@ task_json_lines() {
     captured_status_size=$(_fm_status_file_size "$status_log" 2>/dev/null || printf 0)
     captured_status_size=${captured_status_size//[[:space:]]/}
     case "$captured_status_size" in ''|*[!0-9]*) captured_status_size=0 ;; esac
-    open_decisions_tsv=$(status_open_decisions_incremental "$STATE/$id.status" "$captured_status_size")
+    if ! open_decisions_tsv=$(status_open_decisions_incremental "$STATE/$id.status" "$captured_status_size"); then
+      open_decisions_tsv=$(status_open_decisions "$status_log")
+    fi
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \

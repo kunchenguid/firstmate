@@ -356,10 +356,27 @@ test_primary_pipeline_drive_is_denied_without_blocking_workers() {
     fi
   done
 
+  cat > "$primary/state/fixture-secondmate.meta" <<EOF
+kind=secondmate
+worktree=$worker
+EOF
+  FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
+    --command 'no-mistakes axi respond --action fix' >"$dir/secondmate.out" 2>"$dir/secondmate.err"
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "a marker-backed persistent secondmate home must remain primary, got $rc"
+  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | contains("[primary-pipeline-drive]"))' \
+    "$dir/secondmate.err" >/dev/null \
+    || fail "the persistent secondmate-home deny omitted its stable reason"
+
+  rm "$primary/state/fixture-secondmate.meta"
+  cat > "$primary/state/fixture-worker.meta" <<EOF
+kind=ship
+worktree=$worker
+EOF
   FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
     --command 'no-mistakes axi respond --action fix' >"$dir/worker.out" 2>"$dir/worker.err"
   rc=$?
-  [ "$rc" -eq 0 ] || fail "a task worker must retain its pipeline drive call, got $rc: $(cat "$dir/worker.err")"
+  [ "$rc" -eq 0 ] || fail "an exactly recorded ship worker must retain its pipeline drive call, got $rc: $(cat "$dir/worker.err")"
   [ ! -s "$dir/worker.out" ] && [ ! -s "$dir/worker.err" ] \
     || fail "an allowed task-worker pipeline drive must stay silent"
 

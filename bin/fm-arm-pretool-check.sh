@@ -175,17 +175,63 @@ POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 PRIMARY_SCOPE=false
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh" || exit 0
+
+canonical_git_dir() {
+  local base=$1 path=$2
+  case "$path" in /*) ;; *) path="$base/$path" ;; esac
+  (CDPATH='' cd -- "$path" 2>/dev/null && pwd -P)
+}
+
+meta_exact_value() {
+  local meta=$1 key=$2
+  awk -v key="$key" '
+    index($0, key "=") == 1 { count++; value=substr($0, length(key) + 2) }
+    END { if (count == 1) print value; else exit 1 }
+  ' "$meta" 2>/dev/null
+}
+
+linked_checkout_has_task_owner() {
+  local root=$1 git_dir common_dir common_abs owner candidate candidate_git meta kind worktree resolved
+  git_dir=$(git -C "$root" rev-parse --git-dir 2>/dev/null) || return 1
+  common_dir=$(git -C "$root" rev-parse --git-common-dir 2>/dev/null) || return 1
+  git_dir=$(canonical_git_dir "$root" "$git_dir") || return 1
+  common_abs=$(canonical_git_dir "$root" "$common_dir") || return 1
+  [ "$git_dir" != "$common_abs" ] || return 1
+  owner=$(git -C "$root" worktree list --porcelain 2>/dev/null | while IFS= read -r line; do
+    case "$line" in
+      'worktree '*)
+        candidate=${line#worktree }
+        candidate_git=$(git -C "$candidate" rev-parse --git-dir 2>/dev/null) || continue
+        candidate_git=$(canonical_git_dir "$candidate" "$candidate_git") || continue
+        if [ "$candidate_git" = "$common_abs" ]; then
+          (CDPATH='' cd -- "$candidate" 2>/dev/null && pwd -P)
+          break
+        fi
+        ;;
+    esac
+  done)
+  [ -n "$owner" ] || return 1
+  root=$(CDPATH='' cd -- "$root" 2>/dev/null && pwd -P) || return 1
+  for meta in "$owner/state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    kind=$(meta_exact_value "$meta" kind) || continue
+    case "$kind" in ship|scout) ;; *) continue ;; esac
+    worktree=$(meta_exact_value "$meta" worktree) || continue
+    resolved=$(canonical_git_dir "$owner" "$worktree") || continue
+    [ "$resolved" = "$root" ] && return 0
+  done
+  return 1
+}
+
 if fm_primary_scope_matches "$ROOT" "$ACTIVE_STATE"; then
   PRIMARY_SCOPE=true
-  # A secondmate marker force-includes its persistent linked home in the shared
-  # primary predicate, but pooled task worktrees inherit that local marker too.
-  # Spawned ship branches have the required fm/<task> shape, so the linked
-  # feature checkout remains the worker-owned pipeline surface.
   GIT_DIR=$(git -C "$ROOT" rev-parse --git-dir 2>/dev/null || true)
   GIT_COMMON_DIR=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)
-  GIT_BRANCH=$(git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  if [ -n "$GIT_DIR" ] && [ "$GIT_DIR" != "$GIT_COMMON_DIR" ]; then
-    case "$GIT_BRANCH" in fm/*) PRIMARY_SCOPE=false ;; esac
+  GIT_DIR=$(canonical_git_dir "$ROOT" "$GIT_DIR" 2>/dev/null || true)
+  GIT_COMMON_DIR=$(canonical_git_dir "$ROOT" "$GIT_COMMON_DIR" 2>/dev/null || true)
+  if [ -n "$GIT_DIR" ] && [ -n "$GIT_COMMON_DIR" ] && \
+     [ "$GIT_DIR" != "$GIT_COMMON_DIR" ] && linked_checkout_has_task_owner "$ROOT"; then
+    PRIMARY_SCOPE=false
   fi
 fi
 
