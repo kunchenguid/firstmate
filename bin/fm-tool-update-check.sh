@@ -939,6 +939,10 @@ action_snooze() {
   record_read
   SNOOZE_CAPTURE=1
   run_sweep
+  if [ "$SWEEP_COMPLETE" -eq 0 ]; then
+    printf 'fm-tool-update-check: cannot record a snooze from an incomplete sweep\n' >&2
+    return 1
+  fi
   snoozes_prune
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
