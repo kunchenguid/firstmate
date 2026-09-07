@@ -60,7 +60,8 @@
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
-#     booleans derived from that set.
+#     booleans derived from that set. All three are null when hints.inspection
+#     reports that bounded status inspection did not complete.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
@@ -137,6 +138,7 @@ esac
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-10}
+FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT=${FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT:-10}
 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=${FM_SNAPSHOT_LOCAL_READ_CONCURRENCY:-8}
 FM_SNAPSHOT_BUDGET=${FM_SNAPSHOT_BUDGET:-5}
 FM_SNAPSHOT_CACHE_DIR=${FM_SNAPSHOT_CACHE_DIR:-$STATE/secondmate-summary-cache}
@@ -170,6 +172,7 @@ case "$FM_SNAPSHOT_SECONDMATES" in
     ;;
 esac
 validate_positive_bound FM_SNAPSHOT_CREW_STATE_TIMEOUT "$FM_SNAPSHOT_CREW_STATE_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT "$FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_LOCAL_READ_CONCURRENCY "$FM_SNAPSHOT_LOCAL_READ_CONCURRENCY"
 validate_positive_bound FM_SNAPSHOT_BUDGET "$FM_SNAPSHOT_BUDGET"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
@@ -240,8 +243,10 @@ home with neither a valid current ledger nor a valid current cached copy is
 reported unreadable with the reason; collection never computes a summary in
 that home.
 Each local per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIMEOUT
-(default 10 seconds); a read that hits the bound reports state unknown. Local task
-observations run concurrently, up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY (default 8).
+(default 10 seconds); a read that hits the bound reports state unknown. Complete
+status capture and decision folding share FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT
+(default 10 seconds); a timeout keeps the task and reports its inspection unknown.
+Local task observations run concurrently, up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY (default 8).
 Remote secondmate endpoint liveness is not probed by this command.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
@@ -552,6 +557,39 @@ snapshot_capture_optional() {  # <source> <destination>
   return 1
 }
 
+snapshot_capture_status() {
+  local source=$1 destination=$2 decisions=$3 last_event=$4 first_pr=$5 rc
+  if [ ! -f "$source" ]; then
+    : > "$decisions"
+    : > "$first_pr"
+    return 0
+  fi
+  fm_run_timed "$FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT" \
+    env FM_SNAPSHOT_STATUS_CAPTURE_COMMAND="${FM_SNAPSHOT_STATUS_CAPTURE_COMMAND:-}" \
+    bash -c '
+      source=$1
+      destination=$2
+      decisions=$3
+      classify_lib=$4
+      last_event=$5
+      first_pr=$6
+      if [ -n "$FM_SNAPSHOT_STATUS_CAPTURE_COMMAND" ]; then
+        "$FM_SNAPSHOT_STATUS_CAPTURE_COMMAND" "$source" "$destination" || exit
+      else
+        cp -p -- "$source" "$destination" || exit
+      fi
+      . "$classify_lib" || exit
+      status_open_decisions "$destination" > "$decisions" || exit
+      grep -v "^[[:space:]]*$" "$destination" 2>/dev/null | tail -1 > "$last_event"
+      grep -Eo "https?://[^[:space:])\"]+/pull/[0-9]+" "$destination" 2>/dev/null | head -1 > "$first_pr"
+    ' _ "$source" "$destination" "$decisions" "$SCRIPT_DIR/fm-classify-lib.sh" "$last_event" "$first_pr"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f -- "$destination" "$decisions" "$last_event" "$first_pr"
+  fi
+  return "$rc"
+}
+
 snapshot_mark_optional_present() {  # <source> <destination>
   local source=$1 destination=$2
   [ -f "$source" ] || return 0
@@ -577,19 +615,32 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
 
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
-  local status_log status_capture report_path report_capture
-  local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
+  local status_log status_capture status_decisions status_last_event status_first_pr status_inspection report_path report_capture capture_rc
+  local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1 inspection_reason=
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
   status_log="$STATE/$id.status"
   status_capture="$SNAPSHOT_TASK_DIR/$id.status"
+  status_decisions="$SNAPSHOT_TASK_DIR/$id.open-decisions"
+  status_last_event="$SNAPSHOT_TASK_DIR/$id.status-last-event"
+  status_first_pr="$SNAPSHOT_TASK_DIR/$id.status-first-pr"
+  status_inspection="$SNAPSHOT_TASK_DIR/$id.status-inspection"
   report_path="$DATA/$id/report.md"
   report_capture="$SNAPSHOT_TASK_DIR/$id.report"
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
-    snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
+    snapshot_capture_status "$status_log" "$status_capture" "$status_decisions" "$status_last_event" "$status_first_pr"
+    capture_rc=$?
+    if [ "$capture_rc" -ne 0 ]; then
+      if [ "$capture_rc" -eq 124 ]; then
+        inspection_reason="status inspection timeout after ${FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT}s"
+      else
+        inspection_reason="status inspection failed"
+      fi
+      printf '%s\n' "$inspection_reason" > "$status_inspection" || current_rc=1
+    fi
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
   fi
 
@@ -597,9 +648,20 @@ prefetch_task_observations() {  # <meta> <id>
     jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     agent_alive=unknown
-  elif [ "$generation_current" = 1 ]; then
+  elif [ "$generation_current" = 1 ] && [ -z "$inspection_reason" ]; then
     crew_state_json "$id" "$meta" "$status_capture" > "$current_file" &
     current_pid=$!
+  elif [ "$generation_current" = 1 ]; then
+    jq -n --arg detail "$inspection_reason" \
+      '{state:"unknown",source:"none",detail:$detail,raw:""}' > "$current_file" || current_rc=1
+    agent_alive=unknown
+  else
+    jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
+      > "$current_file" || current_rc=1
+    agent_alive=unknown
+  fi
+
+  if [ -z "$remote_host" ] && [ "$generation_current" = 1 ]; then
     kind=$(meta_value "$meta" kind)
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
@@ -613,17 +675,14 @@ prefetch_task_observations() {  # <meta> <id>
         agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
       fi
     fi
-  else
-    jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
-      > "$current_file" || current_rc=1
-    agent_alive=unknown
   fi
 
   [ -z "$current_pid" ] || wait "$current_pid" || current_rc=1
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
-    rm -f -- "$status_capture" "$report_capture"
+    rm -f -- "$status_capture" "$status_decisions" "$status_last_event" "$status_first_pr" "$report_capture"
+    printf '%s\n' "task generation changed during snapshot" > "$status_inspection" || current_rc=1
     jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     endpoint_exists=null
@@ -691,8 +750,9 @@ task_json_lines() {
   local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local last_event_raw current_state current_source report_present=0 pr_from_status
+  local open_decisions_tsv open_decisions_json status_decisions status_last_event status_first_pr status_inspection inspection_reason
+  local pending_decision_json blocked_event_json inspection_complete_json
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -720,11 +780,15 @@ task_json_lines() {
       target=$(fm_backend_target_of_meta "$meta")
     fi
     status_log="$SNAPSHOT_TASK_DIR/$id.status"
+    status_decisions="$SNAPSHOT_TASK_DIR/$id.open-decisions"
+    status_last_event="$SNAPSHOT_TASK_DIR/$id.status-last-event"
+    status_first_pr="$SNAPSHOT_TASK_DIR/$id.status-first-pr"
+    status_inspection="$SNAPSHOT_TASK_DIR/$id.status-inspection"
     report_path="$SNAPSHOT_TASK_DIR/$id.report"
     pr=$(meta_value "$meta" pr)
     pr_source=meta
     if [ -z "$pr" ]; then
-      pr_from_status=$(first_pr_url_in_file "$status_log" || true)
+      pr_from_status=$(first_pr_url_in_file "$status_first_pr" || true)
       pr=$pr_from_status
       pr_source=status_event
     fi
@@ -737,7 +801,7 @@ task_json_lines() {
       snapshot_task_cleanup
       return 1
     }
-    event_json=$(status_event_json "$status_log" "$STATE/$id.status")
+    event_json=$(status_event_json "$status_last_event" "$STATE/$id.status")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     read -r current_state current_source < <(
       printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
@@ -760,19 +824,34 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
-    open_decisions_tsv=$(status_open_decisions "$status_log")
-    if [ "$kind" != secondmate ] && \
-       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
-           && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
-         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
-      open_decisions_tsv=""
+    inspection_reason=$(LC_ALL=C command cat "$status_inspection" 2>/dev/null || true)
+    inspection_complete_json=true
+    if [ -z "$inspection_reason" ]; then
+      if ! open_decisions_tsv=$(LC_ALL=C command cat "$status_decisions" 2>/dev/null); then
+        inspection_reason="status inspection result unavailable"
+        inspection_complete_json=false
+      fi
+    else
+      inspection_complete_json=false
     fi
-    open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
-      [ splits("\n") | select(length > 0)
-        | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
-        | select(. != null) ]')
-    pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
-    blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
+    if [ "$inspection_complete_json" = true ]; then
+      if [ "$kind" != secondmate ] && \
+         { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
+             && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
+           || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
+        open_decisions_tsv=""
+      fi
+      open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
+        [ splits("\n") | select(length > 0)
+          | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
+          | select(. != null) ]')
+      pending_decision_json=$(printf '%s' "$open_decisions_json" | jq 'any(.[]; .verb == "needs-decision")')
+      blocked_event_json=$(printf '%s' "$open_decisions_json" | jq 'any(.[]; .verb == "blocked")')
+    else
+      open_decisions_json=null
+      pending_decision_json=null
+      blocked_event_json=null
+    fi
 
     endpoint_exists=null
     agent_alive=not_checked
@@ -819,6 +898,7 @@ task_json_lines() {
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
+      --arg inspection_reason "$inspection_reason" \
       --argjson current_state "$current_json" \
       --argjson meta_path "$meta_json" \
       --argjson status_log "$status_json" \
@@ -827,8 +907,9 @@ task_json_lines() {
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
       --argjson open_decisions "$open_decisions_json" \
-      --argjson pending_decision "$(bool_json "$pending_decision")" \
-      --argjson blocked_event "$(bool_json "$blocked_event")" \
+      --argjson pending_decision "$pending_decision_json" \
+      --argjson blocked_event "$blocked_event_json" \
+      --argjson inspection_complete "$inspection_complete_json" \
       --argjson report_present "$(bool_json "$report_present")" \
       '{
         id:$id,
@@ -859,6 +940,7 @@ task_json_lines() {
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,
           open_decisions:$open_decisions,
+          inspection:{complete:$inspection_complete,reason:(if $inspection_reason == "" then null else $inspection_reason end)},
           scout_report_present:$report_present,
           last_event_text:$last_event_raw
         },

@@ -377,7 +377,9 @@ EOF
     'no-mistakes axi respond --action fix' \
     'time no-mistakes axi respond --action fix' \
     'time -p no-mistakes axi respond --action fix' \
+    '/usr/bin/time -l no-mistakes axi respond --action fix' \
     'coproc no-mistakes axi respond --action fix' \
+    'coproc JOB no-mistakes axi respond --action fix' \
     'coproc JOB { no-mistakes axi respond --action fix; }' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
@@ -395,7 +397,9 @@ EOF
     "bash -lc 'no-mistakes axi respond --action fix'" \
     'time no-mistakes axi respond --action fix' \
     'time -p no-mistakes axi respond --action fix' \
+    '/usr/bin/time -l no-mistakes axi respond --action fix' \
     'coproc no-mistakes axi respond --action fix' \
+    'coproc JOB no-mistakes axi respond --action fix' \
     'coproc JOB { no-mistakes axi respond --action fix; }' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
@@ -405,11 +409,19 @@ EOF
     jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | contains("[primary-pipeline-drive]"))' "$dir/run.err" >/dev/null \
       || fail "the primary pipeline-run deny omitted its stable reason"
   done
+  FM_HOME="$primary" "$check" \
+    --command 'case x in *) no-mistakes axi respond --action fix;; esac' >"$dir/case.out" 2>"$dir/case.err"
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "an executed case-body pipeline drive must be denied, got $rc"
+  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | contains("[primary-pipeline-drive]"))' \
+    "$dir/case.err" >/dev/null || fail "the case-body pipeline deny omitted its stable reason"
   for payload in \
     "echo 'no-mistakes axi respond --action fix'" \
     "time echo 'no-mistakes axi run --intent data'" \
+    "/usr/bin/time -l echo 'no-mistakes axi run --intent data'" \
     "coproc echo 'no-mistakes axi respond --action data'" \
-    "if echo 'no-mistakes axi respond --action data'; then echo done; fi"; do
+    "if echo 'no-mistakes axi respond --action data'; then echo done; fi" \
+    "case \"\$x\" in *) echo 'no-mistakes axi run';; esac"; do
     FM_HOME="$primary" "$check" --command "$payload" >/dev/null 2>&1 \
       || fail "a pipeline command mentioned only as data must remain allowed: $payload"
   done

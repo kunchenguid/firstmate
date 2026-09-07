@@ -2661,8 +2661,11 @@ SH
       and .pr.url == null
       and .paths.status_log.present == false
       and .paths.report.present == false
-      and .hints.pending_decision == false
-      and .hints.open_decisions == []
+      and .hints.pending_decision == null
+      and .hints.blocked_event == null
+      and .hints.open_decisions == null
+      and .hints.inspection.complete == false
+      and (.hints.inspection.reason | contains("task generation changed during snapshot"))
       and .hints.scout_report_present == false
       and .hints.last_event_text == ""
   ' >/dev/null || fail "replacement live state crossed task generations: $json"
@@ -2757,6 +2760,57 @@ SH
       and ([.in_flight[] | select(.id == "local-1" and .kind == "ship")] | length) == 1
   ' >/dev/null || fail "large local snapshot lost a worker row: $parallel"
   pass "large local snapshot overlaps local reads with byte-identical serial and concurrent projections"
+}
+
+test_local_snapshot_bounds_status_inspection_and_exposes_timeout() {
+  local home fakebin worktree capture probe json started elapsed
+  home=$(make_home bounded-status-inspection)
+  worktree="$home/projects/bounded-status-inspection"
+  fm_git_init_commit "$worktree"
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] bounded-status-inspection - Bounded status fixture (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/bounded-status-inspection.meta" \
+    "worktree=$worktree" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  printf 'needs-decision [key=must-not-be-inferred-away]: captain choice remains open\n' \
+    > "$home/state/bounded-status-inspection.status"
+  capture="$home/slow-status-capture"
+  probe="$home/status-capture-started"
+  cat > "$capture" <<'SH'
+#!/usr/bin/env bash
+printf started > "$FM_SLOW_STATUS_PROBE"
+sleep 30
+cp -p -- "$1" "$2"
+SH
+  chmod +x "$capture"
+
+  started=$(date +%s)
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT=1 \
+    FM_SNAPSHOT_STATUS_CAPTURE_COMMAND="$capture" FM_SLOW_STATUS_PROBE="$probe" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot failed instead of exposing a bounded status timeout"
+  elapsed=$(( $(date +%s) - started ))
+  [ -f "$probe" ] || fail "bounded status fixture never entered its slow capture"
+  [ "$elapsed" -lt 8 ] || fail "status inspection exceeded its one-second bound: ${elapsed}s"
+  printf '%s' "$json" | jq -e '
+    .tasks[] | select(.id == "bounded-status-inspection")
+    | .current_state.state == "unknown"
+      and (.current_state.detail | contains("status inspection timeout after 1s"))
+      and .hints.inspection.complete == false
+      and (.hints.inspection.reason | contains("status inspection timeout after 1s"))
+      and .hints.pending_decision == null
+      and .hints.blocked_event == null
+      and .hints.open_decisions == null
+  ' >/dev/null || fail "bounded status timeout was not explicit on the retained task: $json"
+  pass "fleet snapshots bound status inspection and expose uncertainty"
 }
 
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
@@ -2925,6 +2979,7 @@ test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state
 test_large_local_snapshot_overlaps_local_reads_without_projection_drift
+test_local_snapshot_bounds_status_inspection_and_exposes_timeout
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
 test_domain_alpha_stale_parent_event_does_not_become_current_work

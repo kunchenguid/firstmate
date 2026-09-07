@@ -284,7 +284,7 @@ export class Lexer {
   }
 
   readControlOperator() {
-    for (const operator of ["&&", "||", "|&", ";;", ";", "&", "|"]) {
+    for (const operator of ["&&", "||", "|&", ";;", ";", "&", "|", ")"]) {
       if (this.source.startsWith(operator, this.index)) {
         this.index += operator.length;
         return operator;
@@ -488,7 +488,7 @@ function wordsInNode(tokens) {
 
 const WRAPPER_OPTIONS = {
   command: { noArgument: new Set(["p", "v", "V"]), takesArgument: new Set() },
-  time: { noArgument: new Set(["p"]), takesArgument: new Set() },
+  time: { noArgument: new Set(["a", "h", "l", "p", "q", "v"]), takesArgument: new Set(["f", "o"]) },
   env: { noArgument: new Set(["0", "i", "P", "v"]), takesArgument: new Set(["a", "C", "S", "u"]) },
   exec: { noArgument: new Set(["c", "l"]), takesArgument: new Set(["a"]) },
   nohup: { noArgument: new Set(), takesArgument: new Set() },
@@ -498,7 +498,7 @@ const WRAPPER_OPTIONS = {
 
 const WRAPPER_LONG_OPTIONS = {
   command: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
-  time: { noArgument: new Set(), takesArgument: new Set() },
+  time: { noArgument: new Set(["append", "help", "portability", "quiet", "verbose", "version"]), takesArgument: new Set(["format", "output"]) },
   env: { noArgument: new Set(["ignore-environment", "null", "help", "version"]), takesArgument: new Set(["argv0", "block-signal", "chdir", "default-signal", "ignore-signal", "split-string", "unset"]) },
   exec: { noArgument: new Set(), takesArgument: new Set() },
   nohup: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
@@ -580,7 +580,7 @@ export function commandPosition(tokens) {
   while (command) {
     const name = basename(command.value);
     if (name === "exec" || name === "command" || name === "sudo" || name === "nohup" || name === "time") {
-      wrappers.push(name);
+      wrappers.push(name === "time" && command.value.includes("/") ? "system-time" : name);
       const options = consumeWrapperOptions(name, words, index + 1);
       unresolvedWrapperOption ||= options.unresolved;
       wrapperPayloads.push(...options.embeddedPayloads);
@@ -601,6 +601,8 @@ export function commandPosition(tokens) {
     if (name === "coproc") {
       wrappers.push(name);
       index += 1;
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(words[index]?.value || "") &&
+          basename(words[index + 1]?.value || "") === "no-mistakes") index += 1;
       command = words[index];
       if (!command) unresolvedWrapperOption = true;
       continue;
