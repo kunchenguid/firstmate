@@ -129,6 +129,102 @@ In the Cloudflare AI Gateway dashboard:
 
 **Note:** The `cf-aig-gateway-id: opencode` header is required for gateway routing; the `cf-aig-metadata` header is additional identity context that appears in logs but doesn't affect routing.
 
+## Hermes integration (fleet job scheduler)
+
+Hermes is a job scheduler, not an AI agent harness. It orchestrates cron jobs and MCP servers that may make AI calls.
+
+### Architecture
+
+- **Hermes**: Cron job runner + API server + MCP host
+- **Job scripts**: Shell/Python scripts invoked by Hermes (may make AI calls)
+- **MCP servers**: Model Context Protocol servers (may make AI calls)
+- **Identity**: Each job/MCP server reports its own identity through gateway
+
+### Configuration
+
+**Config file**: `~/.config/hermes/config.yaml.tmpl`
+
+```yaml
+# Hermes doesn't directly make AI calls, but documents gateway routing
+# for the scripts it invokes. See ~/.hermes-env for gateway configuration.
+```
+
+**Environment file**: `~/.hermes-env.tmpl`
+
+```bash
+# Route job scripts through CF AI Gateway with identity tracking
+export ANTHROPIC_BASE_URL="https://gateway.ai.cloudflare.com/v1/a7fa198dd5b359a187c671064fe6b36e/opencode/compat"
+export ANTHROPIC_API_KEY="${CF_AI_GATEWAY_TOKEN}"
+export ANTHROPIC_CUSTOM_HEADERS=$'cf-aig-gateway-id: opencode\ncf-aig-metadata: {"harness":"hermes","host":"{{ .chezmoi.hostname }}","agent":"cron-job"}'
+
+# Model route for scripts to use
+export HERMES_MODEL_ROUTE="cf-aig-dynamic/dynamic/TUI"
+```
+
+### Job script template
+
+```bash
+#!/bin/bash
+# Hermes job script with AI gateway routing
+set -euo pipefail
+source ~/.hermes-env
+
+# Make AI call through gateway with identity tracking
+response=$(curl -s -X POST "$ANTHROPIC_BASE_URL/v1/messages" \
+  -H "Authorization: Bearer $ANTHROPIC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "cf-aig-gateway-id: opencode" \
+  -H "cf-aig-metadata: {\"harness\":\"hermes\",\"host\":\"{{ .chezmoi.hostname }}\",\"agent\":\"daily-summary\"}" \
+  -d "{\"model\": \"$HERMES_MODEL_ROUTE\", \"messages\": [{\"role\": \"user\", \"content\": \"Generate daily summary\"}]}")
+
+# Process response...
+```
+
+### Identity metadata
+
+```json
+{
+  "harness": "hermes",
+  "host": "<machine-hostname>",
+  "agent": "<job-name>"
+}
+```
+
+**Fields:**
+- `harness`: Always "hermes" (identifies the scheduler)
+- `host`: Machine hostname (dynamic via `{{ .chezmoi.hostname }}`)
+- `agent`: Job-specific identifier (e.g., "daily-summary", "mcp-mybrain")
+
+### Fleet deployment
+
+When chezmoi applies these templates to fleet machines:
+
+1. Each machine gets correct hostname in metadata
+2. Job scripts automatically route through gateway
+3. Dashboard shows which host/job made which AI calls
+4. Cost attribution per host and job type
+
+### MCP server integration
+
+MCP servers hosted by Hermes can also use gateway routing:
+
+```python
+# mybrain-mcp-server.py
+import anthropic
+import os
+
+client = anthropic.Anthropic(
+    base_url=os.environ["ANTHROPIC_BASE_URL"],
+    api_key=os.environ["ANTHROPIC_API_KEY"],
+    default_headers={
+        "cf-aig-gateway-id": "opencode",
+        "cf-aig-metadata": '{"harness":"hermes","host":"' + os.environ.get("HOSTNAME", "unknown") + '","agent":"mcp-mybrain"}'
+    }
+)
+
+# Use client for AI calls...
+```
+
 ## Provider roles
 
 | Provider | Role | Cost |
