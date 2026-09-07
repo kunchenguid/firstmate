@@ -4,6 +4,8 @@
 #
 # Usage:
 #   fm-tool-update-check.sh [check]
+#   fm-tool-update-check.sh snooze <tool> --until YYYY-MM-DD
+#   fm-tool-update-check.sh snooze <tool> --until-commit <commit>
 #   fm-tool-update-check.sh arm
 #   fm-tool-update-check.sh disarm
 #   fm-tool-update-check.sh --help
@@ -62,6 +64,10 @@
 # while a new finding that lands past the one-line cut is still news. A sweep
 # killed part way through leaves no record and is retried, instead of
 # suppressing its finding.
+# A captain can snooze one tool's current update identities until a date, or a
+# git update until the exact commit that was reported. A later update gets a new
+# identity and remains visible, while a snoozed identity is removed once it is
+# no longer present.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -95,6 +101,8 @@ usage() {
   cat <<'EOF'
 Usage:
   fm-tool-update-check.sh [check]   report watched tools needing attention (silent when current)
+  fm-tool-update-check.sh snooze <tool> --until YYYY-MM-DD
+  fm-tool-update-check.sh snooze <tool> --until-commit <commit>
   fm-tool-update-check.sh arm       write and register state/tool-updates.check.sh
   fm-tool-update-check.sh disarm    remove the check shim, its trust binding, and the record
   fm-tool-update-check.sh --help    print this help
@@ -193,6 +201,10 @@ real_epoch() { date +%s; }
 FINDINGS=
 DEADLINE=0
 INCOMPLETE_REPORTED=0
+CURRENT_UPDATE_ENTRIES=
+RECORD_SNOOZES=
+SWEEP_COMPLETE=0
+SNOOZE_CAPTURE=0
 
 # Each finding is flattened to a single line here, because the whole report must
 # stay one line for the wake record.
@@ -204,6 +216,80 @@ emit() {
   else
     FINDINGS="$FINDINGS; $text"
   fi
+}
+
+update_fingerprint() {
+  local identity=$1
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$identity" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$identity" | sha256sum | awk '{print $1}'
+  else
+    printf '%s' "$identity" | cksum | awk '{print $1}'
+  fi
+}
+
+current_update_add() {
+  local entry=$1
+  if [ -z "$CURRENT_UPDATE_ENTRIES" ]; then
+    CURRENT_UPDATE_ENTRIES=$entry
+  else
+    CURRENT_UPDATE_ENTRIES="$CURRENT_UPDATE_ENTRIES
+$entry"
+  fi
+}
+
+snooze_until_active() {
+  local until=$1 today
+  [ "$until" = '-' ] && return 0
+  case "$until" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+      today=$(date -u +%Y-%m-%d)
+      [ "$today" \< "$until" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+snooze_key_active() {
+  local name=$1 key=$2 entry entry_name entry_key until
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    IFS='|' read -r entry_name entry_key until <<EOF
+$entry
+EOF
+    if [ "$entry_name" = "$name" ] && [ "$entry_key" = "$key" ] \
+      && snooze_until_active "$until"; then
+      return 0
+    fi
+  done <<EOF
+$RECORD_SNOOZES
+EOF
+  return 1
+}
+
+emit_update() {
+  local name=$1 kind=$2 value=$3 text=$4 key
+  key=$(update_fingerprint "$kind|$name|$value")
+  current_update_add "$name|$key|$kind|$value"
+  if [ "$SNOOZE_CAPTURE" -eq 0 ] && snooze_key_active "$name" "$key"; then
+    return 0
+  fi
+  emit "$text"
+}
+
+current_update_has_key() {
+  local name=$1 key=$2 entry entry_name entry_key
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    IFS='|' read -r entry_name entry_key _ <<EOF
+$entry
+EOF
+    [ "$entry_name" = "$name" ] && [ "$entry_key" = "$key" ] && return 0
+  done <<EOF
+$CURRENT_UPDATE_ENTRIES
+EOF
+  return 1
 }
 
 budget_exhausted() {
@@ -478,7 +564,8 @@ EOF
       if [ "$status" -gt 1 ]; then
         emit "$name check failed: announce_pattern is not a usable extended regular expression"
       elif [ -n "$matched" ]; then
-        emit "$name update available: $(printf '%s\n' "$matched" | head -n 1)"
+      matched=$(printf '%s\n' "$matched" | head -n 1)
+      emit_update "$name" announce "$matched" "$name update available: $matched"
       fi
     fi
   fi
@@ -492,7 +579,8 @@ EOF
 
   if [ -n "$best_version" ] && [ "$best_path" != "$resolved_path" ] \
     && version_newer "$best_version" "$resolved_version"; then
-    emit "$name update not in effect: PATH resolves $resolved_version at $resolved_path but $best_version is installed at $best_path"
+    emit_update "$name" command "$resolved_version|$best_version" \
+      "$name update not in effect: PATH resolves $resolved_version at $resolved_path but $best_version is installed at $best_path"
   fi
 
   if [ -n "$unreadable" ]; then
@@ -633,12 +721,14 @@ git_findings() {
       ''|*[!0-9]*|0) count= ;;
     esac
     if [ -n "$count" ]; then
-      emit "$name update available: $local_label is $(commit_phrase "$count") behind $remote/$branch"
+      emit_update "$name" git "$remote_sha" \
+        "$name update available: $local_label is $(commit_phrase "$count") behind $remote/$branch"
       return 0
     fi
   fi
 
-  emit "$name update available: $remote/$branch is at $short which this copy does not have"
+  emit_update "$name" git "$remote_sha" \
+    "$name update available: $remote/$branch is at $short which this copy does not have"
   return 0
 }
 
@@ -651,6 +741,7 @@ record_read() {
   local line first=1
   RECORD_EPOCH=0
   RECORD_REPORTED=
+  RECORD_SNOOZES=
   [ -f "$RECORD" ] || return 0
   while IFS= read -r line; do
     if [ "$first" = 1 ]; then
@@ -667,19 +758,34 @@ record_read() {
         esac
         ;;
       reported=*) RECORD_REPORTED=${line#reported=} ;;
+      snooze=*)
+        line=${line#snooze=}
+        if [ -z "$RECORD_SNOOZES" ]; then
+          RECORD_SNOOZES=$line
+        else
+          RECORD_SNOOZES="$RECORD_SNOOZES
+$line"
+        fi
+        ;;
     esac
   done < "$RECORD"
   return 0
 }
 
 record_write() {
-  local reported=$1 tmp
+  local reported=$1 snoozes=${2:-} tmp entry
   tmp=$(mktemp "$RECORD.XXXXXX" 2>/dev/null) || return 1
   chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
   {
     printf '%s\n' "$RECORD_SCHEMA"
     printf 'epoch=%s\n' "$(record_epoch_now)"
     printf 'reported=%s\n' "$reported"
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || continue
+      printf 'snooze=%s\n' "$entry"
+    done <<EOF
+$snoozes
+EOF
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$RECORD" || { rm -f -- "$tmp"; return 1; }
   return 0
@@ -687,19 +793,12 @@ record_write() {
 
 # --- actions ----------------------------------------------------------------
 
-action_check() {
+run_sweep() {
   local name command_name args_joined announce announce_args repo remote branch
-  local line now
-
-  [ -f "$CONFIG" ] || return 0
-
-  record_read
-  now=$(record_epoch_now)
-  if [ "$INTERVAL" -ne 0 ] && [ "$RECORD_EPOCH" -gt 0 ] \
-    && [ "$now" -ge "$RECORD_EPOCH" ] && [ $((now - RECORD_EPOCH)) -lt "$INTERVAL" ]; then
-    return 0
-  fi
-
+  FINDINGS=
+  CURRENT_UPDATE_ENTRIES=
+  INCOMPLETE_REPORTED=0
+  SWEEP_COMPLETE=0
   DEADLINE=$(($(real_epoch) + BUDGET_SECS))
 
   if [ -n "$BUDGET_CUT_FROM" ]; then
@@ -715,7 +814,87 @@ action_check() {
       [ -z "$command_name" ] || command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args"
       [ -z "$repo" ] || git_findings "$name" "$repo" "$remote" "$branch"
     done < <(config_records)
+    [ "$INCOMPLETE_REPORTED" -eq 0 ] && SWEEP_COMPLETE=1
   fi
+}
+
+snoozes_prune() {
+  local entry name key until retained=
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    IFS='|' read -r name key until <<EOF
+$entry
+EOF
+    snooze_until_active "$until" || continue
+    if [ "$SWEEP_COMPLETE" -eq 0 ] || current_update_has_key "$name" "$key"; then
+      if [ -z "$retained" ]; then
+        retained=$entry
+      else
+        retained="$retained
+$entry"
+      fi
+    fi
+  done <<EOF
+$RECORD_SNOOZES
+EOF
+  RECORD_SNOOZES=$retained
+}
+
+snooze_add() {
+  local name=$1 key=$2 until=$3 entry existing entry_name entry_key kept=
+  while IFS= read -r existing; do
+    [ -n "$existing" ] || continue
+    IFS='|' read -r entry_name entry_key _ <<EOF
+$existing
+EOF
+    [ "$entry_name" = "$name" ] && [ "$entry_key" = "$key" ] && continue
+    if [ -z "$kept" ]; then
+      kept=$existing
+    else
+      kept="$kept
+$existing"
+    fi
+  done <<EOF
+$RECORD_SNOOZES
+EOF
+  entry="$name|$key|$until"
+  if [ -z "$kept" ]; then
+    RECORD_SNOOZES=$entry
+  else
+    RECORD_SNOOZES="$kept
+$entry"
+  fi
+}
+
+valid_until_date() {
+  local value=$1 parsed
+  case "$value" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
+    *) return 1 ;;
+  esac
+  if parsed=$(date -u -j -f "%Y-%m-%d" "$value" "+%Y-%m-%d" 2>/dev/null); then
+    :
+  elif parsed=$(date -u -d "$value" "+%Y-%m-%d" 2>/dev/null); then
+    :
+  else
+    return 1
+  fi
+  [ "$parsed" = "$value" ]
+}
+
+action_check() {
+  local line now
+
+  [ -f "$CONFIG" ] || return 0
+
+  record_read
+  now=$(record_epoch_now)
+  if [ "$INTERVAL" -ne 0 ] && [ "$RECORD_EPOCH" -gt 0 ] \
+    && [ "$now" -ge "$RECORD_EPOCH" ] && [ $((now - RECORD_EPOCH)) -lt "$INTERVAL" ]; then
+    return 0
+  fi
+
+  run_sweep
 
   line=
   if [ -n "$FINDINGS" ]; then
@@ -735,7 +914,70 @@ action_check() {
   if [ -n "$line" ] && [ "$FINDINGS" != "$RECORD_REPORTED" ]; then
     printf '%s\n' "$line"
   fi
-  record_write "$FINDINGS" || true
+  snoozes_prune
+  record_write "$FINDINGS" "$RECORD_SNOOZES" || true
+  return 0
+}
+
+action_snooze() {
+  local name=${1:-} option=${2:-} value=${3:-} entry entry_name entry_key kind update_value
+  local until='' count=0 commit
+  [ "$#" -eq 3 ] || die_usage 'snooze needs a tool and exactly one until option'
+  case "$option" in
+    --until)
+      valid_until_date "$value" || die_usage "--until must be a YYYY-MM-DD date: $value"
+      until=$value
+      ;;
+    --until-commit)
+      case "$value" in
+        [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*) ;;
+        *) die_usage "--until-commit must be a hexadecimal commit id: $value" ;;
+      esac
+      commit=$(printf '%s' "$value" | tr 'A-F' 'a-f')
+      until=-
+      ;;
+    *) die_usage "unknown snooze option: $option" ;;
+  esac
+  [ -f "$CONFIG" ] || { printf 'fm-tool-update-check: no watched tool registry at %s\n' "$CONFIG" >&2; return 1; }
+  record_read
+  SNOOZE_CAPTURE=1
+  run_sweep
+  snoozes_prune
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    IFS='|' read -r entry_name entry_key kind update_value <<EOF
+$entry
+EOF
+    [ "$entry_name" = "$name" ] || continue
+    if [ "$option" = '--until-commit' ]; then
+      [ "$kind" = git ] || continue
+      case "$update_value" in
+        "$commit"*) ;;
+        *) continue ;;
+      esac
+    fi
+    snooze_add "$entry_name" "$entry_key" "$until"
+    count=$((count + 1))
+  done <<EOF
+$CURRENT_UPDATE_ENTRIES
+EOF
+  if [ "$count" -eq 0 ]; then
+    if [ "$option" = '--until-commit' ]; then
+      printf 'fm-tool-update-check: no current git update for %s at commit %s\n' "$name" "$value" >&2
+    else
+      printf 'fm-tool-update-check: no current update for %s\n' "$name" >&2
+    fi
+    return 1
+  fi
+  record_write "$FINDINGS" "$RECORD_SNOOZES" || {
+    printf 'fm-tool-update-check: could not record the snooze\n' >&2
+    return 1
+  }
+  if [ "$option" = '--until-commit' ]; then
+    printf 'snoozed: %s until commit %s\n' "$name" "$value"
+  else
+    printf 'snoozed: %s until %s\n' "$name" "$value"
+  fi
   return 0
 }
 
@@ -891,6 +1133,7 @@ action_disarm() {
 
 case "${1:-check}" in
   check) action_check ;;
+  snooze) shift; action_snooze "$@" ;;
   arm) action_arm ;;
   disarm) action_disarm ;;
   -h|--help) usage ;;

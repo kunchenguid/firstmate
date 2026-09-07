@@ -522,6 +522,10 @@ Registering the check is itself a reason to watch, so the home keeps a watcher f
 `bin/fm-tool-update-check.sh disarm` removes the shim, its trust binding, and the report record.
 The check prints nothing when everything is current, and `state/.tool-updates` records the findings the last report was made from so the same pending update is reported once instead of on every poll.
 A changed or returning condition is reported again.
+Use `bin/fm-tool-update-check.sh snooze <tool> --until YYYY-MM-DD` to defer the currently reported update identities for that tool until the date.
+Use `bin/fm-tool-update-check.sh snooze <tool> --until-commit <commit>` for a git update when the deferral should last until that exact reported commit is no longer current.
+The record stores each snooze against the update identity it was taken against, so a later version or commit is reported immediately even when an earlier snooze date has not arrived.
+Snoozes are removed automatically when their exact update clears, and an expired date snooze is reported again.
 Adding, removing, or changing a watched tool is an edit to this file and needs no code change or re-arming.
 This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
 

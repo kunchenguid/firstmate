@@ -684,6 +684,75 @@ test_findings_are_reported_once_until_they_change() {
   pass "the same pending update is reported once, and a change is reported again"
 }
 
+test_snooze_suppresses_only_the_current_command_update() {
+  local home stale fresh out path status
+  home=$(make_home snooze-command)
+  stale="$TMP_ROOT/snooze-command/old/bin"
+  fresh="$TMP_ROOT/snooze-command/new/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"$TOOL\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$stale:$fresh")
+
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "0.8.2 is installed" "the command update was not reported before snoozing"
+  status=0
+  env FM_HOME="$home" PATH="$path" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=0 \
+    "$CHECK" snooze "$TOOL" --until 2099-12-31 >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "command snooze exit"
+  assert_contains "$(cat "$home/state/.tool-updates")" "snooze=" "the command snooze was not recorded"
+
+  run_check "$home" "$path" "$out"
+  [ ! -s "$out" ] || fail "a snoozed command update was reported again: $(cat "$out")"
+
+  make_copy "$fresh" "$TOOL" 'herdr 0.9.0'
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "0.9.0 is installed" "a new command update was hidden by the earlier snooze"
+
+  make_copy "$stale" "$TOOL" 'herdr 0.9.0'
+  run_check "$home" "$path" "$out"
+  [ ! -s "$out" ] || fail "a landed command update still produced a report: $(cat "$out")"
+  assert_not_contains "$(cat "$home/state/.tool-updates")" "snooze=" "the landed command update left its snooze behind"
+  pass "a command snooze suppresses its exact update, reports a newer version, and clears when it lands"
+}
+
+test_snooze_commit_reports_a_new_remote_head() {
+  local home work advance out path status old_head new_head
+  home=$(make_home snooze-commit)
+  work=$(git_fixture snooze-commit-repo)
+  git -C "$work" reset -q --hard HEAD~2
+  old_head=$(git -C "$work" rev-parse origin/main)
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+  path="$PATH"
+
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "2 commits behind" "the git update was not reported before snoozing"
+  status=0
+  env FM_HOME="$home" PATH="$path" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=0 \
+    "$CHECK" snooze firstmate --until-commit "$old_head" >"$out" 2>&1 || status=$?
+  expect_code 0 "$status" "commit snooze exit"
+
+  run_check "$home" "$path" "$out"
+  [ ! -s "$out" ] || fail "the snoozed git update was reported again: $(cat "$out")"
+
+  advance="$TMP_ROOT/snooze-commit-advance"
+  git clone -q "$TMP_ROOT/snooze-commit-repo.git" "$advance"
+  printf 'four\n' > "$advance/f4"
+  git -C "$advance" add f4
+  git -C "$advance" commit -qm four
+  git -C "$advance" push -q origin main
+  new_head=$(git -C "$advance" rev-parse HEAD)
+  [ "$new_head" != "$old_head" ] || fail "the git fixture did not advance its remote head"
+
+  run_check "$home" "$path" "$out"
+  assert_contains "$(cat "$out")" "update available" "a new remote head was hidden by the old commit snooze"
+  assert_contains "$(cat "$out")" "$(printf 'at %.12s' "$new_head")" "the report did not identify the new remote head"
+  assert_not_contains "$(cat "$home/state/.tool-updates")" "snooze=" "the landed or superseded commit snooze was not cleared"
+  pass "a commit snooze suppresses one remote head and reports the next head"
+}
+
 test_an_overlong_report_says_it_was_cut() {
   local home out report i tools=
   # Many watched tools can outgrow one line. The report must say it was cut
@@ -1031,6 +1100,8 @@ test_a_stalled_repository_probe_is_not_reported_as_not_a_repository
 test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
+test_snooze_suppresses_only_the_current_command_update
+test_snooze_commit_reports_a_new_remote_head
 test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals
