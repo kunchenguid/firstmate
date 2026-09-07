@@ -993,6 +993,8 @@ retire_owned_terminal_source() {  # <source-id>
 # claim is held, so the guard names the exact generation it protects, and
 # detached into its OWN process group so the group signal it may later send
 # reaches the runner and every descendant without killing the guard first.
+# If signalling cannot be proved safe or does not finish, the guard remains
+# alive and retries on its normal check cadence rather than abandoning cleanup.
 start_owner_guard() {  # <source-id>
   local identity ready value
   identity=$(fm_pid_identity "$$" 2>/dev/null) || return 1
@@ -1062,8 +1064,11 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
     # Two consecutive misses, so one unreadable read cannot end a live runner.
     misses=$((misses + 1))
     [ "$misses" -ge 2 ] || continue
-    stop_runner_pid "$pid" "$identity"
-    exit 0
+    if stop_runner_pid "$pid" "$identity"; then
+      exit 0
+    fi
+    # Identity/group inspection and signalling can fail transiently. Keep the
+    # guard alive so the next normal tick retries the same generation cleanup.
   done
 }
 
