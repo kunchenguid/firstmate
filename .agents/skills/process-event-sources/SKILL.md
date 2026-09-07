@@ -119,7 +119,7 @@ Supported by tests:
 - one identity-matched owner per canonical source, across homes that share one underlying source store;
 - registration and ownership transitions share one per-source boundary, release is generation-bound, and uncertain process identity preserves the source for retry;
 - ownership moves only when the owner is stale and an independent process-group check proves the whole generation gone, so neither a crashed leader nor a reused pid relaxes cleanup while the old group survives; a safely identified surviving group is stopped before replacement, and the claim is kept for retry when it cannot be;
-- a runner cannot outlive the session that owns it: it stops its own process group, and everything under it, once its home's lease can no longer be proved fresh, and a live home's next cycle simply starts a replacement, while a source in another home is untouched because that home refreshes its own lease ([`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent));
+- a runner cannot outlive the session that owns it: it stops its own process group, and everything under it, once its home's lease can no longer be proved fresh, a minimum interval between command launches prevents an immediately returning source from storming during the lease window, and a live home's next cycle simply starts a replacement, while a source in another home is untouched because that home refreshes its own lease ([`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent));
 - stored argv is executed directly, so an argument containing spaces or shell metacharacters is never re-split or interpreted;
 - oversized output is bounded rather than published whole or silently dropped.
 

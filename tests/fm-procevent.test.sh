@@ -728,7 +728,7 @@ chmod +x "$LAVISH_SCRIPTED_BIN/lavish-axi"
 export LAVISH_COUNT LAVISH_SCRIPT
 # A bounded test override keeps the retry policy's real bound under test without
 # making the suite wait out the production delay.
-export FM_LAVISH_POLL_RETRY_DELAY=0
+export FM_LAVISH_POLL_RETRY_DELAY=1
 
 # Two interruptions, then the captain's real feedback: the retries are silent and
 # only the feedback becomes a captured result and a check wake.
@@ -805,7 +805,7 @@ printf '<h1>near</h1>\n' > "$NEAR_ART"
 near_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$NEAR_ART")
 fm_test_track_procevent_home "$HNEAR"
 LAVISH_COUNT="$TMP_ROOT/near-count"; LAVISH_SCRIPT="near-interrupt feedback"
-PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" FM_LAVISH_POLL_RETRY_DELAY=0 \
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" FM_LAVISH_POLL_RETRY_DELAY=1 \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$NEAR_ART" >/dev/null
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" pe "$HNEAR" start "$near_id" >/dev/null
 [ "$(cat "$LAVISH_COUNT")" = 1 ] \
@@ -822,14 +822,14 @@ HINVALID="$TMP_ROOT/hinvalid"; new_home "$HINVALID"
 INVALID_ART="$TMP_ROOT/invalid-delay-board.html"
 printf '<h1>invalid delay</h1>\n' > "$INVALID_ART"
 invalid_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$INVALID_ART")
-for invalid_delay in 61 invalid; do
+for invalid_delay in 0 61 invalid; do
   invalid_status=0
   invalid_out=$(PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HINVALID" \
     FM_LAVISH_POLL_RETRY_DELAY="$invalid_delay" \
     "$ROOT/bin/fm-procevent-lavish.sh" arm "$INVALID_ART" 2>&1) || invalid_status=$?
   [ "$invalid_status" -ne 0 ] \
     || fail "arm accepted invalid retry delay: $invalid_delay"
-  assert_contains "$invalid_out" "must be whole seconds from 0 to 60" \
+  assert_contains "$invalid_out" "must be whole seconds from 1 to 60" \
     "arm explains the rejected retry delay"
   assert_absent "$HINVALID/state/procevent/$invalid_id.source" \
     "arm publishes no source registration for an invalid retry delay"
@@ -1890,6 +1890,101 @@ assert_contains "$runner_help" "Durability boundary" \
 assert_not_contains "$runner_help" "exactly-once" \
   "the runner's help claims no exactly-once delivery"
 pass "the published interfaces state the loss limitation and claim no lossless delivery"
+
+# --- launch pacing and guard startup ----------------------------------------
+
+FAST_SOURCE="$TMP_ROOT/fast-source.sh"
+cat > "$FAST_SOURCE" <<'SH'
+#!/usr/bin/env bash
+perl -MTime::HiRes=time -e 'printf "%.6f\n", time' >> "$1"
+exit 1
+SH
+chmod +x "$FAST_SOURCE"
+
+STORM_SOURCE="$TMP_ROOT/storm-source.sh"
+cat > "$STORM_SOURCE" <<'SH'
+#!/usr/bin/env bash
+perl -MTime::HiRes=time -e 'printf "%.6f\n", time' >> "$1"
+FM_HOME="$2" perl -MPOSIX=setsid -e '
+  my @command = @ARGV;
+  defined(my $pid = fork) or exit 1;
+  exit 0 if $pid;
+  setsid() >= 0 or exit 1;
+  open STDIN, "<", "/dev/null" or exit 1;
+  open STDOUT, ">", "/dev/null" or exit 1;
+  open STDERR, ">", "/dev/null" or exit 1;
+  select undef, undef, undef, 0.2;
+  exec @command;
+' "$3/bin/fm-procevent.sh" reconcile
+exit 1
+SH
+chmod +x "$STORM_SOURCE"
+
+HFLOOR="$TMP_ROOT/launch-floor"; new_home "$HFLOOR"
+fm_test_track_procevent_home "$HFLOOR"
+pe_register "$HFLOOR" lavish floor-src -- \
+  "$STORM_SOURCE" "$TMP_ROOT/launch-times" "$HFLOOR" "$ROOT"
+FM_PROCEVENT_OWNER_LEASE_SECONDS=4 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+  FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 pe "$HFLOOR" reconcile >/dev/null
+floor_deadline=$((SECONDS + 12))
+while :; do
+  floor_count=0
+  [ ! -f "$TMP_ROOT/launch-times" ] \
+    || floor_count=$(wc -l < "$TMP_ROOT/launch-times" | tr -d ' ')
+  [ "$floor_count" -ge 3 ] && break
+  [ "$SECONDS" -lt "$floor_deadline" ] \
+    || fail "the orphan-storm fixture did not relaunch its source command"
+  sleep 0.1
+done
+launch_count=$(wc -l < "$TMP_ROOT/launch-times" | tr -d ' ')
+launch_span=$(perl -e '@t=<>; printf "%.3f", $t[-1] - $t[0]' "$TMP_ROOT/launch-times")
+perl -e 'exit($ARGV[0] >= ($ARGV[1] - 1) * 0.8 ? 0 : 1)' "$launch_span" "$launch_count" \
+  || fail "an orphaned source launched $launch_count times in only ${launch_span}s"
+[ "$launch_count" -le 6 ] \
+  || fail "an orphaned source stormed $launch_count launches during its owner-dead grace window"
+pass "an orphaned source command obeys the launch floor during its grace window"
+
+storm_deadline=$((SECONDS + 15))
+while :; do
+  storm_before=$(wc -l < "$TMP_ROOT/launch-times" | tr -d ' ')
+  sleep 2
+  storm_after=$(wc -l < "$TMP_ROOT/launch-times" | tr -d ' ')
+  [ "$storm_before" = "$storm_after" ] && break
+  [ "$SECONDS" -lt "$storm_deadline" ] \
+    || fail "an orphaned self-relaunching source survived its expired owner lease"
+done
+pass "an expired owner lease stops a self-relaunching source generation"
+
+HGUARDFAIL="$TMP_ROOT/guard-failure"; new_home "$HGUARDFAIL"
+fm_test_track_procevent_home "$HGUARDFAIL"
+pe_register "$HGUARDFAIL" lavish guard-fail-src -- "$FAST_SOURCE" "$TMP_ROOT/unguarded-launches"
+guard_fail_status=0
+guard_fail_out=$(FM_PROCEVENT_OWNER_LEASE_SECONDS=invalid \
+  pe "$HGUARDFAIL" start guard-fail-src 2>&1) || guard_fail_status=$?
+[ "$guard_fail_status" -ne 0 ] || fail "a runner continued after its owner guard failed to initialize"
+assert_contains "$guard_fail_out" "cannot bind the runner to its owning session" \
+  "guard initialization failure is reported at the runner boundary"
+assert_absent "$TMP_ROOT/unguarded-launches" \
+  "a source command ran without a successfully initialized owner guard"
+pass "a runner fails closed when its owner guard cannot initialize"
+
+HATTACHED="$TMP_ROOT/attached-owner"; new_home "$HATTACHED"
+fm_test_track_procevent_home "$HATTACHED"
+ATTACHED_TRIGGER="$TMP_ROOT/attached.trigger"
+pe_register "$HATTACHED" lavish attached-src -- "$BLOCKER" "$ATTACHED_TRIGGER" "attached payload"
+FM_PROCEVENT_OWNER_LEASE_SECONDS=1 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+  pe "$HATTACHED" start attached-src > "$TMP_ROOT/attached.out" 2>&1 &
+ATTACHED_START_PID=$!
+wait_for "$HATTACHED/state/procevent/attached-src.runner" \
+  || fail "the attached start never launched its source"
+sleep 4
+kill -0 "$ATTACHED_START_PID" 2>/dev/null \
+  || fail "a foreground start lost its owner lease while its caller remained attached"
+touch "$ATTACHED_TRIGGER"
+wait "$ATTACHED_START_PID" || fail "the attached start did not complete after its source returned"
+assert_contains "$(cat "$TMP_ROOT/attached.out")" "captured:" \
+  "the attached source result was not captured"
+pass "a foreground start refreshes its lease while its caller remains attached"
 
 # --- a runner cannot outlive the session that owns it -----------------------
 #

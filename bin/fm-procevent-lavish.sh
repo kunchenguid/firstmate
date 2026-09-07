@@ -175,6 +175,7 @@ cmd_retire() {
 # without waiting it out.
 POLL_RETRY_LIMIT=12
 POLL_RETRY_DELAY_DEFAULT=5
+POLL_RETRY_DELAY_MIN=1
 POLL_RETRY_DELAY_MAX=60
 
 # Exit 0 only for the exact two-line interruption, and nothing else. The whole
@@ -238,10 +239,10 @@ poll_retry_delay() {
     return 0
   fi
   case "$delay" in
-    *[!0-9]*) die "FM_LAVISH_POLL_RETRY_DELAY must be whole seconds from 0 to $POLL_RETRY_DELAY_MAX: $delay" ;;
+    *[!0-9]*) die "FM_LAVISH_POLL_RETRY_DELAY must be whole seconds from $POLL_RETRY_DELAY_MIN to $POLL_RETRY_DELAY_MAX: $delay" ;;
   esac
-  [ "$delay" -le "$POLL_RETRY_DELAY_MAX" ] \
-    || die "FM_LAVISH_POLL_RETRY_DELAY must be whole seconds from 0 to $POLL_RETRY_DELAY_MAX: $delay"
+  [ "$delay" -ge "$POLL_RETRY_DELAY_MIN" ] && [ "$delay" -le "$POLL_RETRY_DELAY_MAX" ] \
+    || die "FM_LAVISH_POLL_RETRY_DELAY must be whole seconds from $POLL_RETRY_DELAY_MIN to $POLL_RETRY_DELAY_MAX: $delay"
   printf '%s\n' "$delay"
 }
 

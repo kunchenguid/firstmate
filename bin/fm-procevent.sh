@@ -625,7 +625,8 @@ isolate_process() {  # <wait|detach> <command> [argv...]
     exit(128 + ($status & 127)) if $status & 127;
     exit($status >> 8);'
   if [ "$mode" = wait ]; then
-    exec perl -e "$program" "$mode" "$@"
+    perl -e "$program" "$mode" "$@"
+    return $?
   fi
   perl -e "$program" "$mode" "$@" >/dev/null 2>&1 &
 }
@@ -655,12 +656,30 @@ owner_lease_refresh() {
   fm_procevent_owner_lease_touch "$STATE" 2>/dev/null || true
 }
 
+owner_lease_keepalive() {  # <parent-pid> <parent-identity>
+  local parent=$1 identity=$2 state
+  while :; do
+    sleep 1
+    fm_procevent_pid_state "$parent" "$identity"
+    state=$?
+    [ "$state" -eq 0 ] || [ "$state" -eq 3 ] || return 0
+    owner_lease_refresh
+  done
+}
+
 cmd_start_public() {
-  local id=${1-}
+  local id=${1-} identity keeper status
   [ "$#" -eq 1 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   owner_lease_refresh
+  identity=$(fm_pid_identity "$$" 2>/dev/null) || die "cannot identify the attached owner"
+  owner_lease_keepalive "$$" "$identity" &
+  keeper=$!
   isolate_runner wait "$id"
+  status=$?
+  kill "$keeper" 2>/dev/null || true
+  wait "$keeper" 2>/dev/null || true
+  return "$status"
 }
 
 cmd_start() {
@@ -753,7 +772,9 @@ cmd_start() {
   # session, so none of it may refresh the lease that proves the owner is there.
   export FM_PROCEVENT_IN_RUNNER=1
   start_owner_guard "$id" || die "cannot bind the runner to its owning session: $id"
-  local runner inbox reservation_dir staging
+  local launch_floor runner inbox reservation_dir staging
+  launch_floor=$(fm_procevent_launch_floor_seconds) \
+    || die "FM_PROCEVENT_LAUNCH_FLOOR_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_FLOOR_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_FLOOR_MAX_SECONDS"
   if [ "$extension_owner" -eq 1 ]; then
     staging=$(fm_procevent_extension_staging_prepare "$STATE") \
       || die "cannot safely prepare the external registry staging boundary"
@@ -790,6 +811,8 @@ cmd_start() {
   # Built-in adapters do not run the extension capture helper, so keep this
   # sentinel defined while sharing the no-result branch below under `set -u`.
   local truncated=0 capture_state='' durable='' reservation_terminal='' reservation_silent=''
+  fm_procevent_launch_floor_wait "$STATE" "$id" "$launch_floor" \
+    || die "cannot enforce the source launch floor: $id"
   if [ "$extension_owner" -eq 1 ]; then
     capture_state=$(perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \
       9 8 6 "$id" "$adapter" "$FM_PROCEVENT_EXTENSION_ID" \
@@ -970,9 +993,24 @@ retire_owned_terminal_source() {  # <source-id>
 # detached into its OWN process group so the group signal it may later send
 # reaches the runner and every descendant without killing the guard first.
 start_owner_guard() {  # <source-id>
-  local identity
+  local identity ready value
   identity=$(fm_pid_identity "$$" 2>/dev/null) || return 1
-  isolate_process detach "$SCRIPT_DIR/fm-procevent.sh" _owner-watchdog "$1" "$$" "$identity"
+  ready=$(umask 077; mktemp "$REG/.owner-guard-ready.XXXXXX") || return 1
+  if ! isolate_process detach "$SCRIPT_DIR/fm-procevent.sh" _owner-watchdog "$1" "$$" "$identity" "$ready"; then
+    rm -f -- "$ready"
+    return 1
+  fi
+  for _ in $(seq 1 50); do
+    if [ -s "$ready" ]; then
+      IFS= read -r value < "$ready" || value=
+      rm -f -- "$ready"
+      [ "$value" = ready ]
+      return $?
+    fi
+    sleep 0.1
+  done
+  rm -f -- "$ready"
+  return 1
 }
 
 # The runner's owner guard, and the reason a detached runner can no longer
@@ -986,17 +1024,27 @@ start_owner_guard() {  # <source-id>
 # matches on a script name, a command line, or a process name: those are shared
 # by every home running the same adapter, and a live source in another home
 # proves its own owner through that home's own lease.
-cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity>
-  local id=${1-} pid=${2-} identity=${3-} lease tick misses=0 pid_state
-  [ "$#" -eq 3 ] || usage
+cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file>
+  local id=${1-} pid=${2-} identity=${3-} ready=${4-} lease tick misses=0 pid_state
+  [ "$#" -eq 4 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$pid" in ''|*[!0-9]*) die "runner pid must be a positive integer: $pid" ;; esac
   [ -n "$identity" ] || die "runner identity is required"
+  [ "${ready%/*}" = "$REG" ] && [ -f "$ready" ] && [ ! -L "$ready" ] \
+    || die "owner guard readiness boundary is invalid"
+  trap 'printf "failed\n" > "$ready" 2>/dev/null || true' EXIT
   require_isolated_group guard
   lease=$(fm_procevent_owner_lease_seconds) \
     || die "FM_PROCEVENT_OWNER_LEASE_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_LEASE_MIN_SECONDS to $FM_PROCEVENT_OWNER_LEASE_MAX_SECONDS"
   tick=$(fm_procevent_owner_check_seconds) \
     || die "FM_PROCEVENT_OWNER_CHECK_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS to $FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS"
+  fm_procevent_pid_state "$pid" "$identity"
+  pid_state=$?
+  [ "$pid_state" -eq 0 ] || die "runner identity changed before owner guard initialization"
+  fm_procevent_owner_alive "$STATE" "$lease" \
+    || die "owning session lease is not fresh at owner guard initialization"
+  printf 'ready\n' > "$ready" || die "cannot confirm owner guard initialization"
+  trap - EXIT
   while :; do
     sleep "$tick"
     fm_procevent_pid_state "$pid" "$identity"

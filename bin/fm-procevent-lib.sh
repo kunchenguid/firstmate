@@ -193,6 +193,51 @@ fm_procevent_owner_check_seconds() {
   printf '%s\n' "$value"
 }
 
+FM_PROCEVENT_LAUNCH_FLOOR_DEFAULT_SECONDS=1
+FM_PROCEVENT_LAUNCH_FLOOR_MIN_SECONDS=1
+FM_PROCEVENT_LAUNCH_FLOOR_MAX_SECONDS=3600
+
+fm_procevent_launch_floor_seconds() {
+  local value=${FM_PROCEVENT_LAUNCH_FLOOR_SECONDS-}
+  if [ -z "$value" ]; then
+    printf '%s\n' "$FM_PROCEVENT_LAUNCH_FLOOR_DEFAULT_SECONDS"
+    return 0
+  fi
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -ge "$FM_PROCEVENT_LAUNCH_FLOOR_MIN_SECONDS" ] || return 1
+  [ "$value" -le "$FM_PROCEVENT_LAUNCH_FLOOR_MAX_SECONDS" ] || return 1
+  printf '%s\n' "$value"
+}
+
+fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <seconds>
+  local reg stamp
+  reg=$(fm_procevent_registry_dir "$1") || return 1
+  stamp="$reg/$2.last-launch"
+  [ ! -L "$stamp" ] || return 1
+  [ ! -e "$stamp" ] || [ -f "$stamp" ] || return 1
+  perl -MTime::HiRes=time,sleep -MFcntl=:DEFAULT -e '
+    use strict;
+    use warnings;
+    my ($path, $floor) = @ARGV;
+    my $previous;
+    if (-e $path) {
+      open my $in, "<", $path or exit 1;
+      my $value = <$in>;
+      close $in or exit 1;
+      defined($value) && $value =~ /\A([0-9]+(?:\.[0-9]+)?)\n?\z/ or exit 1;
+      $previous = 0 + $1;
+    }
+    my $now = time;
+    sleep($floor - ($now - $previous)) if defined($previous) && $now - $previous < $floor;
+    $now = time;
+    my $tmp = "$path.$$";
+    sysopen(my $out, $tmp, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 1;
+    print {$out} "$now\n" or exit 1;
+    close $out or exit 1;
+    rename $tmp, $path or exit 1;
+  ' "$stamp" "$3"
+}
+
 # True while the owning session is provably still there.
 fm_procevent_owner_alive() {  # <state-root> <lease-seconds>
   local age
