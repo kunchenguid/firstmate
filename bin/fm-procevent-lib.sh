@@ -598,16 +598,12 @@ fm_procevent_group_alive() {
 }
 
 # fm_procevent_pid_state <pid> <identity>
-# 0 live match, 1 stale, 2 uncertain, 3 orphaned group.
+# 0 live match, 1 stale, 2 uncertain, 3 ambiguous leaderless group.
 #
-# State 3 is the crash cut: the runner leader is gone, but its owned process
-# group still has members, so the old generation can still be consuming the
-# source. Treating that as stale would release ownership and let a second
-# poller start against one canonical source. Only the leader being absent
-# reaches state 3, which is also what makes signalling that group safe: if this
-# pid had been reused by an unrelated process the leader would be alive, so the
-# identity comparison below would classify it stale or uncertain and no group
-# signal would ever follow.
+# State 3 is the crash cut: the runner leader is gone, but a process group with
+# its numeric id still has members. That group may be the old generation or a
+# leaderless group created after PID/PGID reuse, so cleanup preserves the claim
+# without signalling the group or starting a replacement.
 fm_procevent_pid_state() {
   local pid=$1 expected=$2 actual
   if ! fm_pid_alive "$pid"; then

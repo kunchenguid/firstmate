@@ -1174,30 +1174,8 @@ cmd_reconcile() {
             uncertain=$((uncertain + 1))
           fi
         elif [ "$claim_state" -eq 3 ]; then
-          # The leader crashed but its owned group is still consuming the
-          # source. Never start a replacement alongside it: stop that group and
-          # release its generation first, and if either cannot be proved, keep
-          # the claim and retry on a later cycle rather than adding a second
-          # poller. Only the owning home may signal its own group.
-          owner=$FM_PROCEVENT_CLAIM_HOME
-          pid=$FM_PROCEVENT_CLAIM_PID
-          token=$FM_PROCEVENT_CLAIM_TOKEN
-          identity=$FM_PROCEVENT_CLAIM_IDENTITY
-          stop_state=2
-          if fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
-            stop_runner_pid "$pid" "$identity"
-            stop_state=$?
-          fi
-          if [ "$stop_state" -eq 0 ] \
-            && cleanup_extension_registration_invocations_locked "$id" \
-            && fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
-            rm -f -- "$(staging_file "$id" "$token")"
-            rm -f -- "$(runner_file "$id")"
-            fm_procevent_source_lock_release "$id"
-            detach_runner "$id"
-            started=$((started + 1))
-            continue
-          fi
+          # A leaderless group's generation is ambiguous under PID/PGID reuse,
+          # so preserve its claim without signalling or starting a replacement.
           uncertain=$((uncertain + 1))
         elif [ "$claim_state" -eq 2 ]; then
           uncertain=$((uncertain + 1))

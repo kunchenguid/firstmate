@@ -118,7 +118,7 @@ Supported by tests:
 - the handled acknowledgement is generation-keyed to the exact source and sequence, private, path-safe, durable, and idempotent, and is the only thing that stops re-announcement;
 - one identity-matched owner per canonical source, across homes that share one underlying source store;
 - registration and ownership transitions share one per-source boundary, release is generation-bound, and uncertain process identity preserves the source for retry;
-- ownership moves only when the owner is stale and an independent process-group check proves the whole generation gone, so neither a crashed leader nor a reused pid relaxes cleanup while the old group survives; a safely identified surviving group is stopped before replacement, and the claim is kept for retry when it cannot be;
+- leaderless PID/PGID-reuse ambiguity preserves the claim without signalling or replacement, as owned by the operating contract in [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent);
 - runner lifetime, owner-lease, and launch-pacing guarantees follow the operating contract in [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent);
 - stored argv is executed directly, so an argument containing spaces or shell metacharacters is never re-split or interpreted;
 - oversized output is bounded rather than published whole or silently dropped.
