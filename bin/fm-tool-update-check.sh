@@ -988,6 +988,10 @@ EOF
   # same filtered set that a subsequent check will compare.
   SNOOZE_CAPTURE=0
   run_sweep
+  if [ "$SWEEP_COMPLETE" -eq 0 ]; then
+    printf 'fm-tool-update-check: cannot record a snooze from an incomplete sweep\n' >&2
+    return 1
+  fi
   snoozes_prune
   record_write "$FINDINGS" "$RECORD_SNOOZES" || {
     printf 'fm-tool-update-check: could not record the snooze\n' >&2
