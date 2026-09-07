@@ -230,9 +230,10 @@ def retry_scan_window(order, pos, window):
 
 
 def save_retry_pos(pos_path, order_len, window, pos):
-    """Persist the next retry-scan start position after this poll's window.
-    A failed write propagates so the poll fails closed rather than silently
-    restarting the retry scan at the same head every poll."""
+    """Persist the next retry-scan start position: (pos + window) mod order_len.
+    cmd_poll_list owns what window means on each persist path. A failed write
+    propagates so the poll fails closed rather than silently restarting the
+    retry scan at the same head every poll."""
     if not pos_path:
         return
     if order_len <= 0:
@@ -396,12 +397,8 @@ def cmd_poll_list():
         # cursor over rows that never reached the bash wake layer. A failed
         # position write still fails the poll loudly, so the same bounded
         # window is re-scanned on the next poll rather than silently
-        # restarting from the old head. The retry-scan position advances when
-        # retry_budget > 0 (by the candidates examined within budget), and also
-        # when the scanned window held only unseen uids (so a stale window can
-        # never stall the cursor); it is left unchanged only when the budget is
-        # 0 by a cap=1 new-mail turn (qualifiers exist but yield) or when no
-        # retry window was scanned.
+        # restarting from the old head. The persist block below owns when the
+        # retry-scan position advances, including under a new-mail flood.
         try:
             m.logout()
         except Exception:
