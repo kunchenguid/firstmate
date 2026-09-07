@@ -1809,6 +1809,11 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
     file=$(fm_backlog_file "$data") \
       || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+      # No backlog file at all: this home carries no row for the task, which is
+      # absence, not a decided "no longer an open captain call". A caller that
+      # asked to tell the two apart must not read it as a resolution, because a
+      # card wrongly hidden is worse than a card wrongly shown.
+      [ "$distinguish_absent" = 0 ] || return 3
       return 1
     fi
   fi
