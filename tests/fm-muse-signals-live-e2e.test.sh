@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MUSE_BIN=$(command -v muse 2>/dev/null || true)
 REAL_TMUX=$(command -v tmux 2>/dev/null || true)
@@ -116,14 +119,7 @@ if [ "${1:-}" = --ansi-self-test ]; then
   exit 0
 fi
 
-if [ "${FM_MUSE_SIGNALS_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_MUSE_SIGNALS_LIVE=1 to run the real Muse signal drift guard"
-  exit 0
-fi
-
-[ -x "$MUSE_BIN" ] || fail "FM_MUSE_SIGNALS_LIVE=1 but no real muse executable is installed on PATH"
-[ -x "$REAL_TMUX" ] || fail "FM_MUSE_SIGNALS_LIVE=1 but tmux is not installed"
-command -v node >/dev/null 2>&1 || fail "node is required to inspect Muse's serialized session protocol"
+fm_live_gate opt-in FM_MUSE_SIGNALS_LIVE muse tmux node
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-muse-signals.XXXXXX") || fail "could not create the isolated Muse lab"
 trap cleanup EXIT

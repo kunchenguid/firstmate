@@ -163,6 +163,101 @@ if [ "${FM_TEST_SKIP_ORPHAN_REAP:-0}" != 1 ]; then
   fm_test_reap_orphans
 fi
 
+# --- live-capability gate ---------------------------------------------------
+#
+# fm_live_gate <policy> <vars> [tool ...]
+#
+# The single gate every live-harness guard opens with, so "can this host run
+# this guard for real, and should it?" is decided in one place instead of in
+# two dozen hand-rolled env checks. It returns 0 when the guard should run, and
+# otherwise ends the script with one runner-readable line:
+#
+#   skip: live: <tool> absent                 this host cannot run the guard
+#   skip: live: disabled by <VAR>=0           an explicit local opt-out
+#   skip: live: opt-in; set <VAR>=1 to run    a guard that spends model tokens
+#
+# <policy> is default-on for a guard that spends no model tokens, so it runs
+# wherever its tools are installed - notably on the machine the product and its
+# validation actually run on - and opt-in for a guard that submits prompts,
+# which stays deliberate. <vars> is the guard's own control variable, or a
+# comma-separated list when a guard has more than one entry point.
+#
+# Setting any of those variables to 1 (or FM_LIVE=1, for every guard at once)
+# both turns the guard on and makes an absent tool a hard failure rather than a
+# skip, which is how "run it after a harness upgrade" keeps proving the guard
+# actually ran. Setting one to 0 (or FM_LIVE=0) turns it off; a guard's own
+# variable wins over FM_LIVE.
+#
+# Sourcing this library also exports FM_GATE_REFUSE_BYPASS=1, which is what
+# lets a live guard drive the real fm-spawn/fm-send/fm-teardown from inside a
+# no-mistakes gate worktree instead of being refused by
+# bin/fm-gate-refuse-lib.sh.
+
+fm_live_gate() {
+  local policy=$1 vars=$2
+  shift 2
+  local var value rest primary requested=0 disabled_by='' tool
+  local -a var_list=()
+
+  case "$policy" in
+    default-on | opt-in) ;;
+    *) fail "fm_live_gate: unknown policy '$policy' (expected default-on or opt-in)" ;;
+  esac
+
+  rest=$vars
+  while [ -n "$rest" ]; do
+    var=${rest%%,*}
+    if [ "$var" = "$rest" ]; then
+      rest=''
+    else
+      rest=${rest#*,}
+    fi
+    [ -n "$var" ] && var_list+=("$var")
+  done
+  [ "${#var_list[@]}" -gt 0 ] || fail "fm_live_gate: at least one control variable is required"
+  primary=${var_list[0]}
+
+  for var in "${var_list[@]}"; do
+    value=${!var:-}
+    case "$value" in
+      1) requested=1 ;;
+      0) [ -n "$disabled_by" ] || disabled_by=$var ;;
+    esac
+  done
+
+  if [ "$requested" -eq 0 ]; then
+    if [ -n "$disabled_by" ]; then
+      printf 'skip: live: disabled by %s=0\n' "$disabled_by"
+      exit 0
+    fi
+    case "${FM_LIVE:-}" in
+      0)
+        printf 'skip: live: disabled by FM_LIVE=0\n'
+        exit 0
+        ;;
+      1) requested=1 ;;
+      *)
+        if [ "$policy" = opt-in ]; then
+          printf 'skip: live: opt-in; set %s=1 to run\n' "$primary"
+          exit 0
+        fi
+        ;;
+    esac
+  fi
+
+  for tool in "$@"; do
+    command -v "$tool" >/dev/null 2>&1 && continue
+    if [ "$requested" -eq 1 ]; then
+      printf 'not ok - %s was requested but %s is not installed\n' "$primary" "$tool" >&2
+      exit 1
+    fi
+    printf 'skip: live: %s absent\n' "$tool"
+    exit 0
+  done
+
+  return 0
+}
+
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to

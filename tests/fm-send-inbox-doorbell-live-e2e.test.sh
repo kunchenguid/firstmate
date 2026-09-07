@@ -28,14 +28,13 @@
 # unready state and correctly fails that harness's check.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [ "${FM_SEND_INBOX_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_SEND_INBOX_LIVE_E2E=1 to run the live steering-inbox doorbell guard"
-  exit 0
-fi
+fm_live_gate opt-in FM_SEND_INBOX_LIVE_E2E tmux
 
-command -v tmux >/dev/null 2>&1 || { echo "not ok - FM_SEND_INBOX_LIVE_E2E=1 but tmux is not installed" >&2; exit 1; }
 unset NO_MISTAKES_GATE
 
 SOCKET="fm-inbox-live-$$"

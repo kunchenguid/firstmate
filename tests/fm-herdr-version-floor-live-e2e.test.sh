@@ -20,20 +20,17 @@
 # lifecycle operation and no server is involved.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-if [ "${FM_HERDR_VERSION_FLOOR_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_HERDR_VERSION_FLOOR_LIVE_E2E=1 to run the real-release Herdr version-floor guard"
-  exit 0
-fi
+fm_live_gate default-on FM_HERDR_VERSION_FLOOR_LIVE_E2E herdr jq curl shasum
 
-for tool in herdr jq curl shasum; do
-  command -v "$tool" >/dev/null 2>&1 || { echo "skip: $tool not found"; exit 0; }
-done
 [ -x "$LAB_HELPER" ] || { echo "skip: Herdr lab helper not executable at $LAB_HELPER"; exit 0; }
 
 case "$(uname -s)/$(uname -m)" in

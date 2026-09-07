@@ -787,6 +787,80 @@ assert doc["summary"]["failed"] == 0
   pass "gate-skip accounting is honest and non-failing"
 }
 
+test_gate_skip_reason_is_recorded() {
+  local tmp skip_f out json
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-skipreason.XXXXXX")
+  skip_f="$tmp/skip.test.sh"
+  out="$tmp/out.txt"
+  json="$tmp/timing.json"
+  cat >"$skip_f" <<'SH'
+#!/usr/bin/env bash
+echo "skip: live: fmnosuchharness absent"
+exit 0
+SH
+  chmod +x "$skip_f"
+  "$RUNNER" --json "$json" "$skip_f" >"$out" 2>"$tmp/err.txt" \
+    || fail "a capability skip must still exit 0 from the runner"
+  grep -q 'live: fmnosuchharness absent' "$tmp/err.txt" \
+    || fail "the runner log must name what this host could not exercise: $(cat "$tmp/err.txt")"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+record = doc["scripts"][0]
+assert record["gate_skip"] is True, record
+assert record["gate_skip_reason"] == "live: fmnosuchharness absent", record
+' "$json" || { rm -rf "$tmp"; fail "the timing artifact must carry the skip reason"; }
+  rm -rf "$tmp"
+  pass "a gate skip records why it skipped"
+}
+
+test_a_run_that_ran_records_no_skip_reason() {
+  local tmp ran_f json
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-ranreason.XXXXXX")
+  ran_f="$tmp/ran.test.sh"
+  json="$tmp/timing.json"
+  cat >"$ran_f" <<'SH'
+#!/usr/bin/env bash
+echo "ok - ran"
+exit 0
+SH
+  chmod +x "$ran_f"
+  "$RUNNER" --json "$json" "$ran_f" >"$tmp/out.txt" 2>&1 \
+    || fail "a passing fixture must exit 0 from the runner"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+record = doc["scripts"][0]
+assert record["gate_skip"] is False, record
+assert record["gate_skip_reason"] == "", record
+' "$json" || { rm -rf "$tmp"; fail "a script that ran must carry an empty skip reason"; }
+  rm -rf "$tmp"
+  pass "a script that actually ran records no skip reason"
+}
+
+test_live_guards_expect_a_capability_skip_class() {
+  local tmp out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-liveclass.XXXXXX")
+  out="$tmp/out.txt"
+  # FM_LIVE=0 makes every live guard refuse without touching a harness, so this
+  # exercises the real family through the real runner in bounded time.
+  FM_LIVE=0 "$RUNNER" --json "$tmp/timing.json" \
+    tests/fm-composer-matrix-live-e2e.test.sh >"$out" 2>"$tmp/err.txt" \
+    || fail "a disabled live guard must not fail the runner: $(cat "$tmp/err.txt")"
+  grep -q 'expected_gate_skip=live-capability' "$out" \
+    || fail "the live-harness family must expect a capability skip: $(grep FM_TEST_BEGIN "$out")"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+record = doc["scripts"][0]
+assert record["expected_gate_skip"] == "live-capability", record
+assert record["gate_skip"] is True, record
+assert record["gate_skip_reason"].startswith("live: "), record
+' "$tmp/timing.json" || { rm -rf "$tmp"; fail "the live guard record is wrong"; }
+  rm -rf "$tmp"
+  pass "live guards are recorded as a capability class, not a bare env opt-in"
+}
+
 test_fail_on_gate_skip_token() {
   local tmp skip_f out rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fail-skip.XXXXXX")
@@ -1459,6 +1533,9 @@ test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
 test_gate_skip_accounting
+test_gate_skip_reason_is_recorded
+test_a_run_that_ran_records_no_skip_reason
+test_live_guards_expect_a_capability_skip_class
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard

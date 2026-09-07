@@ -18,6 +18,9 @@
 # places, so it is what this guard drives.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROVO_BIN=$(command -v rovo 2>/dev/null || true)
 [ -x "${ROVO_BIN:-}" ] || ROVO_BIN="$HOME/.local/bin/rovo"
@@ -31,13 +34,9 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
-if [ "${FM_ROVO_SIGNALS_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_ROVO_SIGNALS_LIVE=1 to run the real Rovo signal drift guard"
-  exit 0
-fi
+fm_live_gate opt-in FM_ROVO_SIGNALS_LIVE python3
 
 [ -x "$ROVO_BIN" ] || fail "FM_ROVO_SIGNALS_LIVE=1 but no real rovo executable is installed"
-command -v python3 >/dev/null 2>&1 || fail "python3 is required to drive rovo through a PTY"
 
 VERSION_OUT=$("$ROVO_BIN" --version 2>&1) || fail "rovo --version failed: $VERSION_OUT"
 echo "BOOTSTRAP_INFO: live rovo version: $VERSION_OUT"

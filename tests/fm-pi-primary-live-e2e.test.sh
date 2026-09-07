@@ -4,10 +4,10 @@
 # copying credentials and pins the captain-approved openai-codex model.
 set -u
 
-if [ "${FM_PI_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_PI_LIVE_E2E=1 to run the isolated interactive Pi regression"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_PI_LIVE_E2E pi tmux
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset NO_MISTAKES_GATE
@@ -16,9 +16,6 @@ fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
 }
-
-command -v pi >/dev/null 2>&1 || fail "pi not found"
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
 
 TMUX=$(command -v tmux)
 SOCKET="fm-pi-live-e2e-$$"
