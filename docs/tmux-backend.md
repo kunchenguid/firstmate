@@ -14,6 +14,9 @@ An explicit selection is also the opt-out from Herdr or cmux runtime auto-detect
 
 No provisioning is required before the first task.
 
+A pane's inherited environment is fixed when the tmux server process itself first starts, not by any later `new-session` call against an already-running server.
+Because a server started from inside a Claude Code session inherits `CLAUDE_CODE_CHILD_SESSION` and `CLAUDECODE`, which make every Claude worker later launched under that server run as a nested child session with transcripts off, the server-starting `new-session` call in `fm_backend_tmux_container_ensure` (`bin/backends/tmux.sh`) scrubs both with `env -u` before it runs.
+
 ## Watching the crew
 
 For the best visible experience, launch the primary harness inside a tmux session:

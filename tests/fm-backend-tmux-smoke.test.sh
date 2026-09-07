@@ -53,6 +53,44 @@ export PATH
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
 
+# --- container_ensure clears inherited Claude child-session markers ---------
+#
+# A pane's inherited environment comes from the tmux SERVER process's own
+# environment at the moment the server itself starts, not from whatever env a
+# later client command against an already-running server happens to carry
+# (verified empirically: a later `new-session` under an existing server never
+# changes what earlier or later panes inherit). So this must be the FIRST tmux
+# command against this private socket, before the "smoke" session below starts
+# the server with its own (unscrubbed) environment. A server started from
+# inside a Claude Code session inherits CLAUDE_CODE_CHILD_SESSION and
+# CLAUDECODE, and every claude worker later launched under that server would
+# inherit them and run with transcripts off. The "Claude Code" section of
+# docs/verification/runtime-backends.md owns the versioned evidence.
+CCS_TARGET="firstmate"
+CCS_READY=false
+TMUX='' CLAUDE_CODE_CHILD_SESSION=1 CLAUDECODE=1 fm_backend_tmux_container_ensure >/dev/null \
+  || fail "fm_backend_tmux_container_ensure failed while Claude child-session markers were set"
+tmux has-session -t firstmate 2>/dev/null \
+  || fail "fm_backend_tmux_container_ensure did not create the firstmate session"
+for _ in $(seq 1 100); do
+  tmux send-keys -t "$CCS_TARGET" C-c
+  # shellcheck disable=SC2016  # single quotes are deliberate: this expands in the pane's shell, not here.
+  tmux send-keys -t "$CCS_TARGET" -l 'printf "ccsprobe-%s CCS=%s CC=%s\n" done "${CLAUDE_CODE_CHILD_SESSION-<unset>}" "${CLAUDECODE-<unset>}"'
+  tmux send-keys -t "$CCS_TARGET" Enter
+  if wait_for_capture_text "$CCS_TARGET" "ccsprobe-done" 10; then
+    CCS_READY=true
+    break
+  fi
+done
+[ "$CCS_READY" = true ] || fail "the firstmate session shell did not become ready"
+ccs_out=$(fm_backend_tmux_capture "$CCS_TARGET" 20) || fail "fm_backend_tmux_capture failed on the firstmate session"
+case "$ccs_out" in
+  *"CCS=<unset> CC=<unset>"*) : ;;
+  *) fail "fm_backend_tmux_container_ensure's server start must not hand inherited Claude child-session markers down to worker panes"$'\n'"$ccs_out" ;;
+esac
+tmux kill-session -t firstmate 2>/dev/null || true
+pass "real tmux: fm_backend_tmux_container_ensure's server start clears inherited Claude child-session markers"
+
 SESSION="smoke"
 WINDOW="fm-smoke1"
 TARGET="$SESSION:$WINDOW"

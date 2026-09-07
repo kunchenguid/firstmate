@@ -64,11 +64,20 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
 # prints the resolved session name.
+#
+# tmux has no explicit server-start command: the first client call implicitly
+# starts the server if none is running, and every later pane inherits that
+# server's initial environment. `new-session` is that first call here, so
+# env -u scrubs CLAUDE_CODE_CHILD_SESSION and CLAUDECODE on this exact command,
+# the same markers a server started from inside a Claude session would
+# otherwise hand down to every worker pane later launched under it (see
+# docs/verification/runtime-backends.md "Claude Code"). The reused-session
+# branch starts no server and needs no scrub.
 fm_backend_tmux_container_ensure() {
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
-    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
+    tmux has-session -t firstmate 2>/dev/null || env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE tmux new-session -d -s firstmate
     printf 'firstmate'
   fi
 }
