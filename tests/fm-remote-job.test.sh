@@ -957,6 +957,31 @@ expect_code 1 "$QUARANTINE_TEST_RC" "a malformed quarantine staging name was rec
 assert_present "$QUARANTINE_TEST_STATE/worker.lock/.quarantine.short" \
   "malformed quarantine staging was removed"
 
+new_staged_quarantine_fixture malformed-name-with-stale-owner
+QUARANTINE_TEST_STAGE="$QUARANTINE_TEST_STATE/worker.lock/.quarantine.short"
+mv "$QUARANTINE_TEST_STATE/worker.lock/.quarantine.A1b2C3" "$QUARANTINE_TEST_STAGE"
+sleep 30 &
+QUARANTINE_TEST_AUX_PID=$!
+printf '%s\n' "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.lock/pid"
+fm_remote_job_process_start "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.lock/start"
+fm_remote_job_process_command "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.lock/command"
+chmod 600 "$QUARANTINE_TEST_STATE/worker.lock/pid" "$QUARANTINE_TEST_STATE/worker.lock/start" \
+  "$QUARANTINE_TEST_STATE/worker.lock/command"
+kill "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+wait "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+QUARANTINE_TEST_AUX_PID=
+MALFORMED_STALE_EXPECTED="$QUARANTINE_TEST_DIR/expected-lock"
+mkdir -p "$MALFORMED_STALE_EXPECTED"
+cp "$QUARANTINE_TEST_STATE/worker.lock/pid" "$QUARANTINE_TEST_STATE/worker.lock/start" \
+  "$QUARANTINE_TEST_STATE/worker.lock/command" "$QUARANTINE_TEST_STAGE" \
+  "$MALFORMED_STALE_EXPECTED/"
+touch -t 200001010000 "$QUARANTINE_TEST_STATE/worker.lock"
+expect_staged_quarantine_identity_refusal "$MALFORMED_STALE_EXPECTED" \
+  "a malformed staging name beside a stale owner identity"
+cmp -s "$MALFORMED_STALE_EXPECTED/.quarantine.short" "$QUARANTINE_TEST_STAGE" \
+  || fail "malformed staging refusal changed the malformed entry"
+pass "malformed staging preserves stale owner records and the unknown entry"
+
 INHERITED_SHOPT_ENV="$QUARANTINE_TEST_DIR/inherited-shopt"
 printf 'shopt -s nocasematch\n' > "$INHERITED_SHOPT_ENV"
 new_staged_quarantine_fixture inherited-nocasematch

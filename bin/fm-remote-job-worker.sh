@@ -225,7 +225,7 @@ worker_recover_quarantine() { # <account-home>
 # the established acquisition path below.
 worker_staged_quarantine_inventory() {
   local LC_ALL=C
-  local entry base staged_count=0 owner_fields=0 unsafe=0 status
+  local entry base staged_count=0 owner_fields=0 official=0 unsafe=0 status
   WORKER_STAGED_QUARANTINE=
   WORKER_STAGED_OWNER_FIELDS=0
   for entry in "$WORKER_LOCK"/* "$WORKER_LOCK"/.[!.]* "$WORKER_LOCK"/..?*; do
@@ -235,7 +235,7 @@ worker_staged_quarantine_inventory() {
       pid) owner_fields=$((owner_fields | 1)) ;;
       start) owner_fields=$((owner_fields | 2)) ;;
       command) owner_fields=$((owner_fields | 4)) ;;
-      quarantine) unsafe=1 ;;
+      quarantine) official=1 ;;
       .quarantine.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9])
         staged_count=$((staged_count + 1))
         WORKER_STAGED_QUARANTINE=$entry
@@ -244,8 +244,8 @@ worker_staged_quarantine_inventory() {
     esac
   done
   if [ "$staged_count" -eq 0 ]; then
-    status=1
-  elif [ "$staged_count" -ne 1 ] || [ "$unsafe" -ne 0 ]; then
+    if [ "$unsafe" -eq 0 ]; then status=1; else status=2; fi
+  elif [ "$staged_count" -ne 1 ] || [ "$official" -ne 0 ] || [ "$unsafe" -ne 0 ]; then
     status=2
   else
     case "$owner_fields" in 0|7) status=0 ;; *) status=2 ;; esac
