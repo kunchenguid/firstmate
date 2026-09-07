@@ -146,7 +146,10 @@
 # while ACTING on it is firstmate's judgement, so the capture stays unacknowledged
 # and its `check` wake reaches the handler exactly as it would have anyway.
 #
-# A runner is bound to the session that owns it. Detaching a runner into its own
+# A runner is bound to the HOME that owns it, not to the one session that armed
+# it: a persistent source is meant to outlive that session, so reconcile stops a
+# runner whose source is retired in a live home, and this lease is the backstop
+# for a home that is GONE. Detaching a runner into its own
 # process group is what lets a persistent source outlive the turn that armed it,
 # and with nothing else it is also what lets a runner outlive its whole home:
 # reparented to init, it keeps its blocking child - and everything that child
@@ -1006,7 +1009,7 @@ retire_owned_terminal_source() {  # <source-id>
   return "$status"
 }
 
-# Bind this runner's lifetime to the session that owns it. Started once the
+# Bind this runner's lifetime to the home that owns it. Started once the
 # claim is held, so the guard names the exact generation it protects, and
 # detached into its OWN process group so the group signal it may later send
 # reaches the runner and every descendant without killing the guard first.
@@ -1072,7 +1075,7 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
   [ "$current_device" = "$state_device" ] && [ "$current_inode" = "$state_inode" ] \
     || die "owning state root identity changed before owner guard initialization"
   fm_procevent_owner_alive "$STATE" "$lease" \
-    || die "owning session lease is not fresh at owner guard initialization"
+    || die "owning home lease is not fresh at owner guard initialization"
   printf 'ready\n' > "$ready" || die "cannot confirm owner guard initialization"
   trap - EXIT
   while :; do

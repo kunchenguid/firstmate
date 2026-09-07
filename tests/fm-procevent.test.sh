@@ -2228,7 +2228,19 @@ touch "$REUSED_GROUP_MARKER"
 sleep 3
 kill -0 -"$REUSED_GROUP_RUNNER" 2>/dev/null \
   || fail "the guard killed a process group after its runner identity became ambiguous"
-pe "$HREUSED_GROUP" retire reused-runner-group-src >/dev/null
+# Retiring here must read identity from the source this runner was recorded
+# under, so the override stays in place: without it the read falls back to
+# /proc where that exists, which is a different source than the recorded ps
+# identity, and the guard would refuse this retirement on Linux while accepting
+# it on macOS. Clearing the marker restores the matching identity, so this also
+# asserts the complementary guarantee - once the ambiguity is gone, retirement
+# reaps the whole group rather than leaving it behind.
+rm -f "$REUSED_GROUP_MARKER"
+PATH="$REUSED_GROUP_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-reused-group-proc" \
+  pe "$HREUSED_GROUP" retire reused-runner-group-src >/dev/null
+for _ in $(seq 1 50); do kill -0 -"$REUSED_GROUP_RUNNER" 2>/dev/null || break; sleep 0.1; done
+kill -0 -"$REUSED_GROUP_RUNNER" 2>/dev/null \
+  && fail "retirement left the group alive once runner identity was unambiguous"
 pass "a detected ambiguous reused-PID group is not signalled"
 
 # --- an accidentally orphaned runner is bounded by its owner ----------------

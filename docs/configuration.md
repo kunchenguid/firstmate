@@ -808,9 +808,13 @@ The sweep retires local registrations and machine-wide claims whose recorded sta
 Teardown refuses with the home, lease, routing evidence, registrations, claims, and runners retained when identity is uncertain, ownership is unreadable or unreleased, or relevant state exists without a sweep-capable child script.
 Raw manual deletion of a Firstmate home is unsupported because it can orphan a blocking child.
 To recover, restore that home's tracked `bin/fm-procevent.sh`, run `FM_HOME=<home> <home>/bin/fm-procevent.sh sweep-home`, then rerun the supported teardown.
-The owning-session lease below bounds how long such an orphan can run, but it is a backstop, not a substitute for the supported path.
+The owning-home lease below bounds how long such an orphan can run, but it is a backstop, not a substitute for the supported path.
 
-A runner is bound to the session that owns it.
+A runner is bound to the HOME that owns it, not to the one session that armed it.
+That granularity is deliberate: a persistent source is meant to outlive the turn and the session that armed it, so binding a runner to its arming session would stop exactly the sources this mechanism exists to keep running.
+Any activity in the same home refreshes the lease, so a replacement session, another watcher, or an ordinary inspection command keeps a runner of that home alive; a runner whose SOURCE is no longer wanted in a live home is stopped by reconcile when that source is retired, independently of the lease.
+The lease is therefore the backstop for a home that is GONE - the torn-down test sandbox this change exists to bound - and not a per-session ownership check.
+KNOWN LIMIT: while any activity continues in a home whose original owning session has ended, that activity refreshes the lease and a runner of that home keeps running until its source is retired or the home goes away.
 Detaching a runner into its own process group is what lets a persistent source outlive the turn that armed it, and on its own it is also what lets a runner outlive its whole home: reparented to init, it keeps its blocking child - and every process that child spawns - running with nothing left to reap it.
 So a home's process-event state carries a lease that registration, attached start, reconciliation, acknowledgement, and listing refresh, and the watcher's reconcile cycle is what keeps it fresh in a live home.
 An attached public `start` continues refreshing the lease while its caller remains attached.
