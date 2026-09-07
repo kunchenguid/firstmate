@@ -712,6 +712,36 @@ stop_quarantine_test_worker() {
   QUARANTINE_TEST_WORKER_PID=
 }
 
+expect_staged_quarantine_identity_refusal() { # <expected-owner-dir> <description>
+  local expected_owner=$1 description=$2 i=0 rc field
+  start_staged_quarantine_worker
+  while kill -0 "$QUARANTINE_TEST_WORKER_PID" 2>/dev/null; do
+    if [ ! -e "$QUARANTINE_TEST_STAGE" ] && [ ! -L "$QUARANTINE_TEST_STAGE" ]; then
+      stop_quarantine_test_worker
+      fail "$description permitted staged recovery"
+    fi
+    [ "$i" -lt 100 ] || {
+      stop_quarantine_test_worker
+      fail "$description did not make the worker refuse ownership"
+    }
+    i=$((i + 1))
+    sleep 0.05
+  done
+  set +e
+  wait "$QUARANTINE_TEST_WORKER_PID" 2>/dev/null
+  rc=$?
+  set -e
+  QUARANTINE_TEST_WORKER_PID=
+  expect_code 1 "$rc" "$description returned the wrong ownership-refusal status"
+  assert_present "$QUARANTINE_TEST_STAGE" "$description removed quarantine staging"
+  assert_absent "$QUARANTINE_TEST_STATE/worker.lock/quarantine" \
+    "$description promoted quarantine staging"
+  for field in pid start command; do
+    cmp -s "$expected_owner/$field" "$QUARANTINE_TEST_STATE/worker.lock/$field" \
+      || fail "$description changed the recorded $field identity"
+  done
+}
+
 new_staged_quarantine_fixture live-owner
 sleep 30 &
 QUARANTINE_TEST_AUX_PID=$!
@@ -767,6 +797,46 @@ kill "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
 wait "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
 QUARANTINE_TEST_AUX_PID=
 pass "staged quarantine recovery distinguishes pid reuse by process start identity"
+
+new_staged_quarantine_fixture dead-owner-malformed-command
+sleep 30 &
+QUARANTINE_TEST_AUX_PID=$!
+printf '%s\n' "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.lock/pid"
+fm_remote_job_process_start "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.lock/start"
+: > "$QUARANTINE_TEST_STATE/worker.lock/command"
+chmod 600 "$QUARANTINE_TEST_STATE/worker.lock/pid" "$QUARANTINE_TEST_STATE/worker.lock/start" \
+  "$QUARANTINE_TEST_STATE/worker.lock/command"
+kill "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+wait "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+QUARANTINE_TEST_AUX_PID=
+DEAD_OWNER_EXPECTED="$QUARANTINE_TEST_DIR/expected-owner"
+mkdir -p "$DEAD_OWNER_EXPECTED"
+cp "$QUARANTINE_TEST_STATE/worker.lock/pid" "$QUARANTINE_TEST_STATE/worker.lock/start" \
+  "$QUARANTINE_TEST_STATE/worker.lock/command" "$DEAD_OWNER_EXPECTED/"
+expect_staged_quarantine_identity_refusal "$DEAD_OWNER_EXPECTED" \
+  "a dead owner with an empty command identity"
+pass "completed quarantine staging refuses malformed dead-owner identity"
+
+new_staged_quarantine_fixture reused-owner-malformed-command
+sleep 30 &
+QUARANTINE_TEST_AUX_PID=$!
+printf '%s\n' "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.lock/pid"
+printf 'stale process start identity\n' > "$QUARANTINE_TEST_STATE/worker.lock/start"
+printf 'first command line\nsecond command line\n' > "$QUARANTINE_TEST_STATE/worker.lock/command"
+chmod 600 "$QUARANTINE_TEST_STATE/worker.lock/pid" "$QUARANTINE_TEST_STATE/worker.lock/start" \
+  "$QUARANTINE_TEST_STATE/worker.lock/command"
+REUSED_OWNER_EXPECTED="$QUARANTINE_TEST_DIR/expected-owner"
+mkdir -p "$REUSED_OWNER_EXPECTED"
+cp "$QUARANTINE_TEST_STATE/worker.lock/pid" "$QUARANTINE_TEST_STATE/worker.lock/start" \
+  "$QUARANTINE_TEST_STATE/worker.lock/command" "$REUSED_OWNER_EXPECTED/"
+expect_staged_quarantine_identity_refusal "$REUSED_OWNER_EXPECTED" \
+  "a reused owner pid with a multiline command identity"
+kill -0 "$QUARANTINE_TEST_AUX_PID" 2>/dev/null \
+  || fail "staged recovery signalled a reused pid with malformed owner identity"
+kill "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+wait "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+QUARANTINE_TEST_AUX_PID=
+pass "completed quarantine staging refuses malformed reused-owner identity"
 
 new_staged_quarantine_fixture live-legacy-worker
 LEGACY_WORKER="$QUARANTINE_TEST_DIR/fm-remote-job-worker.sh"

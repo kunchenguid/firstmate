@@ -250,12 +250,12 @@ worker_staged_lock_owner_status() { # <account-home> <uid>
   case "$pid" in ''|*[!0-9]*) return 2 ;; esac
   [ "$pid" -gt 1 ] || return 2
   recorded_start=$(fm_remote_job_read_single_line "$WORKER_LOCK/start" 256 2>/dev/null) || return 2
+  recorded_command=$(fm_remote_job_read_single_line "$WORKER_LOCK/command" 8192 2>/dev/null) || return 2
   actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
     kill -0 "$pid" 2>/dev/null && return 2
     return 1
   }
   [ "$recorded_start" = "$actual_start" ] || return 1
-  recorded_command=$(fm_remote_job_read_single_line "$WORKER_LOCK/command" 8192 2>/dev/null) || return 2
   actual_command=$(fm_remote_job_process_command "$pid" 2>/dev/null) || {
     kill -0 "$pid" 2>/dev/null && return 2
     return 1
