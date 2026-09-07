@@ -21,6 +21,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -2067,6 +2069,112 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+}
+
+# The same declared pause, once a live PR movement poll covers it.
+#
+# The recheck above exists only because nothing else would ever revisit the wait,
+# and that is no longer true when the wait is on a pull request the poll is
+# watching: the poll wakes on every condition that would void the wait, so the
+# recheck can only ever cost a supervision turn to confirm what the poll already
+# reports for free. What licenses the silence is positive evidence, never the
+# absence of a complaint - so the second half of this test takes the evidence
+# away and requires the recheck to come back on its own, with nothing repaired
+# and nobody having noticed.
+arm_paused_pr_wait() {  # <dir> <window> <capture-file> <recorded-reading>
+  local dir=$1 window=$2 capture_file=$3 reading=$4
+  local state statusf key sig back
+  state="$dir/state"
+  statusf="$state/held.status"
+  printf 'idle, waiting on the maintainer' > "$capture_file"
+  printf 'window=%s\nkind=ship\npr=https://github.com/o/r/pull/7\n' "$window" > "$state/held.meta"
+  printf 'paused: awaiting the maintainer on https://github.com/o/r/pull/7\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'idle, waiting on the maintainer')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the maintainer'
+  fm_pr_poll_prepare "$state" held github https://github.com/o/r/pull/7 github.com o/r 7 \
+    "$ROOT/bin/fm-pr-poll.sh" || fail "could not prepare the covering poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the covering poll"
+  fm_pr_poll_observed_record "$state" held github github.com o/r 7 "$reading" \
+    || fail "could not record the poll's reading"
+}
+
+test_paused_recheck_is_suppressed_only_while_a_poll_covers_it() {
+  local dir state fakebin out capture_file window key pid back
+  dir=$(make_case paused-covered-by-poll); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-held"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  arm_paused_pr_wait "$dir" "$window" "$capture_file" \
+    'moved state=OPEN draft=false head=0123456789ab comments=0 review_comments=0 updated=2026-01-01T00:00:00Z'
+
+  # Phase A: the wait is past the recheck threshold, and would have re-surfaced
+  # without the poll (that is exactly what the preceding test asserts). The live
+  # poll takes it instead, so nothing wakes.
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_PAUSE_RESURFACE_SECS=240 \
+    watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a wait a live PR poll covers: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a poll-covered wait printed a recheck: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a poll-covered wait queued a recheck"
+  [ -e "$state/.paused-$key" ] || fail "the paused flag was not recorded while covered"
+  [ ! -e "$state/.paused-resurfaced-$key" ] \
+    || fail "a suppressed recheck must not advance the re-surface throttle"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the covered phase-A stop"
+
+  # Phase B: the poll stops reporting. Nothing else changes, nobody intervenes,
+  # and the evidence simply ages out of the window it has to cover - so the
+  # recheck returns by itself.
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/held.pr-poll-observed"
+  else touch -m -d "@$back" "$state/held.pr-poll-observed"; fi
+  : > "$out"
+  printf 'idle, waiting on the maintainer (token 2)' > "$capture_file"
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_PAUSE_RESURFACE_SECS=240 \
+    watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the recheck did not return once the poll stopped reporting"
+  grep -F "awaiting external" "$out" >/dev/null \
+    || fail "the returning recheck was not the paused/awaiting-external one: $(cat "$out")"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the returning recheck recorded no throttle marker"
+  pass "a declared wait a live PR poll covers takes no timed recheck, and the recheck returns as soon as the poll stops reporting"
+}
+
+# The same wait, on a pull request the maintainer closed without merging.
+#
+# A closed-unmerged pull request keeps its poll armed on purpose, and the poll
+# stays healthy: it reads the same CLOSED state every cycle and refreshes its
+# reading, so poll liveness alone would silence this recheck for the rest of the
+# task's life. Nobody is waiting on that pull request any more, which makes it
+# precisely the wait the recheck exists for - so the coverage exemption has to
+# end where the pull request does.
+test_paused_recheck_returns_when_the_covering_pr_is_closed() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case paused-closed-pr); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-held"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  arm_paused_pr_wait "$dir" "$window" "$capture_file" \
+    'moved state=CLOSED draft=false head=0123456789ab comments=2 review_comments=1 updated=2026-01-01T00:00:00Z'
+
+  FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_PAUSE_RESURFACE_SECS=240 \
+    watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "a wait on a closed-unmerged pull request took no recheck: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null \
+    || fail "the recheck for a closed pull request was not the paused/awaiting-external one: $(cat "$out")"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the recheck recorded no throttle marker"
+  pass "a declared wait on a closed-unmerged pull request keeps re-surfacing, because a live poll is not a live wait"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -5162,6 +5270,8 @@ test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_paused_recheck_is_suppressed_only_while_a_poll_covers_it
+test_paused_recheck_returns_when_the_covering_pr_is_closed
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle

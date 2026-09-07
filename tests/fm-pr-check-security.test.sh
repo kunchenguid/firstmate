@@ -178,11 +178,38 @@ case " $* " in
     printf '%s\n' '{"permissions":{"push":false}}'
     ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
-  *" state "*)
+  *" state,isDraft,headRefOid,reviewDecision "*)
+    # The poll's scalar read: no collection, so nothing here can be slow, and it
+    # is the only read the merged verdict comes from. Stands in for gh's own
+    # field selector, which is gojq inside the binary and so cannot be
+    # reproduced here; tests/fm-pr-state-live-e2e.test.sh proves the real
+    # selectors compile and compose these exact shapes. FM_TEST_GH_STATE_LINE
+    # overrides the whole line for the malformed-output cases.
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ -z "${FM_TEST_GH_STATE_STARTED:-}" ] || : > "$FM_TEST_GH_STATE_STARTED"
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
-    printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
+    if [ -n "${FM_TEST_GH_STATE_LINE+x}" ]; then
+      printf '%s\n' "$FM_TEST_GH_STATE_LINE"
+      exit 0
+    fi
+    printf 'state=%s draft=%s head=%s decision=%s\n' \
+      "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_DRAFT:-false}" \
+      "${FM_TEST_GH_SHORT_HEAD:-0123456789ab}" "${FM_TEST_GH_DECISION:-NONE}"
+    ;;
+  *" api /repos/"*"/pulls/"*)
+    # The poll's activity read: REST totals, which no page size bounds. Its own
+    # failure, slowness, and malformed-output knobs are separate from the state
+    # read's on purpose: that is the difference this fixture has to express.
+    [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    [ "${FM_TEST_GH_ACTIVITY_FAIL:-0}" = 0 ] || exit 1
+    [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
+    [ "${FM_TEST_GH_ACTIVITY_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_ACTIVITY_SLEEP"
+    if [ -n "${FM_TEST_GH_ACTIVITY_LINE+x}" ]; then
+      printf '%s\n' "$FM_TEST_GH_ACTIVITY_LINE"
+      exit 0
+    fi
+    printf 'comments=%s review_comments=%s\n' \
+      "${FM_TEST_GH_COMMENTS:-0}" "${FM_TEST_GH_REVIEW_COMMENTS:-0}"
     ;;
 esac
 SH
@@ -654,7 +681,9 @@ run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
   local check_timeout=${FM_TEST_CHECK_TIMEOUT:-1}
   shift 2
-  perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
+  # This bounds a hung watcher, not poll latency: merge publication takes
+  # several locks and subprocesses, so leave it headroom on a loaded host.
+  perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 60; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT="$check_timeout" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
@@ -720,23 +749,63 @@ run_poll() {
 }
 
 test_static_poll_contract() {
-  local dir state out rc
+  local dir state out rc line
   dir=$(make_case poll-contract)
   make_poll_fixture "$dir"
 
-  for state in OPEN CLOSED EMPTY MALFORMED; do
-    case "$state" in
-      EMPTY) value= ;;
-      MALFORMED) value='not-a-state' ;;
-      *) value=$state ;;
-    esac
-    out=$(FM_TEST_GH_STATE="$value" run_poll "$dir")
-    [ -z "$out" ] || fail "static poll emitted for non-merged state"
+  for state in OPEN CLOSED; do
+    out=$(FM_TEST_GH_STATE="$state" run_poll "$dir")
+    [ "$out" = "moved state=$state draft=false head=0123456789ab decision=NONE comments=0 review_comments=0" ] \
+      || fail "static poll did not report the $state reading as movement"
   done
   out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
   [ "$out" = merged ] || fail "static poll did not emit exactly one merged line"
+  # Every degraded reading is silence, so no partial or reformatted gh output can
+  # be read as a merge or as movement.
+  for line in \
+    '' \
+    'not-a-state' \
+    'state=OPEN' \
+    'state=open draft=false head=0123456789ab decision=NONE' \
+    'state=MERGED' \
+    'state=MERGED draft=false' \
+    'state=OPEN draft=maybe head=0123456789ab decision=NONE' \
+    'state=OPEN draft=false head=zzzzzzzzzzzz decision=NONE' \
+    'state=OPEN draft=false head=0123456789ab' \
+    'state=OPEN draft=false head=0123456789ab decision=lowercase' \
+    'state=OPEN draft=false head=0123456789ab decision=NONE trailing=1'; do
+    out=$(FM_TEST_GH_STATE_LINE="$line" run_poll "$dir")
+    [ -z "$out" ] || fail "static poll emitted for a malformed gh state reading: $line"
+  done
+  for line in \
+    '' \
+    'comments=0' \
+    'comments=x review_comments=0' \
+    'comments=0 review_comments=0 updated=2026-01-01' \
+    'comments=0 review_comments=0 trailing=1'; do
+    out=$(FM_TEST_GH_ACTIVITY_LINE="$line" run_poll "$dir")
+    [ -z "$out" ] || fail "static poll emitted for a malformed gh activity reading: $line"
+  done
   out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "static poll emitted after gh failure"
+
+  # The merge terminal must not ride on the activity read, because that is the
+  # one that can outrun the watcher's FM_CHECK_TIMEOUT budget and be killed with
+  # nothing printed. The merge is reported anyway; only the movement half is
+  # lost, and it is lost as silence rather than as a narrower fingerprint that
+  # would itself look like movement.
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_ACTIVITY_FAIL=1 run_poll "$dir")
+  [ "$out" = merged ] || fail "a merge was lost when the activity read failed"
+  out=$(FM_TEST_GH_STATE=OPEN FM_TEST_GH_ACTIVITY_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "static poll emitted a partial reading when the activity read failed"
+  set +e
+  out=$(FM_STATE_OVERRIDE="$dir/home/state" FM_CHECK_TIMEOUT=1 FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_STATE=MERGED FM_TEST_GH_ACTIVITY_SLEEP=3 PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1"; run_check "$2"' bash "$WATCH" "$dir/home/state/task-a.check.sh")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher run_check timeout wrapper failed"
+  [ "$out" = merged ] || fail "a merge was lost to the activity read exceeding the check timeout"
 
   mv "$dir/home/state/task-a.pr-poll" "$dir/home/state/task-a.pr-poll.missing"
   out=$(run_poll "$dir")
@@ -1214,6 +1283,244 @@ SH
   pass "returned custom check descendants are drained on installed and fallback timeout paths"
 }
 
+# One cycle of the watcher's slow check sweep against a given reading of the
+# pull request, acknowledged so the next cycle starts from a clean queue.
+# Arguments are the six fields bin/fm-pr-poll.sh composes into one reading.
+run_movement_cycle() {  # <dir> <label> <state> <draft> <head> <comments> <review-comments> <decision>
+  local dir=$1 label=$2 rc
+  shift 2
+  rm -f "$dir/home/state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=$1 FM_TEST_GH_DRAFT=$2 FM_TEST_GH_SHORT_HEAD=$3 \
+    FM_TEST_GH_COMMENTS=$4 FM_TEST_GH_REVIEW_COMMENTS=$5 FM_TEST_GH_DECISION=$6 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/watch-$label.out" 2> "$dir/watch-$label.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "movement cycle $label did not complete: $(cat "$dir/watch-$label.err")"
+  ack_watcher_cycle "$dir/home/state" \
+    || fail "movement cycle $label could not be acknowledged"
+}
+
+assert_movement_wake() {  # <dir> <label> <expected-reading>
+  local dir=$1 label=$2 expected=$3
+  grep -qxF "check: $dir/home/state/task-a.check.sh: moved $expected" "$dir/watch-$label.out" \
+    || fail "cycle $label did not wake on movement: $(cat "$dir/watch-$label.out")"
+}
+
+assert_no_movement_wake() {  # <dir> <label>
+  local dir=$1 label=$2
+  ! grep -F 'task-a.check.sh' "$dir/watch-$label.out" >/dev/null \
+    || fail "cycle $label woke for an unchanged pull request: $(cat "$dir/watch-$label.out")"
+  grep -F 'z-stop.check.sh' "$dir/watch-$label.out" >/dev/null \
+    || fail "cycle $label never reached the control check, so its silence proves nothing"
+}
+
+# The captain's defect, in both directions. A pull request that moved must wake
+# firstmate once for each condition that voids a declared wait on it; a pull
+# request nobody touched must cost nothing, however many times it is polled.
+# The control check is what makes the negative assertions real: a cycle that
+# reaches it and still says nothing about task-a was genuinely silent, rather
+# than merely cut short.
+test_pr_movement_wakes_once_per_change() {
+  local dir state
+  dir=$(make_case pr-movement)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  add_stop_custom_check "$dir"
+
+  run_movement_cycle "$dir" baseline OPEN true aaaaaaaaaaaa 0 0 NONE
+  assert_movement_wake "$dir" baseline \
+    'state=OPEN draft=true head=aaaaaaaaaaaa decision=NONE comments=0 review_comments=0'
+  run_movement_cycle "$dir" unchanged OPEN true aaaaaaaaaaaa 0 0 NONE
+  assert_no_movement_wake "$dir" unchanged
+
+  # Each void condition on its own, from the previous reading.
+  run_movement_cycle "$dir" left-draft OPEN false aaaaaaaaaaaa 0 0 NONE
+  assert_movement_wake "$dir" left-draft \
+    'state=OPEN draft=false head=aaaaaaaaaaaa decision=NONE comments=0 review_comments=0'
+  run_movement_cycle "$dir" head-change OPEN false bbbbbbbbbbbb 0 0 NONE
+  assert_movement_wake "$dir" head-change \
+    'state=OPEN draft=false head=bbbbbbbbbbbb decision=NONE comments=0 review_comments=0'
+  run_movement_cycle "$dir" review OPEN false bbbbbbbbbbbb 0 1 NONE
+  assert_movement_wake "$dir" review \
+    'state=OPEN draft=false head=bbbbbbbbbbbb decision=NONE comments=0 review_comments=1'
+  run_movement_cycle "$dir" comment OPEN false bbbbbbbbbbbb 1 1 NONE
+  assert_movement_wake "$dir" comment \
+    'state=OPEN draft=false head=bbbbbbbbbbbb decision=NONE comments=1 review_comments=1'
+  # A plain approval leaves neither an issue comment nor an inline note behind,
+  # so reviewDecision is the only field that carries it. This is the maintainer
+  # signal a declared wait is most often waiting on, and it must not depend on
+  # updated_at, which a label or a bot edit bumps just as readily.
+  run_movement_cycle "$dir" approval OPEN false bbbbbbbbbbbb 1 1 APPROVED
+  assert_movement_wake "$dir" approval \
+    'state=OPEN draft=false head=bbbbbbbbbbbb decision=APPROVED comments=1 review_comments=1'
+  run_movement_cycle "$dir" closed CLOSED false bbbbbbbbbbbb 1 1 APPROVED
+  assert_movement_wake "$dir" closed \
+    'state=CLOSED draft=false head=bbbbbbbbbbbb decision=APPROVED comments=1 review_comments=1'
+
+  # The merge terminal is untouched by any of this: it still emits the exact
+  # merged token and retires the poll rather than reporting a reading.
+  run_movement_cycle "$dir" merged MERGED false bbbbbbbbbbbb 1 1 APPROVED
+  grep -qxF "check: $state/task-a.check.sh: merged" "$dir/watch-merged.out" \
+    || fail "the merge terminal stopped reporting merged: $(cat "$dir/watch-merged.out")"
+  assert_poll_absent "$state" task-a
+  pass "a PR poll wakes once for each condition that voids a wait and stays silent while nothing moves"
+}
+
+# The busiest pull requests are exactly the ones a crew waits longest on, and
+# they are where a count that stops at a page boundary stops meaning anything.
+# The fixture gh clamps its pull-request-view collections at 100 nodes the way
+# the real one does, so a maintainer's 121st comment is invisible to anything
+# reading those collections. Every other field is held fixed across the two
+# cycles, which leaves the comment total as the only thing that could have
+# woken the second.
+test_activity_counts_survive_the_collection_page_cap() {
+  local dir state
+  dir=$(make_case pr-activity-page-cap)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  add_stop_custom_check "$dir"
+
+  run_movement_cycle "$dir" past-cap-baseline OPEN false aaaaaaaaaaaa 120 104 NONE
+  assert_movement_wake "$dir" past-cap-baseline \
+    'state=OPEN draft=false head=aaaaaaaaaaaa decision=NONE comments=120 review_comments=104'
+  run_movement_cycle "$dir" past-cap-comment OPEN false aaaaaaaaaaaa 121 104 NONE
+  assert_movement_wake "$dir" past-cap-comment \
+    'state=OPEN draft=false head=aaaaaaaaaaaa decision=NONE comments=121 review_comments=104'
+  pass "a comment past gh's collection page cap still reports as movement"
+}
+
+# Arming is the moment firstmate has just looked at the pull request, so the
+# reading taken then is a baseline and not news. Without it the first poll would
+# absorb whatever a maintainer did in between as if it had always been true.
+test_arming_seeds_the_baseline_and_stays_silent() {
+  local dir state
+  dir=$(make_case pr-arm-baseline)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_DRAFT=false FM_TEST_GH_SHORT_HEAD=aaaaaaaaaaaa \
+    FM_TEST_GH_COMMENTS=3 FM_TEST_GH_REVIEW_COMMENTS=2 FM_TEST_GH_DECISION=NONE \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "arming failed: $(cat "$dir/arm.err")"
+  fm_pr_poll_observed_read "$state" task-a github github.com o/r 1 \
+    || fail "arming recorded no baseline reading"
+  [ "$FM_PR_POLL_OBSERVED_FINGERPRINT" = \
+    'moved state=OPEN draft=false head=aaaaaaaaaaaa decision=NONE comments=3 review_comments=2' ] \
+    || fail "arming recorded the wrong baseline: $FM_PR_POLL_OBSERVED_FINGERPRINT"
+
+  add_stop_custom_check "$dir"
+  run_movement_cycle "$dir" armed OPEN false aaaaaaaaaaaa 3 2 NONE
+  assert_no_movement_wake "$dir" armed
+  run_movement_cycle "$dir" moved-after-arming OPEN false aaaaaaaaaaaa 4 2 NONE
+  assert_movement_wake "$dir" moved-after-arming \
+    'state=OPEN draft=false head=aaaaaaaaaaaa decision=NONE comments=4 review_comments=2'
+  pass "arming seeds the poll baseline, so the first cycle is silent and later movement is not"
+}
+
+backdate_file() {  # <path> <seconds-ago>
+  local f=$1 back
+  back=$(( $(date +%s) - $2 ))
+  if [ "$(uname)" = Darwin ]; then
+    touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$f"
+  else
+    touch -m -d "@$back" "$f"
+  fi
+}
+
+# Silencing the timed recheck is only safe with positive evidence that something
+# better covers the wait, so every way that evidence can be missing, wrong, or
+# out of date has to fail toward the recheck. Nobody notices a poll that quietly
+# stopped, which is exactly why the absence of a complaint must never be read as
+# coverage.
+test_pr_poll_coverage_requires_live_evidence() {
+  local dir state
+  dir=$(make_case pr-coverage-evidence)
+  state="$dir/home/state"
+
+  fm_pr_poll_covers_wait "$state" task-a "$POLL" 3600 \
+    && fail "an unarmed task was treated as covered"
+
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  fm_pr_poll_covers_wait "$state" task-a "$POLL" 3600 \
+    && fail "an armed poll that has never reported was treated as covered"
+
+  fm_pr_poll_observed_record "$state" task-a github github.com o/r 1 \
+    'moved state=OPEN draft=false head=aaaaaaaaaaaa decision=NONE comments=0 review_comments=0' \
+    || fail "could not record a poll reading"
+  fm_pr_poll_covers_wait "$state" task-a "$POLL" 3600 \
+    || fail "an armed poll with a fresh reading was not treated as covered"
+
+  # A poll can be perfectly alive while the wait it covers is provably dead: a
+  # closed-unmerged pull request keeps its poll armed on purpose, and its
+  # unchanged CLOSED reading refreshes this marker on every cycle forever.
+  fm_pr_poll_observed_record "$state" task-a github github.com o/r 1 \
+    'moved state=CLOSED draft=false head=aaaaaaaaaaaa decision=NONE comments=2 review_comments=1' \
+    || fail "could not record a closed reading"
+  fm_pr_poll_covers_wait "$state" task-a "$POLL" 3600 \
+    && fail "a wait on a closed-unmerged pull request was treated as covered"
+  fm_pr_poll_observed_record "$state" task-a github github.com o/r 1 \
+    'moved state=OPEN draft=false head=aaaaaaaaaaaa decision=NONE comments=0 review_comments=0' \
+    || fail "could not restore the open reading"
+  fm_pr_poll_covers_wait "$state" task-a "$POLL" 3600 \
+    || fail "an open reading stopped counting as coverage"
+
+  backdate_file "$state/task-a.pr-poll-observed" 4000
+  fm_pr_poll_covers_wait "$state" task-a "$POLL" 3600 \
+    && fail "a reading older than the recheck window was treated as coverage"
+  backdate_file "$state/task-a.pr-poll-observed" 10
+  fm_pr_poll_covers_wait "$state" task-a "$POLL" 3600 \
+    || fail "a fresh reading stopped counting as coverage"
+
+  # A future-dated reading is a broken clock or a forged mtime, never freshness.
+  backdate_file "$state/task-a.pr-poll-observed" -4000
+  fm_pr_poll_covers_wait "$state" task-a "$POLL" 3600 \
+    && fail "a future-dated reading was treated as coverage"
+  backdate_file "$state/task-a.pr-poll-observed" 10
+
+  # A reading belonging to a different pull request is not evidence about this one.
+  fm_pr_poll_observed_record "$state" task-a github github.com o/r 2 \
+    'moved state=OPEN draft=false head=aaaaaaaaaaaa decision=NONE comments=0 review_comments=0' \
+    || fail "could not record a foreign-identity reading"
+  fm_pr_poll_covers_wait "$state" task-a "$POLL" 3600 \
+    && fail "a reading for another pull request was treated as coverage"
+  fm_pr_poll_observed_record "$state" task-a github github.com o/r 1 \
+    'moved state=OPEN draft=false head=aaaaaaaaaaaa decision=NONE comments=0 review_comments=0' \
+    || fail "could not restore the matching reading"
+
+  # An unregistered poll is untrusted for execution, so it is untrusted as
+  # evidence too.
+  mv "$state/task-a.pr-poll-registration" "$state/registration.away"
+  fm_pr_poll_covers_wait "$state" task-a "$POLL" 3600 \
+    && fail "an unregistered poll was treated as coverage"
+  mv "$state/registration.away" "$state/task-a.pr-poll-registration"
+  fm_pr_poll_covers_wait "$state" task-a "$POLL" 3600 \
+    || fail "restoring the registration did not restore coverage"
+
+  # A GitLab merge request still reports its merge alone, so it never earns the
+  # exemption a movement poll earns - and arming one takes no baseline reading,
+  # so it reaches the forge no more often than it did before movement reporting
+  # existed (tests/fm-pr-merge.test.sh guards every glab invocation's instance).
+  dir=$(make_case pr-coverage-gitlab)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-b
+  run_check_entry "$dir" task-b https://gitlab.com/g/p/-/merge_requests/1 >/dev/null 2>&1 \
+    || fail "could not arm the GitLab watch"
+  [ ! -s "$dir/glab.log" ] || fail "arming a GitLab watch read the forge: $(cat "$dir/glab.log")"
+  [ ! -e "$state/task-b.pr-poll-observed" ] \
+    || fail "arming a GitLab watch recorded a baseline reading"
+  write_poll_meta "$state" task-b https://gitlab.com/g/p/-/merge_requests/1
+  seed_canonical_poll "$dir" task-b https://gitlab.com/g/p/-/merge_requests/1
+  fm_pr_poll_observed_record "$state" task-b gitlab gitlab.com g/p 1 'moved state=OPEN' \
+    || fail "could not record a GitLab reading"
+  fm_pr_poll_covers_wait "$state" task-b "$POLL" 3600 \
+    && fail "a merge-only GitLab poll was treated as covering a declared wait"
+  pass "a wait counts as covered only by an armed, registered, movement-reporting poll with a current reading"
+}
+
 test_teardown_removes_poll_artifacts() {
   local dir fakebin artifact counterpart rc
   dir=$(make_case teardown-cleanup)
@@ -1492,7 +1799,7 @@ test_merged_poll_retires_once() {
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "merged retirement watcher failed: $(cat "$dir/watch-1.err")"
+  [ "$rc" -eq 0 ] || fail "merged retirement watcher failed (exit $rc): $(cat "$dir/watch-1.err")"
   first=$(cat "$dir/watch-1.out")
   case "$first" in check:*task-a.check.sh:*merged) ;; *) fail "first merged notification was not preserved: $first" ;; esac
   ack_watcher_cycle "$state" || fail "first merged notification handling acknowledgement failed"
@@ -1962,6 +2269,12 @@ test_external_merge_transition_retires_only_terminal_poll() {
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/19
   add_stop_custom_check "$dir"
   before=$(poll_artifact_snapshot "$state" task-a)
+  # Baseline the open reading, so this case stays about which transitions RETIRE
+  # a poll rather than about which ones wake firstmate; the closed transition is
+  # movement and is asserted as such below.
+  fm_pr_poll_observed_record "$state" task-a github github.com o/r 19 \
+    'moved state=OPEN draft=false head=0123456789ab decision=NONE comments=0 review_comments=0' \
+    || fail "could not baseline the external-transition poll"
 
   for label in open-green open-red closed-unmerged forge-error malformed; do
     rm -f "$state/.last-check"
@@ -1983,7 +2296,15 @@ test_external_merge_transition_retires_only_terminal_poll() {
     rc=$?
     set -e
     [ "$rc" -eq 0 ] || fail "$label watcher cycle failed: $(cat "$dir/$label.err")"
-    case "$(cat "$dir/$label.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "$label did not reach the control check" ;; esac
+    case "$label" in
+      closed-unmerged)
+        # A close is real movement and must reach firstmate, but it is not a
+        # merge and must leave the poll armed.
+        grep -F 'task-a.check.sh: moved state=CLOSED' "$dir/$label.out" >/dev/null \
+          || fail "$label did not report the close as movement" ;;
+      *)
+        case "$(cat "$dir/$label.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "$label did not reach the control check" ;; esac ;;
+    esac
     [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "$label changed the armed poll"
     ack_watcher_cycle "$state" || fail "$label control wake acknowledgement failed"
   done
@@ -2776,6 +3097,10 @@ test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_pr_movement_wakes_once_per_change
+test_activity_counts_survive_the_collection_page_cap
+test_arming_seeds_the_baseline_and_stays_silent
+test_pr_poll_coverage_requires_live_evidence
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations

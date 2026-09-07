@@ -1144,6 +1144,21 @@ handle_paused_stale() {  # <window> <task> <hash>
   else
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
+    # The recheck exists because nothing else would ever revisit the wait. When
+    # the wait is on a pull request that a live movement poll is watching,
+    # something else does: the poll wakes on every condition that voids the
+    # wait, so asking a human to confirm it still holds costs a supervision turn
+    # to learn what the poll would have reported for free. Only a poll that is
+    # armed, registered against this exact pull request, reporting every void
+    # condition, and demonstrably still reaching the forge earns that silence -
+    # fm_pr_poll_covers_wait decides, and every way it can be unsure returns the
+    # recheck here. Age-gated because it is the more expensive test and cannot
+    # change the outcome before resurface_absorbed's own window opens.
+    if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] \
+      && fm_pr_poll_covers_wait "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh" "$PAUSE_RESURFACE_SECS"; then
+      triage_log "absorbed stale ($detail, age ${age}s, PR movement poll covers the wait): $win"
+      return 0
+    fi
   fi
   resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
@@ -2247,6 +2262,33 @@ EOF
             continue
           fi
           wake "$reason"
+        fi
+        if [ "$is_pr_poll" -eq 1 ]; then
+          # A movement poll prints the pull request's whole current state every
+          # cycle, so the wake decision is the DIFFERENCE against the last
+          # reading, not the reading itself: a PR nobody has touched must cost
+          # nothing. The reading is recorded either way, because its freshness
+          # is separately the evidence that lets a declared wait on this PR skip
+          # its timed recheck (fm_pr_poll_covers_wait), and evidence that only
+          # appeared when something moved would expire during exactly the quiet
+          # stretch it has to cover.
+          pr_poll_moved=1
+          if fm_pr_poll_observed_read "$STATE" "$id" "$provider" "$host" "$path" "$number" \
+            && [ "$FM_PR_POLL_OBSERVED_FINGERPRINT" = "$out" ]; then
+            pr_poll_moved=0
+          fi
+          if ! fm_pr_poll_observed_record "$STATE" "$id" "$provider" "$host" "$path" "$number" "$out"; then
+            # Nothing to repair from here, and nothing is silenced by it: an
+            # unrecordable reading simply never becomes coverage, so the timed
+            # recheck stays on for this task.
+            triage_log "PR poll reading for $id could not be recorded"
+          fi
+          touch "$STATE/.last-check"
+          if [ "$pr_poll_moved" -eq 0 ]; then
+            pr_poll_control_release || exit 1
+            triage_log "absorbed unchanged PR poll reading for $id"
+            continue
+          fi
         fi
         pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
