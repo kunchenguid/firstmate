@@ -370,6 +370,23 @@ test_snooze_refuses_a_command_sweep_that_runs_out_of_budget() {
   pass "a command sweep that exhausts its budget cannot persist a snooze"
 }
 
+test_snooze_refuses_a_command_sweep_with_a_timed_out_probe() {
+  local home slow out status
+  home=$(make_home snooze-probe-timeout)
+  slow="$TMP_ROOT/snooze-probe-timeout/slow"
+  make_slow_copy "$slow" "$TOOL" 30
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  status=0
+  env FM_HOME="$home" PATH="$(fixture_path "$slow")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=0 \
+    FM_TOOL_UPDATE_PROBE_SECS=1 FM_TOOL_UPDATE_BUDGET_SECS=10 \
+    "$CHECK" snooze herdr --until 2099-12-31 >"$out" 2>&1 || status=$?
+  expect_code 1 "$status" "timed-out command snooze exit"
+  assert_contains "$(cat "$out")" "cannot record a snooze from an incomplete sweep" "a timed-out command probe was accepted for snoozing"
+  [ ! -f "$home/state/.tool-updates" ] || fail "a timed-out command probe persisted a snooze record"
+  pass "a command sweep with a timed-out probe cannot persist a snooze"
+}
+
 test_an_announcement_probe_that_does_not_answer_is_reported() {
   local home dir out report
   # no-mistakes learns about a new release from the network, so the command that
@@ -1107,6 +1124,7 @@ test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep
 test_an_unchecked_announcement_source_is_not_read_as_current
 test_an_announcement_probe_that_does_not_answer_is_reported
 test_snooze_refuses_a_command_sweep_that_runs_out_of_budget
+test_snooze_refuses_a_command_sweep_with_a_timed_out_probe
 test_quiet_tool_with_announce_pattern_is_silent
 test_commits_behind_origin_are_reported
 test_default_branch_is_detected_when_branch_is_omitted

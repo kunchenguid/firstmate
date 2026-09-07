@@ -529,6 +529,14 @@ command_findings() {
     fi
     # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
     out=$(probe_output "$hit" $args_joined)
+    status=$?
+    if [ "$status" -eq 124 ]; then
+      if [ "$INCOMPLETE_REPORTED" -eq 0 ]; then
+        emit "check incomplete: the time budget ran out before $name"
+      fi
+      mark_incomplete
+      emit "$name check failed: $hit did not answer when asked for its version"
+    fi
     version=$(parse_version "$out")
     if [ -z "$resolved_path" ]; then
       resolved_path=$hit
@@ -624,6 +632,9 @@ git_probe() {
     return "$GIT_PROBE_NOT_ISSUED"
   fi
   fm_run_timed "$(probe_bound)" git -C "$repo" "$@"
+  local status=$?
+  [ "$status" -eq 124 ] && mark_incomplete
+  return "$status"
 }
 
 # The single place that reads a probe status as no answer at all, so every probe
