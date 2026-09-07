@@ -30,7 +30,10 @@
 #                                                          this arm attaches and follows it
 #   watcher: busy holder pid=<N> ... left alone          - an identity-matched live holder did not
 #                                                          beat during the bounded wait
-#   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
+#   watcher: UNCONFIRMED - live watcher pid=<N> has no fresh beacon
+#                                                        - the launched child stayed live past startup
+#                                                          confirmation and was preserved
+#   watcher: FAILED - no live watcher with a fresh beacon  - no live child remained to preserve
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
@@ -45,8 +48,9 @@
 # identity-bound delivery record: a matching record reports that wake and exits
 # 0, and only a cycle that delivered nothing is the typed nonzero failure. Apart
 # from the explicit busy-holder-left-alone status, neither is ever a clean empty
-# completion. On FAILED it exits non-zero so the failure is loud. A live healthy
-# cycle already present means re-arm attaches - do not start a second watcher.
+# completion. FAILED and UNCONFIRMED outcomes exit non-zero so uncertainty is
+# loud, but confirmation timeout never signals a child that remains live. A live
+# healthy cycle already present means re-arm attaches - do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records

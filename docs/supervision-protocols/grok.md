@@ -12,7 +12,8 @@ When this session owns supervision and away mode is not active:
 4. Trust only the arm's one-line status.
 5. `watcher: started ...` or `watcher: attached ...` means a live cycle exists.
    On attach, the background task follows verified identity-matched successors instead of exiting when the first cycle ends.
-6. Failure or missing cycle only: `watcher: FAILED ...` means supervision is down; fix and re-arm.
+6. Failure or missing cycle only: `watcher: FAILED ...` means no live cycle was confirmed; fix and re-arm.
+   `watcher: UNCONFIRMED ...` means the launched process stayed live without a fresh beacon and was preserved; inspect it before re-arming so you do not create a competing monitor.
 7. After a successful start or attach status, end the turn.
    The background arm remains the live wait until it returns an actionable wake or failure.
 8. Waiting is silent.
