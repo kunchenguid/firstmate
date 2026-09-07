@@ -1013,6 +1013,8 @@ if bash -c 'shopt -u globasciiranges' >/dev/null 2>&1; then
   LOCALE_RANGE_TEST_SHELL=(bash +O globasciiranges)
 fi
 LOCALE_RANGE_TEST_LOCALE=$(
+  # candidate expands in the nested shell, not this test process.
+  # shellcheck disable=SC2016
   "${LOCALE_RANGE_TEST_SHELL[@]}" -c '
     while IFS= read -r candidate; do
       LC_ALL=$candidate
