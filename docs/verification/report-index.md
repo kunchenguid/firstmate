@@ -32,7 +32,8 @@ Three independent `rebuild` runs on identical input produced byte-identical outp
 The no-second-LLM guarantee is a source and runtime contract fact, not a conclusion drawn from repeated output.
 
 The privacy boundary was pinned by placing a distinctive marker string only in a report body (well past the bounded head) and asserting it appears in neither the index nor the skipped file.
-The body marker never reached either file across the rebuild, confirming extraction reads only each report's bounded head and stores only the catalog fields.
+The body marker never reached either file across the rebuild, which verifies only that those marker bytes were not emitted.
+The bounded-head read remains a documented source contract and is not inferred from this runtime assertion.
 
 ## Skip and safety cases
 
@@ -49,6 +50,7 @@ $ cat <home>/data/report-index.skipped
 
 A directory with a `brief.md` but no `report.md` is not scanned, so it appears in neither file.
 The `stat`-based size read avoids opening the file, so an unreadable report's permission error never leaks to the rebuild's output.
+Portable interface fixtures also confirmed that invalid size caps, failed candidate enumeration or sorting, and directory-shaped publication destinations stop the rebuild with a diagnostic instead of publishing success.
 
 ## Teardown hook and digest
 
@@ -67,7 +69,7 @@ The portable regression in `tests/fm-report-index.test.sh` pins the behavior wit
 ## Reproduction
 
 ```text
-bin/fm-test-run.sh tests/fm-report-index.test.sh        # 15 portable assertions
+bin/fm-test-run.sh tests/fm-report-index.test.sh        # 18 portable assertions
 bin/fm-test-run.sh tests/fm-teardown.test.sh            # scout teardown rebuilds the index (case: test_scout_teardown_rebuilds_report_index)
 bin/fm-test-run.sh --check-coverage                     # coverage guard: the new test is accounted for
 ```

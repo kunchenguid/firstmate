@@ -86,6 +86,8 @@ REBUILD_LOCK="$STATE/.report-index.lock"
 REBUILD_LOCK_HELD=0
 REBUILD_TMP_INDEX=
 REBUILD_TMP_SKIPPED=
+REBUILD_TMP_CANDIDATES_RAW=
+REBUILD_TMP_CANDIDATES=
 
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
@@ -250,6 +252,14 @@ rebuild_cleanup() {
     rm -f -- "$REBUILD_TMP_SKIPPED" 2>/dev/null || status=1
     REBUILD_TMP_SKIPPED=
   fi
+  if [ -n "$REBUILD_TMP_CANDIDATES_RAW" ]; then
+    rm -f -- "$REBUILD_TMP_CANDIDATES_RAW" 2>/dev/null || status=1
+    REBUILD_TMP_CANDIDATES_RAW=
+  fi
+  if [ -n "$REBUILD_TMP_CANDIDATES" ]; then
+    rm -f -- "$REBUILD_TMP_CANDIDATES" 2>/dev/null || status=1
+    REBUILD_TMP_CANDIDATES=
+  fi
   if [ "$REBUILD_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$REBUILD_LOCK" || status=1
     REBUILD_LOCK_HELD=0
@@ -261,6 +271,16 @@ rebuild_cleanup() {
 rebuild() {
   local report id entry_count=0 skipped_count=0
   [ -d "$DATA" ] || { echo "error: data directory not found: $DATA" >&2; return 1; }
+  case "$MAX_REPORT_BYTES" in
+    ''|*[!0-9]*)
+      echo "error: FM_REPORT_INDEX_MAX_BYTES must be a positive integer" >&2
+      return 1
+      ;;
+  esac
+  if ! [ "$MAX_REPORT_BYTES" -gt 0 ] 2>/dev/null; then
+    echo "error: FM_REPORT_INDEX_MAX_BYTES must be a positive integer" >&2
+    return 1
+  fi
   if ! mkdir -p "$STATE" 2>/dev/null; then
     echo "error: state directory unavailable: $STATE" >&2
     return 1
@@ -285,6 +305,14 @@ rebuild() {
     echo "error: could not stage skipped report index in $DATA" >&2
     return 1
   }
+  REBUILD_TMP_CANDIDATES_RAW=$(umask 077; mktemp "$DATA/.report-index.candidates-raw.XXXXXX" 2>/dev/null) || {
+    echo "error: could not stage report candidates in $DATA" >&2
+    return 1
+  }
+  REBUILD_TMP_CANDIDATES=$(umask 077; mktemp "$DATA/.report-index.candidates.XXXXXX" 2>/dev/null) || {
+    echo "error: could not stage sorted report candidates in $DATA" >&2
+    return 1
+  }
   if ! {
     printf '# Scout report index. Schema owner: bin/fm-report-index.sh.\n'
     printf '# One line per report: id | date | project | title | summary | path.\n'
@@ -295,6 +323,15 @@ rebuild() {
   fi
   if ! : > "$REBUILD_TMP_SKIPPED"; then
     echo "error: could not write staged skipped report index" >&2
+    return 1
+  fi
+  if ! find "$DATA" -mindepth 2 -maxdepth 2 -name report.md \
+    > "$REBUILD_TMP_CANDIDATES_RAW" 2>/dev/null; then
+    echo "error: could not enumerate report candidates" >&2
+    return 1
+  fi
+  if ! LC_ALL=C sort "$REBUILD_TMP_CANDIDATES_RAW" > "$REBUILD_TMP_CANDIDATES"; then
+    echo "error: could not sort report candidates" >&2
     return 1
   fi
   # Deterministic lexical order so re-runs reproduce the same bytes.
@@ -315,15 +352,33 @@ rebuild() {
       fi
       skipped_count=$((skipped_count + 1))
     fi
-  done < <(find "$DATA" -mindepth 2 -maxdepth 2 -name report.md 2>/dev/null | LC_ALL=C sort)
+  done < "$REBUILD_TMP_CANDIDATES"
+  if [ -d "$INDEX_FILE" ] || [ -d "$SKIPPED_FILE" ]; then
+    echo "error: report index destination is a directory" >&2
+    return 1
+  fi
   if ! mv -f -- "$REBUILD_TMP_INDEX" "$INDEX_FILE"; then
     echo "error: could not publish report index: $INDEX_FILE" >&2
+    return 1
+  fi
+  if [ ! -f "$INDEX_FILE" ] || [ -L "$INDEX_FILE" ]; then
+    if [ -d "$INDEX_FILE" ]; then
+      rm -f -- "$INDEX_FILE/${REBUILD_TMP_INDEX##*/}" 2>/dev/null || true
+    fi
+    echo "error: report index was not published as a regular file: $INDEX_FILE" >&2
     return 1
   fi
   REBUILD_TMP_INDEX=
   if [ -s "$REBUILD_TMP_SKIPPED" ]; then
     if ! mv -f -- "$REBUILD_TMP_SKIPPED" "$SKIPPED_FILE"; then
       echo "error: could not publish skipped report index: $SKIPPED_FILE" >&2
+      return 1
+    fi
+    if [ ! -f "$SKIPPED_FILE" ] || [ -L "$SKIPPED_FILE" ]; then
+      if [ -d "$SKIPPED_FILE" ]; then
+        rm -f -- "$SKIPPED_FILE/${REBUILD_TMP_SKIPPED##*/}" 2>/dev/null || true
+      fi
+      echo "error: skipped report index was not published as a regular file: $SKIPPED_FILE" >&2
       return 1
     fi
     REBUILD_TMP_SKIPPED=

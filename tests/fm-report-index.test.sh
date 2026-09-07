@@ -78,7 +78,7 @@ EOF
   pass "rebuild extracts id/date/project/title/summary/path deterministically"
 }
 
-test_report_body_never_enters_index_or_skipped() {
+test_report_body_marker_never_enters_index_or_skipped() {
   local home
   home=$(make_home privacy)
   write_report "$home" secret-scout firstmate <<'EOF'
@@ -98,7 +98,7 @@ EOF
     || fail "report body leaked into the index"
   ! grep -q 'ZZPRIVACYBODYMARKER' "$home/data/report-index.skipped" 2>/dev/null \
     || fail "report body leaked into the skipped file"
-  pass "report bodies never enter the index or skipped diagnostics"
+  pass "report body marker never enters the index or skipped diagnostics"
 }
 
 test_rebuild_is_idempotent() {
@@ -306,10 +306,110 @@ EOF
   [ "$rc" -ne 0 ] || fail "publication failure was reported as success"
   assert_grep 'could not publish report index' "$home/rebuild.out" "publication failure was diagnosable"
   [ ! -e "$home/data/report-index.md" ] || fail "failed publication left an index behind"
-  leftovers=$(find "$home/data" -maxdepth 1 \
-    \( -name '.report-index.md.*' -o -name '.report-index.skipped.*' \) -print)
+  leftovers=$(find "$home/data" -maxdepth 1 -name '.report-index.*' -print)
   [ -z "$leftovers" ] || fail "failed publication left staging files behind: $leftovers"
   pass "publication failure returns nonzero and cleans staging files"
+}
+
+test_rebuild_rejects_directory_destinations() {
+  local home link_home rc
+  home=$(make_home directory-index)
+  write_report "$home" directory-report firstmate <<'EOF'
+# Directory report
+
+## TL;DR
+
+directory summary.
+EOF
+  mkdir "$home/data/report-index.md"
+  FM_HOME="$home" "$SCRIPT" rebuild > "$home/rebuild.out" 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "index directory destination was reported as success"
+  [ -d "$home/data/report-index.md" ] || fail "index directory destination was replaced"
+  assert_grep 'destination is a directory' "$home/rebuild.out" "index directory rejection was diagnosable"
+
+  link_home=$(make_home directory-skipped-link)
+  write_report "$link_home" titleless firstmate <<'EOF'
+Titleless report.
+EOF
+  mkdir "$link_home/skipped-target"
+  ln -s "$link_home/skipped-target" "$link_home/data/report-index.skipped"
+  FM_HOME="$link_home" "$SCRIPT" rebuild > "$link_home/rebuild.out" 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "skipped directory symlink destination was reported as success"
+  [ -L "$link_home/data/report-index.skipped" ] || fail "skipped directory symlink was replaced"
+  assert_grep 'destination is a directory' "$link_home/rebuild.out" "skipped directory symlink rejection was diagnosable"
+  pass "rebuild rejects directory and directory-symlink destinations"
+}
+
+test_rebuild_rejects_candidate_enumeration_failures() {
+  local home sort_home real_sort rc
+  home=$(make_home find-failure)
+  write_report "$home" partial firstmate <<'EOF'
+# Partial
+
+## TL;DR
+
+partial summary.
+EOF
+  mkdir -p "$home/fake-bin"
+  cat > "$home/fake-bin/find" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$FM_PARTIAL_REPORT"
+exit 71
+EOF
+  chmod +x "$home/fake-bin/find"
+  FM_PARTIAL_REPORT="$home/data/partial/report.md" PATH="$home/fake-bin:$PATH" \
+    FM_HOME="$home" "$SCRIPT" rebuild > "$home/rebuild.out" 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "failed candidate enumeration was reported as success"
+  [ ! -e "$home/data/report-index.md" ] || fail "failed candidate enumeration published a partial index"
+  assert_grep 'could not enumerate report candidates' "$home/rebuild.out" "find failure was diagnosable"
+
+  sort_home=$(make_home sort-failure)
+  write_report "$sort_home" unsorted firstmate <<'EOF'
+# Unsorted
+
+## TL;DR
+
+unsorted summary.
+EOF
+  real_sort=$(command -v sort)
+  mkdir -p "$sort_home/fake-bin"
+  cat > "$sort_home/fake-bin/sort" <<'EOF'
+#!/usr/bin/env bash
+"$FM_REAL_SORT" "$@"
+exit 72
+EOF
+  chmod +x "$sort_home/fake-bin/sort"
+  FM_REAL_SORT="$real_sort" PATH="$sort_home/fake-bin:$PATH" \
+    FM_HOME="$sort_home" "$SCRIPT" rebuild > "$sort_home/rebuild.out" 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "failed candidate sorting was reported as success"
+  [ ! -e "$sort_home/data/report-index.md" ] || fail "failed candidate sorting published an index"
+  assert_grep 'could not sort report candidates' "$sort_home/rebuild.out" "sort failure was diagnosable"
+  pass "rebuild rejects find and sort candidate failures"
+}
+
+test_rebuild_rejects_invalid_size_cap() {
+  local home value rc
+  for value in invalid 0; do
+    home=$(make_home "invalid-cap-$value")
+    write_report "$home" invalid-cap firstmate <<'EOF'
+# Invalid cap
+
+## TL;DR
+
+invalid cap summary.
+EOF
+    FM_REPORT_INDEX_MAX_BYTES="$value" FM_HOME="$home" "$SCRIPT" rebuild \
+      > "$home/rebuild.out" 2>&1
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "invalid size cap $value was reported as success"
+    [ ! -e "$home/data/report-index.md" ] || fail "invalid size cap $value published an index"
+    assert_grep 'must be a positive integer' "$home/rebuild.out" "invalid size cap $value was diagnosable"
+  done
+  pass "rebuild rejects invalid and nonpositive size caps"
 }
 
 test_rebuild_handles_empty_home() {
@@ -378,13 +478,16 @@ test_rebuild_parses_session_start_and_teardown() {
 }
 
 test_rebuild_extracts_all_fields_deterministically
-test_report_body_never_enters_index_or_skipped
+test_report_body_marker_never_enters_index_or_skipped
 test_rebuild_is_idempotent
 test_skip_cases_record_reasons_without_body
 test_show_bounded_tail_and_absent
 test_rebuild_output_is_deterministic
 test_rebuild_serializes_scan_through_publication
 test_rebuild_reports_publication_failure_and_cleans_staging
+test_rebuild_rejects_directory_destinations
+test_rebuild_rejects_candidate_enumeration_failures
+test_rebuild_rejects_invalid_size_cap
 test_rebuild_handles_empty_home
 test_rebuild_resolves_home_via_FM_HOME
 test_rebuild_project_falls_back_when_no_brief
