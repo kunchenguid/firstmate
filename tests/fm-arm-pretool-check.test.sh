@@ -98,7 +98,7 @@ matrix_case D31 deny "env -S 'bin/fm-watch-arm.sh &'"
 matrix_case D32 deny "env --split-string='$ROOT/bin/fm-watch-arm.sh &'"
 matrix_case D33 deny 'bin/fm-"watch-arm.sh" &'
 matrix_case D34 deny "WATCHER='bin/fm-watch-arm.sh'; \"\$WATCHER\" &"
-matrix_case D35 allow "bash -c -- 'bin/fm-watch-arm.sh &'"
+matrix_case D35 deny "bash -c -- 'bin/fm-watch-arm.sh &'"
 matrix_case D36 deny 'bash bin/fm-watch-arm.sh &'
 matrix_case D37 deny '. bin/fm-watch-arm.sh &'
 matrix_case D38 deny "bash <<< 'bin/fm-watch-arm.sh &'"
@@ -396,6 +396,9 @@ EOF
     'ACTION=$(unknown-action); no-mistakes axi "$ACTION" --action fix' \
     '$(command -v no-mistakes) axi respond --action fix' \
     "SH=bash; \"\$SH\" -c 'no-mistakes axi respond --action fix'" \
+    "bash -c -- 'no-mistakes axi respond --action fix'" \
+    'CMD=$(echo no-mistakes); "$CMD" axi respond --action fix' \
+    'ACTION=respond; for x in; do ACTION=status; done; no-mistakes axi "$ACTION"' \
     'NM=no-mistakes; if false; then NM=echo; fi; "$NM" axi respond --action fix' \
     'ACTION=respond; ! true && ACTION=status; no-mistakes axi "$ACTION"' \
     'NM=no-mistakes; while false; do NM=echo; done; "$NM" axi respond --action fix' \
@@ -434,6 +437,9 @@ EOF
     'ACTION=$(unknown-action); no-mistakes axi "$ACTION" --action fix' \
     '$(command -v no-mistakes) axi respond --action fix' \
     "SH=bash; \"\$SH\" -c 'no-mistakes axi respond --action fix'" \
+    "bash -c -- 'no-mistakes axi respond --action fix'" \
+    'CMD=$(echo no-mistakes); "$CMD" axi respond --action fix' \
+    'ACTION=respond; for x in; do ACTION=status; done; no-mistakes axi "$ACTION"' \
     'NM=no-mistakes; if false; then NM=echo; fi; "$NM" axi respond --action fix' \
     'ACTION=respond; ! true && ACTION=status; no-mistakes axi "$ACTION"' \
     'NM=no-mistakes; while false; do NM=echo; done; "$NM" axi respond --action fix' \
@@ -456,7 +462,6 @@ EOF
     "time echo 'no-mistakes axi run --intent data'" \
     "/usr/bin/time -l echo 'no-mistakes axi run --intent data'" \
     "coproc echo 'no-mistakes axi respond --action data'" \
-    "bash -c -- 'no-mistakes axi respond --action data'" \
     "CMD='no-mistakes axi respond --action data'; echo \"\$CMD\"" \
     "CMD='no-mistakes axi respond --action data'; \"\$CMD\"" \
     'for NM in no-mistakes; do echo "$NM axi respond --action data"; done' \
@@ -472,6 +477,8 @@ EOF
   done
   FM_HOME="$primary" "$check" --command 'no-mistakes axi status' >/dev/null 2>&1 \
     || fail "the primary must retain read-only pipeline status"
+  FM_HOME="$primary" "$check" --command "bash -c -- 'no-mistakes axi status'" >/dev/null 2>&1 \
+    || fail "the primary must retain nested read-only pipeline status"
   FM_HOME="$primary" "$check" --command 'ACTION=$(printf status); no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
     || fail "the primary must retain dynamically selected read-only pipeline status"
   FM_HOME="$primary" "$check" --command 'ACTION=status; false && ACTION=respond; no-mistakes axi "$ACTION"' >/dev/null 2>&1 \

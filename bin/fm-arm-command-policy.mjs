@@ -665,7 +665,9 @@ function shellInvocation(position, context) {
   for (let i = position.index + 1; i < words.length; i += 1) {
     const option = words[i];
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(option.value)) {
-      return { kind: "command", payload: words[i + 1] || null };
+      let payloadIndex = i + 1;
+      if (words[payloadIndex]?.value === "--") payloadIndex += 1;
+      return { kind: "command", payload: words[payloadIndex] || null };
     }
     if (/^[-+](?:O|o)$/.test(option.value) || ["--init-file", "--rcfile"].includes(option.value)) {
       i += 1;
@@ -760,6 +762,7 @@ function evalPayload(position, context) {
 }
 
 function resolvedInvocationFields(word, context) {
+  if (!word) return null;
   const positional = context.positionalArguments || [];
   let match = word.value.match(/^\$(?:\{([0-9]+)\}|([0-9]+))$/);
   if (match) {
@@ -776,9 +779,16 @@ function resolvedInvocationFields(word, context) {
 function isPipelineDriveInvocation(position, context) {
   if (!position.command) return false;
   const invocation = [];
-  for (const word of position.words.slice(position.index)) {
-    const fields = resolvedInvocationFields(word, context);
+  const words = position.words.slice(position.index);
+  for (let index = 0; index < words.length; index += 1) {
+    const fields = resolvedInvocationFields(words[index], context);
     if (fields === null) {
+      if (invocation.length === 0) {
+        const commandGroup = resolvedInvocationFields(words[index + 1], context);
+        const actionGroup = resolvedInvocationFields(words[index + 2], context);
+        return commandGroup?.length === 1 && commandGroup[0] === "axi" &&
+          actionGroup?.length === 1 && ["run", "respond"].includes(actionGroup[0]);
+      }
       return basename(invocation[0] || "") === "no-mistakes" && invocation[1] === "axi" && invocation.length === 2;
     }
     invocation.push(...fields);
@@ -857,10 +867,13 @@ function valueMayDriveOrProtect(value, context, depth) {
 
 function forLoopBinding(position, context, depth) {
   const words = position.words;
-  if (basename(position.command?.value || "") !== "for" || words[2]?.value !== "in") return null;
+  if (basename(position.command?.value || "") !== "for") return null;
   const name = words[1]?.value || "";
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || words.length < 4) return null;
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return null;
+  if (!words[2]) return { name, selected: null, last: null, bodyAssigned: false, zeroIterations: null };
+  if (words[2].value !== "in") return null;
   const values = words.slice(3).map((word) => resolveKnownWord(word, context.knownVariables));
+  if (values.length === 0) return { name, selected: null, last: null, bodyAssigned: false, zeroIterations: true };
   if (values.some((value) => value === null)) return null;
   let selected = values[0];
   for (const value of values) {
@@ -869,7 +882,7 @@ function forLoopBinding(position, context, depth) {
       break;
     }
   }
-  return { name, selected, last: values.at(-1), bodyAssigned: false };
+  return { name, selected, last: values.at(-1), bodyAssigned: false, zeroIterations: false };
 }
 
 function conditionalExecution(separator, previousInfo) {
@@ -1076,12 +1089,14 @@ function analyzeProgram(command, context, depth = 0) {
     nestedProtected ||= nodeNestedProtected;
     const loopBinding = forLoopBinding(position, nodeContext, depth);
     if (loopBinding) {
-      loopBindings.push({ ...loopBinding, kind: "for" });
-      activeContext = contextWithBinding(activeContext, loopBinding.name, loopBinding.selected);
+      loopBindings.push({ ...loopBinding, kind: "for", entryContext: activeContext });
+      if (loopBinding.selected !== null) activeContext = contextWithBinding(activeContext, loopBinding.name, loopBinding.selected);
     } else if (commandName === "done" && loopBindings.length > 0) {
       const completedLoop = loopBindings.pop();
-      if (completedLoop.kind === "for" && !completedLoop.bodyAssigned) {
-        activeContext = contextWithBinding(activeContext, completedLoop.name, completedLoop.last);
+      if (completedLoop.kind === "for") {
+        if (completedLoop.zeroIterations === true) activeContext = completedLoop.entryContext;
+        else if (completedLoop.zeroIterations === null) activeContext = mergeReachableContexts(activeContext, completedLoop.entryContext, depth);
+        else if (!completedLoop.bodyAssigned) activeContext = contextWithBinding(activeContext, completedLoop.name, completedLoop.last);
       } else if (completedLoop.kind === "conditional") {
         if (completedLoop.zeroIterations === true) activeContext = completedLoop.entryContext;
         else if (completedLoop.zeroIterations === null) activeContext = mergeReachableContexts(activeContext, completedLoop.entryContext, depth);
