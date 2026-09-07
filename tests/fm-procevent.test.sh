@@ -2036,6 +2036,41 @@ assert_contains "$(cat "$TMP_ROOT/attached.out")" "captured:" \
   "the attached source result was not captured"
 pass "a foreground start refreshes its lease while its caller remains attached"
 
+HCLOCK="$TMP_ROOT/lease-clock"; new_home "$HCLOCK"
+fm_test_track_procevent_home "$HCLOCK"
+CLOCK_TRIGGER="$TMP_ROOT/lease-clock.trigger"
+CLOCK_STATE="$TMP_ROOT/lease-clock-state"
+CLOCK_BIN=$(fm_fakebin "$TMP_ROOT/lease-clock-bin")
+REAL_DATE=$(command -v date) || fail "the lease clock fixture requires date"
+cat > "$CLOCK_BIN/date" <<SH
+#!/usr/bin/env bash
+if [ "\${1-}" = +%s ]; then
+  while ! mkdir "$CLOCK_STATE.lock" 2>/dev/null; do sleep 0.01; done
+  value=0
+  [ ! -f "$CLOCK_STATE" ] || value=\$(cat "$CLOCK_STATE")
+  value=\$((value + 10000))
+  printf '%s\n' "\$value" > "$CLOCK_STATE"
+  rmdir "$CLOCK_STATE.lock"
+  printf '%s\n' "\$value"
+  exit 0
+fi
+exec "$REAL_DATE" "\$@"
+SH
+chmod +x "$CLOCK_BIN/date"
+pe_register "$HCLOCK" lavish lease-clock-src -- \
+  "$BLOCKER" "$CLOCK_TRIGGER" "clock payload" >/dev/null
+PATH="$CLOCK_BIN:$PATH" FM_PROCEVENT_OWNER_LEASE_SECONDS=1 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+  pe "$HCLOCK" start lease-clock-src > "$TMP_ROOT/lease-clock.out" 2>&1 &
+CLOCK_START_PID=$!
+wait_for "$HCLOCK/state/procevent/lease-clock-src.runner" \
+  || fail "the clock-shift fixture never launched its source"
+sleep 4
+kill -0 "$CLOCK_START_PID" 2>/dev/null \
+  || fail "wall-clock corrections expired a live foreground owner"
+touch "$CLOCK_TRIGGER"
+wait "$CLOCK_START_PID" || fail "the clock-shift fixture did not complete"
+pass "wall-clock corrections do not alter owner lease age"
+
 HDETACHED="$TMP_ROOT/detached-attached-owner"; new_home "$HDETACHED"
 fm_test_track_procevent_home "$HDETACHED"
 DETACHED_TRIGGER="$TMP_ROOT/detached-attached.trigger"

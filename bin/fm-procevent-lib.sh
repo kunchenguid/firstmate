@@ -130,7 +130,8 @@ fm_procevent_owner_lease_touch() {  # <state-root>
   reg=$(fm_procevent_registry_dir "$1")
   [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
   lease=$(fm_procevent_owner_lease_path "$1")
-  now=$(date +%s) || return 1
+  now=$(perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \
+    'printf "%.6f\n", clock_gettime(CLOCK_MONOTONIC)') || return 1
   tmp=$(umask 077; mktemp "$reg/.owner-lease.XXXXXX") || return 1
   if ! printf '%s\n' "$now" > "$tmp" || ! mv -f -- "$tmp" "$lease"; then
     rm -f -- "$tmp"
@@ -139,20 +140,21 @@ fm_procevent_owner_lease_touch() {  # <state-root>
 }
 
 # Seconds since the last refresh. Fails when the lease is absent or unreadable,
-# which is what a removed home looks like from inside a surviving runner. A
-# clock that moved backwards reads as fresh rather than as a dead owner.
+# which is what a removed home looks like from inside a surviving runner.
 fm_procevent_owner_lease_age() {  # <state-root>
-  local lease value now
+  local lease value
   lease=$(fm_procevent_owner_lease_path "$1")
   [ -f "$lease" ] && [ ! -L "$lease" ] || return 1
   IFS= read -r value < "$lease" || return 1
-  case "$value" in ''|*[!0-9]*) return 1 ;; esac
-  now=$(date +%s) || return 1
-  if [ "$now" -le "$value" ]; then
-    printf '0\n'
-    return 0
-  fi
-  printf '%s\n' "$((now - value))"
+  perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e '
+    use strict;
+    use warnings;
+    my $value = shift;
+    $value =~ /\A[0-9]+(?:\.[0-9]+)?\z/ or exit 1;
+    my $now = clock_gettime(CLOCK_MONOTONIC);
+    $now >= $value or exit 1;
+    printf "%d\n", int($now - $value);
+  ' "$value"
 }
 
 # How long a runner keeps going with no sign of its owning session. The default
@@ -210,9 +212,10 @@ fm_procevent_launch_floor_seconds() {
   printf '%s\n' "$value"
 }
 
-fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-generation> <seconds>
+fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-identity> <seconds>
   local reg stamp
-  fm_procevent_registration_generation_valid "$3" || return 1
+  case "$3" in *:*) ;; *) return 1 ;; esac
+  case "$3" in ''|*[!0-9:]*) return 1 ;; esac
   reg=$(fm_procevent_registry_dir "$1") || return 1
   stamp="$reg/$2.$3.last-launch"
   [ ! -L "$stamp" ] || return 1
@@ -274,42 +277,8 @@ fm_procevent_source_lock_release() {
   fm_lock_release "$(fm_procevent_source_lock_path "$1")"
 }
 
-fm_procevent_registration_generation_valid() {
-  case "$1" in
-    sha256:????????????????????????????????????????????????????????????????)
-      case "${1#sha256:}" in *[!0-9a-f]*) return 1 ;; esac
-      ;;
-    legacy:*:*)
-      case "${1#legacy:}" in ''|*[!0-9:]*) return 1 ;; esac
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-fm_procevent_registration_generation_new() {
-  local hex
-  hex=$(LC_ALL=C od -An -v -tx1 -N 32 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
-  [ "${#hex}" -eq 64 ] || return 1
-  printf 'sha256:%s\n' "$hex"
-}
-
-fm_procevent_registration_generation_locked() {  # <state> <source-id>
-  local file line identity
-  file="$(fm_procevent_registry_dir "$1")/$2.source"
-  [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  line=$(sed -n '2p' "$file") || return 1
-  if fm_procevent_registration_generation_valid "${line#generation=}" \
-    && [ "$line" = "generation=${line#generation=}" ]; then
-    printf '%s\n' "${line#generation=}"
-    return 0
-  fi
-  [ "${line%%=*}" = argc ] || return 1
-  identity=$(fm_pr_file_identity "$file") || return 1
-  printf 'legacy:%s\n' "$identity"
-}
-
 fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <argv...>
-  local state=$1 adapter=$2 id=$3 reg dest tmp arg generation
+  local state=$1 adapter=$2 id=$3 reg dest tmp arg
   shift 3
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
@@ -320,12 +289,10 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
   reg=$(fm_procevent_registry_dir "$state")
   (umask 077; mkdir -p "$reg") || return 1
   [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
-  generation=$(fm_procevent_registration_generation_new) || return 1
   dest="$reg/$id.source"
   tmp=$(umask 077; mktemp "$reg/.source.XXXXXX") || return 1
   if {
     printf 'adapter=%s\n' "$adapter"
-    printf 'generation=%s\n' "$generation"
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"
@@ -434,7 +401,7 @@ fm_procevent_extension_registration_load_locked() {  # <state> <source-id>
 
 # Exact legacy registration comparison used by conditional built-in retirement.
 fm_procevent_registration_matches_locked() {  # <state> <adapter> <source-id> <argv...>
-  local state=$1 adapter=$2 id=$3 reg dest tmp arg status=1 generation_line
+  local state=$1 adapter=$2 id=$3 reg dest tmp arg status=1
   shift 3
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
@@ -446,18 +413,9 @@ fm_procevent_registration_matches_locked() {  # <state> <adapter> <source-id> <a
   [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
   dest="$reg/$id.source"
   [ -f "$dest" ] && [ ! -L "$dest" ] || return 1
-  generation_line=$(sed -n '2p' "$dest") || return 1
-  case "$generation_line" in
-    generation=*)
-      fm_procevent_registration_generation_valid "${generation_line#generation=}" || return 1
-      ;;
-    argc=*) generation_line= ;;
-    *) return 1 ;;
-  esac
   tmp=$(umask 077; mktemp "$reg/.source-match.XXXXXX") || return 1
   if {
     printf 'adapter=%s\n' "$adapter"
-    [ -z "$generation_line" ] || printf '%s\n' "$generation_line"
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"
