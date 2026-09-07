@@ -810,8 +810,9 @@ The owning-session lease below bounds how long such an orphan can run, but it is
 
 A runner is bound to the session that owns it.
 Detaching a runner into its own process group is what lets a persistent source outlive the turn that armed it, and on its own it is also what lets a runner outlive its whole home: reparented to init, it keeps its blocking child - and every process that child spawns - running with nothing left to reap it.
-So a home's process-event state carries a lease that every ordinary `bin/fm-procevent.sh` entry point an owning session runs refreshes, and the watcher's reconcile cycle is what keeps it fresh in a live home.
-Each runner starts a small guard beside it, in a separate process group, that re-reads that lease and stops the runner's whole process group once it can no longer be proved fresh - which is what reaches the blocking child and everything under it, exactly as retirement does.
+So a home's process-event state carries a lease that registration, attached start, reconciliation, acknowledgement, and listing refresh, and the watcher's reconcile cycle is what keeps it fresh in a live home.
+An attached public `start` continues refreshing the lease while its caller remains attached.
+Each runner fails closed unless a small guard starts successfully beside it in a separate process group; that guard re-reads the lease and stops the runner's whole process group once freshness can no longer be proved, which reaches the blocking child and everything under it exactly as retirement does.
 Nothing a runner spawns can refresh the lease, so a source cannot certify its own owner, and the next reconcile in a live home simply starts a replacement runner.
 Scope is the owning state root and one runner generation, never a script or process name, so a live source in another home is untouched: that home refreshes its own lease.
 `FM_PROCEVENT_OWNER_LEASE_SECONDS` (default 600, range 1..86400) is how long a runner keeps going with no sign of its owning session, and `FM_PROCEVENT_OWNER_CHECK_SECONDS` (default 15, range 1..3600) is how often its guard re-reads the lease.

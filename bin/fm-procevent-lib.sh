@@ -110,10 +110,11 @@ fm_procevent_any_registered() {
 # nothing bounds its lifetime, so its blocking child - and everything that child
 # spawns - can keep running indefinitely.
 #
-# The bound is a lease on the OWNING STATE ROOT. Every ordinary process-event
-# entry point an owning session runs refreshes it, and the watcher's reconcile
-# cycle is the one that keeps it fresh in a live home. A runner proves its owner
-# is still there by reading that lease; when it cannot, it stops its own process
+# The bound is a lease on the OWNING STATE ROOT. Owner-presence operations
+# refresh it, an attached public start keeps it fresh while its caller remains
+# attached, and the watcher's reconcile cycle keeps it fresh in a live home.
+# A runner proves its owner is still there by reading that lease; when it cannot,
+# it stops its own process
 # group. The lease is keyed by state root, so another home's live runner is
 # untouched: that home refreshes its own lease. Nothing here keys on a script
 # name, a command line, or a process name, all of which are shared across homes.

@@ -153,11 +153,12 @@
 # spawns - running with nobody left to reap it. So every runner starts a small
 # guard beside it, in its own separate process group, which re-reads the owning
 # state root's lease on a bounded cadence and stops the runner's whole process
-# group once that lease can no longer be proved fresh. Every ordinary entry point
-# an owning session runs refreshes the lease, and the watcher's reconcile cycle
-# is what keeps it fresh in a live home; nothing a runner spawns can refresh it,
-# so a source cannot certify its own owner. Scope is the owning state root and
-# one runner generation, never a script or process name, so a live source in
+# group once that lease can no longer be proved fresh. Owner-presence operations
+# refresh the lease, an attached public start keeps it fresh while its caller
+# remains attached, and the watcher's reconcile cycle keeps it fresh in a live
+# home. Nothing a runner spawns can refresh it, so a source cannot certify its
+# own owner. Scope is the owning state root and one runner generation, never a
+# script or process name, so a live source in
 # another home is untouched. See bin/fm-procevent-lib.sh for the lease itself.
 #
 # Ownership is machine-wide per canonical source, because separate Firstmate

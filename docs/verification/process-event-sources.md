@@ -113,6 +113,10 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | one owner per canonical source | a second home's `start` for the same source id reports `already owned` and publishes nothing |
 | canonical physical identity | a final-component symlink and its target produce the same Lavish source id |
 | isolated public start boundary | direct `start` establishes a new runner-led process group before claiming the source, so retirement cannot signal an unrelated process inherited from the caller's group |
+| guarded runner startup | the source command does not launch when the detached owner guard rejects an invalid lease configuration, proving the runner waits for positive guard readiness and fails closed when initialization fails |
+| attached owner continuity | a foreground `start` with a one-second lease remains alive beyond that lease while its caller stays attached, then captures normally when the blocking source completes |
+| owner-session lifetime and scope | a detached runner and its spawning descendant are observed reparented before an expired owner lease stops their whole process group and process churn, while an identical runner in a home whose reconcile cycle keeps its lease fresh remains alive |
+| launch pacing during owner-loss grace | an immediately returning source that attempts detached self-relaunches is held to the configured minimum interval between command launches and remains bounded until its expired owner lease stops the generation |
 | stale reclaim without displacement | concurrent contenders replacing one stale claim start exactly one runner, cross-home replacement removes the old generation's staging file from its recorded state directory, and a generation whose stale owner and independently empty process group prove it gone remains reclaimable when its recorded state-root identity can no longer be revalidated |
 | crashed leader with a live owned group | `SIGKILL` on only the runner leader leaves its blocking child group alive; reconcile then stops that surviving group before any replacement starts, never leaves two source processes running for one canonical source, and a generation with no leader and no surviving group is still reclaimed |
 | PID-reuse safety | retirement refuses to signal a live PID whose identity differs from the claim, a reused PID never reaches the group-stop path because its leader is alive, and a surviving old process group prevents stale-generation cleanup on both ordinary and failed reservation-removal paths |
@@ -173,20 +177,24 @@ The 2026-08-27 review inspected `bin/fm-harness.sh`, `bin/fm-supervision-instruc
 ## Runner lifetime and cleanup
 
 A runner started by `reconcile` is its own process group leader and is reparented to init, so it outlives the shell that started it by design.
-That means nothing about the starting context can reap it: removing a home's state directory does not stop an already-running child, and signalling only the runner leaves the blocking child alive.
+Removing a home's state directory does not stop an already-running child, and signalling only the runner leaves the blocking child alive.
 
-Two paths therefore stop a runner, and both verify the runner-owned process group, escalate to `KILL` while that group still exists, and refuse to release ownership until the whole group is gone:
+Three paths stop a runner generation through its verified process group:
 
+- The runner starts only after its separate owner guard confirms initialization; the guard stops the runner group after two consecutive checks cannot prove the owning home's lease fresh.
 - `retire` resolves the runner PID and identity from this home's machine-wide claim, so retirement still works when the home's state is already gone.
 - `reconcile` stops a runner this home owns whose source registration has been removed, and reports it as `stopped=N`.
+
+The owner guard and explicit cleanup paths reach the blocking source and its descendants through the runner's group.
+The launch floor independently bounds an immediately returning source while an owner-loss lease is still valid.
+An attached public `start` maintains the lease for its caller's lifetime, while detached runners and everything they spawn are forbidden from refreshing it.
 
 The same group rule decides when a claim may be reclaimed, not only when a runner may be signalled.
 A leader that died while its owned group kept running is not a gone generation, so `reconcile` stops that surviving group and releases its generation before starting any replacement, and preserves the claim for a later retry when it cannot prove the group stopped or another home owns it.
 Once a stale owner and an independent group check prove the whole generation gone, an unreachable token-keyed capture reservation cannot veto reclamation.
 Signalling an orphaned group is safe precisely because only an absent leader reaches that state: a reused PID leaves the leader alive, so no group signal follows, and an independent surviving-group check still prevents stale-generation cleanup.
 
-This was found by four orphaned runners, elapsed 6-13 minutes, left by a suite whose fixture source never completed.
-`tests/fm-procevent.test.sh` now covers both paths, and three consecutive suite runs leave zero runners, zero fixture children, and zero stray claims.
+`tests/fm-procevent.test.sh` covers owner-loss reaping, descendant churn cessation, cross-home scope, launch pacing, guard startup failure, attached-start continuity, explicit retirement, and stale-group reconciliation.
 
 ## Portability finding
 
