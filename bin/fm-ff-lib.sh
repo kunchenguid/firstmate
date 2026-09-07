@@ -10,19 +10,27 @@
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
 #
+# A REMOTE secondmate home follows that same primary commit. Its host cannot read
+# this object store, so bin/fm-spawn.sh and bin/fm-bootstrap.sh hand the commit to
+# bin/fm-remote-secondmate-control.sh, which imports it on that host and then runs
+# THIS ff_target with it as the base, so the guards below stay the only copy of the
+# ancestry rules.
+#
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward that
-# never touches the network. A standalone clone moves through that path only when
-# it already has the target; otherwise it is skipped until the origin path updates it.
+# never touches the network. A local standalone clone moves through that path
+# only when it already has the target; otherwise it is skipped until the origin
+# path updates it.
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
 # secondmate's backlog, projects, or in-flight work.
 # The seeded .fm-secondmate-home identity marker is gitignored too; the local
 # sync tolerates only that marker during the one-time upgrade of pre-ignore
 # linked-worktree homes.
-# Homes are leased at a detached HEAD on the
-# default branch, so the fast-forward advances HEAD only and never moves the
-# shared default branch or any other worktree's checkout.
+# Locally leased homes start at a detached HEAD on the default branch, so their
+# fast-forward advances HEAD only and never moves the shared default branch or
+# any other worktree's checkout. A standalone remote home may instead advance
+# its checked-out default branch under the same guard.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -224,6 +232,20 @@ changed_instr() {
   printf '%s' "$out"
 }
 
+# Translate one remote home sync leg's failure into an operator-actionable
+# reason. The remote leg refuses a command shape it does not recognize with this
+# status, which on this leg can only mean that host's Firstmate copy predates the
+# parent-targeted sync it was just asked for; every other failure already carries
+# its own diagnostic.
+REMOTE_SYNC_UNSUPPORTED_STATUS=2
+remote_sync_failure_reason() { # <exit-status> <output>
+  if [ "$1" = "$REMOTE_SYNC_UNSUPPORTED_STATUS" ]; then
+    printf '%s\n' "the Firstmate copy on that host is too old to sync to this primary's commit; run /updatefirstmate"
+    return 0
+  fi
+  first_line "$2"
+}
+
 dirty_status() {
   local dir=$1 ignore_seed_marker=${2:-no}
   if [ "$ignore_seed_marker" = yes ]; then
@@ -375,6 +397,20 @@ FF_SEEN_HOMES=""
 # whose only change was non-instruction tracked files, is left undisturbed. The
 # firstmate repo itself (FM_ROOT) is never processed as its own secondmate, and
 # each resolved home is processed at most once.
+#
+# Two optional caller hooks fire from here, each at most once per resolved home:
+#   fm_ff_after_instruction_update <id> <home> <window> <instr>
+#     the nudge-shaped hook: only for an advance that changed the instruction
+#     surface, and only under nudge_requires_instr=yes.
+#   fm_ff_after_secondmate_settled <id> <home> <window> <status> <instr>
+#     the settled-state hook: for every home this sweep left AT the base with a
+#     live window, whether it advanced (status=updated) or was already there
+#     (status=current). A home that was SKIPPED is never settled, so a dirty,
+#     diverged, offline, or unsafe home never reaches this hook and nothing here
+#     forces, stashes, or discards its work. /updatefirstmate uses this hook to
+#     reach every live mate that is genuinely on the new bytes, including the
+#     ones that needed no advance to get there.
+# An undefined hook is simply not called.
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
   [ -n "$id" ] || return 0
@@ -393,6 +429,10 @@ process_secondmate() {
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
   ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
+  if [ -n "$window" ] && { [ "$FF_STATUS" = "updated" ] || [ "$FF_STATUS" = "current" ]; } \
+    && type fm_ff_after_secondmate_settled >/dev/null 2>&1; then
+    fm_ff_after_secondmate_settled "$id" "$home_real" "$window" "$FF_STATUS" "$FF_INSTR"
+  fi
   if [ "$FF_STATUS" = "updated" ] && [ -n "$window" ]; then
     if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
       return 0

@@ -1824,15 +1824,21 @@ test_secondmate_merge_reports_upward_once() {
 
   assert_grep "done [key=merged-task-x1]: merged task-x1 $url" "$replies" \
     "secondmate-merge-reports: the landed PR was not reported upward"
-  [ "$(wc -l <"$replies")" -eq 1 ] \
-    || fail "secondmate-merge-reports: one merge produced more than one upward line"
+  [ "$(grep -c 'merged-task-x1' "$replies")" -eq 1 ] \
+    || fail "secondmate-merge-reports: one merge produced more than one upward merge line"
+  # The merge path registers the PR first, and that registration publishes the
+  # child's ready line on the same channel from fm-pr-check itself.
+  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url" "$replies" \
+    "secondmate-merge-reports: the registration's ready line was not reported upward"
 
   # The same merge again: the forge accepts it in this fixture, so only the
   # at-most-once contract can keep the parent from being told twice.
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout2" 2>"$case_dir/stderr2" || fail "secondmate-merge-reports: repeat merge failed"
-  [ "$(parent_reply_lines "$replies" "$url")" -eq 1 ] \
+  [ "$(grep -c 'merged-task-x1' "$replies")" -eq 1 ] \
     || fail "secondmate-merge-reports: a repeat merge of the same PR duplicated the upward line"
+  [ "$(parent_reply_lines "$replies" "$url")" -eq 2 ] \
+    || fail "secondmate-merge-reports: a repeat merge changed the upward lines: $(cat "$replies")"
   pass "a merge a secondmate home performs itself is reported upward exactly once"
 }
 
@@ -1868,7 +1874,9 @@ test_failed_merge_reports_nothing() {
   set -e
 
   expect_code 1 "$rc" "failed-merge-silent: a failed merge should propagate"
-  assert_absent "$case_dir/state/parent-replies.status" \
+  # The registration's ready line is a fact of its own; only a merge line
+  # would misreport the unlanded merge.
+  assert_no_grep 'merged-task-x1' "$case_dir/state/parent-replies.status" \
     "failed-merge-silent: a merge that never landed was reported as landed"
   pass "a refused or failed merge reports no outcome"
 }
@@ -1887,7 +1895,9 @@ test_gitlab_refusal_reports_nothing() {
   set -e
 
   expect_code 1 "$rc" "gitlab-refusal-silent: a refused GitLab merge should exit non-zero"
-  assert_absent "$case_dir/state/parent-replies.status" \
+  # Registration succeeds before the later GitLab pre-merge refusal, so the
+  # PR-ready fact is expected; only a merged outcome would be false.
+  assert_no_grep 'merged-task-x1' "$case_dir/state/parent-replies.status" \
     "gitlab-refusal-silent: a refused merge request was reported as landed"
   pass "a GitLab merge refused before the forge call reports no outcome"
 }

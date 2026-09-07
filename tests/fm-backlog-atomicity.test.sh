@@ -26,6 +26,10 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# An exported TASKS_AXI_BACKEND would outrank each case's .tasks.toml fixture
+# in fm_tasks_axi_backend, so the backend cases must start from a clean slate.
+unset TASKS_AXI_BACKEND || :
+
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
@@ -53,7 +57,17 @@ make_home() {  # <name> [task-id...]
     > "$home/data/backlog.md"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
-    printf 'Delivery contract: mode=no-mistakes\nbrief for %s\n' "$id" > "$home/data/$id/brief.md"
+    cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Exercise backlog dispatch for $id.
+
+## Firstmate spec
+Verify the atomic backlog transition.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+EOF
   done
 
   cat > "$fakebin/tmux" <<'SH'
@@ -109,6 +123,53 @@ SH
   chmod +x "$case_dir/fakebin/tasks-axi"
 }
 
+record_tasks_axi_calls() {  # <case-dir>
+  local case_dir=$1 real
+  real=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tasks-axi-calls"
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+make_beads_tasks_axi_stub() {  # <case-dir> <id>
+  local case_dir=$1 id=$2
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tasks-axi-calls"
+case "\${1:-}" in
+  --version)
+    printf '%s\n' '0.2.5'
+    ;;
+  update)
+    [ "\${2:-}" = --help ] || exit 1
+    printf '%s\n' '--archive-body'
+    ;;
+  mv)
+    [ "\${2:-}" = --help ] || exit 1
+    printf '%s\n' 'usage: tasks-axi mv [<id>...]'
+    ;;
+  show)
+    [ "\${2:-}" = "$id" ] || exit 1
+    if [ "\${3:-}" = --file ]; then
+      printf '%s\n' 'error: beads show failed' >&2
+      printf '%s\n' 'code: UNKNOWN' >&2
+      exit 1
+    fi
+    printf '%s\n' 'task:'
+    printf '  id: %s\n' "$id"
+    printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
 make_tasks_axi_incompatible() {  # <case-dir>
   local case_dir=$1 real
   real=$(command -v tasks-axi)
@@ -157,6 +218,166 @@ fi
 exec "$real" "\$@"
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+# The commit's `start` reports success but never moves the row - the beads
+# failure pattern - and interrupts the spawn, so the deferred-signal exit path
+# must read the preserved state back before it claims anything about it.
+# <repair> decides whether a LATER start (the error path's own read-back
+# repair) can move the row, or fails too.
+lie_start_then_interrupt() {  # <case-dir> <repair: works|fails>
+  local case_dir=$1 repair=$2 real
+  real=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = start ]; then
+  if [ ! -f "$case_dir/start-interrupted" ]; then
+    : > "$case_dir/start-interrupted"
+    spawn_pid=\$(ps -o ppid= -p "\$PPID" | tr -d ' ')
+    case "\$spawn_pid" in ''|*[!0-9]*) exit 1 ;; esac
+    kill -TERM "\$spawn_pid"
+    exit 0
+  fi
+  if [ "$repair" = fails ]; then
+    echo 'error: "backlog is unwritable"' >&2
+    exit 1
+  fi
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+# The commit's `start` reports success but never moves the row - the beads
+# failure pattern - and interrupts the spawn; every later `start` (the error
+# path's own read-back repair) never answers. With FM_TASKS_AXI_TIMEOUT
+# bounding each call, the verification must time out and exit with the honest
+# attempted wording instead of holding the per-task meta lock open forever.
+hang_start_after_first() {  # <case-dir>
+  local case_dir=$1 real
+  real=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = start ]; then
+  if [ ! -f "$case_dir/start-interrupted" ]; then
+    : > "$case_dir/start-interrupted"
+    spawn_pid=\$(ps -o ppid= -p "\$PPID" | tr -d ' ')
+    case "\$spawn_pid" in ''|*[!0-9]*) exit 1 ;; esac
+    kill -TERM "\$spawn_pid"
+    exit 0
+  fi
+  sleep 300
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+# --- fm_tasks_axi's own bound -------------------------------------------------
+
+# A PATH with no timeout variant on it - the stock-macOS shape, where GNU
+# timeout is absent and coreutils does not ship gtimeout. fm_tasks_axi must
+# still bound the call, through its perl watchdog, instead of running it
+# unbounded under the per-task meta lock.
+make_fallback_bin() {  # <case-dir> <tasks-axi-stub-script>
+  local case_dir=$1 stub=$2 fb="$1/fallbackbin"
+  mkdir -p "$fb"
+  ln -s "$(command -v perl)" "$fb/perl"
+  ln -s "$(command -v sleep)" "$fb/sleep"
+  printf '%s\n' "$stub" > "$fb/tasks-axi"
+  chmod +x "$fb/tasks-axi"
+  printf '%s\n' "$fb"
+}
+
+run_bounded_fm_tasks_axi() {  # <fallback-bin> <bound> [args...]
+  local fb=$1 bound=$2 out rc=0 saved_path=$PATH
+  shift 2
+  # The fallback shape itself: a PATH with no timeout variant on it. Set and
+  # restored here, never in a subshell, so the change cannot leak into other
+  # tests.
+  PATH="$fb"
+  out=$(
+    . "$ROOT/bin/fm-backlog-transition-lib.sh"
+    FM_TASKS_AXI_TIMEOUT="$bound" fm_tasks_axi "$@" 2>&1
+  ) || rc=$?
+  PATH=$saved_path
+  printf '%s' "$out"
+  return "$rc"
+}
+
+test_fm_tasks_axi_fallback_bounds_the_call_without_a_timeout_binary() {
+  local case_dir fb out rc=0 started
+  case_dir=$(make_home fm-tasks-axi-fallback)
+  fb=$(make_fallback_bin "$case_dir" '#!/bin/bash
+exec sleep 300')
+  started=$SECONDS
+  out=$(run_bounded_fm_tasks_axi "$fb" 2 show never-answers) || rc=$?
+  [ "$rc" -eq 124 ] \
+    || fail "the perl watchdog fallback did not report the call as timed out (rc=$rc, out=$out)"
+  [ $((SECONDS - started)) -ge 2 ] \
+    || fail "the perl watchdog fallback fired before the bound elapsed"
+  [ $((SECONDS - started)) -lt 20 ] \
+    || fail "the perl watchdog fallback did not bound the call (${SECONDS}s)"
+  pass "fm_tasks_axi bounds the call through its perl watchdog when no timeout binary exists"
+}
+
+test_fm_tasks_axi_fallback_passes_the_child_status_and_output_through() {
+  local case_dir fb out rc=0
+  case_dir=$(make_home fm-tasks-axi-passthrough)
+  fb=$(make_fallback_bin "$case_dir" '#!/bin/bash
+echo "stub failed"
+exit 7')
+  out=$(run_bounded_fm_tasks_axi "$fb" 5 show x) || rc=$?
+  [ "$rc" -eq 7 ] \
+    || fail "the perl watchdog fallback did not pass the child status through (rc=$rc)"
+  assert_contains "$out" "stub failed" "the perl watchdog fallback lost the child's output"
+  pass "fm_tasks_axi's perl watchdog passes the child status and output through unchanged"
+}
+
+test_fm_tasks_axi_fails_closed_when_nothing_can_bound_the_call() {
+  local case_dir fb out rc=0
+  case_dir=$(make_home fm-tasks-axi-unboundable)
+  fb="$case_dir/unboundablebin"
+  mkdir -p "$fb"
+  printf '#!/bin/bash\nexit 0\n' > "$fb/tasks-axi"
+  chmod +x "$fb/tasks-axi"
+  out=$(run_bounded_fm_tasks_axi "$fb" 5 show x) || rc=$?
+  [ "$rc" -eq 127 ] \
+    || fail "fm_tasks_axi ran the call although nothing could bound it (rc=$rc)"
+  assert_contains "$out" "cannot bound tasks-axi" \
+    "the fail-closed diagnostic did not say why the call was refused"
+  pass "fm_tasks_axi fails closed rather than running unbounded when no bounding mechanism exists"
+}
+
+test_fm_tasks_axi_gnu_timeout_forces_termination_of_a_sigterm_ignoring_child() {
+  local case_dir fb out rc=0 started
+  if ! command -v timeout >/dev/null 2>&1; then
+    pass "fm_tasks_axi's GNU timeout forces termination (skipped: no timeout binary on this host)"
+    return 0
+  fi
+  case_dir=$(make_home fm-tasks-axi-kill-after)
+  # A real GNU timeout on the PATH, and a tasks-axi that ignores SIGTERM
+  # (the ignored disposition survives exec into sleep). timeout alone would
+  # wait forever for such a child; only its kill-after stops it, so this
+  # test fails on an unforced bound and passes once TERM is followed by
+  # KILL at one further bound.
+  fb="$case_dir/gnubin"
+  mkdir -p "$fb"
+  ln -s "$(command -v timeout)" "$fb/timeout"
+  ln -s "$(command -v sleep)" "$fb/sleep"
+  printf '#!/bin/bash\ntrap "" TERM\nexec sleep 300\n' > "$fb/tasks-axi"
+  chmod +x "$fb/tasks-axi"
+  started=$SECONDS
+  out=$(run_bounded_fm_tasks_axi "$fb" 2 show never-answers) || rc=$?
+  case $rc in
+    124 | 137) ;;
+    *) fail "the GNU timeout path did not report the TERM-ignoring child as timed out (rc=$rc, out=$out)" ;;
+  esac
+  [ $((SECONDS - started)) -ge 2 ] \
+    || fail "the GNU timeout path fired before the bound elapsed"
+  [ $((SECONDS - started)) -lt 20 ] \
+    || fail "the GNU timeout path did not force-terminate the TERM-ignoring child (${SECONDS}s)"
+  pass "fm_tasks_axi's GNU timeout kills a child that ignores SIGTERM after one further bound"
 }
 
 change_row_on_second_show() {  # <case-dir> <done|rm>
@@ -333,7 +554,11 @@ write_task_meta() {  # <case-dir> <id> <kind> <mode> [extra-line...]
 run_spawn() {  # <case-dir> <args...>
   local case_dir=$1
   shift
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
+  # A claude spawn pre-registers workspace trust in the launching user's own
+  # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
+  # without it this suite would write the developer's real ~/.claude.json.
+  mkdir -p "$case_dir/user-home"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" HOME="$case_dir/user-home" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
@@ -371,13 +596,103 @@ test_dispatch_moves_the_item_in_flight_in_the_same_run() {
   id=atomic-dispatch-b1
   case_dir=$(make_home dispatch-ok "$id")
   add_item "$case_dir" "$id"
+  cp "$ROOT/.tasks.toml" "$(home_of "$case_dir")/.tasks.toml"
+  record_tasks_axi_calls "$case_dir"
 
   out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"
   assert_contains "$out" "spawned $id" "spawn did not report success"
   assert_present "$(home_of "$case_dir")/state/$id.meta" "spawn published no record"
+  assert_grep "show $id --file $(backlog_of "$case_dir")" \
+    "$case_dir/tasks-axi-calls" \
+    "markdown dispatch did not pass the backlog file to show"
   [ "$(row_state "$case_dir" "$id")" = in_flight ] \
     || fail "spawn reported success with its backlog item still $(row_state "$case_dir" "$id")"
   pass "dispatch publishes the record and moves the backlog item In flight in one run"
+}
+
+test_dispatch_omits_the_file_for_a_beads_show() {
+  local case_dir home id out
+  id=atomic-dispatch-beads-b1
+  case_dir=$(make_home dispatch-beads "$id")
+  home=$(home_of "$case_dir")
+  printf '%s\n' 'backend = "beads"' '[beads]' 'path = ".beads"' \
+    'prefix = "atomic"' > "$home/.tasks.toml"
+  make_beads_tasks_axi_stub "$case_dir" "$id"
+
+  out=$(run_ship_spawn "$case_dir" "$id") || fail "Beads spawn failed: $out"
+  assert_contains "$out" "spawned $id" "Beads spawn did not report success"
+  assert_grep "show $id" "$case_dir/tasks-axi-calls" \
+    "Beads dispatch did not probe the backlog row"
+  assert_no_grep "show $id --file" "$case_dir/tasks-axi-calls" \
+    "Beads dispatch passed the markdown file to show"
+  pass "dispatch omits the markdown file when probing a Beads backlog"
+}
+
+test_completion_omits_the_file_for_a_beads_done() {
+  local case_dir home id out
+  id=atomic-completion-beads-b1
+  case_dir=$(make_home completion-beads "$id")
+  home=$(home_of "$case_dir")
+  printf '%s\n' 'backend = "beads"' '[beads]' 'path = ".beads"' \
+    'prefix = "atomic"' > "$home/.tasks.toml"
+  # A Beads home keeps no markdown backlog at all: the transition gate, the
+  # row probe, and the close must all address the configured backend without
+  # requiring or overriding a markdown file.
+  rm -f "$home/data/backlog.md"
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tasks-axi-calls"
+case "\${1:-}" in
+  --version) printf '%s\n' '0.2.5' ;;
+  update)
+    [ "\${2:-}" = --help ] || exit 1
+    printf '%s\n' '--archive-body'
+    ;;
+  mv)
+    [ "\${2:-}" = --help ] || exit 1
+    printf '%s\n' 'usage: tasks-axi mv [<id>...]'
+    ;;
+  show)
+    [ "\${2:-}" = "$id" ] || exit 1
+    case " \$* " in
+      *" --file "*)
+        printf '%s\n' 'error: beads show received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    printf '%s\n' 'task:'
+    printf '  id: %s\n' "$id"
+    printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no'
+    ;;
+  done)
+    [ "\${2:-}" = "$id" ] || exit 1
+    case " \$* " in
+      *" --file "*)
+        printf '%s\n' 'error: beads done received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    printf 'ok: done %s\n' "$id"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-beads-done"
+
+  out=$(run_teardown "$case_dir" "$id") \
+    || fail "Beads completion teardown failed without a markdown backlog: $out"
+  assert_grep "done $id" "$case_dir/tasks-axi-calls" \
+    "the Beads close never ran"
+  assert_no_grep "done $id --file" "$case_dir/tasks-axi-calls" \
+    "the Beads close passed the markdown file to done"
+  assert_absent "$home/state/$id.meta" \
+    "the Beads completion teardown left the task record behind"
+  assert_absent "$home/state/$id.backlog-close" \
+    "the Beads completion teardown left its pending-close record behind"
+  assert_not_contains "$out" "backlog.md" \
+    "the Beads teardown reported the close against a markdown file this home has not got"
+  pass "completion applies and closes a Beads backlog without any markdown file"
 }
 
 test_dispatch_refuses_a_pending_authoritative_close() {
@@ -895,14 +1210,87 @@ test_dispatch_defers_interruption_across_backlog_commit() {
     rc=0
     out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
     [ "$rc" -ne 0 ] || fail "a $timing-commit interruption was reported as success"
-    assert_contains "$out" "paired task record and In-flight backlog state were preserved" \
-      "a $timing-commit interruption did not report its atomic outcome"
+    assert_contains "$out" "verified preserved: its paired task record is present and its backlog item is In flight" \
+      "a $timing-commit interruption did not report its verified atomic outcome"
     [ "$(row_state "$case_dir" "$id")" = in_flight ] \
       || fail "a $timing-commit interruption left the backlog row queued"
     assert_present "$(home_of "$case_dir")/state/$id.meta" \
       "a $timing-commit interruption removed the paired task record"
   done
   pass "dispatch retries interrupted transitions before honoring termination"
+}
+
+test_deferred_signal_reads_back_preserved_state() {
+  local case_dir id out rc=0
+  id=atomic-dispatch-signal-readback-b5
+  case_dir=$(make_home dispatch-signal-readback "$id")
+  add_item "$case_dir" "$id"
+  lie_start_then_interrupt "$case_dir" works
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
+  assert_contains "$out" "moved to In flight now and verified" \
+    "a signal-deferred spawn did not read the row back and repair it"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "the read-back repair left the backlog row at $(row_state "$case_dir" "$id")"
+  assert_present "$(home_of "$case_dir")/state/$id.meta" \
+    "the read-back repair lost the paired task record"
+  pass "a signal-deferred spawn verifies its preserved state and repairs a row that did not move"
+}
+
+test_deferred_signal_never_claims_unverified_preservation() {
+  local case_dir id out rc=0
+  id=atomic-dispatch-signal-unverified-b5
+  case_dir=$(make_home dispatch-signal-unverified "$id")
+  add_item "$case_dir" "$id"
+  lie_start_then_interrupt "$case_dir" fails
+
+  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
+  assert_contains "$out" "preservation could not be verified" \
+    "an unverifiable preservation was not reported as attempted, not verified"
+  case "$out" in
+    *"In-flight backlog state were preserved"*) \
+      fail "the interrupted spawn still claimed a preservation it never verified" ;;
+  esac
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "the failed repair left the backlog row at $(row_state "$case_dir" "$id")"
+  assert_present "$(home_of "$case_dir")/state/$id.meta" \
+    "the failed repair removed the paired task record"
+  pass "a signal-deferred spawn reports attempted preservation as attempted when it cannot be verified"
+}
+
+test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
+  local case_dir id out rc=0
+  id=atomic-dispatch-signal-hang-b5
+  case_dir=$(make_home dispatch-signal-hang "$id")
+  add_item "$case_dir" "$id"
+  hang_start_after_first "$case_dir"
+
+  # The read-back's own `start` never answers, so the spawn must bound it
+  # (FM_TASKS_AXI_TIMEOUT=3), print the attempted wording naming the timeout,
+  # and exit - the outer `timeout -k 5 30` only turns a regression back into
+  # the lock-held-forever hang it exists to catch.
+  mkdir -p "$case_dir/user-home"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
+    HOME="$case_dir/user-home" FM_SPAWN_NO_GUARD=1 \
+    FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" CLAUDE_CONFIG_DIR='' \
+    FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$PATH" \
+    timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
+    --mode no-mistakes --yolo off 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
+  case "$rc" in
+    124|137) fail "the verification hung on the unresponsive start instead of timing out: $out" ;;
+  esac
+  assert_contains "$out" "preservation could not be verified" \
+    "a timed-out verification did not report the preservation as attempted, not verified"
+  assert_contains "$out" "did not finish within 3s" \
+    "the attempted-preservation wording did not name the timeout as its reason"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "the timed-out repair left the backlog row at $(row_state "$case_dir" "$id")"
+  assert_present "$(home_of "$case_dir")/state/$id.meta" \
+    "the timed-out repair removed the paired task record"
+  pass "a signal-deferred spawn bounds its verification so an unresponsive tasks-axi cannot hold the meta lock forever"
 }
 
 test_dispatch_interruption_during_kimi_readiness_fails_before_commit() {
@@ -2223,6 +2611,8 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
 }
 
 test_dispatch_moves_the_item_in_flight_in_the_same_run
+test_dispatch_omits_the_file_for_a_beads_show
+test_completion_omits_the_file_for_a_beads_done
 test_dispatch_refuses_a_pending_authoritative_close
 test_dispatch_refuses_a_held_row_before_creating_resources
 test_dispatch_refuses_a_blocked_row_before_creating_resources
@@ -2245,6 +2635,13 @@ test_dispatch_reports_an_incomplete_record_rollback
 test_dispatch_reports_an_incomplete_busy_rollback
 test_dispatch_rolls_back_before_a_failed_launch_delivery
 test_dispatch_defers_interruption_across_backlog_commit
+test_deferred_signal_reads_back_preserved_state
+test_deferred_signal_never_claims_unverified_preservation
+test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi
+test_fm_tasks_axi_fallback_bounds_the_call_without_a_timeout_binary
+test_fm_tasks_axi_fallback_passes_the_child_status_and_output_through
+test_fm_tasks_axi_fails_closed_when_nothing_can_bound_the_call
+test_fm_tasks_axi_gnu_timeout_forces_termination_of_a_sigterm_ignoring_child
 test_dispatch_interruption_during_kimi_readiness_fails_before_commit
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight

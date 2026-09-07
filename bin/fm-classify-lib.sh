@@ -419,6 +419,14 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
   return 0
 }
 
+_fm_is_pending_reply_escalation() {  # <key> <note>
+  case "$1" in pending-reply-*) ;; *) return 1 ;; esac
+  case "$2" in
+    pending-reply-missed:*|pending-reply-delivery-unknown:*|pending-reply-recovery-delivery-failed:*|pending-reply-recovery-delivery-unknown:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
   local open=$1 line=$2 resolve=$3 held=$4 verb key note
   # Blank-line guard. A `case` glob answers "does this line hold any non-space
@@ -670,6 +678,15 @@ _fm_status_file_size() {  # <status-file>
   fi
 }
 
+_fm_status_file_mtime() {  # <status-file>
+  local f=$1
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%m' "$f" 2>/dev/null
+  else
+    LC_ALL=C stat -c '%Y' "$f" 2>/dev/null
+  fi
+}
+
 # Private scratch path for a one-shot span read, alongside the status file the
 # same way the cursor above is, and PID-scoped so concurrent readers of one log
 # (the watcher and the away-mode daemon both classify the same stream) never
@@ -848,8 +865,81 @@ status_presentation_snapshot() {  # <state>
   done
 }
 
+# Read the latest non-blank event through one captured presentation endpoint.
+# This is the bounded latest-event owner for fleet-wide backstops: at most the
+# final 64 KiB is inspected, and a file that changes during the read is deferred
+# to the next snapshot instead of combining a line from one state with the mtime
+# from another. The status log is append-only and ordinary event lines are far
+# below this bound. A pathological latest line that crosses the fixed bound is
+# intentionally unclassifiable and omitted: bounded memory and never presenting
+# a possibly routine line as captain-facing take precedence on that edge.
+FM_STATUS_SNAPSHOT_EVENT_LINE=
+FM_STATUS_SNAPSHOT_EVENT_MTIME=
+FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=
+# shellcheck disable=SC2034 # Output globals are consumed by sourcing drain scripts.
+status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-identity>
+  local f=$1 endpoint=$2 expected_ident=$3 limit=65536 start length scratch record line event_endpoint
+  local before_mtime after_mtime before_size after_size before_ident after_ident skip_first=0
+  FM_STATUS_SNAPSHOT_EVENT_LINE=
+  FM_STATUS_SNAPSHOT_EVENT_MTIME=
+  FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=
+  case "$endpoint" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ -n "$expected_ident" ] || return 1
+
+  before_mtime=$(_fm_status_file_mtime "$f") || return 1
+  before_size=$(_fm_status_file_size "$f") || return 1
+  before_size=${before_size//[[:space:]]/}
+  before_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  case "$before_mtime:$before_size" in *[!0-9:]*) return 1 ;; esac
+  [ "$before_size" -eq "$endpoint" ] && [ "$before_ident" = "$expected_ident" ] || return 1
+
+  if [ "$endpoint" -gt "$limit" ]; then
+    start=$((endpoint - limit))
+    skip_first=1
+  else
+    start=0
+  fi
+  length=$((endpoint - start))
+  scratch="$(_fm_status_span_scratch "$f").latest"
+  _fm_status_read_span "$f" "$start" "$length" > "$scratch" 2>/dev/null \
+    || { rm -f "$scratch"; return 1; }
+  if record=$(LC_ALL=C perl -e '
+    my ($path, $start, $skip_first) = @ARGV;
+    open my $file, "<", $path or exit 1;
+    binmode $file;
+    scalar(<$file>) if $skip_first;
+    my ($latest, $end);
+    while (defined(my $line = <$file>)) {
+      next unless $line =~ /[^\s]/;
+      $line =~ s/[\r\n]+\z//;
+      ($latest, $end) = ($line, $start + tell($file));
+    }
+    exit 1 unless defined $end;
+    print "$end\t$latest";
+  ' "$scratch" "$start" "$skip_first"); then :; else rm -f "$scratch"; return 1; fi
+  rm -f "$scratch"
+  event_endpoint=${record%%$'\t'*}
+  line=${record#*$'\t'}
+  case "$event_endpoint" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$line" ] || return 1
+
+  after_mtime=$(_fm_status_file_mtime "$f") || return 1
+  after_size=$(_fm_status_file_size "$f") || return 1
+  after_size=${after_size//[[:space:]]/}
+  after_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  case "$after_mtime:$after_size" in *[!0-9:]*) return 1 ;; esac
+  [ "$after_mtime" = "$before_mtime" ] \
+    && [ "$after_size" -eq "$endpoint" ] \
+    && [ "$after_ident" = "$expected_ident" ] \
+    || return 1
+
+  FM_STATUS_SNAPSHOT_EVENT_LINE=$line
+  FM_STATUS_SNAPSHOT_EVENT_MTIME=$before_mtime
+  FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$event_endpoint
+}
+
 status_presentation_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task offset ident extra cur_ident size legacy
+  local f=$1 state task manifest data row_task offset ident backstop extra cur_ident size legacy
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
@@ -858,11 +948,11 @@ status_presentation_cursor_offset() {  # <status-file>
     [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
     data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
     offset=
-    while IFS=$(printf '\t') read -r row_task ident legacy extra; do
+    while IFS=$(printf '\t') read -r row_task ident legacy backstop extra; do
       [ -n "$row_task" ] || continue
       [ -z "$extra" ] || return 1
-      case "$legacy" in ''|*[!0-9]*) return 1 ;; esac
-      [ -n "$ident" ] || return 1
+      case "$legacy:$backstop" in *[!0-9:]*) return 1 ;; esac
+      [ -n "$legacy" ] && [ -n "$ident" ] || return 1
       if [ "$row_task" = "$task" ]; then
         [ -z "$offset" ] || return 1
         offset=$legacy
@@ -891,6 +981,38 @@ EOF
   case "$size:$offset" in *[!0-9:]*) return 1 ;; esac
   if [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then offset=0; fi
   printf '%s' "$offset"
+}
+
+status_outcome_backstop_cursor_offset() {  # <status-file>
+  local f=$1 state task manifest data row_task ident presented row_backstop backstop extra current size
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  state=${f%/*}
+  task=${f##*/}; task=${task%.status}
+  manifest="$state/.status-presentation-cursor"
+  [ -e "$manifest" ] || { printf '0'; return 0; }
+  [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
+  data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
+  backstop=0
+  while IFS=$(printf '\t') read -r row_task ident presented row_backstop extra; do
+    [ -n "$row_task" ] || continue
+    [ -z "$extra" ] || return 1
+    case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
+    [ -n "$presented" ] && [ -n "$ident" ] || return 1
+    if [ "$row_task" = "$task" ]; then
+      current=$(_fm_open_decisions_file_ident "$f") || return 1
+      size=$(_fm_status_file_size "$f") || return 1
+      size=${size//[[:space:]]/}
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$ident" = "$current" ] || { printf '0'; return 0; }
+      backstop=${row_backstop:-0}
+      [ "$backstop" -le "$size" ] || backstop=0
+      printf '%s' "$backstop"
+      return 0
+    fi
+  done <<EOF
+$data
+EOF
+  printf '0'
 }
 
 status_signal_seen_marker_path() {  # <state> <task-id>
@@ -1026,7 +1148,7 @@ status_presentation_marker_commit() {
 }
 
 status_retire_presentation_task() {  # <state> <task-id>
-  local state=$1 task=$2 lock manifest tmp data row_task ident offset extra rc=0 found=0
+  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
   local signal_marker heartbeat_marker daemon_marker
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
@@ -1051,10 +1173,11 @@ status_retire_presentation_task() {  # <state> <task-id>
     fi
     if [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] \
       && data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
-      while IFS=$(printf '\t') read -r row_task ident offset extra; do
+      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
         [ -n "$row_task" ] || continue
         if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
-        case "$offset" in ''|*[!0-9]*) rc=1; break ;; esac
+        case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
+        [ -n "$offset" ] || { rc=1; break; }
         [ "$row_task" != "$task" ] || found=1
       done <<EOF
 $data
@@ -1073,12 +1196,13 @@ EOF
     elif ! : > "$tmp"; then
       rc=1
     else
-      while IFS=$(printf '\t') read -r row_task ident offset extra; do
+      while IFS=$(printf '\t') read -r row_task ident offset backstop extra; do
         [ -n "$row_task" ] || continue
         if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
-        case "$offset" in ''|*[!0-9]*) rc=1; break ;; esac
+        case "$offset:$backstop" in *[!0-9:]*) rc=1; break ;; esac
+        [ -n "$offset" ] || { rc=1; break; }
         if [ "$row_task" != "$task" ]; then
-          printf '%s\t%s\t%s\n' "$row_task" "$ident" "$offset" >> "$tmp" \
+          printf '%s\t%s\t%s\t%s\n' "$row_task" "$ident" "$offset" "${backstop:-0}" >> "$tmp" \
             || { rc=1; break; }
         fi
       done <<EOF
@@ -1131,7 +1255,7 @@ EOF
 }
 
 status_commit_presentation_snapshot() {  # <state> <snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp
+  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp backstop acknowledged_task acknowledged_endpoint
   tmp="$state/.status-presentation-cursor.tmp.$$"
   : > "$tmp" || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
@@ -1146,7 +1270,15 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
     case "$size" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ "$cur_ident" = "$ident" ] && [ "$endpoint" -le "$size" ] \
       || { rm -f "$tmp"; return 1; }
-    printf '%s\t%s\t%s\n' "$task" "$ident" "$endpoint" >> "$tmp" \
+    backstop=$(status_outcome_backstop_cursor_offset "$f") || { rm -f "$tmp"; return 1; }
+    while IFS=$(printf '\t') read -r acknowledged_task acknowledged_endpoint; do
+      if [ "$acknowledged_task" = "$task" ]; then backstop=$acknowledged_endpoint; fi
+    done <<EOF
+${STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED:-}
+EOF
+    case "$backstop" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
+    [ "$backstop" -le "$size" ] || { rm -f "$tmp"; return 1; }
+    printf '%s\t%s\t%s\t%s\n' "$task" "$ident" "$endpoint" "$backstop" >> "$tmp" \
       || { rm -f "$tmp"; return 1; }
   done <<EOF
 $snapshot
@@ -1432,12 +1564,16 @@ window_to_task() {
 
 # Capture the bytes of an append-only status log at or after <start-offset> under
 # one size-and-identity snapshot.
-# The record form prints `<endpoint>\t<identity>\t<events>` and returns 0 when
+# The record form produces `<endpoint>\t<identity>\t<events>` and returns 0 when
 # the span has actionable events, joining every such event in source order with
 # ` ; ` so callers report the complete captured span before committing it.
+# With optional <record-var>, it assigns that record instead of printing it; with
+# optional <needs-decision-var>, it also assigns 1 when the span newly surfaces a
+# needs-decision, captain-held declaration, or pending-reply escalation, otherwise
+# 0. This side-band classification never changes the event text.
 # It returns 1 after a successful classification with no actionable event; an
-# existing log still prints its committable endpoint and identity, while an absent
-# log is the ordinary empty case and prints no record.
+# existing log still produces its committable endpoint and identity, while an absent
+# log is the ordinary empty case and produces no record.
 # It returns 2 with no committable endpoint when an existing status object cannot
 # be classified.
 # The simpler wrapper prints only the event field, and the predicate discards the
@@ -1492,9 +1628,9 @@ _fm_status_open_decision_origins() {  # <status-file>
   printf '%s' "$origins"
 }
 
-status_span_first_actionable_record() {  # <status-file> <start-offset>
-  local f=$1 start=${2:-0} size ident cur_ident scratch chunk_file full_file prefix_file
-  local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key
+status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
+  local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file full_file prefix_file result
+  local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
@@ -1503,7 +1639,16 @@ status_span_first_actionable_record() {  # <status-file> <start-offset>
   case "$size" in ''|*[!0-9]*) return 2 ;; esac
   case "$start" in ''|*[!0-9]*) start=0 ;; esac
   [ "$start" -le "$size" ] || start=0
-  [ "$start" -lt "$size" ] || { printf '%s\t%s' "$size" "$ident"; return 1; }
+  if [ "$start" -ge "$size" ]; then
+    result="${size}"$'\t'"${ident}"
+    if [ -n "$output_var" ]; then
+      printf -v "$output_var" '%s' "$result"
+      [ -z "$needs_var" ] || printf -v "$needs_var" '%s' 0
+    else
+      printf '%s' "$result"
+    fi
+    return 1
+  fi
   scratch=$(_fm_status_span_scratch "$f") || return 2
   chunk_file="${scratch}.span"; full_file="${scratch}.full"; prefix_file="${scratch}.prefix"
   _fm_status_read_span "$f" "$start" "$((size - start))" > "$chunk_file" 2>/dev/null \
@@ -1515,6 +1660,13 @@ status_span_first_actionable_record() {  # <status-file> <start-offset>
   while IFS= read -r line || [ -n "$line" ]; do
     line_number=$((line_number + 1))
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    if status_is_captain_held "$line"; then
+      # A transfer closes the status-log decision and remains non-actionable to
+      # stale classification. The side-band marker lets signal routing surface
+      # the captain-owned hold without changing that established stale verdict.
+      _fm_span_needs_decision=1
+      continue
+    fi
     status_is_captain_relevant "$line" || continue
     verb=$(status_line_verb "$line")
     case "$verb" in
@@ -1522,12 +1674,14 @@ status_span_first_actionable_record() {  # <status-file> <start-offset>
         key=$(_fm_decision_key "$line") || {
           [ -n "$events" ] && events="${events} ; "
           events="${events}${line}"
+          [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
           rc=0
           continue
         }
         _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || {
           [ -n "$events" ] && events="${events} ; "
           events="${events}reconciliation-required: ${line}"
+          [ "$verb" = needs-decision ] && _fm_span_needs_decision=1
           rc=0
           continue
         }
@@ -1551,6 +1705,10 @@ EOF
         [ -n "$live_line" ] && [ "$((prefix_lines + line_number))" -eq "$live_line" ] || continue
         [ -n "$events" ] && events="${events} ; "
         events="${events}${line}"
+        if [ "$verb" = needs-decision ] || { [ "$verb" = blocked ] &&
+          _fm_is_pending_reply_escalation "$key" "$(status_line_note "$line")"; }; then
+          _fm_span_needs_decision=1
+        fi
         rc=0
         ;;
       *)
@@ -1562,7 +1720,13 @@ EOF
   done < "$chunk_file"
   rm -f "$chunk_file" "$full_file" "$prefix_file"
   [ "$failed" -eq 0 ] || return 2
-  if [ "$rc" -eq 0 ]; then printf '%s\t%s\t%s' "$size" "$ident" "$events"; else printf '%s\t%s' "$size" "$ident"; fi
+  if [ "$rc" -eq 0 ]; then result="${size}"$'\t'"${ident}"$'\t'"${events}"; else result="${size}"$'\t'"${ident}"; fi
+  if [ -n "$output_var" ]; then
+    printf -v "$output_var" '%s' "$result"
+    [ -z "$needs_var" ] || printf -v "$needs_var" '%s' "$_fm_span_needs_decision"
+  else
+    printf '%s' "$result"
+  fi
   return "$rc"
 }
 

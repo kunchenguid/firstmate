@@ -20,10 +20,18 @@
 #     SECONDMATE_SYNC:, and a home with no live metadata is never swept.
 #   - Spawning a secondmate fast-forwards its worktree to the primary's HEAD
 #     before launch, or warns and launches unchanged when the sync is skipped.
+#   - A REMOTE secondmate home follows that same primary commit rather than the
+#     Firstmate copy on its own host: the parent resolves the commit and the host
+#     imports it (from the home, that copy, or the home's origin) before running
+#     the same ff guards, skipping with an actionable reason when it cannot. The
+#     host's own copy is never moved, /updatefirstmate's code-root-relative sync
+#     is unchanged, and a launch never re-targets that copy.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/remote-herdr-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 
 # shellcheck source=bin/fm-ff-lib.sh
 . "$ROOT/bin/fm-ff-lib.sh"
@@ -87,6 +95,9 @@ bump_primary() {
     printf 'v-%s\n' "$mode" > "$w/main/AGENTS.md"
     printf 'echo %s\n' "$mode" > "$w/main/bin/tool.sh"
     printf 's-%s\n' "$mode" > "$w/main/.agents/skills/note.md"
+  fi
+  if [ "$mode" = bin ]; then
+    printf 'echo %s-%s\n' "$mode" "$RANDOM" > "$w/main/bin/tool.sh"
   fi
   git -C "$w/main" add -A
   git -C "$w/main" commit -qm "bump-$mode"
@@ -888,6 +899,449 @@ test_seed_marker_does_not_mask_real_dirt() {
   pass "T14 marker tolerance does not mask a genuinely dirty home"
 }
 
+# --- remote secondmate homes ------------------------------------------------
+# A remote home lives on another machine and is a standalone clone, so it cannot
+# read the primary's object store. The parent therefore resolves ITS primary
+# default-branch commit and hands it to that host, which imports the commit and
+# then runs the SAME ff_target guards above. These cases drive the real
+# host-local leg (bin/fm-remote-secondmate-control.sh) directly.
+
+# new_remote_world <name>: a PRIMARY firstmate repo with a bare forge origin, a
+# host "Firstmate copy" clone (the code root), and a persistent remote home clone
+# of that copy - the topology bin/fm-remote-home-provision.sh lays down. Echoes
+# the world dir. The primary starts one commit ahead of both clones.
+new_remote_world() {
+  local name=$1 w
+  w="$TMP_ROOT/$name"
+  mkdir -p "$w/home/state" "$w/home/data"
+  git init -q -b main "$w/main"
+  printf 'projects/\nstate/\ndata/\nconfig/\n.no-mistakes/\n.fm-secondmate-home\n' > "$w/main/.gitignore"
+  printf 'v1\n' > "$w/main/AGENTS.md"
+  mkdir -p "$w/main/bin" "$w/main/.agents/skills"
+  printf 'echo a\n' > "$w/main/bin/tool.sh"
+  printf 's1\n' > "$w/main/.agents/skills/note.md"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm c1
+  git init -q --bare "$w/forge.git"
+  git -C "$w/main" remote add origin "$w/forge.git"
+  git -C "$w/main" push -q -u origin main
+  git --git-dir="$w/forge.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$w/forge.git" "$w/coderoot"
+  printf '%s\n' "$w"
+}
+
+# add_remote_home <w> <id> <clone-source> <commit>: a seeded standalone remote
+# home cloned from <clone-source> and parked at <commit>.
+add_remote_home() {
+  local w=$1 id=$2 src=$3 commit=$4
+  git clone -q "$src" "$w/$id"
+  git -C "$w/$id" checkout -q --detach "$commit"
+  mkdir -p "$w/$id/state" "$w/$id/data" "$w/$id/config" "$w/$id/projects"
+  printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
+}
+
+# make_remote_leg_ssh_stub <w>: a fake ssh that decodes fm-on.sh's payload and
+# EXECUTES the real host-local leg against this world's code root, so a parent
+# path is tested across the boundary it really crosses. Host readiness is not
+# under test here, so the doctor bootstrap answers ready.
+make_remote_leg_ssh_stub() { # <w> -> echoes the fakebin dir
+  local w=$1 fb
+  fb=$(fm_fakebin "$w/ssh")
+  cat > "$fb/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+cat > /dev/null
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+shift 2  # host, fm-remote-entrypoint.sh
+home_b64=$3
+argv_b64=$4
+decode() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D; }
+remote_home=$(decode "$home_b64")
+rargs=()
+while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$argv_b64")
+cmd=${rargs[0]}
+[ "$cmd" != fm-remote-doctor.sh ] || exit 0
+# An older remote Firstmate copy rejects a command shape it does not know with
+# the usage status, which is exactly what a parent-targeted sync meets there.
+if [ "${FM_TEST_REMOTE_LEG_REJECT_SYNC:-0}" = 1 ] \
+  && [ "$cmd" = fm-remote-secondmate-control.sh ] && [ "${rargs[1]:-}" = sync ]; then
+  printf 'Host-local lifecycle control for the remote secondmate home selected by fm-on.\n'
+  exit 2
+fi
+rc=0
+env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
+  "$FM_TEST_REPO_ROOT/bin/$cmd" "${rargs[@]:1}" || rc=$?
+exit "$rc"
+SH
+  chmod +x "$fb/fake-ssh"
+  printf '%s\n' "$fb"
+}
+
+# remote_sync <w> <id> [target-commit...]: the real host-local sync leg, run as
+# that host runs it. Sets REMOTE_SYNC_OUT and REMOTE_SYNC_RC.
+REMOTE_SYNC_OUT=""
+REMOTE_SYNC_RC=0
+remote_sync() {
+  local w=$1 id=$2
+  shift 2
+  REMOTE_SYNC_RC=0
+  REMOTE_SYNC_OUT=$(FM_HOME="$w/$id" FM_ROOT_OVERRIDE="$w/coderoot" \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" sync "$id" "$@" 2>&1) || REMOTE_SYNC_RC=$?
+}
+
+# --- R1: a remote home follows the PARENT primary, not the host's own copy ----
+# The reported incident: the home had already advanced past the host's Firstmate
+# copy, so a sync aimed at that copy refused as a non-fast-forward and the home
+# stayed behind the primary. Aimed at the primary's own commit it advances, and
+# the host's copy is not touched at all.
+test_remote_sync_targets_primary_not_host_copy() {
+  local w c1 c2 c3 coderoot_before
+  w=$(new_remote_world remote-target)
+  c1=$(head_of "$w/main")
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  bump_primary "$w" instr
+  c3=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  add_remote_home "$w" sm "$w/forge.git" "$c2"
+  [ "$(head_of "$w/coderoot")" = "$c1" ] || fail "precondition: the host copy should still be behind"
+  coderoot_before=$(head_of "$w/coderoot")
+
+  remote_sync "$w" sm "$c3"
+
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "remote sync to the primary commit failed: $REMOTE_SYNC_OUT"
+  assert_contains "$REMOTE_SYNC_OUT" "synced: $c3" "remote sync did not report the primary commit"
+  [ "$(head_of "$w/sm")" = "$c3" ] || fail "remote home did not advance to the primary's commit"
+  [ "$(head_of "$w/coderoot")" = "$coderoot_before" ] \
+    || fail "remote sync moved the host's own Firstmate copy"
+  pass "R1 a remote home ahead of the host's Firstmate copy still advances to the primary's commit"
+}
+
+# --- R2: the target is imported from the host's copy when the home lacks it ----
+# --- R1b: a remote sync reports WHICH instruction paths its advance changed ----
+# The parent cannot diff a checkout it cannot read, so the host's own result is
+# the only place that fact can come from. /updatefirstmate needs it to decide
+# whether the running remote agent must be replaced to reload, or whether the
+# advance reloads itself.
+test_remote_sync_reports_the_changed_instruction_surface() {
+  local w c_instr c_bin c_readme
+  w=$(new_remote_world remote-instr)
+  add_remote_home "$w" sm "$w/coderoot" "$(head_of "$w/main")"
+
+  bump_primary "$w" instr
+  c_instr=$(head_of "$w/main")
+  git -C "$w/coderoot" fetch -q --no-tags "$w/main" "$c_instr"
+  remote_sync "$w" sm "$c_instr"
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "the instruction advance did not sync: $REMOTE_SYNC_OUT"
+  assert_contains "$REMOTE_SYNC_OUT" "instr=AGENTS.md,bin,.agents/skills" \
+    "the sync result did not name the changed instruction paths"
+
+  bump_primary "$w" bin
+  c_bin=$(head_of "$w/main")
+  git -C "$w/coderoot" fetch -q --no-tags "$w/main" "$c_bin"
+  remote_sync "$w" sm "$c_bin"
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "the bin-only advance did not sync: $REMOTE_SYNC_OUT"
+  assert_contains "$REMOTE_SYNC_OUT" "instr=bin" "a bin-only advance must be reported as bin only"
+  assert_not_contains "$REMOTE_SYNC_OUT" "AGENTS.md" "a bin-only advance must not claim AGENTS.md changed"
+
+  bump_primary "$w" readme
+  c_readme=$(head_of "$w/main")
+  git -C "$w/coderoot" fetch -q --no-tags "$w/main" "$c_readme"
+  remote_sync "$w" sm "$c_readme"
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "the README-only advance did not sync: $REMOTE_SYNC_OUT"
+  assert_contains "$REMOTE_SYNC_OUT" "instr=" "an advance with no instruction change must still report the field"
+  assert_not_contains "$REMOTE_SYNC_OUT" "instr=bin" "a README-only advance must not claim bin changed"
+  pass "R1b a remote sync names exactly which instruction paths its advance changed"
+}
+
+test_remote_sync_imports_from_host_copy() {
+  local w c1 c2 coderoot_before
+  w=$(new_remote_world remote-import-host)
+  c1=$(head_of "$w/main")
+  add_remote_home "$w" sm "$w/coderoot" "$c1"
+  # The primary's new commit never reaches the forge, so only the host's copy has it.
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  git -C "$w/coderoot" fetch -q --no-tags "$w/main" "$c2"
+  coderoot_before=$(head_of "$w/coderoot")
+  # Strip the home's origin so the host's own copy is the only possible source.
+  git -C "$w/sm" remote remove origin
+  git -C "$w/sm" cat-file -e "$c2^{commit}" 2>/dev/null \
+    && fail "precondition: the home should not already hold the target"
+
+  remote_sync "$w" sm "$c2"
+
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "remote sync could not import from the host copy: $REMOTE_SYNC_OUT"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "remote home did not advance to the imported commit"
+  [ "$(head_of "$w/coderoot")" = "$coderoot_before" ] \
+    || fail "importing from the host's copy moved that copy's HEAD"
+  pass "R2 a missing target is imported from the host's Firstmate copy without moving it"
+}
+
+# --- R3: the target is imported from the home's own origin ---------------------
+test_remote_sync_imports_from_origin() {
+  local w c1 c2
+  w=$(new_remote_world remote-import-origin)
+  c1=$(head_of "$w/main")
+  add_remote_home "$w" sm "$w/forge.git" "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  git -C "$w/sm" cat-file -e "$c2^{commit}" 2>/dev/null \
+    && fail "precondition: the home should not already hold the target"
+  git -C "$w/coderoot" cat-file -e "$c2^{commit}" 2>/dev/null \
+    && fail "precondition: the host copy should not hold the target either"
+
+  remote_sync "$w" sm "$c2"
+
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "remote sync could not import from the home's origin: $REMOTE_SYNC_OUT"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "remote home did not advance to the origin-imported commit"
+  pass "R3 a target neither side holds is imported from the home's own origin"
+}
+
+# --- R4: a target already in the home needs no fetch at all --------------------
+test_remote_sync_uses_present_objects() {
+  local w c1 c2
+  w=$(new_remote_world remote-present)
+  c1=$(head_of "$w/main")
+  add_remote_home "$w" sm "$w/coderoot" "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  git -C "$w/sm" fetch -q --no-tags "$w/main" "$c2"
+  # Strand the home: no origin and a host copy that never saw the commit, so an
+  # advance can only come from what the home already holds.
+  git -C "$w/sm" remote remove origin
+  git -C "$w/coderoot" cat-file -e "$c2^{commit}" 2>/dev/null \
+    && fail "precondition: the host copy should not hold the target"
+
+  remote_sync "$w" sm "$c2"
+
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "remote sync refused an already-present target: $REMOTE_SYNC_OUT"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "remote home did not advance on already-present objects"
+  pass "R4 an already-present target advances the home with no fetch available"
+}
+
+# --- R5: an unreachable target skips with an actionable reason -----------------
+test_remote_sync_skips_unimportable_target() {
+  local w c1 c2 before
+  w=$(new_remote_world remote-unimportable)
+  c1=$(head_of "$w/main")
+  add_remote_home "$w" sm "$w/coderoot" "$c1"
+  bump_primary "$w" instr          # never pushed, never given to the host copy
+  c2=$(head_of "$w/main")
+  before=$(head_of "$w/sm")
+
+  remote_sync "$w" sm "$c2"
+
+  [ "$REMOTE_SYNC_RC" -ne 0 ] || fail "remote sync claimed success on an unreachable commit"
+  assert_contains "$REMOTE_SYNC_OUT" "could not import $c2" \
+    "the skip does not name the commit that could not be imported"
+  assert_contains "$REMOTE_SYNC_OUT" "/updatefirstmate" \
+    "the skip does not name the command that refreshes the host's copy"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "an unreachable target still moved the home"
+  pass "R5 a target neither the host copy nor the origin holds skips with an actionable reason"
+}
+
+# --- R6: the same skips as a local home, with the home left untouched ----------
+test_remote_sync_skips_dirty_diverged_and_feature_branch() {
+  local w c1 c2 before
+  w=$(new_remote_world remote-skips)
+  c1=$(head_of "$w/main")
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+
+  # dirty: a real uncommitted edit refuses and survives
+  add_remote_home "$w" dirty "$w/forge.git" "$c1"
+  printf 'uncommitted local edit\n' >> "$w/dirty/AGENTS.md"
+  before=$(head_of "$w/dirty")
+  remote_sync "$w" dirty "$c2"
+  [ "$REMOTE_SYNC_RC" -ne 0 ] || fail "a dirty remote home was synced anyway"
+  assert_contains "$REMOTE_SYNC_OUT" "dirty working tree" "dirty skip does not name the reason"
+  [ "$(head_of "$w/dirty")" = "$before" ] || fail "dirty remote home HEAD moved"
+  grep -q 'uncommitted local edit' "$w/dirty/AGENTS.md" || fail "dirty remote edit was discarded"
+
+  # diverged: a unique commit is never rewritten
+  add_remote_home "$w" unique "$w/forge.git" "$c1"
+  printf 'local only\n' > "$w/unique/LOCAL.md"
+  git -C "$w/unique" add LOCAL.md
+  git -C "$w/unique" commit -qm "unique remote commit"
+  before=$(head_of "$w/unique")
+  remote_sync "$w" unique "$c2"
+  [ "$REMOTE_SYNC_RC" -ne 0 ] || fail "a diverged remote home was synced anyway"
+  assert_contains "$REMOTE_SYNC_OUT" "diverged from $c2" "diverged skip does not name the reason"
+  [ "$(head_of "$w/unique")" = "$before" ] || fail "diverged remote home lost its unique commit"
+
+  # feature branch: in-flight work is left alone
+  add_remote_home "$w" feature "$w/forge.git" "$c1"
+  git -C "$w/feature" checkout -q -b fm/in-flight
+  before=$(head_of "$w/feature")
+  remote_sync "$w" feature "$c2"
+  [ "$REMOTE_SYNC_RC" -ne 0 ] || fail "a remote home on a feature branch was synced anyway"
+  assert_contains "$REMOTE_SYNC_OUT" "on fm/in-flight, expected main" \
+    "feature-branch skip does not name the branch"
+  [ "$(head_of "$w/feature")" = "$before" ] || fail "feature-branch remote home HEAD moved"
+
+  pass "R6 dirty, diverged, and feature-branch remote homes skip and are left untouched"
+}
+
+# --- R7: /updatefirstmate's contract is unchanged ------------------------------
+# That path refreshes the host's own Firstmate copy from origin first and then
+# syncs the home to THAT copy, so the no-target call must still target the copy.
+test_remote_sync_without_target_follows_host_copy() {
+  local w c1 c2
+  w=$(new_remote_world remote-updatefirstmate)
+  c1=$(head_of "$w/main")
+  add_remote_home "$w" sm "$w/coderoot" "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  git -C "$w/coderoot" pull -q --ff-only        # what /updatefirstmate does first
+  [ "$(head_of "$w/coderoot")" = "$c2" ] || fail "precondition: the host copy should be refreshed"
+
+  remote_sync "$w" sm
+
+  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "the no-target sync failed: $REMOTE_SYNC_OUT"
+  assert_contains "$REMOTE_SYNC_OUT" "synced: $c2" "the no-target sync did not follow the host copy"
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "the no-target sync did not advance the home"
+  pass "R7 a sync with no target still follows the host's own refreshed Firstmate copy"
+}
+
+# --- R8: session start hands the remote host the PRIMARY's commit --------------
+# The deferred network stage is the only startup path that reaches a remote home,
+# so this drives the real bin/fm-bootstrap.sh network phase across the real
+# transport boundary and reads back where the home actually landed.
+test_bootstrap_syncs_remote_home_to_primary_commit() {
+  local w c1 c2 home fakebin out coderoot_before
+  w=$(new_remote_world remote-bootstrap)
+  # fm-on.sh only routes commands this primary checkout genuinely tracks, so the
+  # fixture primary carries the real tooling the parent legs invoke.
+  cp "$ROOT"/bin/fm-remote-*.sh "$w/main/bin/"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm "primary tooling"
+  git -C "$w/main" push -q origin main
+  c1=$(head_of "$w/main")
+  add_remote_home "$w" sm "$w/forge.git" "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  coderoot_before=$(head_of "$w/coderoot")
+  home="$w/home"
+  mkdir -p "$home/config" "$home/projects"
+  printf -- '- sm - remote fixture (host: host-sm; root: %s; home: %s; scope: remote work; projects: alpha; added 2026-08-02)\n' \
+    "$w/coderoot" "$w/sm" > "$home/data/secondmates.md"
+  fm_write_secondmate_meta "$home/state/sm.meta" "$w/sm"
+  printf 'remote_host=host-sm\n' >> "$home/state/sm.meta"
+  mkdir -p "$w/sm/state/parent-route"
+  fm_write_meta "$w/sm/state/parent-route/sm.meta" \
+    'window=fm-remote:p1' 'endpoint_task_id=sm' 'worktree=-' 'project=-' \
+    'backend=herdr' 'harness=codex' 'herdr_session=fm-remote' \
+    'herdr_workspace_id=w1' 'herdr_tab_id=t1' 'herdr_pane_id=p1'
+
+  fakebin=$(make_remote_leg_ssh_stub "$w")
+  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  out=$(PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_BOOTSTRAP_NETWORK=only \
+    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
+    FM_TEST_REPO_ROOT="$ROOT" \
+    FM_INHERITABLE_CONFIG='' FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+
+  [ "$(head_of "$w/sm")" = "$c2" ] \
+    || fail "session start left the remote home off the primary's commit (out: $out)"
+  [ "$(head_of "$w/coderoot")" = "$coderoot_before" ] \
+    || fail "session start moved the host's own Firstmate copy"
+  pass "R8 session start converges a remote home on the primary's default-branch commit"
+}
+
+# --- R10: an outdated host refuses, and the report says how to fix it ----------
+# A host still running an older Firstmate copy rejects a command shape it does
+# not know, which for this leg can only mean it predates the parent-targeted
+# sync. Session start must name the command that refreshes that copy rather than
+# echoing an unexplained refusal.
+test_bootstrap_reports_outdated_host_actionably() {
+  local w c1 home fakebin out
+  w=$(new_remote_world remote-outdated)
+  cp "$ROOT"/bin/fm-remote-*.sh "$w/main/bin/"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm "primary tooling"
+  git -C "$w/main" push -q origin main
+  c1=$(head_of "$w/main")
+  add_remote_home "$w" sm "$w/forge.git" "$c1"
+  home="$w/home"
+  mkdir -p "$home/config" "$home/projects"
+  printf -- '- sm - remote fixture (host: host-sm; root: %s; home: %s; scope: remote work; projects: alpha; added 2026-08-02)\n' \
+    "$w/coderoot" "$w/sm" > "$home/data/secondmates.md"
+  fm_write_secondmate_meta "$home/state/sm.meta" "$w/sm"
+  printf 'remote_host=host-sm\n' >> "$home/state/sm.meta"
+
+  fakebin=$(make_remote_leg_ssh_stub "$w")
+  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  out=$(PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_BOOTSTRAP_NETWORK=only \
+    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
+    FM_TEST_REPO_ROOT="$ROOT" FM_TEST_REMOTE_LEG_REJECT_SYNC=1 \
+    FM_INHERITABLE_CONFIG='' FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+
+  assert_contains "$out" "SECONDMATE_SYNC: secondmate sm: skipped:" \
+    "an outdated host did not produce its own convergence line"
+  assert_contains "$out" "too old to sync to this primary's commit; run /updatefirstmate" \
+    "the outdated-host report does not say how to fix it"
+  pass "R10 a host too old for a parent-targeted sync is reported with the command that fixes it"
+}
+
+# --- R9: a remote launch never re-targets the host's own Firstmate copy --------
+# The launch leg runs a host-local spawn whose FM_ROOT is that host's Firstmate
+# copy. Once the parent has synced the home to ITS commit, that spawn must leave
+# the home there. The control home proves the suppressed step is otherwise live:
+# the ordinary secondmate spawn contract does move an identical home onto the
+# host's copy.
+test_remote_launch_does_not_retarget_host_copy() {
+  local w c1 c2 herdrbin fakebin launch_out control_out
+  w=$(new_remote_world remote-launch)
+  c1=$(head_of "$w/main")           # the parent primary stays here
+  git -C "$w/coderoot" fetch -q --no-tags "$w/main" "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  git -C "$w/coderoot" pull -q --ff-only   # the host's copy is now AHEAD of the parent
+  [ "$(head_of "$w/coderoot")" = "$c2" ] || fail "precondition: the host copy should be ahead"
+  add_remote_home "$w" launched "$w/forge.git" "$c1"
+  add_remote_home "$w" control "$w/forge.git" "$c1"
+
+  fakebin=$(fm_fakebin "$w/launchfake")
+  herdrbin="$w/herdrhost"
+  mkdir -p "$herdrbin/bin"
+  install_remote_herdr_fixture "$herdrbin" "$w/herdr.state" "$w/herdr.log" \
+    "$w/herdr.sendfail" "$w/herdr.sock"
+  cp "$herdrbin/bin/herdr" "$fakebin/herdr"
+  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+
+  # The real launch leg, exactly as the parent invokes it after its own sync.
+  launch_out=$(PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$w/launched" FM_ROOT_OVERRIDE="$w/coderoot" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" launch launched codex - - herdr 2>&1) || true
+  [ "$(head_of "$w/launched")" = "$c1" ] \
+    || fail "a remote launch moved the home onto the host's own Firstmate copy (out: $launch_out)"
+
+  # Divergence control: the ordinary secondmate spawn contract DOES follow its
+  # FM_ROOT, so the suppressed step above is not vacuously absent.
+  control_out=$(PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$w/coderoot" FM_ROOT_OVERRIDE="$w/coderoot" \
+    FM_STATE_OVERRIDE="$w/control/state" FM_DATA_OVERRIDE="$w/control/data" \
+    FM_CONFIG_OVERRIDE="$w/control/config" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" control "$w/control" --secondmate --harness codex --backend herdr 2>&1) || true
+  [ "$(head_of "$w/control")" = "$c2" ] \
+    || fail "the ordinary secondmate spawn did not follow its own checkout, so the launch case is vacuous (out: $control_out)"
+
+  pass "R9 a remote launch leaves the home on the parent's commit while an ordinary spawn follows its own checkout"
+}
+
 test_ff_updated
 test_ff_current
 test_ff_dirty
@@ -909,5 +1363,16 @@ test_spawn_warns_when_sync_skipped_before_launch
 test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
 test_seed_marker_does_not_mask_real_dirt
+test_remote_sync_targets_primary_not_host_copy
+test_remote_sync_reports_the_changed_instruction_surface
+test_remote_sync_imports_from_host_copy
+test_remote_sync_imports_from_origin
+test_remote_sync_uses_present_objects
+test_remote_sync_skips_unimportable_target
+test_remote_sync_skips_dirty_diverged_and_feature_branch
+test_remote_sync_without_target_follows_host_copy
+test_bootstrap_syncs_remote_home_to_primary_commit
+test_bootstrap_reports_outdated_host_actionably
+test_remote_launch_does_not_retarget_host_copy
 
 echo "# all fm-secondmate-sync tests passed"

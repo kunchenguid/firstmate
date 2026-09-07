@@ -86,6 +86,18 @@ run_guard_case_extension() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
+# The same extension-model call from the supervision branch actor
+# (FM_SUPERVISION_ACTOR=branch, as the Pi branch extension injects it).
+run_guard_case_extension_as_branch() {
+  local dir=$1
+  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_MODEL=extension \
+    FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
 # Stand up the durable evidence a live Pi session leaves behind: both primary
 # extensions present under the case root, and a marker per extension recording
 # that extension's current build plus the session pid in state/.lock.
@@ -613,6 +625,39 @@ test_extension_handoff_keeps_queued_wake_warning() {
 # The tolerance is scoped to the extension model alone. Every persistent-watcher
 # primary (codex, opencode, grok, kimi, tmux, unknown) must keep alarming on the
 # same state, even when Pi extension markers happen to be present on disk.
+# The supervision branch runs guarded commands (fm-peek, fm-crew-state) while
+# handling the very rows that are queued. For that actor the drain warning is
+# not advice, it is the misreading that re-ran a previous acknowledgement in a
+# loop, so the guard stays silent about queued rows for that actor.
+test_branch_actor_is_not_told_to_drain_queued_wakes() {
+  local dir home out pid
+  dir=$(make_guard_case branch-actor-queued-wake)
+  home=$(case_home "$dir")
+  sleep 60 &
+  pid=$!
+  record_pi_extension_session "$dir" "$pid" || fail "could not record the Pi extension session"
+  touch "$home/state/.last-watcher-beat"
+  printf '%s\n' \
+    "1700000000	7	stale	firstmate:fm-task	stale: firstmate:fm-task (idle 378s, possible wedge)" \
+    "1700000001	8	check	merge-poll	check: merge-poll: merged" > "$home/state/.wake-queue"
+  printf '7\n' > "$home/state/.branch-eligible-rows"
+  out=$(run_guard_case_extension_as_branch "$dir")
+  assert_not_contains "$out" "queued wakes pending" \
+    "the branch actor must not be told to drain the rows it is already handling"
+  assert_not_contains "$out" "wake row" \
+    "the branch actor gets no replacement note about queued rows"
+  rm -f "$home/state/.branch-eligible-rows"
+  out=$(run_guard_case_extension_as_branch "$dir")
+  assert_not_contains "$out" "queued wakes pending" \
+    "a branch actor with no grant can drain nothing, so the warning must stay silent"
+  out=$(run_guard_case_extension "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_contains "$out" "queued wakes pending" \
+    "main must still be warned about the queued rows"
+  pass "fm-guard: the branch actor is never told to drain queued wakes while main still is"
+}
+
 test_persistent_model_ignores_pi_extension_evidence() {
   local dir home out pid
   dir=$(make_guard_case persistent-ignores-pi-evidence)
@@ -690,6 +735,7 @@ test_extension_without_ownership_evidence_stays_alarm
 test_extension_ownership_needs_every_signal
 test_extension_stale_beacon_alarms_despite_live_session
 test_extension_handoff_keeps_queued_wake_warning
+test_branch_actor_is_not_told_to_drain_queued_wakes
 test_persistent_model_ignores_pi_extension_evidence
 test_extension_live_watcher_is_healthy_without_ownership_evidence
 test_autoarm_fresh_beacon_without_watcher_is_healthy

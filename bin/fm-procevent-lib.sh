@@ -380,6 +380,33 @@ fm_procevent_claim_capture_reservation_remove_locked() {
   fm_procevent_capture_reservation_remove_claim "$FM_PROCEVENT_CLAIM_STATE_ROOT" "$FM_PROCEVENT_CLAIM_TOKEN"
 }
 
+# fm_procevent_claim_generation_gone_locked
+# True only when the loaded claim's owner is stale and the process group it led
+# independently has no members left. The separate group check also covers a
+# reused live pid whose identity differs while the old generation survives.
+# A live matched owner (state 0), an unreadable identity (state 2), and a
+# crashed leader whose owned group is still running (state 3) all return false.
+fm_procevent_claim_generation_gone_locked() {
+  local state=0
+  fm_procevent_pid_state "${FM_PROCEVENT_CLAIM_PID:-}" "${FM_PROCEVENT_CLAIM_IDENTITY:-}" || state=$?
+  [ "$state" -eq 1 ] \
+    && ! fm_procevent_group_alive "${FM_PROCEVENT_CLAIM_PID:-}"
+}
+
+# Capture-reservation cleanup for a claim being reclaimed.
+#
+# Reservation records are keyed by CLAIM TOKEN, and every replacement claims a
+# fresh token, so a dead generation's leftovers can never collide with the
+# generation that replaces it. They are hygiene, not an ownership invariant -
+# the runner's own successful-capture path already tidies them best-effort.
+# The cleanup is still attempted and remains authoritative for a generation
+# that is not provably gone; it stops being a veto only after the stale owner
+# and independent group check prove the whole generation gone.
+fm_procevent_claim_capture_reservation_reclaim_locked() {
+  fm_procevent_claim_capture_reservation_remove_locked && return 0
+  fm_procevent_claim_generation_gone_locked
+}
+
 # fm_procevent_group_alive <pid>
 # True while any process remains in the process group a runner leads. A runner
 # started by reconcile is its own group leader, so this is what distinguishes a
@@ -469,7 +496,7 @@ fm_procevent_claim_acquire_locked() {
             fi
           fi
           if [ "$status" -eq 0 ]; then
-            fm_procevent_claim_capture_reservation_remove_locked || status=1
+            fm_procevent_claim_capture_reservation_reclaim_locked || status=1
           fi
           [ "$status" -ne 0 ] || rm -f -- "$claim" || status=1
         else
@@ -544,8 +571,28 @@ fm_procevent_claim_mark_terminal_locked() {
 }
 
 # fm_procevent_claim_release_locked <source-id> <home> <pid> <token>
+# The live owner uses this path for its own release. Reservation cleanup must
+# succeed normally; stale-generation relaxation is never consulted.
 fm_procevent_claim_release_locked() {
-  local id=$1 home=$2 pid=$3 token=$4 claim
+  fm_procevent_claim_release_mode_locked release "$@"
+}
+
+# fm_procevent_claim_release_terminal_self_locked <source-id> <home> <pid> <token>
+# A live runner uses this only while retiring its own terminal source mid-capture.
+# Its in-flight reservation is transient, so attempt cleanup without making that
+# cleanup a veto; exact ownership still must match before releasing the claim.
+fm_procevent_claim_release_terminal_self_locked() {
+  fm_procevent_claim_release_mode_locked terminal-self "$@"
+}
+
+# fm_procevent_claim_reclaim_locked <source-id> <home> <pid> <token>
+# Lifecycle commands use this only after proving or stopping a dead generation.
+fm_procevent_claim_reclaim_locked() {
+  fm_procevent_claim_release_mode_locked reclaim "$@"
+}
+
+fm_procevent_claim_release_mode_locked() {
+  local mode=$1 id=$2 home=$3 pid=$4 token=$5 claim
   fm_procevent_source_id_valid "$id" || return 1
   claim=$(fm_procevent_claim_path "$id")
   [ -e "$claim" ] || return 0
@@ -553,7 +600,18 @@ fm_procevent_claim_release_locked() {
     && [ "$FM_PROCEVENT_CLAIM_HOME" = "$home" ] \
     && [ "$FM_PROCEVENT_CLAIM_PID" = "$pid" ] \
     && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$token" ]; then
-    fm_procevent_claim_capture_reservation_remove_locked || return 1
+    case "$mode" in
+      reclaim)
+        fm_procevent_claim_capture_reservation_reclaim_locked || return 1
+        ;;
+      terminal-self)
+        fm_procevent_claim_capture_reservation_remove_locked || true
+        ;;
+      release)
+        fm_procevent_claim_capture_reservation_remove_locked || return 1
+        ;;
+      *) return 1 ;;
+    esac
     rm -f -- "$claim"
     return $?
   fi

@@ -333,7 +333,8 @@ test_empty_queue_does_not_swallow_later_signal_annotation() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "empty-queue drain failed before delayed signal publication"
-  [ ! -s "$out" ] || fail "routine status unexpectedly broke the silent empty-queue contract: $(cat "$out")"
+  grep -F 'task-delayed done: shipped before watcher published signal' "$out" >/dev/null \
+    || fail "the main-drain loss backstop did not surface the terminal event before its delayed signal: $(cat "$out")"
 
   append_wake "$state" signal task-delayed.status "signal: task-delayed.status" \
     || fail "publishing the delayed status signal failed"
@@ -341,27 +342,36 @@ test_empty_queue_does_not_swallow_later_signal_annotation() {
     || fail "drain failed after delayed signal publication"
   grep -F 'latest wake-EVENT observed at drain, not current state: task-delayed.status: done: shipped before watcher published signal' "$out" >/dev/null \
     || fail "the empty-queue drain acknowledged an event before its signal annotation: $(cat "$out")"
-  pass "an empty-queue drain preserves routine status for a later signal annotation"
+  pass "an empty-queue backstop presentation still preserves the status for its later signal annotation"
 }
 
-test_routine_working_lines_stay_silent_on_the_empty_queue() {
-  local dir state out
+test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
+  local dir state out old
   dir=$(make_case silent-working)
   state="$dir/state"
   out="$dir/drain.out"
   printf 'working: on it\n' > "$state/task7.status"
   printf 'done: shipped clean\n' > "$state/task8.status"
+  old=$(( $(date +%s) - 20 ))
+  perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$old" "$state/task8.status" \
+    || fail "could not age the covered done fixture"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task8 --verdict captain --summary 'shipped clean was handled' >/dev/null \
+    || fail "could not record the newer branch outcome fixture"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with only routine working/done lines"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with routine working and covered done lines"
 
   if grep -F 'UNREAD STATUS' "$out" >/dev/null; then
-    fail "routine working/done lines printed an UNREAD STATUS section: $(cat "$out")"
+    fail "routine working/covered done lines printed an UNREAD STATUS section: $(cat "$out")"
+  fi
+  if grep -F 'STATUS OUTCOME BACKSTOP' "$out" >/dev/null; then
+    fail "a covered done line printed the outcome backstop: $(cat "$out")"
   fi
   if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
-    fail "routine working/done lines printed OPEN DECISIONS: $(cat "$out")"
+    fail "routine working/covered done lines printed OPEN DECISIONS: $(cat "$out")"
   fi
-  [ ! -s "$out" ] || fail "the empty-queue routine case was not silent: $(cat "$out")"
-  pass "routine working/done lines still print nothing on an empty-queue drain"
+  [ ! -s "$out" ] || fail "the empty-queue covered routine case was not silent: $(cat "$out")"
+  pass "routine working and branch-covered done lines print nothing on an empty-queue drain"
 }
 
 test_incident_note_answer_buried_under_routine_note_surfaces_both
@@ -376,4 +386,4 @@ test_weak_identity_still_presents_and_advances
 test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
-test_routine_working_lines_stay_silent_on_the_empty_queue
+test_routine_working_and_covered_done_stay_silent_on_the_empty_queue
