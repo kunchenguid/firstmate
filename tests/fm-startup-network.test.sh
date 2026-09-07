@@ -87,6 +87,25 @@ SH
   printf '%s|%s|%s\n' "$home" "$root" "$w/bootstrap.log"
 }
 
+new_real_bootstrap_world() {
+  local name=$1 w home root fakebin
+  w="$TMP_ROOT/$name"
+  home="$w/home"
+  root="$w/root"
+  fakebin="$w/fakebin"
+  mkdir -p "$home/state" "$root/bin" "$fakebin"
+  for f in "$ROOT"/bin/*.sh; do
+    ln -s "$f" "$root/bin/$(basename "$f")"
+  done
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_FAKE_GH_FAIL:-0}" = 1 ] && exit 1
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+  printf '%s|%s|%s\n' "$home" "$root" "$fakebin"
+}
+
 # The detached worker records itself a moment after `start` returns - that gap is
 # the whole point of not blocking - so a test that wants to observe the worker
 # waits for its record rather than assuming instant publication.
@@ -118,6 +137,13 @@ run_stage() {  # <home> <root> <args...>
   shift 2
   PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="${FM_FAKE_HARNESS_PID_OVERRIDE:-$$}" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-startup-network.sh" "$@"
+}
+
+run_real_bootstrap_stage() {  # <home> <root> <fakebin> <args...>
+  local home=$1 root=$2 fakebin=$3
+  shift 3
+  PATH="$root/bin:$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    "$root/bin/fm-startup-network.sh" "$@"
 }
 
 wait_for_startup_network_wake() {  # <home> [tenths]
@@ -343,6 +369,38 @@ EOF
     "an actionable result did not reach the wake queue"
 
   pass "fm-startup-network: an actionable state=done report still queues a wake"
+}
+
+# The runtime backend notice is useful during the local tool-detection half of
+# bootstrap, but it is not an actionable network finding. A secondmate's first
+# turn can end before this deferred worker publishes, so keeping the notice out
+# of the network-only report is what prevents a clean result from becoming an
+# orphaned self-owned wake.
+test_network_only_clean_result_is_silent_but_actionable_result_wakes() {
+  local rec home root fakebin report
+  rec=$(new_real_bootstrap_world clean-runtime-notice)
+  IFS='|' read -r home root fakebin <<EOF
+$rec
+EOF
+
+  HERDR_ENV=1 run_real_bootstrap_stage "$home" "$root" "$fakebin" run --locked 0
+  report=$(run_real_bootstrap_stage "$home" "$root" "$fakebin" report)
+  assert_not_contains "$report" "NOTICE: auto-detected herdr runtime" \
+    "the network-only report resolved a local runtime and captured its notice"
+  assert_contains "$report" "(silent - no problems found)" \
+    "the network-only run was not classified as a clean result"
+  [ ! -s "$home/state/.wake-queue" ] \
+    || fail "a clean network-only result queued a self-owned wake: $(cat "$home/state/.wake-queue")"
+
+  FM_FAKE_GH_FAIL=1 HERDR_ENV=1 \
+    run_real_bootstrap_stage "$home" "$root" "$fakebin" run --locked 0
+  report=$(run_real_bootstrap_stage "$home" "$root" "$fakebin" report)
+  assert_contains "$report" "NEEDS_GH_AUTH" \
+    "the actionable network-only result lost its GitHub-auth finding"
+  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+    "the actionable network-only result did not reach the durable wake queue"
+
+  pass "fm-startup-network: clean network-only results stay silent while actionable results wake"
 }
 
 test_deferred_invalid_secondmate_markers_queue_durable_findings() {
@@ -766,6 +824,7 @@ test_a_claimant_crash_after_publish_still_queues_the_wake
 test_a_report_publication_failure_is_failed_and_still_wakes
 test_a_successful_result_never_queues_a_wake
 test_an_actionable_successful_result_still_queues_a_wake
+test_network_only_clean_result_is_silent_but_actionable_result_wakes
 test_deferred_invalid_secondmate_markers_queue_durable_findings
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands
 test_the_stage_bound_is_reported_not_swallowed
