@@ -244,10 +244,13 @@ Reading this check as a security control exceeds its stated scope.
 
 It runs before the first push rather than before merge, because on a repository firstmate does not own a maintainer can merge at any moment.
 The enforcement point is `bin/fm-lint.sh`'s default path: `.no-mistakes.yaml` pins `commands.lint` to that script and the gate runs lint after its review, test, and document steps, so it is the last firstmate-owned code to see every commit the branch would contribute, including the ones the gate's own agents wrote.
-It stops with an unknown-range error when neither `origin/main` nor local `main` resolves, which is why the CI lint job checks out full history.
+The default pre-push range requires `origin/main` as its authoritative publication ref.
+When `origin/main` is missing, the guard reports the range as unestablished and refuses with exit 3 rather than scanning.
+A local `main` is not an implicit fallback because it can carry the unpublished commit the scan must refuse.
+An operator may use local `main` only by explicitly designating it as an authorized bound with `--range`.
 On a branch that has not been pushed, a matching commit message is therefore refused before it leaves the machine.
 
-The set the guard scans by default is every commit reachable from `HEAD` but not from the default-branch ref, preferring `origin/main` and falling back to local `main` only when it does not resolve, so an ahead local branch cannot shrink the set.
+The set the guard scans by default is every commit reachable from `HEAD` that `origin/main` does not carry.
 That set is deliberately broader than "commits that have never been pushed": a commit already on a feature remote or already visible in an open pull request stays in it until the default branch carries it.
 The conservative choice is what keeps the refusal standing while the leak is still in what a maintainer would merge, and the cost is that clearing such a refusal means rewriting already-pushed history rather than adding a commit on top.
 
