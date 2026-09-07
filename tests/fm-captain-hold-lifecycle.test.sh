@@ -2706,6 +2706,19 @@ test_retained_row_artifacts_survive_captain_answers() {
   tasks_in "$home" 'done' "$answered_id" >/dev/null \
     || fail "could not complete the released artifactless captain call"
 
+  decision_local_id=sample-released-local-worded-decision
+  tasks_in "$home" add "$decision_local_id" "Land the reviewed change" --kind ship \
+    --repo sample --start >/dev/null \
+    || fail "could not create the local-worded decision fixture"
+  run_captain "$home" hold "$decision_local_id" --reason "captain landing route pending" \
+    >/dev/null || fail "could not hold the local-worded decision fixture"
+  printf 'local main\n' > "$home/local-worded-answer.txt"
+  run_captain "$home" answer "$decision_local_id" --release \
+    --decision-file "$home/local-worded-answer.txt" >/dev/null \
+    || fail "could not release the local-worded decision fixture"
+  tasks_in "$home" 'done' "$decision_local_id" >/dev/null \
+    || fail "could not complete the local-worded decision fixture"
+
   reportless_scout_id=sample-reportless-scout
   tasks_in "$home" add "$reportless_scout_id" "Investigate without a report" --kind scout \
     --repo sample --start >/dev/null || fail "could not create the reportless scout"
@@ -2729,7 +2742,7 @@ test_retained_row_artifacts_survive_captain_answers() {
     --arg approved_id "$approved_id" --arg local_id "$local_id" \
     --arg approved_pr "$approved_pr" --arg released_id "$released_id" \
     --arg answered_id "$answered_id" --arg reportless_scout_id "$reportless_scout_id" \
-    --arg legacy_id "$legacy_id" \
+    --arg legacy_id "$legacy_id" --arg decision_local_id "$decision_local_id" \
     --arg released "data/$released_id/report.md" '
       (.landed | any(.id == $retained_id and .artifact == $retained))
         and (.landed | any(.id == $precedence_id and .artifact == $precedence))
@@ -2748,6 +2761,10 @@ test_retained_row_artifacts_survive_captain_answers() {
         # Requiring a present non-captain kind would also remove this older
         # artifactless delivery, so the compatibility boundary stays observable.
         and (.landed | any(.id == $legacy_id))
+        # The captain worded this decision "local main" and the work closed
+        # with no artifact, so reading that prose as a recorded note would
+        # publish a local-only landing that never happened.
+        and (.landed | any(.id == $decision_local_id and .artifact == "-"))
     ' >/dev/null || fail "released, retained, or rejected deliveries were misclassified: $json"
   pass "release and scout report retention distinguish deliveries from rejected merge answers"
 }
