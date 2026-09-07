@@ -2371,6 +2371,7 @@ EOF
 }
 
 spawn_worktree_has_origin_config() {  # <worktree>
+  # Inactive conditional includes are intentionally over-classified as configured so uncertainty fails closed.
   local worktree=$1 config include key origin matched index=0 seen=$'\n' config_dir
   local -a configs
   git -C "$worktree" config --get-regexp '^remote\.origin\.' >/dev/null 2>&1 && return 0
