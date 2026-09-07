@@ -598,6 +598,233 @@ SH
   pass "fm-teardown: an exact recorded endpoint still tears down after changing cwd outside its worktree"
 }
 
+# --- Treehouse project-lock anchoring across home layouts --------------------
+#
+# The lock is anchored at the local root home, so every home on this machine
+# that can reach the same pool must derive the identical file. A remote parent
+# binding terminates that walk at the home holding it: its parent is on another
+# machine and can neither hold nor observe a lock taken here.
+
+write_local_parent_record() {  # <home> <parent-home>
+  cat > "$1/.fm-secondmate-parent" <<REC
+schema=fm-secondmate-parent.v1
+route=local
+parent_home=$2
+REC
+}
+
+write_remote_parent_record() {  # <home>
+  cat > "$1/.fm-secondmate-parent" <<'REC'
+schema=fm-secondmate-parent.v1
+route=remote
+parent_host=machine-a
+REC
+}
+
+make_home() {  # <path>
+  mkdir -p "$1/state" "$1/data" "$1/config" "$1/projects"
+}
+
+resolve_project_lock() {  # <home> <project>
+  FM_HOME="$1" bash -c '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$2"
+}
+
+test_project_lock_anchors_at_the_local_root_across_home_layouts() {
+  local dir main_home main_project local_mate remote_mate remote_child
+  local main_lock mate_lock remote_lock child_lock orphan_lock rc
+  dir=$(make_case project-lock-anchoring)
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm anchor-fixture
+
+  # Main-home layout: a root home and a local secondmate beneath it.
+  main_home="$dir/home"
+  main_project="$main_home/projects/project"
+  make_home "$main_home"
+  git clone -q "$dir/project" "$main_project"
+  local_mate="$dir/local-mate"
+  make_home "$local_mate"
+  write_local_parent_record "$local_mate" "$main_home"
+  git clone -q "$dir/project" "$local_mate/projects/project"
+
+  # Remote layout: a home seeded from another machine, plus its own local child.
+  remote_mate="$dir/remote-mate"
+  make_home "$remote_mate"
+  write_remote_parent_record "$remote_mate"
+  git clone -q "$dir/project" "$remote_mate/projects/project"
+  remote_child="$dir/remote-mate-child"
+  make_home "$remote_child"
+  write_local_parent_record "$remote_child" "$remote_mate"
+  git clone -q "$dir/project" "$remote_child/projects/project"
+
+  main_lock=$(resolve_project_lock "$main_home" "$main_project") \
+    || fail "the root home could not resolve its project lock"
+  mate_lock=$(resolve_project_lock "$local_mate" "$local_mate/projects/project") \
+    || fail "a local secondmate home could not resolve its project lock"
+  remote_lock=$(resolve_project_lock "$remote_mate" "$remote_mate/projects/project") \
+    || fail "a remote-seeded secondmate home could not resolve its project lock"
+  child_lock=$(resolve_project_lock "$remote_child" "$remote_child/projects/project") \
+    || fail "a local child of a remote-seeded home could not resolve its project lock"
+
+  [ "$main_lock" = "$mate_lock" ] \
+    || fail "the root home and its local secondmate derived different project locks"
+  [ "$remote_lock" = "$child_lock" ] \
+    || fail "a remote-seeded home and its local child derived different project locks"
+  case "$remote_lock" in
+    "$remote_mate/state/"*) ;;
+    *) fail "a remote-seeded home anchored its project lock outside its own state: $remote_lock" ;;
+  esac
+
+  # An origin-less local-only project still resolves, keyed on its worktree top.
+  git init -q "$remote_mate/projects/local-only"
+  orphan_lock=$(resolve_project_lock "$remote_mate" "$remote_mate/projects/local-only") \
+    || fail "an origin-less local-only project could not resolve its lock in a remote-seeded home"
+  [ "$orphan_lock" != "$remote_lock" ] \
+    || fail "an origin-less project shared the lock identity of an unrelated origin"
+
+  # Everything other than a remote route still fails closed.
+  printf 'schema=fm-secondmate-parent.v1\nroute=sideways\n' \
+    > "$remote_child/.fm-secondmate-parent"
+  set +e
+  resolve_project_lock "$remote_child" "$remote_child/projects/project" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unsupported parent route resolved a project lock instead of refusing"
+
+  pass "Treehouse project locking anchors at the local root for main-home, local-secondmate, and remote-seeded layouts"
+}
+
+test_remote_seeded_home_returns_its_uncontested_slot() {
+  local dir id=remote-task rc
+  dir=$(make_case remote-home-teardown)
+  mark_case_as_treehouse_pool "$dir"
+  write_remote_parent_record "$dir/home"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "teardown in a remote-seeded home refused its own uncontested slot: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "remote-seeded teardown left the task record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "remote-seeded teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# remote-seeded Treehouse teardown command\n'
+    printf '$ FM_HOME=%s bin/fm-teardown.sh %s --force\n' "$dir/home" "$id"
+    printf 'stdout:\n'; cat "$dir/stdout"
+    printf 'stderr:\n'; cat "$dir/stderr"
+    printf 'exit=%s\nruntime calls:\n' "$rc"; cat "$dir/runtime.log"
+    printf 'task metadata=%s\nslot sentinel=%s\n' \
+      "$([ -e "$dir/home/state/$id.meta" ] && printf present || printf removed)" \
+      "$([ -e "$dir/worktree/sentinel" ] && printf present || printf removed)"
+  fi
+
+  pass "fm-teardown: a remote-seeded secondmate home returns its own uncontested pool slot"
+}
+
+test_remote_seeded_home_still_refuses_a_slot_its_child_holds() {
+  local dir id=remote-stale other=child-task child_home child_project rc
+  dir=$(make_case remote-home-collision)
+  mark_case_as_treehouse_pool "$dir"
+  write_remote_parent_record "$dir/home"
+  printf 'fixture\n' > "$dir/project/tracked"
+  git -C "$dir/project" add tracked
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
+  child_home="$dir/child-home"
+  child_project="$child_home/projects/project"
+  make_home "$child_home"
+  write_local_parent_record "$child_home" "$dir/home"
+  git clone -q "$dir/project" "$child_project"
+  printf '%s\n' "- mate - fixture (home: $child_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$child_home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$child_project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "a remote-seeded home returned a pool slot its own local child still holds"
+  assert_present "$dir/home/state/$id.meta" "remote-layout collision removed stale metadata"
+  assert_present "$child_home/state/$other.meta" "remote-layout collision removed live metadata"
+  assert_present "$dir/worktree/sentinel" "remote-layout collision reset the shared slot"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "remote-layout refusal should name the task holding the slot"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# remote-seeded cross-home collision command\n'
+    printf '$ FM_HOME=%s bin/fm-teardown.sh %s --force\n' "$dir/home" "$id"
+    printf 'stderr:\n'; cat "$dir/stderr"
+    printf 'exit=%s\nruntime calls=%s\n' "$rc" \
+      "$([ -s "$dir/runtime.log" ] && cat "$dir/runtime.log" || printf none)"
+    printf 'remote metadata=%s\nchild metadata=%s\nslot sentinel=%s\n' \
+      "$([ -e "$dir/home/state/$id.meta" ] && printf preserved || printf removed)" \
+      "$([ -e "$child_home/state/$other.meta" ] && printf preserved || printf removed)" \
+      "$([ -e "$dir/worktree/sentinel" ] && printf preserved || printf removed)"
+  fi
+
+  pass "fm-teardown: slot ownership across a remote-seeded home and its local child still refuses"
+}
+
+test_remote_layout_homes_serialize_on_one_project_lock() {
+  local dir id=remote-serialize child_home child_project lock holder rc waited=0
+  dir=$(make_case remote-lock-exclusion)
+  mark_case_as_treehouse_pool "$dir"
+  write_remote_parent_record "$dir/home"
+  printf 'fixture\n' > "$dir/project/tracked"
+  git -C "$dir/project" add tracked
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
+  child_home="$dir/child-home"
+  child_project="$child_home/projects/project"
+  make_home "$child_home"
+  write_local_parent_record "$child_home" "$dir/home"
+  git clone -q "$dir/project" "$child_project"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  # The local child takes the lock its own home derives and stays alive holding
+  # it, standing in for a slot allocation running in that home right now.
+  lock=$(resolve_project_lock "$child_home" "$child_project") \
+    || fail "the local child could not resolve the shared project lock"
+  FM_HOME="$child_home" bash -c \
+    '. "$1"; fm_lock_try_acquire "$2" || exit 1; : > "$3"; exec sleep 30' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/lock-held" &
+  holder=$!
+  while [ ! -e "$dir/lock-held" ] && [ "$waited" -lt 100 ]; do
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$dir/lock-held" ] || fail "the local child never took the shared project lock"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  [ "$rc" -ne 0 ] \
+    || fail "a remote-seeded home returned a pool slot while its local child held the shared lock"
+  assert_present "$dir/home/state/$id.meta" "contended remote-layout teardown removed the task record"
+  assert_present "$dir/worktree/sentinel" "contended remote-layout teardown reset the slot"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "contended remote-layout teardown reached the runtime: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "another Treehouse slot allocation or return is in progress" \
+    "the refusal should name the shared project lock, not some unrelated check"
+
+  pass "Treehouse project locking still serializes two homes across the remote-seeded boundary"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
@@ -611,3 +838,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
+test_project_lock_anchors_at_the_local_root_across_home_layouts
+test_remote_seeded_home_returns_its_uncontested_slot
+test_remote_seeded_home_still_refuses_a_slot_its_child_holds
+test_remote_layout_homes_serialize_on_one_project_lock
