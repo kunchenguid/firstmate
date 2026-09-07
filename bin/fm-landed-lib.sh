@@ -23,9 +23,10 @@
 # when it retains no captain-question provenance. A retained scout is identified
 # by its kind and recorded report because its title links do not change what it
 # delivers. A captain question remains kind captain when it closes, so it is
-# never rendered as shipped work even when its text names an artifact. Older
-# kindless local-only completions cannot be distinguished from answered calls
-# and stay out; merged PRs and reported scouts remain distinct.
+# never rendered as shipped work even when its text names an artifact.
+# A local-only completion is a delivery whether or not its row carries a kind.
+# The retained hold-kind alone keeps answered calls out of the section.
+# Merged PRs and reported scouts remain distinct.
 #
 # The sole compatibility fallback keeps a structured Done row whose three
 # parsed artifact fields are absent when it does not retain hold-kind captain.
@@ -51,8 +52,7 @@ FM_LANDED_JQ_DEFS='
       and .hold_kind != "captain"
       and .completion.verb == "merged"
       and (.pr_url // null) != null)
-    or ((.kind // null) != null
-      and .kind != "scout"
+    or (.kind != "scout"
       and .kind != "captain"
       and .hold_kind != "captain"
       and .completion.verb == "done"
