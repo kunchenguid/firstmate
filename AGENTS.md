@@ -417,7 +417,8 @@ Treat any `UNREAD STATUS` section as newly surfaced status that must be read thi
 Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `captain-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
 After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD STATUS sections, run the exact generation-bound `--ack-through` command printed as `WAKE_ACK_REQUIRED`; interruption before that acknowledgement deliberately leaves the work durable for idempotent re-handling.
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
-A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
+A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed, and a blocked or parked report resolves to exactly one of seven states - `BLOCKED - PROVIDER QUOTA`, `BLOCKED - WAITING FOR INPUT`, `BLOCKED - DEPENDENCY`, `BLOCKED - HUMAN DECISION`, `BLOCKED - ACCESS/PERMISSION`, `BLOCKED - FAILED EXECUTION`, or `PARKED - NO WORK ASSIGNED` (idle by design and healthy, including an otherwise-idle agent whose provider happens to be unavailable); [`docs/configuration.md`](docs/configuration.md) owns each state's full definition.
+Check the live pane and provider quota before treating any blocked report as a stuck-crewmate signal, since conflating provider exhaustion with a real dependency causes false escalations and unnecessary relaunches.
 
 Handle actionable wakes as follows:
 
@@ -476,6 +477,13 @@ When evidence uses an internal label, rewrite it before sending:
 - status file, metadata, state, task id, or raw path -> durable record, local record, or omit it unless the captain needs the file path to act.
 - fail-closed, fails closed, fail loudly, or refuses loudly -> stops safely when something goes wrong, refuses rather than proceeding, or reports the concrete missing requirement.
 - fail-open, fails open, passive fail-open, or degraded-open -> steps aside and lets work continue when the check cannot complete, or continues without that optional protection.
+- `BLOCKED - PROVIDER QUOTA` -> stopped responding because its tool ran out of usage, without naming the provider unless the tool choice itself blocks work.
+- `BLOCKED - WAITING FOR INPUT` -> waiting on your answer or the material it asked for.
+- `BLOCKED - DEPENDENCY` -> waiting on another piece of work to finish first.
+- `BLOCKED - HUMAN DECISION` -> waiting on your decision.
+- `BLOCKED - ACCESS/PERMISSION` -> needs access or a credential it does not have.
+- `BLOCKED - FAILED EXECUTION` -> stopped after its last attempt failed, holding rather than retrying blindly.
+- `PARKED - NO WORK ASSIGNED` -> idle and healthy, holding no work.
 
 Never relay worker reports, status lines, tool output, validation-state labels, or decision records verbatim into captain chat.
 Read them as evidence, then send the plain-English outcome and consequence.
