@@ -543,13 +543,17 @@ record_pr_metadata() {
 require_released_captain_hold() {
   local hold_status=0
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" || hold_status=$?
+    "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" --distinguish-absent || hold_status=$?
   case "$hold_status" in
     0)
       echo "error: task $ID is still held for the captain; release it before merging" >&2
       return 1
       ;;
-    1) return 0 ;;
+    1|3) return 0 ;;
+    4)
+      echo "error: captain-hold authority record is unavailable for task $ID; refusing to merge" >&2
+      return 1
+      ;;
     *)
       echo "error: could not determine whether task $ID is still held for the captain; refusing to merge" >&2
       return 1
