@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Opt-in live guard for the Herdr presentation version floor.
+# Default-on live guard for the Herdr presentation version floor.
 #
 # Protocol is the floor's structural signal, and its mapping to real releases
 # is a vendor-supplied fact that no fixture can prove. The runtime gate checks
@@ -10,7 +10,8 @@
 # identity the binary actually reports. It fails naming the version and protocol
 # rather than degrading quietly.
 #
-# It is opt-in because it downloads upstream release binaries over the network.
+# A run downloads upstream release binaries over the network but submits no
+# prompt, so the shared live gate runs it by default wherever its tools exist.
 # Run it after every Herdr upgrade and before trusting a refreshed
 # docs/verification/runtime-backends.md "Presentation version floor" entry.
 #

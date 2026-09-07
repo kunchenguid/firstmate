@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/fm-harness-liveness-drift-live-e2e.test.sh - opt-in drift guard proving
+# tests/fm-harness-liveness-drift-live-e2e.test.sh - default-on drift guard proving
 # every INSTALLED harness is still classified `alive` by the tmux liveness
 # probe (bin/backends/tmux.sh).
 #
@@ -16,8 +16,9 @@
 # unauthenticated harness still starts its process, which is all the liveness
 # probe reads.
 #
-# Standard CI has no harness binaries or credentials, so this real-harness guard
-# is opt-in and on-demand. The portable counterpart in
+# Portable serial CI installs the public Pi package but no credentials, so this
+# guard checks that available token-free surface there and runs against every installed
+# harness on more capable hosts. The portable counterpart in
 # tests/fm-tmux-agent-liveness.test.sh pins the classifier logic in CI. Run this
 # guard after any harness upgrade and before trusting refreshed evidence.
 set -u
