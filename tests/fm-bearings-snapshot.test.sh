@@ -2763,54 +2763,55 @@ SH
 }
 
 test_local_snapshot_bounds_status_inspection_and_exposes_timeout() {
-  local home fakebin worktree capture probe json started elapsed
+  local home fakebin worktree template json started elapsed i
   home=$(make_home bounded-status-inspection)
   worktree="$home/projects/bounded-status-inspection"
   fm_git_init_commit "$worktree"
   fakebin=$(make_fakebin "$home")
-  cat > "$home/data/backlog.md" <<'EOF'
-## In flight
-- [ ] bounded-status-inspection - Bounded status fixture (repo: firstmate) (kind: ship)
-
-## Queued
-
-## Done
-EOF
-  fm_write_meta "$home/state/bounded-status-inspection.meta" \
-    "worktree=$worktree" "project=firstmate" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
-  printf 'needs-decision [key=must-not-be-inferred-away]: captain choice remains open\n' \
-    > "$home/state/bounded-status-inspection.status"
-  capture="$home/slow-status-capture"
-  probe="$home/status-capture-started"
-  cat > "$capture" <<'SH'
-#!/usr/bin/env bash
-printf started > "$FM_SLOW_STATUS_PROBE"
-sleep 30
-cp -p -- "$1" "$2"
-SH
-  chmod +x "$capture"
+  {
+    printf '## In flight\n'
+    i=1
+    while [ "$i" -le 16 ]; do
+      printf -- '- [ ] bounded-status-%s - Bounded status fixture %s (repo: firstmate) (kind: ship)\n' "$i" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$home/data/backlog.md"
+  template="$home/oversized.status"
+  i=1
+  while [ "$i" -le 50000 ]; do
+    printf 'working: historical status line %s with enough content to require a complete fold\n' "$i"
+    i=$((i + 1))
+  done > "$template"
+  i=1
+  while [ "$i" -le 16 ]; do
+    fm_write_meta "$home/state/bounded-status-$i.meta" \
+      "worktree=$worktree" "project=firstmate" \
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    cp "$template" "$home/state/bounded-status-$i.status"
+    i=$((i + 1))
+  done
 
   started=$(date +%s)
   json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT=1 \
-    FM_SNAPSHOT_STATUS_CAPTURE_COMMAND="$capture" FM_SLOW_STATUS_PROBE="$probe" \
-    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
-    || fail "fleet snapshot failed instead of exposing a bounded status timeout"
+    FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot failed instead of exposing bounded status timeouts"
   elapsed=$(( $(date +%s) - started ))
-  [ -f "$probe" ] || fail "bounded status fixture never entered its slow capture"
-  [ "$elapsed" -lt 8 ] || fail "status inspection exceeded its one-second bound: ${elapsed}s"
+  [ "$elapsed" -lt 8 ] || fail "fleet status inspection multiplied its one-second deadline across batches: ${elapsed}s"
   printf '%s' "$json" | jq -e '
-    .tasks[] | select(.id == "bounded-status-inspection")
-    | .current_state.state == "unknown"
-      and (.current_state.detail | contains("status inspection timeout after 1s"))
-      and .hints.inspection.complete == false
-      and (.hints.inspection.reason | contains("status inspection timeout after 1s"))
-      and .hints.pending_decision == null
-      and .hints.blocked_event == null
-      and .hints.open_decisions == null
-  ' >/dev/null || fail "bounded status timeout was not explicit on the retained task: $json"
-  pass "fleet snapshots bound status inspection and expose uncertainty"
+    (.tasks | length) == 16
+      and ([.tasks[] | select(
+        .current_state.state == "unknown"
+        and (.current_state.detail | contains("local snapshot deadline after 1s"))
+        and .hints.inspection.complete == false
+        and (.hints.inspection.reason | contains("local snapshot deadline after 1s"))
+        and .hints.pending_decision == null
+        and .hints.blocked_event == null
+        and .hints.open_decisions == null
+      )] | length) > 0
+  ' >/dev/null || fail "fleet deadline did not retain unfinished tasks with explicit uncertainty: $json"
+  pass "fleet snapshots enforce one status deadline and expose unfinished tasks"
 }
 
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {

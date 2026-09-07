@@ -244,8 +244,8 @@ reported unreadable with the reason; collection never computes a summary in
 that home.
 Each local per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIMEOUT
 (default 10 seconds); a read that hits the bound reports state unknown. Complete
-status capture and decision folding share FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT
-(default 10 seconds); a timeout keeps the task and reports its inspection unknown.
+status capture and decision folding share one overall FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT
+(default 10 seconds); the deadline keeps unfinished tasks and reports their inspection unknown.
 Local task observations run concurrently, up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY (default 8).
 Remote secondmate endpoint liveness is not probed by this command.
 Terminal contradiction evidence uses
@@ -527,12 +527,14 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 SNAPSHOT_TASK_DIR=
+SNAPSHOT_LOCAL_DEADLINE_EPOCH=
 SNAPSHOT_TASK_METAS=()
 SNAPSHOT_TASK_META_COUNT=0
 
 snapshot_task_cleanup() {
   [ -z "$SNAPSHOT_TASK_DIR" ] || rm -rf -- "$SNAPSHOT_TASK_DIR"
   SNAPSHOT_TASK_DIR=
+  SNAPSHOT_LOCAL_DEADLINE_EPOCH=
   SNAPSHOT_TASK_METAS=()
   SNAPSHOT_TASK_META_COUNT=0
 }
@@ -557,27 +559,30 @@ snapshot_capture_optional() {  # <source> <destination>
   return 1
 }
 
+snapshot_local_seconds_remaining() {
+  local now remaining
+  now=$(date +%s) || return 1
+  remaining=$((SNAPSHOT_LOCAL_DEADLINE_EPOCH - now))
+  [ "$remaining" -gt 0 ] || return 1
+  printf '%s\n' "$remaining"
+}
+
 snapshot_capture_status() {
-  local source=$1 destination=$2 decisions=$3 last_event=$4 first_pr=$5 rc
+  local source=$1 destination=$2 decisions=$3 last_event=$4 first_pr=$5 rc timeout
   if [ ! -f "$source" ]; then
     : > "$decisions"
     : > "$first_pr"
     return 0
   fi
-  fm_run_timed "$FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT" \
-    env FM_SNAPSHOT_STATUS_CAPTURE_COMMAND="${FM_SNAPSHOT_STATUS_CAPTURE_COMMAND:-}" \
-    bash -c '
+  timeout=$(snapshot_local_seconds_remaining) || return 124
+  fm_run_timed "$timeout" bash -c '
       source=$1
       destination=$2
       decisions=$3
       classify_lib=$4
       last_event=$5
       first_pr=$6
-      if [ -n "$FM_SNAPSHOT_STATUS_CAPTURE_COMMAND" ]; then
-        "$FM_SNAPSHOT_STATUS_CAPTURE_COMMAND" "$source" "$destination" || exit
-      else
-        cp -p -- "$source" "$destination" || exit
-      fi
+      cp -p -- "$source" "$destination" || exit
       . "$classify_lib" || exit
       status_open_decisions "$destination" > "$decisions" || exit
       grep -v "^[[:space:]]*$" "$destination" 2>/dev/null | tail -1 > "$last_event"
@@ -616,7 +621,7 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
   local status_log status_capture status_decisions status_last_event status_first_pr status_inspection report_path report_capture capture_rc
-  local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1 inspection_reason=
+  local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1 inspection_reason= remaining
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
@@ -635,7 +640,7 @@ prefetch_task_observations() {  # <meta> <id>
     capture_rc=$?
     if [ "$capture_rc" -ne 0 ]; then
       if [ "$capture_rc" -eq 124 ]; then
-        inspection_reason="status inspection timeout after ${FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT}s"
+        inspection_reason="local snapshot deadline after ${FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT}s"
       else
         inspection_reason="status inspection failed"
       fi
@@ -649,8 +654,16 @@ prefetch_task_observations() {  # <meta> <id>
       > "$current_file" || current_rc=1
     agent_alive=unknown
   elif [ "$generation_current" = 1 ] && [ -z "$inspection_reason" ]; then
-    crew_state_json "$id" "$meta" "$status_capture" > "$current_file" &
-    current_pid=$!
+    if remaining=$(snapshot_local_seconds_remaining); then
+      FM_SNAPSHOT_CREW_STATE_TIMEOUT=$remaining crew_state_json "$id" "$meta" "$status_capture" > "$current_file" &
+      current_pid=$!
+    else
+      inspection_reason="local snapshot deadline after ${FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT}s"
+      printf '%s\n' "$inspection_reason" > "$status_inspection" || current_rc=1
+      jq -n --arg detail "$inspection_reason" \
+        '{state:"unknown",source:"none",detail:$detail,raw:""}' > "$current_file" || current_rc=1
+      agent_alive=unknown
+    fi
   elif [ "$generation_current" = 1 ]; then
     jq -n --arg detail "$inspection_reason" \
       '{state:"unknown",source:"none",detail:$detail,raw:""}' > "$current_file" || current_rc=1
@@ -701,6 +714,7 @@ prefetch_task_current_states() {
   local -a pids=()
   snapshot_task_cleanup
   SNAPSHOT_TASK_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-tasks.XXXXXX") || return 1
+  SNAPSHOT_LOCAL_DEADLINE_EPOCH=$(( $(date +%s) + FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT ))
   # Keep the metadata generation that selected each task beside its observations.
   # Publishers replace metadata atomically, so copying before workers start gives
   # composition one coherent task manifest even if publication or teardown races it.

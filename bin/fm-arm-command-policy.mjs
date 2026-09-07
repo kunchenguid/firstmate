@@ -556,6 +556,7 @@ function consumeWrapperOptions(name, words, index) {
 }
 
 const CONTROL_COMMAND_PREFIXES = new Set(["if", "then", "elif", "else", "while", "until", "do", "!"]);
+const COPROC_COMMAND_WORDS = new Set(["bash", "command", "env", "exec", "gtimeout", "nohup", "no-mistakes", "sh", "sudo", "time", "timeout", "zsh"]);
 
 export function commandPosition(tokens) {
   const words = wordsInNode(tokens);
@@ -602,7 +603,7 @@ export function commandPosition(tokens) {
       wrappers.push(name);
       index += 1;
       if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(words[index]?.value || "") &&
-          basename(words[index + 1]?.value || "") === "no-mistakes") index += 1;
+          COPROC_COMMAND_WORDS.has(basename(words[index + 1]?.value || ""))) index += 1;
       command = words[index];
       if (!command) unresolvedWrapperOption = true;
       continue;
@@ -661,7 +662,7 @@ function shellInvocation(position) {
       if (words[payloadIndex]?.value === "--") payloadIndex += 1;
       return { kind: "command", payload: words[payloadIndex] || null };
     }
-    if (/^[-+]O$/.test(option.value)) {
+    if (/^[-+](?:O|o)$/.test(option.value) || ["--init-file", "--rcfile"].includes(option.value)) {
       i += 1;
       continue;
     }
