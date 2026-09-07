@@ -69,14 +69,23 @@
 # the model.
 #
 # --ensure-watcher is the Stop-guard priming path: the same identity, AFK, and
-# need gates, then a session-detached bin/fm-watch-arm.sh cycle and an immediate
-# exit 0. It does not take a generation claim and does not exit 2, so the
-# registered asyncRewake firing remains the rewake owner once a later Stop is
-# allowed. The detached arm starts the watcher as a handling successor
-# (FM_WATCH_PREDECESSOR_ARM_PID) so a post-downtime start does not re-announce
-# and immediately resurface. The guard invokes this before a refusal so a
-# blocked Stop cannot abort the only process that could restore a watcher
-# (docs/turnend-guard.md).
+# need gates, then a session-detached bin/fm-watch-arm.sh cycle. It does not
+# take a generation claim and does not exit 2, so the registered asyncRewake
+# firing remains the rewake owner once a later Stop is allowed. The detached arm
+# starts the watcher as a handling successor (FM_WATCH_PREDECESSOR_ARM_PID) so a
+# post-downtime start does not re-announce and immediately resurface. The guard
+# invokes this before a refusal so a blocked Stop cannot abort the only process
+# that could restore a watcher (docs/turnend-guard.md).
+#
+# Its exit status answers exactly one question: did this call DETACH a cycle?
+# Exit 0 only after the fork that hands a process to bin/fm-watch-arm.sh; every
+# gate that returns without forking - foreign host, non-primary scope, a foreign
+# live session-lock owner, away mode, no supervision need, an unrecoverable
+# session lock, an already healthy watcher, no executable arm, no python3 -
+# exits non-zero. The guard's refusal banner tells the model a recovery cycle is
+# in flight only on the 0, so that claim can never outrun the fork. Only the
+# guard passes this flag; the registered asyncRewake firing takes no arguments
+# and keeps its own always-exit-0-or-2 contract untouched.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,6 +108,9 @@ for arg in "$@"; do
     *) echo "usage: $(basename "$0") [--ensure-watcher]" >&2; exit 2 ;;
   esac
 done
+# "Did not detach" is the default answer for every exit below, including gates
+# added later; the single fork site is the only place that opts out of it.
+[ "$ENSURE_WATCHER" -eq 1 ] && trap 'exit 1' EXIT
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -197,11 +209,11 @@ if [ "$ENSURE_WATCHER" -eq 1 ]; then
   case "$predecessor" in
     ''|*[!0-9]*) predecessor=primed ;;
   esac
-  if command -v python3 >/dev/null 2>&1; then
-    FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" python3 -c '
+  if command -v python3 >/dev/null 2>&1 \
+    && FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" python3 -c '
 import os, sys
 if len(sys.argv) < 2:
-    os._exit(0)
+    os._exit(1)
 pid = os.fork()
 if pid > 0:
     os._exit(0)
@@ -213,7 +225,8 @@ os.dup2(devnull, 2)
 if devnull > 2:
     os.close(devnull)
 os.execvp(sys.argv[1], sys.argv[1:])
-' "$ARM" || true
+' "$ARM"; then
+    trap - EXIT
   fi
   exit 0
 fi

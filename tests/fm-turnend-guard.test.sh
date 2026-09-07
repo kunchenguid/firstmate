@@ -2050,6 +2050,30 @@ test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal() {
   pass "fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (frozen-epoch variant)"
 }
 
+# Priming has gates of its own, and away mode is one of them: the auto-arm exits
+# there without forking anything. The banner must be keyed on the fork rather
+# than on the call, because this is the documented condition where every turn end
+# refuses and nothing bounds it - the worst possible place to tell the model a
+# recovery start it can wait for is in flight.
+test_hook_claude_mode_away_refusal_claims_no_primed_start() {
+  local dir out status
+  command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach a primed watcher"
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-away-primes-nothing")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  install_integrated_autoarm "$dir"
+  write_gated_watch_fixture "$dir"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  expect_code 2 "$status" "an away home with no fresh beacon and no daemon must still refuse"
+  assert_contains "$out" "TURN WOULD END BLIND" "the away-mode refusal lost the blind-turn banner"
+  assert_not_contains "$out" "primed a detached watcher start" "a refusal whose priming forked nothing must not claim a watcher start"
+  assert_contains "$out" "recovery is NOT already under way" "a refusal that detached nothing must say nothing is recovering"
+  [ -z "$(primed_cycle_pids "$dir")" ] \
+    || fail "away mode forked a primed cycle after all: $(primed_cycle_pids "$dir")"
+  [ ! -e "$dir/state/.watch.lock/pid" ] || fail "away mode started a watcher through the priming path"
+  pass "fm-turnend-guard --claude: a refusal that detached nothing does not claim a primed start"
+}
+
 test_hook_claude_mode_refused_stop_recovers_without_epoch_progress() {
   local dir out status epoch
   command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach the primed watcher"
@@ -2475,6 +2499,7 @@ test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_ordinary_stop_does_not_prime
 test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal
+test_hook_claude_mode_away_refusal_claims_no_primed_start
 test_hook_claude_mode_refused_stop_recovers_without_epoch_progress
 test_hook_claude_mode_advancing_epoch_refusal_cannot_guarantee_a_second_refusal
 test_hook_claude_mode_frozen_epoch_still_reaches_the_bounded_fail_open

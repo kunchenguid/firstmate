@@ -222,9 +222,11 @@ if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
   allow_supervised_stop
 fi
 
-# Set by the refusal-path priming below, so the banner reports what this hook
-# actually did rather than inferring from the absent generation claim that
-# nothing is recovering.
+# Set only when the refusal-path priming below actually detached a cycle, so the
+# banner reports what this hook did rather than inferring from the absent
+# generation claim that nothing is recovering. Priming has gates of its own -
+# away mode and an absent python3 among them - and every one of them returns
+# without forking, so invoking it proves nothing on its own.
 PRIMED_RECOVERY=0
 
 block_stop() {
@@ -491,19 +493,19 @@ fi
 # detaches the bin/fm-watch-arm.sh owner as a handling successor so a primed
 # cycle is confirmed, ledgered, and not re-announced into a one-poll
 # resurface, and takes no generation claim, so the registered asyncRewake hook
-# still owns rewake once a later Stop is
-# allowed. The primed process is already setsid-detached and survives this
-# refusal. Do not prime before the wait: that made every ordinary Claude Stop
-# start a handling successor and suppressed once-per-generation downtime
-# re-presentation. Do not call autoarm_owns_recovery here: that accounts the
-# failed-epoch budget.
+# still owns rewake once a later Stop is allowed. The primed process is already
+# setsid-detached and survives this refusal. Its exit status reports whether it
+# forked, which is what the banner claim below is keyed on. Do not prime before
+# the wait: that made every ordinary Claude Stop start a handling successor and
+# suppressed once-per-generation downtime re-presentation. Do not call
+# autoarm_owns_recovery here: that accounts the failed-epoch budget.
 if ! fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" \
   && ! fm_autoarm_claim_open "$STATE" "$GRACE" \
   && [ -x "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" ]; then
-  printf '%s' "$PAYLOAD" \
-    | "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" --ensure-watcher \
-    || true
-  PRIMED_RECOVERY=1
+  if printf '%s' "$PAYLOAD" \
+    | "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" --ensure-watcher; then
+    PRIMED_RECOVERY=1
+  fi
 fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
