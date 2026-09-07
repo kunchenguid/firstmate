@@ -1522,6 +1522,145 @@ PYEOF
   pass "fm-mail: a retry window of unseen uids never stalls the cursor"
 }
 
+test_poll_retry_unfetchable_window_advances_with_new_mail() {
+  # Greptile P1 / no-mistakes retry-pos-not-out-stalls-mixed: when every
+  # retry uid in the current window is unfetchable while new mail fills the
+  # poll output, the durable position must still advance. Gating persist on
+  # an empty `out` re-scans the same failed prefix forever and strands a
+  # recovered uid beyond the window.
+  local harness out1 out2 pos rc1=0 rc2=0
+  harness="$TMP_ROOT/retry-newmail-unfetchable-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_RETRY_POS': sys.argv[3],
+    'FM_MAIL_POLL_MAX_WAKES': '4',
+})
+# First window (cap=4 -> window=16) is 301..316; those stay unfetchable.
+# 320 has recovered and sits beyond that window. 400 is sustained new mail.
+FAILING = {str(u).encode() for u in range(301, 320)}
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'400'])
+        if cmd == 'fetch':
+            if args[0] in FAILING:
+                return ('NO', None)
+            return ('OK', [(b'', b'Subject: rec\r\nFrom: z@x.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[4])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  mkdir -p "$HOME_DIR/state"
+  {
+    printf 'uidvalidity=90009\n'
+    for u in $(seq 301 320); do printf '%s\n' "$u"; done
+  } > "$HOME_DIR/state/.mail-seen"
+  for u in $(seq 301 320); do printf '%s\n' "$u"; done > "$HOME_DIR/state/.mail-retry"
+  : > "$HOME_DIR/state/.mail-retry-pos"
+
+  out1=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc1=$?
+  expect_code 0 "$rc1" "first poll must succeed while new mail fills the output"
+  assert_contains "$out1" $'400\t\tz@x.c\trec\tok' \
+    "sustained new mail is emitted on the first poll"
+  assert_not_contains "$out1" $'320\t' \
+    "the recovered retry uid is still beyond the unfetchable window"
+  pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "16" "$pos" \
+    "unfetchable retry window advances the cursor even while new mail fills out"
+
+  out2=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc2=$?
+  expect_code 0 "$rc2" "second poll must succeed"
+  assert_contains "$out2" $'320\t\tz@x.c\trec\tretry' \
+    "the recovered uid beyond the failed prefix surfaces once the cursor advances"
+  pass "fm-mail: an unfetchable retry window still advances while new mail fills out"
+}
+
+test_poll_retry_unseen_window_advances_with_new_mail() {
+  # Same stall as retry-pos-not-out-stalls-mixed on the all-unseen window
+  # branch: a retry window of uids absent from the seen cursor must still
+  # advance the durable position when new mail fills `out`, so a later
+  # eligible retry uid beyond that window remains reachable.
+  local harness out1 out2 pos rc1=0 rc2=0
+  harness="$TMP_ROOT/retry-newmail-unseen-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_RETRY_POS': sys.argv[3],
+    'FM_MAIL_POLL_MAX_WAKES': '4',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'400'])
+        if cmd == 'fetch':
+            return ('OK', [(b'', b'Subject: rec\r\nFrom: z@x.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[4])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  mkdir -p "$HOME_DIR/state"
+  printf 'uidvalidity=90009\n320\n' > "$HOME_DIR/state/.mail-seen"
+  for u in $(seq 301 320); do printf '%s\n' "$u"; done > "$HOME_DIR/state/.mail-retry"
+  : > "$HOME_DIR/state/.mail-retry-pos"
+
+  out1=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc1=$?
+  expect_code 0 "$rc1" "first poll must succeed while new mail fills the output"
+  assert_contains "$out1" $'400\t\tz@x.c\trec\tok' \
+    "sustained new mail is emitted on the first poll"
+  assert_not_contains "$out1" $'320\t' \
+    "the recovered retry uid is still beyond the unseen window"
+  pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "16" "$pos" \
+    "unseen retry window advances the cursor even while new mail fills out"
+
+  out2=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc2=$?
+  expect_code 0 "$rc2" "second poll must succeed"
+  assert_contains "$out2" $'320\t\tz@x.c\trec\tretry' \
+    "the recovered uid beyond the unseen window surfaces once the cursor advances"
+  pass "fm-mail: an unseen retry window still advances while new mail fills out"
+}
+
 test_poll_retry_logout_before_emit_and_position_save() {
   # A standing check can SIGKILL poll_list while IMAP logout is still blocked.
   # Logout must finish before any emit or persist so that kill cannot advance
@@ -2366,6 +2505,8 @@ test_poll_retry_cursor_advances_past_failures
 test_poll_retry_position_does_not_advance_past_unpublished_wake
 test_poll_retry_budget_advances_by_examined_not_window
 test_poll_retry_window_of_unseen_never_stalls_cursor
+test_poll_retry_unfetchable_window_advances_with_new_mail
+test_poll_retry_unseen_window_advances_with_new_mail
 test_poll_retry_logout_before_emit_and_position_save
 test_poll_retry_position_not_saved_when_row_emitted
 test_poll_retry_small_window_rotates_past_unfetchable_prefix

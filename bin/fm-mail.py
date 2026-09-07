@@ -423,21 +423,27 @@ def cmd_poll_list():
         # retry uid. If that uid's wake fails to publish, it stays at the head
         # of the scan for the next poll; if the wake succeeds, the bash layer
         # removes it from the retry set and the same numeric start scans the
-        # next remaining uid. When no retry row was emitted, candidates were
-        # examined (unfetchable) or the window held only unseen uids, and the
-        # position advances so the scan does not stall.
+        # next remaining uid. Advance is keyed off whether a retry row was
+        # emitted (first_retry_emitted_index), never off whether `out` is
+        # empty: new-mail rows filling the poll must not stall the retry
+        # cursor (Greptile 'Retry window stops progressing'). When no retry
+        # row was emitted, candidates were examined (unfetchable) or the
+        # window held only unseen uids, and the position advances so the
+        # scan does not stall. An emitted retry at index 0 leaves the
+        # position unchanged, same as landing on that uid.
         # Three cases advance it:
-        #  1. budget > 0 and a retry row was emitted -> by the number of
-        #     unfetchable retry candidates before the first emitted one,
-        #     landing the cursor on that uid (never past it).
+        #  1. budget > 0 and a retry row was emitted past index 0 -> by the
+        #     number of unfetchable retry candidates before the first emitted
+        #     one, landing the cursor on that uid (never past it).
         #  2. budget > 0 but no retry row emitted -> by the candidates actually
         #     examined within budget (fetched or rotated), never the full
-        #     window (Greptile 'Retry cursor skips candidates').
+        #     window (Greptile 'Retry cursor skips candidates'), even when
+        #     new-mail rows fill `out`.
         #  3. budget == 0 because the window held only unseen uids (none
         #      qualified as a seen retry) -> by the scanned window itself, so
         #      a leading stale window cannot stall the march and strand a
         #      later eligible retry uid (Greptile 'Retry cursor stalls
-        #      permanently').
+        #      permanently'), even when new-mail rows fill `out`.
         # A cap=1 new-mail turn (qualifiers exist but yield deliberately,
         # retry_budget 0 with retry_candidates non-empty) leaves the position
         # unchanged so an unexamined window is never skipped.
@@ -445,10 +451,10 @@ def cmd_poll_list():
             if first_retry_emitted_index > 0:
                 save_retry_pos(retry_pos_path, len(retry_order),
                                first_retry_emitted_index, retry_pos)
-            elif not out:
+            elif first_retry_emitted_index < 0:
                 save_retry_pos(retry_pos_path, len(retry_order),
                                max(1, retry_examined), retry_pos)
-        elif len(retry_window) > 0 and len(retry_candidates) == 0 and not out:
+        elif len(retry_window) > 0 and len(retry_candidates) == 0:
             save_retry_pos(retry_pos_path, len(retry_order),
                            len(retry_window), retry_pos)
         return 0
