@@ -371,8 +371,8 @@ test_base_branch_step_runs_against_the_local_ref() {
   local home id base brief checkout_cmd fetch_cmd repo local_tip remote_tip
   local -a cmd fetch_part checkout_part
   home="$TMP_ROOT/base-branch-step-home"
-  id=brief-base-step-c4
-  base=feat/stack
+  id="brief-base-step-c4"
+  base="feat/stack"
   write_registry "$home"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only --base "$base" >/dev/null 2>&1 \
