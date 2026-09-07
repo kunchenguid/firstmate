@@ -1067,7 +1067,13 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
     pid_state=$?
     case "$pid_state" in
       1) exit 0 ;;
-      0|3) ;;
+      3)
+        if stop_runner_pid "$pid" "$identity"; then
+          exit 0
+        fi
+        continue
+        ;;
+      0) ;;
       *) continue ;;
     esac
     if fm_procevent_owner_alive "$STATE" "$lease"; then

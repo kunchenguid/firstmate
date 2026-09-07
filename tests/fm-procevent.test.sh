@@ -2061,6 +2061,39 @@ while kill -0 "$DETACHED_RUNNER_PID" 2>/dev/null; do
 done
 pass "an attached-start keeper stops refreshing after its parent exits"
 
+GROUP_LEAK_SOURCE="$TMP_ROOT/group-leak-source.sh"
+cat > "$GROUP_LEAK_SOURCE" <<'SH'
+#!/usr/bin/env bash
+marker=$1
+(
+  trap '' HUP
+  exec </dev/null >/dev/null 2>&1
+  printf '%s\n' "$BASHPID" > "$marker.pid"
+  while :; do sleep 1; done
+) &
+while [ ! -s "$marker.pid" ]; do sleep 0.01; done
+exit 1
+SH
+chmod +x "$GROUP_LEAK_SOURCE"
+HGROUP_LEAK="$TMP_ROOT/group-leak"; new_home "$HGROUP_LEAK"
+fm_test_track_procevent_home "$HGROUP_LEAK"
+GROUP_LEAK_MARKER="$TMP_ROOT/group-leak-child"
+pe_register "$HGROUP_LEAK" lavish group-leak-src -- \
+  "$GROUP_LEAK_SOURCE" "$GROUP_LEAK_MARKER" >/dev/null
+FM_PROCEVENT_OWNER_LEASE_SECONDS=30 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+  pe "$HGROUP_LEAK" reconcile >/dev/null
+wait_for "$GROUP_LEAK_MARKER.pid" || fail "the source did not leave its same-group child"
+GROUP_LEAK_PID=$(cat "$GROUP_LEAK_MARKER.pid")
+group_leak_deadline=$((SECONDS + 6))
+while kill -0 "$GROUP_LEAK_PID" 2>/dev/null; do
+  if [ "$SECONDS" -ge "$group_leak_deadline" ]; then
+    pe "$HGROUP_LEAK" retire group-leak-src >/dev/null 2>&1 || true
+    fail "a same-group child survived its runner under a fresh owner lease"
+  fi
+  sleep 0.1
+done
+pass "the owner guard immediately reaps a runner's leftover process group"
+
 # --- a runner cannot outlive the session that owns it -----------------------
 #
 # Reproduces the shape that wedged a host: a listener detached into its own

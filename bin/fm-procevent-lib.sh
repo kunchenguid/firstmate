@@ -217,7 +217,7 @@ fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-gen
   stamp="$reg/$2.$3.last-launch"
   [ ! -L "$stamp" ] || return 1
   [ ! -e "$stamp" ] || [ -f "$stamp" ] || return 1
-  perl -MTime::HiRes=time,sleep -MFcntl=:DEFAULT -e '
+  perl -MTime::HiRes=clock_gettime,sleep,CLOCK_MONOTONIC -MFcntl=:DEFAULT -e '
     use strict;
     use warnings;
     my ($path, $floor) = @ARGV;
@@ -229,10 +229,10 @@ fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-gen
       defined($value) && $value =~ /\A([0-9]+(?:\.[0-9]+)?)\n?\z/ or exit 1;
       $previous = 0 + $1;
     }
-    my $now = time;
+    my $now = clock_gettime(CLOCK_MONOTONIC);
     my $elapsed = defined($previous) && $now >= $previous ? $now - $previous : 0;
     sleep($floor - $elapsed) if defined($previous) && $elapsed < $floor;
-    $now = time;
+    $now = clock_gettime(CLOCK_MONOTONIC);
     my $tmp = "$path.$$";
     sysopen(my $out, $tmp, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 1;
     print {$out} "$now\n" or exit 1;
