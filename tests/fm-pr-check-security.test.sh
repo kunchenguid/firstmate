@@ -993,6 +993,53 @@ SH
   pass "a worker replaced during the state read is refused at fm-send's own delivery-time guard"
 }
 
+# See docs/architecture.md "Branch-currency dispatch" (issue #3886): a
+# replacement already launched before this poll leaves both spawn_gen reads
+# current, so this "done" - a stale status log line - needs its own refusal.
+test_branch_currency_stale_status_log_refuses() {
+  local dir state rc old_epoch
+
+  dir=$(make_case branch-currency-stale-status-log)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  enable_pr_refresh "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/9 >/dev/null \
+    || fail "could not arm stale-status-log branch-currency fixture"
+
+  printf 'done: checks green: PR ready for review\n' > "$state/task-a.status"
+  old_epoch=$(($(date +%s) - 1000))
+  perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$old_epoch" "$state/task-a.status" \
+    || fail "could not backdate the stale status log"
+  sed "s/^spawn_gen=.*/spawn_gen=s$(date +%s).1.1/" "$state/task-a.meta" > "$state/task-a.meta.next"
+  mv "$state/task-a.meta.next" "$state/task-a.meta"
+
+  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: done \302\267 source: status-log \302\267 checks green: PR ready for review\n'
+SH
+  cat > "$dir/fakebin/fm-refresh-send.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_REFRESH_SEND_LOG"
+SH
+  chmod +x "$dir/fakebin/fm-crew-state.sh" "$dir/fakebin/fm-refresh-send.sh"
+  : > "$dir/refresh-send.log"
+
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/stale.out" 2> "$dir/stale.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "stale-status-log watcher failed: $(cat "$dir/stale.err")"
+  [ ! -s "$dir/refresh-send.log" ] \
+    || fail "a done verdict sourced from a stale status log reached an actively launching replacement"
+  assert_grep 'branch-refresh-refused pr=https://github.com/o/r/pull/9 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=generation-unconfirmed' \
+    "$dir/stale.out" "a done verdict predating the current spawn_gen was not refused"
+  pass "a done verdict sourced from a status log older than the current spawn_gen is refused"
+}
+
 # See docs/architecture.md "Branch-currency dispatch": spawn_gen is never
 # frozen across polls, so an ordinary post-arm relaunch still dispatches.
 test_branch_currency_dispatches_after_ordinary_relaunch() {
@@ -2595,6 +2642,7 @@ test_gitlab_merged_poll_retires() {
 
 test_branch_currency_dispatch_and_active_refusal
 test_branch_currency_generation_race_defers
+test_branch_currency_stale_status_log_refuses
 test_branch_currency_dispatches_after_ordinary_relaunch
 test_branch_currency_remote_secondmate_refused
 test_branch_currency_restart_before_state_recorded

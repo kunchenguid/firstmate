@@ -1299,6 +1299,7 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
   local id=$1 url=$2 condition=$3 head=$4
   local marker="$STATE/$id.pr-refresh-state" meta="$STATE/$id.meta"
   local state_line state mode spawn_gen message attempt record record_path record_state
+  local gen_epoch status_mtime
 
   if [ -f "$marker" ] && pr_refresh_state_read "$marker" && [ "$PR_REFRESH_HEAD" = "$head" ] \
     && [ "$PR_REFRESH_STATUS" != resolved ]; then
@@ -1346,6 +1347,28 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
   if [ "$state" != "done" ]; then
     pr_refresh_refuse "$id" "$url" "$condition" "$head" "task-state-$state"
     return $?
+  fi
+
+  # A "done" answer sourced from a status log predating the current spawn_gen
+  # is refused, not dispatched. docs/architecture.md "Branch-currency
+  # dispatch" owns why (issue #3886).
+  if [ -f "$STATE/$id.status" ]; then
+    case "$spawn_gen" in
+      s[0-9]*.*)
+        gen_epoch=${spawn_gen#s}
+        gen_epoch=${gen_epoch%%.*}
+        status_mtime=$(stat_mtime "$STATE/$id.status")
+        case "$status_mtime" in
+          ''|*[!0-9]*) ;;
+          *)
+            if [ "$status_mtime" -lt "$gen_epoch" ]; then
+              pr_refresh_refuse "$id" "$url" "$condition" "$head" generation-unconfirmed
+              return $?
+            fi
+            ;;
+        esac
+        ;;
+    esac
   fi
   case "$mode" in no-mistakes|direct-PR) ;; *)
     pr_refresh_refuse "$id" "$url" "$condition" "$head" unsupported-mode
