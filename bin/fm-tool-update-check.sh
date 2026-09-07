@@ -31,6 +31,9 @@
 # manager's "latest" directory can hold an older build. A copy that will not
 # report a version is reported as a check failure rather than assumed current.
 #
+# Published versions are read from the public npm registry or GitHub latest
+# release API with curl and jq. No vendor CLI update command is invoked.
+#
 # What this script never does: it reports, and it repairs nothing. It does not
 # install, update, uninstall, reorder PATH, or touch any version manager's
 # configuration, and it never fetches into a watched git repository. Every git
@@ -251,11 +254,15 @@ version_newer() {
   IFS=. read -r -a bp <<< "$b"
   i=0
   while [ "$i" -lt "${#ap[@]}" ] || [ "$i" -lt "${#bp[@]}" ]; do
-    left=$((10#${ap[i]:-0}))
-    right=$((10#${bp[i]:-0}))
-    if [ "$left" -gt "$right" ]; then
+    left=${ap[i]:-0}
+    right=${bp[i]:-0}
+    # Compare decimal strings so untrusted large components cannot overflow
+    # shell arithmetic. Leading zeroes and omitted components are insignificant.
+    while [ "${#left}" -gt 1 ] && [ "${left#0}" != "$left" ]; do left=${left#0}; done
+    while [ "${#right}" -gt 1 ] && [ "${right#0}" != "$right" ]; do right=${right#0}; done
+    if [ "${#left}" -gt "${#right}" ] || { [ "${#left}" -eq "${#right}" ] && [[ "$left" > "$right" ]]; }; then
       return 0
-    elif [ "$left" -lt "$right" ]; then
+    elif [ "$left" != "$right" ]; then
       return 1
     fi
     i=$((i + 1))
@@ -327,6 +334,15 @@ config_validate() {
       elif ($t | has("git")) and (($t.git.repo | type) != "string" or ($t.git.repo | startswith("/") | not) or ($t.git.repo | test("[[:cntrl:]]"))) then "tool \($t.name) git.repo must be an absolute path on one line"
       elif ($t | has("git")) and ($t.git | has("remote")) and (($t.git.remote | type) != "string" or ($t.git.remote | test("^[A-Za-z0-9._-]+$") | not)) then "tool \($t.name) git.remote must be a simple remote name"
       elif ($t | has("git")) and ($t.git | has("branch")) and (($t.git.branch | type) != "string" or ($t.git.branch | test("^[A-Za-z0-9._/-]+$") | not)) then "tool \($t.name) git.branch must be a simple branch name"
+      elif ($t | has("published")) and (($t.published | type) != "object") then "tool \($t.name) published must be an object"
+      elif ($t | has("published")) and (($t | has("command")) | not) then "tool \($t.name) published needs command to report the installed version"
+      elif ($t | has("published")) and ($t.published.source != "npm" and $t.published.source != "github") then "tool \($t.name) published.source must be npm or github"
+      elif ($t | has("published")) and $t.published.source == "npm" and
+        (($t.published.package | type) != "string" or ($t.published.package | test("^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$") | not)) then "tool \($t.name) published.package must be an npm package name"
+      elif ($t | has("published")) and $t.published.source == "github" and
+        (($t.published.repo | type) != "string" or ($t.published.repo | test("^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$") | not)) then "tool \($t.name) published.repo must be a GitHub owner/repo"
+      elif ($t | has("published")) and
+        (($t.published | keys) - (if $t.published.source == "npm" then ["source", "package"] else ["source", "repo"] end) | length) > 0 then "tool \($t.name) published has unsupported fields"
       else empty
       end;
     def problems:
@@ -367,7 +383,9 @@ config_records() {
       ((.announce_args // .version_args // ["--version"]) | join(" ")),
       (.git.repo // ""),
       (.git.remote // "origin"),
-      (.git.branch // "")
+      (.git.branch // ""),
+      (.published.source // ""),
+      (.published.package // .published.repo // "")
     ] | join("\u001f")
   ' "$CONFIG" 2>/dev/null
 }
@@ -401,11 +419,14 @@ probe_output() {
   fm_run_timed "$(probe_bound)" "$path" "$@" 2>&1
 }
 
+COMMAND_VERSION=
+
 command_findings() {
   local name=$1 command_name=$2 args_joined=$3 announce=$4 announce_args=$5
   local hit out version matched announce_out status
   local resolved_path='' resolved_version='' resolved_out=''
   local best_path='' best_version='' unreadable='' hits=''
+  COMMAND_VERSION=
 
   # This tool's announcement source is dead if its pattern cannot be used, which
   # is reported here, for this tool alone, so the rest of the sweep still runs.
@@ -428,7 +449,9 @@ command_findings() {
     fi
     # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
     out=$(probe_output "$hit" $args_joined)
-    version=$(parse_version "$out")
+    status=$?
+    version=
+    [ "$status" -ne 0 ] || version=$(parse_version "$out")
     if [ -z "$resolved_path" ]; then
       resolved_path=$hit
       resolved_version=$version
@@ -490,6 +513,8 @@ EOF
     return 0
   fi
 
+  COMMAND_VERSION=$resolved_version
+
   if [ -n "$best_version" ] && [ "$best_path" != "$resolved_path" ] \
     && version_newer "$best_version" "$resolved_version"; then
     emit "$name update not in effect: PATH resolves $resolved_version at $resolved_path but $best_version is installed at $best_path"
@@ -499,6 +524,59 @@ EOF
     emit "$name check failed: $unreadable did not report a version"
   fi
   return 0
+}
+
+# --- published release probes -----------------------------------------------
+
+published_findings() {
+  local name=$1 source=$2 package=$3 installed=$4
+  local url field version status bound
+  # command_findings already reports a missing or unreadable resolved command.
+  [ -n "$installed" ] || return 0
+  budget_allows "$name published source" || return 0
+  if ! command -v curl >/dev/null 2>&1; then
+    emit "$name check failed: curl is required to read its published source"
+    return 0
+  fi
+  case "$source" in
+    npm)
+      # Encode scoped package names as one URL path component.
+      url="https://registry.npmjs.org/$(jq -rn --arg package "$package" '$package | @uri')/latest"
+      field=version
+      ;;
+    github)
+      url="https://api.github.com/repos/$package/releases/latest"
+      field=tag_name
+      ;;
+  esac
+  bound=$(probe_bound)
+  # -q must be first: ignore curlrc (credentials, output files, or write methods).
+  # No credentials, redirects, retries, or stdin; HTTP errors are failed probes.
+  # Keep HTTP and JSON parsing in the same bound, including blocking DNS builds.
+  # Only the documented version field counts, never dotted text in release notes
+  # or errors. Exit 65 distinguishes an unsupported response from a failed read.
+  # shellcheck disable=SC2016  # Expanded by the bounded child shell and jq.
+  version=$(fm_run_timed "$bound" bash -c '
+    body=$(curl -q --fail --silent --show-error \
+      --proto "=https" --connect-timeout "$1" --max-time "$1" \
+      --header "Accept: application/json" --url "$2") || exit "$?"
+    version=$(printf "%s" "$body" | jq -ser --arg field "$3" "$4") || exit 65
+    [ -n "$version" ] || exit 65
+    printf "%s\n" "$version"
+  ' published-probe "$bound" "$url" "$field" \
+    'select(length == 1) | .[0][$field] | strings | select(test("^v?[0-9]+(\\.[0-9]+)+$"))' </dev/null 2>/dev/null)
+  status=$?
+  if [ "$status" -eq 65 ]; then
+    emit "$name check failed: published source $url did not report a supported version"
+    return 0
+  elif [ "$status" -ne 0 ]; then
+    emit "$name check failed: published source $url could not be reached or read (exit $status)"
+    return 0
+  fi
+  version=${version#v}
+  if version_newer "$version" "$installed"; then
+    emit "$name update available: installed $installed, published $version at $url"
+  fi
 }
 
 # --- git probes -------------------------------------------------------------
@@ -689,7 +767,7 @@ record_write() {
 
 action_check() {
   local name command_name args_joined announce announce_args repo remote branch
-  local line now
+  local line now source package
 
   [ -f "$CONFIG" ] || return 0
 
@@ -709,10 +787,12 @@ action_check() {
   if ! config_validate; then
     emit "watched tool registry: $CONFIG_PROBLEM"
   else
-    while IFS=$FIELD_SEP read -r name command_name args_joined announce announce_args repo remote branch; do
+    while IFS=$FIELD_SEP read -r name command_name args_joined announce announce_args repo remote branch source package; do
       [ -n "$name" ] || continue
       budget_allows "$name" || break
+      COMMAND_VERSION=
       [ -z "$command_name" ] || command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args"
+      [ -z "$source" ] || published_findings "$name" "$source" "$package" "$COMMAND_VERSION"
       [ -z "$repo" ] || git_findings "$name" "$repo" "$remote" "$branch"
     done < <(config_records)
   fi

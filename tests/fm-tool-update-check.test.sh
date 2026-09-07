@@ -347,6 +347,7 @@ SH
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=2
   report=$(cat "$out")
   assert_contains "$report" "no-mistakes check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
+  assert_grep 'reported=' "$home/state/.tool-updates" "an unchecked announcement did not record its finding"
   pass "an announcement source the budget could not reach is reported, not read as current"
 }
 
@@ -613,6 +614,346 @@ SH
   assert_contains "$report" "firstmate check failed: $work did not answer whether it is a git repository" "a repository probe that never answered was not reported as such"
   assert_not_contains "$report" "is not a git repository" "a repository probe that never answered was reported as not a repository"
   pass "a stalled repository probe is reported as no answer, not as not a repository"
+}
+
+# --- published release sources ----------------------------------------------
+
+# Fake only the HTTP transport; the executable still validates the registry,
+# chooses the endpoint, parses real response shapes, and compares command output.
+make_release_transport() {
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/curl" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = -q ] || exit 90
+printf '%s\n' "$@" >> "$FM_RELEASE_LOG"
+# A query must not consume stdin even if its caller has input waiting.
+if IFS= read -r input; then exit 91; fi
+if [ "${FM_RELEASE_SLEEP:-0}" != 0 ]; then sleep "$FM_RELEASE_SLEEP"; fi
+if [ -n "${FM_RELEASE_CLOCK:-}" ]; then printf '110\n' > "$FM_RELEASE_CLOCK"; fi
+cat "$FM_RELEASE_RESPONSE"
+exit "${FM_RELEASE_STATUS:-0}"
+SH
+  chmod 0755 "$dir/curl"
+}
+
+write_release_config() {
+  local home=$1 name=$2 source=$3 package=$4
+  jq -n --arg name "$name" --arg command "$TOOL" --arg source "$source" --arg package "$package" '
+    {tools: [{name: $name, command: $command, published:
+      ({source: $source} + (if $source == "npm" then {package: $package} else {repo: $package} end))}]}
+  ' > "$home/config/watched-tools.json"
+}
+
+test_published_versions_for_the_three_motivating_tools() {
+  local name source package current older ahead field prefix home dir out installed
+  while read -r name source package current older ahead field prefix; do
+    home=$(make_home "release-$name")
+    dir="$home/bin"
+    out="$home/out.txt"
+    make_release_transport "$dir"
+    write_release_config "$home" "$name" "$source" "$package"
+    jq -n --arg field "$field" --arg version "$prefix$current" '{($field): $version}' > "$home/response"
+    for installed in "$older" "$current" "$ahead"; do
+      case "$name" in
+        herdr) make_copy "$dir" "$TOOL" "herdr $installed" ;;
+        tasks-axi) make_copy "$dir" "$TOOL" "v$installed" ;;
+        gnhf) make_copy "$dir" "$TOOL" "$installed" ;;
+      esac
+      run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log"
+      if [ "$installed" = "$older" ]; then
+        assert_contains "$(cat "$out")" "$name update available: installed $older, published $current" "the published newer $name was missed"
+      else
+        [ ! -s "$out" ] || fail "$name installed $installed against published $current was not silent: $(cat "$out")"
+      fi
+    done
+    case "$source" in
+      github) assert_grep "https://api.github.com/repos/$package/releases/latest" "$home/http.log" "wrong GitHub source" ;;
+      npm) assert_grep "https://registry.npmjs.org/$package/latest" "$home/http.log" "wrong npm source" ;;
+    esac
+    assert_grep --max-time "$home/http.log" "HTTP query had no internal time bound"
+    assert_grep --fail "$home/http.log" "HTTP errors were not refused"
+  done <<'EOF'
+herdr github herdrdev/herdr 0.8.2 0.8.0 0.9.0 tag_name v
+tasks-axi npm tasks-axi 0.2.5 0.2.4 0.3.0 version v
+gnhf npm gnhf 0.1.49 0.1.47 0.2.0 version
+EOF
+  pass "published herdr, tasks-axi and gnhf report older fixtures and stay silent when equal or ahead"
+}
+
+test_published_failures_do_not_blind_other_tools() {
+  local home dir out response status
+  home=$(make_home release-failures)
+  dir="$home/bin"
+  out="$home/out.txt"
+  make_release_transport "$dir"
+  make_copy "$dir" "$TOOL" 'herdr 0.8.0'
+  write_release_config "$home" herdr github herdrdev/herdr
+  jq '.tools += [{name:"other",command:"fm-absent-release-fixture"}]' "$home/config/watched-tools.json" > "$home/config-next"
+  mv "$home/config-next" "$home/config/watched-tools.json"
+  for response in 'not json 0.9.0' '{}' '{"tag_name":7}' '{"message":"error 0.9.0"}' '{"tag_name":"unknown 0.9.0"}' '{"tag_name":"v0.9.0-rc.1"}' '{"tag_name":"v0.9.0"} {}'; do
+    printf '%s\n' "$response" > "$home/response"
+    rm -f "$home/state/.tool-updates"
+    run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log"
+    assert_contains "$(cat "$out")" 'herdr check failed: published source' "bad response was treated as current: $response"
+    assert_contains "$(cat "$out")" 'other check failed:' "a bad source stopped the other tools"
+    assert_not_contains "$(cat "$out")" 'update available' "a malformed version was treated as an update"
+  done
+  # Even a partial response that carries a newer version is no answer when the
+  # HTTP request failed (connection failure, HTTP error, or curl timeout).
+  printf '%s\n' '{"tag_name":"v0.9.0"}' > "$home/response"
+  for status in 7 22 28; do
+    run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_STATUS="$status"
+    assert_contains "$(cat "$out")" "could not be reached or read (exit $status)" "HTTP failure was not reported"
+    assert_contains "$(cat "$out")" 'other check failed:' "HTTP failure stopped the sweep"
+    assert_not_contains "$(cat "$out")" 'update available' "failed HTTP request leaked a version"
+  done
+  pass "unreachable and unparseable published sources fail for their own tool and the sweep continues"
+}
+
+test_published_probe_bounds_and_report_record() {
+  local home dir out start elapsed real_jq
+  home=$(make_home release-bounds)
+  dir="$home/bin"
+  out="$home/out.txt"
+  make_release_transport "$dir"
+  make_copy "$dir" "$TOOL" '0.8.0'
+  write_release_config "$home" herdr github herdrdev/herdr
+  printf '%s\n' '{"tag_name":"v0.8.2"}' > "$home/response"
+  start=$(date +%s)
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_SLEEP=20 FM_TOOL_UPDATE_PROBE_SECS=1
+  elapsed=$(($(date +%s) - start))
+  [ "$elapsed" -lt 10 ] || fail "published probe escaped its bound: ${elapsed}s"
+  assert_contains "$(cat "$out")" 'could not be reached or read (exit 124)' "hung HTTP source was not a check failure"
+  # Spend the whole sweep budget, leaving a later tool unchecked.
+  jq '.tools += [{name:"unreached",command:"fm-absent-release-fixture"}]' "$home/config/watched-tools.json" > "$home/config-next"
+  mv "$home/config-next" "$home/config/watched-tools.json"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_SLEEP=20 FM_TOOL_UPDATE_PROBE_SECS=5 FM_TOOL_UPDATE_BUDGET_SECS=2
+  assert_contains "$(cat "$out")" 'check incomplete:' "incomplete sweep was silent"
+  assert_grep 'check incomplete:' "$home/state/.tool-updates" "incomplete sweep did not record its finding"
+  rm "$home/state/.tool-updates"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_SLEEP=20 FM_TOOL_UPDATE_PROBE_SECS=5 FM_TOOL_UPDATE_BUDGET_SECS=2
+  assert_grep 'reported=' "$home/state/.tool-updates" "incomplete sweep did not create a report record"
+  # A stalled parser must have the same bound as the HTTP read. Registry parsing
+  # still goes through the real jq, so this only stalls response parsing.
+  real_jq=$(command -v jq)
+  cat > "$dir/jq" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = -ser ]; then sleep 20; fi
+exec '$real_jq' "\$@"
+SH
+  chmod 0755 "$dir/jq"
+  start=$(date +%s)
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_TOOL_UPDATE_PROBE_SECS=1
+  elapsed=$(($(date +%s) - start))
+  [ "$elapsed" -lt 10 ] || fail "response parser escaped the probe bound: ${elapsed}s"
+  assert_contains "$(cat "$out")" 'could not be reached or read (exit 124)' "stalled parser was not bounded"
+  pass "published probes obey their bound and incomplete sweeps record their findings"
+}
+
+# Advance the check's clock only when a fixture probe finishes. This pins the
+# deadline boundary without waiting for a wall-clock second or a real network.
+make_budget_clock() {
+  local dir=$1 clock=$2 real_date
+  real_date=$(command -v date)
+  mkdir -p "$dir"
+  printf '100\n' > "$clock"
+  cat > "$dir/date" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = +%s ]; then cat '$clock'; else exec '$real_date' "\$@"; fi
+SH
+  chmod 0755 "$dir/date"
+}
+
+test_completed_late_sweep_records_and_deduplicates() {
+  local home dir out clock path status queries
+  home=$(make_home release-finish-late)
+  dir="$home/bin"
+  out="$home/out.txt"
+  clock="$home/clock"
+  make_budget_clock "$dir" "$clock"
+  make_release_transport "$dir"
+  make_copy "$dir" "$TOOL" 'herdr 0.8.0'
+  write_release_config "$home" herdr github herdrdev/herdr
+  printf '%s\n' '{"tag_name":"v0.8.2"}' > "$home/response"
+  path=$(fixture_path "$dir")
+
+  # Starts at 100 with deadline 105, returns a valid newer version at 110.
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" FM_TOOL_UPDATE_BUDGET_SECS=5 FM_TOOL_UPDATE_NOW=1700000000
+  [ "$(cat "$clock")" = 110 ] || fail "the final probe did not cross the deadline"
+  assert_contains "$(cat "$out")" 'herdr update available:' "late completed sweep did not report its update"
+  assert_grep 'epoch=1700000000' "$home/state/.tool-updates" "late completed sweep discarded its cadence epoch"
+  assert_grep 'reported=herdr update available:' "$home/state/.tool-updates" "late completed sweep discarded its finding"
+
+  printf '100\n' > "$clock"
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" FM_TOOL_UPDATE_BUDGET_SECS=5 FM_TOOL_UPDATE_NOW=1700000000
+  [ ! -s "$out" ] || fail "same completed late sweep reported its update twice"
+  queries=$(wc -l < "$home/http.log")
+  # A normal cadence-gated poll must not issue another HTTP query at all.
+  status=0
+  env FM_HOME="$home" PATH="$path" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW=1700000300 \
+    FM_TOOL_UPDATE_BUDGET_SECS=5 FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" \
+    "$CHECK" > "$out" 2>&1 || status=$?
+  expect_code 0 "$status" "late sweep cadence poll"
+  [ ! -s "$out" ] || fail "late sweep cadence poll reported again"
+  [ "$(wc -l < "$home/http.log")" = "$queries" ] || fail "late sweep cadence epoch did not suppress probes"
+
+  # Counterfactual: the same late probe with another configured tool after it
+  # leaves work unchecked.
+  jq '.tools += [{name:"unreached",command:"fm-unreached-budget-fixture"}]' "$home/config/watched-tools.json" > "$home/next-config"
+  mv "$home/next-config" "$home/config/watched-tools.json"
+  printf '100\n' > "$clock"
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" FM_TOOL_UPDATE_BUDGET_SECS=5 FM_TOOL_UPDATE_NOW=1700001000
+  assert_contains "$(cat "$out")" 'check incomplete: the time budget ran out before unreached' "an unreached tool was treated as checked"
+  assert_grep 'epoch=1700001000' "$home/state/.tool-updates" "partial sweep discarded its cadence epoch"
+  assert_grep 'check incomplete:' "$home/state/.tool-updates" "partial sweep discarded its finding"
+  queries=$(wc -l < "$home/http.log")
+  status=0
+  env FM_HOME="$home" PATH="$path" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW=1700001300 \
+    FM_TOOL_UPDATE_BUDGET_SECS=5 FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" \
+    "$CHECK" > "$out" 2>&1 || status=$?
+  expect_code 0 "$status" "partial sweep cadence poll"
+  [ ! -s "$out" ] || fail "partial sweep cadence poll reported again"
+  [ "$(wc -l < "$home/http.log")" = "$queries" ] || fail "partial sweep cadence epoch did not suppress probes"
+  rm "$home/state/.tool-updates"
+  printf '100\n' > "$clock"
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log" FM_RELEASE_CLOCK="$clock" FM_TOOL_UPDATE_BUDGET_SECS=5
+  assert_grep 'reported=' "$home/state/.tool-updates" "partial sweep did not create a record"
+  pass "complete and partial late sweeps record findings and retain cadence"
+}
+
+test_unstarted_published_probe_reports_budget_once() {
+  local home dir out clock fresh
+  home=$(make_home release-budget-once)
+  dir="$home/bin"
+  out="$home/out.txt"
+  clock="$home/clock"
+  make_budget_clock "$dir" "$clock"
+  make_release_transport "$dir"
+  cat > "$dir/$TOOL" <<SH
+#!/usr/bin/env bash
+printf '110\n' > '$clock'
+printf 'herdr 0.8.0\n'
+SH
+  chmod 0755 "$dir/$TOOL"
+  write_release_config "$home" herdr github herdrdev/herdr
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_LOG="$home/http.log" FM_TOOL_UPDATE_BUDGET_SECS=5
+  [ "$(cat "$out")" = 'tool updates: check incomplete: the time budget ran out before herdr published source' ] \
+    || fail "an unstarted published probe reported its budget failure more than once: $(cat "$out")"
+  assert_absent "$home/http.log" "published source was asked after its budget was gone"
+  assert_grep 'reported=' "$home/state/.tool-updates" "unstarted published probe did not record its finding"
+
+  # A skipped PATH copy is also unfinished work, even within the last tool.
+  fresh="$home/fresh"
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  printf '100\n' > "$clock"
+  run_check "$home" "$(fixture_path "$dir:$fresh")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=5
+  assert_contains "$(cat "$out")" 'the time budget ran out before every copy answered' "skipped PATH copy was treated as checked"
+  assert_grep 'reported=' "$home/state/.tool-updates" "skipped PATH copy did not record its finding"
+  pass "a skipped published probe reports its budget failure once and skipped probes record their findings"
+}
+
+test_malformed_published_config_refuses_whole_registry() {
+  local home dir out entry status
+  home=$(make_home release-invalid)
+  dir="$home/bin"
+  out="$home/out.txt"
+  make_counting_copy "$dir" "$TOOL" '0.8.0' "$home/probes"
+  while IFS= read -r entry; do
+    write_config "$home" "{\"tools\":[{\"name\":\"other\",\"command\":\"$TOOL\"},$entry]}"
+    status=0
+    FM_HOME="$home" "$CHECK" arm > "$out" 2>&1 || status=$?
+    expect_code 1 "$status" "arm with invalid entry $entry"
+    [ -s "$out" ] || fail "arm refused invalid entry without a diagnostic"
+    assert_absent "$home/state/tool-updates.check.sh" "invalid entry armed the watcher"
+    rm -f "$home/state/.tool-updates"
+    run_check "$home" "$(fixture_path "$dir")" "$out"
+    assert_contains "$(cat "$out")" 'watched tool registry:' "malformed entry was not a registry failure"
+    assert_not_contains "$(cat "$out")" 'other check failed:' "malformed registry produced a per-tool failure"
+    assert_absent "$home/probes" "malformed registry allowed a valid tool to be probed"
+  done <<'EOF'
+{"name":"bad","command":"herdr-fixture","published":null}
+{"name":"bad","published":{"source":"npm","package":"gnhf"}}
+{"name":"bad","command":"herdr-fixture","published":{"source":"unknown"}}
+{"name":"bad","command":"herdr-fixture","published":{"source":"npm","package":"../gnhf"}}
+{"name":"bad","command":"herdr-fixture","published":{"source":"npm","package":3}}
+{"name":"bad","command":"herdr-fixture","published":{"source":"github","repo":"https://github.com/herdrdev/herdr"}}
+{"name":"bad","command":"herdr-fixture","published":{"source":"github","repo":"herdrdev/herdr","tag":"v0.8.2"}}
+{"name":"bad","command":"herdr-fixture","published":{"source":"npm","package":"gnhf","repo":"x/y"}}
+{"command":"herdr-fixture"}
+{"name":"bad"}
+{"name":"bad","command":"bad command"}
+{"name":"other","command":"herdr-fixture"}
+42
+EOF
+  pass "arm and sweep refuse the whole registry for malformed entries"
+}
+
+test_published_dedupe_and_composition() {
+  local home dir fresh out path
+  home=$(make_home release-compose)
+  dir="$home/bin"
+  fresh="$home/fresh"
+  out="$home/out.txt"
+  make_release_transport "$dir"
+  make_copy "$dir" "$TOOL" 'herdr 0.8.0 (update to 0.8.2)'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_release_config "$home" herdr npm '@scope/tool'
+  jq '.tools[0] += {announce_pattern:"update to [0-9.]+",git:{repo:"/fm-absent-release-fixture"}}' "$home/config/watched-tools.json" > "$home/config-next"
+  mv "$home/config-next" "$home/config/watched-tools.json"
+  printf '%s\n' '{"version":"0.8.2"}' > "$home/response"
+  path=$(fixture_path "$dir:$fresh")
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log"
+  assert_contains "$(cat "$out")" 'update not in effect:' "published source replaced PATH skew"
+  assert_contains "$(cat "$out")" 'update available: update to 0.8.2' "published source replaced the announcement"
+  assert_contains "$(cat "$out")" 'update available: installed 0.8.0, published 0.8.2' "published source did not compare the resolved copy"
+  assert_contains "$(cat "$out")" 'is not a directory' "published source replaced the git probe"
+  assert_grep 'https://registry.npmjs.org/%40scope%2Ftool/latest' "$home/http.log" "scoped npm package was not encoded"
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log"
+  [ ! -s "$out" ] || fail "same published condition was reported twice"
+  printf '%s\n' '{"version":"0.8.3"}' > "$home/response"
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log"
+  assert_contains "$(cat "$out")" 'published 0.8.3' "changed published update was suppressed"
+  printf '%s\n' '{"version":"0.8.0"}' > "$home/response"
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log"
+  assert_not_contains "$(cat "$out")" 'published 0.8.0' "current source reported an update"
+  printf '%s\n' '{"version":"0.8.3"}' > "$home/response"
+  run_check "$home" "$path" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log"
+  assert_contains "$(cat "$out")" 'published 0.8.3' "returning published update was suppressed"
+  pass "published sources compose with PATH skew, announcements and git, with changed and returning update dedupe"
+}
+
+test_published_numeric_comparison_and_failed_installed_command() {
+  local home dir out installed published verdict
+  home=$(make_home release-numeric)
+  dir="$home/bin"
+  out="$home/out.txt"
+  make_release_transport "$dir"
+  write_release_config "$home" gnhf npm gnhf
+  while read -r installed published verdict; do
+    make_copy "$dir" "$TOOL" "$installed"
+    printf '{"version":"%s"}\n' "$published" > "$home/response"
+    run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log"
+    if [ "$verdict" = newer ]; then
+      assert_contains "$(cat "$out")" 'gnhf update available:' "numeric comparison missed $published > $installed"
+    else
+      [ ! -s "$out" ] || fail "numeric comparison falsely reported $published > $installed"
+    fi
+  done <<'EOF'
+0.9.0 0.10.0 newer
+0.10.0 0.9.0 silent
+v000.010.0 0.10 silent
+0.10.0 0.10.0.1 newer
+0.10.0 0.99999999999999999999999999 newer
+0.99999999999999999999999999 0.10.0 silent
+EOF
+  # Failure output can contain a version, but is not a usable installed answer.
+  printf '#!/bin/sh\nprintf "0.8.0\\n"\nexit 1\n' > "$dir/$TOOL"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_RELEASE_RESPONSE="$home/response" FM_RELEASE_LOG="$home/http.log"
+  assert_contains "$(cat "$out")" 'did not report a version' "failed installed command was treated as usable"
+  assert_not_contains "$(cat "$out")" 'update available' "failed installed command supplied a comparison baseline"
+  pass "published versions compare numeric components without overflow and require a successful installed answer"
 }
 
 # --- registry and reporting contract ----------------------------------------
@@ -1004,6 +1345,15 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
   assert_contains "$(cat "$out")" "tool updates: herdr update not in effect" "the wake did not carry the PATH skew report"
   pass "the armed check reaches the watcher as an ordinary check wake"
 }
+
+test_published_versions_for_the_three_motivating_tools
+test_published_failures_do_not_blind_other_tools
+test_published_probe_bounds_and_report_record
+test_completed_late_sweep_records_and_deduplicates
+test_unstarted_published_probe_reports_budget_once
+test_malformed_published_config_refuses_whole_registry
+test_published_dedupe_and_composition
+test_published_numeric_comparison_and_failed_installed_command
 
 test_path_skew_is_reported_from_every_copy
 test_newest_copy_first_on_path_is_silent

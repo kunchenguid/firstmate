@@ -496,6 +496,10 @@ This section is the single owner of the canonical schema.
       "version_args": ["<optional args that make it print its version, default --version>"],
       "announce_pattern": "<optional extended regex matching the tool's own update announcement>",
       "announce_args": ["<optional args for the command that carries that announcement, default version_args>"],
+      "published": {
+        "source": "npm",
+        "package": "<npm package name, including an optional @scope/>"
+      },
       "git": {
         "repo": "<optional absolute path to a local clone>",
         "remote": "<optional remote name, default origin>",
@@ -506,14 +510,29 @@ This section is the single owner of the canonical schema.
 }
 ```
 
-Each entry needs a `name` and at least one of `command` or `git`; an entry may carry both.
+Each entry needs a unique non-empty `name` and at least one of `command` or `git`; an entry may carry both.
+A `published` probe also requires `command` to supply the installed version; it can accompany `git` and an announcement on the same entry.
 A `command` entry gives the `PATH` comparison above, and adding `announce_pattern` also reports the tool's own update announcement, which is how a tool that already reports its own updates is read rather than reimplemented.
 A tool does not always announce a new release on the command that prints its version: `no-mistakes --version` prints only the version, while its other commands carry the announcement.
 `announce_args` names the command to search for the announcement in that case, and it is asked only of the copy `PATH` resolves; without it the version probe's own output is searched.
 An `announce_pattern` that is not a usable extended regular expression stops `arm`, and during a sweep it is reported as that one tool's own check failure so one broken pattern never stops the other watched tools from being checked.
 A `git` entry reports how many commits the local clone is behind its remote branch, and stays silent when the clone is current or ahead.
 An omitted `branch` uses the remote's default branch, taken from the clone's own record of it and otherwise asked of the remote directly, so a `--single-branch` clone still resolves.
-Both probe kinds are read-only and bounded, and a probe that cannot answer is reported as a check failure rather than assumed current.
+A `published` object selects one public release source:
+
+- `{"source":"npm","package":"tasks-axi"}` reads the public npm registry version selected by the package's `latest` dist-tag; scoped names such as `@scope/tool` are supported.
+- `{"source":"github","repo":"herdrdev/herdr"}` reads the `tag_name` of GitHub's latest published release for that public repository; draft releases, prereleases, and tags without a release are not selected.
+
+`published` accepts only the fields shown for its source, and requires a package name or `owner/repo`, without a URL, query, or credentials.
+It compares that source with the version from the command that `PATH` resolves, and reports an update only when the published version is numerically newer.
+The installed version is the first dotted number in the output of a version command that exits successfully, so `0.1.49`, `v0.8.2`, and `herdr 0.8.2` work.
+The published version must be a dotted numeric version with an optional leading `v`; other formats, including prerelease suffixes, produce a check failure.
+Components are compared numerically, with leading zeroes and missing trailing zero components ignored.
+These queries use `curl` and the existing `jq` parser, without an npm installation or a GitHub login; `curl` is required only for a `published` probe.
+The HTTP reads ignore curl configuration and send no credentials, follow no redirects, and fail within the probe bound on an unavailable source, HTTP error, or unreadable version.
+All probe kinds are read-only and bounded, and a probe that cannot answer is reported as a check failure rather than assumed current.
+Malformed configuration stops `arm` with a diagnostic.
+During a sweep, malformed configuration is reported as a registry failure and no tools are checked.
 See [`docs/examples/watched-tools.json`](examples/watched-tools.json) for a starting point to copy into local `config/watched-tools.json`.
 
 Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
@@ -526,7 +545,8 @@ Adding, removing, or changing a watched tool is an edit to this file and needs n
 This file is not inherited by secondmate homes, so each home watches the tools it actually depends on.
 
 `FM_TOOL_UPDATE_INTERVAL` (default 900 seconds, `0` to probe on every run) sets how often probes actually run, `FM_TOOL_UPDATE_PROBE_SECS` (default 5) bounds one probe, and `FM_TOOL_UPDATE_BUDGET_SECS` (default 20) bounds a whole sweep.
-A sweep that runs out of budget says which tool it did not reach rather than reporting the rest as current.
+A sweep that skips work because its budget runs out records the partial findings, including the incomplete check, and waits until the next configured interval before probing again.
+A sweep that completes its last probe after the deadline still records the completed result and cadence epoch.
 The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
