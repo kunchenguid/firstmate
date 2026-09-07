@@ -220,13 +220,10 @@ emit() {
 
 update_fingerprint() {
   local identity=$1
-  if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$identity" | shasum -a 256 | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$identity" | sha256sum | awk '{print $1}'
-  else
-    printf '%s' "$identity" | cksum | awk '{print $1}'
-  fi
+  # cksum is the stable fallback across the supported hosts. Do not select a
+  # digest utility from PATH: a later run must derive the same key if PATH
+  # changes between the snooze and the check.
+  printf '%s' "$identity" | cksum | awk '{print $1 ":" $2}'
 }
 
 current_update_add() {
@@ -969,6 +966,12 @@ EOF
     fi
     return 1
   fi
+  # The first sweep is deliberately unfiltered so every current identity can
+  # be selected. Re-run after adding the snooze so the persisted report is the
+  # same filtered set that a subsequent check will compare.
+  SNOOZE_CAPTURE=0
+  run_sweep
+  snoozes_prune
   record_write "$FINDINGS" "$RECORD_SNOOZES" || {
     printf 'fm-tool-update-check: could not record the snooze\n' >&2
     return 1
