@@ -146,6 +146,20 @@
 # while ACTING on it is firstmate's judgement, so the capture stays unacknowledged
 # and its `check` wake reaches the handler exactly as it would have anyway.
 #
+# A runner is bound to the session that owns it. Detaching a runner into its own
+# process group is what lets a persistent source outlive the turn that armed it,
+# and with nothing else it is also what lets a runner outlive its whole home:
+# reparented to init, it keeps its blocking child - and everything that child
+# spawns - running with nobody left to reap it. So every runner starts a small
+# guard beside it, in its own separate process group, which re-reads the owning
+# state root's lease on a bounded cadence and stops the runner's whole process
+# group once that lease can no longer be proved fresh. Every ordinary entry point
+# an owning session runs refreshes the lease, and the watcher's reconcile cycle
+# is what keeps it fresh in a live home; nothing a runner spawns can refresh it,
+# so a source cannot certify its own owner. Scope is the owning state root and
+# one runner generation, never a script or process name, so a live source in
+# another home is untouched. See bin/fm-procevent-lib.sh for the lease itself.
+#
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
 # only a claim whose stale owner and independently absent process group prove
@@ -437,6 +451,7 @@ cmd_register() {
     die "cannot publish the registration"
   fi
   fm_procevent_source_lock_release "$id"
+  owner_lease_refresh
   printf 'registered: %s (%s)\n' "$id" "$adapter"
 }
 
@@ -526,6 +541,7 @@ cmd_register_extension() {
   fi
   fm_procevent_source_lock_release "$id"
   extension_lifecycle_lock_release
+  owner_lease_refresh
   printf 'registered: %s (%s from %s@%s)\n' "$id" "$adapter" "$extension_id" "$extension_version"
   printf 'owner-token: %s\n' "$registration_token"
   printf 'retire: bin/fm-procevent.sh retire %s --if-owner %s\n' "$id" "$registration_token"
@@ -585,8 +601,15 @@ publish_pending() {  # [result-file-to-skip]
   printf '%s\n' "$published"
 }
 
-isolate_runner() {  # <wait|detach> <source-id>
-  local mode=$1 id=$2 program
+# Start one command as the leader of a fresh process group, either waiting for
+# it (the public `start` boundary) or detaching from it (reconcile's restart and
+# the runner's own owner guard). The guard deliberately gets its OWN group
+# rather than joining the runner's: it has to survive the group signal it sends,
+# and a member of the runner's group would also make that group read as alive
+# after the runner itself is gone.
+isolate_process() {  # <wait|detach> <command> [argv...]
+  local mode=$1 program
+  shift
   # shellcheck disable=SC2016 # Perl owns every $ expression in this literal program.
   program='my $mode = shift @ARGV;
     defined(my $pid = fork) or exit 125;
@@ -602,26 +625,41 @@ isolate_runner() {  # <wait|detach> <source-id>
     exit(128 + ($status & 127)) if $status & 127;
     exit($status >> 8);'
   if [ "$mode" = wait ]; then
-    exec perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id"
+    exec perl -e "$program" "$mode" "$@"
   fi
-  perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id" >/dev/null 2>&1 &
+  perl -e "$program" "$mode" "$@" >/dev/null 2>&1 &
 }
 
-require_runner_group() {
-  local pgid
+isolate_runner() {  # <wait|detach> <source-id>
+  isolate_process "$1" "$SCRIPT_DIR/fm-procevent.sh" _start "$2"
+}
+
+require_isolated_group() {  # <role>
+  local role=$1 pgid
   [ "${FM_PROCEVENT_RUNNER_GROUP:-}" = "$$" ] \
-    || die "runner process group was not isolated"
+    || die "$role process group was not isolated"
   pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]') \
-    || die "cannot inspect runner process group"
-  [ -n "$pgid" ] || die "cannot inspect runner process group"
-  [ "$pgid" = "$$" ] || die "runner does not lead its process group"
+    || die "cannot inspect $role process group"
+  [ -n "$pgid" ] || die "cannot inspect $role process group"
+  [ "$pgid" = "$$" ] || die "$role does not lead its process group"
   unset FM_PROCEVENT_RUNNER_GROUP
+}
+
+require_runner_group() { require_isolated_group runner; }
+
+# Record that an owning session is still here. Skipped inside a runner and
+# everything it spawns, so a source cannot keep refreshing its own owner's lease
+# and outlive the session that armed it.
+owner_lease_refresh() {
+  [ "${FM_PROCEVENT_IN_RUNNER:-0}" = 1 ] && return 0
+  fm_procevent_owner_lease_touch "$STATE" 2>/dev/null || true
 }
 
 cmd_start_public() {
   local id=${1-}
   [ "$#" -eq 1 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  owner_lease_refresh
   isolate_runner wait "$id"
 }
 
@@ -711,6 +749,10 @@ cmd_start() {
     fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
   }
   trap release_start_claim EXIT
+  # Everything this runner spawns is inside the source, not inside the owning
+  # session, so none of it may refresh the lease that proves the owner is there.
+  export FM_PROCEVENT_IN_RUNNER=1
+  start_owner_guard "$id" || die "cannot bind the runner to its owning session: $id"
   local runner inbox reservation_dir staging
   if [ "$extension_owner" -eq 1 ]; then
     staging=$(fm_procevent_extension_staging_prepare "$STATE") \
@@ -923,6 +965,59 @@ retire_owned_terminal_source() {  # <source-id>
   return "$status"
 }
 
+# Bind this runner's lifetime to the session that owns it. Started once the
+# claim is held, so the guard names the exact generation it protects, and
+# detached into its OWN process group so the group signal it may later send
+# reaches the runner and every descendant without killing the guard first.
+start_owner_guard() {  # <source-id>
+  local identity
+  identity=$(fm_pid_identity "$$" 2>/dev/null) || return 1
+  isolate_process detach "$SCRIPT_DIR/fm-procevent.sh" _owner-watchdog "$1" "$$" "$identity"
+}
+
+# The runner's owner guard, and the reason a detached runner can no longer
+# outlive its home. It re-reads the owning state root's lease on a bounded
+# cadence and, once that lease can no longer be proved fresh, stops the runner's
+# whole process group - which is what reaches the blocking child and everything
+# that child spawned, exactly as retirement does. It ends itself as soon as that
+# group is gone, so it can never become the leftover it exists to prevent.
+#
+# Scope is the owning state root and this one runner generation. It never
+# matches on a script name, a command line, or a process name: those are shared
+# by every home running the same adapter, and a live source in another home
+# proves its own owner through that home's own lease.
+cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity>
+  local id=${1-} pid=${2-} identity=${3-} lease tick misses=0 pid_state
+  [ "$#" -eq 3 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  case "$pid" in ''|*[!0-9]*) die "runner pid must be a positive integer: $pid" ;; esac
+  [ -n "$identity" ] || die "runner identity is required"
+  require_isolated_group guard
+  lease=$(fm_procevent_owner_lease_seconds) \
+    || die "FM_PROCEVENT_OWNER_LEASE_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_LEASE_MIN_SECONDS to $FM_PROCEVENT_OWNER_LEASE_MAX_SECONDS"
+  tick=$(fm_procevent_owner_check_seconds) \
+    || die "FM_PROCEVENT_OWNER_CHECK_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS to $FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS"
+  while :; do
+    sleep "$tick"
+    fm_procevent_pid_state "$pid" "$identity"
+    pid_state=$?
+    case "$pid_state" in
+      1) exit 0 ;;
+      0|3) ;;
+      *) continue ;;
+    esac
+    if fm_procevent_owner_alive "$STATE" "$lease"; then
+      misses=0
+      continue
+    fi
+    # Two consecutive misses, so one unreadable read cannot end a live runner.
+    misses=$((misses + 1))
+    [ "$misses" -ge 2 ] || continue
+    stop_runner_pid "$pid" "$identity"
+    exit 0
+  done
+}
+
 # Start a runner outside the watcher cycle that noticed it was missing. The
 # public start boundary establishes its own process group before claiming.
 detach_runner() {  # <source-id>
@@ -931,6 +1026,7 @@ detach_runner() {  # <source-id>
 
 cmd_reconcile() {
   local rec id published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
+  owner_lease_refresh
   published=$(publish_pending)
 
   # Stop a runner this home owns whose source is no longer registered. Without
@@ -1115,6 +1211,7 @@ cmd_handled() {
   local id=${1-} seq=${2-} status
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
+  owner_lease_refresh
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   fm_procevent_mark_handled "$STATE" "$id" "$seq"
   status=$?
@@ -1391,6 +1488,7 @@ cmd_sweep_home() {
 
 cmd_list() {
   local rec id adapter owner pending
+  owner_lease_refresh
   if ! fm_procevent_any_registered "$STATE"; then
     printf 'no sources registered\n'
     return 0
@@ -1511,6 +1609,7 @@ case "${1-}" in
   register-extension) shift; cmd_register_extension "$@" ;;
   start)              shift; cmd_start_public "$@" ;;
   _start)             shift; cmd_start "$@" ;;
+  _owner-watchdog)    shift; cmd_owner_watchdog "$@" ;;
   reconcile)          shift; cmd_reconcile "$@" ;;
   classify)           shift; cmd_classify "$@" ;;
   handled)            shift; cmd_handled "$@" ;;

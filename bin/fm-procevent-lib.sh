@@ -103,6 +103,103 @@ fm_procevent_any_registered() {
   return 1
 }
 
+# --- owning-session lease ---------------------------------------------------
+# A runner is detached into its own process group so it survives the turn that
+# started it. That is what makes a persistent source work, and on its own it is
+# also what lets a runner outlive its whole home: once reparented to init,
+# nothing bounds its lifetime, so its blocking child - and everything that child
+# spawns - can keep running indefinitely.
+#
+# The bound is a lease on the OWNING STATE ROOT. Every ordinary process-event
+# entry point an owning session runs refreshes it, and the watcher's reconcile
+# cycle is the one that keeps it fresh in a live home. A runner proves its owner
+# is still there by reading that lease; when it cannot, it stops its own process
+# group. The lease is keyed by state root, so another home's live runner is
+# untouched: that home refreshes its own lease. Nothing here keys on a script
+# name, a command line, or a process name, all of which are shared across homes.
+
+fm_procevent_owner_lease_path() {  # <state-root>
+  printf '%s/.owner-lease\n' "$(fm_procevent_registry_dir "$1")"
+}
+
+# Record that an owning session touched this home's process-event state. Best
+# effort by design: a home with no registry directory yet owns no runner.
+fm_procevent_owner_lease_touch() {  # <state-root>
+  local reg lease tmp now
+  reg=$(fm_procevent_registry_dir "$1")
+  [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
+  lease=$(fm_procevent_owner_lease_path "$1")
+  now=$(date +%s) || return 1
+  tmp=$(umask 077; mktemp "$reg/.owner-lease.XXXXXX") || return 1
+  if ! printf '%s\n' "$now" > "$tmp" || ! mv -f -- "$tmp" "$lease"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Seconds since the last refresh. Fails when the lease is absent or unreadable,
+# which is what a removed home looks like from inside a surviving runner. A
+# clock that moved backwards reads as fresh rather than as a dead owner.
+fm_procevent_owner_lease_age() {  # <state-root>
+  local lease value now
+  lease=$(fm_procevent_owner_lease_path "$1")
+  [ -f "$lease" ] && [ ! -L "$lease" ] || return 1
+  IFS= read -r value < "$lease" || return 1
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s) || return 1
+  if [ "$now" -le "$value" ]; then
+    printf '0\n'
+    return 0
+  fi
+  printf '%s\n' "$((now - value))"
+}
+
+# How long a runner keeps going with no sign of its owning session. The default
+# is forty watcher cycles at the default poll interval, so an ordinary busy or
+# briefly wedged home never trips it, while a home that is simply gone stops
+# owning processes within the hour rather than within a day.
+FM_PROCEVENT_OWNER_LEASE_DEFAULT_SECONDS=600
+FM_PROCEVENT_OWNER_LEASE_MIN_SECONDS=1
+FM_PROCEVENT_OWNER_LEASE_MAX_SECONDS=86400
+
+fm_procevent_owner_lease_seconds() {
+  local value=${FM_PROCEVENT_OWNER_LEASE_SECONDS-}
+  if [ -z "$value" ]; then
+    printf '%s\n' "$FM_PROCEVENT_OWNER_LEASE_DEFAULT_SECONDS"
+    return 0
+  fi
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -ge "$FM_PROCEVENT_OWNER_LEASE_MIN_SECONDS" ] || return 1
+  [ "$value" -le "$FM_PROCEVENT_OWNER_LEASE_MAX_SECONDS" ] || return 1
+  printf '%s\n' "$value"
+}
+
+# How often a runner's guard re-reads that lease. One watcher cycle at the
+# default poll interval, so the guard costs about as much as the cycle that
+# refreshes what it reads.
+FM_PROCEVENT_OWNER_CHECK_DEFAULT_SECONDS=15
+FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS=1
+FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS=3600
+
+fm_procevent_owner_check_seconds() {
+  local value=${FM_PROCEVENT_OWNER_CHECK_SECONDS-}
+  if [ -z "$value" ]; then
+    printf '%s\n' "$FM_PROCEVENT_OWNER_CHECK_DEFAULT_SECONDS"
+    return 0
+  fi
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -ge "$FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS" ] || return 1
+  [ "$value" -le "$FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS" ] || return 1
+  printf '%s\n' "$value"
+}
+
+# True while the owning session is provably still there.
+fm_procevent_owner_alive() {  # <state-root> <lease-seconds>
+  local age
+  age=$(fm_procevent_owner_lease_age "$1") || return 1
+  [ "$age" -le "$2" ]
+}
+
 # --- ownership --------------------------------------------------------------
 # A claim is a private file recording the home, runner pid, claim generation,
 # and process identity. Registration and every ownership transition are

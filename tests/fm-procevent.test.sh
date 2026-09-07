@@ -24,9 +24,13 @@ BLOCKER="$TMP_ROOT/blocker.sh"
 cat > "$BLOCKER" <<'SH'
 #!/usr/bin/env bash
 # Blocks until the trigger exists, then emits its payload. Completion is the
-# event; nothing here polls on a schedule.
+# event; nothing here polls on a schedule. The wait is bounded so a stub that
+# escapes its test cannot keep spawning processes indefinitely.
 trigger=$1; shift
-while [ ! -e "$trigger" ]; do sleep 0.05; done
+while [ ! -e "$trigger" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+  sleep 0.05
+done
 [ -n "${BLOCKER_STDERR:-}" ] && printf 'noise on stderr\n' >&2
 [ -n "${BLOCKER_EXIT:-}" ] && exit "$BLOCKER_EXIT"
 printf '%s\n' "$@"
@@ -35,31 +39,17 @@ chmod +x "$BLOCKER"
 
 pe() { FM_HOME="$1" "$ROOT/bin/fm-procevent.sh" "${@:2}"; }
 
-# Every source this suite registers is tracked so teardown can stop its runner.
-# A runner started by reconcile is detached and reparented, so a source that
-# never completes outlives the suite unless it is retired explicitly - removing
-# the fixture directory does not stop an already-running child.
-PE_TRACKED=()
+# Every home this suite registers a source in is tracked so teardown can stop
+# its runners. A runner started by reconcile is detached and reparented, so a
+# source that never completes outlives the suite unless its home is swept -
+# removing the fixture directory does not stop an already-running child.
+# tests/lib.sh owns that sweep and runs it from every cleanup path.
 pe_register() {  # <home> <adapter> <source-id> -- <argv>...
   local home=$1 adapter=$2 id=$3
   shift 3
-  PE_TRACKED+=("$home|$id")
+  fm_test_track_procevent_home "$home"
   pe "$home" register "$adapter" "$id" "$@"
 }
-
-procevent_teardown() {
-  local entry home seen=$'\n'
-  for entry in ${PE_TRACKED[@]+"${PE_TRACKED[@]}"}; do
-    home=${entry%%|*}
-    case "$seen" in
-      *$'\n'"$home"$'\n'*) continue ;;
-    esac
-    seen+="$home"$'\n'
-    FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-  done
-  fm_test_cleanup
-}
-trap procevent_teardown EXIT
 new_home() { mkdir -p "$1/state"; }
 wake_payloads() { awk -F '\t' '{print $5}' "$1/state/.wake-queue" 2>/dev/null; }
 
@@ -417,7 +407,7 @@ pe_adapter() {  # <home> <command>...: run the runner against the fixture adapte
 }
 
 HPUBLISH="$TMP_ROOT/hpublish"; new_home "$HPUBLISH"
-PE_TRACKED+=("$HPUBLISH|publish-src")
+fm_test_track_procevent_home "$HPUBLISH"
 pe_adapter "$HPUBLISH" register applying publish-src -- /bin/echo "apply after publish" >/dev/null
 mkdir "$HPUBLISH/state/.wake-queue"
 out=$(pe_adapter "$HPUBLISH" start publish-src 2>&1)
@@ -449,7 +439,7 @@ pass "automatic application waits for durable publication and failed publication
 # channel is the announcement. The declaration never silences a capture the
 # adapter could NOT apply - that one still publishes for the handler.
 HSELF="$TMP_ROOT/hself"; new_home "$HSELF"
-PE_TRACKED+=("$HSELF|self-src")
+fm_test_track_procevent_home "$HSELF"
 pe_adapter "$HSELF" register selfann self-src -- /bin/echo "self announced" >/dev/null
 out=$(pe_adapter "$HSELF" start self-src 2>&1)
 assert_contains "$out" "autohandled: self-src" "the self-announcing adapter did not apply its own capture"
@@ -480,7 +470,7 @@ rm -f "$HSELF/state/selfann-fail"
 pass "a self-announcing adapter applies quietly and still publishes what it could not apply"
 
 HTERM="$TMP_ROOT/hterm"; new_home "$HTERM"
-PE_TRACKED+=("$HTERM|ends-src")
+fm_test_track_procevent_home "$HTERM"
 pe_adapter "$HTERM" register endnow ends-src -- /bin/echo "terminal payload" >/dev/null
 out=$(pe_adapter "$HTERM" start ends-src)
 assert_contains "$out" "captured:" "a terminal result is still captured durably"
@@ -504,7 +494,7 @@ assert_contains "$out" "published=0" "an acknowledged terminal result stops bein
 pass "an adapter-classified terminal result is captured once, announced, and retires its source automatically"
 
 HOPEN="$TMP_ROOT/hopen"; new_home "$HOPEN"
-PE_TRACKED+=("$HOPEN|open-src")
+fm_test_track_procevent_home "$HOPEN"
 pe_adapter "$HOPEN" register openended open-src -- /bin/echo "open payload" >/dev/null
 out=$(pe_adapter "$HOPEN" start open-src)
 assert_contains "$out" "captured:" "a result from an adapter with no terminal verdict is captured"
@@ -514,7 +504,7 @@ pe_adapter "$HOPEN" retire open-src >/dev/null
 pass "a source stays armed unless its own adapter classifies the result terminal"
 
 HREPLACE="$TMP_ROOT/hreplace"; new_home "$HREPLACE"
-PE_TRACKED+=("$HREPLACE|replace-src")
+fm_test_track_procevent_home "$HREPLACE"
 OLD_TRIGGER="$TMP_ROOT/replace-old-trigger"
 pe_adapter "$HREPLACE" register endnow replace-src -- "$BLOCKER" "$OLD_TRIGGER" "old terminal payload" >/dev/null
 pe_adapter "$HREPLACE" start replace-src > "$TMP_ROOT/replace-old.out" 2>&1 &
@@ -537,7 +527,7 @@ pe_adapter "$HREPLACE" retire replace-src >/dev/null
 pass "terminal retirement preserves and releases a concurrently replaced registration"
 
 HRETFAIL="$TMP_ROOT/hretfail"; new_home "$HRETFAIL"
-PE_TRACKED+=("$HRETFAIL|retire-fail-src")
+fm_test_track_procevent_home "$HRETFAIL"
 FAIL_RM_BIN=$(fm_fakebin "$TMP_ROOT/retire-fail-bin")
 REAL_RM=$(command -v rm)
 export REAL_RM
@@ -598,7 +588,7 @@ chmod +x "$LAVISH_BIN/lavish-axi"
 REVIEW_ART="$TMP_ROOT/review.html"
 printf '<h1>review</h1>\n' > "$REVIEW_ART"
 lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REVIEW_ART")
-PE_TRACKED+=("$HLT|$lavish_id")
+fm_test_track_procevent_home "$HLT"
 PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" arm "$REVIEW_ART" >/dev/null
 for _ in $(seq 1 6); do
   PATH="$LAVISH_BIN:$PATH" pe "$HLT" reconcile >/dev/null
@@ -638,7 +628,7 @@ chmod +x "$EMPTY_BIN/lavish-axi"
 QUIET_ART="$TMP_ROOT/quiet-board.html"
 printf '<h1>quiet</h1>\n' > "$QUIET_ART"
 quiet_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$QUIET_ART")
-PE_TRACKED+=("$HEMPTY|$quiet_id")
+fm_test_track_procevent_home "$HEMPTY"
 PATH="$EMPTY_BIN:$PATH" FM_HOME="$HEMPTY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$QUIET_ART" >/dev/null
 quiet_out=$(PATH="$EMPTY_BIN:$PATH" pe "$HEMPTY" start "$quiet_id" 2>&1)
@@ -684,7 +674,7 @@ chmod +x "$ANSWER_BIN/lavish-axi"
 ANSWER_ART="$TMP_ROOT/answered-board.html"
 printf '<h1>answered</h1>\n' > "$ANSWER_ART"
 answer_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$ANSWER_ART")
-PE_TRACKED+=("$HANSWER|$answer_id")
+fm_test_track_procevent_home "$HANSWER"
 PATH="$ANSWER_BIN:$PATH" FM_HOME="$HANSWER" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$ANSWER_ART" >/dev/null
 PATH="$ANSWER_BIN:$PATH" pe "$HANSWER" reconcile >/dev/null
@@ -746,7 +736,7 @@ HRETRY="$TMP_ROOT/hretry"; new_home "$HRETRY"
 RETRY_ART="$TMP_ROOT/retry-board.html"
 printf '<h1>retry</h1>\n' > "$RETRY_ART"
 retry_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$RETRY_ART")
-PE_TRACKED+=("$HRETRY|$retry_id")
+fm_test_track_procevent_home "$HRETRY"
 LAVISH_COUNT="$TMP_ROOT/retry-count"; LAVISH_SCRIPT="interrupt interrupt feedback"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HRETRY" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$RETRY_ART" >/dev/null
@@ -770,7 +760,7 @@ HEXH="$TMP_ROOT/hexh"; new_home "$HEXH"
 EXH_ART="$TMP_ROOT/exhaust-board.html"
 printf '<h1>exhaust</h1>\n' > "$EXH_ART"
 exh_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$EXH_ART")
-PE_TRACKED+=("$HEXH|$exh_id")
+fm_test_track_procevent_home "$HEXH"
 LAVISH_COUNT="$TMP_ROOT/exhaust-count"; LAVISH_SCRIPT="interrupt"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HEXH" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$EXH_ART" >/dev/null
@@ -793,7 +783,7 @@ HOTHER="$TMP_ROOT/hother"; new_home "$HOTHER"
 OTHER_ART="$TMP_ROOT/other-board.html"
 printf '<h1>other</h1>\n' > "$OTHER_ART"
 other_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$OTHER_ART")
-PE_TRACKED+=("$HOTHER|$other_id")
+fm_test_track_procevent_home "$HOTHER"
 LAVISH_COUNT="$TMP_ROOT/other-count"; LAVISH_SCRIPT="other-server-error"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HOTHER" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$OTHER_ART" >/dev/null
@@ -813,7 +803,7 @@ HNEAR="$TMP_ROOT/hnear"; new_home "$HNEAR"
 NEAR_ART="$TMP_ROOT/near-board.html"
 printf '<h1>near</h1>\n' > "$NEAR_ART"
 near_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$NEAR_ART")
-PE_TRACKED+=("$HNEAR|$near_id")
+fm_test_track_procevent_home "$HNEAR"
 LAVISH_COUNT="$TMP_ROOT/near-count"; LAVISH_SCRIPT="near-interrupt feedback"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HNEAR" FM_LAVISH_POLL_RETRY_DELAY=0 \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$NEAR_ART" >/dev/null
@@ -865,7 +855,7 @@ LAVISH_STREAM_RELEASE="$TMP_ROOT/stream-release"
 mkdir -p "$STREAM_TMPDIR"
 printf '<h1>stream</h1>\n' > "$STREAM_ART"
 stream_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$STREAM_ART")
-PE_TRACKED+=("$HSTREAM|$stream_id")
+fm_test_track_procevent_home "$HSTREAM"
 LAVISH_COUNT="$TMP_ROOT/stream-count"; LAVISH_SCRIPT="stream"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HSTREAM" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$STREAM_ART" >/dev/null
@@ -1900,5 +1890,131 @@ assert_contains "$runner_help" "Durability boundary" \
 assert_not_contains "$runner_help" "exactly-once" \
   "the runner's help claims no exactly-once delivery"
 pass "the published interfaces state the loss limitation and claim no lossless delivery"
+
+# --- a runner cannot outlive the session that owns it -----------------------
+#
+# Reproduces the shape that wedged a host: a listener detached into its own
+# process group, reparented to init when its session ended, and left running for
+# a day with its blocking child - and everything that child spawned - still
+# executing. The cost was not the runner itself but the process churn under it,
+# which is why this asserts the whole descendant tree stops, not just the leader.
+#
+# Scope is asserted alongside it, in the same run and against the same stub: a
+# home whose session is still there keeps its runner. Reaping that keyed on the
+# script or process name instead of the owning session would take both.
+
+ORPHAN_STUB="$TMP_ROOT/orphan-stub.sh"
+cat > "$ORPHAN_STUB" <<'SH'
+#!/usr/bin/env bash
+# A blocking source whose child keeps spawning processes, which is what a poll
+# stub waiting on a trigger file actually does. The spawn rate is what turned a
+# leftover listener into a host-wide storm, so the tick log is the evidence that
+# the storm stopped and not merely that one pid went away.
+marker=$1
+( while [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do
+    printf 'tick\n' >> "$marker.ticks"
+    sleep 0.1
+  done ) &
+printf '%s\n' "$!" > "$marker.descendant"
+while [ ! -e "$marker.trigger" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+  sleep 0.1
+done
+printf 'orphan payload\n'
+SH
+chmod +x "$ORPHAN_STUB"
+
+# Short enough to observe, and driven through the same environment a real home
+# uses, so the bound under test is the shipped one rather than a test-only path.
+orphan_pe() {  # <home> <command...>
+  local home=$1
+  shift
+  FM_PROCEVENT_OWNER_LEASE_SECONDS=2 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+    FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" "$@"
+}
+
+wait_gone() {  # <pid-or-group-spec> [tries]
+  local spec=$1 n=${2:-160}
+  for _ in $(seq 1 "$n"); do
+    kill -0 "$spec" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+HORPHAN="$TMP_ROOT/orphan-dead-owner"; new_home "$HORPHAN"
+fm_test_track_procevent_home "$HORPHAN"
+HKEEP="$TMP_ROOT/orphan-live-owner"; new_home "$HKEEP"
+fm_test_track_procevent_home "$HKEEP"
+orphan_pe "$HORPHAN" register lavish orphan-src -- "$ORPHAN_STUB" "$TMP_ROOT/orphan-dead" >/dev/null
+orphan_pe "$HKEEP" register lavish keep-src -- "$ORPHAN_STUB" "$TMP_ROOT/orphan-live" >/dev/null
+orphan_pe "$HORPHAN" reconcile >/dev/null
+orphan_pe "$HKEEP" reconcile >/dev/null
+
+wait_for "$HORPHAN/state/procevent/orphan-src.runner" \
+  || fail "the dead-owner listener never recorded its runner"
+wait_for "$HKEEP/state/procevent/keep-src.runner" \
+  || fail "the live-owner listener never recorded its runner"
+wait_for "$TMP_ROOT/orphan-dead.descendant" \
+  || fail "the dead-owner listener's child never spawned its own descendant"
+ORPHAN_PID=$(cat "$HORPHAN/state/procevent/orphan-src.runner")
+KEEP_PID=$(cat "$HKEEP/state/procevent/keep-src.runner")
+ORPHAN_DESCENDANT=$(cat "$TMP_ROOT/orphan-dead.descendant")
+
+# The reproduction condition itself: the listener is already an orphan in the
+# kernel's sense before anything is asserted about reaping it.
+orphan_ppid=$(ps -o ppid= -p "$ORPHAN_PID" 2>/dev/null | tr -d '[:space:]')
+[ "$orphan_ppid" = 1 ] \
+  || fail "the listener under test was not reparented away from its session (ppid $orphan_ppid)"
+kill -0 -"$ORPHAN_PID" 2>/dev/null \
+  || fail "the listener's process group was not running"
+kill -0 "$ORPHAN_DESCENDANT" 2>/dev/null \
+  || fail "the listener's descendant was not running"
+pass "a detached listener starts reparented, with a live descendant tree under it"
+
+# Only the second home's session stays present, on the same short bound, so the
+# owning session is the single difference between the two listeners.
+keep_owner_present() { orphan_pe "$HKEEP" reconcile >/dev/null 2>&1 || true; sleep 0.25; }
+
+deadline=$((SECONDS + 40))
+while kill -0 -"$ORPHAN_PID" 2>/dev/null; do
+  [ "$SECONDS" -lt "$deadline" ] \
+    || fail "a listener whose owning session was gone kept its process group running"
+  keep_owner_present
+done
+deadline=$((SECONDS + 20))
+while kill -0 "$ORPHAN_DESCENDANT" 2>/dev/null; do
+  [ "$SECONDS" -lt "$deadline" ] \
+    || fail "a listener whose owning session was gone left a descendant running"
+  keep_owner_present
+done
+pass "a listener whose owning session is gone stops itself and its whole process group"
+
+keep_owner_present
+before=$(wc -l < "$TMP_ROOT/orphan-dead.ticks" | tr -d ' ')
+deadline=$((SECONDS + 2))
+while [ "$SECONDS" -lt "$deadline" ]; do keep_owner_present; done
+after=$(wc -l < "$TMP_ROOT/orphan-dead.ticks" | tr -d ' ')
+[ "$before" = "$after" ] \
+  || fail "the reaped listener's descendant kept spawning processes ($before then $after)"
+pass "reaping the listener stops the process churn under it"
+
+keep_owner_present
+kill -0 -"$KEEP_PID" 2>/dev/null \
+  || fail "an identical listener in a home whose session is still there was reaped too"
+pass "an identical listener in a home whose session is still there is untouched"
+
+# Retirement remains the explicit path, and it must reach a listener that has
+# already reparented, along with everything under it.
+wait_for "$TMP_ROOT/orphan-live.descendant" \
+  || fail "the live-owner listener's child never spawned its own descendant"
+KEEP_DESCENDANT=$(cat "$TMP_ROOT/orphan-live.descendant")
+keep_owner_present
+orphan_pe "$HKEEP" retire keep-src >/dev/null
+wait_gone "-$KEEP_PID" \
+  || fail "retiring a source left its reparented listener's process group running"
+wait_gone "$KEEP_DESCENDANT" \
+  || fail "retiring a source left a descendant of its listener running"
+pass "retiring a source reaps its reparented listener and every descendant under it"
 
 printf '\nall procevent tests passed\n'

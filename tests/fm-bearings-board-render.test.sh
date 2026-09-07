@@ -18,24 +18,12 @@ TMP_ROOT=$(fm_test_tmproot fm-bearings-board-render)
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
 
-# A build starts a listener for the board it publishes, so every home this
-# suite creates is swept before the fixture directory is removed.
-RENDER_HOMES=()
-
-render_teardown() {
-  local home
-  for home in ${RENDER_HOMES[@]+"${RENDER_HOMES[@]}"}; do
-    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-      FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-      "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-  done
-  fm_test_cleanup
-}
-trap render_teardown EXIT
-
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
-  RENDER_HOMES+=("$home")
+  # A build starts a listener for the board it publishes. Registered with
+  # tests/lib.sh, not with a shell array: make_home runs inside a command
+  # substitution, where an array append never reaches the caller.
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
   mkdir -p "$home/state" "$home/data"
   fakebin=$(fm_fakebin "$home")
   # The build proves the board session is live before it arms anything, so the
@@ -51,7 +39,11 @@ case "${1-}" in
     [ ! -s "$FM_HOME/lavish-open" ] \
       || printf '  %s,open,"http://127.0.0.1/session/render",0\n' "$(cat "$FM_HOME/lavish-open")"
     ;;
-  poll) while :; do sleep 1; done ;;
+  poll)
+    # Bounded, so a listener that escapes its test stops on its own.
+    while [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 1; done
+    exit 75
+    ;;
   *)
     real=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
     printf '%s\n' "$real" > "$FM_HOME/lavish-open"
