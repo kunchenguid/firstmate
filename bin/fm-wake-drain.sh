@@ -88,17 +88,21 @@ reclaim_stale_branch_grant_locked() {
 # reported and never fatal: the usable rows are still presentable and
 # acknowledgeable, and failing the whole drain would strand them too.
 retire_unconsumable_rows_locked() {
-  local invalid
+  local retired
   [ -f "$FM_WAKE_QUEUE" ] || return 0
-  if invalid=$(fm_wake_queue_rows_invalid_count "$FM_WAKE_QUEUE"); then
-    [ "$invalid" -gt 0 ] || return 0
-    if DRAIN_TMP=$(mktemp "$STATE/.wake-queue.retire.XXXXXX") \
-      && chmod 0600 "$DRAIN_TMP" \
-      && awk -F '\t' 'NF >= 5 && $2 ~ /^[0-9]+$/ { print }' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" \
-      && _fm_atomic_replace "$DRAIN_TMP" "$FM_WAKE_QUEUE"; then
+  if DRAIN_TMP=$(mktemp "$STATE/.wake-queue.retire.XXXXXX") \
+    && chmod 0600 "$DRAIN_TMP" \
+    && awk -F '\t' 'NF >= 5 && $2 ~ /^[0-9]+$/ { print }' "$FM_WAKE_QUEUE" > "$DRAIN_TMP"; then
+    retired=$(( $(awk 'END { print NR }' "$FM_WAKE_QUEUE") - $(awk 'END { print NR }' "$DRAIN_TMP") ))
+    if [ "$retired" -eq 0 ]; then
+      rm -f -- "$DRAIN_TMP"
+      DRAIN_TMP=
+      return 0
+    fi
+    if _fm_atomic_replace "$DRAIN_TMP" "$FM_WAKE_QUEUE"; then
       DRAIN_TMP=
       printf 'wake drain: retired %s unusable queue row(s) that carried no sequence to present or acknowledge\n' \
-        "$invalid" >&2
+        "$retired" >&2
       return 0
     fi
   fi
@@ -115,7 +119,7 @@ print_branch_held_notice() {
   seqs=$(fm_wake_grant_rows_valid "$ELIGIBLE_ROWS_FILE" \
     && awk 'NR <= 20 { printf "%s%s", (NR > 1 ? "," : ""), $1 } END { if (NR > 20) printf ",..." }' \
       "$ELIGIBLE_ROWS_FILE")
-  printf 'WAKE ROWS HELD BY SUPERVISION BRANCH: %s queued row(s) (%s) are granted to the live supervision branch, which presents and acknowledges them; nothing is queued for this actor.\n' \
+  printf 'WAKE ROWS HELD BY SUPERVISION BRANCH: %s queued row(s) (%s) are granted to the live supervision branch, which presents and acknowledges them.\n' \
     "$held" "${seqs:-unknown}"
 }
 

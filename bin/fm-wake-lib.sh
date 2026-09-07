@@ -1788,16 +1788,6 @@ fm_wake_branch_grant_live() {  # <rows-file> <owner-file>
   fm_wake_grant_rows_valid "$1" && fm_wake_branch_owner_matches "$2"
 }
 
-# A queue row is structurally valid when it carries the five appended fields and
-# a numeric sequence. Only such a row can be claimed, presented, or
-# acknowledged; anything else is unconsumable by construction and a main drain
-# retires it instead of leaving it queued forever.
-fm_wake_queue_rows_invalid_count() {  # [<queue-file>]
-  local queue=${1:-$FM_WAKE_QUEUE}
-  [ -f "$queue" ] || { printf '0\n'; return 0; }
-  awk -F '\t' 'NF < 5 || $2 !~ /^[0-9]+$/ { n++ } END { print n + 0 }' "$queue"
-}
-
 # How many queued rows <actor> can act on right now - exactly the rows a drain
 # by that actor would present or retire, and therefore the only rows worth
 # telling that actor to drain. Main owns every structurally valid row a live
