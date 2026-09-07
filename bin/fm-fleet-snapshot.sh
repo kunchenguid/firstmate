@@ -761,12 +761,17 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
-    captured_status_size=$(_fm_status_file_size "$status_log" 2>/dev/null || printf 0)
+    captured_status_size=$(_fm_status_file_size "$status_log" 2>/dev/null || true)
     captured_status_size=${captured_status_size//[[:space:]]/}
-    case "$captured_status_size" in ''|*[!0-9]*) captured_status_size=0 ;; esac
-    if ! open_decisions_tsv=$(status_open_decisions_incremental "$STATE/$id.status" "$captured_status_size"); then
-      open_decisions_tsv=$(status_open_decisions "$status_log")
-    fi
+    case "$captured_status_size" in
+      ''|*[!0-9]*) open_decisions_tsv=$(status_open_decisions "$status_log") ;;
+      *)
+        if ! open_decisions_tsv=$(status_open_decisions_incremental \
+          "$STATE/$id.status" "$captured_status_size" true); then
+          open_decisions_tsv=$(status_open_decisions "$status_log")
+        fi
+        ;;
+    esac
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \

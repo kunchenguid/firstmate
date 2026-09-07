@@ -2852,6 +2852,48 @@ EOF
   pass "fleet snapshots preserve open decisions when cursor publication fails"
 }
 
+test_local_snapshot_preserves_decisions_when_incremental_read_fails() {
+  local home fakebin worktree reader probe json
+  home=$(make_home decision-incremental-read-failure)
+  worktree="$home/projects/decision-incremental-read-failure"
+  fm_git_init_commit "$worktree"
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] decision-incremental-read-failure - Incremental read failure fixture (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/decision-incremental-read-failure.meta" \
+    "worktree=$worktree" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  printf 'needs-decision [key=survives-read-failure]: captain choice remains open\n' \
+    > "$home/state/decision-incremental-read-failure.status"
+
+  reader="$home/fail-status-span"
+  probe="$home/incremental-read-failure"
+  cat > "$reader" <<'SH'
+#!/usr/bin/env bash
+printf failed > "$FM_SPAN_FAIL_PROBE"
+exit 1
+SH
+  chmod +x "$reader"
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_STATUS_SPAN_READER="$reader" \
+    FM_SPAN_FAIL_PROBE="$probe" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot failed instead of using its captured status after an incremental read failure"
+  [ -f "$probe" ] || fail "incremental read failure fixture did not reach the failing span reader"
+  printf '%s' "$json" | jq -e '
+    .tasks[] | select(.id == "decision-incremental-read-failure")
+    | .hints.pending_decision == true
+      and (.hints.open_decisions | any(.key == "survives-read-failure" and .verb == "needs-decision"))
+  ' >/dev/null || fail "fleet snapshot hid an open decision after an incremental read failure: $json"
+  pass "fleet snapshots preserve captured decisions when incremental reads fail"
+}
+
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
   local parent fakebin json i remote_home pid collector_pid sleeper_pid duplicate_base cache_file candidate tmp
   parent=$(make_home concurrent-remote-ledgers)
@@ -3020,6 +3062,7 @@ test_relaunched_task_does_not_inherit_reused_endpoint_state
 test_large_local_snapshot_overlaps_local_reads_without_projection_drift
 test_local_snapshot_advances_open_decisions_without_refolding_lifetime_history
 test_local_snapshot_preserves_decisions_when_cursor_publish_fails
+test_local_snapshot_preserves_decisions_when_incremental_read_fails
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
 test_domain_alpha_stale_parent_event_does_not_become_current_work
