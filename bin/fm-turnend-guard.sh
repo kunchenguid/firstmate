@@ -76,10 +76,11 @@
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
 #      before that wait, if recovery is not already proven, this guard primes
-#      bin/fm-claude-stop-autoarm.sh --ensure-watcher so a refusal cannot abort
-#      the only process that could restore a watcher (Claude Code starts the
-#      registered asyncRewake hook in parallel, then cancels sibling hooks when
-#      a Stop is blocked);
+#      bin/fm-claude-stop-autoarm.sh --ensure-watcher as a handling successor
+#      with persisted start output so a refusal cannot abort the only process
+#      that could restore a watcher (Claude Code starts the registered
+#      asyncRewake hook in parallel, then cancels sibling hooks when a Stop is
+#      blocked);
 #   3. only when neither materializes is the auto-arm genuinely absent: re-block
 #      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
 #      (default 3) consecutive blocks per session - safely below Claude Code's
@@ -242,6 +243,12 @@ block_stop() {
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
+      if [ -s "$STATE/.claude-autoarm-prime.out" ]; then
+        printf '●  Primed watcher start output (%s):\n' "$STATE/.claude-autoarm-prime.out"
+        tail -n 5 "$STATE/.claude-autoarm-prime.out" | while IFS= read -r line || [ -n "$line" ]; do
+          printf '●    %s\n' "$line"
+        done
+      fi
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
@@ -457,15 +464,16 @@ failure_episode_verified() {
 # in-flight asyncRewake hook, which is what turned one missed claim into a
 # deadlock: the arm never ran, the epoch could freeze or advance, and every
 # later Stop refused. --ensure-watcher uses this hook's harness ancestry,
-# detaches the bin/fm-watch-arm.sh owner so a primed cycle is confirmed and
-# ledgered like every other arm, and takes no generation claim, so the
-# registered asyncRewake hook still owns rewake once a Stop is allowed.
+# detaches the bin/fm-watch-arm.sh owner as a handling successor so a primed
+# cycle is confirmed, ledgered, and not re-announced into a one-poll
+# resurface, persists that cycle's output, and takes no generation claim, so
+# the registered asyncRewake hook still owns rewake once a Stop is allowed.
 # Do not call autoarm_owns_recovery here: that accounts the failed-epoch budget.
 if ! fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" \
   && ! fm_autoarm_claim_open "$STATE" "$GRACE" \
   && [ -x "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" ]; then
   printf '%s' "$PAYLOAD" \
-    | "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" --ensure-watcher >/dev/null 2>&1 \
+    | "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" --ensure-watcher \
     || true
 fi
 

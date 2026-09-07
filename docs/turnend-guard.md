@@ -98,7 +98,8 @@ Claude Code sets `stop_hook_active=true` on every stop after any stop-hook conti
 The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, the auto-arm's generation claim is open, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
 Before that wait, if none of those proofs is already present, the guard primes `bin/fm-claude-stop-autoarm.sh --ensure-watcher`.
 That path uses the Stop hook's harness ancestry, detaches `bin/fm-watch-arm.sh` - the single owner of watcher start, bounded confirmation, and the `state/.watch-cycle-exits.log` lifecycle ledger - and takes no generation claim, so a refused Stop cannot abort the only process that could restore a watcher.
-A primed cycle that cannot start still appends its lifecycle record, so the lock holder that blocked it stays named even though the detached process discards its own output.
+The primed arm starts the watcher as a handling successor so a leftover downtime marker is not re-announced into a one-poll resurface, and it writes that cycle's stdout and stderr to `state/.claude-autoarm-prime.out` so a wake or a failed start still has a consumer.
+A primed cycle that cannot start still appends its lifecycle record and keeps that failed start on the prime output file, so the lock holder that blocked it stays named.
 The registered `asyncRewake` hook remains the rewake owner and attaches once a later Stop is allowed.
 A primed watcher that is still coming up survives the refusal, so two consecutive refusals cannot be guaranteed by the first.
 The claim is the ledger entry itself: the epoch sequence in `state/.claude-autoarm-epoch` is a monotonic claim generation, line 1 records the claim and terminal outcome, and line 2 records the claiming process's mandatory pid-identity; `fm_autoarm_claim_open` and `fm_autoarm_claim_next` in `bin/fm-wake-lib.sh` own the format contract.
