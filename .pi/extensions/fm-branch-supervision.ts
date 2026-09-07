@@ -239,7 +239,11 @@ type BranchModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
 type BranchEffort = ReturnType<NonNullable<ExtensionAPI["getThinkingLevel"]>>;
 type PinnedBranchModel = { model: BranchModel; modelRuntime: ModelRuntime };
 type BranchModelResolution = { ok: true; selection: PinnedBranchModel } | { ok: false; reason: string };
-type CodexCompatResources = { extensionPath: string; settingsManager: SettingsManager };
+type CodexCompatResources = {
+  extensionPath: string;
+  settingsManager: SettingsManager;
+  restoreGuardedBash: boolean;
+};
 type VersionTuple = readonly [number, number, number];
 
 function parseVersion(value: string): VersionTuple | null {
@@ -339,10 +343,14 @@ async function resolveCodexCompatResources(model: BranchModel | undefined): Prom
   };
   const extensionEntries = packageManifest.pi?.extensions;
   const piPeer = packageManifest.peerDependencies?.["@earendil-works/pi-coding-agent"];
+  // This upstream prerelease needs a command-tool adaptation. Do not
+  // generalize the observed startup transition to untested prereleases or
+  // Pi versions. Stable packages still require their declared peer range.
+  const restoreGuardedBash = packageManifest.version === "0.0.10-alpha.7" && VERSION === "0.85.1";
   if (
     packageManifest.name !== CODEX_COMPAT_PACKAGE ||
     typeof packageManifest.version !== "string" ||
-    parseVersion(packageManifest.version) === null ||
+    (parseVersion(packageManifest.version) === null && !restoreGuardedBash) ||
     typeof piPeer !== "string" ||
     !Array.isArray(extensionEntries) ||
     extensionEntries.length !== 1 ||
@@ -376,7 +384,7 @@ async function resolveCodexCompatResources(model: BranchModel | undefined): Prom
   ) {
     throw new Error(`${CODEX_COMPAT_PACKAGE} did not resolve to its declared user-package extension`);
   }
-  return { extensionPath: expectedExtensionPath, settingsManager };
+  return { extensionPath: expectedExtensionPath, settingsManager, restoreGuardedBash };
 }
 
 // Pi owns the effort vocabulary. The picker's options and every clamp still
@@ -1425,7 +1433,18 @@ ${context.command}
         } catch {}
         throw new Error(`${CODEX_COMPAT_PACKAGE} session startup failed: ${startupErrors.join("; ")}`);
       }
-      const activeTools = created.session.getActiveToolNames();
+      let activeTools = created.session.getActiveToolNames();
+      // alpha.7 removes bash in session_start to offer its own command tools.
+      // The SDK's tools allowlist already excludes those replacements. Restore
+      // only this observed transition, using the registered guarded override;
+      // every other mutation must still fail the exact allowlist check below.
+      if (
+        codexCompat.restoreGuardedBash &&
+        activeTools.length === 2 && activeTools[0] === "read" && activeTools[1] === "fm_branch_report"
+      ) {
+        created.session.setActiveToolsByName([...BRANCH_TOOL_NAMES]);
+        activeTools = created.session.getActiveToolNames();
+      }
       if (
         activeTools.length !== BRANCH_TOOL_NAMES.length ||
         activeTools.some((name, index) => name !== BRANCH_TOOL_NAMES[index])

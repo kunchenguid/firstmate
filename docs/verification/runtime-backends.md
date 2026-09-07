@@ -1434,6 +1434,39 @@ Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verifica
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh the SDK construction, picker, renderer, and type evidence after every Pi upgrade by rerunning the applicable live guard probes, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists).
 The live guard now drives both extensions through the watcher-owned settlement handshake, requires rejected branch settlement before main delivery, and verifies successor-delivery confirmation; rerun it against the matching importable Pi package to refresh end-to-end fallback evidence.
 
+### 2026-09-07 Pi 0.85.1 and Codex compatibility alpha.7
+
+On Linux x86_64 with Node v22.22.2, the 46-case focused branch suite, strict Pi typecheck, and seven real-SDK probes passed against installed Pi 0.85.1 and an isolated official `pi-openai-codex-compat@0.0.10-alpha.7` package.
+The official Pi 0.84.4 / plugin 0.0.9 control also passed its real-SDK guard before the candidate was applied.
+The candidate plugin's `tree-sitter@0.25.1` prebuild required an unavailable `GLIBCXX_3.4.31`; rebuilding that dependency from source with the host's existing toolchain made the unmodified plugin load.
+The guard copies the installed dependency closure, including built native artifacts, without installing packages or changing the user's Pi store.
+
+```sh
+bash tests/fm-pi-branch-extension.test.sh
+bash tests/fm-pi-primary-types.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 \
+  FM_PI_CODEX_COMPAT_NODE_MODULES="$compat_agent_dir/npm/node_modules" \
+  bash tests/fm-pi-branch-live-e2e.test.sh
+```
+
+Here `compat_agent_dir` is the prepared isolated Pi agent directory containing the exact candidate package and its working native dependencies; `FM_PI_PACKAGE_DIR` can select a matching importable Pi package for a control.
+
+```text
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.85.1
+ok - real installed pi-openai-codex-compat 0.0.10-alpha.7 initializes before prompting and persists native Codex compaction
+```
+
+The real-SDK compaction probe intercepts provider responses and uses synthetic credentials; it proves the exact three-tool payload and persisted native checkpoint, not authentication.
+A separate real authenticated SDK run inside a guarded named Herdr lab used Pi's installed CLI dispatcher bootstrap and the existing controlled SOCKS5 proxy, without changing main or its installation.
+Its `openai-codex/gpt-5.6-sol` main request returned HTTP 200 and `LAB_AUTH_OK`; the actual alpha.7 branch then drained a synthetic task event, claimed its lease, read its report, wrote one captain outcome, acknowledged its queue row, and released its lease through the guarded bash tool.
+The real main session called `fm_branch_processed` through sequence 1 and answered `LAB_OUTCOME_ACK`.
+One visible outcome entry remained after a duplicate offer, and an unanswered captain-only decision row stayed queued for main.
+This proves the SDK branch roundtrip, not a TUI reload or activation of the running primary.
+
+A separate credential-free failure probe loaded the candidate with its incompatible native prebuild and observed the actual `GLIBCXX_3.4.31` loader error before any provider request.
+The real watcher extension returned that rejected branch settlement to its recording main adapter exactly once and retained the durable wake; main delivery in that failure probe used an adapter, while authenticated main processing was proven by the preceding real session.
+Private task evidence retains the exact lab programs and transcripts; [the supervision owner](../pi-supervision-branch.md) defines the version and tool boundaries, and the portable suite rejects unknown prereleases, an unverified Pi patch version, and unexpected tool mutations.
+
 ### 2026-09-02 streaming-time watcher delivery
 
 The focused watcher suite, strict typecheck, and credential-free live guard were run against the npm `@earendil-works/pi-coding-agent` 0.84.4 package selected with `FM_PI_PACKAGE_DIR`, on macOS 26.6.2 arm64, Node v24.14.1, after the watcher extension stopped waiting for `before_agent_start` before settling a main delivery.
