@@ -916,6 +916,60 @@ test_arm_recovers_a_wedged_watcher_via_sigkill() {
   pass "watch-arm: a frozen wedged watcher is evicted via bounded SIGKILL escalation and re-armed"
 }
 
+test_sigkill_refuses_a_changed_lock_identity() {
+  local dir state fakebin holder_script holder identity i
+  dir=$(make_case sigkill-refuses-changed-identity)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  holder_script="$dir/term-resistant-holder"
+  cat > "$holder_script" <<'SH'
+#!/usr/bin/env bash
+trap ': > "$FM_TEST_TERM_SEEN"' TERM
+: > "$FM_TEST_HOLDER_READY"
+while :; do sleep 0.1; done
+SH
+  chmod +x "$holder_script"
+  FM_TEST_TERM_SEEN="$dir/term.seen" FM_TEST_HOLDER_READY="$dir/holder.ready" "$holder_script" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -e "$dir/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$dir/holder.ready" ] || fail "resistant lock holder did not start"
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$holder") \
+    || fail "could not identify the resistant lock holder"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  : > "$state/.last-watcher-beat"
+  age_beacon_past_grace "$state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=3 \
+    FM_WATCH_EVICT_TERM_GRACE=3 FM_ARM_CONFIRM_TIMEOUT=8 \
+    FM_POLL=600 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$dir/arm.out" 2>&1 &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -e "$dir/term.seen" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/term.seen" ] || fail "arm never sent the initial SIGTERM"
+  printf 'identity-changed-during-grace\n' > "$state/.watch.lock/pid-identity"
+  sleep 4
+
+  is_live_non_zombie "$holder" \
+    || fail "arm sent SIGKILL after the recorded watcher identity changed"
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "watch-arm: SIGKILL refuses a changed watcher identity"
+}
+
 # The eviction must be surgical: a genuinely healthy watcher (live, own lock,
 # fresh beacon) is NEVER killed - arm attaches to it, exactly as before. This
 # guards the auto-recovery from ever tearing down a working supervisor.
@@ -994,5 +1048,6 @@ test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
 test_arm_recovers_a_wedged_watcher
 test_arm_recovers_a_wedged_watcher_via_sigkill
+test_sigkill_refuses_a_changed_lock_identity
 test_arm_attaches_to_a_healthy_watcher_without_evicting
 test_poll_blocked_watcher_is_term_interruptible

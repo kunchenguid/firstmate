@@ -97,6 +97,7 @@ Only a cycle with no matching delivery record emits `watcher: FAILED - cycle end
 The arm layer recovers a wedged watcher instead of refusing it.
 A watcher whose beacon is stale past grace while its own live process still holds the lock is the "WATCHER DOWN" condition, and a fresh child cannot steal a lock held by a live PID, so without recovery the wedged watcher keeps the lock and supervision stays down until a manual restart.
 When `arm` finds THIS home's own watcher live but its beacon stale past grace, it evicts that watcher home-scoped and arms a fresh cycle, so the Claude Stop-hook auto-arm self-heals a wedged watcher at the next turn boundary rather than only reporting the failure.
+As an intentional, captain-accepted limitation, an idle-session wedge recovers at that next Stop-hook turn boundary, not continuously mid-idle; the arm process does not monitor the beacon while waiting for its supervised child.
 Eviction (`stop_this_home_watcher`, shared with `--restart`) resolves and signals only the pid recorded in this home's lock, and only after `fm_watcher_lock_matches_pid` proves it is this home's own watcher: SIGTERM first, then, after `FM_WATCH_EVICT_TERM_GRACE` seconds, SIGKILL for a watcher that defers its TERM trap while wedged in a foreground syscall.
 It never signals a live PID that is not this home's watcher and never uses a name-matching kill.
 A watcher that recovered in the race fails the beacon-stale check and is attached to instead, and a healthy watcher is always attached to, never evicted.

@@ -1558,6 +1558,52 @@ SH
   pass "pending-reply: a stalled remote observe is bounded and cannot freeze the watcher poll"
 }
 
+test_remote_observes_share_one_tick_budget() {
+  local dir home state sshbin started elapsed calls task corr
+  dir="$TMP_ROOT/remote-observe-shared-bound-$RANDOM"
+  home="$dir/home"
+  state="$home/state"
+  mkdir -p "$state" "$home/data" "$dir/sshbin"
+  cat > "$home/data/secondmates.md" <<'REG'
+# Secondmates
+
+- ios - iOS mate (host: remote-mac; root: /remote/root; home: /remote/ios; scope: ios; projects: none; added 2026-09-06)
+- android - Android mate (host: remote-mac; root: /remote/root; home: /remote/android; scope: android; projects: none; added 2026-09-06)
+- web - Web mate (host: remote-mac; root: /remote/root; home: /remote/web; scope: web; projects: none; added 2026-09-06)
+REG
+  for task in ios android web; do
+    fm_write_meta "$state/$task.meta" \
+      "window=fm-remote:w1:p1" "harness=claude" "kind=secondmate" "mode=secondmate" \
+      "home=/remote/$task" "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
+    corr=$(fm_pending_reply_create "$home" "$state" "$task" "status of $task")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+  done
+
+  sshbin="$dir/sshbin/stalled-ssh"
+  cat > "$sshbin" <<'SH'
+#!/usr/bin/env bash
+printf 'called\n' >> "$FM_TEST_SSH_CALLS"
+cat > /dev/null
+sleep 30
+SH
+  chmod +x "$sshbin"
+
+  started=$(date +%s)
+  (
+    export FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SSH_BIN="$sshbin" \
+      FM_TEST_SSH_CALLS="$dir/ssh.calls" FM_PENDING_REPLY_OBSERVE_TIMEOUT=2
+    fm_pending_reply_tick "$state"
+  ) || fail "the shared-budget tick failed"
+  elapsed=$(( $(date +%s) - started ))
+  calls=$(wc -l < "$dir/ssh.calls" 2>/dev/null | tr -d '[:space:]')
+
+  [ "$calls" = 1 ] \
+    || fail "the tick spawned $calls stalled remote observes after exhausting its shared budget"
+  [ "$elapsed" -lt 8 ] \
+    || fail "distinct stalled remote observes stacked to ${elapsed}s instead of sharing one budget"
+  pass "pending-reply: remote observes share one per-tick deadline"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1599,5 +1645,6 @@ test_mechanical_helper_writes_parent_channel
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
 test_remote_observe_is_bounded_so_the_poll_loop_cannot_freeze
+test_remote_observes_share_one_tick_budget
 
 printf 'ok - all pending-reply tests passed\n'

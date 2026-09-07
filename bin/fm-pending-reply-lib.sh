@@ -99,9 +99,10 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-timeout-lib.sh"
 
-# Hard bound (seconds) on the synchronous remote-secondmate observe below. The
-# tick runs inside the watcher's own poll cycle (bin/fm-watch.sh calls
-# fm_pending_reply_tick between two liveness-beacon touches), so a remote observe
+# Hard bound (seconds) on one synchronous remote-secondmate observe and on all
+# remote observes in one tick. The tick runs inside the watcher's own poll cycle
+# (bin/fm-watch.sh calls fm_pending_reply_tick between two liveness-beacon
+# touches), so a remote observe
 # that hangs - a reachable host whose observe command stalls, or an ssh connect
 # with no answer - would freeze the poll loop and let the beacon go stale past
 # the guard grace, taking supervision (and every secondmate-outcome surfacing
@@ -1427,7 +1428,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
-  local observation observation_task found i
+  local observation observation_task found i observe_deadline=0 observe_now observe_remaining
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
@@ -1521,13 +1522,19 @@ fm_pending_reply_tick() {  # <state-dir>
         done
         if [ "$found" = 0 ]; then
           if [ -n "$remote_host" ]; then
-            # Hard-bounded so a hung remote observe cannot freeze the watcher
-            # poll loop (see FM_PENDING_REPLY_OBSERVE_TIMEOUT above). A timeout
-            # (fm_run_timed exit 124) or any failure degrades to "unknown".
-            observation=$(fm_run_timed "$FM_PENDING_REPLY_OBSERVE_TIMEOUT" \
-              "$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
-              fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
-            case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
+            observe_now=$(date +%s)
+            if [ "$observe_deadline" -eq 0 ]; then
+              observe_deadline=$((observe_now + FM_PENDING_REPLY_OBSERVE_TIMEOUT))
+            fi
+            observe_remaining=$((observe_deadline - observe_now))
+            if [ "$observe_remaining" -gt 0 ]; then
+              observation=$(fm_run_timed "$observe_remaining" \
+                "$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
+                fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
+              case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
+            else
+              observation=unknown
+            fi
           else
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           fi

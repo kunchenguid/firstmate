@@ -305,6 +305,8 @@ stop_this_home_watcher() {
     sleep 0.1
   done
   if fm_pid_alive "$lock_pid" && watcher_beacon_stale_past_grace; then
+    [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$lock_pid" ] || return 0
+    fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME" || return 0
     kill -KILL "$lock_pid" 2>/dev/null || true
     i=0
     while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
