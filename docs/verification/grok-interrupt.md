@@ -9,23 +9,22 @@ This record preserves the live evidence gathered before deciding whether to chan
 | Field | Measured value |
 | --- | --- |
 | Date | 2026-09-07 |
-| PATH winner | `/home/awilliam/.local/bin/grok` -> `/home/awilliam/.grok/downloads/grok-linux-x86_64` |
+| PATH winner | `~/.local/bin/grok` -> `~/.grok/downloads/grok-linux-x86_64` |
 | PATH winner version | `grok 1.0.13 (5e9a58528b76) [stable]` |
-| Other PATH candidate | `/home/awilliam/.nvm/versions/node/v24.19.0/bin/grok` -> `1.0.1` |
+| Other PATH candidate | `~/.nvm/versions/node/v24.19.0/bin/grok` -> `1.0.1` |
 | Platform | Linux x86_64 |
 | Terminal | tmux 3.5a |
 | Model shown by the TUI | `Grok 4.6 (high)` |
-| Launch flags | `--always-approve --no-alt-screen` |
-| Escape trials | Three independent turns with a real foreground `sleep 30`, interrupted after 23, 27, and 30 seconds |
-| Control trial | One independent real foreground `sleep 30` turn, interrupted after 27 seconds with `C-c` |
-| Verdict | Escape visibly cancelled the TUI turn, but the evidence does not prove a clean production interrupt contract, so Firstmate retains `C-c` |
+| Launch flags | `--always-approve --no-alt-screen` for the first lot, then the production spawn shape `--always-approve` for the re-capture lot |
+| Escape trials | Three independent `--no-alt-screen` turns with a real foreground `sleep 30`, interrupted after 23, 27, and 30 seconds; then four independent production-shape turns with a real foreground `sleep 60`, interrupted after 27, 27, 28, and 29 seconds |
+| Control trials | One `--no-alt-screen` and one production-shape real foreground turn, interrupted with `C-c` after 27 and 28 seconds |
+| Verdict | Escape visibly cancels the turn and preserves an interactive session under both shapes, but so does `C-c`, and neither key reliably stops the already-running tool child, so there is no discriminator favouring Escape and Firstmate retains `C-c` |
 
 The PATH inventory was captured with `type -a grok`, `readlink -f`, and each candidate's `--version` output before the live trials.
 The live session invoked the PATH winner through `exec grok`, which resolved to the 1.0.13 native executable shown above.
 The `--no-alt-screen` flag was accepted by the installed CLI and made pane capture deterministic.
-Firstmate's own spawn shape in `bin/fm-spawn.sh` omits that flag, so these trials differ from the fleet launch in exactly one flag.
-Key delivery is `tmux send-keys` either way, but identical delivery does not establish identical handling: the 0.2.73 premise under revision is precisely that Escape focused the scrollback, and scrollback ownership is what the alternate screen changes hands over.
-Both the Escape observations and the footer literals below are therefore scoped to the `--no-alt-screen` capture shape, and each must be re-captured under the production launch shape before it justifies a key switch or a busy-signature repair.
+Firstmate's own spawn shape in `bin/fm-spawn.sh` omits that flag, so the first lot differed from the fleet launch in exactly one flag, and identical `tmux send-keys` delivery would not have established identical handling: the 0.2.73 premise under revision is precisely that Escape focused the scrollback, and scrollback ownership is what the alternate screen changes hands over.
+Both the Escape observations and the footer literals were therefore re-captured under the production launch shape, recorded below; the two shapes agree on the cancellation behavior, on the absent `Ctrl+c:cancel` literal, and on the idle bar.
 
 ## Method and expected behavior
 
@@ -44,7 +43,7 @@ cd "$PWD" && exec grok --always-approve --no-alt-screen "Use the bash tool to ex
 Each qualifying trial first verified a direct child command containing `sleep 30` and then waited until the pane's elapsed turn counter was at least 20 seconds before sending exactly one key.
 The pane was captured immediately after the key and again after three seconds.
 
-## Raw Escape observations
+## Raw Escape observations (`--no-alt-screen` lot)
 
 All three qualifying trials showed the active footer:
 
@@ -82,7 +81,7 @@ The Grok process itself remained alive, and a later follow-up produced `READY` i
 
 An earlier Escape sent before the real tool had started restored the composed prompt without a cancellation line, which is additional mode sensitivity rather than qualifying interrupt evidence.
 
-## Ctrl+C control
+## Ctrl+C control (`--no-alt-screen` lot)
 
 The control used the same launch, prompt, foreground `sleep 30`, active-mode check, and capture sequence.
 The control pane showed `Thinking... 27s ... [stop]` and the same `Esc:cancel` footer before one `C-c`.
@@ -94,8 +93,37 @@ Shift+Tab:mode  │  Ctrl+x:shortcuts
 ◎ 1 command still running
 ```
 
-The control confirms that `C-c` reaches the same visible cancellation path, while the older maintained adapter evidence remains the reason Firstmate keeps `C-c` as the production key.
-The current experiment does not establish that either key terminates an already-running child tool process, so it cannot safely promote Escape over the established path.
+The control confirms that `C-c` reaches the same visible cancellation path.
+
+## Production-shape re-capture
+
+The re-capture lot used the launch Firstmate actually spawns, with no `--no-alt-screen`:
+
+```sh
+grok --always-approve "Use the bash tool to execute exactly the foreground command sleep 60. Do not respond or claim completion until the command has actually exited."
+```
+
+Each trial was qualified the same way before the single key was sent: an `Esc:cancel` footer, a live `sleep 60` child, and an elapsed turn counter of at least 20 seconds; the pane was captured immediately and again after three seconds.
+
+| Trial | Key | Pane state when the key was sent | Immediate effect | Grok process | Tool child after 3s |
+| --- | --- | --- | --- | --- | --- |
+| escape-1 | `Escape` | `Thinking... 0.7s`, 28s elapsed, `sleep 60` live | `Cancelling...` then the idle bar, `Turn cancelled by user in 28s.` | alive | still running |
+| escape-2 | `Escape` | `Run sleep 60 in the foreground... 12s`, 27s elapsed | `Cancelling...` then the idle bar | alive | gone |
+| escape-3 | `Escape` | `Foreground sleep for 60 seconds... 13s`, 27s elapsed | the idle bar | alive | gone |
+| escape-4 | `Escape` | `Foreground sleep for 60 seconds... 0.6s`, 29s elapsed | `Turn cancelled by user in 29s.` | alive | not read; a follow-up in the same session answered `READY` |
+| control | `C-c` | `Thinking... 0.1s`, 28s elapsed, `sleep 60` live | the idle bar and `◎ 1 command still running` | alive | still running |
+
+Two active footers appeared under the production shape, the second only while the running tool was backgroundable:
+
+```text
+Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts
+Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+x:shortcuts
+```
+
+The idle bar was `Shift+Tab:mode  │  Ctrl+x:shortcuts`, matching the first lot.
+So the production shape reproduces the `--no-alt-screen` result rather than contradicting it: one Escape cancels a genuinely in-flight turn and leaves an interactive session that accepts a follow-up.
+It also reproduces the limit. Neither key terminates an already-running child tool process reliably: the `escape-1` and `C-c` control trials both left the `sleep 60` child running behind the same `1 command still running` residue.
+`C-c` therefore matches Escape on every measured axis under the production shape, leaving no discriminator that favours switching keys.
 
 ## History and disconfirming evidence
 
@@ -104,7 +132,7 @@ The earlier 1.0.13 ancillary Escape observation was not treated as complete unti
 The separate queued-Enter experiment at `https://github.com/kunchenguid/firstmate/pull/3868` is not required for this result and is not causal evidence.
 The captures also disconfirm the maintained Grok busy signature, which is a separate defect this interrupt-scoped verification records rather than fixes.
 `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT` is `Ctrl\+c:cancel` in `bin/fm-composer-lib.sh`, grepped by `fm_busy_grok_tail_busy` in `bin/fm-busy-lib.sh` for the `grok*` classifier arm.
-That literal is absent from every 1.0.13 active footer captured above, so on this build the rendered-tail fallback prints `idle grok-regex` for a genuinely busy turn with no error, and the 1.0.13 idle bar is `Shift+Tab:mode │ Ctrl+x:shortcuts` rather than the recorded `Shift+Tab:mode │ Ctrl+.:shortcuts`.
+That literal is absent from every 1.0.13 active footer captured above under either launch shape, so on this build the rendered-tail fallback prints `idle grok-regex` for a genuinely busy turn with no error, and the 1.0.13 idle bar is `Shift+Tab:mode │ Ctrl+x:shortcuts` rather than the recorded `Shift+Tab:mode │ Ctrl+.:shortcuts`.
 The same variable is also the delivery guard `fm_busy_lines_match` in `bin/fm-composer-lib.sh`, selected only when a caller passes `grok`, which reaches two further paths.
 `pane_is_busy` in `bin/fm-supervise-daemon.sh` takes its harness from `fm_daemon_primary_harness` and, per its own contract, reads only the supervisor pane during away-mode injection, so the hazard there is a grok 1.0.13 PRIMARY pane read as not-busy and injected mid-turn, not a recorded worker task.
 `fm_pending_reply_backend_observation` in `bin/fm-pending-reply-lib.sh` is called with the recorded harness, so a busy grok secondmate yields `fallback-idle`, which becomes `idle` after its grace window, stamps the turn completed, and lets `fm_pending_reply_send_recovery` resend into a still-running turn.
@@ -112,9 +140,9 @@ The crewmate consequence runs through the classifier instead: `stale_window_is_b
 The tmux and herdr submit readers never select the grok literal because their call sites pass no harness, but the `FM_DELIVERY_BUSY_REGEX_DEFAULT` union they fall back to matches none of the captured 1.0.13 rows either, so grok submit acknowledgement is equally stale on this build.
 Grok busy detection is therefore known stale on 1.0.13; widening or version-scoping the signature needs its own busy-scoped live verification and regression coverage, and this verification does not change the busy regex.
 
-An Escape-is-safe conclusion would require repeated active-turn captures under the production launch shape, without `--no-alt-screen`, where one Escape cancels the turn and the active tool work also stops cleanly, the Grok process remains interactive, and a follow-up is accepted.
+An Escape-is-safe conclusion would require repeated active-turn captures under the production launch shape where one Escape cancels the turn and the active tool work also stops cleanly, the Grok process remains interactive, and a follow-up is accepted.
 It would be falsified by any repeatable capture where Escape only changes scrollback focus, leaves the turn generating, leaves active work running, exits or wedges the Grok process, fails to restore an interactive composer, or prevents a follow-up.
-The retained raw captures include the active-command result and therefore do not meet that stronger conclusion.
+The production-shape lot meets every clause except the active work one, which `escape-1` falsifies, so Escape is not established as safe; and because the `C-c` control fails that same clause identically, the incumbent key is not shown to be worse either.
 
-Firstmate consequently retains one `C-c` for Grok, and the harness guidance continues to carry the older version caveat.
+Firstmate consequently retains one `C-c` for Grok, and the harness guidance records that 1.0.13 also cancels on Escape without giving a reason to switch.
 The portable public-control regression remains `tests/fm-control.test.sh`, which verifies the key delivered by `bin/fm-control.sh` rather than asserting implementation source text.
