@@ -605,10 +605,12 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 # publish as success. Newer bash returns normally there, so this divergence is
 # invisible to any lane that does not run on bash 3.2.
 fm_backend_source_file() {  # <path>
-  local source_path=$1 source_rc had_errexit=0 source_failed=0 saved_err_trap
+  local source_path=$1 source_rc had_errexit=0 had_errtrace=0 source_failed=0 saved_err_trap
   case $- in *e*) had_errexit=1 ;; esac
+  case $- in *E*) had_errtrace=1 ;; esac
   saved_err_trap=$(trap -p ERR)
   set +e
+  set -E
   trap 'source_failed=1' ERR
   # shellcheck source=/dev/null
   . "$source_path"
@@ -619,6 +621,7 @@ fm_backend_source_file() {  # <path>
     trap - ERR
   fi
   [ "$had_errexit" -eq 1 ] && set -e
+  [ "$had_errtrace" -eq 0 ] && set +E
   [ "$source_failed" -eq 0 ] || source_rc=1
   return "$source_rc"
 }
