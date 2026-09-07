@@ -212,13 +212,12 @@ fm_procevent_launch_floor_seconds() {
   printf '%s\n' "$value"
 }
 
-fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id>
-  local reg stamp
+fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id> <registration-identity>
+  local reg
+  case "$3" in *:*) ;; *) return 1 ;; esac
+  case "$3" in ''|*[!0-9:]*) return 1 ;; esac
   reg=$(fm_procevent_registry_dir "$1") || return 1
-  for stamp in "$reg/$2".*.last-launch "$reg/$2.last-launch"; do
-    [ -e "$stamp" ] || [ -L "$stamp" ] || continue
-    rm -f -- "$stamp" || return 1
-  done
+  rm -f -- "$reg/$2.$3.last-launch"
 }
 
 fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-identity> <seconds>
@@ -287,7 +286,7 @@ fm_procevent_source_lock_release() {
 }
 
 fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <argv...>
-  local state=$1 adapter=$2 id=$3 reg dest tmp arg
+  local state=$1 adapter=$2 id=$3 reg dest tmp arg identity
   shift 3
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
@@ -306,7 +305,8 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
     printf 'argv:\n'
     printf '%s\n' "$@"
   } > "$tmp" && chmod 0600 "$tmp" \
-    && fm_procevent_launch_floor_reset_locked "$state" "$id" \
+    && identity=$(fm_pr_file_identity "$tmp") \
+    && fm_procevent_launch_floor_reset_locked "$state" "$id" "$identity" \
     && mv -f -- "$tmp" "$dest"; then
     return 0
   fi
@@ -319,7 +319,7 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
 # stored because the tracked host constructs that command at run time.
 fm_procevent_extension_registration_publish_locked() {  # <state> <adapter> <source-id> <extension-id> <extension-version> <capability-version> <package-digest> <binding-digest> <config-ref> <registration-token>
   local state=$1 adapter=$2 id=$3 extension_id=$4 extension_version=$5 capability_version=$6
-  local package_digest=$7 binding_digest=$8 config_ref=$9 registration_token=${10} reg dest tmp
+  local package_digest=$7 binding_digest=$8 config_ref=$9 registration_token=${10} reg dest tmp identity
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
   fm_procevent_extension_id_valid "$extension_id" || return 1
@@ -348,7 +348,8 @@ fm_procevent_extension_registration_publish_locked() {  # <state> <adapter> <sou
     printf 'argc=0\n'
     printf 'argv:\n'
   } > "$tmp" && chmod 0600 "$tmp" \
-    && fm_procevent_launch_floor_reset_locked "$state" "$id" \
+    && identity=$(fm_pr_file_identity "$tmp") \
+    && fm_procevent_launch_floor_reset_locked "$state" "$id" "$identity" \
     && mv -f -- "$tmp" "$dest"; then
     return 0
   fi
