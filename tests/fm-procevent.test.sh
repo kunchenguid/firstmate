@@ -2112,4 +2112,65 @@ wait_gone "$KEEP_DESCENDANT" \
   || fail "retiring a source left a descendant of its listener running"
 pass "retiring a source reaps its reparented listener and every descendant under it"
 
+# --- reaping an expired runner is not best-effort ---------------------------
+#
+# A stop the guard cannot PROVE must not end the guard. A descendant still
+# finishing uninterruptible work outlives even the group KILL, and a guard that
+# gave up after one attempt would walk away from a still-running expired runner
+# - the best-effort reaping this whole mechanism exists to remove.
+#
+# The unprovable attempt is injected through the signal the real path actually
+# reads: `ps` answers ONE process-group query for the runner with a group it
+# does not lead, which is exactly how a stop that cannot be proved is reported.
+# Every other `ps` call, and every later one, is the real command.
+
+RETRY_HOME="$TMP_ROOT/stop-retry"; new_home "$RETRY_HOME"
+fm_test_track_procevent_home "$RETRY_HOME"
+RETRY_STATE="$TMP_ROOT/stop-retry-state"; mkdir -p "$RETRY_STATE"
+RETRY_BIN=$(fm_fakebin "$TMP_ROOT/stop-retry-bin")
+REAL_PS=$(command -v ps) || fail "this host has no ps to build the retry fixture on"
+cat > "$RETRY_BIN/ps" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = -o ] && [ "\$2" = "pgid=" ] && [ "\$3" = -p ] \\
+  && [ -s "\$STOP_RETRY_STATE/target" ] \\
+  && [ "\$4" = "\$(cat "\$STOP_RETRY_STATE/target")" ] \\
+  && [ ! -e "\$STOP_RETRY_STATE/spent" ]; then
+  : > "\$STOP_RETRY_STATE/spent"
+  printf ' 999999\n'
+  exit 0
+fi
+exec "$REAL_PS" "\$@"
+SH
+chmod +x "$RETRY_BIN/ps"
+
+retry_pe() {  # <command...>
+  PATH="$RETRY_BIN:$PATH" STOP_RETRY_STATE="$RETRY_STATE" \
+    FM_PROCEVENT_OWNER_LEASE_SECONDS=2 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+    FM_HOME="$RETRY_HOME" "$ROOT/bin/fm-procevent.sh" "$@"
+}
+
+retry_pe register lavish retry-src -- "$ORPHAN_STUB" "$TMP_ROOT/stop-retry-marker" >/dev/null
+retry_pe reconcile >/dev/null
+wait_for "$RETRY_HOME/state/procevent/retry-src.runner" \
+  || fail "the retry listener never recorded its runner"
+RETRY_PID=$(cat "$RETRY_HOME/state/procevent/retry-src.runner")
+# Armed only now: the runner already proved its own process group at startup,
+# and arming earlier would fail that assertion instead of the stop under test.
+printf '%s\n' "$RETRY_PID" > "$RETRY_STATE/target"
+wait_for "$TMP_ROOT/stop-retry-marker.descendant" \
+  || fail "the retry listener's child never spawned its own descendant"
+RETRY_DESCENDANT=$(cat "$TMP_ROOT/stop-retry-marker.descendant")
+
+deadline=$((SECONDS + 60))
+while kill -0 -"$RETRY_PID" 2>/dev/null; do
+  [ "$SECONDS" -lt "$deadline" ] \
+    || fail "the guard gave up on an expired runner after a stop it could not prove"
+  sleep 0.5
+done
+[ -e "$RETRY_STATE/spent" ] \
+  || fail "the unprovable stop attempt this test injects never happened"
+wait_gone "$RETRY_DESCENDANT" \
+  || fail "the guard stopped retrying before the expired runner's descendant was reaped"
+pass "a stop the guard cannot prove is retried until the expired runner is reaped"
+
 printf '\nall procevent tests passed\n'
