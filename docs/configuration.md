@@ -790,14 +790,15 @@ Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `F
 Each claim binds its caller-reported home and runner PID to a process identity, unique claim generation, exact registration-file generation, and resolved state-root identity.
 Registration, acquisition, replacement, retirement, and generation-bound release are serialized at one machine-wide boundary per source.
 A live identity-matched owner is never displaced, and release removes only the exact generation the caller acquired.
-Retirement and orphan reconciliation signal a runner process group only while its recorded process identity still matches, or when the recorded leader is gone and only its own owned group survives.
-A runner leads its own process group, so a claim counts as reclaimable only when its owner is stale and an independent process-group check finds no members; a crashed leader or reused pid whose old group still has members cannot relax ownership cleanup, and reconcile stops a safely identified surviving group before starting any replacement.
+Retirement and orphan reconciliation select a runner process group for signalling only while its recorded process identity still matches and the live runner still leads that group.
+A claim counts as reclaimable only when its owner is stale and an independent process-group check finds no members; a crashed leader or reused pid whose process group still has members cannot relax ownership cleanup, so reconcile preserves the claim without signalling the ambiguous group or starting a replacement.
 Reclaiming a generation that IS gone is not gated on tidying its capture-reservation records.
 Those records are keyed by claim token and every replacement claims a fresh one, so a leftover that can no longer be located - a state-root identity a claim recorded before its home was re-created, for example - is stale bytes rather than an ownership hazard.
 Ordinary release and reclamation still attempt reservation cleanup and require it unless both owner staleness and whole-group absence prove the generation gone.
 The narrow live-owner terminal-self-retirement path also attempts cleanup but tolerates its own still-in-flight reservation, which the runner removes on the normal end-of-capture path; exact home, PID, and claim-token ownership remains mandatory before the claim is released.
 If identity cannot be established for a live PID, or a surviving owned group cannot be proved stopped, the operation preserves the registration and claim for safe retry rather than adding a second owner.
-A live PID whose identity no longer matches is a reused PID, so it is treated as stale and its process group is never signalled.
+A live PID whose identity no longer matches is a reused PID, so cleanup refuses it before signalling.
+Identity and process-group verification cannot be made atomic with signalling in portable shell: the reaper signals only a target it has verified as the recorded generation, but PID and group reuse remain possible in the narrow interval between verification and the signal. Launch pacing is the primary host-wedge protection; watchdog cleanup is a backstop.
 
 Supported secondmate retirement preflights each target home's bounded `sweep-home` command before destructive teardown, snapshots its registrations outside the target, then runs the sweep at that home's final deletion or return boundary.
 If deletion or return fails, teardown restores those registrations and reconciles them before returning the refusal.

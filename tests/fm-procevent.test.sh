@@ -1327,7 +1327,7 @@ kill -0 "$innocent_pid" 2>/dev/null || fail "retirement signaled a PID whose ide
 kill "$innocent_pid" 2>/dev/null || true
 wait "$innocent_pid" 2>/dev/null || true
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/reused-src.claim" "retirement releases the exact reused-pid claim"
-pass "PID reuse cannot signal an unrelated process"
+pass "detected PID reuse is refused before signalling"
 
 HL="$TMP_ROOT/hl"; new_home "$HL"
 IDENTITY_TRIGGER="$TMP_ROOT/identity-trigger"
@@ -2167,7 +2167,7 @@ sleep 3
 kill -0 -"$REUSED_GROUP_RUNNER" 2>/dev/null \
   || fail "the guard killed a process group after its runner identity became ambiguous"
 pe "$HREUSED_GROUP" retire reused-runner-group-src >/dev/null
-pass "an ambiguous reused-PID group is never signalled"
+pass "a detected ambiguous reused-PID group is not signalled"
 
 # --- a runner cannot outlive the session that owns it -----------------------
 #

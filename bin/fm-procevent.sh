@@ -168,10 +168,10 @@
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
 # only a claim whose stale owner and independently absent process group prove
-# its whole generation gone is reclaimed. A runner leads its own process group,
-# so a crashed leader or reused pid whose old group still has members cannot
-# relax ownership cleanup. Reconcile stops a safely identified surviving group
-# before replacement and keeps the claim for a later retry when it cannot.
+# its whole generation gone is reclaimed. A crashed leader or reused pid whose
+# process group still has members cannot relax ownership cleanup. Reconcile
+# signals only a live identity-matched runner group and otherwise keeps the
+# claim without starting a replacement.
 #
 # Durability boundary: see bin/fm-procevent-lib.sh. This runner proves capture
 # before publication and bounded re-announcement until handled, and nothing
@@ -1216,8 +1216,8 @@ cmd_reconcile() {
 runner_group_signal() {  # <signal> <pid> <identity>
   local signal=$1 pid=$2 identity=$3 state pgid
   # KNOWN LIMIT: only an alive identity-matched leader proves group ownership.
-  # Reused PIDs and absent leaders are never signalled; launch pacing, leases,
-  # and reconcile cleanup are the confused-agent-grade backstop.
+  # Detected reused PIDs and absent leaders are refused before signalling;
+  # launch pacing, leases, and reconcile cleanup are the backstop.
   fm_procevent_pid_state "$pid" "$identity"
   state=$?
   case "$state" in
@@ -1227,6 +1227,8 @@ runner_group_signal() {  # <signal> <pid> <identity>
   esac
   pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
   [ "$pgid" = "$pid" ] || return 2
+  # KNOWN LIMIT: portable shell cannot make this verification and signal atomic,
+  # so the PID and group could be reused in the interval between them.
   kill -"$signal" -"$pid" 2>/dev/null || return 2
 }
 
