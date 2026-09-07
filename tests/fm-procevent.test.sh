@@ -2154,15 +2154,11 @@ wait_for "$HREUSED_GROUP/state/procevent/reused-runner-group-src.runner" \
   || fail "the reused-group fixture runner did not start"
 REUSED_GROUP_RUNNER=$(cat "$HREUSED_GROUP/state/procevent/reused-runner-group-src.runner")
 touch "$REUSED_GROUP_MARKER"
-reused_group_deadline=$((SECONDS + 6))
-while kill -0 -"$REUSED_GROUP_RUNNER" 2>/dev/null; do
-  if [ "$SECONDS" -ge "$reused_group_deadline" ]; then
-    pe "$HREUSED_GROUP" retire reused-runner-group-src >/dev/null 2>&1 || true
-    fail "a reused runner identity made the guard abandon its source group"
-  fi
-  sleep 0.1
-done
-pass "registration generation evidence reaps a reused runner group"
+sleep 3
+kill -0 -"$REUSED_GROUP_RUNNER" 2>/dev/null \
+  || fail "the guard killed a process group after its runner identity became ambiguous"
+pe "$HREUSED_GROUP" retire reused-runner-group-src >/dev/null
+pass "an ambiguous reused-PID group is never signalled"
 
 # --- a runner cannot outlive the session that owns it -----------------------
 #

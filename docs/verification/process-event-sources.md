@@ -193,6 +193,7 @@ The same group rule decides when a claim may be reclaimed, not only when a runne
 A leader that died while its owned group kept running is not a gone generation, so `reconcile` stops that surviving group and releases its generation before starting any replacement, and preserves the claim for a later retry when it cannot prove the group stopped or another home owns it.
 Once a stale owner and an independent group check prove the whole generation gone, an unreachable token-keyed capture reservation cannot veto reclamation.
 Signalling an orphaned group is safe precisely because only an absent leader reaches that state: a reused PID leaves the leader alive, so no group signal follows, and an independent surviving-group check still prevents stale-generation cleanup.
+Known limit: when PID reuse makes group ownership ambiguous, the reaper does not act because it cannot prove the group is the orphan generation; storm-rate containment plus ordinary lease and reconcile cleanup are the confused-agent-grade backstop.
 
 `tests/fm-procevent.test.sh` covers owner-loss reaping, descendant churn cessation, cross-home scope, launch pacing, guard startup failure, attached-start continuity, explicit retirement, and stale-group reconciliation.
 

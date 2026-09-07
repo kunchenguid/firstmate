@@ -1015,7 +1015,7 @@ start_owner_guard() {  # <source-id>
   identity=$(fm_pid_identity "$$" 2>/dev/null) || return 1
   ready=$(umask 077; mktemp "$REG/.owner-guard-ready.XXXXXX") || return 1
   if ! isolate_process detach "$SCRIPT_DIR/fm-procevent.sh" _owner-watchdog \
-      "$1" "$$" "$identity" "$CLAIM_REG_IDENTITY" "$ready"; then
+      "$1" "$$" "$identity" "$ready"; then
     rm -f -- "$ready"
     return 1
   fi
@@ -1043,10 +1043,9 @@ start_owner_guard() {  # <source-id>
 # matches on a script name, a command line, or a process name: those are shared
 # by every home running the same adapter, and a live source in another home
 # proves its own owner through that home's own lease.
-cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <registration-identity> <ready-file>
-  local id=${1-} pid=${2-} identity=${3-} registration_identity=${4-} ready=${5-}
-  local lease tick misses=0 pid_state replacement_pgid current_registration_identity
-  [ "$#" -eq 5 ] || usage
+cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file>
+  local id=${1-} pid=${2-} identity=${3-} ready=${4-} lease tick misses=0 pid_state
+  [ "$#" -eq 4 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$pid" in ''|*[!0-9]*) die "runner pid must be a positive integer: $pid" ;; esac
   [ -n "$identity" ] || die "runner identity is required"
@@ -1071,16 +1070,9 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <registrati
     pid_state=$?
     case "$pid_state" in
       1)
-        replacement_pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || replacement_pgid=
-        if [ "$replacement_pgid" = "$pid" ]; then
-          current_registration_identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null || true)
-          [ "$current_registration_identity" = "$registration_identity" ] || exit 0
-          if stop_runner_pid "$pid" "$identity" "$registration_identity" "$id"; then
-            exit 0
-          fi
-          continue
-        fi
-        fm_procevent_group_alive "$pid" && continue
+        # KNOWN LIMIT: a reused PID makes group ownership ambiguous, so the
+        # reaper does not signal it. Launch pacing, lease expiry, and ordinary
+        # reconcile cleanup remain the confused-agent-grade backstop.
         exit 0
         ;;
       3)
@@ -1232,9 +1224,8 @@ cmd_reconcile() {
 # its own process group leader, so the group signal is what actually reaches the
 # blocking child - signalling only the runner would leave that child alive and
 # reparented, which is exactly how a source that never completes leaks.
-stop_runner_pid() {  # <pid> <identity> [registration-identity source-id]
-  local pid=${1-} identity=${2-} registration_identity=${3-} source_id=${4-}
-  local state pgid i=0 current_registration_identity
+stop_runner_pid() {  # <pid> <identity>
+  local pid=${1-} identity=${2-} state pgid i=0
   case "$pid" in ''|*[!0-9]*) return 2 ;; esac
   [ -n "$identity" ] || return 2
   fm_procevent_pid_state "$pid" "$identity"
@@ -1245,13 +1236,6 @@ stop_runner_pid() {  # <pid> <identity> [registration-identity source-id]
       # really is the one this pid leads before signalling it.
       pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
       [ "$pgid" = "$pid" ] || return 2
-      ;;
-    1)
-      [ -n "$registration_identity" ] || return 1
-      current_registration_identity=$(fm_pr_file_identity "$(source_file "$source_id")" 2>/dev/null || true)
-      [ "$current_registration_identity" = "$registration_identity" ] || return 1
-      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
-      [ "$pgid" = "$pid" ] || return 1
       ;;
     3)
       # The leader crashed but its owned group is still running. Its pgid cannot

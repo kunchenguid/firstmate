@@ -213,19 +213,21 @@ fm_procevent_launch_floor_seconds() {
 }
 
 fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id> <registration-identity>
-  local reg
+  local reg identity
   case "$3" in *:*) ;; *) return 1 ;; esac
   case "$3" in ''|*[!0-9:]*) return 1 ;; esac
   reg=$(fm_procevent_registry_dir "$1") || return 1
-  rm -f -- "$reg/$2.$3.last-launch"
+  identity=${3//:/-}
+  rm -f -- "$reg/$2.$identity.last-launch"
 }
 
 fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-identity> <seconds>
-  local reg stamp
+  local reg stamp identity
   case "$3" in *:*) ;; *) return 1 ;; esac
   case "$3" in ''|*[!0-9:]*) return 1 ;; esac
   reg=$(fm_procevent_registry_dir "$1") || return 1
-  stamp="$reg/$2.$3.last-launch"
+  identity=${3//:/-}
+  stamp="$reg/$2.$identity.last-launch"
   [ ! -L "$stamp" ] || return 1
   [ ! -e "$stamp" ] || [ -f "$stamp" ] || return 1
   perl -MTime::HiRes=clock_gettime,sleep,CLOCK_MONOTONIC -MFcntl=:DEFAULT -e '
