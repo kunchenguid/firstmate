@@ -1297,6 +1297,18 @@ pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to th
 
 # Two homes recovering concurrently serialize on the named session lock and
 # each replace only their own exact husk.
+# Release earlier live fixtures so replacement slots cannot collide with them.
+for META_HOME_PAIR in \
+  "p1:$HOME_DIR" "p2:$HOME_DIR" \
+  "a1:$SECOND_HOME_A" "a2:$SECOND_HOME_A" \
+  "b1:$SECOND_HOME_B" "b2:$SECOND_HOME_B"
+do
+  TASK_ID=${META_HOME_PAIR%%:*}
+  TASK_HOME=${META_HOME_PAIR#*:}
+  teardown_task "$TASK_ID" "$TASK_HOME" > "$TMP_ROOT/td-before-recovery-$TASK_ID.out" 2> "$TMP_ROOT/td-before-recovery-$TASK_ID.err" \
+    || fail "pre-recovery teardown of $TASK_ID failed: $(cat "$TMP_ROOT/td-before-recovery-$TASK_ID.err")"
+done
+
 PRIMARY_WAVE_ID=resume-wave-primary
 BRAVO_WAVE_ID=resume-wave-bravo
 mkdir -p "$HOME_DIR/data/$PRIMARY_WAVE_ID" "$SECOND_HOME_B/data/$BRAVO_WAVE_ID"
@@ -1371,10 +1383,10 @@ pass "real Herdr lab: legacy projection labels and flat secondmate tabs are left
 
 # Teardown multi-home projected tasks by exact pane only.
 for META_HOME_PAIR in \
-  "p1:$HOME_DIR" "p2:$HOME_DIR" "pcw:$HOME_DIR" "post-legacy:$HOME_DIR" \
-  "a1:$SECOND_HOME_A" "a2:$SECOND_HOME_A" "acw:$SECOND_HOME_A" \
+  "pcw:$HOME_DIR" "post-legacy:$HOME_DIR" \
+  "acw:$SECOND_HOME_A" \
   "alpha:$HOME_DIR" \
-  "b1:$SECOND_HOME_B" "b2:$SECOND_HOME_B" "bcw:$SECOND_HOME_B"
+  "bcw:$SECOND_HOME_B"
 do
   TASK_ID=${META_HOME_PAIR%%:*}
   TASK_HOME=${META_HOME_PAIR#*:}
