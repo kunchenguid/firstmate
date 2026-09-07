@@ -3183,6 +3183,75 @@ test_local_merge_entrypoint_refuses_a_captain_held_task() {
   pass "the local merge entrypoint refuses a captain-held task before merging"
 }
 
+test_pr_merge_entrypoint_refuses_a_missing_authority_record_but_allows_an_untracked_task() {
+  local home id pr rc merge_count
+  home=$(make_home missing-pr-authority-record)
+  configure_merged_github "$home"
+  id=sample-missing-pr-authority
+  pr=https://github.com/sample/sample/pull/43
+  write_origin_meta "$home" "$id" ship
+
+  rm "$home/data/backlog.md"
+  set +e
+  run_pr_merge "$home" "$id" "$pr" > "$home/missing-pr.out" 2> "$home/missing-pr.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the PR merge entrypoint accepted a missing captain-hold authority record"
+  assert_grep "captain-hold authority record is unavailable" "$home/missing-pr.err" \
+    "the PR merge refusal did not name its unavailable authority record"
+  assert_no_grep 'pr merge 43 ' "$home/gh-axi.log" \
+    "the PR merge entrypoint reached the forge without a captain-hold authority record"
+
+  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  run_pr_merge "$home" "$id" "$pr" > "$home/untracked-pr.out" 2> "$home/untracked-pr.err" \
+    || fail "the PR merge entrypoint refused an untracked task in a readable backlog"
+  merge_count=$(grep -c 'pr merge 43 ' "$home/gh-axi.log" || true)
+  [ "$merge_count" -eq 1 ] || fail "the readable backlog with no task row did not permit exactly one PR merge"
+  pass "the PR merge entrypoint distinguishes a missing authority record from an untracked task"
+}
+
+test_local_merge_entrypoint_refuses_a_missing_authority_record_but_allows_an_untracked_task() {
+  local home id repo wt before after rc
+  home=$(make_home missing-local-authority-record)
+  id=sample-missing-local-authority
+  repo="$home/projects/sample-local"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" "fm/$id"
+  printf 'untracked local delivery\n' > "$wt/local.txt"
+  git -C "$wt" add local.txt
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'untracked local delivery'
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=local-only" \
+    "spawn_gen=fixture-$id"
+  before=$(git -C "$repo" rev-parse main)
+
+  rm "$home/data/backlog.md"
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$id" \
+    > "$home/missing-local.out" 2> "$home/missing-local.err"
+  rc=$?
+  set -e
+  after=$(git -C "$repo" rev-parse main)
+  [ "$rc" -ne 0 ] || fail "the local merge entrypoint accepted a missing captain-hold authority record"
+  [ "$after" = "$before" ] || fail "the local merge entrypoint moved main without a captain-hold authority record"
+  assert_grep "captain-hold authority record is unavailable" "$home/missing-local.err" \
+    "the local merge refusal did not name its unavailable authority record"
+
+  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$id" \
+    > "$home/untracked-local.out" 2> "$home/untracked-local.err" \
+    || fail "the local merge entrypoint refused an untracked task in a readable backlog"
+  after=$(git -C "$repo" rev-parse main)
+  [ "$after" != "$before" ] || fail "the readable backlog with no task row did not permit the local merge"
+  pass "the local merge entrypoint distinguishes a missing authority record from an untracked task"
+}
+
 test_merge_entrypoints_validate_identity_and_state_before_locking() {
   local home pr_state local_state bad_id rc
   home=$(make_home invalid-merge-entrypoint-inputs)
@@ -3732,6 +3801,8 @@ test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task
 test_local_merge_entrypoint_refuses_a_captain_held_task
+test_pr_merge_entrypoint_refuses_a_missing_authority_record_but_allows_an_untracked_task
+test_local_merge_entrypoint_refuses_a_missing_authority_record_but_allows_an_untracked_task
 test_merge_entrypoints_validate_identity_and_state_before_locking
 test_merge_entrypoints_refuse_a_reused_task_incarnation
 test_merge_entrypoints_serialize_forced_teardown_before_task_reads

@@ -157,7 +157,8 @@
 # is (not Done, hold kind captain), 1 means it is not, and 2 means the answer
 # could not be established, so a caller that must never close a live call can
 # treat "cannot tell" as its own case instead of as a no. With
-# `--distinguish-absent`, an absent local task returns 3 instead of 1.
+# `--distinguish-absent`, an absent local task returns 3 instead of 1, while an
+# unavailable markdown authority record returns 4.
 # It prints nothing on these predicate results and mutates nothing, unless
 # `--identity` asks it to print this call's
 # LIFECYCLE identity, which it does on an exit 0 only. That identity - the
@@ -1786,8 +1787,9 @@ EOF
 
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
 # A row this home does not carry is 3 when the caller requests the distinction;
-# every other read failure is a 2, printed to stderr, because a mechanical
-# closer must never read "cannot tell" as permission to close.
+# an unavailable markdown authority record is 4, and every other read failure
+# is a 2, printed to stderr, because a mechanical closer must never read
+# "cannot tell" as permission to close.
 command_open() {  # <task-id> [--identity] [--distinguish-absent]
   local id='' identity=0 distinguish_absent=0 data state root file show shown_body
   while [ "$#" -gt 0 ]; do
@@ -1816,11 +1818,7 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
     file=$(fm_backlog_file "$data") \
       || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-      # No backlog file at all: this home carries no row for the task, which is
-      # absence, not a decided "no longer an open captain call". A caller that
-      # asked to tell the two apart must not read it as a resolution, because a
-      # card wrongly hidden is worse than a card wrongly shown.
-      [ "$distinguish_absent" = 0 ] || return 3
+      [ "$distinguish_absent" = 0 ] || return 4
       return 1
     fi
   fi
