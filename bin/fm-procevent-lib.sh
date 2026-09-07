@@ -237,15 +237,15 @@ fm_procevent_launch_floor_prune_locked() {  # <state-root> <source-id> <registra
 }
 
 fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-identity> <seconds>
-  local reg stamp identity
-  case "$3" in *:*) ;; *) return 1 ;; esac
-  case "$3" in ''|*[!0-9:]*) return 1 ;; esac
-  reg=$(fm_procevent_registry_dir "$1") || return 1
-  identity=${3//:/-}
-  stamp="$reg/$2.$identity.last-launch"
+  local state=$1 id=$2 expected=$3 floor=$4 reg stamp identity registration current_identity status=0
+  case "$expected" in *:*) ;; *) return 1 ;; esac
+  case "$expected" in ''|*[!0-9:]*) return 1 ;; esac
+  reg=$(fm_procevent_registry_dir "$state") || return 1
+  identity=${expected//:/-}
+  stamp="$reg/$id.$identity.last-launch"
   [ ! -L "$stamp" ] || return 1
   [ ! -e "$stamp" ] || [ -f "$stamp" ] || return 1
-  perl -MTime::HiRes=clock_gettime,sleep,CLOCK_MONOTONIC -MFcntl=:DEFAULT -e '
+  perl -MTime::HiRes=clock_gettime,sleep,CLOCK_MONOTONIC -e '
     use strict;
     use warnings;
     my ($path, $floor) = @ARGV;
@@ -260,13 +260,31 @@ fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-ide
     my $now = clock_gettime(CLOCK_MONOTONIC);
     my $elapsed = defined($previous) && $now >= $previous ? $now - $previous : undef;
     sleep($floor - $elapsed) if defined($elapsed) && $elapsed < $floor;
-    $now = clock_gettime(CLOCK_MONOTONIC);
-    my $tmp = "$path.$$";
-    sysopen(my $out, $tmp, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 1;
-    print {$out} "$now\n" or exit 1;
-    close $out or exit 1;
-    rename $tmp, $path or exit 1;
-  ' "$stamp" "$4"
+  ' "$stamp" "$floor" || return 1
+
+  fm_procevent_source_lock_acquire "$id" || return 1
+  registration="$reg/$id.source"
+  current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null) || current_identity=
+  if [ "$current_identity" != "$expected" ]; then
+    fm_procevent_source_lock_release "$id"
+    return 0
+  fi
+  [ ! -L "$stamp" ] && { [ ! -e "$stamp" ] || [ -f "$stamp" ]; } || status=1
+  if [ "$status" -eq 0 ]; then
+    perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -MFcntl=:DEFAULT -e '
+      use strict;
+      use warnings;
+      my $path = shift;
+      my $now = clock_gettime(CLOCK_MONOTONIC);
+      my $tmp = "$path.$$";
+      sysopen(my $out, $tmp, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 1;
+      print {$out} "$now\n" or exit 1;
+      close $out or exit 1;
+      rename $tmp, $path or exit 1;
+    ' "$stamp" || status=1
+  fi
+  fm_procevent_source_lock_release "$id" || status=1
+  return "$status"
 }
 
 # True while the owning session is provably still there.

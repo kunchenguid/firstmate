@@ -2015,6 +2015,27 @@ PACE_STAMPS=$(find "$HPACE/state/procevent" -maxdepth 1 -type f \
 [ "$PACE_STAMPS" = 1 ] || fail "replacement registrations accumulated stale pacing state"
 pass "a replacement registration starts with one fresh launch floor"
 
+HPACE_RACE="$TMP_ROOT/registration-pacing-race"; new_home "$HPACE_RACE"
+fm_test_track_procevent_home "$HPACE_RACE"
+PACE_RACE_LOG="$TMP_ROOT/registration-pacing-race.log"
+pe_register "$HPACE_RACE" lavish pace-race-src -- "$FAST_SOURCE" "$PACE_RACE_LOG" >/dev/null
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3 pe "$HPACE_RACE" start pace-race-src >/dev/null
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3 \
+  pe "$HPACE_RACE" start pace-race-src > "$TMP_ROOT/registration-pacing-race.out" 2>&1 &
+PACE_RACE_PID=$!
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/pace-race-src.claim" \
+  || fail "the superseded pacing fixture did not claim its registration"
+[ "$(wc -l < "$PACE_RACE_LOG" | tr -d ' ')" = 1 ] \
+  || fail "the superseded pacing fixture was not waiting on its launch floor"
+pe_register "$HPACE_RACE" lavish pace-race-src -- "$FAST_SOURCE" "$PACE_RACE_LOG" >/dev/null
+wait "$PACE_RACE_PID" || fail "the superseded paced runner failed"
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3 pe "$HPACE_RACE" start pace-race-src >/dev/null
+PACE_RACE_STAMPS=$(find "$HPACE_RACE/state/procevent" -maxdepth 1 -type f \
+  -name 'pace-race-src.*.last-launch' | wc -l | tr -d ' ')
+[ "$PACE_RACE_STAMPS" = 1 ] \
+  || fail "a superseded sleeping runner recreated stale pacing state"
+pass "a superseded sleeping runner cannot recreate stale pacing state"
+
 HCOMMIT="$TMP_ROOT/registration-commit"; new_home "$HCOMMIT"
 fm_test_track_procevent_home "$HCOMMIT"
 COMMIT_LOG="$TMP_ROOT/registration-commit.log"
