@@ -1102,6 +1102,131 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+test_guard_watcher_path_aliases() (
+  local dir state alias_home alias_root pid i home root model out identity
+  dir=$(make_case 'guard aliases')
+  state="$dir/state"
+  alias_home="$TMP_ROOT/home alias"
+  alias_root="$TMP_ROOT/repo alias"
+  ln -s "$dir" "$alias_home"
+  ln -s "$ROOT" "$alias_root"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$dir/watch.out" 2>&1 &
+  pid=$!
+  trap 'kill -CONT "$pid" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+  for ((i=0; i<100; i++)); do
+    [ -s "$state/.watch.lock/pid-identity" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null)" = "$pid" ] \
+    || fail "alias fixture did not start a real watcher"
+  # Hold the real watcher's published evidence constant across every comparison.
+  # A stopped process is still alive; the stale-beacon counterfactual below must
+  # nevertheless alarm, just as it does for an overloaded watcher.
+  kill -STOP "$pid" || fail "could not hold the alias fixture watcher"
+  identity=$(cat "$state/.watch.lock/pid-identity")
+  printf 'project=x\n' > "$state/task.meta"
+  for model in extension persistent; do
+    for home in "$dir" "$alias_home"; do
+      for root in "$ROOT" "$alias_root"; do
+        out=$(FM_ROOT_OVERRIDE="$dir" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+          FM_GUARD_READ_ONLY=1 FM_GUARD_GRACE=999 FM_SUPERVISION_MODEL="$model" \
+          "$root/bin/fm-guard.sh" 2>&1)
+        [ -z "$out" ] || fail "$model guard rejected home=$home root=$root: $out"
+      done
+    done
+  done
+  [ "$(cat "$state/.watch.lock/pid-identity")" = "$identity" ] \
+    || fail "alias checks rewrote the watcher's process identity"
+  pass "guard accepts independent home and script aliases of a real watcher"
+
+  mkdir "$dir/other-home"
+  cp "$WATCH" "$dir/other-watch.sh"
+  for model in extension persistent; do
+    for i in home path identity stale; do
+      home="$alias_home"
+      printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+      printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+      case "$i" in
+        home) home="$dir/other-home" ;;
+        path) printf '%s\n' "$dir/other-watch.sh" > "$state/.watch.lock/watcher-path" ;;
+        identity) printf 'different-process\n' > "$state/.watch.lock/pid-identity" ;;
+        stale) touch -t 200001010000 "$state/.last-watcher-beat" ;;
+      esac
+      out=$(FM_ROOT_OVERRIDE="$dir" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+        FM_GUARD_READ_ONLY=1 FM_GUARD_GRACE=999 FM_SUPERVISION_MODEL="$model" \
+        "$alias_root/bin/fm-guard.sh" 2>&1)
+      assert_contains "$out" 'WATCHER DOWN - SUPERVISION IS OFF' \
+        "$model alias guard accepted a different $i"
+      # Restore the fixture beacon for the next model's independent cases.
+      [ "$i" != stale ] || touch "$state/.last-watcher-beat"
+    done
+  done
+  pass "alias guard rejects another home, another watcher file, changed PID identity, and stale beacon"
+)
+
+test_watcher_path_identity_boundaries() (
+  local dir state identity path
+  dir=$(make_case path-boundaries)
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state"
+  # shellcheck source=/dev/null
+  . "$LIB"
+  mkdir -p "$state/.watch.lock" "$dir/home" "$dir/other-home"
+  printf 'watcher\n' > "$dir/watch.sh"
+  cp "$dir/watch.sh" "$dir/other-watch.sh"
+  ln -s home "$dir/home-link"
+  ln -s home-link "$dir/home-chain"
+  ln -s watch.sh "$dir/watch-link"
+  ln -s missing "$dir/broken"
+  ln -s loop "$dir/loop"
+  identity=$(fm_pid_identity "$$") || fail "could not identify path-boundary owner"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$dir/home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$dir/watch.sh" > "$state/.watch.lock/watcher-path"
+  for path in "$dir/home-link" "$dir/home-chain" "$dir/home/../home/"; do
+    fm_watcher_lock_matches_pid "$state" "$dir/watch-link" "$$" "$path" \
+      || fail "existing directory/file aliases did not match: $path"
+  done
+  fm_watcher_lock_matches_pid "$state" "$dir/other-watch.sh" "$$" "$dir/home" \
+    && fail "same-content different watcher file matched"
+  fm_watcher_lock_matches_pid "$state" "$dir/watch.sh" "$$" "$dir/other-home" \
+    && fail "different existing home matched"
+
+  # Unavailable paths never collapse to a shared empty canonical value.
+  for path in "$dir/missing" "$dir/broken" "$dir/loop" ''; do
+    printf '%s\n' "$path" > "$state/.watch.lock/fm-home"
+    fm_watcher_lock_matches_pid "$state" "$dir/watch.sh" "$$" "$dir/absent" \
+      && fail "unresolvable home matched another path: $path"
+  done
+  printf '%s\n' "$dir/home" > "$state/.watch.lock/fm-home"
+  for path in "$dir/missing" "$dir/broken" "$dir/loop" ''; do
+    printf '%s\n' "$path" > "$state/.watch.lock/watcher-path"
+    fm_watcher_lock_matches_pid "$state" "$dir/absent" "$$" "$dir/home" \
+      && fail "unresolvable watcher matched another path: $path"
+  done
+  printf '%s\n' "$dir/watch.sh" > "$state/.watch.lock/watcher-path"
+  rm "$dir/watch.sh"
+  fm_watcher_lock_matches_pid "$state" "$dir/watch-link" "$$" "$dir/home" \
+    && fail "deleted watcher alias still matched"
+  fm_watcher_lock_matches_pid "$state" "$dir/watch.sh" "$$" "$dir/home" \
+    || fail "exact deleted path lost the existing identity contract"
+
+  cd "$dir" || exit 1
+  printf 'home\n' > "$state/.watch.lock/fm-home"
+  fm_watcher_lock_matches_pid "$state" "$dir/watch.sh" "$$" "$dir/home" \
+    && fail "relative recorded home was resolved against the reader's cwd"
+  fm_watcher_lock_matches_pid "$state" "$dir/watch.sh" "$$" home \
+    || fail "exact relative paths lost the existing identity contract"
+  printf '\n' > "$state/.watch.lock/watcher-path"
+  fm_watcher_lock_matches_pid "$state" '' "$$" home \
+    && fail "empty watcher ownership evidence matched"
+  pass "watcher ownership handles symlink chains, missing/deleted paths, and relative paths conservatively"
+)
+
+test_guard_watcher_path_aliases || exit 1
+test_watcher_path_identity_boundaries || exit 1
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse

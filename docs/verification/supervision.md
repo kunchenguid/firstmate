@@ -421,6 +421,24 @@ Observed output, before and after the model correction, then with the recorded P
 ●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 0s ago).
 ```
 
+The watcher ownership path comparison was verified on 2026-09-07 on Linux with Bash 5.2.15 through the real watcher and read-only guard in `tests/fm-watcher-lock.test.sh`.
+The shared predicate in `bin/fm-wake-lib.sh` accepts filesystem aliases of the recorded home and watcher file while retaining exact PID identity and beacon freshness checks.
+The same regression rejects another existing home, a different watcher file with identical contents, a changed process identity, and a stale beacon under both extension and persistent supervision models.
+It also covers file and directory symlinks, symlink chains and loops, missing and deleted paths, and conservative relative-path handling.
+This is portable shell/process coverage, not refreshed vendor lifecycle or real-backend evidence.
+
+```sh
+bin/fm-test-run.sh tests/fm-watcher-lock.test.sh
+```
+
+Relevant output:
+
+```text
+ok - guard accepts independent home and script aliases of a real watcher
+ok - alias guard rejects another home, another watcher file, changed PID identity, and stale beacon
+ok - watcher ownership handles symlink chains, missing/deleted paths, and relative paths conservatively
+```
+
 The broader relevant regression pass was rerun on 2026-08-02 without live-home or daemon mutation.
 
 ```sh

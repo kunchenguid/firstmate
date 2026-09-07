@@ -117,6 +117,20 @@ fm_watcher_lock_unheld() {
   [ -z "$pid" ]
 }
 
+# Compare watcher ownership paths without changing their persisted spelling or
+# the process's byte-exact cmdline identity. Bash's -ef follows filesystem
+# aliases (including symlinks) by device/inode, without a platform-specific
+# realpath command. Missing, deleted, or unresolvable paths retain only exact
+# non-empty equality. Do not resolve differing relative paths against a reader's
+# cwd: the lock does not record the writer's cwd, so that could match another home.
+fm_watcher_paths_equal() {  # <recorded-path> <expected-path>
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  [ "$1" = "$2" ] && return 0
+  case "$1" in /*) ;; *) return 1 ;; esac
+  case "$2" in /*) ;; *) return 1 ;; esac
+  [ "$1" -ef "$2" ]
+}
+
 FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
@@ -125,8 +139,8 @@ fm_watcher_lock_matches_pid() {
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$home" ] || return 1
-  [ "$lock_path" = "$watch_path" ] || return 1
+  fm_watcher_paths_equal "$lock_home" "$home" || return 1
+  fm_watcher_paths_equal "$lock_path" "$watch_path" || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ] || return 1
