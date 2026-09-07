@@ -709,8 +709,10 @@ test_unignored_copy_a_task_rewrote_after_seeding_is_kept() {
   status=$?
   expect_code 0 "$status" "the fixture's first acquisition should seed the slot"
   unignore_local_env_file
-  # The task replaces the seeded copy with byte-identical content.
-  cp "$PROJECT_DIR/.env.local" "$POOL_DIR/.env.local"
+  # The task rewrites the seeded copy in place with byte-identical content.
+  # Content and inode therefore remain unchanged, but its filesystem change
+  # time proves that the task authored it after seeding.
+  printf '%s' "$(cat "$PROJECT_DIR/.env.local")" > "$POOL_DIR/.env.local"
   prepare_second_acquisition "$second"
 
   out=$(run_spawn "$second" --mode no-mistakes --yolo off)
