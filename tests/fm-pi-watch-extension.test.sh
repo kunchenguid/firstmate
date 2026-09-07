@@ -2764,6 +2764,197 @@ EOF
   pass "a gate drop with a failing handoff cleanup marks the record delivered and stays bounded"
 }
 
+# The replay gate answers through an awaited asynchronous child, never a
+# spawnSync on Pi's UI thread: while a gate answer is pending, Pi's JavaScript
+# thread must keep running timers and serving the session, and once the answer
+# arrives the drop must still be applied. The gate fixture parks on a release
+# latch, so a synchronous gate would hold the only thread - the driver's timer
+# could not fire and the driver could never reach the release step.
+test_pi_replay_gate_answer_stays_off_the_ui_thread() {
+  local repo home plugin stop release gate_log out status
+  repo="$TMP_ROOT/pi-replay-offthread-root"
+  home="$TMP_ROOT/pi-replay-offthread-home"
+  stop="$TMP_ROOT/pi-replay-offthread.stop"
+  release="$TMP_ROOT/pi-replay-offthread.release"
+  gate_log="$TMP_ROOT/pi-replay-offthread.gate.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_replay_gate_fixture "$repo"
+  mv "$repo/bin/fm-watch-replay-gate.sh" "$repo/bin/fm-watch-replay-gate-real.sh"
+  cat > "$repo/bin/fm-watch-replay-gate.sh" <<SH
+#!/usr/bin/env bash
+printf 'asked\n' >> "$gate_log"
+while [ ! -e "$release" ]; do sleep 0.02; done
+exec bash "$repo/bin/fm-watch-replay-gate-real.sh" "\$@"
+SH
+  chmod +x "$repo/bin/fm-watch-replay-gate.sh"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=offthread-fixture\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_STOP_FILE="$stop" FM_GATE_LOG="$gate_log" FM_RELEASE_FILE="$release" timeout 60 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.watcher-down`, "acked:handling:130247.1788720192.pbH0L2\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "");
+const handoff = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+mkdirSync(handoff.slice(0, handoff.lastIndexOf("/")), { recursive: true });
+writeFileSync(handoff, `${JSON.stringify({
+  version: 2,
+  pending: [{
+    version: 1,
+    token: "130247-1788720192-1",
+    message: "stale: default:wMA:p2",
+    predecessorArmPid: "",
+  }],
+})}\n`);
+
+const handlers = new Map();
+const prompts = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+  events: { on() {}, emit() {} },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+let uiAlive = false;
+const uiTimer = setTimeout(() => { uiAlive = true; }, 80);
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+for (let i = 0; i < 250 && !existsSync(process.env.FM_GATE_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_GATE_LOG)) throw new Error("the replay gate was never consulted");
+// The gate child is parked on the latch. A synchronous gate would hold the
+// only JS thread here: this timer could not fire while it sat blocked.
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (!uiAlive) throw new Error("a pending replay gate answer blocked Pi's JavaScript thread");
+if (prompts.some((message) => message.includes("stale: default:wMA:p2"))) {
+  throw new Error(`the record was presented before its gate answer arrived: ${prompts.join(" | ")}`);
+}
+writeFileSync(process.env.FM_RELEASE_FILE, "go\n");
+for (let i = 0; i < 250 && existsSync(handoff); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (existsSync(handoff)) throw new Error("the gate's drop verdict was never applied to the handoff record");
+if (prompts.some((message) => message.includes("stale: default:wMA:p2"))) {
+  throw new Error(`a dropped replay was presented: ${prompts.join(" | ")}`);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a pending replay gate must not block Pi's thread and must still apply its verdict"
+  [ -z "$out" ] || fail "Pi replay-offthread test printed output: $out"
+  pass "a pending replay gate answer stays off Pi's UI thread and its verdict still lands"
+}
+
+# A gate child that never answers must not hold the replacement activation
+# open forever, and the failure to answer must fail open: after the bounded
+# timeout the replay is presented exactly once - the safe direction - and the
+# gate is not consulted again. The gate fixture parks forever, so only the
+# timeout can unblock delivery.
+test_pi_stalled_replay_gate_times_out_and_fails_open() {
+  local repo home plugin stop gate_log out status
+  repo="$TMP_ROOT/pi-replay-stall-root"
+  home="$TMP_ROOT/pi-replay-stall-home"
+  stop="$TMP_ROOT/pi-replay-stall.stop"
+  gate_log="$TMP_ROOT/pi-replay-stall.gate.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_replay_gate_fixture "$repo"
+  mv "$repo/bin/fm-watch-replay-gate.sh" "$repo/bin/fm-watch-replay-gate-real.sh"
+  cat > "$repo/bin/fm-watch-replay-gate.sh" <<SH
+#!/usr/bin/env bash
+printf 'asked\n' >> "$gate_log"
+while :; do sleep 0.05; done
+SH
+  chmod +x "$repo/bin/fm-watch-replay-gate.sh"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=stall-fixture\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_STOP_FILE="$stop" FM_GATE_LOG="$gate_log" FM_PI_REPLAY_GATE_TIMEOUT_MS=800 timeout 60 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.watcher-down`, "acked:handling:130247.1788720192.pbH0L2\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "");
+const handoff = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+mkdirSync(handoff.slice(0, handoff.lastIndexOf("/")), { recursive: true });
+writeFileSync(handoff, `${JSON.stringify({
+  version: 2,
+  pending: [{
+    version: 1,
+    token: "130247-1788720192-1",
+    message: "stale: default:wMA:p2",
+    predecessorArmPid: "",
+  }],
+})}\n`);
+
+const handlers = new Map();
+const prompts = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+  events: { on() {}, emit() {} },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+for (let i = 0; i < 250 && !existsSync(process.env.FM_GATE_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_GATE_LOG)) throw new Error("the replay gate was never consulted");
+// The gate never answers; only its timeout can unblock the replay, and the
+// safe direction for "no answer" is to present once.
+for (let i = 0; i < 400 && prompts.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+const presented = prompts.filter((message) => message.includes("FIRSTMATE WATCHER WAKE: stale: default:wMA:p2"));
+if (presented.length !== 1) {
+  throw new Error(`a stalled gate must fail open with exactly one presentation: ${JSON.stringify(prompts)}`);
+}
+for (let i = 0; i < 250 && existsSync(handoff); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (existsSync(handoff)) throw new Error("the presented replay kept its persisted handoff record");
+const gateCalls = readFileSync(process.env.FM_GATE_LOG, "utf8").split("\n").filter((row) => row !== "").length;
+if (gateCalls !== 1) {
+  throw new Error(`the stalled record was re-gated: ${gateCalls} calls`);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a stalled replay gate must time out, fail open, and stay bounded to one presentation"
+  [ -z "$out" ] || fail "Pi replay-stall test printed output: $out"
+  pass "a stalled replay gate times out, fails open, and stays bounded"
+}
+
 # A replayed record whose referenced wake is still unhandled delivers exactly
 # once; Pi's acceptance then retires the record, so a further replacement is
 # silent. Redelivery is bounded at one presentation per acceptance.
@@ -4397,6 +4588,8 @@ test_pi_streaming_followup_is_never_redelivered_after_replacement
 test_pi_replayed_acked_wake_of_torn_down_task_is_dropped
 test_pi_replayed_signal_wake_of_torn_down_task_is_dropped
 test_pi_gate_drop_survives_handoff_cleanup_failure_without_spinning
+test_pi_replay_gate_answer_stays_off_the_ui_thread
+test_pi_stalled_replay_gate_times_out_and_fails_open
 test_pi_replayed_unhandled_wake_delivers_once_then_stops
 test_pi_streaming_time_delivery_keeps_the_successor_chain
 test_pi_successor_failure_during_delivery_is_retried_after_delivery

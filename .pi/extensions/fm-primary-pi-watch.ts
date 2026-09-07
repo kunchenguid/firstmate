@@ -24,6 +24,9 @@
 // compares the record's reason line with the wake queue and the recovery
 // episode and may drop a wake whose row was already acknowledged or whose
 // subject task no longer exists, so an already-handled wake can never loop.
+// That gate runs as a bounded, asynchronous child - never synchronously on
+// Pi's UI thread, which must keep repainting and dispatching keystrokes
+// while a replay is being decided.
 // Consumption (an idle main at before_agent_start, a streaming main at the
 // user message_start carrying the exact wake text) still finishes the record,
 // and either completion is idempotent.
@@ -40,6 +43,7 @@ import {
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
+import { runCommandAsync } from "./lib/fm-async-exec.ts";
 import {
   type CalmPresentationState,
   calmTranscriptClassIsVisible,
@@ -157,6 +161,12 @@ const armReadyTimeoutMs = positiveInteger(
   process.platform === "win32" ? 35000 : 12000,
 );
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+// Ceiling for one replay-gate answer. The gate is a bash child that scans the
+// home's durable wake records; it normally answers in well under a second,
+// but a stalled filesystem or child must not hold a replay (or a replacement
+// waiting on its delivery claim) open forever. An answer that never arrives
+// counts as "deliver", the gate's own safe direction.
+const replayGateTimeoutMs = positiveInteger("FM_PI_REPLAY_GATE_TIMEOUT_MS", 10000);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
@@ -685,21 +695,20 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Ask the durable-state gate whether a replayed record may be re-sent.
-  // Anything unreadable answers "deliver": presenting one bounded extra wake
-  // is safer than suppressing an unhandled one.
-  function replayGateDrops(message: string): boolean {
-    let result;
-    try {
-      result = spawnSync("bash", [replayGateScript, message], {
-        cwd: fmRoot,
-        encoding: "utf8",
-        env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
-      });
-    } catch {
-      return false;
-    }
+  // Runs as a bounded awaited child through lib/fm-async-exec.ts - never
+  // synchronously on Pi's UI thread, which must keep repainting and
+  // dispatching keystrokes while the gate scans durable state. Anything
+  // unreadable, timed out (null status), or non-zero answers "deliver":
+  // presenting one bounded extra wake is safer than suppressing an unhandled
+  // one.
+  async function replayGateDrops(message: string): Promise<boolean> {
+    const result = await runCommandAsync("bash", [replayGateScript, message], {
+      cwd: fmRoot,
+      env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
+      timeoutMs: replayGateTimeoutMs,
+    });
     if (result.status !== 0) return false;
-    const verdict = (result.stdout || "").split(/\r?\n/).find((line) => line.length > 0) ?? "";
+    const verdict = result.stdout.split(/\r?\n/).find((line) => line.length > 0) ?? "";
     return verdict.startsWith("drop");
   }
 
@@ -806,10 +815,15 @@ export default function (pi: ExtensionAPI) {
           // A replayed record was presented in a previous session. Gate its
           // re-send against durable state: a wake whose row was acknowledged
           // or whose subject task is gone must never be presented again. The
-          // activation that enqueued this record already started this
-          // generation's arm child, so dropping still leaves supervision
-          // armed.
-          if (pending.replayed && replayGateDrops(pending.message)) {
+          // gate is an awaited asynchronous child, so this activation keeps
+          // serving Pi while the verdict is pending. A drop settles the claim
+          // "delivered" even if this generation died mid-gate: the verdict
+          // proves the wake is already handled, so any replacement holding a
+          // copy must skip presenting it too, and the handoff cleanup below
+          // retires the record for everyone. The activation that enqueued
+          // this record already started this generation's arm child, so
+          // dropping still leaves supervision armed.
+          if (pending.replayed && (await replayGateDrops(pending.message))) {
             settleClaim("delivered");
             pending.delivered = true;
             try {
