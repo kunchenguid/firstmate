@@ -236,7 +236,7 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 The same identity that the authority boundary above contains also leaks in the other direction, as text rather than as capability.
 An agent working inside this repo reads `AGENTS.md`'s "address the user as captain" rule as an ordinary repo file and applies it to commit messages, which it treats as responses; the messages that leaked came from the gate's own review, test, and document agents, so no crewmate brief could have prevented them.
 `bin/fm-prepush-voice-guard.sh` is deterministic commit-message prevention, paired with the scoping sentence at that instruction in `AGENTS.md`.
-This check catches the accident in which a pipeline agent writes internal voice into a commit message or pull request description without meaning to, the same failure that put two such messages permanently into public history under the repository owner's name.
+The guard catches the accident in which a pipeline agent writes internal voice into a commit message without meaning to, the same failure that put two such messages permanently into public history under the repository owner's name.
 It is not a trust boundary.
 It does not stop an author who deliberately disables it, because the lint entry point, the scanner, and the workflow file all travel with the branch being judged.
 Enforcement that binds a determined author has to live somewhere the branch cannot edit, which is the separate upstream item already filed as `nm-pr-body-scan-before-api`.

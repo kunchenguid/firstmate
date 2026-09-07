@@ -1,24 +1,13 @@
 name: Voice guard
 run-name: "PR #${{ github.event.pull_request.number }} text - ${{ github.event.action }}"
 
-# The commit-message half of this refusal is prevention: bin/fm-lint.sh runs it
-# before the first push, so matching text never leaves the machine.
-# This pull request check is only a backstop, and the "Internal-voice refusal
-# before the first push" section of docs/architecture.md owns why.
-#
-# It matters because of how a squash merge composes public history: the title
-# becomes the merge commit's subject and the description can become its body,
-# so internal voice in either lands on the default branch under the repository
-# owner's name exactly like a leaked commit message would.
+# docs/architecture.md's "Internal-voice refusal before the first push" section owns this check's complete boundary and post-disclosure limit.
 #
 # "edited" is in the trigger list on purpose: a description rewritten after the
 # checks first passed is the one vector the pre-push refusal cannot see.
 #
 # SCANNER SELECTION. The separate base-branch checkout prevents this job from
-# executing a scanner the pull request rewrote. It does not make the job a trust
-# boundary because this workflow file still travels with the pull request; the
-# "Internal-voice refusal before the first push" section of docs/architecture.md
-# owns the complete scope and trust limit.
+# executing a scanner the pull request rewrote.
 #
 # BOOTSTRAP GAP. While bin/fm-prepush-voice-guard.sh is absent from the base
 # branch, this check does not scan anything, including on the pull request that
