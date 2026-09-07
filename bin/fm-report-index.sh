@@ -16,7 +16,11 @@
 #   data/report-index.skipped   one line per report that was not indexed:
 #     <id> | <reason>
 #     reason is one of: missing, no-title, unreadable, oversized. It carries
-#     only the id and a category, never report content.
+#     only the id and a category, never report content. "missing" is sourced
+#     from the authoritative completed-scout records in data/done-archive.md
+#     and data/backlog.md (lines marked (kind: scout)): a completed scout whose
+#     data/<id>/report.md is absent is flagged, so a deleted report is not
+#     silently invisible.
 #
 # Field extraction is DETERMINISTIC and uses no LLM at runtime (the task forbids
 # a second LLM for semantic routing; this never calls one):
@@ -88,6 +92,7 @@ REBUILD_TMP_INDEX=
 REBUILD_TMP_SKIPPED=
 REBUILD_TMP_CANDIDATES_RAW=
 REBUILD_TMP_CANDIDATES=
+REBUILD_TMP_ENTRIES=
 
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
@@ -211,6 +216,7 @@ index_entry() {
   local id=$1 report=$2 size title date project summary path
   SKIP_REASON=
   INDEX_ENTRY_LINE=
+  INDEX_ENTRY_DATE=
   [ -f "$report" ] || { SKIP_REASON=missing; return 1; }
   # stat reports size without opening the file, so an unreadable report's
   # permission error never leaks here; the head gate below owns readability.
@@ -239,7 +245,32 @@ index_entry() {
   fm_cap_line_var "$title" "$TITLE_CAP"; title=$FM_LINE_CAP_LINE
   fm_cap_line_var "$summary" "$SUMMARY_CAP"; summary=$FM_LINE_CAP_LINE
   INDEX_ENTRY_LINE="$id | $date | $project | $title | $summary | $path"
+  INDEX_ENTRY_DATE=$date
   return 0
+}
+
+# enumerate_backlog_scout_ids: best-effort enumeration of authoritative
+# completed-scout ids from data/done-archive.md and data/backlog.md's Done rows
+# (the backlog is the authoritative completed-task record). A line is a completed
+# scout when it carries (kind: scout) and a data/<id>/report.md pointer; the id is
+# the pointer's directory. Format drift silently yields no ids (no missing
+# entries) rather than failing the rebuild, so this couples loosely.
+enumerate_backlog_scout_ids() {
+  local file line id
+  for file in "$DATA/done-archive.md" "$DATA/backlog.md"; do
+    [ -f "$file" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      case "$line" in
+        *'(kind: scout)'*)
+          id=$(printf '%s\n' "$line" | grep -oE 'data/[^/[:space:]]+/report\.md' | head -n1)
+          id=${id#data/}
+          id=${id%/report.md}
+          [ -n "$id" ] && printf '%s\n' "$id"
+          ;;
+      esac
+    done < "$file"
+  done | LC_ALL=C sort -u
 }
 
 rebuild_cleanup() {
@@ -260,6 +291,10 @@ rebuild_cleanup() {
     rm -f -- "$REBUILD_TMP_CANDIDATES" 2>/dev/null || status=1
     REBUILD_TMP_CANDIDATES=
   fi
+  if [ -n "$REBUILD_TMP_ENTRIES" ]; then
+    rm -f -- "$REBUILD_TMP_ENTRIES" 2>/dev/null || status=1
+    REBUILD_TMP_ENTRIES=
+  fi
   if [ "$REBUILD_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$REBUILD_LOCK" || status=1
     REBUILD_LOCK_HELD=0
@@ -269,7 +304,7 @@ rebuild_cleanup() {
 
 # rebuild: scan data/*/report.md, write the index and skipped files atomically.
 rebuild() {
-  local report id entry_count=0 skipped_count=0
+  local report id entry_count=0 skipped_count=0 missing_count=0 sort_date scout_id
   [ -d "$DATA" ] || { echo "error: data directory not found: $DATA" >&2; return 1; }
   case "$MAX_REPORT_BYTES" in
     ''|*[!0-9]*)
@@ -313,6 +348,10 @@ rebuild() {
     echo "error: could not stage sorted report candidates in $DATA" >&2
     return 1
   }
+  REBUILD_TMP_ENTRIES=$(umask 077; mktemp "$DATA/.report-index.entries.XXXXXX" 2>/dev/null) || {
+    echo "error: could not stage sorted report index entries in $DATA" >&2
+    return 1
+  }
   if ! {
     printf '# Scout report index. Schema owner: bin/fm-report-index.sh.\n'
     printf '# One line per report: id | date | project | title | summary | path.\n'
@@ -334,13 +373,22 @@ rebuild() {
     echo "error: could not sort report candidates" >&2
     return 1
   fi
-  # Deterministic lexical order so re-runs reproduce the same bytes.
+  # Deterministic lexical scan order; the published index is ordered by date
+  # then id below (r2), so re-runs reproduce the same bytes regardless.
   while IFS= read -r report; do
     [ -f "$report" ] || continue
     id=$(basename "$(dirname "$report")") || continue
     if index_entry "$id" "$report"; then
-      if ! printf '%s\n' "$INDEX_ENTRY_LINE" >> "$REBUILD_TMP_INDEX"; then
-        echo "error: could not write staged report index" >&2
+      # r2: sort by date (recency) then id; "unknown" dates sort oldest so the
+      # bounded digest tail surfaces the most recent reports. Stage a
+      # tab-prefixed key, sort, then strip it into the index after the loop.
+      if [ -z "$INDEX_ENTRY_DATE" ] || [ "$INDEX_ENTRY_DATE" = unknown ]; then
+        sort_date=0000-00-00
+      else
+        sort_date=$INDEX_ENTRY_DATE
+      fi
+      if ! printf '%s\t%s\t%s\n' "$sort_date" "$id" "$INDEX_ENTRY_LINE" >> "$REBUILD_TMP_ENTRIES"; then
+        echo "error: could not stage report index entry" >&2
         return 1
       fi
       entry_count=$((entry_count + 1))
@@ -353,6 +401,27 @@ rebuild() {
       skipped_count=$((skipped_count + 1))
     fi
   done < "$REBUILD_TMP_CANDIDATES"
+  # r1: enumerate authoritative completed-scout records (backlog Done +
+  # done-archive) and flag any whose report.md is missing. The main scan only
+  # indexes existing report.md files, so a completed scout whose report was
+  # removed is surfaced here as `id | missing` rather than silently dropped.
+  while IFS= read -r scout_id; do
+    [ -n "$scout_id" ] || continue
+    if [ ! -f "$DATA/$scout_id/report.md" ]; then
+      if ! printf '%s | missing\n' "$scout_id" >> "$REBUILD_TMP_SKIPPED"; then
+        echo "error: could not write staged skipped report index" >&2
+        return 1
+      fi
+      missing_count=$((missing_count + 1))
+      skipped_count=$((skipped_count + 1))
+    fi
+  done < <(enumerate_backlog_scout_ids)
+  # r2: publish entries ordered by date then id after the schema-owner header.
+  if ! LC_ALL=C sort -t$'\t' -k1,1 -k2,2 "$REBUILD_TMP_ENTRIES" \
+    | cut -f3- >> "$REBUILD_TMP_INDEX"; then
+    echo "error: could not sort and stage report index entries" >&2
+    return 1
+  fi
   if [ -d "$INDEX_FILE" ] || [ -d "$SKIPPED_FILE" ]; then
     echo "error: report index destination is a directory" >&2
     return 1
@@ -393,8 +462,8 @@ rebuild() {
     return 1
   fi
   trap - EXIT HUP INT TERM
-  printf 'indexed %d report(s), skipped %d; index: %s\n' \
-    "$entry_count" "$skipped_count" "$INDEX_FILE"
+  printf 'indexed %d report(s), skipped %d (%d missing); index: %s\n' \
+    "$entry_count" "$skipped_count" "$missing_count" "$INDEX_FILE"
 }
 
 # show [--tail N]: print the current index, one capped line per entry, newest

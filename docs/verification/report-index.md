@@ -57,19 +57,29 @@ Portable interface fixtures also confirmed that invalid size caps, failed candid
 A scout teardown (`kind=scout`) with a finalized report, run through the `tests/fm-teardown.test.sh` machinery, rebuilt the index and cataloged the report while preserving `data/<id>/report.md` (the report survives teardown).
 The session-start digest's new "Scout report index (data/report-index.md)" subsection printed the bounded tail from the prebuilt file, and printed `report index: ABSENT` without creating the index file when no index existed (no rebuild on the blocking path).
 
+## Missing enumeration, recency ordering, and digest hardening
+
+Three contract decisions (raised as ask-user review findings and approved A/A/A) were implemented on top of the publication/concurrency hardening:
+
+- **Missing reports (r1).** `rebuild` enumerates authoritative completed-scout records from `data/done-archive.md` and `data/backlog.md` Done rows (lines marked `(kind: scout)` with a `data/<id>/report.md` pointer) and flags any completed scout whose `data/<id>/report.md` is absent as `<id> | missing` in the skipped file. The main scan only indexes existing `report.md` files, so a deleted completed-scout report is surfaced rather than silently invisible. The backlog parse is best-effort: a format change yields no missing entries rather than failing the rebuild, so the coupling stays loose.
+- **Recency ordering (r2).** The published index is ordered by date then id (a stable sort key staged per entry, with `unknown` dates mapped oldest), so the bounded digest tail surfaces the most recent reports. This replaces the earlier lexical-by-id order, which could let an old `z-*` report displace a newly finalized `a-*` report. Determinism is preserved: same dates reproduce the same bytes, ties broken by id.
+- **Digest hardening (r12).** `print_report_index_tail` rejects a symlinked or non-regular `data/report-index.md` and one missing the schema-owner header as ABSENT, never streaming its target. A path pointing at a report body therefore cannot inject report content into the digest.
+
+Fixtures in `tests/fm-report-index.test.sh` pin each: a completed scout in `done-archive.md` whose report is absent is flagged `missing`; a newer-by-date `a-*` report is the tail entry over an older `z-*` report; and a symlinked or non-schema-header index is rejected without streaming a body marker.
+
 ## Portability and harness surface
 
 Verified 2026-09-07 with the repo-pinned ShellCheck 0.11.0, GNU bash 3.2.57 (Apple Git, macOS stock `/bin/bash`), tasks-axi 0.2.5, and git 2.50.1.
 `bash -n bin/fm-report-index.sh` parses cleanly under `/bin/bash` 3.2, so the macos-stock-bash CI lane is satisfied, and ShellCheck 0.11.0 reports the script, `bin/fm-session-start.sh`, `bin/fm-teardown.sh`, and `tests/fm-report-index.test.sh` clean.
 
 The report index is harness-agnostic: it reads markdown files and prints text, and its verdicts never depend on a vendor-emitted signal (process name, rendered glyph, banner, or bound key).
-Under the harness-dependent-checks rule in [`firstmate-coding-guidelines`](../.agents/skills/firstmate-coding-guidelines/SKILL.md) that marks an axis not applicable only after inspecting its integration surface, no per-harness live guard applies.
+Under the harness-dependent-checks rule in [`firstmate-coding-guidelines`](../../.agents/skills/firstmate-coding-guidelines/SKILL.md) that marks an axis not applicable only after inspecting its integration surface, no per-harness live guard applies.
 The portable regression in `tests/fm-report-index.test.sh` pins the behavior with no harness and runs in CI everywhere; the teardown hook is exercised end to end by `tests/fm-teardown.test.sh`.
 
 ## Reproduction
 
 ```text
-bin/fm-test-run.sh tests/fm-report-index.test.sh        # 18 portable assertions
+bin/fm-test-run.sh tests/fm-report-index.test.sh        # 21 portable assertions (extraction, privacy, skips, publication, missing, ordering, digest hardening)
 bin/fm-test-run.sh tests/fm-teardown.test.sh            # scout teardown rebuilds the index (case: test_scout_teardown_rebuilds_report_index)
 bin/fm-test-run.sh --check-coverage                     # coverage guard: the new test is accounted for
 ```

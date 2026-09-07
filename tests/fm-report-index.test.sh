@@ -477,6 +477,93 @@ test_rebuild_parses_session_start_and_teardown() {
   pass "touched scripts parse cleanly"
 }
 
+# r1: a completed scout recorded in the backlog whose report.md is missing is
+# surfaced as `<id> | missing` rather than silently invisible.
+test_rebuild_flags_missing_completed_scout_reports() {
+  local home skipped
+  home=$(make_home missing-scout)
+  write_report "$home" present-scout firstmate <<'EOF'
+# Present scout
+
+## Summary (TL;DR)
+
+present.
+EOF
+  # A completed scout recorded in done-archive but whose report.md is absent.
+  cat > "$home/data/done-archive.md" <<'EOF'
+
+## Archived 2026-09-07
+- [x] ghost-scout - a completed scout whose report was removed data/ghost-scout/report.md (repo: firstmate) (kind: scout) (reported 2026-09-06)
+- [x] present-scout - an indexed completed scout data/present-scout/report.md (repo: firstmate) (kind: scout) (reported 2026-09-07)
+EOF
+  FM_HOME="$home" "$SCRIPT" rebuild >/dev/null
+  assert_grep "present-scout | " "$home/data/report-index.md" "the present scout was indexed"
+  skipped=$(cat "$home/data/report-index.skipped" 2>/dev/null)
+  assert_contains "$skipped" "ghost-scout | missing" "the missing completed scout was flagged with a reason"
+  ! grep -q 'present-scout' "$home/data/report-index.skipped" 2>/dev/null \
+    || fail "the present scout was wrongly flagged as missing"
+  pass "rebuild flags missing completed-scout reports from the authoritative backlog"
+}
+
+# r2: entries are ordered by date then id (recency), not lexical task id, so the
+# bounded tail surfaces the most recent reports.
+test_rebuild_orders_entries_by_date_then_id() {
+  local home out
+  home=$(make_home date-order)
+  # Lexical id order would put aaa before zzz; date order must win instead.
+  write_report "$home" zzz-old-report firstmate <<'EOF'
+# Older report
+
+- date: 2026-01-01
+
+## Summary (TL;DR)
+
+older.
+EOF
+  write_report "$home" aaa-new-report firstmate <<'EOF'
+# Newer report
+
+- date: 2026-12-31
+
+## Summary (TL;DR)
+
+newer.
+EOF
+  FM_HOME="$home" "$SCRIPT" rebuild >/dev/null
+  out=$(FM_HOME="$home" "$SCRIPT" show --tail 1)
+  assert_contains "$out" "aaa-new-report" "the newest-by-date report is the tail entry"
+  ! grep -q 'zzz-old-report' <<<"$out" \
+    || fail "an older report displaced the newest-by-date report in the tail"
+  pass "rebuild orders entries by date then id (recency), not lexical id"
+}
+
+# r12: the digest reader rejects a symlinked or non-schema-header index as
+# ABSENT rather than streaming its target, so a path pointing at a report body
+# can never inject report content.
+test_digest_rejects_symlinked_and_non_schema_index() {
+  local home out
+  home=$(make_home digest-harden)
+  write_report "$home" body-leak firstmate <<'EOF'
+# A report body
+
+## TL;DR
+
+ZZLEAKMARKER must never reach the digest.
+EOF
+  # A symlinked index pointing at a report body.
+  ln -s "$home/data/body-leak/report.md" "$home/data/report-index.md"
+  out=$(FM_HOME="$home" "$SESSION_START" 2>/dev/null)
+  assert_contains "$out" "report index: ABSENT" "a symlinked index was rejected as ABSENT"
+  ! grep -q 'ZZLEAKMARKER' <<<"$out" || fail "a symlinked index streamed report body into the digest"
+  # A regular index missing the schema-owner header.
+  rm -f "$home/data/report-index.md"
+  printf '# Not the schema owner\nbody line one\nbody line two\n' > "$home/data/report-index.md"
+  out=$(FM_HOME="$home" "$SESSION_START" 2>/dev/null)
+  assert_contains "$out" "is not the schema-owner index" "a non-schema-header index was rejected"
+  ! grep -q 'body line one' <<<"$out" || fail "a non-schema index streamed content into the digest"
+  pass "the digest rejects symlinked and non-schema-header indexes without streaming bodies"
+}
+
 test_rebuild_extracts_all_fields_deterministically
 test_report_body_marker_never_enters_index_or_skipped
 test_rebuild_is_idempotent
@@ -493,5 +580,8 @@ test_rebuild_resolves_home_via_FM_HOME
 test_rebuild_project_falls_back_when_no_brief
 test_rebuild_parses_cleanly
 test_rebuild_parses_session_start_and_teardown
+test_rebuild_flags_missing_completed_scout_reports
+test_rebuild_orders_entries_by_date_then_id
+test_digest_rejects_symlinked_and_non_schema_index
 test_session_start_digest_surfaces_bounded_index_tail
 test_session_start_digest_reports_absent_without_rebuild

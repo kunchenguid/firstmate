@@ -543,15 +543,25 @@ print_status_tail() {
 # print_report_index_tail: a bounded catalog of scout reports, read from the
 # prebuilt data/report-index.md (bin/fm-report-index.sh owns the schema and
 # rebuilds it at scout teardown). The digest never rebuilds here, so startup
-# stays off any scan; an absent index prints ABSENT. Each entry line is capped
-# by the shared fm_cap_line, id-first so truncation keeps the report id (the
-# path is data/<id>/report.md and is also carried in the line). This mirrors
-# print_status_tail's shape on purpose: the index is a flat one-line-per-report
-# file, exactly as status logs are flat one-line-per-event files.
+# stays off any scan; an absent or unsafe index prints ABSENT. Each entry line
+# is capped by the shared fm_cap_line, id-first so truncation keeps the report
+# id (the path is data/<id>/report.md and is also carried in the line). This
+# mirrors print_status_tail's shape on purpose: the index is a flat
+# one-line-per-report file, exactly as status logs are flat one-line-per-event
+# files.
+# Privacy boundary: never stream an untrusted file. A symlinked or non-regular
+# index - or one missing the schema-owner header - is rejected as ABSENT rather
+# than tailed, so a path pointing at a report body can never inject report
+# content into the digest.
 print_report_index_tail() {
-  local index="$DATA/report-index.md" line
-  if [ ! -f "$index" ]; then
-    printf 'report index: ABSENT (run bin/fm-report-index.sh rebuild to index existing reports)\n'
+  local index="$DATA/report-index.md" line first
+  if [ ! -f "$index" ] || [ -L "$index" ]; then
+    printf 'report index: ABSENT or unsafe (not a regular file: %s)\n' "$index"
+    return 0
+  fi
+  first=$(head -n 1 "$index" 2>/dev/null) || first=
+  if [ "$first" != '# Scout report index. Schema owner: bin/fm-report-index.sh.' ]; then
+    printf 'report index: ABSENT (rejected: %s is not the schema-owner index)\n' "$index"
     return 0
   fi
   printf 'report index (last %s, one line per scout report; read <path> for a body):\n' "$REPORT_INDEX_TAIL"
