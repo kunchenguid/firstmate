@@ -241,10 +241,17 @@ a { color: inherit; text-decoration: none; }
 }
 .bb-row:first-child { border-top: none; }
 .bb-row__main { min-width: 0; flex: 1 1 auto; }
+/* Row text wraps before it clips: a one-line clamp hid what these rows were
+   about, so the title gets three lines and its secondary line two.
+   overflow-wrap keeps an unbreakable URL or id from setting a min-content width
+   that the .bb-row__main min-width:0 shrink could not absorb, and overflow
+   hidden keeps whatever passes the clamp off the page's own horizontal axis. */
 .bb-row__title { font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); line-height: 1.3;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+  overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }
 .bb-row__sub { font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.3; margin-top: 1px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }
 .bb-row__id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
 .bb-row__pr { font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600; color: var(--ocean-600); white-space: nowrap; }
 .bb-row__pr:hover { text-decoration: underline; }
