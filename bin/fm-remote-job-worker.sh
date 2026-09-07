@@ -47,6 +47,8 @@
 # that dies just past the healthy threshold cannot restart without bound
 # either. fm-on's ensure path restarts a worker that gave up.
 set -u
+unset GLOBIGNORE
+shopt -u dotglob failglob nocaseglob nocasematch nullglob
 
 # A non-numeric override falls back to the default rather than crashing the
 # arithmetic that bounds these loops.
@@ -223,7 +225,7 @@ worker_recover_quarantine() { # <account-home>
 # the established acquisition path below.
 worker_staged_quarantine_inventory() {
   local LC_ALL=C
-  local entry base staged_count=0 owner_fields=0 unsafe=0
+  local entry base staged_count=0 owner_fields=0 unsafe=0 status
   WORKER_STAGED_QUARANTINE=
   WORKER_STAGED_OWNER_FIELDS=0
   for entry in "$WORKER_LOCK"/* "$WORKER_LOCK"/.[!.]* "$WORKER_LOCK"/..?*; do
@@ -241,10 +243,15 @@ worker_staged_quarantine_inventory() {
       *) unsafe=1 ;;
     esac
   done
-  [ "$staged_count" -gt 0 ] || return 1
-  [ "$staged_count" -eq 1 ] && [ "$unsafe" -eq 0 ] || return 2
-  case "$owner_fields" in 0|7) ;; *) return 2 ;; esac
-  WORKER_STAGED_OWNER_FIELDS=$owner_fields
+  if [ "$staged_count" -eq 0 ]; then
+    status=1
+  elif [ "$staged_count" -ne 1 ] || [ "$unsafe" -ne 0 ]; then
+    status=2
+  else
+    case "$owner_fields" in 0|7) status=0 ;; *) status=2 ;; esac
+  fi
+  if [ "$status" -eq 0 ]; then WORKER_STAGED_OWNER_FIELDS=$owner_fields; fi
+  return "$status"
 }
 
 # Return 0 for the exact live owner, 1 for a definitively stale or reused pid,
@@ -309,12 +316,11 @@ worker_promote_staged_quarantine() { # <account-home>
   if [ "$WORKER_STAGED_OWNER_FIELDS" -eq 7 ]; then
     worker_staged_lock_owner_status "$account_home" "$uid"
     owner_status=$?
-    [ "$owner_status" -ne 2 ] || return 2
+    case "$owner_status" in 1) ;; *) return 2 ;; esac
   fi
   worker_staged_legacy_owner_status "$uid"
   legacy_status=$?
   case "$legacy_status" in
-    0) [ "$owner_status" -eq 0 ] || return 2 ;;
     1) ;;
     *) return 2 ;;
   esac

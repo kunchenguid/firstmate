@@ -759,9 +759,11 @@ fm_remote_job_process_command "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STA
 chmod 600 "$QUARANTINE_TEST_STATE/worker.lock/pid" "$QUARANTINE_TEST_STATE/worker.lock/start" \
   "$QUARANTINE_TEST_STATE/worker.lock/command"
 run_staged_quarantine_worker
-expect_code 75 "$QUARANTINE_TEST_RC" "a completed staging marker displaced its matching live lock owner"
-assert_present "$QUARANTINE_TEST_STATE/worker.lock/quarantine" \
-  "a matching live lock owner lost the published quarantine protection"
+expect_code 1 "$QUARANTINE_TEST_RC" "a completed staging marker displaced its matching live lock owner"
+assert_present "$QUARANTINE_TEST_STAGE" \
+  "a matching live lock owner lost its staged quarantine protection"
+assert_absent "$QUARANTINE_TEST_STATE/worker.lock/quarantine" \
+  "a matching live lock owner's staging marker was consumed"
 kill -0 "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || fail "staged recovery signalled the matching live lock owner"
 kill "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
 wait "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
@@ -955,6 +957,32 @@ expect_code 1 "$QUARANTINE_TEST_RC" "a malformed quarantine staging name was rec
 assert_present "$QUARANTINE_TEST_STATE/worker.lock/.quarantine.short" \
   "malformed quarantine staging was removed"
 
+INHERITED_SHOPT_ENV="$QUARANTINE_TEST_DIR/inherited-shopt"
+printf 'shopt -s nocasematch\n' > "$INHERITED_SHOPT_ENV"
+new_staged_quarantine_fixture inherited-nocasematch
+mv "$QUARANTINE_TEST_STAGE" "$QUARANTINE_TEST_STATE/worker.lock/.QUARANTINE.A1b2C3"
+QUARANTINE_TEST_STAGE="$QUARANTINE_TEST_STATE/worker.lock/.QUARANTINE.A1b2C3"
+touch -t 200001010000 "$QUARANTINE_TEST_STATE/worker.lock"
+export BASH_ENV=$INHERITED_SHOPT_ENV
+run_staged_quarantine_worker
+unset BASH_ENV
+expect_code 1 "$QUARANTINE_TEST_RC" \
+  "nocasematch made a malformed quarantine prefix recoverable"
+assert_present "$QUARANTINE_TEST_STAGE" \
+  "nocasematch allowed malformed quarantine staging to be removed"
+
+INHERITED_SHOPT_ENV="$QUARANTINE_TEST_DIR/inherited-shopt"
+printf '%s\n' 'shopt -s dotglob failglob nocaseglob nocasematch nullglob' \
+  "GLOBIGNORE='*:.*'" > "$INHERITED_SHOPT_ENV"
+new_staged_quarantine_fixture inherited-glob-options
+export BASH_ENV=$INHERITED_SHOPT_ENV
+start_staged_quarantine_worker
+unset BASH_ENV
+wait_for_quarantine_recovery \
+  || fail "inherited glob options prevented exact staged-quarantine recovery"
+stop_quarantine_test_worker
+pass "quarantine staging classification is independent of inherited shell options"
+
 LOCALE_RANGE_TEST_SHELL=(bash)
 if bash -c 'shopt -u globasciiranges' >/dev/null 2>&1; then
   LOCALE_RANGE_TEST_SHELL=(bash +O globasciiranges)
@@ -1021,20 +1049,26 @@ QUARANTINE_TEST_AUX_PID=
 new_staged_quarantine_fixture wrong-owner
 WRONG_OWNER_BIN="$QUARANTINE_TEST_DIR/fakebin"
 mkdir -p "$WRONG_OWNER_BIN"
-REAL_ID=$(command -v id)
-cat > "$WRONG_OWNER_BIN/id" <<'SH'
+REAL_STAT=$(command -v stat)
+cat > "$WRONG_OWNER_BIN/stat" <<'SH'
 #!/bin/bash
-if [ "${1:-}" = -u ]; then
-  printf '%s\n' "$FM_TEST_OTHER_UID"
-  exit 0
-fi
-exec "$FM_TEST_REAL_ID" "$@"
+last=${!#}
+case "$last" in
+  */worker.lock/.quarantine.A1b2C3)
+    value=$("$FM_TEST_REAL_STAT" "$@") || exit 1
+    read -r _ mode device inode extra <<< "$value"
+    [ -z "${extra:-}" ] || exit 1
+    printf '%s %s %s %s\n' "$FM_TEST_OTHER_UID" "$mode" "$device" "$inode"
+    exit 0
+    ;;
+esac
+exec "$FM_TEST_REAL_STAT" "$@"
 SH
-chmod +x "$WRONG_OWNER_BIN/id"
-export FM_TEST_REAL_ID="$REAL_ID"
+chmod +x "$WRONG_OWNER_BIN/stat"
+export FM_TEST_REAL_STAT="$REAL_STAT"
 export FM_TEST_OTHER_UID="$(( $(id -u) + 1 ))"
 run_staged_quarantine_worker "$WRONG_OWNER_BIN:$PATH"
-unset FM_TEST_REAL_ID FM_TEST_OTHER_UID
+unset FM_TEST_REAL_STAT FM_TEST_OTHER_UID
 expect_code 1 "$QUARANTINE_TEST_RC" "a foreign-owner quarantine staging file was recovered"
 assert_present "$QUARANTINE_TEST_STAGE" "foreign-owner quarantine staging was removed"
 pass "malformed, ambiguous, symlinked, and foreign quarantine staging remains untouched"
@@ -1067,12 +1101,58 @@ case "${FM_TEST_QUARANTINE_PUBLISH_ACTION:-}:$last" in
     sleep 0.1
     exit 1
     ;;
+  race:*/worker.lock/quarantine)
+    : > "$FM_TEST_RACE_READY"
+    while [ ! -e "$FM_TEST_RACE_RELEASE" ]; do sleep 0.01; done
+    ;;
 esac
 exec "$FM_TEST_REAL_MV" "$@"
 SH
 chmod +x "$PUBLISH_FAKEBIN/chmod" "$PUBLISH_FAKEBIN/mv"
 export FM_TEST_REAL_CHMOD="$REAL_CHMOD"
 export FM_TEST_REAL_MV="$REAL_MV"
+
+new_staged_quarantine_fixture live-publisher-race
+rm -rf "$QUARANTINE_TEST_STATE/worker.lock"
+FM_TEST_RACE_READY="$QUARANTINE_TEST_DIR/publisher-ready"
+FM_TEST_RACE_RELEASE="$QUARANTINE_TEST_DIR/publisher-release"
+export FM_TEST_RACE_READY FM_TEST_RACE_RELEASE
+export FM_TEST_QUARANTINE_PUBLISH_ACTION=race
+start_staged_quarantine_worker "$PUBLISH_FAKEBIN:$PATH"
+for _ in $(seq 1 300); do
+  [ -f "$QUARANTINE_TEST_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$QUARANTINE_TEST_STATE/worker.ready" \
+  "the live-publisher race worker did not become ready"
+kill -TERM "$QUARANTINE_TEST_WORKER_PID"
+for _ in $(seq 1 300); do
+  [ -f "$FM_TEST_RACE_READY" ] && break
+  sleep 0.05
+done
+assert_present "$FM_TEST_RACE_READY" \
+  "the live publisher did not reach completed quarantine staging"
+QUARANTINE_TEST_STAGE=$(find "$QUARANTINE_TEST_STATE/worker.lock" -maxdepth 1 \
+  -name '.quarantine.??????' -print)
+[ -n "$QUARANTINE_TEST_STAGE" ] \
+  || fail "the live publisher did not retain its completed staging marker"
+run_staged_quarantine_worker
+expect_code 1 "$QUARANTINE_TEST_RC" \
+  "a replacement consumed an active publisher's quarantine staging"
+assert_present "$QUARANTINE_TEST_STAGE" \
+  "a replacement removed an active publisher's quarantine staging"
+assert_absent "$QUARANTINE_TEST_STATE/worker.lock/quarantine" \
+  "a replacement promoted an active publisher's quarantine staging"
+kill -0 "$QUARANTINE_TEST_WORKER_PID" 2>/dev/null \
+  || fail "a replacement disturbed the active quarantine publisher"
+: > "$FM_TEST_RACE_RELEASE"
+wait "$QUARANTINE_TEST_WORKER_PID" \
+  || fail "the active quarantine publisher did not finish shutdown"
+QUARANTINE_TEST_WORKER_PID=
+unset FM_TEST_QUARANTINE_PUBLISH_ACTION FM_TEST_RACE_READY FM_TEST_RACE_RELEASE
+assert_absent "$QUARANTINE_TEST_STATE/worker.lock" \
+  "the active quarantine publisher did not release ownership"
+pass "a replacement preserves an active publisher's quarantine staging"
 
 for PUBLISH_FAILURE in chmod mv; do
   new_staged_quarantine_fixture "publish-$PUBLISH_FAILURE"
