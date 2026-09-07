@@ -389,6 +389,7 @@ EOF
     'NM=no-mistakes; $NM axi respond --action fix' \
     'for NM in no-mistakes; do "$NM" axi respond --action fix; done' \
     'for NM in echo; do NM=no-mistakes; done; "$NM" axi respond --action fix' \
+    'NM=no-mistakes; false && NM=echo; "$NM" axi respond --action fix' \
     "bash -c \"\$(printf '%s' 'no-mistakes axi respond --action fix')\"" \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
@@ -418,6 +419,7 @@ EOF
     'NM=no-mistakes; $NM axi respond --action fix' \
     'for NM in no-mistakes; do "$NM" axi respond --action fix; done' \
     'for NM in echo; do NM=no-mistakes; done; "$NM" axi respond --action fix' \
+    'NM=no-mistakes; false && NM=echo; "$NM" axi respond --action fix' \
     "bash -c \"\$(printf '%s' 'no-mistakes axi respond --action fix')\"" \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
@@ -442,6 +444,7 @@ EOF
     "CMD='no-mistakes axi respond --action data'; echo \"\$CMD\"" \
     "CMD='no-mistakes axi respond --action data'; \"\$CMD\"" \
     'for NM in no-mistakes; do echo "$NM axi respond --action data"; done' \
+    'NM=no-mistakes; true && NM=echo; "$NM" axi respond --action data' \
     "echo \"\$(printf '%s' 'no-mistakes axi respond --action data')\"" \
     "if echo 'no-mistakes axi respond --action data'; then echo done; fi" \
     "case \"\$x\" in *) echo 'no-mistakes axi run';; esac"; do

@@ -39,7 +39,7 @@ exit 0
 SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
-if [ "${FAKE_TMUX_SLEEP:-0}" = 1 ]; then
+if [ "${FAKE_TMUX_SLEEP:-0}" = 1 ] && [ "${FM_SNAPSHOT_DEADLINE_PROBE:-0}" = 1 ]; then
   [ -z "${FAKE_TMUX_SIGNAL:-}" ] || : > "$FAKE_TMUX_SIGNAL"
   sleep 30
 fi
@@ -2871,7 +2871,7 @@ test_local_snapshot_bounds_endpoint_observation() {
   fakebin=$(make_fakebin "$home")
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
-- [ ] bounded-endpoint - Bounded endpoint fixture (repo: firstmate) (kind: ship)
+- [ ] bounded-endpoint - Bounded endpoint fixture (repo: firstmate) (kind: secondmate)
 
 ## Queued
 
@@ -2879,8 +2879,9 @@ test_local_snapshot_bounds_endpoint_observation() {
 EOF
   fm_write_meta "$home/state/bounded-endpoint.meta" \
     "window=fixture:bounded-endpoint" "worktree=$worktree" "project=firstmate" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
-  printf 'working: endpoint observation fixture\n' > "$home/state/bounded-endpoint.status"
+    "harness=claude" "kind=secondmate" "mode=no-mistakes"
+  printf 'needs-decision: preserve this decision while probing the endpoint\n' \
+    > "$home/state/bounded-endpoint.status"
   signal="$home/endpoint-started"
 
   started=$(date +%s)
@@ -2893,17 +2894,16 @@ EOF
   [ "$elapsed" -lt 7 ] || fail "endpoint probe exceeded the overall two-second deadline: ${elapsed}s"
   printf '%s' "$json" | jq -e '
     .tasks[] | select(.id == "bounded-endpoint")
-    | .current_state.state == "unknown"
-      and (.current_state.detail | contains("local snapshot deadline after 2s"))
-      and .endpoint.exists == null
+    | .endpoint.exists == null
       and .endpoint.agent_alive == "unknown"
       and .endpoint.status == "unknown"
-      and .hints.inspection.complete == false
-      and (.hints.inspection.reason | contains("local snapshot deadline after 2s"))
-      and .hints.pending_decision == null
-      and .hints.blocked_event == null
-      and .hints.open_decisions == null
-  ' >/dev/null || fail "endpoint timeout omitted explicit task uncertainty: $json"
+      and .hints.inspection.complete == true
+      and .hints.inspection.reason == null
+      and .hints.pending_decision == true
+      and .hints.blocked_event == false
+      and (.hints.open_decisions | map(.key)) == ["default"]
+      and ((.current_state.detail // "") | contains("local snapshot deadline") | not)
+  ' >/dev/null || fail "endpoint timeout discarded completed task observations: $json"
   pass "fleet snapshots bound endpoint probes inside the local deadline"
 }
 

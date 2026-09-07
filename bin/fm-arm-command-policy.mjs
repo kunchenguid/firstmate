@@ -815,6 +815,34 @@ function forLoopBinding(position, context, depth) {
   return { name, selected };
 }
 
+function conditionalExecution(separator, previousInfo) {
+  if (!["&&", "||"].includes(separator) || !previousInfo || previousInfo.position.wrappers.length > 0 ||
+      previousInfo.position.prefixAssignments > 0 || previousInfo.position.words.length !== 1 || previousInfo.redirection) return "maybe";
+  const name = basename(previousInfo.position.command?.value || "");
+  if (![":", "true", "false"].includes(name)) return "maybe";
+  const succeeded = name !== "false";
+  return (separator === "&&") === succeeded ? "always" : "never";
+}
+
+function contextWithConditionalAssignments(previous, assigned, words, depth) {
+  let merged = assigned;
+  for (const word of words) {
+    const name = assignmentName(word);
+    if (!name || !previous.knownVariables.has(name)) continue;
+    const previousValue = previous.knownVariables.get(name);
+    const assignedValue = assigned.knownVariables.get(name);
+    const previousAnalysis = analyzeProgram(previousValue, previous, depth + 1);
+    const previousIsProtected = basename(previousValue) === "no-mistakes" || previousAnalysis.pipelineDrive || previousAnalysis.protectedFound;
+    let assignedIsProtected = false;
+    if (assignedValue !== undefined) {
+      const assignedAnalysis = analyzeProgram(assignedValue, assigned, depth + 1);
+      assignedIsProtected = basename(assignedValue) === "no-mistakes" || assignedAnalysis.pipelineDrive || assignedAnalysis.protectedFound;
+    }
+    if (previousIsProtected && !assignedIsProtected) merged = contextWithBinding(merged, name, previousValue);
+  }
+  return merged;
+}
+
 function nodeHasRedirection(tokens) {
   return tokens.some((token) => token.type === "redir");
 }
@@ -852,7 +880,9 @@ function analyzeProgram(command, context, depth = 0) {
   };
   let unclassifiableProtected = false;
 
-  for (const tokens of program.nodes) {
+  for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
+    const tokens = program.nodes[nodeIndex];
+    const precedingSeparator = nodeIndex > 0 ? program.separators[nodeIndex - 1] : "";
     const position = commandPosition(tokens);
     const assignmentPrefixes = position.words.slice(0, position.index).filter((word) => isAssignment(word.value));
     const nodeContext = contextWithAssignments(activeContext, assignmentPrefixes);
@@ -952,8 +982,13 @@ function analyzeProgram(command, context, depth = 0) {
     const loopBinding = forLoopBinding(position, nodeContext, depth);
     if (loopBinding) {
       activeContext = contextWithBinding(activeContext, loopBinding.name, loopBinding.selected);
-    } else if (!position.command) activeContext = nodeContext;
-    else if (commandName === "export") activeContext = contextWithAssignments(activeContext, args.filter((word) => isAssignment(word.value)));
+    } else if (!position.command) {
+      const execution = conditionalExecution(precedingSeparator, nodeInfos.at(-1));
+      if (execution === "always") activeContext = nodeContext;
+      else if (execution === "maybe") activeContext = ["&&", "||"].includes(precedingSeparator)
+        ? contextWithConditionalAssignments(activeContext, nodeContext, assignmentPrefixes, depth)
+        : nodeContext;
+    } else if (commandName === "export") activeContext = contextWithAssignments(activeContext, args.filter((word) => isAssignment(word.value)));
     if (position.unresolvedWrapperOption) unsupported = true;
     nodeInfos.push({
       tokens,

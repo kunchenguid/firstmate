@@ -616,6 +616,7 @@ snapshot_backend_target_exists() {
   timeout=$(snapshot_local_seconds_remaining) || return 124
   fm_run_timed "$timeout" env \
     FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" \
+    FM_SNAPSHOT_DEADLINE_PROBE=1 \
     bash -c '. "$1"; fm_backend_target_exists "$2" "$3" "$4"' \
     _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$label"
 }
@@ -625,6 +626,7 @@ snapshot_backend_agent_alive() {
   timeout=$(snapshot_local_seconds_remaining) || return 124
   fm_run_timed "$timeout" env \
     FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" \
+    FM_SNAPSHOT_DEADLINE_PROBE=1 \
     bash -c '. "$1"; fm_backend_agent_alive "$2" "$3"' \
     _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target"
 }
@@ -734,10 +736,6 @@ prefetch_task_observations() {  # <meta> <id>
 
   [ -z "$current_pid" ] || wait "$current_pid" || current_rc=1
   if [ "$endpoint_timed_out" -eq 1 ]; then
-    inspection_reason="local snapshot deadline after ${deadline_seconds}s"
-    printf '%s\n' "$inspection_reason" > "$status_inspection" || current_rc=1
-    jq -n --arg detail "$inspection_reason" \
-      '{state:"unknown",source:"none",detail:$detail,raw:""}' > "$current_file" || current_rc=1
     endpoint_exists=null
     agent_alive=unknown
   fi
