@@ -787,6 +787,10 @@ test_unconsumable_rows_are_retired_instead_of_wedging_the_queue() {
   err="$dir/main.err"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "main drain failed: $(cat "$err")"
   grep -Fq 'retired 2 unusable queue row(s)' "$err" || fail "main drain did not report the rows it retired"
+  grep -Fq "$(printf '1788792074\t574\tstale\tfleet:w2:p3')" "$err" \
+    || fail "the retired row's content was discarded instead of reported"
+  grep -Fq "$(printf '1788792075\tnot-a-sequence\tstale\tfleet:w2:p4\tstale: fleet:w2:p4')" "$err" \
+    || fail "the second retired row's content was discarded instead of reported"
   grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "retirement dropped a usable row"
   [ "$(awk 'END { print NR }' "$state/.wake-queue")" -eq 1 ] || fail "unusable rows survived the drain"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
