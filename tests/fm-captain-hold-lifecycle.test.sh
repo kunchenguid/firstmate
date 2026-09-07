@@ -3183,7 +3183,7 @@ test_local_merge_entrypoint_refuses_a_captain_held_task() {
   pass "the local merge entrypoint refuses a captain-held task before merging"
 }
 
-test_pr_merge_entrypoint_refuses_a_missing_authority_record_but_allows_an_untracked_task() {
+test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() {
   local home id pr rc merge_count
   home=$(make_home missing-pr-authority-record)
   configure_merged_github "$home"
@@ -3191,26 +3191,31 @@ test_pr_merge_entrypoint_refuses_a_missing_authority_record_but_allows_an_untrac
   pr=https://github.com/sample/sample/pull/43
   write_origin_meta "$home" "$id" ship
 
-  rm "$home/data/backlog.md"
+  # A backlog that exists but cannot be read may hide a live captain hold, so
+  # the merge must refuse without reaching the forge.
+  chmod 000 "$home/data/backlog.md"
   set +e
   run_pr_merge "$home" "$id" "$pr" > "$home/missing-pr.out" 2> "$home/missing-pr.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "the PR merge entrypoint accepted a missing captain-hold authority record"
-  assert_grep "captain-hold authority record is unavailable" "$home/missing-pr.err" \
-    "the PR merge refusal did not name its unavailable authority record"
+  chmod 644 "$home/data/backlog.md"
+  [ "$rc" -ne 0 ] || fail "the PR merge entrypoint accepted an unreadable captain-hold authority record"
+  assert_grep "could not determine whether task $id is still held for the captain" "$home/missing-pr.err" \
+    "the PR merge refusal did not name its unreadable authority record"
   assert_no_grep 'pr merge 43 ' "$home/gh-axi.log" \
-    "the PR merge entrypoint reached the forge without a captain-hold authority record"
+    "the PR merge entrypoint reached the forge without a readable authority record"
 
-  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
-  run_pr_merge "$home" "$id" "$pr" > "$home/untracked-pr.out" 2> "$home/untracked-pr.err" \
-    || fail "the PR merge entrypoint refused an untracked task in a readable backlog"
+  # A home with no backlog at all records no captain calls, so nothing can be
+  # held and the merge proceeds.
+  rm "$home/data/backlog.md"
+  run_pr_merge "$home" "$id" "$pr" > "$home/absent-pr.out" 2> "$home/absent-pr.err" \
+    || fail "the PR merge entrypoint refused a home carrying no backlog"
   merge_count=$(grep -c 'pr merge 43 ' "$home/gh-axi.log" || true)
-  [ "$merge_count" -eq 1 ] || fail "the readable backlog with no task row did not permit exactly one PR merge"
-  pass "the PR merge entrypoint distinguishes a missing authority record from an untracked task"
+  [ "$merge_count" -eq 1 ] || fail "the absent backlog did not permit exactly one PR merge"
+  pass "the PR merge entrypoint separates an unreadable authority record from an absent one"
 }
 
-test_local_merge_entrypoint_refuses_a_missing_authority_record_but_allows_an_untracked_task() {
+test_local_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() {
   local home id repo wt before after rc
   home=$(make_home missing-local-authority-record)
   id=sample-missing-local-authority
@@ -3227,7 +3232,8 @@ test_local_merge_entrypoint_refuses_a_missing_authority_record_but_allows_an_unt
     "spawn_gen=fixture-$id"
   before=$(git -C "$repo" rev-parse main)
 
-  rm "$home/data/backlog.md"
+  # Unreadable authority record: refuse, and leave the default branch where it was.
+  chmod 000 "$home/data/backlog.md"
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -3235,21 +3241,23 @@ test_local_merge_entrypoint_refuses_a_missing_authority_record_but_allows_an_unt
     > "$home/missing-local.out" 2> "$home/missing-local.err"
   rc=$?
   set -e
+  chmod 644 "$home/data/backlog.md"
   after=$(git -C "$repo" rev-parse main)
-  [ "$rc" -ne 0 ] || fail "the local merge entrypoint accepted a missing captain-hold authority record"
-  [ "$after" = "$before" ] || fail "the local merge entrypoint moved main without a captain-hold authority record"
-  assert_grep "captain-hold authority record is unavailable" "$home/missing-local.err" \
-    "the local merge refusal did not name its unavailable authority record"
+  [ "$rc" -ne 0 ] || fail "the local merge entrypoint accepted an unreadable captain-hold authority record"
+  [ "$after" = "$before" ] || fail "the local merge entrypoint moved main without a readable authority record"
+  assert_grep "could not determine whether task $id is still held for the captain" "$home/missing-local.err" \
+    "the local merge refusal did not name its unreadable authority record"
 
-  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  # No backlog at all: nothing can be held, so the landing proceeds.
+  rm "$home/data/backlog.md"
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$id" \
-    > "$home/untracked-local.out" 2> "$home/untracked-local.err" \
-    || fail "the local merge entrypoint refused an untracked task in a readable backlog"
+    > "$home/absent-local.out" 2> "$home/absent-local.err" \
+    || fail "the local merge entrypoint refused a home carrying no backlog"
   after=$(git -C "$repo" rev-parse main)
-  [ "$after" != "$before" ] || fail "the readable backlog with no task row did not permit the local merge"
-  pass "the local merge entrypoint distinguishes a missing authority record from an untracked task"
+  [ "$after" != "$before" ] || fail "the absent backlog did not permit the local merge"
+  pass "the local merge entrypoint separates an unreadable authority record from an absent one"
 }
 
 test_merge_entrypoints_validate_identity_and_state_before_locking() {
@@ -3801,8 +3809,8 @@ test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task
 test_local_merge_entrypoint_refuses_a_captain_held_task
-test_pr_merge_entrypoint_refuses_a_missing_authority_record_but_allows_an_untracked_task
-test_local_merge_entrypoint_refuses_a_missing_authority_record_but_allows_an_untracked_task
+test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one
+test_local_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one
 test_merge_entrypoints_validate_identity_and_state_before_locking
 test_merge_entrypoints_refuse_a_reused_task_incarnation
 test_merge_entrypoints_serialize_forced_teardown_before_task_reads
