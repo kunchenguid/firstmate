@@ -4,8 +4,8 @@
 # A treehouse pool can return a clean detached worktree whose origin/main was
 # advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin/main tip or stops when origin is
-# unreachable.
+# starts the worker from the fetched origin tip, launches a clean origin-less
+# pool as-is, or stops when a configured origin is unusable.
 set -u
 
 # shellcheck source=tests/fixtures.sh
