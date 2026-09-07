@@ -1073,6 +1073,38 @@ SH
   pass "fm-mail: a failed retry write fails the poll instead of losing recovery"
 }
 
+test_poll_journal_failure_never_cursor_records() {
+  # A mail must never be marked surfaced in the cursor without the journal
+  # recording its wake. If the journal write fails, the cursor is NOT written
+  # and the poll fails closed, so the next poll re-wakes the mail instead of
+  # silently suppressing it (cursor-without-journal suppression).
+  local fakebin homedir_bin out rc=0
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  homedir_bin="$HOME_DIR/bin"
+  mkdir -p "$homedir_bin"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t90009\n'
+printf '78\t2026-09-06T00:00:00Z\tfrom@x\tHello\tok\n'
+SH
+  chmod +x "$fakebin/python3"
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+  : > "$HOME_DIR/state/.mail-woken"
+  chmod 0400 "$HOME_DIR/state/.mail-woken"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll must fail when the journal cannot be written"
+  assert_not_contains "$out" "woke for 78" "no wake is emitted before the journal commits"
+  assert_not_contains "$(cat "$HOME_DIR/state/.mail-seen" 2>/dev/null)" "78" \
+    "a failed journal write must not cursor-record the uid (no cursor-without-journal suppression)"
+  chmod 0600 "$HOME_DIR/state/.mail-woken"
+  pass "fm-mail: a journal write failure never cursor-records a suppressed mail"
+}
+
 test_poll_resurfaces_degraded_uid_whose_wake_never_recorded() {
   local harness out rc=0
   harness="$TMP_ROOT/retry-not-seen-harness.py"
@@ -2010,6 +2042,7 @@ test_poll_cap_one_never_suppresses_new_mail
 test_poll_cap_one_alternates_new_and_retry
 test_poll_cap_one_does_not_advance_unexamined_retry_window
 test_poll_fails_closed_when_retry_unwritable
+test_poll_journal_failure_never_cursor_records
 test_poll_fails_closed_when_retry_clear_fails
 test_poll_fails_closed_when_stale_retry_clear_fails
 test_assert_equals_rejects_mismatch
