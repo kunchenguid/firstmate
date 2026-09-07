@@ -1029,6 +1029,50 @@ SH
   pass "a task relaunched for reasons unrelated to its PR still dispatches after the relaunch"
 }
 
+# A remote secondmate's fm-send.sh leg never prints INBOX_RECORD; refuse
+# honestly up front instead of a misleading receipt-invalid dispatch attempt.
+test_branch_currency_remote_secondmate_refused() {
+  local dir state rc
+
+  dir=$(make_case branch-currency-remote-unsupported)
+  state="$dir/home/state"
+  fm_write_meta "$state/task-a.meta" \
+    "window=firstmate:fm-task-a" \
+    "endpoint_task_id=task-a" \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=1" \
+    "remote_host=secondmate.example.org"
+  enable_pr_refresh "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/10 >/dev/null \
+    || fail "could not arm remote-secondmate branch-currency fixture"
+  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: done \302\267 source: run-step \302\267 checks green: PR ready for review\n'
+SH
+  cat > "$dir/fakebin/fm-refresh-send.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_REFRESH_SEND_LOG"
+SH
+  chmod +x "$dir/fakebin/fm-crew-state.sh" "$dir/fakebin/fm-refresh-send.sh"
+  : > "$dir/refresh-send.log"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_MERGE_STATE=BEHIND \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PR_REFRESH_SEND_BIN="$dir/fakebin/fm-refresh-send.sh" \
+    FM_TEST_REFRESH_SEND_LOG="$dir/refresh-send.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/remote.out" 2> "$dir/remote.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "remote-secondmate branch-currency watcher failed: $(cat "$dir/remote.err")"
+  [ ! -s "$dir/refresh-send.log" ] || fail "a remote-secondmate task invoked the refresh send binary"
+  assert_grep 'branch-refresh-refused pr=https://github.com/o/r/pull/10 head=0123456789abcdef0123456789abcdef01234567 condition=behind reason=remote-unsupported' \
+    "$dir/remote.out" "a remote-secondmate task was not refused with an honest reason"
+  pass "a remote-secondmate task is refused honestly instead of a misleading receipt-invalid dispatch"
+}
+
 # See docs/architecture.md "Branch-currency dispatch": deleting the state
 # file after a real dispatch reproduces a crash before that write landed.
 test_branch_currency_restart_before_state_recorded() {
@@ -2552,6 +2596,7 @@ test_gitlab_merged_poll_retires() {
 test_branch_currency_dispatch_and_active_refusal
 test_branch_currency_generation_race_defers
 test_branch_currency_dispatches_after_ordinary_relaunch
+test_branch_currency_remote_secondmate_refused
 test_branch_currency_restart_before_state_recorded
 test_branch_currency_refusal_is_deduplicated
 test_branch_currency_opt_out_by_default

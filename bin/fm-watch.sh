@@ -1365,6 +1365,11 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
     message="FIRSTMATE_OP: v1 branch-currency attempt $attempt: Your open pull request $url is not current with its base (behind or in conflict) at head $head. Refresh it through this brief's direct-PR delivery path. Before any edit or branch movement, confirm no active validation run owns the branch. Fetch and merge the pull request's base without force, run the project checks on the resulting head, push normally, and wait for current-head checks. If the merge conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
   fi
 
+  if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+    pr_refresh_refuse "$id" "$url" "$condition" "$head" remote-unsupported
+    return $?
+  fi
+
   if ! record_path=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     FM_SEND_EXPECTED_SPAWN_GEN="$spawn_gen" FM_SEND_IDEMPOTENT=1 FM_SEND_PRINT_INBOX_RECORD=1 \
     "$FM_PR_REFRESH_SEND_BIN" "$id" "$message" 2>/dev/null); then
