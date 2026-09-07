@@ -850,6 +850,11 @@ function contextWithBinding(context, name, value) {
   return contextWithAssignments(context, [{ value: `${name}=${value}`, literal: true, subs: [] }]);
 }
 
+function valueMayDriveOrProtect(value, context, depth) {
+  const nested = analyzeProgram(value, context, depth + 1);
+  return basename(value) === "no-mistakes" || ["run", "respond"].includes(value) || nested.pipelineDrive || nested.protectedFound;
+}
+
 function forLoopBinding(position, context, depth) {
   const words = position.words;
   if (basename(position.command?.value || "") !== "for" || words[2]?.value !== "in") return null;
@@ -859,8 +864,7 @@ function forLoopBinding(position, context, depth) {
   if (values.some((value) => value === null)) return null;
   let selected = values[0];
   for (const value of values) {
-    const nested = analyzeProgram(value, context, depth + 1);
-    if (basename(value) === "no-mistakes" || nested.pipelineDrive || nested.protectedFound) {
+    if (valueMayDriveOrProtect(value, context, depth)) {
       selected = value;
       break;
     }
@@ -884,13 +888,9 @@ function contextWithConditionalAssignments(previous, assigned, words, depth) {
     if (!name || !previous.knownVariables.has(name)) continue;
     const previousValue = previous.knownVariables.get(name);
     const assignedValue = assigned.knownVariables.get(name);
-    const previousAnalysis = analyzeProgram(previousValue, previous, depth + 1);
-    const previousIsProtected = basename(previousValue) === "no-mistakes" || previousAnalysis.pipelineDrive || previousAnalysis.protectedFound;
+    const previousIsProtected = valueMayDriveOrProtect(previousValue, previous, depth);
     let assignedIsProtected = false;
-    if (assignedValue !== undefined) {
-      const assignedAnalysis = analyzeProgram(assignedValue, assigned, depth + 1);
-      assignedIsProtected = basename(assignedValue) === "no-mistakes" || assignedAnalysis.pipelineDrive || assignedAnalysis.protectedFound;
-    }
+    if (assignedValue !== undefined) assignedIsProtected = valueMayDriveOrProtect(assignedValue, assigned, depth);
     if (previousIsProtected && !assignedIsProtected) merged = contextWithBinding(merged, name, previousValue);
   }
   return merged;
@@ -900,13 +900,9 @@ function mergeReachableContexts(first, second, depth) {
   let merged = second;
   for (const [name, firstValue] of first.knownVariables) {
     const secondValue = second.knownVariables.get(name);
-    const firstAnalysis = analyzeProgram(firstValue, first, depth + 1);
-    const firstIsProtected = basename(firstValue) === "no-mistakes" || firstAnalysis.pipelineDrive || firstAnalysis.protectedFound;
+    const firstIsProtected = valueMayDriveOrProtect(firstValue, first, depth);
     let secondIsProtected = false;
-    if (secondValue !== undefined) {
-      const secondAnalysis = analyzeProgram(secondValue, second, depth + 1);
-      secondIsProtected = basename(secondValue) === "no-mistakes" || secondAnalysis.pipelineDrive || secondAnalysis.protectedFound;
-    }
+    if (secondValue !== undefined) secondIsProtected = valueMayDriveOrProtect(secondValue, second, depth);
     if (firstIsProtected && !secondIsProtected) merged = contextWithBinding(merged, name, firstValue);
   }
   return merged;
@@ -969,6 +965,15 @@ function analyzeProgram(command, context, depth = 0) {
         condition: conditionName === "true" || conditionName === ":" ? true : conditionName === "false" ? false : null,
         thenContext: null,
         hasElse: false,
+      });
+    }
+    if (firstName === "while" || firstName === "until") {
+      const conditionName = basename(position.command?.value || "");
+      const succeeds = conditionName === "true" || conditionName === ":" ? true : conditionName === "false" ? false : null;
+      loopBindings.push({
+        kind: "conditional",
+        entryContext: activeContext,
+        zeroIterations: succeeds === null ? null : firstName === "while" ? !succeeds : succeeds,
       });
     }
     const assignmentPrefixes = position.words.slice(0, position.index).filter((word) => isAssignment(word.value));
@@ -1071,11 +1076,16 @@ function analyzeProgram(command, context, depth = 0) {
     nestedProtected ||= nodeNestedProtected;
     const loopBinding = forLoopBinding(position, nodeContext, depth);
     if (loopBinding) {
-      loopBindings.push(loopBinding);
+      loopBindings.push({ ...loopBinding, kind: "for" });
       activeContext = contextWithBinding(activeContext, loopBinding.name, loopBinding.selected);
     } else if (commandName === "done" && loopBindings.length > 0) {
       const completedLoop = loopBindings.pop();
-      if (!completedLoop.bodyAssigned) activeContext = contextWithBinding(activeContext, completedLoop.name, completedLoop.last);
+      if (completedLoop.kind === "for" && !completedLoop.bodyAssigned) {
+        activeContext = contextWithBinding(activeContext, completedLoop.name, completedLoop.last);
+      } else if (completedLoop.kind === "conditional") {
+        if (completedLoop.zeroIterations === true) activeContext = completedLoop.entryContext;
+        else if (completedLoop.zeroIterations === null) activeContext = mergeReachableContexts(activeContext, completedLoop.entryContext, depth);
+      }
     } else if (!position.command) {
       const execution = conditionalExecution(precedingSeparator, nodeInfos.at(-1));
       if (execution === "always") activeContext = nodeContext;
@@ -1083,7 +1093,7 @@ function analyzeProgram(command, context, depth = 0) {
         ? contextWithConditionalAssignments(activeContext, nodeContext, assignmentPrefixes, depth)
         : nodeContext;
       for (const binding of loopBindings) {
-        if (assignmentPrefixes.some((word) => assignmentName(word) === binding.name) && execution !== "never") binding.bodyAssigned = true;
+        if (binding.kind === "for" && assignmentPrefixes.some((word) => assignmentName(word) === binding.name) && execution !== "never") binding.bodyAssigned = true;
       }
     } else if (commandName === "export") activeContext = contextWithAssignments(activeContext, args.filter((word) => isAssignment(word.value)));
     if (firstName === "fi" && conditionalBindings.length > 0) {

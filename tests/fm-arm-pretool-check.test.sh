@@ -397,6 +397,8 @@ EOF
     '$(command -v no-mistakes) axi respond --action fix' \
     "SH=bash; \"\$SH\" -c 'no-mistakes axi respond --action fix'" \
     'NM=no-mistakes; if false; then NM=echo; fi; "$NM" axi respond --action fix' \
+    'ACTION=respond; ! true && ACTION=status; no-mistakes axi "$ACTION"' \
+    'NM=no-mistakes; while false; do NM=echo; done; "$NM" axi respond --action fix' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
@@ -433,6 +435,8 @@ EOF
     '$(command -v no-mistakes) axi respond --action fix' \
     "SH=bash; \"\$SH\" -c 'no-mistakes axi respond --action fix'" \
     'NM=no-mistakes; if false; then NM=echo; fi; "$NM" axi respond --action fix' \
+    'ACTION=respond; ! true && ACTION=status; no-mistakes axi "$ACTION"' \
+    'NM=no-mistakes; while false; do NM=echo; done; "$NM" axi respond --action fix' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
@@ -470,6 +474,8 @@ EOF
     || fail "the primary must retain read-only pipeline status"
   FM_HOME="$primary" "$check" --command 'ACTION=$(printf status); no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
     || fail "the primary must retain dynamically selected read-only pipeline status"
+  FM_HOME="$primary" "$check" --command 'ACTION=status; false && ACTION=respond; no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
+    || fail "a skipped driving-action assignment must retain read-only pipeline status"
   FM_HOME="$primary" "$check" --command 'no-mistakes axi abort --run 01RUN' >/dev/null 2>&1 \
     || fail "the primary must retain explicit recovery controls"
   pass "foreground pipeline drives are denied across primary harness transports while workers retain ownership"
