@@ -73,10 +73,23 @@ fi
 # and treats a recorded value that disagrees as stale rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
-    && fm_pr_head_valid "$REMOTE_HEAD"; then
+# A mapped account must actually read the PR before a poll is armed. A stale
+# credential or denied repository must not look like successful registration.
+# Unmapped/explicit-token callers keep the existing optional-head behavior.
+if [ "$PROVIDER" = github ]; then
+  PR_ACCOUNT=$(fm_pr_github_account "$HOST" "$PROJECT_PATH") || exit 1
+  if [ -n "$PR_ACCOUNT" ]; then
+    if ! REMOTE_HEAD=$(fm_pr_github_run "$HOST" "$PROJECT_PATH" gh pr view "$URL" --json headRefOid -q .headRefOid) \
+      || ! fm_pr_head_valid "$REMOTE_HEAD"; then
+      echo 'error: configured GitHub account could not read the PR head; poll not armed' >&2
+      exit 1
+    fi
     PR_HEAD=$REMOTE_HEAD
+  elif [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
+    if REMOTE_HEAD=$(cd "$WT" && fm_pr_github_run "$HOST" "$PROJECT_PATH" gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+      && fm_pr_head_valid "$REMOTE_HEAD"; then
+      PR_HEAD=$REMOTE_HEAD
+    fi
   fi
 fi
 

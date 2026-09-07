@@ -3,6 +3,12 @@
 # supported forges. Callers must validate task IDs and raw PR/MR URLs before
 # constructing task paths or performing any side effect.
 #
+# Source this library for PR identity and artifact helpers.
+# Command-scoped GitHub credentials (also callable inside existing timeouts):
+#   bash bin/fm-pr-lib.sh --github <host> <owner/repository> <command> [args...]
+# Caller-supplied command arguments must address that same canonical repository;
+# this is a credential boundary for trusted callers, not a command sandbox.
+#
 # The stored identity is provider-tagged: provider, url, host, path, number.
 # "path" is the full project path, which is owner/repository on GitHub and an
 # arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
@@ -206,6 +212,75 @@ fm_pr_url_parse() {
   FM_PR_PATH=$path
   FM_PR_NUMBER=${BASH_REMATCH[3]}
 }
+
+# Select an explicitly configured GitHub login for one canonical repository.
+# config/github-accounts is whitespace-separated scope/login data (blank lines
+# and full-line # comments allowed). Scopes are github.com/owner[/repository].
+# Matching is case-insensitive, an exact repository wins over its owner, and
+# duplicate scopes or malformed rows refuse the entire file. Never probe access
+# or try another account. See docs/configuration.md for operator setup.
+fm_pr_github_account() {  # <host> <owner/repository>; prints login or nothing
+  local host=$1 path=$2 config scope login extra key seen='|' owner_login='' repo_login=''
+  local owner repo target LC_ALL=C
+  [ "$host" = github.com ] && fm_pr_url_parse "https://$host/$path/pull/1" || return 1
+  [ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ] || return 0
+  target=$(printf '%s' "$host/$path" | tr '[:upper:]' '[:lower:]')
+  config="${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}/config}/github-accounts"
+  [ -e "$config" ] || [ -L "$config" ] || return 0
+  if [ ! -f "$config" ] || [ ! -r "$config" ] || [ -L "$config" ]; then
+    echo 'error: config/github-accounts must be a readable regular file' >&2
+    return 1
+  fi
+  while IFS=$' \t' read -r scope login extra || [ -n "$scope$login$extra" ]; do
+    case "$scope" in ''|\#*) continue ;; esac
+    key=$(printf '%s' "$scope" | tr '[:upper:]' '[:lower:]')
+    owner=${key#github.com/}; repo=${owner#*/}; owner=${owner%%/*}
+    if [ -n "$extra" ] || [ -z "$login" ] || [ "$key" = "${key#github.com/}" ] \
+      || ! fm_pr_url_parse "https://github.com/$owner/$repo/pull/1" \
+      || ! fm_pr_url_parse "https://github.com/$login/account/pull/1"; then
+      echo 'error: malformed config/github-accounts (expected github.com/owner[/repository] login)' >&2
+      return 1
+    fi
+    case "$seen" in
+      *"|$key|"*) echo 'error: duplicate scope in config/github-accounts' >&2; return 1 ;;
+    esac
+    seen="$seen$key|"
+    [ "$key" != "${target%/*}" ] || owner_login=$login
+    [ "$key" != "$target" ] || repo_login=$login
+  done < "$config" || { echo 'error: could not read config/github-accounts' >&2; return 1; }
+  printf '%s' "${repo_login:-$owner_login}"
+}
+
+# Run a GitHub operation in a subshell, never changing the caller's environment
+# or gh's active account. Explicit nonempty github.com tokens retain precedence;
+# otherwise only an opt-in mapping can select a stored login. Resolve afresh in
+# the command, never in metadata or poll sidecars. Disable tracing before token
+# retrieval and suppress credential-tool diagnostics, which may contain secrets.
+fm_pr_github_run() (  # <host> <owner/repository> <command> [args...]
+  set +x
+  local host=${1-} path=${2-} login token
+  [ "$#" -ge 3 ] || return 2
+  [ "$host" = github.com ] && fm_pr_url_parse "https://$host/$path/pull/1" || return 2
+  shift 2
+  export GH_HOST=$host
+  if [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ]; then
+    "$@"
+    return $?
+  fi
+  login=$(fm_pr_github_account "$host" "$path") || return 1
+  if [ -n "$login" ]; then
+    unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_DEBUG
+    if ! token=$(gh auth token --hostname "$host" --user "$login" 2>/dev/null) || [ -z "$token" ]; then
+      printf 'error: configured GitHub account %s on %s has no available credential; authenticate that login on this machine\n' "$login" "$host" >&2
+      return 1
+    fi
+    case "$token" in
+      *[[:space:]]*) echo 'error: configured GitHub credential is malformed' >&2; return 1 ;;
+    esac
+    export GH_TOKEN=$token
+  fi
+  "$@"
+)
 
 fm_pr_head_valid() {
   local head=${1-}
@@ -1014,3 +1089,13 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"
 }
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  if [ "${1:-}" != --github ] || [ "$#" -lt 4 ]; then
+    echo 'usage: bash fm-pr-lib.sh --github <host> <owner/repository> <command> [args...]' >&2
+    exit 2
+  fi
+  shift
+  fm_pr_github_run "$@"
+  exit $?
+fi

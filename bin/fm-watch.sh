@@ -1154,6 +1154,14 @@ procevent_surface_queued() {
 run_check_process() {
   local c=$1
   shift
+  # Keep the byte-static poll and its registration hashes unchanged. Only the
+  # trusted, validated GitHub dispatch goes through the PR credential owner,
+  # inside the existing timeout/process group (including credential retrieval).
+  if [ "$c" = "$SCRIPT_DIR/fm-pr-poll.sh" ] && [ "$#" -eq 6 ] \
+    && [ "$1" = --validated ] && [ "$2" = github ]; then
+    set -- --github "$4" "$5" bash "$c" "$@"
+    c="$SCRIPT_DIR/fm-pr-lib.sh"
+  fi
   if [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then
     exec timeout "$CHECK_TIMEOUT" bash "$c" "$@"
   elif [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then
