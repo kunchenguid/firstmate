@@ -240,14 +240,15 @@ type PinnedBranchModel = { model: BranchModel; modelRuntime: ModelRuntime };
 type BranchModelResolution = { ok: true; selection: PinnedBranchModel } | { ok: false; reason: string };
 type CodexCompatResources = {
   extensionPath: string;
-  settingsManager: SettingsManager;
 };
 
-async function resolveCodexCompatResources(model: BranchModel | undefined): Promise<CodexCompatResources | null> {
+async function resolveCodexCompatResources(
+  model: BranchModel | undefined,
+  settingsManager: SettingsManager,
+): Promise<CodexCompatResources | null> {
   if (model?.provider !== "openai-codex") return null;
 
   const agentDir = getAgentDir();
-  const settingsManager = SettingsManager.inMemory({}, { projectTrusted: false });
   const packageManager = new DefaultPackageManager({ cwd: fmRoot, agentDir, settingsManager });
   const installedPath = packageManager.getInstalledPath(CODEX_COMPAT_SOURCE, "user");
   if (!installedPath) throw new Error(`${CODEX_COMPAT_PACKAGE} is not installed in Pi's user package store`);
@@ -292,7 +293,7 @@ async function resolveCodexCompatResources(model: BranchModel | undefined): Prom
   ) {
     throw new Error(`${CODEX_COMPAT_PACKAGE} did not resolve to its declared user-package extension`);
   }
-  return { extensionPath: expectedExtensionPath, settingsManager };
+  return { extensionPath: expectedExtensionPath };
 }
 
 // Pi owns the effort vocabulary. The picker's options and every clamp still
@@ -1200,7 +1201,19 @@ export default function (pi: ExtensionAPI) {
     const pinned = await branchModelSelection();
     const effectiveModel = await effectiveBranchModel(pinned?.model);
     const effort = branchEffortSelection(effectiveModel);
-    const codexCompat = await resolveCodexCompatResources(effectiveModel);
+    // Pi owns settings parsing and migrations. Keep a global-only snapshot so
+    // branch/plugin setters cannot persist into main's settings. Resource lists
+    // must also be empty: Pi resolves configured packages before no* filtering.
+    const globalSettings = SettingsManager.create(fmRoot, getAgentDir(), { projectTrusted: false });
+    const settingsErrors = globalSettings.drainErrors();
+    if (settingsErrors.length > 0) {
+      throw new Error(`Pi global settings could not be loaded: ${settingsErrors.map(({ error }) => error.message).join("; ")}`);
+    }
+    const settingsManager = SettingsManager.inMemory({
+      ...globalSettings.getGlobalSettings(),
+      packages: [], extensions: [], skills: [], prompts: [], themes: [],
+    }, { projectTrusted: false });
+    const codexCompat = await resolveCodexCompatResources(effectiveModel, settingsManager);
     const prompt = await runCommandAsync("bash", [promptScript], {
       cwd: fmRoot,
       env: scriptEnv,
@@ -1238,8 +1251,8 @@ export default function (pi: ExtensionAPI) {
     const loader = new DefaultResourceLoader({
       cwd: fmRoot,
       agentDir: getAgentDir(),
+      settingsManager,
       ...(codexCompat ? {
-        settingsManager: codexCompat.settingsManager,
         additionalExtensionPaths: [codexCompat.extensionPath],
       } : {}),
       noExtensions: true,
@@ -1314,7 +1327,7 @@ ${context.command}
       cwd: fmRoot,
       sessionManager,
       resourceLoader: loader,
-      ...(codexCompat ? { settingsManager: codexCompat.settingsManager } : {}),
+      settingsManager,
       tools: [...BRANCH_TOOL_NAMES],
       customTools: [
         bashTool as unknown as ToolDefinition,

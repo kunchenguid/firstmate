@@ -1434,6 +1434,32 @@ Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verifica
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh the SDK construction, picker, renderer, and type evidence after every Pi upgrade by rerunning the applicable live guard probes, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists).
 The live guard now drives both extensions through the watcher-owned settlement handshake, requires rejected branch settlement before main delivery, and verifies successor-delivery confirmation; rerun it against the matching importable Pi package to refresh end-to-end fallback evidence.
 
+### 2026-09-08 Pi branch global settings ownership
+
+On Linux x86_64 with Node v22.22.2, installed Pi 0.85.1 and `pi-openai-codex-compat` 0.0.10-alpha.7 passed the actual branch construction and provider-consumer regression.
+The isolated global settings file selects SSE, a 7000 ms WebSocket connection timeout, a 23000 ms HTTP idle timeout, and a provider retry limit; conflicting project settings are ignored.
+The real loader resolves no configured packages, exposes no discovered skills, prompts, themes or context, and retains the explicit compatibility extension and guarded tool allowlist.
+Persistence-capable model, effort, transport and compaction setters are flushed on the branch manager without changing either settings file or the proxy environment.
+The previous empty-manager construction fails this probe at the real provider consumer with `auto !== sse`.
+
+```sh
+bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh tests/fm-branch-supervision.test.sh tests/fm-pi-watch-extension.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh tests/fm-pi-primary-types.test.sh
+```
+
+```text
+ok - real Pi CLI 0.85.1 with pi-openai-codex-compat 0.0.10-alpha.7 inherits global SSE and connection settings without project resources or writes, preserving Luna/minimal, guarded tools, legacy outcomes and native compaction
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.85.1
+```
+
+Those repeatable guards use synthetic authentication and intercepted responses.
+A separate authenticated candidate run used the installed CLI dispatcher bootstrap and existing controlled SOCKS5 proxy inside a guarded non-default Herdr lab: five branch calls returned HTTP 200, all five persisted transport diagnostics recorded configured and selected `sse`, and the WebSocket constructor observer recorded zero attempts.
+The real branch published one durable captain outcome and the real lab main acknowledged sequence 1; duplicate delivery produced no extra outcome and a separate captain-only decision remained unresolved.
+Protected host files and the copied lab settings were unchanged, and the lab helper passed its default-session teardown tripwire.
+The HTTP responses on this route had no content-type header; SSE evidence comes from the actual provider consumer and persisted compatibility transport diagnostics, not an inferred response MIME type.
+This verifies candidate SDK behavior, not activation or a TUI reload of the running primary, and does not establish that the old branch bypassed a proxy: Pi's CLI initializes the process-wide dispatcher before branch construction.
+Private task evidence retains the authenticated lab programs and transcripts; [the supervision owner](../pi-supervision-branch.md) defines settings ownership.
+
 ### 2026-09-07 lazy Codex branch creation after legacy outcome migration
 
 On Linux x86_64 with Node v22.22.2, the installed Pi 0.85.1 CLI and an isolated copy of `npm:pi-openai-codex-compat@0.0.10-alpha.7` and its native dependency closure passed the Luna/minimal first-notification regression.

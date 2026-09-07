@@ -1002,7 +1002,7 @@ pass "real Pi SDK $PI_VERSION queues a streaming-time watcher wake without befor
 
 # Sixth probe: run the executable supervision extension with the REAL installed
 # pi-openai-codex-compat package copied into an otherwise isolated Pi home. The
-# provider transport is forced to SSE only inside this process and intercepted
+# provider transport is inherited from its isolated global settings and intercepted
 # before the network, so the real provider override, tool-call loop, threshold
 # compaction hook, and persisted native checkpoint all execute without using a
 # captain credential or contacting OpenAI.
@@ -1023,9 +1023,13 @@ for package_path in \
 done
 compat_version=$(jq -r '.version' "$compat_package_dir/package.json" 2>/dev/null || printf 'unknown')
 compathome="$TMP_ROOT/compat-home"
+compatroot="$TMP_ROOT/compat-root"
 compatagentdir="$TMP_ROOT/compat-agent-dir"
 compatmodules="$compatagentdir/npm/node_modules"
 mkdir -p "$compathome/state/branch-session" "$compathome/config" "$compatmodules"
+mkdir -p "$compatroot/.pi"
+ln -s "$ROOT/bin" "$compatroot/bin"
+ln -s "$ROOT/.agents" "$compatroot/.agents"
 # Copy the installed package's declared dependency closure, including locally
 # built native binaries. Different supported releases own different parsers;
 # the live guard must neither install packages nor assume the 0.0.9 WASM tree.
@@ -1057,7 +1061,8 @@ fi
 # in main. Both extensions below are explicit, loaded by the real CLI.
 printf '{"packages":["npm:pi-openai-codex-compat@%s"]}\n' "$compat_version" > "$compatagentdir/settings.json"
 cat > "$repo/compat-probe.ts" <<'EOF'
-import { ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { AgentSession, DefaultPackageManager, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
@@ -1087,21 +1092,79 @@ export default async function compatProbe(pi) {
   }
   if (probeModel.contextWindow <= 5000) throw new Error("the Codex probe model cannot support its test threshold");
 
-  // The production branch intentionally uses an in-memory manager. Narrow its
-  // values here so the real AgentSession takes deterministic SSE and crosses a
-  // small threshold after the synthetic final response. The extension under
-  // test still creates and shares the manager through its production path.
-  const originalInMemory = SettingsManager.inMemory.bind(SettingsManager);
-  SettingsManager.inMemory = (settings = {}, options = {}) => originalInMemory({
-    ...settings,
+  // These are files consumed by the actual branch constructor, not injected
+  // settings or transport overrides. Project defaults deliberately conflict.
+  const root = resolve(process.env.FM_ROOT_OVERRIDE);
+  const sentinel = `${agentDir}/unwanted`;
+  mkdirSync(sentinel, { recursive: true });
+  writeFileSync(`${sentinel}/package.json`, JSON.stringify({ name: "unwanted", pi: { extensions: ["index.ts"] } }));
+  writeFileSync(`${sentinel}/index.ts`, 'export default function () { throw new Error("unwanted extension loaded"); }');
+  writeFileSync(`${sentinel}/SKILL.md`, "---\nname: unwanted\ndescription: unwanted\n---\nUNWANTED_CONTEXT\n");
+  writeFileSync(`${sentinel}/prompt.md`, "UNWANTED_CONTEXT\n");
+  writeFileSync(`${agentDir}/AGENTS.md`, "UNWANTED_CONTEXT\n");
+  writeFileSync(`${root}/AGENTS.md`, "UNWANTED_CONTEXT\n");
+  const resourceSettings = {
+    packages: [sentinel], extensions: [`${sentinel}/index.ts`],
+    skills: [sentinel], prompts: [`${sentinel}/prompt.md`], themes: [sentinel],
+  };
+  const globalSettingsBytes = JSON.stringify({
+    ...resourceSettings,
+    defaultProvider: "openai-codex", defaultModel: "gpt-5.6-sol", defaultThinkingLevel: "high",
     transport: "sse",
+    websocketConnectTimeoutMs: 7000,
+    httpIdleTimeoutMs: 23000,
+    httpProxy: "http://127.0.0.1:9",
     compaction: {
       enabled: true,
       reserveTokens: probeModel.contextWindow - 5000,
       keepRecentTokens: 50,
     },
-    retry: { enabled: false },
-  }, options);
+    retry: { enabled: false, provider: { maxRetries: 0, maxRetryDelayMs: 1234 } },
+  }, null, 2);
+  const projectSettingsBytes = JSON.stringify({ ...resourceSettings, transport: "websocket", websocketConnectTimeoutMs: 1 });
+  writeFileSync(`${agentDir}/settings.json`, globalSettingsBytes);
+  writeFileSync(`${root}/.pi/settings.json`, projectSettingsBytes);
+  const proxyEnvironment = Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"].map((key) => [key, process.env[key]]));
+
+  const originalResolve = DefaultPackageManager.prototype.resolve;
+  let branchPackageResolutions = 0;
+  DefaultPackageManager.prototype.resolve = function (...args) {
+    if (this.cwd === root) {
+      branchPackageResolutions += 1;
+      assert.deepEqual(this.listConfiguredPackages(), [], "branch must not resolve configured packages before discovery filtering");
+    }
+    return originalResolve.apply(this, args);
+  };
+  let branchSession;
+  const originalPrompt = AgentSession.prototype.prompt;
+  AgentSession.prototype.prompt = function (...args) {
+    if (!this.sessionManager.getSessionFile()?.startsWith(sessionsDir)) return originalPrompt.apply(this, args);
+    branchSession = this;
+    assert.equal(this.settingsManager.isProjectTrusted(), false);
+    assert.deepEqual(this.settingsManager.getProjectSettings(), {});
+    assert.deepEqual(this.resourceLoader.getSkills().skills, []);
+    assert.deepEqual(this.resourceLoader.getPrompts().prompts, []);
+    assert.deepEqual(this.resourceLoader.getThemes().themes, []);
+    assert.deepEqual(this.resourceLoader.getAgentsFiles().agentsFiles, []);
+    assert.equal(this.model.id, "gpt-5.6-luna");
+    assert.equal(this.thinkingLevel, "minimal");
+    return originalPrompt.apply(this, args);
+  };
+  let providerCalls = 0;
+  const originalStream = ModelRuntime.prototype.streamSimple;
+  ModelRuntime.prototype.streamSimple = function (model, context, options) {
+    providerCalls += 1;
+    assert.equal(options.transport, "sse", "global SSE must reach the real branch provider consumer");
+    assert.equal(branchSession.settingsManager.getGlobalSettings().httpProxy, "http://127.0.0.1:9");
+    assert.equal(options.websocketConnectTimeoutMs, 7000);
+    assert.equal(options.timeoutMs, 23000);
+    assert.equal(options.maxRetries, 0);
+    assert.equal(options.maxRetryDelayMs, 1234);
+    assert(!context.systemPrompt.includes("UNWANTED_CONTEXT"));
+    return originalStream.call(this, model, context, options);
+  };
+  let websocketAttempts = 0;
+  globalThis.WebSocket = class { constructor() { websocketAttempts += 1; throw new Error("unexpected WebSocket attempt"); } };
 
   // Legacy endpoint labels are valid outcome history but cannot name task caches.
   // Ownership at session_start reproduces the primary startup reconciliation path.
@@ -1251,6 +1314,21 @@ export default async function compatProbe(pi) {
       throw new Error("the executable branch boundary did not persist its report");
     }
     await settlement;
+    assert(branchPackageResolutions > 0, "real branch package resolver was not exercised");
+    assert(providerCalls >= 2, "real branch provider consumer was not exercised");
+    assert.equal(websocketAttempts, 0);
+    // Exercise persistence-capable SDK/plugin setters on the branch-owned
+    // manager, flush their async queue, and prove neither file was rewritten.
+    branchSession.settingsManager.setDefaultModelAndProvider("test", "branch-only");
+    branchSession.settingsManager.setDefaultThinkingLevel("low");
+    branchSession.settingsManager.setTransport("websocket");
+    branchSession.setAutoCompactionEnabled(false);
+    await branchSession.settingsManager.flush();
+    await branchSession.settingsManager.reload();
+    assert.equal(branchSession.settingsManager.getTransport(), "websocket");
+    assert.equal(readFileSync(`${agentDir}/settings.json`, "utf8"), globalSettingsBytes);
+    assert.equal(readFileSync(`${root}/.pi/settings.json`, "utf8"), projectSettingsBytes);
+    for (const [key, value] of Object.entries(proxyEnvironment)) assert.equal(process.env[key], value);
     const visible = ctx.sessionManager.getEntries().filter((entry) => entry.type === "custom_message" &&
       entry.customType === "fm-branch-merge" &&
       JSON.stringify(entry.content).includes("installed Codex compatibility provider handled the branch"));
@@ -1265,7 +1343,7 @@ export default async function compatProbe(pi) {
 }
 EOF
 pi_cli_entry=$(jq -er '.bin.pi' "$PI_PACKAGE_DIR/package.json") || fail "installed Pi CLI entry is absent"
-FM_HOME="$compathome" FM_ROOT_OVERRIDE="$ROOT" PI_CODING_AGENT_DIR="$compatagentdir" PI_OFFLINE=1 \
+FM_HOME="$compathome" FM_ROOT_OVERRIDE="$compatroot" PI_CODING_AGENT_DIR="$compatagentdir" PI_OFFLINE=1 \
   node "$PI_PACKAGE_DIR/$pi_cli_entry" --offline --no-context-files --no-skills \
   --no-prompt-templates --no-themes --no-extensions \
   -e "$repo/.pi/extensions/fm-branch-supervision.ts" -e "$repo/compat-probe.ts" \
@@ -1276,4 +1354,4 @@ out=$(cat "$TMP_ROOT/compat-output")
 if [ "$status" -ne 0 ] || ! printf '%s\n' "$out" | grep -qx 'CODEX_COMPAT_OK'; then
   fail "real installed pi-openai-codex-compat $compat_version branch guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-pass "real Pi CLI $PI_VERSION with pi-openai-codex-compat $compat_version creates Luna/minimal branch on its first eligible wake after legacy outcome migration, with guarded tools and native compaction"
+pass "real Pi CLI $PI_VERSION with pi-openai-codex-compat $compat_version inherits global SSE and connection settings without project resources or writes, preserving Luna/minimal, guarded tools, legacy outcomes and native compaction"

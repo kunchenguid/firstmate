@@ -33,6 +33,11 @@ The supervision branch itself is Pi-only by construction:
   A fleet-wide heartbeat keeps its own all-or-nothing rule (see "Heartbeat routing" below): it takes every branch-ownable unread row or none of them.
   A co-present main-owned check row no longer defers that review to main, because it is not fleet context the branch is missing and main is woken for it on its own triggering close.
 - The branch itself: `.pi/extensions/fm-branch-supervision.ts` creates the branch session, serializes wakes, mirrors dialog, and merges outcomes.
+  Each build reads global settings through Pi's `SettingsManager` with `projectTrusted: false`, then shares an in-memory snapshot between package resolution, the resource loader, and the session.
+  Runtime settings such as transport, connection timeouts, retry policy, and proxy configuration survive; branch and plugin setters cannot write back to user settings, and model/effort selection retains the explicit precedence described below.
+  The snapshot clears configured packages, extensions, skills, prompts, and themes because Pi resolves package sources before applying the loader's discovery flags.
+  Unreadable or malformed global settings fail the build and return the wake to main instead of silently using defaults.
+  Pi's CLI owns process-wide proxy environment and HTTP dispatcher initialization; the branch retains that process setup and does not reconfigure it.
   Before an `openai-codex` branch can prompt, it resolves the installed user package `npm:pi-openai-codex-compat` through Pi's package manager, validates package identity and the readable manifest, loads exactly its declared in-package extension entry from the installed user-package provenance, and binds the extension so its `session_start` provider override and native compaction hooks are active.
   Every other resource-discovery class remains disabled, and the post-start active-tool check must still equal `read`, guarded `bash`, and `fm_branch_report` in that order.
   If compatibility startup removes only `bash`, leaving exactly `read` and `fm_branch_report`, the branch restores the registered guarded override and verifies the full active-tool set again.
