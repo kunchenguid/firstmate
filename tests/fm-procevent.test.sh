@@ -1502,6 +1502,55 @@ kill -0 "$noisy_child" 2>/dev/null && fail "TERM-resistant source child survived
 assert_absent "$staged" "retirement removes the tracked partial staging file"
 pass "live output stays bounded and retirement reaps the whole source group"
 
+HPOST_TERM="$TMP_ROOT/post-term-reuse"; new_home "$HPOST_TERM"
+POST_TERM_SOURCE="$TMP_ROOT/post-term-reuse-source.sh"
+POST_TERM_PID="$TMP_ROOT/post-term-reuse.pid"
+POST_TERM_MARKER="$TMP_ROOT/post-term-reuse.marker"
+POST_TERM_COUNT="$TMP_ROOT/post-term-reuse.count"
+cat > "$POST_TERM_SOURCE" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+printf '%s\n' "$$" > "$1"
+while :; do sleep 1; done
+SH
+chmod +x "$POST_TERM_SOURCE"
+POST_TERM_BIN=$(fm_fakebin "$TMP_ROOT/post-term-reuse-bin")
+REAL_PS=$(command -v ps) || fail "the post-TERM reuse fixture requires ps"
+cat > "$POST_TERM_BIN/ps" <<SH
+#!/usr/bin/env bash
+if [ -e "$POST_TERM_MARKER" ] && [ "\${1-}" = -p ] \
+  && [ "\${3-}" = -o ] && [ "\${4-}" = lstart= ]; then
+  count=0
+  [ ! -f "$POST_TERM_COUNT" ] || count=\$(cat "$POST_TERM_COUNT")
+  count=\$((count + 1))
+  printf '%s\n' "\$count" > "$POST_TERM_COUNT"
+  if [ "\$count" -gt 1 ]; then
+    printf 'post-TERM reused identity\n'
+    exit 0
+  fi
+fi
+exec "$REAL_PS" "\$@"
+SH
+chmod +x "$POST_TERM_BIN/ps"
+pe_register "$HPOST_TERM" lavish post-term-src -- \
+  "$POST_TERM_SOURCE" "$POST_TERM_PID" >/dev/null
+FM_PROCEVENT_OWNER_CHECK_SECONDS=5 pe "$HPOST_TERM" reconcile >/dev/null
+wait_for "$POST_TERM_PID" || fail "the post-TERM reuse fixture did not start"
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
+  || fail "the post-TERM reuse fixture did not claim its source"
+POST_TERM_RUNNER=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim")
+touch "$POST_TERM_MARKER"
+post_term_status=0
+PATH="$POST_TERM_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
+  pe "$HPOST_TERM" retire post-term-src >/dev/null 2>&1 || post_term_status=$?
+[ "$post_term_status" -ne 0 ] || fail "retirement escalated after runner identity became ambiguous"
+[ "$(cat "$POST_TERM_COUNT" 2>/dev/null || printf 0)" -gt 1 ] \
+  || fail "the post-TERM identity transition did not occur"
+kill -0 -"$POST_TERM_RUNNER" 2>/dev/null \
+  || fail "an ambiguous reused-PID group was killed during escalation"
+pe "$HPOST_TERM" retire post-term-src >/dev/null
+pass "cleanup aborts escalation after runner identity becomes ambiguous"
+
 HBAD="$TMP_ROOT/hbad"; new_home "$HBAD"
 pe_register "$HBAD" lavish bad-limit -- /bin/true >/dev/null
 bad_limit_status=0

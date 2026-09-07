@@ -1225,7 +1225,7 @@ cmd_reconcile() {
 # blocking child - signalling only the runner would leave that child alive and
 # reparented, which is exactly how a source that never completes leaks.
 stop_runner_pid() {  # <pid> <identity>
-  local pid=${1-} identity=${2-} state pgid i=0
+  local pid=${1-} identity=${2-} state pgid process_state i=0
   case "$pid" in ''|*[!0-9]*) return 2 ;; esac
   [ -n "$identity" ] || return 2
   fm_procevent_pid_state "$pid" "$identity"
@@ -1250,11 +1250,29 @@ stop_runner_pid() {  # <pid> <identity>
     if kill -0 "$pid" 2>/dev/null; then
       fm_procevent_pid_state "$pid" "$identity"
       state=$?
-      [ "$state" -eq 2 ] && return 2
+      case "$state" in
+        0|3) ;;
+        1)
+          process_state=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
+          case "$process_state" in Z*) ;; *) return 2 ;; esac
+          ;;
+        *) return 2 ;;
+      esac
     fi
     sleep 0.1
     i=$((i + 1))
   done
+  fm_procevent_pid_state "$pid" "$identity"
+  state=$?
+  case "$state" in
+    0|3) ;;
+    1)
+      fm_pid_alive "$pid" && return 2
+      fm_procevent_group_alive "$pid" || return 0
+      return 2
+      ;;
+    *) return 2 ;;
+  esac
   kill -KILL -"$pid" 2>/dev/null || return 2
   i=0
   while [ "$i" -lt 20 ]; do
