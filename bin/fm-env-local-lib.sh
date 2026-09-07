@@ -241,7 +241,14 @@ fm_env_local_retire_unignored_copy() {  # <worktree> <target> <refusing-step>
 # question rather than trusting the caller's earlier answer, so a file that changed
 # in between is never deleted on a stale verdict.
 fm_env_local_retire_seeded_copy() {  # <worktree>
-  return 1
+  local worktree=$1 target="$1/.env.local"
+  # Re-check ownership immediately before removal. The caller invokes this only
+  # after task processes have been reaped, but the second check keeps this helper
+  # safe when used independently and prevents a stale safety verdict authorizing
+  # deletion of a task-owned file.
+  fm_env_local_seeded_copy_intact "$worktree" || return 1
+  rm -f -- "$target" || return 1
+  fm_env_local_drop_seed_record "$worktree"
 }
 
 fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
