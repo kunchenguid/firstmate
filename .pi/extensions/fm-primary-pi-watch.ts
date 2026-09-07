@@ -16,11 +16,20 @@
 // The successor pipeline never waits for the model to read it: a follow-up
 // queued while main is streaming joins the running run without ever raising
 // before_agent_start, so waiting on that event stalls every later close.
-// Consumption is tracked only so a replacement can replay a follow-up Pi had
-// not consumed. An idle main consumes at before_agent_start; a streaming main
-// consumes at the user message_start carrying the exact wake text; either
-// event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// Acceptance is the redelivery bound: once Pi accepts a record in a live
+// generation the message is in the session and its run will read it, so the
+// record is marked delivered and never re-sent - a replacement replays a
+// pending record only while Pi never accepted it. A replayed record is also
+// gated against durable state before its re-send: bin/fm-watch-replay-gate.sh
+// compares the record's reason line with the wake queue and the recovery
+// episode and may drop a wake whose row was already acknowledged or whose
+// subject task no longer exists, so an already-handled wake can never loop.
+// That gate runs as a bounded, asynchronous child - never synchronously on
+// Pi's UI thread, which must keep repainting and dispatching keystrokes
+// while a replay is being decided.
+// Consumption (an idle main at before_agent_start, a streaming main at the
+// user message_start carrying the exact wake text) still finishes the record,
+// and either completion is idempotent.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -34,6 +43,7 @@ import {
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
+import { runCommandAsync } from "./lib/fm-async-exec.ts";
 import {
   type CalmPresentationState,
   calmTranscriptClassIsVisible,
@@ -59,6 +69,9 @@ type PendingActionableClose = {
   message: string;
   predecessorArmPid: string;
   delivered?: true;
+  // Set on a record carried across a session replacement: it was presented in
+  // a previous session, so its re-send must pass the durable replay gate.
+  replayed?: true;
 };
 
 type ReplacementActionableHandoff = {
@@ -132,6 +145,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const replayGateScript = `${fmRoot}/bin/fm-watch-replay-gate.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const handoffDir = `${state}/extensions/pi-primary-watch`;
 const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
@@ -147,6 +161,12 @@ const armReadyTimeoutMs = positiveInteger(
   process.platform === "win32" ? 35000 : 12000,
 );
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+// Ceiling for one replay-gate answer. The gate is a bash child that scans the
+// home's durable wake records; it normally answers in well under a second,
+// but a stalled filesystem or child must not hold a replay (or a replacement
+// waiting on its delivery claim) open forever. An answer that never arrives
+// counts as "deliver", the gate's own safe direction.
+const replayGateTimeoutMs = positiveInteger("FM_PI_REPLAY_GATE_TIMEOUT_MS", 10000);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
@@ -289,7 +309,9 @@ function validatePendingActionable(value: unknown): PendingActionableClose {
     typeof (value as { predecessorArmPid?: unknown }).predecessorArmPid !== "string" ||
     !/^[0-9]*$/.test((value as { predecessorArmPid: string }).predecessorArmPid) ||
     ((value as { delivered?: unknown }).delivered !== undefined &&
-      (value as { delivered?: unknown }).delivered !== true)
+      (value as { delivered?: unknown }).delivered !== true) ||
+    ((value as { replayed?: unknown }).replayed !== undefined &&
+      (value as { replayed?: unknown }).replayed !== true)
   ) {
     throw new Error(`invalid Pi replacement actionable handoff at ${actionableHandoff}`);
   }
@@ -528,10 +550,15 @@ export default function (pi: ExtensionAPI) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
       throw error;
     }
-    // Accepted by Pi. A generation replaced while Pi was accepting it may
-    // have lost the follow-up with the old session, so report it undelivered
-    // and let the replacement replay the still-pending record.
-    return generationIsLive(owner);
+    // Accepted by Pi in this live generation: the message is in the session
+    // and its run will read it, so mark the record delivered - it must never
+    // be re-sent, and the cleanup pass retires it and clears its handoff
+    // record. A generation replaced while Pi was accepting it may have lost
+    // the follow-up with the old session, so report that case undelivered and
+    // let the replacement replay the still-pending record once.
+    const live = generationIsLive(owner);
+    if (pending && live) pending.delivered = true;
+    return live;
   }
 
   // Pi consumed a main follow-up: an idle main at before_agent_start, a
@@ -667,6 +694,24 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  // Ask the durable-state gate whether a replayed record may be re-sent.
+  // Runs as a bounded awaited child through lib/fm-async-exec.ts - never
+  // synchronously on Pi's UI thread, which must keep repainting and
+  // dispatching keystrokes while the gate scans durable state. Anything
+  // unreadable, timed out (null status), or non-zero answers "deliver":
+  // presenting one bounded extra wake is safer than suppressing an unhandled
+  // one.
+  async function replayGateDrops(message: string): Promise<boolean> {
+    const result = await runCommandAsync("bash", [replayGateScript, message], {
+      cwd: fmRoot,
+      env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
+      timeoutMs: replayGateTimeoutMs,
+    });
+    if (result.status !== 0) return false;
+    const verdict = result.stdout.split(/\r?\n/).find((line) => line.length > 0) ?? "";
+    return verdict.startsWith("drop");
+  }
+
   function enqueuePendingActionable(
     owner: SessionGeneration,
     pending: PendingActionableClose,
@@ -675,6 +720,7 @@ export default function (pi: ExtensionAPI) {
     owner.pendingActionables.push(pending);
     if (owner.stopping && owner.replacement) {
       let replacementPending = pending;
+      replacementPending.replayed = true;
       try {
         mergeReplacementHandoff(pending);
       } catch (error) {
@@ -766,6 +812,28 @@ export default function (pi: ExtensionAPI) {
           // A new restoration supersedes whatever became of the previous
           // successor; only a failure during this delivery is retried after it.
           owner.deferredClose = null;
+          // A replayed record was presented in a previous session. Gate its
+          // re-send against durable state: a wake whose row was acknowledged
+          // or whose subject task is gone must never be presented again. The
+          // gate is an awaited asynchronous child, so this activation keeps
+          // serving Pi while the verdict is pending. A drop settles the claim
+          // "delivered" even if this generation died mid-gate: the verdict
+          // proves the wake is already handled, so any replacement holding a
+          // copy must skip presenting it too, and the handoff cleanup below
+          // retires the record for everyone. The activation that enqueued
+          // this record already started this generation's arm child, so
+          // dropping still leaves supervision armed.
+          if (pending.replayed && (await replayGateDrops(pending.message))) {
+            settleClaim("delivered");
+            pending.delivered = true;
+            try {
+              finishPendingActionable(owner, pending);
+            } catch (error) {
+              surfaceCleanupFailure(owner, error);
+            }
+            releaseClaim();
+            continue;
+          }
           const restoration = await restoreAfterActionableClose(owner, pending.predecessorArmPid);
           if (!generationIsLive(owner)) {
             settleClaim("failed");
@@ -782,8 +850,10 @@ export default function (pi: ExtensionAPI) {
           const awaitingConsumption = owner.unconsumedWakes.has(pending.token);
           if (awaitingConsumption && !generationIsLive(owner)) {
             // Pi accepted the follow-up, then the session was replaced before
-            // this continuation ran: the shutdown persisted the still-pending
-            // record, so a replacement waiting on this claim must replay it.
+            // this continuation ran. A record Pi accepted in the old
+            // generation is already delivered and never re-sent; only a
+            // record whose acceptance raced the replacement rides the handoff
+            // for the replacement to replay once.
             settleClaim("failed");
             releaseClaim();
             return;
@@ -1073,6 +1143,9 @@ export default function (pi: ExtensionAPI) {
     }
     const inProcessPending = replacementCoordinator.pending.splice(0);
     for (const actionable of [...pending, ...inProcessPending]) {
+      // Both sources carried the record across a session boundary, so it was
+      // presented before: its re-send is a replay and must pass the gate.
+      actionable.replayed = true;
       enqueuePendingActionable(owner, actionable);
     }
     if (owner.pendingActionables.length > 0) {

@@ -35,6 +35,13 @@ export interface AsyncExecOptions {
    * maxBuffer. Defaults to 1 MiB.
    */
   maxBuffer?: number;
+  /**
+   * Kill the child after this many milliseconds and resolve a null status -
+   * the same answer a signalled child already reports - so a stalled child
+   * can never hold a caller's await open forever. The caller still sees the
+   * child's partial output. Unset means unbounded, the historical behavior.
+   */
+  timeoutMs?: number;
 }
 
 const DEFAULT_MAX_BUFFER = 1024 * 1024;
@@ -51,9 +58,11 @@ export function runCommandAsync(
     let stderrBytes = 0;
     const maxBuffer = options.maxBuffer ?? DEFAULT_MAX_BUFFER;
     let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
     const finish = (status: number | null, detail = ""): void => {
       if (settled) return;
       settled = true;
+      if (timeout) clearTimeout(timeout);
       resolve({ status, stdout, stderr: detail ? `${stderr}${detail}` : stderr });
     };
     let child;
@@ -95,6 +104,15 @@ export function runCommandAsync(
     // drained, so no output is lost the way an early "exit" would lose it.
     child.on("close", (code) => finish(code));
     child.on("error", (error: Error) => finish(null, error.message));
+    if (options.timeoutMs !== undefined) {
+      timeout = setTimeout(() => {
+        child.kill();
+        finish(null, `timed out after ${options.timeoutMs}ms`);
+      }, options.timeoutMs);
+      // Killing a stalled child on exit must not keep the host process alive
+      // just to do it.
+      timeout.unref();
+    }
     if (child.stdin) {
       // A child that exits before reading stdin makes the write fail with
       // EPIPE, which is its answer, not this helper's failure.
