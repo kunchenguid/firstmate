@@ -488,6 +488,7 @@ function wordsInNode(tokens) {
 
 const WRAPPER_OPTIONS = {
   command: { noArgument: new Set(["p", "v", "V"]), takesArgument: new Set() },
+  time: { noArgument: new Set(["p"]), takesArgument: new Set() },
   env: { noArgument: new Set(["0", "i", "P", "v"]), takesArgument: new Set(["a", "C", "S", "u"]) },
   exec: { noArgument: new Set(["c", "l"]), takesArgument: new Set(["a"]) },
   nohup: { noArgument: new Set(), takesArgument: new Set() },
@@ -497,6 +498,7 @@ const WRAPPER_OPTIONS = {
 
 const WRAPPER_LONG_OPTIONS = {
   command: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
+  time: { noArgument: new Set(), takesArgument: new Set() },
   env: { noArgument: new Set(["ignore-environment", "null", "help", "version"]), takesArgument: new Set(["argv0", "block-signal", "chdir", "default-signal", "ignore-signal", "split-string", "unset"]) },
   exec: { noArgument: new Set(), takesArgument: new Set() },
   nohup: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
@@ -564,7 +566,7 @@ export function commandPosition(tokens) {
   let command = words[index];
   while (command) {
     const name = basename(command.value);
-    if (name === "exec" || name === "command" || name === "sudo" || name === "nohup") {
+    if (name === "exec" || name === "command" || name === "sudo" || name === "nohup" || name === "time") {
       wrappers.push(name);
       const options = consumeWrapperOptions(name, words, index + 1);
       unresolvedWrapperOption ||= options.unresolved;
@@ -581,6 +583,13 @@ export function commandPosition(tokens) {
       index = options.index;
       while (words[index] && (words[index].value.startsWith("-") || isAssignment(words[index].value))) index += 1;
       command = words[index];
+      continue;
+    }
+    if (name === "coproc") {
+      wrappers.push(name);
+      index += 1;
+      command = words[index];
+      if (!command) unresolvedWrapperOption = true;
       continue;
     }
     if (name === "timeout" || name === "gtimeout") {
@@ -764,7 +773,7 @@ function analyzeProgram(command, context, depth = 0) {
     const position = commandPosition(tokens);
     const nodeContext = contextWithAssignments(activeContext, position.words);
     const firstName = basename(position.words[0]?.value || "");
-    if (["if", "then", "else", "elif", "fi", "for", "while", "until", "case", "esac", "do", "done", "function", "time", "coproc"].includes(firstName)) {
+    if (["if", "then", "else", "elif", "fi", "for", "while", "until", "case", "esac", "do", "done", "function"].includes(firstName)) {
       unsupported = true;
     }
 
@@ -866,9 +875,8 @@ function analyzeProgram(command, context, depth = 0) {
   const protectedFound = directProtected || nestedProtected || unclassifiableProtected;
   if (unclassifiableProtected) unsupported = true;
   const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
-  const rawPipelineDriveFound = unsupported && rawMentionsPipelineDrive(command);
-  if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound || rawPipelineDriveFound)) {
-    return { error: "unsupported compound grammar", protectedFound: protectedFound || rawMentionsProtected(command) || broadKillFound, broadKill: broadKillFound, pipelineDrive: pipelineDrive || rawPipelineDriveFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound)) {
+    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pipelineDrive, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
   }
   return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pipelineDrive, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }

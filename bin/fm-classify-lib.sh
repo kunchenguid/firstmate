@@ -460,10 +460,8 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Pure read of
 # the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
-# is the pure-read durable open-set a one-shot historical consumer uses instead of
-# trusting the last status line. Repeated fleet views use the incremental sibling
-# with a captured endpoint so their cost follows new appends instead of lifetime
-# status history.
+# is the durable open-set the fleet snapshot and any point-in-time consumer must use
+# instead of trusting the last status line.
 # The scan_open_decisions wrapper below enumerates a whole directory rather than
 # a single caller-chosen path, so a status file that is itself a symlink (e.g.
 # escaping the state directory) is rejected outright with a plain [ -L ] check
@@ -581,8 +579,7 @@ EOF
 # fleet-wide scan using that whole-file function would pay that cost for every
 # task on every wake, which grows unbounded as tasks run longer and accumulate
 # status history. status_open_decisions_incremental and scan_open_decisions_incremental
-# below are the bounded-cost siblings used for per-drain and repeated fleet-view
-# paths: each call
+# below are the bounded-cost siblings used for that per-drain path: each call
 # reads only the bytes appended to a status file since its own last call (a
 # persisted per-file byte cursor) and folds just those new lines into a
 # persisted running open-set, via the exact same _fm_decision_fold_line rule
@@ -622,11 +619,10 @@ EOF
 #
 # Not a pure status-file read: this writes/rewrites the sibling cursor file as a
 # side effect (state/.<task>.open-decisions-cursor), the library's second
-# documented exception to the pure-read rule after crew_absorb_class. Wake drains
-# and fleet snapshots share this observational cache. The write is atomic (temp
-# file + rename), so a crash between calls leaves either the prior cursor or the
-# new one, never a partial one. bin/fm-wake-drain.sh calls this only after
-# releasing the wake-queue lock, so a hypothetical race between
+# documented exception to the pure-read rule after crew_absorb_class. The write
+# is atomic (temp file + rename), so a crash between calls leaves either the
+# prior cursor or the new one, never a partial one. bin/fm-wake-drain.sh calls
+# this only after releasing the wake-queue lock, so a hypothetical race between
 # two overlapping drains can at worst redo a little folding work twice - never
 # drop an open decision - because a losing writer's offset can only ever be
 # equal to or behind an already-recorded byte position, and the next call
@@ -718,11 +714,11 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   ' "$f" "$start" "$length"
 }
 
-status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [<require-endpoint>]
-  local f=$1 captured_end=${2:-} require_endpoint=${3:-false} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
+status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
+  local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
   local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
   local target_cursor
-  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { [ "$require_endpoint" = true ] && return 1; return 0; }
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
   ident=''
@@ -770,49 +766,23 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
   # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
   # report the already-trusted persisted set unchanged rather than risking a
   # silent invalidation that would wipe it.
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || {
-    [ "$require_endpoint" = true ] && return 1
-    printf '%s' "$trusted_open"
-    return 0
-  }
-  [ -n "$cur_ident" ] || {
-    [ "$require_endpoint" = true ] && return 1
-    printf '%s' "$trusted_open"
-    return 0
-  }
-  actual_size=$(_fm_status_file_size "$f") || {
-    [ "$require_endpoint" = true ] && return 1
-    printf '%s' "$trusted_open"
-    return 0
-  }
+  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
+  [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
+  actual_size=$(_fm_status_file_size "$f") \
+    || { printf '%s' "$trusted_open"; return 0; }
   actual_size=${actual_size//[[:space:]]/}
-  case "$actual_size" in
-    ''|*[!0-9]*)
-      [ "$require_endpoint" = true ] && return 1
-      printf '%s' "$trusted_open"
-      return 0
-      ;;
-  esac
+  case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
   if [ -n "$captured_end" ]; then
     case "$captured_end" in
-      ''|*[!0-9]*)
-        [ "$require_endpoint" = true ] && return 1
-        printf '%s' "$trusted_open"
-        return 0
-        ;;
+      ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;;
     esac
-    if [ "$captured_end" -gt "$actual_size" ]; then
-      [ "$require_endpoint" = true ] && return 1
-      printf '%s' "$trusted_open"
-      return 0
-    fi
+    [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return 0; }
     size=$captured_end
   else
     size=$actual_size
   fi
 
-  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || \
-     [ "$offset" -gt "$actual_size" ] || [ "$offset" -gt "$size" ]; then
+  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
     offset=0
     open=''
     trusted_open=''
@@ -821,26 +791,13 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
 
   if [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
-    if ! _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null; then
-      rm -f "$chunk_file"
-      [ "$require_endpoint" = true ] && return 1
-      printf '%s' "$trusted_open"
-      return 0
-    fi
-    if ! chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null); then
-      rm -f "$chunk_file"
-      [ "$require_endpoint" = true ] && return 1
-      printf '%s' "$trusted_open"
-      return 0
-    fi
+    _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
+      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+    chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
+      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
     chunk_size=${chunk_size//[[:space:]]/}
     case "$chunk_size" in
-      ''|*[!0-9]*)
-        rm -f "$chunk_file"
-        [ "$require_endpoint" = true ] && return 1
-        printf '%s' "$trusted_open"
-        return 0
-        ;;
+      ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
     esac
     # Test-only observability seam (off by default, no production behavior
     # change): when set, records exactly how many bytes THIS call folded, so a

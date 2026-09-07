@@ -58,7 +58,7 @@
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
-#     fm-classify-lib.sh's authoritative incremental open-decision fold and reconciled
+#     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
@@ -215,7 +215,7 @@ usage: fm-fleet-snapshot.sh --json
 
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract. The default snapshot
-refreshes its parent-side remote-summary cache and open-decision cursors as observational side effects.
+refreshes only its parent-side remote-summary cache as an observational side effect.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -575,36 +575,21 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
   fi
 }
 
-snapshot_task_status_is_current() {
-  local captured_meta=$1 id=$2 expected_identity=$3 current_identity
-  [ -n "$expected_identity" ] || return 1
-  snapshot_task_generation_is_current "$captured_meta" "$id" || return 1
-  current_identity=$(_fm_open_decisions_file_ident "$STATE/$id.status" 2>/dev/null) || return 1
-  [ "$current_identity" = "$expected_identity" ]
-}
-
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
-  local status_log status_capture status_identity_file status_identity_before status_identity_after report_path report_capture
+  local status_log status_capture report_path report_capture
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
   status_log="$STATE/$id.status"
   status_capture="$SNAPSHOT_TASK_DIR/$id.status"
-  status_identity_file="$SNAPSHOT_TASK_DIR/$id.status-ident"
   report_path="$DATA/$id/report.md"
   report_capture="$SNAPSHOT_TASK_DIR/$id.report"
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
-    status_identity_before=$(_fm_open_decisions_file_ident "$status_log" 2>/dev/null || true)
     snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
-    status_identity_after=$(_fm_open_decisions_file_ident "$status_log" 2>/dev/null || true)
-    if [ -f "$status_capture" ] && [ -n "$status_identity_before" ] && \
-       [ "$status_identity_before" = "$status_identity_after" ]; then
-      printf '%s\n' "$status_identity_before" > "$status_identity_file" || current_rc=1
-    fi
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
   fi
 
@@ -638,7 +623,7 @@ prefetch_task_observations() {  # <meta> <id>
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
-    rm -f -- "$status_capture" "$status_identity_file" "$report_capture"
+    rm -f -- "$status_capture" "$report_capture"
     jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     endpoint_exists=null
@@ -707,8 +692,7 @@ task_json_lines() {
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json captured_status_size captured_status_identity status_identity_file
-  local use_incremental
+  local open_decisions_tsv open_decisions_json
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -759,10 +743,9 @@ task_json_lines() {
       printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
     )
 
-    # Durable keyed open-decision set: advance the shared cursor-backed fold
-    # (fm-classify-lib.sh's status_open_decisions_incremental) so a later unrelated
-    # event can never mask a still-open captain decision without re-reading a
-    # secondmate's lifetime status history on every fleet view. The set is derived purely from the
+    # Durable keyed open-decision set: fold the WHOLE status stream
+    # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
+    # never mask a still-open captain decision. The set is derived purely from the
     # keyed fold - never from report bodies or decision-like prose - and then
     # reconciled against the crew LIFECYCLE, which only clears a stale decision the
     # crew has provably moved past. Two lifecycle signals clear it, neither of which
@@ -777,25 +760,7 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
-    captured_status_size=$(_fm_status_file_size "$status_log" 2>/dev/null || true)
-    captured_status_size=${captured_status_size//[[:space:]]/}
-    status_identity_file="$SNAPSHOT_TASK_DIR/$id.status-ident"
-    captured_status_identity=$(LC_ALL=C command cat "$status_identity_file" 2>/dev/null || true)
-    use_incremental=0
-    case "$captured_status_size" in
-      ''|*[!0-9]*) ;;
-      *)
-        if snapshot_task_status_is_current "$meta" "$id" "$captured_status_identity" && \
-           open_decisions_tsv=$(status_open_decisions_incremental \
-             "$STATE/$id.status" "$captured_status_size" true) && \
-           snapshot_task_status_is_current "$meta" "$id" "$captured_status_identity"; then
-          use_incremental=1
-        fi
-        ;;
-    esac
-    if [ "$use_incremental" -ne 1 ]; then
-      open_decisions_tsv=$(status_open_decisions "$status_log")
-    fi
+    open_decisions_tsv=$(status_open_decisions "$status_log")
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \

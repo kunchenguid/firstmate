@@ -61,7 +61,7 @@ Malformed or unsupported shell syntax that contains a protected command is a sem
 ## Primary pipeline ownership
 
 An executed `no-mistakes` command whose first two arguments are `axi run` or `axi respond` is a pipeline drive.
-The classifier follows the same recognized wrapper and literal nested-shell execution positions used for watcher commands, so `env no-mistakes axi respond ...` and `bash -lc 'no-mistakes axi run ...'` cannot evade the ownership boundary.
+The classifier follows the same recognized wrapper and literal nested-shell execution positions used for watcher commands, so `env`, `time -p`, `coproc`, and `bash -lc` execution cannot evade the ownership boundary.
 A pipeline drive denies with `primary-pipeline-drive` only when `bin/fm-primary-scope-lib.sh` proved the checker is running in a genuine primary home.
 The identical command is allowed from a linked task worktree because that worker owns the run.
 Commands such as `no-mistakes axi status` and `no-mistakes axi abort` remain available in the primary for supervision and explicit recovery.

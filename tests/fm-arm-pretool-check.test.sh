@@ -376,6 +376,7 @@ EOF
   for payload in \
     'no-mistakes axi respond --action fix' \
     'time no-mistakes axi respond --action fix' \
+    'time -p no-mistakes axi respond --action fix' \
     'coproc no-mistakes axi respond --action fix'; do
     FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
       --command "$payload" >"$dir/worker.out" 2>"$dir/worker.err"
@@ -390,6 +391,7 @@ EOF
     'env NO_COLOR=1 no-mistakes axi respond --action fix' \
     "bash -lc 'no-mistakes axi respond --action fix'" \
     'time no-mistakes axi respond --action fix' \
+    'time -p no-mistakes axi respond --action fix' \
     'coproc no-mistakes axi respond --action fix'; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
     rc=$?
@@ -397,8 +399,13 @@ EOF
     jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | contains("[primary-pipeline-drive]"))' "$dir/run.err" >/dev/null \
       || fail "the primary pipeline-run deny omitted its stable reason"
   done
-  FM_HOME="$primary" "$check" --command "echo 'no-mistakes axi respond --action fix'" >/dev/null 2>&1 \
-    || fail "a pipeline command mentioned only as data must remain allowed"
+  for payload in \
+    "echo 'no-mistakes axi respond --action fix'" \
+    "time echo 'no-mistakes axi run --intent data'" \
+    "coproc echo 'no-mistakes axi respond --action data'"; do
+    FM_HOME="$primary" "$check" --command "$payload" >/dev/null 2>&1 \
+      || fail "a pipeline command mentioned only as data must remain allowed: $payload"
+  done
   FM_HOME="$primary" "$check" --command 'no-mistakes axi status' >/dev/null 2>&1 \
     || fail "the primary must retain read-only pipeline status"
   FM_HOME="$primary" "$check" --command 'no-mistakes axi abort --run 01RUN' >/dev/null 2>&1 \
