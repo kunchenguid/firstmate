@@ -57,9 +57,11 @@ cleanup() {
 trap cleanup EXIT
 
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$PROJECT/.pi/extensions/fm-branch-supervision.ts"
-for lib in fm-async-exec fm-branch-dispatch fm-branch-model-picker fm-calm-visibility fm-operational-input; do
+for lib in fm-async-exec fm-branch-dispatch fm-branch-model-picker fm-calm-visibility fm-operational-input fm-feishu-native-channel; do
   cp "$ROOT/.pi/extensions/lib/$lib.ts" "$PROJECT/.pi/extensions/lib/$lib.ts"
 done
+mkdir -p "$PROJECT/bin"
+cp "$ROOT/bin/fm-feishu-state.mjs" "$PROJECT/bin/fm-feishu-state.mjs"
 
 EXT="$PROJECT/.pi/extensions/fm-branch-supervision.ts"
 OUTCOME_SCRIPT="$ROOT/bin/fm-branch-outcome.sh"

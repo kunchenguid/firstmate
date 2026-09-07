@@ -114,6 +114,9 @@ Only a genuine store fault keeps that backstop skipped.
 Main's captain and assistant text - never tool calls, tool results, operational injections, or the branch's own merged notes - is mirrored into the branch as read-only `fm-main-mirror` messages.
 The idle path mirrors at main's turn end.
 At `before_agent_start`, Pi's authoritative prompt is staged verbatim before SessionManager persists that user entry, so the complete current captain message precedes any branch wake accepted after that boundary; the later persisted copy is suppressed and older dialog entries remain bounded.
+Native Feishu input uses Pi's custom-message queue instead of that prompt event, so its text is staged at `message_start` when Pi consumes it, including while main is streaming.
+The native channel's `classifyFeishuMessage` remains the provenance owner: only a matching accepted delivery, binding generation, and immutable content digest qualifies as captain input; arbitrary custom messages and forged Feishu metadata do not.
+Persisted Feishu entries use the same validation during history collection, preserving user/assistant order and cold-start continuity, and a staged delivery is suppressed once its persisted entry catches up.
 The mirror cursor is durable (`state/.branch-mirror-cursor`), so within one main session only not-yet-mirrored dialog is replayed.
 Every main session start re-anchors the mirror to the current main session's start, because that start also opens a new branch conversation: the cursor records what the PREVIOUS branch conversation received, so without the reset a `/resume` or reload, which keeps main's own session file, would leave the new branch blind to dialog main itself still has.
 The reset is bounded by the current main session and costs only re-delivered read-only context, and the cursor keeps advancing incrementally from there.
