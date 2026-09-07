@@ -1678,6 +1678,12 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
   "$TASKS_AXI_BIN" 'done' noted-local --note "local main" \
     --file "$main_backlog" >/dev/null \
     || fail "could not complete the recorded-note local delivery"
+  "$TASKS_AXI_BIN" add legacy-noted-local "Complete the legacy work" \
+    --repo firstmate --start --file "$main_backlog" >/dev/null \
+    || fail "could not create the kindless local delivery"
+  "$TASKS_AXI_BIN" 'done' legacy-noted-local --note "local main" \
+    --file "$main_backlog" >/dev/null \
+    || fail "could not complete the kindless local delivery"
   "$TASKS_AXI_BIN" add shipping-scout "SHIPPING parser boundary" --kind scout \
     --repo firstmate --start --file "$main_backlog" >/dev/null \
     || fail "could not create the longer-word scout"
@@ -1748,6 +1754,11 @@ EOF
   printf '%s' "$json" | jq -e \
     '.landed | any(.id == "noted-local" and .artifact == "local main")' >/dev/null \
     || failures="${failures}recorded-note local delivery artifact was missing; "
+  # A kindless row records the same landing, so reading the note from the body
+  # must not cost it the section it reached while that note went unparsed.
+  printf '%s' "$json" | jq -e \
+    '.landed | any(.id == "legacy-noted-local" and .artifact == "local main")' >/dev/null \
+    || failures="${failures}kindless local delivery was missing; "
   printf '%s' "$json" | jq -e --arg report "$shipping_report" \
     '.landed | any(.id == "shipping-scout" and .artifact == $report)' >/dev/null \
     || failures="${failures}longer-word explicit scout kind was lost; "
