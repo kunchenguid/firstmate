@@ -347,7 +347,9 @@ test_relaunch_reaches_the_launch_attempt_from_a_missing_endpoint() {
     "an unconfirmed replacement must still report where the work lives"
   [ "$(journal_field "$dir" rl41 phase)" = "failed:launching" ] \
     || fail "the transaction journal should record the launch phase, got '$(journal_field "$dir" rl41 phase)'"
-  assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
+  # A vanished endpoint is already agent-free, so exit is idempotent and sends
+  # no bytes (test_missing_endpoint_exit_is_idempotent pins that directly);
+  # what proves the launch was actually attempted is the launch-brief literal.
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement launch should have been attempted"
   pass "fm-control relaunch: a vanished endpoint reaches the launch attempt instead of the old dead-end refusal"
 }
