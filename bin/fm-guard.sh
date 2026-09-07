@@ -5,9 +5,9 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if a task is in flight (a state/<id>.meta exists) or X-mode relay
-# polling is active (state/x-watch.check.sh exists) and supervision is not
-# healthy, prints a loud, clearly delimited banner so the agent cannot skim past
+# Then, if the home needs supervision (bin/fm-supervision-lib.sh owns that
+# condition set) and that supervision is not healthy, prints a loud, clearly
+# delimited banner so the agent cannot skim past
 # it in the tool output of whatever it was doing - the one channel every harness
 # has. Supervision health is MODEL-AWARE (fm_watcher_supervision_verdict in
 # bin/fm-wake-lib.sh): under the Claude Stop auto-arm model the watcher runs only
@@ -27,7 +27,10 @@
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
 # suppressed by that dedup. Normal wake handling (watcher briefly down between a
 # wake and the next supervision resume) stays inside the grace window and stays
-# silent. Always exits 0: the guard warns, it never blocks.
+# silent. The queued-wakes warning stays silent for the supervision branch
+# actor (FM_SUPERVISION_ACTOR=branch), because that actor runs guarded commands
+# while handling exactly the queued rows its grant covers and can drain nothing
+# else. Always exits 0: the guard warns, it never blocks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +55,12 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+
+# The current actor (fm_lease_actor is the one owner of that identity); a
+# malformed value is a wiring bug elsewhere, so the guard just warns as main.
+GUARD_ACTOR=$(fm_lease_actor 2>/dev/null) || GUARD_ACTOR=main
 
 # Deterministic episode key from the qualitative down-state (the failing
 # condition), NOT the beacon mtime: under the auto-arm model a healthy
@@ -149,11 +158,12 @@ if [ -n "$tangle_branch" ]; then
 fi
 
 # Compute supervision need and watcher-beacon freshness via the shared
-# grace-based predicate (bin/fm-supervision-lib.sh). Act when work, an event
-# source, or an X-mode relay poll needs supervision.
+# grace-based predicate (bin/fm-supervision-lib.sh), which owns what needs
+# supervision.
 fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
 sources=$FM_SUP_SOURCES
+checks=$FM_SUP_CHECKS
 needed=$FM_SUP_NEEDED
 beacon_desc=$FM_SUP_BEACON_DESC
 fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME" "$FM_ROOT"
@@ -207,6 +217,8 @@ if [ "$watcher_healthy" = false ]; then
         printf '●  %s task(s) in flight, but %s.\n' "$in_flight" "$watcher_cause"
       elif [ "$sources" -gt 0 ]; then
         printf '●  %s process-event source(s) registered, but %s.\n' "$sources" "$watcher_cause"
+      elif [ "$checks" -gt 0 ]; then
+        printf '●  %s registered custom check(s), but %s.\n' "$checks" "$watcher_cause"
       else
         printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_cause"
       fi
@@ -232,10 +244,16 @@ fi
 # Queued wakes are an independent hazard; warn whenever they are pending, even if
 # a watcher is alive. Kept after the banner so the no-watcher alarm reads first.
 # Dedup of the watcher-down banner never suppresses this warning.
+# The supervision branch is the exception: it runs guarded commands (fm-peek,
+# fm-crew-state) in the middle of handling the very rows that are queued, and
+# "drain them before anything else" mid-handling reads as "an earlier wake is
+# still pending", which is what made it re-run a previous acknowledgement in a
+# loop. The branch can act on nothing outside its grant anyway, so for that
+# actor the guard stays silent about queued rows.
 if "$queue_pending"; then
   if [ "$READ_ONLY" -eq 1 ]; then
     echo "WARNING: queued wakes pending - left untouched because this session lacks verified fleet-lock ownership." >&2
-  else
+  elif [ "$GUARD_ACTOR" != branch ]; then
     echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
   fi
 fi

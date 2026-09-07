@@ -288,7 +288,7 @@ pass "real herdr: current_path reads the pane's live cwd"
 # --- busy_state on a real claude harness (verified in herdr-verification-p2.md) ---
 
 if [ "${FM_HERDR_SMOKE_REAL_CLAUDE:-0}" = 1 ] && command -v claude >/dev/null 2>&1; then
-  fm_backend_herdr_send_literal "$TARGET" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --print 'say the word HERDRSMOKEOK and nothing else'"
+  fm_backend_herdr_send_literal "$TARGET" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --print 'say the word HERDRSMOKEOK and nothing else'"
   sleep 0.2
   fm_backend_herdr_send_key "$TARGET" Enter
   found_working=0

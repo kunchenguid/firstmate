@@ -137,8 +137,10 @@ phase_send() {
   : > "$LOG"
   printf '❯\n' > "$PANE"
   # The meta window (firstmate:fm-design) must win over a foreign same-named
-  # window returned by list-windows.
-  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_WINDOW="other-session:fm-design" \
+  # window returned by list-windows. Include the recorded endpoint in the fake
+  # inventory so the recovery-grade liveness check can verify it exists.
+  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_WINDOW="firstmate:fm-design
+other-session:fm-design" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-send.sh" fm-design 'route this work' >/dev/null 2>&1 \
     || fail "fm-send failed for a bare firstmate window with home metadata"
@@ -150,7 +152,7 @@ phase_send() {
   body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$record")
   assert_contains "$body" '[fm-from-firstmate]' "the inbox request was not marked as from-firstmate"
   assert_contains "$body" 'route this work' "the original request text did not survive the marker"
-  assert_grep 'send-keys -t firstmate:fm-design -l Firstmate instruction waiting:' "$LOG" "send did not ring the window recorded in this home's meta"
+  assert_grep 'send-keys -t firstmate:fm-design -l : Firstmate instruction waiting:' "$LOG" "send did not ring the window recorded in this home's meta"
   assert_no_grep 'route this work' "$LOG" "send typed the payload instead of only the doorbell"
   assert_no_grep 'send-keys -t other-session:fm-design' "$LOG" "send targeted a foreign same-named window"
   pass "send: a bare fm-<id> secondmate enqueues a marked request and rings the meta window"

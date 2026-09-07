@@ -111,6 +111,12 @@ Move or delete evidence only after the current owner and regression pointer are 
 After all documentation, review-fix, and lint-fix commits, review the complete branch diff again against those criteria rather than reviewing only the latest commit.
 Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup routing, local link targets, and owner pointers without keyword-linting legitimate evidence prose.
 
+## No-mistakes test configuration
+
+Never configure a deterministic suite-walk `commands.test` in any repository's no-mistakes config, whether it selects the full suite, changed tests, a family, or a fixed script list.
+Targeted validation belongs to the no-mistakes evidence path, while CI owns broad deterministic regression coverage.
+Firstmate PR #3644 demonstrated the cost: pinning a 75-162-script walk took 32.7 minutes per validation, while removing it restored the 3.6-minute targeted-validation posture.
+
 ## Repo style rules
 
 - Put one full sentence per line in tracked Markdown.

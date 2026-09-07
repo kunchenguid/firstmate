@@ -23,6 +23,14 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 herdr_forget_inherited_pane
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
+# Pin the ambient-home default to a marker-free fixture: FM_HOME resolves to
+# the suite's own root when unset, and a secondmate-marked checkout (any
+# treehouse crew home carries .fm-secondmate-home) would flip the default
+# workspace label to 2ndmate-*, silently changing placement behavior for
+# every test that does not set FM_HOME itself. Per-test FM_HOME prefixes
+# still override this default.
+mkdir -p "$TMP_ROOT/ambient-home"
+export FM_HOME="$TMP_ROOT/ambient-home"
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,

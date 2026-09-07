@@ -202,6 +202,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/gemini.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/grok.md",
       "audience": "agent-runtime"
     },
@@ -214,11 +218,19 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/omp.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/opencode.md",
       "audience": "agent-runtime"
     },
     {
       "path": ".agents/skills/harness-adapters/references/harness/pi.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/rovo.md",
       "audience": "agent-runtime"
     },
     {
@@ -394,6 +406,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/secondmate-parent-channel.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/scripts.md",
       "audience": "operator-current"
     },
@@ -419,6 +435,10 @@
     },
     {
       "path": "docs/supervision-protocols/grok.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-protocols/omp.md",
       "audience": "agent-runtime"
     },
     {
@@ -450,6 +470,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/lint-option-a.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/aime-cloud-worker.md",
       "audience": "maintainer-verification"
     },
@@ -474,7 +498,15 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/rovo.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/secondmate-parent-channel.md",
       "audience": "maintainer-verification"
     },
     {

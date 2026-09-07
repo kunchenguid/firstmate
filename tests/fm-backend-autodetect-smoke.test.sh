@@ -90,7 +90,14 @@ mkdir -p "$STATE" "$DATA/$ID" "$CONFIG"
 # Backend auto-detection is what is under test here, so opt out of the default-on
 # presentation projection and keep the assertions on the flat per-home workspace.
 printf 'off\n' > "$CONFIG/herdr-presentation-spaces"
-printf 'trivial autodetect-smoke brief: nothing to do.\n' > "$DATA/$ID/brief.md"
+cat > "$DATA/$ID/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise Herdr backend auto-detection.
+
+## Firstmate spec
+Verify the real spawn path selects Herdr.
+EOF
 
 PROJ="$TMP_ROOT/scratch-project"
 mkdir -p "$PROJ"
@@ -115,8 +122,8 @@ status=$?
 
 assert_contains_local "$(cat "$ERR_FILE")" "NOTICE" \
   "fm-spawn.sh did not print the auto-detect notice to stderr when selecting herdr"
-assert_contains_local "$(cat "$ERR_FILE")" "EXPERIMENTAL herdr backend" \
-  "fm-spawn.sh's auto-detect notice did not flag herdr as experimental"
+assert_contains_local "$(cat "$ERR_FILE")" "spawning into the herdr backend" \
+  "fm-spawn.sh's auto-detect notice did not name the selected herdr backend"
 pass "real herdr: fm-spawn.sh auto-detects herdr from HERDR_ENV=1 (no explicit config) and prints the loud notice"
 
 META="$STATE/$ID.meta"

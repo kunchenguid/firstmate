@@ -44,6 +44,7 @@ Pi sets `PI_CODING_AGENT=true` for its children as its harness-detection marker.
 The primary turn-end behavior was verified on 2026-07-09 with Pi 0.80.5.
 `.pi/extensions/fm-primary-turnend-guard.ts` listens for logical-run `agent_settled`, not per-tool-loop `turn_end`, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one guarded follow-up when `../../../bin/fm-turnend-guard.sh` returns 2.
 Without `deliverAs: "followUp"`, Pi rejects the send while the agent is still processing.
+On native Windows, the extension runs its session-start, both PreToolUse, turn-end, and operational-input Bash helpers through `bash`; macOS and Linux invoke those helpers directly.
 
 The primary watcher protocol also requires `.pi/extensions/fm-primary-pi-watch.ts`.
 The Pi engine auto-discovers both tracked project-local extensions once the project is trusted.

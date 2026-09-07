@@ -32,8 +32,17 @@ _fm_wake_require_timeout() {
   . "$FM_WAKE_LIB_DIR/fm-timeout-lib.sh"
 }
 
-fm_current_pid() {
-  printf '%s\n' "${BASHPID:-$$}"
+# Pass a variable name to capture this frame's pid without forking it in $().
+# On Bash 3.2, exec a child shell so its PPID identifies this frame, unlike $$.
+fm_current_pid() {  # [output-variable]
+  local fm_pid
+  fm_pid=${BASHPID:-$(exec sh -c 'printf "%s\n" "$PPID"')} || return 1
+  case "$fm_pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  if [ "$#" -gt 0 ]; then
+    printf -v "$1" '%s' "$fm_pid"
+  else
+    printf '%s\n' "$fm_pid"
+  fi
 }
 
 fm_pid_alive() {
@@ -180,7 +189,7 @@ fm_supervision_model() {
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude|cursor) printf 'autoarm\n' ;;
-    pi|pi-signed) printf 'extension\n' ;;
+    pi|pi-signed|omp) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
 }
@@ -229,18 +238,72 @@ fm_pi_extension_loaded() {
 # backstop that catches a cycle the watch extension failed to restore, so a home
 # missing it has no benign hand-off to tolerate.
 fm_pi_extension_owns_supervision() {
-  local state=$1 root=$2 lock session_pid pair source marker version
-  lock="$state/.lock"
-  for pair in \
+  fm_extension_pair_owns_supervision "$1" "$2/.pi/extensions" \
     "fm-primary-pi-watch.ts:.pi-watch-extension-loaded" \
-    "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"; do
+    "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"
+}
+
+# fm_omp_extension_owns_supervision <state> <root>
+# The omp (Oh My Pi) primary's proof, keyed on its own two tracked extensions
+# under .omp/extensions/ and their own state markers. It is a separate proof on
+# purpose: omp must never inherit the Pi tolerance by accident, and a Pi home
+# never satisfies the omp markers. Both proofs bind to the pid in state/.lock,
+# so a session on one harness cannot vouch for a home held by the other.
+fm_omp_extension_owns_supervision() {
+  fm_extension_pair_owns_supervision "$1" "$2/.omp/extensions" \
+    "fm-primary-omp-watch.ts:.omp-watch-extension-loaded" \
+    "fm-primary-turnend-guard.ts:.omp-turnend-extension-loaded"
+}
+
+# fm_extension_owns_supervision <state> <root>
+# The extension-model proof the verdict below consults: whichever extension
+# family's markers the lock-owning session recorded. Exactly one family can
+# match because both bind to the same lock pid.
+fm_extension_owns_supervision() {
+  fm_pi_extension_owns_supervision "$1" "$2" || fm_omp_extension_owns_supervision "$1" "$2"
+}
+
+fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker>...
+  local state=$1 dir=$2 lock session_pid pair source marker version
+  shift 2
+  lock="$state/.lock"
+  for pair in "$@"; do
     source=${pair%%:*}
     marker=${pair#*:}
-    version=$(fm_pi_extension_version "$root/.pi/extensions/$source") || return 1
+    version=$(fm_pi_extension_version "$dir/$source") || return 1
     fm_pi_extension_loaded "$state/$marker" "$version" "$lock" || return 1
   done
   session_pid=$(sed -n '1p' "$lock" 2>/dev/null)
   fm_pid_alive "$session_pid"
+}
+
+# Away-mode supervision evidence. While state/.afk exists the away-mode daemon
+# (bin/fm-supervise-daemon.sh) owns supervision: it runs bin/fm-watch.sh
+# one-shot, so the watcher exits on EVERY wake and the daemon starts its
+# replacement. Between those cycles no watcher process holds the watch lock,
+# with nothing at all wrong - the supervisor is the daemon, and the watcher is
+# its restarting child.
+#
+# fm_afk_daemon_owns_supervision <state>
+# True when away mode is active AND a live, identity-matched daemon holds this
+# home's singleton daemon lock. The identity match is the same discipline the
+# watcher lock uses (fm_watcher_lock_matches_pid): a recycled pid, a lock left
+# by a killed daemon, or a daemon that never recorded its identity all fail it,
+# so only a daemon process that is genuinely still running counts as ownership.
+# This proves an OWNER, never freshness: callers keep their own beacon test, so
+# a daemon that stops restarting its watcher still fails supervision once the
+# beacon passes grace.
+fm_afk_daemon_owns_supervision() {
+  local state=$1 lockdir pid recorded current
+  [ -e "$state/.afk" ] || return 1
+  lockdir="$state/.supervise-daemon.lock"
+  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
+  fm_pid_alive "$pid" || return 1
+  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null) || return 1
+  [ -n "$recorded" ] || return 1
+  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$current" ] || return 1
+  [ "$current" = "$recorded" ]
 }
 
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
@@ -257,7 +320,8 @@ fm_pi_extension_owns_supervision() {
 # because the watcher only runs between turns; only a stale beacon is a lapse.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
 # genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
-# session provably owns continuity (fm_pi_extension_owns_supervision) - that is the
+# session provably owns continuity (fm_extension_owns_supervision: the Pi or the
+# omp extension pair, whichever the lock-owning session recorded) - that is the
 # extension's own tear-down-and-respawn hand-off, which it retries and escalates
 # itself. A lock with any recorded pid remains down if the strict health check fails.
 # Without ownership proof an unheld lock is down exactly as before, so an unloaded,
@@ -291,7 +355,7 @@ fm_watcher_supervision_verdict() {
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
     if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
-      && fm_pi_extension_owns_supervision "$state" "$root"; then
+      && fm_extension_owns_supervision "$state" "$root"; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true
     else
@@ -319,7 +383,7 @@ fm_lock_set_role() {
     autoarm|terminal-check) : ;;
     *) return 1 ;;
   esac
-  current=${BASHPID:-$$}
+  fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 1
   printf '%s\n' "$role" > "$lockdir/role" 2>/dev/null || return 1
@@ -347,7 +411,7 @@ fm_lock_owner_dir() {
 
 fm_lock_prepare_owner() {
   local ownerdir=$1 mypid back
-  mypid=${BASHPID:-$$}
+  fm_current_pid mypid || return 1
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$mypid" ]
@@ -396,7 +460,7 @@ fm_lock_claim_blocked_by_steal() {
 
 fm_lock_claim() {
   local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
-  mypid=${BASHPID:-$$}
+  fm_current_pid mypid || return 1
   if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -800,7 +864,7 @@ fm_recovery_marker_reopen_announced() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -809,10 +873,9 @@ fm_lock_try_acquire() {
     return 0
   fi
 
-  # Compare against ${BASHPID:-$$} inline, never via a command substitution:
-  # $() forks a subshell whose BASHPID is not this frame's pid.
+  fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+  if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
     # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
@@ -925,7 +988,7 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
   else
     ownerdir=$lockdir
   fi
-  current=${BASHPID:-$$}
+  fm_current_pid current || { fm_lock_release "$lockdir"; return 1; }
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   if [ "$back" != "$current" ] \
     || ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
@@ -953,7 +1016,7 @@ fm_lock_acquire_wait_bounded() {
     return 0
   fi
 
-  caller_pid=${BASHPID:-$$}
+  fm_current_pid caller_pid || return 1
   # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   if fm_run_timed "$seconds" env \
     "FM_STATE_OVERRIDE=$STATE" \
@@ -998,7 +1061,7 @@ fm_lock_acquire_wait_bounded() {
 
 fm_lock_release() {
   local lockdir=$1 pid current ownerdir
-  current=${BASHPID:-$$}
+  fm_current_pid current || return 1
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0
@@ -1051,6 +1114,75 @@ fm_task_set_lock_path() {  # <state-dir>
   printf '%s/.task-set.lock\n' "$state"
 }
 
+# The top-most firstmate home reachable from this one on THIS machine, used as
+# the single anchor every local home agrees on for machine-local shared state.
+#
+# A local parent binding is followed upward. A remote parent binding terminates
+# the walk at the current home, which is the correct answer rather than an
+# error: the parent lives on another machine, so its filesystem can neither hold
+# nor be observed by a lock taken here, and a remote-seeded home is itself the
+# top of the local tree that bin/fm-teardown.sh's collect_local_firstmate_states
+# enumerates (that walk already skips remote registry entries for the same
+# reason). Refusing a remote binding instead made every operation anchored here
+# fail closed inside a remote secondmate home and its local descendants.
+#
+# Everything else still fails closed: an unreadable or malformed binding, an
+# unreachable local parent, a cycle, and a chain deeper than the bound.
+fm_firstmate_root_home() {
+  local home=${1:-$FM_HOME} marker parent seen="|" depth=0
+  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
+  while [ -e "$home/.fm-secondmate-parent" ] || [ -L "$home/.fm-secondmate-parent" ]; do
+    marker="$home/.fm-secondmate-parent"
+    if ! command -v fm_secondmate_parent_record_parse >/dev/null 2>&1; then
+      # shellcheck source=bin/fm-secondmate-parent-lib.sh
+      . "$FM_WAKE_LIB_DIR/fm-secondmate-parent-lib.sh"
+    fi
+    fm_secondmate_parent_record_parse "$marker" || return 1
+    case "$FM_SECONDMATE_PARENT_ROUTE" in
+      local) ;;
+      remote) break ;;
+      *) return 1 ;;
+    esac
+    parent=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || return 1
+    case "$seen" in *"|$parent|"*) return 1 ;; esac
+    seen="$seen$home|"
+    home=$parent
+    depth=$((depth + 1))
+    [ "$depth" -le 64 ] || return 1
+  done
+  printf '%s\n' "$home"
+}
+
+# The one lock serializing Treehouse slot allocation and return for a project.
+#
+# It is anchored in the local root home's state directory so that every home on
+# this machine that can reach the same pool - the root, and each secondmate home
+# below it, including a remote-seeded home and its own local descendants -
+# derives the identical path. Its identity is the project's resolved origin, so
+# separate clones of one origin share a single lock; an origin-less local-only
+# project falls back to its own worktree top instead of failing to resolve.
+fm_treehouse_project_lock_path() {  # <project-dir>
+  local project=$1 root origin identity hash top
+  [ -d "$project" ] || return 1
+  root=$(fm_firstmate_root_home "$FM_HOME") || return 1
+  origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
+  if [ -n "$origin" ]; then
+    case "$origin" in
+      /*) [ ! -d "$origin" ] || origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 1 ;;
+      *://*|*:* ) ;;
+      *) [ ! -d "$project/$origin" ] || origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 1 ;;
+    esac
+    identity=$origin
+  else
+    top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
+    top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+    identity=$top
+  fi
+  hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
+  [ -d "$root/state" ] || return 1
+  printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
@@ -1060,7 +1192,7 @@ fm_failure_episode_reset() {
       acquired=1
       ;;
     held)
-      current=${BASHPID:-$$}
+      fm_current_pid current || return 1
       pid=$(cat "$lock/pid" 2>/dev/null || true)
       [ "$pid" = "$current" ] || return 1
       ;;

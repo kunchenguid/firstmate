@@ -144,7 +144,7 @@ make_spawn_case() {  # <name>
   id=traex-test
   fakebin=$(make_traex_fakebin "$dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'brief for TraeX\n' > "$home/data/$id/brief.md"
+  printf '# Task\n\nCaptain: brief for TraeX\n' > "$home/data/$id/brief.md"
   printf 'off\n' > "$home/config/herdr-presentation-spaces"
   fm_git_worktree "$project" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -315,7 +315,7 @@ test_raw_traex_refuses_without_breaking_other_raw_launches() {
 
   raw_id='raw-other'
   mkdir -p "$HOME_DIR/data/$raw_id"
-  printf 'raw brief\n' > "$HOME_DIR/data/$raw_id/brief.md"
+  printf '# Task\n\nCaptain: raw brief\n' > "$HOME_DIR/data/$raw_id/brief.md"
   out=$(traex_env env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     "$SPAWN" "$raw_id" "$PROJECT_DIR" "bash -lc 'printf ok'" \
