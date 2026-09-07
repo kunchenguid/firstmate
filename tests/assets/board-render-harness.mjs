@@ -3,7 +3,9 @@
 // asserted through the real template rather than by reading its source.
 //
 // Usage: node board-render-harness.mjs <built-board.html>
-// Prints one JSON document: { stats:[{n,label}], charted:[{title,sub,badges,pickable}] }
+// Prints one JSON document:
+//   { stats:[{n,label}], charted:[{title,sub,badges,pickable}],
+//     calls:[{title,badges,ctx:[{k,v}]}] }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -22,9 +24,18 @@ class Node {
     this.type = "";
     this.value = "";
     this.checked = false;
+    const tokens = () => this.className.split(/\s+/).filter(Boolean);
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
-      contains: (c) => this.className.split(/\s+/).includes(c),
+      contains: (c) => tokens().includes(c),
+      remove: (c) => { this.className = tokens().filter((t) => t !== c).join(" "); },
+      // Card-deck navigation drives the class it wants with an explicit second
+      // argument, so honour force before falling back to flipping.
+      toggle: (c, force) => {
+        const on = force === undefined ? !tokens().includes(c) : Boolean(force);
+        if (on) this.classList.add(c); else this.classList.remove(c);
+        return on;
+      },
     };
   }
   get textContent() {
@@ -85,7 +96,12 @@ new Function(script)();
 const badgesOf = (row) =>
   row.children
     .filter((c) => c.className.includes("fm-badge"))
-    .map((c) => ({ tone: c.className.replace(/.*fm-badge--/, "").trim(), text: c.textContent }));
+    // A badge may carry further classes after its tone, so read the tone token
+    // itself rather than everything that follows the prefix.
+    .map((c) => ({
+      tone: (c.className.match(/fm-badge--([\w-]+)/) || [, ""])[1],
+      text: c.textContent,
+    }));
 
 const strip = byId.get("bb-stats") || new Node("div");
 const stats = strip.children.map((t) => ({
@@ -105,6 +121,25 @@ const charted = ch.children
       pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
     };
   });
+// Captain's Call cards: the badges each card wears and the context rows in its
+// body, so what the risk value renders as is asserted through the template.
+const deck = byId.get("bb-call") || new Node("div");
+const calls = deck.children
+  .filter((c) => c.className.split(/\s+/).includes("bb-decision"))
+  .map((card) => {
+    const pad = card.children.find((c) => c.className.includes("bb-decision__pad"));
+    const top = pad?.children.find((c) => c.className.includes("bb-decision__top"));
+    const ctx = pad?.children.find((c) => c.className.includes("bb-ctx"));
+    return {
+      title: pad?.children.find((c) => c.className.includes("bb-decision__title"))?.textContent ?? "",
+      badges: top ? badgesOf(top) : [],
+      ctx: (ctx?.children ?? []).map((row) => ({
+        k: row.children.find((c) => c.className.includes("bb-ctx__k"))?.textContent ?? "",
+        v: row.children.find((c) => c.className.includes("bb-ctx__v"))?.textContent ?? "",
+      })),
+    };
+  });
+
 // A fail-closed render replaces the page body instead of the board sections, so
 // surface it rather than reporting an empty board as a successful render.
 const errorText = [...byId.entries()]
@@ -114,4 +149,4 @@ const errorText = [...byId.entries()]
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
-process.stdout.write(JSON.stringify({ stats, charted, empty, more, error: errorText }) + "\n");
+process.stdout.write(JSON.stringify({ stats, charted, calls, empty, more, error: errorText }) + "\n");
