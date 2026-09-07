@@ -143,21 +143,6 @@ esac
 
 # Cross-home bounds are explicit so one broken or unexpectedly large home cannot
 # hang or explode the parent snapshot.
-# Cross-home collection is the snapshot's ONE network-touching path: it reads
-# each registered remote secondmate's ledger over the remote transport. A caller
-# that must not leave this machine - anything on the blocking session-start path,
-# or a display that redraws on a timer - sets FM_SNAPSHOT_LOCAL_ONLY=1. That
-# skips the remote reads and the parent-side cache refresh entirely, and every
-# remote home is then reported unreadable with that exact reason, never as an
-# absent or empty one.
-FM_SNAPSHOT_LOCAL_ONLY=${FM_SNAPSHOT_LOCAL_ONLY:-0}
-case "$FM_SNAPSHOT_LOCAL_ONLY" in
-  0|1) ;;
-  *)
-    echo "fm-fleet-snapshot: FM_SNAPSHOT_LOCAL_ONLY must be 0 or 1" >&2
-    exit 2
-    ;;
-esac
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-10}
 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=${FM_SNAPSHOT_LOCAL_READ_CONCURRENCY:-8}
@@ -178,6 +163,22 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+
+# Cross-home collection is the snapshot's ONE network-touching path: it reads
+# each registered remote secondmate's ledger over the remote transport. A caller
+# that must not leave this machine - anything on the blocking session-start path,
+# or a display that redraws on a timer - sets FM_SNAPSHOT_LOCAL_ONLY=1. That
+# skips the remote reads and the parent-side cache refresh entirely, and every
+# remote home is then reported unreadable with that exact reason, never as an
+# absent or empty one.
+FM_SNAPSHOT_LOCAL_ONLY=${FM_SNAPSHOT_LOCAL_ONLY:-0}
+case "$FM_SNAPSHOT_LOCAL_ONLY" in
+  0|1) ;;
+  *)
+    echo "fm-fleet-snapshot: FM_SNAPSHOT_LOCAL_ONLY must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
