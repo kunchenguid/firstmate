@@ -500,12 +500,26 @@ test_acquired_worktree_refreshes_a_stale_local_env_file() {
   prepare_second_acquisition "$second"
   out=$(run_spawn "$second" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 1 "$status" "spawn should refuse to replace an existing .env.local without unforgeable ownership evidence"
-  [ -f "$POOL_DIR/.env.local" ] \
-    || fail "spawn removed the existing .env.local while refusing replacement"
-  assert_contains "$out" "cannot establish unforgeable ownership" \
-    "spawn did not explain why it preserved the existing .env.local"
-  pass "an acquired pooled worktree preserves an existing local environment file"
+  expect_code 0 "$status" "spawn should refresh an intact seeded .env.local in an acquired slot"
+  source_mode=$(stat -c %a "$PROJECT_DIR/.env.local" 2>/dev/null \
+    || stat -f %Lp "$PROJECT_DIR/.env.local")
+  target_mode=$(stat -c %a "$POOL_DIR/.env.local" 2>/dev/null \
+    || stat -f %Lp "$POOL_DIR/.env.local")
+  [ "$target_mode" = "$source_mode" ] \
+    || fail "reissued .env.local did not preserve its mode"
+  source_uid=$(stat -c %u "$PROJECT_DIR/.env.local" 2>/dev/null \
+    || stat -f %u "$PROJECT_DIR/.env.local")
+  target_uid=$(stat -c %u "$POOL_DIR/.env.local" 2>/dev/null \
+    || stat -f %u "$POOL_DIR/.env.local")
+  [ "$target_uid" = "$source_uid" ] \
+    || fail "reissued .env.local did not preserve its owner"
+  source_gid=$(stat -c %g "$PROJECT_DIR/.env.local" 2>/dev/null \
+    || stat -f %g "$PROJECT_DIR/.env.local")
+  target_gid=$(stat -c %g "$POOL_DIR/.env.local" 2>/dev/null \
+    || stat -f %g "$POOL_DIR/.env.local")
+  [ "$target_gid" = "$source_gid" ] \
+    || fail "reissued .env.local did not preserve its group"
+  pass "an acquired pooled worktree refreshes an intact seeded local environment file"
   source_mode=$(stat -c %a "$PROJECT_DIR/.env.local" 2>/dev/null \
     || stat -f %Lp "$PROJECT_DIR/.env.local")
   target_mode=$(stat -c %a "$POOL_DIR/.env.local" 2>/dev/null \
