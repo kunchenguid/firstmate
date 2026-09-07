@@ -21,9 +21,15 @@ fm_root_is_secondmate_home() {
 # other than $1.
 #
 # FM_ROOT_OVERRIDE is an operator-directed pointer at the checkout a process is
-# meant to run out of. Every producer in this repo sets it to the checkout whose
-# bin/ holds the command being invoked, so a credible override always resolves
-# to the running script's own checkout. A crew, scout, or secondmate session
+# meant to run out of. Every producer that invokes a primary-scoped hook sets it
+# to the checkout whose bin/ holds that hook, so a credible override always
+# resolves to the running script's own checkout. That is the invariant this
+# predicate rests on, and it binds only those call sites: producers driving
+# commands that are NOT primary-scoped may legitimately pair a foreign command
+# with their own root - bin/fm-teardown.sh runs another home's
+# bin/fm-procevent.sh under FM_ROOT_OVERRIDE="$FM_ROOT". Wiring a primary-scoped
+# hook into such a call site would break the invariant and must set the override
+# to that hook's own checkout instead. A crew, scout, or secondmate session
 # that merely INHERITED the parent primary's environment carries an override
 # naming a foreign checkout instead. FM_HOME and the FM_*_OVERRIDE paths travel
 # with it and describe the parent's home too, so once the override is proven

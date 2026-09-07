@@ -30,6 +30,7 @@ install_cd_scripts() {
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-cd-command-policy.mjs" "$dir/bin/fm-cd-command-policy.mjs"
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   chmod +x "$dir/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-command-policy.mjs"
 }
 
@@ -226,6 +227,44 @@ test_inert_in_child_worktree() {
   pass "cd-guard: inert in a crewmate/scout task worktree (linked git worktree)"
 }
 
+# bin/fm-spawn.sh clears FM_ROOT_OVERRIDE only for a secondmate launch, so a
+# crewmate or scout inherits the parent primary's value. Taken as proof of a
+# primary checkout it turns the guard on inside the child's OWN worktree and
+# denies every cd there, with no way for the crewmate to repair it.
+test_inert_in_child_worktree_with_inherited_override() {
+  local base dir out rc
+  base="$TMP_ROOT/inherited-base"
+  dir="$TMP_ROOT/inherited-wt"
+  make_primary_fixture "$base" >/dev/null
+  make_child_worktree_fixture "$base" "$dir" >/dev/null
+  out=$(FM_ROOT_OVERRIDE="$base" FM_HOME="$base" \
+    "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  expect_code 0 "$rc" "cd-guard must stay inert in a child worktree that inherited the parent primary's FM_ROOT_OVERRIDE"
+  [ -z "$out" ] || fail "cd-guard produced output in a child worktree with an inherited override: $out"
+  pass "cd-guard: inert in a child worktree despite an inherited FM_ROOT_OVERRIDE"
+}
+
+# The operator-directed use of the override - it names this script's own
+# checkout - must keep working: rejecting it would disarm the guard wherever a
+# launcher sets it legitimately.
+test_fires_with_own_checkout_override() {
+  local out rc
+  out=$(FM_ROOT_OVERRIDE="$PRIMARY" "$CHECK" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  expect_code 2 "$rc" "cd-guard must still fire when FM_ROOT_OVERRIDE names its own checkout"
+  assert_contains "$out" '[persistent-cd]' "self-pointing override block must carry the reason code"
+  pass "cd-guard: still fires when FM_ROOT_OVERRIDE names its own checkout"
+}
+
+# An override that cannot be resolved proves nothing, so it is not treated as
+# foreign; it simply fails the checkout confirmation and the guard goes inert.
+test_inert_when_override_unresolvable() {
+  local out rc
+  out=$(FM_ROOT_OVERRIDE="$TMP_ROOT/does-not-exist" "$CHECK" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  expect_code 0 "$rc" "cd-guard must be inert when FM_ROOT_OVERRIDE cannot be resolved"
+  [ -z "$out" ] || fail "cd-guard produced output for an unresolvable override: $out"
+  pass "cd-guard: inert when FM_ROOT_OVERRIDE cannot be resolved"
+}
+
 test_inert_when_not_firstmate_repo() {
   local dir out rc
   dir="$TMP_ROOT/not-firstmate"
@@ -388,6 +427,9 @@ test_scripts_are_shellcheck_clean() {
 test_full_acceptance_matrix
 test_fires_in_secondmate_home
 test_inert_in_child_worktree
+test_inert_in_child_worktree_with_inherited_override
+test_fires_with_own_checkout_override
+test_inert_when_override_unresolvable
 test_inert_when_not_firstmate_repo
 test_inert_when_not_a_git_repo
 test_e2e_cwd_leak_regression

@@ -29,9 +29,12 @@
 #   DENY, --cursor - exit 0 and Cursor's own decision object on stdout. Cursor
 #          reads the returned object rather than the exit status.
 #   INERT - not the real primary checkout (a crewmate/scout task worktree or a
-#           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
+#           non-firstmate repo): exit 0 with no output, exactly like ALLOW. An
+#           inherited FM_ROOT_OVERRIDE naming the parent primary never lifts
+#           this; scope always comes from this script's own checkout then.
 #   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
-#               missing Node or policy owner, or an invalid policy response.
+#               missing scope library, Node or policy owner, or an invalid
+#               policy response.
 #
 # Claude requires stdout to remain empty on deny.
 # Codex blocks on exit 2 and displays stderr.
@@ -141,7 +144,22 @@ case "$CMD" in
 esac
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
-FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
+SESSION_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh" 2>/dev/null || exit 0
+# An inherited FM_ROOT_OVERRIDE that names a foreign checkout is a parent
+# primary's environment leaking into a crew, scout, or secondmate session rather
+# than an operator-directed pointer, so it cannot prove this session runs in a
+# primary checkout - it would make the guard deny cwd changes inside the child's
+# OWN worktree. Only the running script's checkout scopes the guard then. This
+# hook needs no STATE or CONFIG, so the shared predicate is enough; the turn-end
+# guard and the session-start adapters use fm_primary_scope_resolve_env for the
+# same boundary.
+if fm_primary_scope_env_is_foreign "$SESSION_ROOT"; then
+  FM_ROOT=$SESSION_ROOT
+else
+  FM_ROOT=${FM_ROOT_OVERRIDE:-$SESSION_ROOT}
+fi
 
 # Scope to a plain, non-worktree firstmate checkout, where git-dir equals
 # git-common-dir. A crewmate/scout task worktree - the shape bin/fm-spawn.sh
