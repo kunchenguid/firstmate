@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# exact pr_head=<sha> when available, then atomically arm a static movement poll
+# and, on GitHub, seed its baseline reading so only later movement wakes anyone.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -147,6 +148,30 @@ else
   PR_POLL_PUBLISH_LOCK_HELD=0
   echo "error: could not publish PR poll" >&2
   exit 1
+fi
+
+# Seed the poll's baseline reading with the pull request as it stands right now.
+# Arming happens at the moment firstmate has just looked at this PR, so "now" is
+# exactly what firstmate already knows and nothing here is worth a wake; every
+# later reading is compared against it, so a maintainer acting between arming
+# and the first poll is reported instead of being absorbed as the baseline. The
+# poll itself produces the reading, so the field logic has one owner.
+# Best-effort on purpose: a seed that cannot be taken leaves no coverage
+# evidence, which keeps the timed recheck on for this task and makes the first
+# poll report the state it finds. A merged reading is deliberately not recorded,
+# because a merge is the poll's own terminal path and never a baseline.
+# GitHub only, because only the GitHub branch of the poll returns a movement
+# reading to baseline; arming a GitLab watch stays a purely local operation
+# rather than gaining a forge read whose result would be discarded.
+if [ "$PROVIDER" = github ]; then
+  SEED=$("$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+    "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || SEED=
+  case "$SEED" in
+    'moved '*)
+      fm_pr_poll_observed_record "$STATE" "$ID" "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SEED" \
+        || echo "warning: PR poll baseline could not be recorded; the first poll will report the state it finds" >&2
+      ;;
+  esac
 fi
 # The contribution observer uses the same authenticated check mechanism and
 # owns verdict freshness, required actors and external feedback separately from

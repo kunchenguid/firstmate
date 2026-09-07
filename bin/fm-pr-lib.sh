@@ -60,6 +60,7 @@ FM_PR_POLL_EXPECT_DATA_HASH=
 FM_PR_POLL_EXPECT_TEMPLATE_HASH=
 FM_PR_POLL_EXPECT_DATA_IDENTITY=
 FM_PR_POLL_EXPECT_CHECK_IDENTITY=
+FM_PR_POLL_OBSERVED_FINGERPRINT=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
 FM_PR_POLL_SNAPSHOT_ID=
@@ -238,6 +239,14 @@ fm_pr_file_link_count() {
     /usr/bin/stat -f %l "$1" 2>/dev/null
   else
     stat -c %h "$1" 2>/dev/null
+  fi
+}
+
+fm_pr_file_mtime() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
   fi
 }
 
@@ -1187,6 +1196,153 @@ fm_pr_poll_retirement_recover_all() {
     fi
   done
   [ -z "$FM_PR_POLL_RETIREMENT_REJECTED" ]
+}
+
+# --- observed-state marker ---------------------------------------------------
+# The last reading bin/fm-pr-poll.sh returned for this task's pull request, and
+# through its mtime the time of the last SUCCESSFUL reading. One file serves two
+# purposes because both need exactly the same fact.
+#
+# As a dedupe record it is what makes a movement poll quiet. The poll keeps no
+# memory, so it prints the same fingerprint every cycle while nothing moves;
+# only a fingerprint that differs from the stored one is real movement worth a
+# wake.
+#
+# As health evidence it is the ONLY positive proof that the poll is armed and
+# actually reaching the forge, which is what licenses suppressing the timed
+# pause recheck (fm_pr_poll_covers_wait). Absence of a complaint is not that
+# proof: a poll that is missing, unregistered, erroring, or wedged simply stops
+# refreshing this file, the evidence ages out on its own, and the recheck comes
+# back with nobody having to notice or repair anything.
+#
+# The identity is stored alongside the fingerprint for the same reason the
+# merge-notification marker below stores it: a task re-armed onto a DIFFERENT
+# pull request must not inherit the old one's reading as either a baseline or as
+# coverage.
+fm_pr_poll_observed_parse() {  # <marker> <device> <provider> <host> <path> <number>
+  local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
+  local version provider host path number fingerprint _extra
+  FM_PR_POLL_OBSERVED_FINGERPRINT=
+  fm_pr_private_file_valid "$marker" 600 "$device" || return 1
+  exec 8< "$marker" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
+  IFS= read -r host <&8 || { exec 8<&-; return 1; }
+  IFS= read -r path <&8 || { exec 8<&-; return 1; }
+  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  IFS= read -r fingerprint <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  [ "$version" = fm-pr-poll-observed-v1 ] || return 1
+  [ "$provider" = "$expected_provider" ] || return 1
+  [ "$host" = "$expected_host" ] || return 1
+  [ "$path" = "$expected_path" ] || return 1
+  [ "$number" = "$expected_number" ] || return 1
+  [ -n "$fingerprint" ] || return 1
+  FM_PR_POLL_OBSERVED_FINGERPRINT=$fingerprint
+}
+
+# 0 and FM_PR_POLL_OBSERVED_FINGERPRINT set when a reading for exactly this pull
+# request is on record; 1 whenever there is none, so a first reading and a
+# re-armed task both read as "nothing to compare against".
+fm_pr_poll_observed_read() {  # <state> <id> <provider> <host> <path> <number>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 state_device
+  FM_PR_POLL_OBSERVED_FINGERPRINT=
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_poll_observed_parse "$state/$id.pr-poll-observed" "$state_device" \
+    "$provider" "$host" "$path" "$number"
+}
+
+# Record a successful reading. Called for every successful non-merged poll, not
+# only for a changed one: an unchanged reading is exactly the evidence that the
+# poll is alive and covering the wait, so rewriting the same content to advance
+# the mtime is the point rather than a wasted write. A newline in the
+# fingerprint would forge a record boundary and is refused.
+fm_pr_poll_observed_record() {  # <state> <id> <provider> <host> <path> <number> <fingerprint>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 fingerprint=$7
+  local marker tmp state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  [ -n "$fingerprint" ] || return 1
+  case "$fingerprint" in
+    *$'\n'*) return 1 ;;
+  esac
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-poll-observed"
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-poll-observed.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-observed-v1 "$provider" "$host" "$path" "$number" "$fingerprint" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_poll_observed_parse "$tmp" "$state_device" \
+      "$provider" "$host" "$path" "$number" \
+    || [ "$FM_PR_POLL_OBSERVED_FINGERPRINT" != "$fingerprint" ] \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
+    || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# 0 only with positive evidence that a live movement poll covers a declared
+# external wait on this task's pull request, so the timed recheck that would
+# otherwise ask a human to confirm the wait still holds can be skipped.
+#
+# Every clause is a licence to go quiet, so each one fails toward the noisy
+# answer: the poll must still be armed and transactionally registered against
+# this exact pull request, it must be a provider whose poll reports every void
+# condition rather than the merge alone, it must have a reading on record for
+# that same pull request, that reading must still be of an OPEN pull request,
+# and it must be no older than the window the recheck would have covered.
+# Anything else - a retired poll, a tampered registration, a GitLab merge
+# request, an expired credential, a wedged watcher - returns 1 and the recheck
+# happens.
+#
+# The open clause is what keeps a live poll from standing in for a live wait. A
+# closed-unmerged pull request deliberately keeps its poll armed, and its
+# unchanged CLOSED reading would go on refreshing the marker forever, so
+# liveness alone would silence the recheck permanently on exactly the wait that
+# most needs it: one nobody can be waiting on any more. Matched positively, so
+# any other reading a future poll might record is a recheck rather than silence.
+fm_pr_poll_covers_wait() {  # <state> <id> <template> <max-age-secs>
+  local state=$1 id=$2 template=$3 max_age=$4 mtime now
+  case "$max_age" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
+  [ "$FM_PR_DATA_PROVIDER" = github ] || return 1
+  fm_pr_poll_observed_read "$state" "$id" \
+    "$FM_PR_DATA_PROVIDER" "$FM_PR_DATA_HOST" "$FM_PR_DATA_PATH" "$FM_PR_DATA_NUMBER" || return 1
+  case "$FM_PR_POLL_OBSERVED_FINGERPRINT" in
+    'moved state=OPEN '*) ;;
+    *) return 1 ;;
+  esac
+  mtime=$(fm_pr_file_mtime "$state/$id.pr-poll-observed") || return 1
+  case "$mtime" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  # A reading dated in the future is not a fresh reading, it is a broken clock or
+  # a forged mtime, and treating it as coverage would silence the recheck for as
+  # long as that date stands. Bound the age from both ends.
+  now=$(date +%s)
+  [ "$(( now - mtime ))" -ge 0 ] && [ "$(( now - mtime ))" -lt "$max_age" ]
+}
+
+# Removed at teardown alongside the other per-task PR-poll artifacts
+# (bin/fm-teardown.sh) so a retired task id leaves no residue behind.
+fm_pr_poll_observed_remove() {  # <state> <id>
+  local state=$1 id=$2 marker
+  fm_pr_task_id_valid "$id" || return 1
+  marker="$state/$id.pr-poll-observed"
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  rm -f -- "$marker"
 }
 
 # --- merge-notification canonical-identity marker ----------------------------

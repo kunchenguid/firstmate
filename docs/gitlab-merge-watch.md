@@ -184,6 +184,10 @@ The live registration tag is `fm-pr-poll-registration-v2`, which includes the pr
 A `fm-pr-poll-registration-v1` record no longer parses.
 Arm a current watch with `bin/fm-pr-check.sh`.
 
+The template hash inside a registration is the hash of `bin/fm-pr-poll.sh` at the moment the watch was armed, so it changes with every edit to that program and is reproduced above as the record's shape rather than as a constant to compare against.
+After this evidence was collected, the poll gained GitHub movement reporting: a GitHub pull request that is not merged now returns a `moved ...` reading instead of nothing.
+The GitLab branch is unchanged, so every GitLab command and output on this page still reproduces exactly, and `fm_pr_poll_covers_wait` deliberately refuses to silence a declared wait's timed recheck on the strength of a merge-only GitLab poll.
+
 ## Merging a merge request
 
 `bin/fm-pr-merge.sh` now merges a GitLab merge request through the shared recording helper and GitLab's own live pre-merge guards.
