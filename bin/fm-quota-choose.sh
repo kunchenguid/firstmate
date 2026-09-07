@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-quota-choose.sh [--snapshot <path>] [--candidate <harness:model>]...
+#   fm-quota-choose.sh --normalize [--snapshot <path>]
 #
 # Reads one already-captured quota-axi default TOON or JSON snapshot from the
 # provided file, or from stdin when --snapshot is omitted. For each --candidate
@@ -74,6 +75,7 @@ usage() {
 
 CANDIDATES=()
 SNAPSHOT_SOURCE=
+NORMALIZE=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -87,6 +89,10 @@ while [ "$#" -gt 0 ]; do
       CANDIDATES+=("$2")
       shift 2
       ;;
+    --normalize)
+      NORMALIZE=1
+      shift
+      ;;
     -h|--help|help) usage ;;
     --) shift; break ;;
     -*) die "unknown option: $1" ;;
@@ -99,7 +105,7 @@ while [ "$#" -gt 0 ]; do
   CANDIDATES+=("$1"); shift
 done
 
-[ "${#CANDIDATES[@]}" -gt 0 ] || die "no candidates supplied"
+[ "$NORMALIZE" -eq 1 ] || [ "${#CANDIDATES[@]}" -gt 0 ] || die "no candidates supplied"
 
 # A candidate is <harness>:<model>. A bare harness with no colon means the
 # default model. Reject empty harnesses and characters that cannot form a safe
@@ -316,6 +322,11 @@ else
 fi
 
 printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi provider data"
+
+if [ "$NORMALIZE" -eq 1 ]; then
+  printf '%s\n' "$QUOTA_JSON"
+  exit 0
+fi
 
 # provider_for_harness <harness> [<model>]
 # Map a firstmate harness name to its primary quota-axi provider family.

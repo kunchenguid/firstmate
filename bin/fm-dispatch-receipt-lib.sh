@@ -30,9 +30,21 @@
 # _EFFECTIVE_WORKER_MODEL, _QUOTA_EVIDENCE_SOURCE, and
 # _QUOTA_SNAPSHOT_SHA256.
 
+FM_DISPATCH_RECEIPT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=bin/fm-quota-axi-lib.sh
+. "$FM_DISPATCH_RECEIPT_LIB_DIR/fm-quota-axi-lib.sh"
+
+fm_dispatch_model_is_astra() {
+  case "$1" in
+    gpt-6-astra|*/gpt-6-astra) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_dispatch_selection_receipt_required() {  # <crew-dispatch.json> <harness> <model>
   local config=$1 harness=$2 model=$3 rc
-  [ "$model" != gpt-6-astra ] || return 0
+  fm_dispatch_model_is_astra "$model" && return 0
   [ -f "$config" ] || return 1
   command -v jq >/dev/null 2>&1 || {
     echo "error: jq is required to evaluate a configured selection-receipt requirement" >&2
@@ -59,26 +71,14 @@ fm_dispatch_selection_receipt_required() {  # <crew-dispatch.json> <harness> <mo
 }
 
 fm_dispatch_snapshot_generated_at() {  # <TOON or JSON snapshot> -> strict timestamp
-  local snapshot=$1 value
+  local snapshot=$1 value normalized
   if jq -e . "$snapshot" >/dev/null 2>&1; then
-    jq -er '
-      . as $snapshot
-      | ((.schemaVersion | type == "number" and floor == . and . > 0)
-      and (.generatedAt | type == "string")
-      and (.providers | type == "array" and length > 0
-           and all(.[]; type == "object"
-             and (.provider | type == "string" and length > 0)
-             and (.state | type == "object"
-                  and (.status | type == "string" and length > 0))
-             and (.windows | type == "array")
-             and (.credits | type == "object")
-             and (.quotaSemantics | type == "object"
-                  and (.status | type == "string" and length > 0)
-                  and (.effectiveAvailability | type == "array"))))
-      | $snapshot.generatedAt
-    ' "$snapshot" 2>/dev/null
+    fm_quota_json_valid < "$snapshot" || return 1
+    jq -er '.generatedAt | strings' "$snapshot" 2>/dev/null
     return
   fi
+  normalized=$("$FM_DISPATCH_RECEIPT_LIB_DIR/fm-quota-choose.sh" --normalize --snapshot "$snapshot") || return 1
+  printf '%s\n' "$normalized" | fm_quota_json_valid || return 1
   value=$(awk '
     /^generatedAt: "[^"]+"$/ {
       count += 1
@@ -87,16 +87,7 @@ fm_dispatch_snapshot_generated_at() {  # <TOON or JSON snapshot> -> strict times
       sub(/"$/, "", line)
       value = line
     }
-    /^quota\[[0-9]+\]\{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt\}:$/ {
-      quota = 1
-    }
-    /^exhaustion\[[0-9]+\]\{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId\}:$/ {
-      exhaustion = 1
-    }
-    /^attention\[[0-9]+\]:$/ {
-      attention = 1
-    }
-    END { if (count == 1 && quota && exhaustion && attention) print value; else exit 1 }
+    END { if (count == 1) print value; else exit 1 }
   ' "$snapshot") || return 1
   printf '%s\n' "$value"
 }

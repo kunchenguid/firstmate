@@ -1735,6 +1735,14 @@ if [ -n "$CODEX_HOME_ARG" ]; then
     echo "error: --codex-home applies only to the codex harness, but this spawn resolved harness '$HARNESS'" >&2
     exit 1
   fi
+  if [ "$RAW_LAUNCH" -eq 1 ]; then
+    case "$LAUNCH" in
+      *CODEX_HOME=*)
+        echo "error: a raw Codex launch cannot assign CODEX_HOME when --codex-home selects the worker account" >&2
+        exit 1
+        ;;
+    esac
+  fi
   case "$CODEX_HOME_ARG" in
     *[[:cntrl:]]*) echo "error: --codex-home contains an invalid control byte" >&2; exit 1 ;;
   esac
@@ -1750,6 +1758,15 @@ if [ -n "$CODEX_HOME_ARG" ]; then
     echo "error: --codex-home has no auth.json: $CODEX_HOME_ARG (log that account in with CODEX_HOME=$CODEX_HOME_ARG codex login)" >&2
     exit 1
   fi
+fi
+
+if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  case "$LAUNCH" in
+    *gpt-6-astra*)
+      echo "error: raw launch commands selecting Astra are not inspectable for selection receipts; use the verified harness and --model instead" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # Astra and configured receipt-gated tuples require current primary evidence.
