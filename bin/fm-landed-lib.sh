@@ -19,13 +19,13 @@
 #
 # The distinction that decides the section is delivery: Recently Landed is
 # merged PRs, completed scouts, and finished local-only merges. A closed row
-# whose artifact matches its merged, reported, or done completion verb is a
-# delivery whoever approved it. A retained scout is identified by its kind and
-# recorded report because its title links do not change what it delivers. A
-# captain question remains kind captain when it closes, so it is never rendered
-# as shipped work even when its text names an artifact. Older kindless local-only
-# completions cannot be distinguished from answered calls and stay out; merged
-# PRs and reported scouts remain distinct.
+# whose artifact matches its merged or done completion verb is a delivery only
+# when it retains no captain-question provenance. A retained scout is identified
+# by its kind and recorded report because its title links do not change what it
+# delivers. A captain question remains kind captain when it closes, so it is
+# never rendered as shipped work even when its text names an artifact. Older
+# kindless local-only completions cannot be distinguished from answered calls
+# and stay out; merged PRs and reported scouts remain distinct.
 #
 # The sole compatibility fallback keeps a structured Done row whose three
 # parsed artifact fields are absent when it does not retain hold-kind captain.
