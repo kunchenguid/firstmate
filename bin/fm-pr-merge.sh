@@ -550,10 +550,6 @@ require_released_captain_hold() {
       return 1
       ;;
     1|3) return 0 ;;
-    4)
-      echo "error: captain-hold authority record is unavailable for task $ID; refusing to merge" >&2
-      return 1
-      ;;
     *)
       echo "error: could not determine whether task $ID is still held for the captain; refusing to merge" >&2
       return 1

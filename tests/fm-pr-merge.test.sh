@@ -2134,6 +2134,57 @@ test_gitlab_stale_recorded_head_is_reported
 test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses
 test_gitlab_missing_tool_refuses_before_recording
+
+# The merge gate asks whether the task is still held for the captain. A home
+# that carries no backlog records no captain calls at all, so nothing can be
+# held and the merge must proceed; a backlog that EXISTS but cannot be read may
+# hide a live hold, so that one must refuse. The two states are distinct and
+# only the second is a refusal.
+test_absent_backlog_still_merges() {
+  local case_dir rc
+  case_dir=$(make_case absent-backlog-merges)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6161616161616161616161616161616161616161
+  : > "$case_dir/gh-axi.log"
+  rm -f "$case_dir/home/data/backlog.md"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/61 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "absent-backlog-merges: a home with no backlog must still merge"
+  assert_no_grep 'held for the captain' "$case_dir/stderr" \
+    "absent-backlog-merges: an absent backlog was read as a captain hold"
+  grep -qxF 'pr merge 61 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "absent-backlog-merges: the merge was not attempted"
+  pass "fm-pr-merge proceeds when the home carries no backlog at all"
+}
+
+test_unreadable_backlog_refuses_the_merge() {
+  local case_dir rc
+  case_dir=$(make_case unreadable-backlog-refuses)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6262626262626262626262626262626262626262
+  : > "$case_dir/gh-axi.log"
+  chmod 000 "$case_dir/home/data/backlog.md"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/62 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 644 "$case_dir/home/data/backlog.md"
+
+  expect_code 1 "$rc" "unreadable-backlog-refuses: an unreadable authority record must refuse"
+  assert_grep 'refusing to merge' "$case_dir/stderr" \
+    "unreadable-backlog-refuses: the refusal did not say it refused to merge"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "unreadable-backlog-refuses: the forge was called despite an unreadable record"
+  pass "fm-pr-merge refuses when the backlog exists but cannot be read"
+}
+
 test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
@@ -2146,3 +2197,5 @@ test_queued_github_merge_leaves_the_poll_armed
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
+test_absent_backlog_still_merges
+test_unreadable_backlog_refuses_the_merge

@@ -121,10 +121,6 @@ case "$hold_status" in
     exit 1
     ;;
   1|3) ;;
-  4)
-    echo "error: captain-hold authority record is unavailable for task $ID; refusing to merge" >&2
-    exit 1
-    ;;
   *)
     echo "error: could not determine whether task $ID is still held for the captain; refusing to merge" >&2
     exit 1

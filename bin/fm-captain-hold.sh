@@ -157,8 +157,8 @@
 # is (not Done, hold kind captain), 1 means it is not, and 2 means the answer
 # could not be established, so a caller that must never close a live call can
 # treat "cannot tell" as its own case instead of as a no. With
-# `--distinguish-absent`, an absent local task returns 3 instead of 1, while an
-# unavailable markdown authority record returns 4.
+# `--distinguish-absent`, an absent local task returns 3 instead of 1; a home
+# with no backlog file counts as absent, because it records no captain calls.
 # It prints nothing on these predicate results and mutates nothing, unless
 # `--identity` asks it to print this call's
 # LIFECYCLE identity, which it does on an exit 0 only. That identity - the
@@ -1786,10 +1786,11 @@ EOF
 }
 
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
-# A row this home does not carry is 3 when the caller requests the distinction;
-# an unavailable markdown authority record is 4, and every other read failure
-# is a 2, printed to stderr, because a mechanical closer must never read
-# "cannot tell" as permission to close.
+# A row this home does not carry is 3 when the caller requests the distinction,
+# and so is a home with no backlog file at all, because a backlog that does not
+# exist holds nothing. Every read failure over a record that DOES exist is a 2,
+# printed to stderr, because a mechanical closer must never read "cannot tell"
+# as permission to close.
 command_open() {  # <task-id> [--identity] [--distinguish-absent]
   local id='' identity=0 distinguish_absent=0 data state root file show shown_body
   while [ "$#" -gt 0 ]; do
@@ -1818,7 +1819,11 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
     file=$(fm_backlog_file "$data") \
       || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-      [ "$distinguish_absent" = 0 ] || return 4
+      # No backlog file at all: this home records no captain calls, so the task
+      # is absent from it rather than held. A record that EXISTS but cannot be
+      # read is a different state and still leaves by the exit 2 paths below,
+      # because that one may hide a live hold.
+      [ "$distinguish_absent" = 0 ] || return 3
       return 1
     fi
   fi
