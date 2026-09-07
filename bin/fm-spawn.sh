@@ -2250,6 +2250,37 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# A fresh task may only record a worktree that no other live task record names.
+# A holder's task branch is durable ownership evidence even after its endpoint
+# stops; an unreadable or live endpoint is also retained as a live claim. A
+# detached pool slot with a missing or dead endpoint has no live holder branch.
+spawn_refuse_worktree_collision() {  # <task-id> <worktree>
+  local task_id=$1 worktree=$2 target_real current_branch other_meta holder_id holder_wt holder_real
+  local holder_backend holder_target holder_state
+  target_real=$(real_path_or_raw "$worktree")
+  current_branch=$(git -C "$worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  for other_meta in "$STATE"/*.meta; do
+    [ -f "$other_meta" ] && [ ! -L "$other_meta" ] || continue
+    holder_id=$(basename "$other_meta" .meta)
+    [ "$holder_id" != "$task_id" ] || continue
+    holder_wt=$(fm_meta_get "$other_meta" worktree)
+    [ -n "$holder_wt" ] || continue
+    holder_real=$(real_path_or_raw "$holder_wt")
+    [ "$holder_real" = "$target_real" ] || continue
+    holder_backend=$(fm_backend_of_meta "$other_meta")
+    holder_target=$(fm_backend_target_of_meta "$other_meta")
+    holder_state=$(fm_backend_agent_state "$holder_backend" "$holder_target")
+    case "$holder_state" in
+      dead|missing)
+        [ "$current_branch" = "fm/$holder_id" ] || continue
+        ;;
+    esac
+    echo "error: spawn refused: worktree '$worktree' is already held by task '$holder_id'" >&2
+    echo "Resolve task '$holder_id' and retry after its work is safely landed and its record is cleaned up; do not bypass this refusal." >&2
+    return 1
+  done
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -3063,6 +3094,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+fi
+if [ "$RELAUNCH" -eq 0 ]; then
+  spawn_refuse_worktree_collision "$ID" "$WT" || exit 1
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1

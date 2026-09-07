@@ -1476,6 +1476,26 @@ canonical_existing_dir() {
   ( cd "$target" && pwd -P )
 }
 
+# A task may only tear down its own task branch. A pooled copy checked out on
+# another task's branch belongs to that task, so this guard refuses before any
+# branch, endpoint, worktree, or record mutation.
+teardown_refuse_if_other_task_branch() {
+  local branch holder_id
+  [ "$KIND" != secondmate ] || return 0
+  [ -d "$WT" ] || return 0
+  branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$branch" ] || return 0
+  [ "$branch" != "fm/$ID" ] || return 0
+  case "$branch" in
+    fm/*) holder_id=${branch#fm/} ;;
+    *) return 0 ;;
+  esac
+  [ -n "$holder_id" ] && [ "$holder_id" != "$ID" ] || return 0
+  echo "REFUSED: task $ID's recorded worktree $WT is checked out on branch $branch for task $holder_id; refusing teardown to avoid changing another task's copy." >&2
+  echo "Resolve task $holder_id and retry teardown after its work is safely landed; do not use --force to bypass this refusal." >&2
+  return 1
+}
+
 retry_wait_secs_is_valid() {
   [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
 }
@@ -3060,6 +3080,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
   ORCA_PATH_MATCH_VERIFIED=1
 fi
+
+teardown_refuse_if_other_task_branch || exit 1
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
