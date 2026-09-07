@@ -117,8 +117,7 @@ resolve_base_ref() {
   return 1
 }
 if ! BASE_REF=$(resolve_base_ref); then
-  printf '%s\n' 'skip: fm-backend baseline requires local main or origin/main'
-  exit 0
+  fail 'fm-backend baseline requires local main or origin/main'
 fi
 
 # Newest first-parent revision whose bin/backends/tmux.sh still uses the
