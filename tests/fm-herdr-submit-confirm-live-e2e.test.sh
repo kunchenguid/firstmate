@@ -14,20 +14,17 @@
 # Every Herdr call, including adapter calls, is routed through bin/fm-herdr-lab.sh.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-if [ "${FM_HERDR_SUBMIT_CONFIRM_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_HERDR_SUBMIT_CONFIRM_LIVE=1 to run the live Herdr submit-confirmation guard"
-  exit 0
-fi
+fm_live_gate opt-in FM_HERDR_SUBMIT_CONFIRM_LIVE herdr jq claude
 
-command -v herdr >/dev/null 2>&1 || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 but herdr is not installed"
-command -v jq >/dev/null 2>&1 || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 but jq is not installed"
-command -v claude >/dev/null 2>&1 || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 but Claude Code is not installed"
 [ -x "$LAB_HELPER" ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 but the Herdr lab helper is not executable at $LAB_HELPER"
 
 # shellcheck source=tests/herdr-test-safety.sh

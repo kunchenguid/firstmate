@@ -12,10 +12,10 @@
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
 set -u
 
-if [ "${FM_CLAUDE_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_CLAUDE_LIVE_E2E=1 to run the Claude Stop auto-arm regression"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_CLAUDE_LIVE_E2E claude
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -23,8 +23,6 @@ fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
 }
-
-command -v claude >/dev/null 2>&1 || fail "claude not found"
 
 LAB="$ROOT/.claude-autoarm-live-e2e.$$"
 PROJECT="$LAB/project"

@@ -204,7 +204,7 @@ That is the same terminal shape the `echo`-provider interrupt produced, now conf
 
 ## Refreshing this record
 
-Run both opt-in live guards after any muse upgrade, because the version-suffixed process name, session protocol, and styled composer are vendor-controlled surfaces:
+Run both live guards after any muse upgrade, because the version-suffixed process name, session protocol, and styled composer are vendor-controlled surfaces:
 
 ```
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh

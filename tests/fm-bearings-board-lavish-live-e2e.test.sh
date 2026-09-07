@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/fm-bearings-board-lavish-live-e2e.test.sh - opt-in drift guard proving
+# tests/fm-bearings-board-lavish-live-e2e.test.sh - live drift guard proving
 # the real lavish-axi still behaves the way bin/fm-bearings-board.sh's session
 # liveness check is written against.
 #
@@ -17,18 +17,18 @@
 # a human. The artifact is a scratch page in a temporary directory, and the
 # session it opens is ended again before the guard returns.
 #
-# Standard CI has no lavish-axi, so this is opt-in and on-demand. The portable
-# counterpart in tests/fm-bearings-board.test.sh pins the build's logic in CI
-# against a stub that reproduces these shapes. Run this guard after a lavish-axi
-# upgrade and before trusting refreshed evidence.
+# Standard CI has no lavish-axi, so this reports a capability skip there. The
+# portable counterpart in tests/fm-bearings-board.test.sh pins the build's logic
+# in CI against a stub that reproduces these shapes. Run this guard after a
+# lavish-axi upgrade and before trusting refreshed evidence.
 set -u
 
-if [ "${FM_BEARINGS_LAVISH_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_BEARINGS_LAVISH_LIVE=1 to run the installed lavish-axi board-session guard"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+fm_live_gate default-on FM_BEARINGS_LAVISH_LIVE lavish-axi jq curl
 
 pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
@@ -44,9 +44,6 @@ cleanup() {
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup; exit 1; }
 trap cleanup EXIT
 
-command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
-command -v jq >/dev/null 2>&1 || fail "jq is not installed"
-command -v curl >/dev/null 2>&1 || fail "curl is not installed"
 VERSION=$(lavish-axi --version 2>/dev/null | tr -d '[:space:]')
 note "lavish-axi ${VERSION:-version-unknown}"
 

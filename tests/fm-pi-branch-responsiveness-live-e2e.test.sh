@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Opt-in live guard for the ONE thing only a real Pi TUI can answer: whether
+# Default-on live guard for the ONE thing only a real Pi TUI can answer: whether
 # the captain can still type and see the screen repaint while a supervision
 # outcome is being delivered into his session.
 #
@@ -28,17 +28,10 @@
 # which runs the same reconcile-and-deliver chain an arriving outcome runs.
 set -u
 
-if [ "${FM_PI_BRANCH_RESPONSIVENESS_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_PI_BRANCH_RESPONSIVENESS_E2E=1 to run the real-Pi delivery responsiveness guard"
-  exit 0
-fi
-
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-command -v pi >/dev/null 2>&1 || fail "pi not installed: the real-Pi responsiveness guard cannot report a verdict without it"
-command -v tmux >/dev/null 2>&1 || fail "tmux not installed: the real-Pi responsiveness guard cannot drive a pane without it"
-command -v node >/dev/null 2>&1 || fail "node not installed: the real-Pi responsiveness guard cannot time keystroke echo without it"
+fm_live_gate default-on FM_PI_BRANCH_RESPONSIVENESS_E2E pi tmux node
 
 PI_VERSION=$(pi --version 2>/dev/null || printf 'unknown')
 TMUX=$(command -v tmux)

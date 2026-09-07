@@ -22,14 +22,7 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
-if [ "${FM_SEND_MARKER_HERDR_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_SEND_MARKER_HERDR_E2E=1 to run the real Pi/Herdr secondmate-marker regression"
-  exit 0
-fi
-
-for tool in git herdr jq pi; do
-  command -v "$tool" >/dev/null 2>&1 || { echo "skip: $tool not found"; exit 0; }
-done
+fm_live_gate opt-in FM_SEND_MARKER_HERDR_E2E git herdr jq pi
 
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 SESSION=$("$LAB_HELPER" name fm-send-secondmate-marker-v7)

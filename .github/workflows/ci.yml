@@ -165,6 +165,14 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      # The Pi extension tests read the installed Pi package's own types and
+      # runtime, so without it they gate-skip and pass silently. It is a public
+      # npm package and needs no credential, so CI can hold the real thing.
+      - name: Install the Pi package for the Pi extension tests
+        run: |
+          set -eu
+          npm install -g @earendil-works/pi-coding-agent
+          npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix
@@ -175,7 +183,10 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
+          # The Pi package is installed above, so a skip for its absence means
+          # the install broke rather than that this host cannot run the test.
           bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
+            --fail-on-gate-skip 'installed @earendil-works/pi-coding-agent package not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
       - name: Upload portable serial shard ${{ matrix.shard }} timing artifact
         if: always()
