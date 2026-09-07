@@ -25,11 +25,14 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 X_LINK="$ROOT/bin/fm-x-link.sh"
+PR_POLL="$ROOT/bin/fm-pr-poll.sh"
 # fm_test_tmproot's own cleanup trap fires when its command substitution exits,
 # so recreate the root before resolving it and clean it up from this file's trap.
 TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
@@ -202,6 +205,19 @@ run_spawn() {  # <case-dir> <args...>
 
 meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
+}
+
+seed_armed_pr_poll() {  # <case-dir> <id> <url>
+  local dir=$1 id=$2 url=$3 provider host path number
+  fm_pr_url_parse "$url" || fail "the regression fixture URL was invalid"
+  provider=$FM_PR_PROVIDER
+  host=$FM_PR_HOST
+  path=$FM_PR_PATH
+  number=$FM_PR_NUMBER
+  printf 'pr=%s\n' "$url" >> "$dir/home/state/$id.meta"
+  fm_pr_poll_prepare "$dir/home/state" "$id" "$provider" "$url" "$host" "$path" "$number" "$PR_POLL" \
+    || fail "could not prepare the regression poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the regression poll"
 }
 
 journal_field() {  # <case-dir> <id> <key>
@@ -384,6 +400,23 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_keeps_an_armed_pr_poll_valid() {
+  local dir out rc url
+  dir=$(new_case armed-pr-poll rl42)
+  add_ship_task "$dir" rl42 claude
+  url=https://github.com/example/repo/pull/42
+  seed_armed_pr_poll "$dir" rl42 "$url"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl42 "$PR_POLL" \
+    || fail "the regression fixture did not start with a valid PR poll"
+
+  out=$(run_control "$dir" rl42 relaunch --note "continue after recovery"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed with an armed PR poll"$'\n'"$out"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl42 "$PR_POLL" \
+    || fail "relaunch invalidated the armed PR poll"
+  pass "fm-control relaunch: an armed PR poll remains valid after replacement publication"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1535,6 +1568,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_pr_poll_valid
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
