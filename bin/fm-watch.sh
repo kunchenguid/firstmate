@@ -221,10 +221,11 @@ SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-60}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent surfaces on first sight
-# and is then held to that same cadence; a secondmate earns the cadence on its
-# declaration alone, because its endpoint liveness is deliberately never read
-# (pause_state_class owns that split).
+# bounded cadence, while a live or ambiguously read agent surfaces once per
+# declaration and then joins it; a secondmate earns the cadence on its declaration
+# alone, because its endpoint liveness is deliberately never read
+# (pause_state_class owns that split, and the declaration - not the pane hash or
+# another still-declaring status append - owns how long the cadence holds).
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -727,21 +728,16 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # absorb can rot invisibly. <age> is how long the current absorb has held and
 # <throttle> is the per-window marker whose mtime records the last re-surface, so
 # once past PAUSE_RESURFACE_SECS the pane wakes once per window rather than every
-# poll. An optional <scope> binds that cadence to its current declaration; callers
-# without a scoped declaration keep the timestamp body. Shared by the
-# declared-pause absorb and the worktree-write deferral so the two cadences cannot
-# drift apart; each caller owns its own marker and reason.
+# poll. Shared by the declared-pause absorb and the worktree-write deferral so the
+# two cadences cannot drift apart; each caller owns its own marker and reason.
 # Returns without waking while either the absorb or the throttle is inside the
 # window; wake() itself exits the cycle, exactly as it does inline.
-resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope]
-  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-}
-  if [ -z "$scope" ] || [ ! -e "$throttle" ] \
-    || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
-    [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
-    [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
-  fi
+resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
+  local win=$1 throttle=$2 age=$3 reason=$4
+  [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
+  [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fm_wake_append stale "$win" "$reason" || exit 1
-  if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
+  date +%s > "$throttle"
   wake "$reason"
 }
 
@@ -853,16 +849,18 @@ busy_turn_over_age() {  # <task>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration
+  local win=$1 task=$2 h=$3 key statusf mtime age cadence_age detail reason throttle
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
+  throttle="$STATE/.paused-resurfaced-$key"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
+  if [ -e "$throttle" ]; then cadence_age=$(age_of "$throttle"); else cadence_age=$age; fi
   if status_is_captain_held "$(last_status_line "$statusf")"; then
     detail="captain-held, awaiting the captain"
     reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
@@ -870,8 +868,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration"
+  resurface_absorbed "$win" "$throttle" "$cadence_age" "stale: $win ($reason)"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
@@ -957,8 +954,15 @@ clear_pause_tracking() {  # <window-key>
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
+#
+# The ordinary-crew liveness gate is one-shot per declared wait, and .paused-<key>
+# records that the key is already on the bounded cadence. A live or ambiguously
+# read agent surfaces once for inspection, then further pane churn, watcher
+# restarts, and still-declaring status appends retain that cadence. The marker is
+# dropped only when the last status line stops declaring a wait or the crew is
+# provably working again.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive kind
+  local win=$1 task=$2 key last recheck_file class agent_alive kind on_cadence
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
@@ -967,19 +971,8 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  # Read once past the declared-wait gate and reused by both liveness gates below,
-  # so a mate's stale poll costs one metadata scan rather than one per gate, and the
-  # far more common no-declaration path above still costs none.
-  kind=$(window_kind "$win")
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$kind" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
+  if [ -e "$STATE/.paused-$key" ]; then on_cadence=0; else on_cadence=1; fi
+  if [ "$on_cadence" -eq 0 ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     printf 'paused'
     return
   fi
@@ -989,22 +982,26 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
-  if [ "$kind" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
-      return
+  if [ "$on_cadence" -ne 0 ]; then
+    kind=$(window_kind "$win")
+    if [ "$kind" != secondmate ]; then
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      if [ "$agent_alive" != dead ]; then
+        rm -f "$recheck_file"
+        printf 'none'
+        return
+      fi
     fi
   fi
   # Recover paused classification for a declared wait that authoritative crew state
-  # could not name. Reaching here already proves the only two admissible cases: an
+  # could not name. Reaching here already proves one of the admissible cases: an
   # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
-  # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
-  # read and so cannot supply that confirmation. Without the mate case a mate's
-  # captain hold - which has no current-state mapping and so arrives as `none` -
-  # would be silenced by every caller rather than taking the bounded re-surface
-  # cadence, and a forgotten hold would rot invisibly.
+  # is being silenced; a secondmate, whose endpoint liveness is deliberately never
+  # read and so cannot supply that confirmation; or a key already on the bounded
+  # cadence, whose one live-agent inspection has been spent. Without the mate case a
+  # mate's captain hold - which has no current-state mapping and so arrives as
+  # `none` - would be silenced by every caller rather than taking the bounded
+  # re-surface cadence, and a forgotten hold would rot invisibly.
   [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
@@ -1025,19 +1022,19 @@ pause_state_class() {  # <window> <task>
 # window's own .paused-resurfaced-<key> marker: an idle parked pane still churns
 # its hash (a clock, a token counter), and each new hash re-enters this path, so
 # without that bound one declared wait re-alarms firstmate for its whole duration.
+# A still-declaring status append retains the same marker for the same reason.
 # The FIRST sight still wakes, keeping the inspect-an-inconclusive-state intent,
 # and the throttle is read BEFORE anything is queued and advanced only by a wake
 # that really fires - a throttle written by the wake it should have prevented, or
 # read after that wake was already appended, bounds nothing.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last declaration='' declared=1 throttled=1
+  local win=$1 h=$2 key task last declared=1 throttled=1
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     declared=0
-    declaration="declared:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
-    if [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$declaration" ] \
+    if [ -e "$STATE/.paused-$key" ] \
       && [ "$(age_of "$STATE/.paused-resurfaced-$key")" -lt "$PAUSE_RESURFACE_SECS" ]; then
       throttled=0
     fi
@@ -1051,7 +1048,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   if [ "$declared" -eq 0 ]; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
-    [ "$throttled" -eq 0 ] || printf '%s' "$declaration" > "$STATE/.paused-resurfaced-$key"
+    [ "$throttled" -eq 0 ] || date +%s > "$STATE/.paused-resurfaced-$key"
   else
     clear_pause_state "$key"
   fi

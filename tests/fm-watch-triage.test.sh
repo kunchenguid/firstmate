@@ -2165,20 +2165,146 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+# One watcher restart over a crew that is idling on a declared wait.
+watch_paused_round() {  # <state> <fakebin> <out> <window> <capture-file>
+  local state=$1 fakebin=$2 out=$3 window=$4 capture=$5 pid
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if wait_poll_cycle "$state" "$pid" && wait_poll_cycle "$state" "$pid" \
+    && wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    return 0
+  fi
+  wait "$pid" 2>/dev/null || true
+  ack_stopped_cycle "$state"
+}
+
+arm_pause_cadence() {  # <state> <capture-file> <status-file> <window> <key> <pane-hash>
+  local state=$1 capture=$2 statusf=$3 window=$4 key=$5 pane_hash=$6
+  printf 'idle awaiting the upstream release\n' > "$capture"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/armed.meta"
+  printf 'paused: waiting on the upstream vendor release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-armed_status"
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  date +%s > "$state/.paused-rechecked-$key"
+  date +%s > "$state/.paused-resurfaced-$key"
+}
+
+watch_armed_pause() {  # <state> <fakebin> <out> <window> <capture-file>
+  local state=$1 fakebin=$2 out=$3 window=$4 capture=$5
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+}
+
+# Regression from fork PR #67: one current declaration must retain its cadence
+# across pane churn, declaring appends, and watcher restarts.
+test_declared_pause_cadence_survives_pane_churn_and_restarts() {
+  local dir state fakebin out capture_file statusf window key round stales
+  dir=$(make_case declared-pause-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/churn.status"
+  window="test:fm-churn"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/churn.meta"
+  printf 'paused: waiting on the upstream vendor release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-churn_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the upstream vendor release'
+
+  round=1
+  while [ "$round" -le 5 ]; do
+    printf 'idle awaiting the upstream release\ntokens %s\n' "$round" > "$capture_file"
+    watch_paused_round "$state" "$fakebin" "$out" "$window" "$capture_file" \
+      || fail "could not acknowledge the pause-churn round $round stop"
+    round=$((round + 1))
+  done
+  stales=$(grep -c '^stale:' "$out" || true)
+  [ "$stales" -eq 1 ] \
+    || fail "a churning declared pause surfaced $stales stale wakes across five restarts (expected the single live-agent inspection)"
+
+  printf 'idle awaiting the upstream release\ntokens settled\n' > "$capture_file"
+  round=1
+  while [ "$round" -le 3 ]; do
+    printf 'paused: still waiting on the upstream vendor release (check %s)\n' "$round" >> "$statusf"
+    printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-churn_status"
+    watch_paused_round "$state" "$fakebin" "$out" "$window" "$capture_file" \
+      || fail "could not acknowledge the pause-append round $round stop"
+    round=$((round + 1))
+  done
+  stales=$(grep -c '^stale:' "$out" || true)
+  [ "$stales" -eq 1 ] \
+    || fail "declaring status appends re-armed the stale path ($stales stale wakes in total)"
+  [ -e "$state/.paused-$key" ] \
+    || fail "the declared-wait cadence marker was lost across pane churn, appends and restarts"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a declared wait started the wedge timer"
+  grep -F 'possible wedge' "$out" >/dev/null && fail "a declared wait was mislabeled a possible wedge"
+  unset FM_FAKE_CREW_STATE
+  pass "a current declared wait holds its long cadence across pane churn, declaring appends and watcher restarts"
+}
+
+# Captain-relevant lines end the declared wait and must still wake immediately.
+test_captain_relevant_line_breaks_an_armed_pause_cadence() {
+  local dir state fakebin out capture_file statusf window key pane_hash pid slug line
+  window="test:fm-armed"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting the upstream release")
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the upstream vendor release'
+  while IFS='|' read -r slug line; do
+    [ -n "$slug" ] || continue
+
+    dir=$(make_case "armed-pause-signal-$slug"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/armed.status"
+    arm_pause_cadence "$state" "$capture_file" "$statusf" "$window" "$key" "$pane_hash"
+    printf '%s\n' "$line" >> "$statusf"
+    watch_armed_pause "$state" "$fakebin" "$out" "$window" "$capture_file"
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "an armed pause cadence swallowed a $slug append on the signal path"; }
+    grep -F "$statusf" "$state/.wake-queue" >/dev/null \
+      || fail "a $slug append behind an armed pause cadence was not queued: $(cat "$state/.wake-queue" 2>/dev/null)"
+
+    dir=$(make_case "armed-pause-stale-$slug"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/armed.status"
+    arm_pause_cadence "$state" "$capture_file" "$statusf" "$window" "$key" "$pane_hash"
+    printf '%s\n' "$line" >> "$statusf"
+    printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-armed_status"
+    watch_armed_pause "$state" "$fakebin" "$out" "$window" "$capture_file"
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "an armed pause cadence swallowed a $slug line on the stale path"; }
+    grep -F "stale: $window" "$out" >/dev/null \
+      || fail "a $slug line behind an armed pause cadence did not surface as a stale wake: $(cat "$out")"
+    grep -F 'awaiting external' "$out" >/dev/null \
+      && fail "a $slug line was rechecked on the pause cadence instead of surfacing"
+    [ ! -e "$state/.paused-$key" ] \
+      || fail "a $slug line left the declared-wait cadence armed"
+  done <<'VERBS'
+needs-decision|needs-decision [key=api-shape]: pick the sync or the async client
+blocked|blocked: the upstream vendor token expired
+done|done: PR https://example.test/x/pull/9 checks green
+VERBS
+  unset FM_FAKE_CREW_STATE
+  pass "needs-decision, blocked and done still wake immediately through an armed declared-wait cadence"
+}
+
 # A dead worker reaches handle_paused_stale rather than the live fallback above.
-# When one declared wait directly replaces another, the existing
-# throttle belongs to the old declaration and must not suppress the new wait's
-# first inspection merely because its timestamp is still young.
-test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
-  local spec name initial replacement expected dir state fakebin out capture_file
+# A further declaring append must retain the cadence already established for the
+# current wait rather than manufacturing a new first inspection.
+test_absorbed_wait_append_retains_the_existing_throttle() {
+  local spec name initial replacement dir state fakebin out capture_file
   local statusf window key sig back pid wakes
   for spec in \
-    'paused-replacement|paused: waiting on validation run one|paused: waiting on validation run two|awaiting external' \
-    'captain-held-replacement|captain-held [key=route]: awaiting the routing call|captain-held [key=release]: awaiting the release call|awaiting the captain'
+    'paused-append|paused: waiting on validation run one|paused: still waiting on validation run one' \
+    'captain-held-append|captain-held [key=route]: awaiting the routing call|captain-held [key=route]: still awaiting the routing call'
   do
     name=${spec%%|*}; spec=${spec#*|}
     initial=${spec%%|*}; spec=${spec#*|}
-    replacement=${spec%%|*}; expected=${spec#*|}
+    replacement=$spec
     dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
     window="test:fm-held"
@@ -2204,7 +2330,7 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
 
     printf '%s\n' "$replacement" >> "$statusf"
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
-    printf 'idle after replacement wait\n' > "$capture_file"
+    printf 'idle after declaring append\n' > "$capture_file"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
       FM_WATCH_HANDLING_SUCCESSOR=1 \
@@ -2212,15 +2338,14 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
       FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
-    wait_for_exit "$pid" 100 \
-      || { reap "$pid"; fail "[$name] replacement declared wait inherited the old throttle"; }
+    wait_poll_cycle "$state" "$pid" 300 \
+      || { reap "$pid"; fail "[$name] declaring append re-surfaced inside the existing cadence"; }
+    reap "$pid"
     wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
       "$state/.wake-queue" 2>/dev/null || echo 0)
-    [ "$wakes" -eq 1 ] || fail "[$name] replacement declared wait produced $wakes wakes instead of one"
-    grep -F "$expected" "$state/.wake-queue" >/dev/null \
-      || fail "[$name] replacement declared wait used the wrong recheck reason: $(cat "$state/.wake-queue")"
+    [ "$wakes" -eq 0 ] || fail "[$name] declaring append produced $wakes wakes inside the existing cadence"
   done
-  pass "absorbed paused and captain-held replacements each start their own re-surface cadence"
+  pass "absorbed paused and captain-held appends retain their existing re-surface cadence"
 }
 
 # Run one watcher round against a parked-worker fixture, so a round differs only
@@ -2261,18 +2386,18 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
 # The 2026-08/09 alarm loop, in both observed forms - a worker parked on the
 # CAPTAIN (captain-held, five consecutive alarms) and one parked on the PIPELINE
 # (paused:, dozens across one day). pause_state_class deliberately returns `none`
-# for either while the agent is still ALIVE, so that a worker genuinely waiting on
-# a decision is never silenced; first sight of each distinct stale hash therefore
-# reaches surface_nonterminal_stale. An idle parked pane still churns its hash (a
+# for the first sight while the agent is still alive, so that a worker genuinely
+# waiting on a decision is never silenced; the pause marker then records that the
+# inspection was spent. An idle parked pane still churns its hash (a
 # clock, a token counter), so every tick used to re-enter that first-sight path and
 # wake firstmate - the throttle was written by the very wake it should have
 # prevented, and the hash-change path cleared it again before it was ever read.
-# The contract pinned here: the FIRST sight still surfaces, further sights inside
-# PAUSE_RESURFACE_SECS are absorbed, and the window's end still re-surfaces once,
-# so a forgotten wait cannot rot invisibly.
+# The contract pinned here: the first sight still surfaces, further sights and
+# still-declaring appends inside PAUSE_RESURFACE_SECS are absorbed, and the
+# window's end still re-surfaces once, so a forgotten wait cannot rot invisibly.
 test_live_declared_wait_churn_honors_the_resurface_throttle() {
   local spec name status_line dir state fakebin out capture_file statusf window key
-  local sig round wakes bare text throttle replacement
+  local sig round wakes text throttle replacement expected
   for spec in \
     'paused-pipeline-churn|paused: waiting on the validation run to finish' \
     'captain-held-churn|captain-held [key=route]: awaiting the captain on the routing call'
@@ -2313,33 +2438,27 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
       round=$((round + 1))
     done
 
-    # A direct wait-to-wait transition starts a NEW declaration even though the
-    # same window remains parked. Its first sight must not inherit the previous
-    # declaration's throttle, or an unrelated replacement wait can stay silent
-    # for nearly the whole old cadence window.
+    # A still-declaring status append belongs to the current wait and must retain
+    # the cadence already established above.
     case "$name" in
-      paused-pipeline-churn) replacement='paused: waiting on the replacement validation run' ;;
-      captain-held-churn) replacement='captain-held [key=release]: awaiting the captain on the release call' ;;
+      paused-pipeline-churn) replacement='paused: still waiting on the validation run to finish' ;;
+      captain-held-churn) replacement='captain-held [key=route]: still awaiting the captain on the routing call' ;;
     esac
     printf '%s\n' "$replacement" >> "$statusf"
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
-    printf 'replacement wait, elapsed 1s' > "$capture_file"
-    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
-      || fail "[$name] a replacement declared wait inherited the previous wait's re-surface throttle"
-    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
-      "$state/.wake-queue" 2>/dev/null || echo 0)
-    bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
-      "$state/.wake-queue" 2>/dev/null || echo 0)
-    [ "$wakes" -eq 1 ] || fail "[$name] replacement declared wait produced $wakes first wakes instead of one"
-    [ "$bare" -eq 1 ] || fail "[$name] replacement declared wait changed the wake identity: $(cat "$state/.wake-queue")"
-    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the replacement wait's first surface"
-
-    printf 'replacement wait, elapsed 2s' > "$capture_file"
+    printf 'declaring append, elapsed 1s' > "$capture_file"
     parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
-      || fail "[$name] replacement wait re-alarmed inside its own re-surface window"
+      || fail "[$name] a declaring append re-armed the live-agent inspection"
     wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
       "$state/.wake-queue" 2>/dev/null || echo 0)
-    [ "$wakes" -eq 0 ] || fail "[$name] replacement wait re-alarmed $wakes time(s) inside its own re-surface window"
+    [ "$wakes" -eq 0 ] || fail "[$name] declaring append produced $wakes wakes inside the current cadence"
+
+    printf 'declaring append, elapsed 2s' > "$capture_file"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+      || fail "[$name] declaring append re-alarmed inside the current re-surface window"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 0 ] || fail "[$name] declaring append re-alarmed $wakes time(s) inside the current re-surface window"
 
     # End of the window: the wait must re-surface exactly once, on the same plain
     # identity as before, so absorbing churn never becomes silence.
@@ -2349,10 +2468,13 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
       || fail "[$name] a parked worker did not re-surface once its re-surface window elapsed"
     wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
       "$state/.wake-queue" 2>/dev/null || echo 0)
-    bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
-      "$state/.wake-queue" 2>/dev/null || echo 0)
     [ "$wakes" -eq 1 ] || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
-    [ "$bare" -eq 1 ] || fail "[$name] elapsed re-surface changed the wake identity: $(cat "$state/.wake-queue")"
+    case "$name" in
+      paused-pipeline-churn) expected='awaiting external' ;;
+      captain-held-churn) expected='awaiting the captain' ;;
+    esac
+    grep -F "$expected" "$state/.wake-queue" >/dev/null \
+      || fail "[$name] elapsed re-surface used the wrong declared-wait reason: $(cat "$state/.wake-queue")"
   done
   pass "a parked live worker surfaces once, absorbs pane churn for the whole re-surface window, then re-surfaces when it elapses"
 }
@@ -4171,7 +4293,9 @@ test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
-test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
+test_declared_pause_cadence_survives_pane_churn_and_restarts
+test_captain_relevant_line_breaks_an_armed_pause_cadence
+test_absorbed_wait_append_retains_the_existing_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
