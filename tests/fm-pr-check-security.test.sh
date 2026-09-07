@@ -1292,8 +1292,10 @@ arm_github_poll() {  # <case-dir> <id> <url>
 # them after pr= and disarm the poll. Drive the real writer.
 test_fm_captain_hold_complete_does_not_disarm_an_armed_poll() {
   local dir state
-  command -v tasks-axi >/dev/null 2>&1 \
-    || fail "fm-captain-hold.sh complete coverage needs tasks-axi"
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the origin attestation is inert"
+    return 0
+  }
   dir=$(make_case hold-complete-after-pr)
   state="$dir/home/state"
   arm_github_poll "$dir" task-a https://github.com/o/r/pull/10
@@ -1335,7 +1337,8 @@ test_fm_control_relaunch_does_not_disarm_an_armed_poll() {
 }
 
 # The parse still refuses a binding whose pr= no longer matches the sidecar,
-# a second pr= line, garbage after pr=, and an invalid pr_head= after pr=.
+# a second pr= line, garbage after pr=, a malformed key after pr=, and an
+# invalid pr_head= after pr=.
 test_armed_poll_still_refuses_a_tampered_binding() {
   local dir state before
   dir=$(make_case tampered-pr-identity)
@@ -1360,6 +1363,11 @@ test_armed_poll_still_refuses_a_tampered_binding() {
   printf '# not-a-key\n' >> "$state/task-a.meta"
   ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
     || fail "a non-key line after pr= remained an authenticated binding"
+
+  printf '%s\n' "$before" > "$state/task-a.meta"
+  printf 'not a key=1\n' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a malformed key after pr= remained an authenticated binding"
 
   printf '%s\n' "$before" > "$state/task-a.meta"
   printf 'pr_head=not-a-sha\n' >> "$state/task-a.meta"
