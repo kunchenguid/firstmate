@@ -169,8 +169,43 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_recorded_base_branch_is_compare_base() {
+  local case_dir out
+  case_dir=$(make_case recorded-base)
+  git -C "$case_dir/wt" checkout -q -b develop
+  printf 'from-develop\n' > "$case_dir/wt/develop.txt"
+  git -C "$case_dir/wt" add develop.txt
+  git -C "$case_dir/wt" commit -qm "develop tip"
+  git -C "$case_dir/wt" push -q origin develop
+  printf 'crew-only\n' > "$case_dir/wt/crew.txt"
+  git -C "$case_dir/wt" add crew.txt
+  git -C "$case_dir/wt" commit -qm "crew on develop"
+  git -C "$case_dir/wt" branch -f fm/task-x1 HEAD
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+
+  write_task_meta "$case_dir"
+  out=$(run_review_diff "$case_dir" task-x1)
+  assert_contains "$out" 'diff base: origin/main' \
+    "absent base_branch= must keep the default-branch compare base"
+  assert_contains "$out" '+from-develop' \
+    "absent base_branch= should include named-base-only commits vs default"
+  assert_contains "$out" '+crew-only' \
+    "absent base_branch= should still include crew commits"
+
+  write_task_meta "$case_dir" "base_branch=develop"
+  out=$(run_review_diff "$case_dir" task-x1)
+  assert_contains "$out" 'diff base: origin/develop' \
+    "recorded base_branch= must become the compare base"
+  assert_not_contains "$out" '+from-develop' \
+    "recorded base_branch= must not treat named-base commits as the review diff"
+  assert_contains "$out" '+crew-only' \
+    "recorded base_branch= should still include crew commits vs that base"
+  pass "fm-review-diff uses recorded base_branch= as compare base, default otherwise"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_recorded_base_branch_is_compare_base

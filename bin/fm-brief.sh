@@ -13,7 +13,7 @@
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--base-branch <branch>] [--branch-name <name>]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [--base-branch <branch>] [--branch-name <name>]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [--base-branch <branch>]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -62,11 +62,12 @@
 # --branch-name <name> replaces every generated `fm/<task-id>` crew branch
 # (checkout command, push-rule text, local-only done line) with that name.
 # The name must pass `git check-ref-format --branch`. When omitted, scaffolds
-# still use `fm/<task-id>` exactly as today. --secondmate refuses the flag.
-# The resolved crew branch (an explicit --branch-name, or fm/<task-id> when
-# that flag is omitted) and --base-branch cannot name the same branch: the
-# scaffold checks out the base, so an identical crew branch would make
-# `git checkout -b` fail on the worker's first action.
+# still use `fm/<task-id>` exactly as today. Scout and secondmate refuse the flag:
+# a scout never creates a crew branch, so `--base-branch fm/<id>` is legal there.
+# On a ship brief the resolved crew branch (an explicit --branch-name, or
+# fm/<task-id> when that flag is omitted) and --base-branch cannot name the
+# same branch: the scaffold checks out the base, so an identical crew branch
+# would make `git checkout -b` fail on the worker's first action.
 # A custom name is recorded as `Crew branch: branch=<name>` on ship briefs.
 # After the generated Definition of done, every ship and scout scaffold writes
 # the exact line `Scaffold bound: generated`. bin/fm-spawn.sh and
@@ -208,7 +209,11 @@ if [ "$KIND" = secondmate ] && [ "$BASE_BRANCH_SET" -eq 1 ]; then
   exit 1
 fi
 if [ "$KIND" = secondmate ] && [ "$BRANCH_NAME_SET" -eq 1 ]; then
-  echo "error: --branch-name applies only to ship and scout briefs; a secondmate already owns its home" >&2
+  echo "error: --branch-name applies only to ship briefs; a secondmate already owns its home" >&2
+  exit 1
+fi
+if [ "$KIND" = scout ] && [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  echo "error: --branch-name applies only to ship briefs; a scout does not create a crew branch" >&2
   exit 1
 fi
 if [ "$BASE_BRANCH_SET" -eq 1 ]; then
@@ -228,7 +233,7 @@ CREW_BRANCH="fm/$ID"
 if [ "$BRANCH_NAME_SET" -eq 1 ]; then
   CREW_BRANCH=$BRANCH_NAME
 fi
-if [ "$BASE_BRANCH_SET" -eq 1 ] && [ "$BASE_BRANCH" = "$CREW_BRANCH" ]; then
+if [ "$KIND" = ship ] && [ "$BASE_BRANCH_SET" -eq 1 ] && [ "$BASE_BRANCH" = "$CREW_BRANCH" ]; then
   echo "error: --base-branch cannot be the crew branch ($CREW_BRANCH): the scaffold checks out the base, so the worker cannot create a crew branch with the same name" >&2
   exit 1
 fi
@@ -260,11 +265,9 @@ shell_quote() {
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
-BASE_BRANCH_COMMAND=$BASE_BRANCH
 CREW_BRANCH_COMMAND=$CREW_BRANCH
 BASE_BRANCH_CONTRACT=
 if [ "$BASE_BRANCH_SET" -eq 1 ]; then
-  BASE_BRANCH_COMMAND=$(shell_quote "$BASE_BRANCH")
   BASE_BRANCH_CONTRACT=$'\nBase branch contract: base_branch='$BASE_BRANCH
 fi
 if [ "$BRANCH_NAME_SET" -eq 1 ]; then

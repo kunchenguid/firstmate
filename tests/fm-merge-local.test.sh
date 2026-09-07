@@ -38,7 +38,10 @@ test_recorded_custom_branch_merges() {
 
   fm_write_meta "$home/state/task-custom.meta" \
     "project=$project" "kind=ship" "mode=local-only"
-  printf '%s\n' 'Crew branch: branch=feature/custom-task' > "$home/data/task-custom/brief.md"
+  cat > "$home/data/task-custom/brief.md" <<'EOF'
+# Definition of done
+Crew branch: branch=feature/custom-task
+EOF
 
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     "$ROOT/bin/fm-merge-local.sh" task-custom >/dev/null \
@@ -98,7 +101,10 @@ test_invalid_recorded_branch_refuses() {
 
   fm_write_meta "$home/state/task-bad.meta" \
     "project=$project" "kind=ship" "mode=local-only"
-  printf '%s\n' 'Crew branch: branch=bad..name' > "$home/data/task-bad/brief.md"
+  cat > "$home/data/task-bad/brief.md" <<'EOF'
+# Definition of done
+Crew branch: branch=bad..name
+EOF
 
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     "$ROOT/bin/fm-merge-local.sh" task-bad 2>&1)
@@ -176,6 +182,7 @@ test_recorded_base_lands_on_named_branch_not_default() {
   fm_write_meta "$home/state/task-named-base.meta" \
     "project=$project" "kind=ship" "mode=local-only"
   cat > "$home/data/task-named-base/brief.md" <<'EOF'
+# Definition of done
 Delivery contract: mode=local-only
 Base branch contract: base_branch=feature/named-base
 EOF
@@ -258,7 +265,10 @@ test_invalid_recorded_base_refuses() {
 
   fm_write_meta "$home/state/task-bad-base.meta" \
     "project=$project" "kind=ship" "mode=local-only"
-  printf '%s\n' 'Base branch contract: base_branch=bad..name' > "$home/data/task-bad-base/brief.md"
+  cat > "$home/data/task-bad-base/brief.md" <<'EOF'
+# Definition of done
+Base branch contract: base_branch=bad..name
+EOF
 
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     "$ROOT/bin/fm-merge-local.sh" task-bad-base 2>&1)
@@ -688,6 +698,47 @@ EOF
   pass "fm-merge-local.sh ignores contract lines conjured in a relaunch progress note"
 }
 
+test_checked_out_named_base_refuses_update_ref() {
+  local case_dir home project wt out status base_before
+  case_dir="$TMP_ROOT/checked-out-base"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  wt="$case_dir/base-wt"
+  mkdir -p "$home/data/task-checked-out" "$home/state"
+
+  make_local_only_project "$project"
+  git -C "$project" checkout -qb feature/named-base
+  printf 'named base\n' > "$project/named-base.txt"
+  git -C "$project" add named-base.txt
+  git -C "$project" commit -qm named-base
+  git -C "$project" checkout -qb "fm/task-checked-out"
+  printf 'crew work\n' > "$project/crew.txt"
+  git -C "$project" add crew.txt
+  git -C "$project" commit -qm crew-work
+  git -C "$project" checkout -q main
+  git -C "$project" worktree add -q "$wt" feature/named-base
+  base_before=$(git -C "$project" rev-parse feature/named-base)
+
+  fm_write_meta "$home/state/task-checked-out.meta" \
+    "project=$project" "kind=ship" "mode=local-only"
+  cat > "$home/data/task-checked-out/brief.md" <<'EOF'
+# Definition of done
+Base branch contract: base_branch=feature/named-base
+EOF
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-merge-local.sh" task-checked-out 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-merge-local.sh updated a named base that is checked out"
+  assert_contains "$out" "checked out" \
+    "checked-out named base did not refuse update-ref"
+  [ "$(git -C "$project" rev-parse feature/named-base)" = "$base_before" ] \
+    || fail "checked-out named base still moved"
+  [ "$(git -C "$project" symbolic-ref --short HEAD)" = main ] \
+    || fail "checked-out named-base refuse left the default checkout"
+  pass "fm-merge-local.sh refuses update-ref when the landing branch is checked out"
+}
+
 test_recorded_custom_branch_merges
 test_omitted_crew_branch_still_merges_fm_id
 test_invalid_recorded_branch_refuses
@@ -703,3 +754,4 @@ test_task_text_forged_relaunch_marker_cannot_hide_generated_contracts
 test_progress_note_worktree_line_cannot_extend_past_relaunch_marker
 test_progress_note_setup_pair_cannot_override_generated_contracts
 test_progress_note_cannot_conjure_absent_contract_lines
+test_checked_out_named_base_refuses_update_ref

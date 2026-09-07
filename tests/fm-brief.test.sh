@@ -293,7 +293,8 @@ mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode 
 base-branch on a secondmate charter|brief-refused-b5 --secondmate --no-projects --base-branch develop|--base-branch applies only to ship and scout briefs
 empty base-branch value|brief-refused-b6 some-proj --mode no-mistakes --base-branch=|--base-branch requires a non-empty value
 invalid base-branch name|brief-refused-b7 some-proj --mode no-mistakes --base-branch bad..name|--base-branch is not a usable git branch name
-branch-name on a secondmate charter|brief-refused-b8 --secondmate --no-projects --branch-name feature/x|--branch-name applies only to ship and scout briefs
+branch-name on a secondmate charter|brief-refused-b8 --secondmate --no-projects --branch-name feature/x|--branch-name applies only to ship briefs
+branch-name on a scout brief|brief-refused-b8s some-proj --scout --branch-name feature/x|--branch-name applies only to ship briefs
 empty branch-name value|brief-refused-b9 some-proj --mode no-mistakes --branch-name=|--branch-name requires a non-empty value
 invalid branch-name|brief-refused-b10 some-proj --mode no-mistakes --branch-name bad..name|--branch-name is not a usable git branch name
 identical base and crew branch|brief-refused-b11 some-proj --mode no-mistakes --base-branch feature/x --branch-name feature/x|--base-branch cannot be the crew branch
@@ -975,6 +976,14 @@ test_base_branch_worker_steps() {
   assert_no_grep "axi run --base-branch" "$brief" \
     "scout --base-branch must not add a no-mistakes pipeline step"
 
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-scout-fm-id some-proj --scout --base-branch fm/brief-base-scout-fm-id >/dev/null 2>&1 \
+    || fail "scout --base-branch matching fm/<id> must scaffold; a scout never creates that crew branch"
+  brief="$home/data/brief-base-scout-fm-id/brief.md"
+  assert_grep "Base branch contract: base_branch=fm/brief-base-scout-fm-id" "$brief" \
+    "scout --base-branch fm/<id> must record its freshen base"
+  assert_no_grep "git checkout -b" "$brief" \
+    "scout --base-branch fm/<id> must not invent a crew-branch checkout"
+
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-shell some-proj --mode no-mistakes --base-branch 'topic;id' >/dev/null 2>&1 \
     || fail "shell-metacharacter --base-branch brief should scaffold"
   brief="$home/data/brief-base-shell/brief.md"
@@ -994,7 +1003,7 @@ test_base_branch_worker_steps() {
 # --branch-name replaces every generated fm/<id> crew branch. Omitted keeps
 # today's exact fm/<id> wording and does not write a Crew branch contract line.
 test_branch_name_worker_steps() {
-  local home brief
+  local home brief out status
   home="$TMP_ROOT/branch-name-brief-home"
   mkdir -p "$home/data"
 
@@ -1044,12 +1053,13 @@ test_branch_name_worker_steps() {
   assert_grep "Work only on your \`feature/TD-131-visual-dom-editor\` branch" "$brief" \
     "--branch-name must replace the local-only push-rule branch"
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bn-scout some-proj --scout --branch-name feature/TD-131-visual-dom-editor >/dev/null 2>&1 \
-    || fail "--branch-name scout brief should scaffold"
-  brief="$home/data/brief-bn-scout/brief.md"
-  assert_present "$brief" "scout --branch-name brief was not scaffolded"
-  assert_no_grep "git checkout -b" "$brief" \
-    "scout briefs must not invent a checkout command when --branch-name is set"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bn-scout some-proj --scout --branch-name feature/TD-131-visual-dom-editor 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--branch-name scout brief should refuse"
+  assert_contains "$out" "--branch-name applies only to ship briefs" \
+    "scout --branch-name refusal did not name the ship-only rule"
+  assert_absent "$home/data/brief-bn-scout/brief.md" \
+    "scout --branch-name must not write a brief"
   pass "fm-brief.sh: --branch-name replaces generated fm/<id> crew branches only when set"
 }
 

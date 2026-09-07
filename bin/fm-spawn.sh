@@ -206,7 +206,10 @@
 #   retarget after green. A direct-PR ship opens with `gh-axi pr create
 #   --base <branch>`. Scaffold the matching brief with the same flag
 #   (bin/fm-brief.sh). --relaunch, --secondmate, and backend=orca refuse the
-#   flag. Relaunch reuses the recorded worktree without fetching or resetting
+#   flag. local-only plus --base-branch also refuses when that branch exists
+#   only on origin and not as a local refs/heads/<branch>: merge-local cannot
+#   land there, and spawn must not create or track a local copy of that base.
+#   Relaunch reuses the recorded worktree without fetching or resetting
 #   its base. An unreachable detected origin, unresolved default branch, or
 #   non-clean worktree refuses a fresh spawn rather than risking a PR based
 #   on stale history or discarding local work.
@@ -2211,6 +2214,14 @@ else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
+  if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ "$BASE_BRANCH_SET" -eq 1 ]; then
+    if git -C "$PROJ_ABS" remote get-url origin >/dev/null 2>&1 \
+      && git -C "$PROJ_ABS" ls-remote --exit-code --heads origin "refs/heads/$BASE_BRANCH" >/dev/null 2>&1 \
+      && ! git -C "$PROJ_ABS" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
+      echo "error: --base-branch '$BASE_BRANCH' cannot be combined with local-only: it exists only on origin, not as a local branch" >&2
+      exit 1
+    fi
+  fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
@@ -2280,10 +2291,8 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # recorded task delivery differ, which is the exact drift this contract prevents.
 # Last generated Definition of done wins; a later relaunch progress note is
 # ignored so appended text cannot override the scaffold. The same last-match
-# rule applies to Base branch contract. When Scaffold bound: generated is
-# missing, older one-line records are read from the brief prefix before the
-# first generated Setup pair. bin/fm-merge-local.sh uses the same rule for
-# landing.
+# rule applies to Base branch contract. Lookups read only that last generated
+# Definition of done. bin/fm-merge-local.sh uses the same rule for landing.
 brief_dod_section() {
   awk '
     FNR==NR {
@@ -2319,52 +2328,10 @@ brief_dod_section() {
   ' "$1" "$1"
 }
 
-brief_truncated_prefix() {
-  awk '
-    FNR==NR {
-      if (!scaffold_end && $0 == "Scaffold bound: generated") scaffold_end=FNR
-      if (pending_setup && /^[[:space:]]*$/) next
-      if (pending_setup) {
-        if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
-        pending_setup=0
-        next
-      }
-      if ($0 ~ /^# Setup[[:space:]]*$/) pending_setup=1
-      next
-    }
-    pending_relaunch && /^[[:space:]]*$/ { next }
-    pending_relaunch {
-      if ($0 ~ /^This task was relaunched\./) {
-        if (scaffold_end) {
-          if (FNR > scaffold_end) exit
-        } else if (!last_setup || FNR > last_setup) {
-          exit
-        }
-      }
-      pending_relaunch=0
-    }
-    /^## Progress note \([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$/ {
-      pending_relaunch=1
-      next
-    }
-    { print }
-  ' "$1" "$1"
-}
-
-brief_contract_region_nonempty() {
-  local region=$1
-  [ -n "$(printf '%s' "$region" | sed '/^[[:space:]]*$/d' | head -n 1)" ]
-}
-
 brief_last_contract_word() {
-  local file=$1 prefix=$2 section region value
+  local file=$1 prefix=$2 section value
   section=$(brief_dod_section "$file")
-  if brief_contract_region_nonempty "$section"; then
-    region=$section
-  else
-    region=$(brief_truncated_prefix "$file")
-  fi
-  value=$(printf '%s\n' "$region" | sed -n "s/^${prefix}\([^ ]*\).*$/\1/p" | tail -n 1)
+  value=$(printf '%s\n' "$section" | sed -n "s/^${prefix}\([^ ]*\).*$/\1/p" | tail -n 1)
   printf '%s' "$value"
 }
 

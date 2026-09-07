@@ -902,6 +902,37 @@ test_base_branch_refused_on_relaunch_secondmate_and_orca() {
   pass "--relaunch, --secondmate, and backend=orca refuse --base-branch"
 }
 
+test_local_only_origin_only_base_refuses() {
+  local rec id out status before
+  id='pool-local-only-origin-base-r1'
+  rec=$(make_case local-only-origin-base "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'only on origin develop\n' > "$CASE_DIR/publisher/develop-only.txt"
+  git -C "$CASE_DIR/publisher" add develop-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm origin-only-develop
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  git -C "$PROJECT_DIR" show-ref --verify --quiet refs/heads/develop \
+    && fail "fixture unexpectedly created a local develop on the landing project"
+  scaffold_ship_brief "$id" local-only develop
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch develop)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn accepted an origin-only --base-branch"
+  assert_contains "$out" "cannot be combined with local-only" \
+    "local-only origin-only --base-branch did not name the illegal combination"
+  assert_contains "$out" "exists only on origin" \
+    "local-only origin-only --base-branch did not say the base is origin-only"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "local-only origin-only refuse still freshened the pooled worktree"
+  git -C "$PROJECT_DIR" show-ref --verify --quiet refs/heads/develop \
+    && fail "local-only origin-only refuse created a local develop on the landing project"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "local-only origin-only refuse recorded metadata"
+  pass "local-only --base-branch refuses when the base exists only on origin"
+}
+
 test_base_branch_contract_refuses_mismatch() {
   local rec id out status before kind
   for kind in ship scout; do
@@ -1132,6 +1163,7 @@ test_base_branch_ref_fetch_failure_refuses_local_fallback
 test_missing_base_branch_refuses_without_default_fallback
 test_originless_base_branch_uses_local_or_refuses
 test_base_branch_refused_on_relaunch_secondmate_and_orca
+test_local_only_origin_only_base_refuses
 test_base_branch_contract_refuses_mismatch
 test_scout_base_branch_contract_agrees_and_records
 test_base_branch_contract_uses_last_line

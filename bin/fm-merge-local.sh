@@ -6,13 +6,12 @@
 # `Base branch contract: base_branch=<branch>` in that same brief (written by
 # --base-branch). For both lines the last match wins, because the generated
 # contract is appended after free-form {TASK} text that may mention the same
-# phrase. Both lookups read only the generated contract region: the last
-# `# Definition of done` before an fm-control relaunch marker when that section
-# exists, otherwise the brief prefix before that marker so older one-line
-# records keep working. A marker copied into replaceable {TASK} text does not
-# count: it still sits before the first `Scaffold bound: generated` line, or
-# before the generated Setup pair on older briefs that lack that line. A
-# relaunch progress note is never scanned. When the
+# phrase. Both lookups read only the last generated `# Definition of done`
+# before an fm-control relaunch marker. A marker copied into replaceable
+# {TASK} text does not count: it still sits before the first
+# `Scaffold bound: generated` line, or before the generated Setup pair on
+# older briefs that lack that line. A relaunch progress note is never
+# scanned. When the
 # crew-branch line is absent from that region, this
 # script still uses fm/<id>. When the base-branch line is absent, it still
 # lands on the project's default branch. Omitted flags therefore stay
@@ -108,55 +107,10 @@ brief_dod_section() {
   ' "$1" "$1"
 }
 
-# Brief body before the first fm-control relaunch marker after the generated
-# scaffold bound (or, on older briefs, after generated Setup). Progress notes
-# after that marker are untrusted free text for contract lookup.
-brief_truncated_prefix() {
-  awk '
-    FNR==NR {
-      if (!scaffold_end && $0 == "Scaffold bound: generated") scaffold_end=FNR
-      if (pending_setup && /^[[:space:]]*$/) next
-      if (pending_setup) {
-        if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
-        pending_setup=0
-        next
-      }
-      if ($0 ~ /^# Setup[[:space:]]*$/) pending_setup=1
-      next
-    }
-    pending_relaunch && /^[[:space:]]*$/ { next }
-    pending_relaunch {
-      if ($0 ~ /^This task was relaunched\./) {
-        if (scaffold_end) {
-          if (FNR > scaffold_end) exit
-        } else if (!last_setup || FNR > last_setup) {
-          exit
-        }
-      }
-      pending_relaunch=0
-    }
-    /^## Progress note \([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$/ {
-      pending_relaunch=1
-      next
-    }
-    { print }
-  ' "$1" "$1"
-}
-
-brief_contract_region_nonempty() {
-  local region=$1
-  [ -n "$(printf '%s' "$region" | sed '/^[[:space:]]*$/d' | head -n 1)" ]
-}
-
 brief_last_contract() {
-  local file=$1 prefix=$2 section region value
+  local file=$1 prefix=$2 section value
   section=$(brief_dod_section "$file")
-  if brief_contract_region_nonempty "$section"; then
-    region=$section
-  else
-    region=$(brief_truncated_prefix "$file")
-  fi
-  value=$(printf '%s\n' "$region" | sed -n "s/^${prefix}//p" | tail -n 1)
+  value=$(printf '%s\n' "$section" | sed -n "s/^${prefix}//p" | tail -n 1)
   printf '%s' "$value"
 }
 
@@ -211,6 +165,11 @@ before=$(git -C "$PROJ" rev-parse --short "$TARGET")
 if [ "$cur" = "$TARGET" ]; then
   git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 else
+  target_worktree=$(git -C "$PROJ" for-each-ref --format='%(worktreepath)' "refs/heads/$TARGET")
+  if [ -n "$target_worktree" ]; then
+    echo "error: $TARGET is checked out in $target_worktree; refusing to update-ref it" >&2
+    exit 1
+  fi
   # Stay on the default checkout and fast-forward the named base in place.
   git -C "$PROJ" update-ref -m "fm-merge-local: fast-forward $TARGET to $BRANCH" \
     "refs/heads/$TARGET" "$(git -C "$PROJ" rev-parse "$BRANCH")" "$(git -C "$PROJ" rev-parse "$TARGET")"

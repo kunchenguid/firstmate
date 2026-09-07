@@ -4,6 +4,8 @@
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
+# When state/<id>.meta records base_branch=, that name is the compare base
+# instead of the default; when the field is absent the default path is unchanged.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -66,6 +68,11 @@ default_branch() {
 }
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+RECORDED_BASE=$(grep '^base_branch=' "$META" | tail -1 | cut -d= -f2- || true)
+COMPARE_BASE=$DEFAULT
+if [ -n "$RECORDED_BASE" ]; then
+  COMPARE_BASE=$RECORDED_BASE
+fi
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
@@ -135,11 +142,11 @@ fi
 
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
-  # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  # origin/<base> stale on some Git versions and only refresh FETCH_HEAD.
+  git -C "$WT" fetch origin "+refs/heads/$COMPARE_BASE:refs/remotes/origin/$COMPARE_BASE" --quiet
+  BASE="origin/$COMPARE_BASE"
 else
-  BASE="$DEFAULT"
+  BASE="$COMPARE_BASE"
 fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
