@@ -35,7 +35,6 @@ trap render_teardown EXIT
 
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
-  RENDER_HOMES+=("$home")
   mkdir -p "$home/state" "$home/data"
   fakebin=$(fm_fakebin "$home")
   # The build proves the board session is live before it arms anything, so the
@@ -86,6 +85,7 @@ charted_next_count() {  # <render-json>
 test_a_warning_row_reads_as_a_repair_not_as_queued_work() {
   local home out
   home=$(make_home warning-badge)
+  RENDER_HOMES+=("$home")
   out=$(render "$home" '[
     {"id":"real-queued","repo":"sample","title":"Queued work","reason":"queued behind the cutover","dispatchable":true},
     {"id":"main-inventory","repo":"sample","title":"Main inventory integrity","reason":"main inventory","dispatchable":false,"kind":"warning"}
@@ -107,6 +107,7 @@ test_a_warning_row_reads_as_a_repair_not_as_queued_work() {
 test_warnings_are_excluded_from_the_charted_next_count() {
   local home out
   home=$(make_home warning-count)
+  RENDER_HOMES+=("$home")
   out=$(render "$home" '[
     {"id":"queued-one","repo":"sample","title":"One","reason":"gated","dispatchable":true},
     {"id":"warn-one","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"},
@@ -122,6 +123,7 @@ test_warnings_are_excluded_from_the_charted_next_count() {
 test_a_board_of_only_warnings_still_reports_nothing_queued() {
   local home out
   home=$(make_home warning-only)
+  RENDER_HOMES+=("$home")
   out=$(render "$home" '[
     {"id":"warn-only","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
   ]')
@@ -137,6 +139,7 @@ test_a_board_of_only_warnings_still_reports_nothing_queued() {
 test_omitted_warnings_never_count_as_more_queued() {
   local home out
   home=$(make_home warning-more)
+  RENDER_HOMES+=("$home")
   out=$(render "$home" '[
     {"id":"warn-visible","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
   ]' 0 1)
@@ -153,6 +156,7 @@ test_omitted_warnings_never_count_as_more_queued() {
 test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   local home out
   home=$(make_home default-kind)
+  RENDER_HOMES+=("$home")
   out=$(render "$home" '[
     {"id":"with-reason","repo":"sample","title":"With reason","reason":"blocked on prep","dispatchable":true},
     {"id":"no-reason","repo":"sample","title":"No reason","reason":"","dispatchable":true}
