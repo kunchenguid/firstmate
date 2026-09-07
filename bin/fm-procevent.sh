@@ -1066,7 +1066,10 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
     fm_procevent_pid_state "$pid" "$identity"
     pid_state=$?
     case "$pid_state" in
-      1) exit 0 ;;
+      1)
+        fm_procevent_group_alive "$pid" && continue
+        exit 0
+        ;;
       3)
         if stop_runner_pid "$pid" "$identity"; then
           exit 0
