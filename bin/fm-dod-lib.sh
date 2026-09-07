@@ -236,6 +236,7 @@ fm_delivery_base_validate() {  # <branch>
 # never state two landing targets in one document: bin/fm-brief.sh's Rule 1 and
 # the Definition of done below both resolve the name from here.
 fm_delivery_target_label() {  # <base-branch>
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
   printf '`%s`' "${1:-main}"
 }
 
