@@ -316,7 +316,7 @@ test_secondmate_home_uses_own_treehouse_pool() {
   status=$?
   expect_code 0 "$status" "secondmate-home spawn should succeed with its own pooled worktree"
   assert_contains "$out" "spawned $id" "secondmate-home spawn did not report success"
-  assert_grep "treehouse get --root \"$SECOND_HOME/config\"" "$SECOND_LAUNCHLOG" \
+  assert_grep "treehouse get --root '$SECOND_HOME/config'" "$SECOND_LAUNCHLOG" \
     "secondmate-home spawn did not type the home-specific Treehouse root"
   assert_grep "worktree=$SECOND_HOME_WT" "$SECOND_HOME/state/$id.meta" \
     "secondmate-home spawn did not record the worktree from its own pool"
@@ -324,7 +324,7 @@ test_secondmate_home_uses_own_treehouse_pool() {
 }
 
 test_secondmate_home_quotes_apostrophe_in_treehouse_root() {
-  local rec id out status
+  local rec id out status expected_root
   id=settle-secondmate-apostrophe-z4
   rec=$(make_secondmate_pool_case settle-secondmate-apostrophe "$id" "secondmate-home's-copy")
   read_secondmate_pool_record "$rec"
@@ -333,7 +333,9 @@ test_secondmate_home_quotes_apostrophe_in_treehouse_root() {
   status=$?
   expect_code 0 "$status" "secondmate-home spawn should preserve an apostrophe in its pool root"
   assert_contains "$out" "spawned $id" "apostrophe-path spawn did not report success"
-  assert_grep "treehouse get --root \"$SECOND_HOME/config\"" "$SECOND_LAUNCHLOG" \
+  expected_root=$(printf '%s' "$SECOND_HOME/config" | sed "s/'/'\\\\''/g")
+  expected_root="'$expected_root'"
+  assert_grep "treehouse get --root $expected_root" "$SECOND_LAUNCHLOG" \
     "apostrophe-path spawn did not quote its home-specific Treehouse root"
   assert_grep "worktree=$SECOND_HOME_WT" "$SECOND_HOME/state/$id.meta" \
     "apostrophe-path spawn did not record the worktree from its own pool"
@@ -350,8 +352,8 @@ test_secondmate_home_quotes_history_expansion_in_treehouse_root() {
   status=$?
   expect_code 0 "$status" "secondmate-home spawn should preserve history expansion in its pool root"
   assert_contains "$out" "spawned $id" "history-expansion-path spawn did not report success"
-  expected_root=$(printf '%s' "$SECOND_HOME/config" | sed 's/!/\\!/g')
-  assert_grep "treehouse get --root \"$expected_root\"" "$SECOND_LAUNCHLOG" \
+  expected_root="'$SECOND_HOME/config'"
+  assert_grep "treehouse get --root $expected_root" "$SECOND_LAUNCHLOG" \
     "history-expansion-path spawn did not escape ! for the pane shell"
   pass "a secondmate home escapes history expansion in the Treehouse root passed to its pane shell"
 }
