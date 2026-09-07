@@ -746,6 +746,10 @@ function isPipelineDriveInvocation(position, context) {
   return basename(invocation[0] || "") === "no-mistakes" && invocation[1] === "axi" && ["run", "respond"].includes(invocation[2]);
 }
 
+function unresolvedExecutionPayloadMentionsPipelineDrive(words) {
+  return words.some((word) => word.subs.some((substitution) => rawMentionsPipelineDrive(substitution.content)));
+}
+
 function hasDynamicExecutionPayload(position, context) {
   if (!position.command) return false;
   const name = basename(position.command.value);
@@ -808,7 +812,7 @@ function forLoopBinding(position, context, depth) {
       break;
     }
   }
-  return { name, selected, last: values.at(-1) };
+  return { name, selected };
 }
 
 function nodeHasRedirection(tokens) {
@@ -847,7 +851,6 @@ function analyzeProgram(command, context, depth = 0) {
     knownVariables: new Map(context.knownVariables || []),
   };
   let unclassifiableProtected = false;
-  const loopBindings = [];
 
   for (const tokens of program.nodes) {
     const position = commandPosition(tokens);
@@ -907,6 +910,7 @@ function analyzeProgram(command, context, depth = 0) {
       const resolvedShellPayload = resolveKnownWord(shellPayload, nodeContext.knownVariables);
       if (resolvedShellPayload === null) {
         if (wordReferencesAny(shellPayload, nodeContext.protectedVariables)) nodeNestedProtected = true;
+        if (unresolvedExecutionPayloadMentionsPipelineDrive([shellPayload])) pipelineDrive = true;
       } else {
         const nested = analyzeProgram(resolvedShellPayload, nodeContext, depth + 1);
         nodeNestedProtected ||= nested.protectedFound;
@@ -916,6 +920,8 @@ function analyzeProgram(command, context, depth = 0) {
         if (nested.error && rawMentionsProtected(resolvedShellPayload)) unsupported = true;
       }
     }
+    if (basename(position.command?.value || "") === "eval" && resolvedEvalPayload === null &&
+        unresolvedExecutionPayloadMentionsPipelineDrive(position.words.slice(position.index + 1))) pipelineDrive = true;
     for (const payload of [resolvedEvalPayload, ...heredocPayloads, ...hereStringPayloads]) {
       if (payload === null) continue;
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
@@ -945,11 +951,7 @@ function analyzeProgram(command, context, depth = 0) {
     nestedProtected ||= nodeNestedProtected;
     const loopBinding = forLoopBinding(position, nodeContext, depth);
     if (loopBinding) {
-      loopBindings.push(loopBinding);
       activeContext = contextWithBinding(activeContext, loopBinding.name, loopBinding.selected);
-    } else if (commandName === "done" && loopBindings.length > 0) {
-      const completedLoop = loopBindings.pop();
-      activeContext = contextWithBinding(activeContext, completedLoop.name, completedLoop.last);
     } else if (!position.command) activeContext = nodeContext;
     else if (commandName === "export") activeContext = contextWithAssignments(activeContext, args.filter((word) => isAssignment(word.value)));
     if (position.unresolvedWrapperOption) unsupported = true;

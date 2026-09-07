@@ -611,6 +611,24 @@ snapshot_mark_optional_present() {  # <source> <destination>
   : > "$destination"
 }
 
+snapshot_backend_target_exists() {
+  local backend=$1 target=$2 label=$3 timeout
+  timeout=$(snapshot_local_seconds_remaining) || return 124
+  fm_run_timed "$timeout" env \
+    FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" \
+    bash -c '. "$1"; fm_backend_target_exists "$2" "$3" "$4"' \
+    _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$label"
+}
+
+snapshot_backend_agent_alive() {
+  local backend=$1 target=$2 timeout
+  timeout=$(snapshot_local_seconds_remaining) || return 124
+  fm_run_timed "$timeout" env \
+    FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" \
+    bash -c '. "$1"; fm_backend_agent_alive "$2" "$3"' \
+    _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target"
+}
+
 snapshot_task_generation_is_current() {  # <captured-meta> <id>
   local captured_meta=$1 id=$2 current_meta captured_gen current_gen captured_contents current_contents
   current_meta="$STATE/$id.meta"
@@ -632,7 +650,7 @@ prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
   local status_log status_capture status_decisions status_last_event status_first_pr status_inspection report_path report_capture capture_rc
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1 inspection_reason= remaining
-  local deadline_seconds=$FM_SNAPSHOT_CREW_STATE_TIMEOUT
+  local deadline_seconds=$FM_SNAPSHOT_CREW_STATE_TIMEOUT endpoint_rc endpoint_timed_out=0
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
@@ -691,18 +709,38 @@ prefetch_task_observations() {  # <meta> <id>
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     if [ -n "$target" ]; then
-      if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
+      if snapshot_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
         endpoint_exists=true
       else
-        endpoint_exists=false
+        endpoint_rc=$?
+        if [ "$endpoint_rc" -eq 124 ]; then
+          endpoint_timed_out=1
+          endpoint_exists=null
+        else
+          endpoint_exists=false
+        fi
       fi
-      if [ "$kind" = secondmate ]; then
-        agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
+      if [ "$kind" = secondmate ] && [ "$endpoint_timed_out" -eq 0 ]; then
+        if agent_alive=$(snapshot_backend_agent_alive "$backend" "$target" 2>/dev/null); then
+          :
+        else
+          endpoint_rc=$?
+          agent_alive=unknown
+          [ "$endpoint_rc" -ne 124 ] || endpoint_timed_out=1
+        fi
       fi
     fi
   fi
 
   [ -z "$current_pid" ] || wait "$current_pid" || current_rc=1
+  if [ "$endpoint_timed_out" -eq 1 ]; then
+    inspection_reason="local snapshot deadline after ${deadline_seconds}s"
+    printf '%s\n' "$inspection_reason" > "$status_inspection" || current_rc=1
+    jq -n --arg detail "$inspection_reason" \
+      '{state:"unknown",source:"none",detail:$detail,raw:""}' > "$current_file" || current_rc=1
+    endpoint_exists=null
+    agent_alive=unknown
+  fi
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
