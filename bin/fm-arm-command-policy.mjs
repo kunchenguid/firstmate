@@ -365,7 +365,7 @@ export class Lexer {
           this.error = "unclosed command substitution";
           return null;
         }
-        word.subs.push({ kind: "command", content: balanced.content });
+        word.subs.push({ kind: "command", content: balanced.content, offset: word.value.length });
         word.literal = false;
         this.index = balanced.next;
         continue;
@@ -376,7 +376,7 @@ export class Lexer {
           this.error = "unclosed process substitution";
           return null;
         }
-        word.subs.push({ kind: "process", content: balanced.content });
+        word.subs.push({ kind: "process", content: balanced.content, offset: word.value.length });
         word.literal = false;
         this.index = balanced.next;
         continue;
@@ -387,7 +387,7 @@ export class Lexer {
           this.error = "unclosed backtick substitution";
           return null;
         }
-        word.subs.push({ kind: "command", content: backticks.content });
+        word.subs.push({ kind: "command", content: backticks.content, offset: word.value.length });
         word.literal = false;
         this.index = backticks.next;
         continue;
@@ -421,7 +421,7 @@ export class Lexer {
       if (this.source.startsWith("$(", this.index)) {
         const balanced = extractBalanced(this.source, this.index + 2, "(", ")");
         if (!balanced) break;
-        word.subs.push({ kind: "command", content: balanced.content });
+        word.subs.push({ kind: "command", content: balanced.content, offset: word.value.length });
         word.literal = false;
         this.index = balanced.next;
         continue;
@@ -429,7 +429,7 @@ export class Lexer {
       if (char === "`") {
         const backticks = extractBackticks(this.source, this.index + 1);
         if (!backticks) break;
-        word.subs.push({ kind: "command", content: backticks.content });
+        word.subs.push({ kind: "command", content: backticks.content, offset: word.value.length });
         word.literal = false;
         this.index = backticks.next;
         continue;
@@ -707,12 +707,37 @@ function wordReferencesAny(word, names) {
   return false;
 }
 
+function staticSubstitutionOutput(substitution) {
+  if (substitution.kind !== "command") return null;
+  const lexed = new Lexer(substitution.content).tokenize();
+  if (lexed.error) return null;
+  const program = splitProgram(lexed.tokens);
+  if (program.nodes.length !== 1 || program.separators.length > 0) return null;
+  const words = wordsInNode(program.nodes[0]);
+  if (words.some((word) => !word.literal || word.subs.length > 0)) return null;
+  const values = words.map((word) => word.value);
+  if (values[0] === "command" && values[1] === "-v" && basename(values[2] || "") === "no-mistakes" && values.length === 3) return "no-mistakes";
+  if (values[0] !== "printf" || values.length < 2) return null;
+  const format = values[1];
+  if (!format.includes("%")) return format;
+  if (format === "%s") return values.slice(2).join("");
+  return null;
+}
+
 function resolveKnownWord(word, knownVariables) {
-  if (!word || word.subs.length > 0) return null;
-  if (word.literal) return word.value;
+  if (!word) return null;
+  let value = word.value;
+  let dynamicResolved = false;
+  for (const substitution of [...word.subs].reverse()) {
+    const output = staticSubstitutionOutput(substitution);
+    if (output === null) return null;
+    value = `${value.slice(0, substitution.offset)}${output}${value.slice(substitution.offset)}`;
+    dynamicResolved = true;
+  }
+  if (word.literal) return value;
   let matched = false;
   let unresolved = false;
-  const value = word.value.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (reference, braced, plain) => {
+  value = value.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (reference, braced, plain) => {
     matched = true;
     const name = braced || plain;
     if (!knownVariables.has(name)) {
@@ -721,7 +746,7 @@ function resolveKnownWord(word, knownVariables) {
     }
     return knownVariables.get(name);
   });
-  return matched && !unresolved ? value : null;
+  return (matched || dynamicResolved) && !unresolved ? value : null;
 }
 
 function evalPayload(position, context) {
