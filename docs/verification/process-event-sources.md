@@ -181,19 +181,22 @@ Removing a home's state directory does not stop an already-running child, and si
 
 Three paths stop a runner generation through its verified process group:
 
-- The runner starts only after its separate owner guard confirms initialization; the guard stops the runner group after two consecutive checks cannot prove the owning home's lease fresh.
+- The runner starts only after its separate owner guard confirms initialization; the guard stops the runner group after two consecutive checks cannot prove the owning home's recorded physical identity and lease freshness.
 - `retire` resolves the runner PID and identity from this home's machine-wide claim, so retirement still works when the home's state is already gone.
 - `reconcile` stops a runner this home owns whose source registration has been removed, and reports it as `stopped=N`.
 
 The owner guard and explicit cleanup paths reach the blocking source and its descendants through the runner's group.
 The launch floor independently bounds an immediately returning source while an owner-loss lease is still valid.
-An attached public `start` maintains the lease for its caller's lifetime. At the accepted confused-agent/accidental grade, the inherited `FM_PROCEVENT_IN_RUNNER` marker prevents detached runners and their ordinary children from refreshing it; adversarial unforgeability against a source that deliberately strips that marker is out of scope.
+An attached public `start` maintains the lease for its caller's lifetime.
+At the accepted confused-agent/accidental grade, the inherited `FM_PROCEVENT_IN_RUNNER` marker prevents detached runners and their ordinary children from refreshing it; adversarial unforgeability against a source that deliberately strips that marker is out of scope.
 
 The same group rule decides when a claim may be reclaimed, not only when a runner may be signalled.
-A leader that died while its process group kept running is not a gone generation. Because the leaderless group cannot be proved to belong to the recorded generation, `reconcile` preserves its claim without signalling it or starting a replacement.
+A leader that died while its process group kept running is not a gone generation.
+Because the leaderless group cannot be proved to belong to the recorded generation, `reconcile` preserves its claim without signalling it or starting a replacement.
 Once a stale owner and an independent group check prove the whole generation gone, an unreachable token-keyed capture reservation cannot veto reclamation.
 Known limit: when either a live reused PID or an absent leader makes group ownership ambiguous, the reaper does not act because it cannot prove the group is the orphan generation; storm-rate containment plus ordinary lease and reconcile cleanup are the confused-agent-grade backstop.
-Known limit: identity and process-group verification cannot be made atomic with signalling in portable shell. The reaper signals only a target it has verified as the orphan generation, but PID and group reuse remain possible in the narrow interval between verification and the signal; launch pacing is the primary host-wedge protection and watchdog cleanup is a backstop.
+Known limit: identity and process-group verification cannot be made atomic with signalling in portable shell.
+The reaper signals only a target it has verified as the orphan generation, but PID and group reuse remain possible in the narrow interval between verification and the signal; launch pacing is the primary host-wedge protection and watchdog cleanup is a backstop.
 
 `tests/fm-procevent.test.sh` covers owner-loss reaping, descendant churn cessation, cross-home scope, launch pacing, guard startup failure, attached-start continuity, explicit retirement, and stale-group reconciliation.
 

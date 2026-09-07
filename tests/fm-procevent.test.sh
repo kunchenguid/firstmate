@@ -2204,7 +2204,7 @@ kill -0 -"$REUSED_GROUP_RUNNER" 2>/dev/null \
 pe "$HREUSED_GROUP" retire reused-runner-group-src >/dev/null
 pass "a detected ambiguous reused-PID group is not signalled"
 
-# --- a runner cannot outlive the session that owns it -----------------------
+# --- an accidentally orphaned runner is bounded by its owner ----------------
 #
 # Reproduces the shape that wedged a host: a listener detached into its own
 # process group, reparented to init when its session ended, and left running for
@@ -2330,12 +2330,11 @@ wait_gone "$KEEP_DESCENDANT" \
   || fail "retiring a source left a descendant of its listener running"
 pass "retiring a source reaps its reparented listener and every descendant under it"
 
-# --- reaping an expired runner is not best-effort ---------------------------
+# --- an expired runner's guard retries unproved cleanup ---------------------
 #
 # A stop the guard cannot PROVE must not end the guard. A descendant still
 # finishing uninterruptible work outlives even the group KILL, and a guard that
-# gave up after one attempt would walk away from a still-running expired runner
-# - the best-effort reaping this whole mechanism exists to remove.
+# gave up after one attempt would walk away from a still-running expired runner.
 #
 # The unprovable attempt is injected through the signal the real path actually
 # reads: `ps` answers ONE process-group query for the runner with a group it

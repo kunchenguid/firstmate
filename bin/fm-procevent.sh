@@ -1034,12 +1034,13 @@ start_owner_guard() {  # <source-id>
   return 1
 }
 
-# The runner's owner guard, and the reason a detached runner can no longer
-# outlive its home. It re-reads the owning state root's lease on a bounded
-# cadence and, once that lease can no longer be proved fresh, stops the runner's
-# whole process group - which is what reaches the blocking child and everything
-# that child spawned, exactly as retirement does. It ends itself as soon as that
-# group is gone, so it can never become the leftover it exists to prevent.
+# The runner's owner guard, which bounds an accidentally orphaned detached
+# runner after its home ends. It revalidates the recorded physical state root
+# and its lease on a bounded cadence and, after two consecutive checks cannot prove
+# both, invokes the identity-gated stop for the runner's whole process group -
+# which is what reaches the blocking child and everything that child spawned,
+# exactly as retirement does. A failed verified stop stays on the retry cadence;
+# an absent leader ends the guard without signalling an ambiguous group.
 #
 # Scope is the owning state root and this one runner generation. It never
 # matches on a script name, a command line, or a process name: those are shared

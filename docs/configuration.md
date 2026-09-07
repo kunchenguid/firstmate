@@ -798,7 +798,8 @@ Ordinary release and reclamation still attempt reservation cleanup and require i
 The narrow live-owner terminal-self-retirement path also attempts cleanup but tolerates its own still-in-flight reservation, which the runner removes on the normal end-of-capture path; exact home, PID, and claim-token ownership remains mandatory before the claim is released.
 If identity cannot be established for a live PID, or a surviving owned group cannot be proved stopped, the operation preserves the registration and claim for safe retry rather than adding a second owner.
 A live PID whose identity no longer matches is a reused PID, so cleanup refuses it before signalling.
-Identity and process-group verification cannot be made atomic with signalling in portable shell: the reaper signals only a target it has verified as the recorded generation, but PID and group reuse remain possible in the narrow interval between verification and the signal. Launch pacing is the primary host-wedge protection; watchdog cleanup is a backstop.
+Identity and process-group verification cannot be made atomic with signalling in portable shell: the reaper signals only a target it has verified as the recorded generation, but PID and group reuse remain possible in the narrow interval between verification and the signal.
+Launch pacing is the primary host-wedge protection; watchdog cleanup is a backstop.
 
 Supported secondmate retirement preflights each target home's bounded `sweep-home` command before destructive teardown, snapshots its registrations outside the target, then runs the sweep at that home's final deletion or return boundary.
 If deletion or return fails, teardown restores those registrations and reconciles them before returning the refusal.
@@ -813,13 +814,16 @@ A runner is bound to the session that owns it.
 Detaching a runner into its own process group is what lets a persistent source outlive the turn that armed it, and on its own it is also what lets a runner outlive its whole home: reparented to init, it keeps its blocking child - and every process that child spawns - running with nothing left to reap it.
 So a home's process-event state carries a lease that registration, attached start, reconciliation, acknowledgement, and listing refresh, and the watcher's reconcile cycle is what keeps it fresh in a live home.
 An attached public `start` continues refreshing the lease while its caller remains attached.
-Each runner fails closed unless a small guard starts successfully beside it in a separate process group; that guard accepts the lease only while the state root retains the device/inode identity recorded by the runner's claim, and stops the runner's whole process group once identity or freshness can no longer be proved. The group signal reaches the blocking child and everything under it exactly as retirement does.
+Each runner fails closed unless a small guard starts successfully beside it in a separate process group.
+That guard accepts the lease only while the state root retains the device/inode identity recorded by the runner's claim, and stops the runner's whole process group after two consecutive checks cannot prove that identity and lease freshness.
+The group signal reaches the blocking child and everything under it exactly as retirement does.
 A runner exports the inherited `FM_PROCEVENT_IN_RUNNER` marker and every lease refresh is skipped under it, so a runner and its ordinary children do not certify their own owner, and the next reconcile in a live home simply starts a replacement runner.
 That no-self-refresh rule is CONFUSED-AGENT-GRADE, the same deliberate captain-decided grade `bin/fm-lease-lib.sh` documents: it stops the accidental case this boundary exists for, an orphaned or test-scaffolding source tree that would otherwise keep its own owner alive.
 A source that DELIBERATELY strips the marker from its environment can still refresh the lease, so adversarial-grade unforgeability is explicitly out of scope here and tracked as separate follow-up design work.
 Scope is the owning state root and one runner generation, never a script or process name, so a live source in another home is untouched: that home refreshes its own lease.
 `FM_PROCEVENT_OWNER_LEASE_SECONDS` (default 600, range 1..86400) is how long a runner keeps going with no sign of its owning session, and `FM_PROCEVENT_OWNER_CHECK_SECONDS` (default 15, range 1..3600) is how often its guard re-reads the lease.
-`FM_PROCEVENT_LAUNCH_FLOOR_SECONDS` (default 1, range 1..3600) is the minimum time between launches of one source's stored command, so an immediately returning source cannot create a process storm during that lease window.
+`FM_PROCEVENT_LAUNCH_FLOOR_SECONDS` (default 1, range 1..3600) is the minimum time between consecutive launches of one registration generation's stored command, so an immediately returning source cannot create a process storm during that lease window.
+The generation's first launch is immediate, later launches share its monotonic pacing timestamp, a timestamp from before a reboot is treated as expired, and replacing the registration starts a fresh pacing generation.
 
 `FM_PROCEVENT_MAX_OUTPUT_BYTES` (default 1048576) bounds a single captured result while the source runs; oversized output is drained but truncated with a stderr notice rather than staged or published whole or dropped.
 
@@ -910,7 +914,7 @@ FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going with no sign of its owning session; 1..86400
 FM_PROCEVENT_OWNER_CHECK_SECONDS=15     # how often a runner's guard re-reads that lease; 1..3600
-FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum interval between launches of one source command; 1..3600
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum interval between launches of one registration generation's source command; 1..3600
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
