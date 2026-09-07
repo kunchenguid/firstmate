@@ -306,6 +306,10 @@ budget_exhausted() {
   [ "$(real_epoch)" -ge "$DEADLINE" ]
 }
 
+mark_incomplete() {
+  INCOMPLETE_REPORTED=1
+}
+
 # True while the sweep budget still has room for another probe. When it does not,
 # it records once which tool the sweep did not finish, so a sweep that cannot
 # finish says so rather than being killed by the watcher with nothing printed.
@@ -313,7 +317,7 @@ budget_allows() {
   local name=$1
   budget_exhausted || return 0
   if [ "$INCOMPLETE_REPORTED" -eq 0 ]; then
-    INCOMPLETE_REPORTED=1
+    mark_incomplete
     emit "check incomplete: the time budget ran out before $name"
   fi
   return 1
@@ -519,6 +523,7 @@ command_findings() {
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     if budget_exhausted; then
+      mark_incomplete
       emit "$name check failed: the time budget ran out before every copy answered"
       break
     fi
@@ -550,6 +555,7 @@ EOF
     announce_out=$resolved_out
     if [ "$announce_args" != "$args_joined" ]; then
       if budget_exhausted; then
+        mark_incomplete
         # The version probe's output cannot carry the announcement, so searching
         # it would present a source that was never asked as a clean result.
         emit "$name check failed: the time budget ran out before the update announcement was checked"
@@ -613,7 +619,10 @@ GIT_PROBE_NOT_ISSUED=3
 git_probe() {
   local repo=$1
   shift
-  budget_exhausted && return "$GIT_PROBE_NOT_ISSUED"
+  if budget_exhausted; then
+    mark_incomplete
+    return "$GIT_PROBE_NOT_ISSUED"
+  fi
   fm_run_timed "$(probe_bound)" git -C "$repo" "$@"
 }
 

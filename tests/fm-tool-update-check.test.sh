@@ -350,6 +350,26 @@ SH
   pass "an announcement source the budget could not reach is reported, not read as current"
 }
 
+test_snooze_refuses_a_command_sweep_that_runs_out_of_budget() {
+  local home slow fast fresh out status
+  home=$(make_home snooze-budget)
+  fast="$TMP_ROOT/snooze-budget/fast"
+  fresh="$TMP_ROOT/snooze-budget/fresh"
+  slow="$TMP_ROOT/snooze-budget/slow"
+  make_copy "$fast" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  make_slow_copy "$slow" "$TOOL" 30
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  status=0
+  env FM_HOME="$home" PATH="$(fixture_path "$fast:$fresh:$slow")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=0 \
+    FM_TOOL_UPDATE_BUDGET_SECS=1 "$CHECK" snooze herdr --until 2099-12-31 >"$out" 2>&1 || status=$?
+  expect_code 1 "$status" "incomplete command snooze exit"
+  assert_contains "$(cat "$out")" "cannot record a snooze from an incomplete sweep" "an incomplete command sweep was accepted for snoozing"
+  [ ! -f "$home/state/.tool-updates" ] || fail "an incomplete command sweep persisted a snooze record"
+  pass "a command sweep that exhausts its budget cannot persist a snooze"
+}
+
 test_an_announcement_probe_that_does_not_answer_is_reported() {
   local home dir out report
   # no-mistakes learns about a new release from the network, so the command that
@@ -1086,6 +1106,7 @@ test_unusable_announce_pattern_is_reported_not_read_as_silence
 test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep
 test_an_unchecked_announcement_source_is_not_read_as_current
 test_an_announcement_probe_that_does_not_answer_is_reported
+test_snooze_refuses_a_command_sweep_that_runs_out_of_budget
 test_quiet_tool_with_announce_pattern_is_silent
 test_commits_behind_origin_are_reported
 test_default_branch_is_detected_when_branch_is_omitted
