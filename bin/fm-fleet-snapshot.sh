@@ -616,7 +616,6 @@ snapshot_backend_target_exists() {
   timeout=$(snapshot_local_seconds_remaining) || return 124
   fm_run_timed "$timeout" env \
     FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" \
-    FM_SNAPSHOT_DEADLINE_PROBE=1 \
     bash -c '. "$1"; fm_backend_target_exists "$2" "$3" "$4"' \
     _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$label"
 }
@@ -626,7 +625,6 @@ snapshot_backend_agent_alive() {
   timeout=$(snapshot_local_seconds_remaining) || return 124
   fm_run_timed "$timeout" env \
     FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" \
-    FM_SNAPSHOT_DEADLINE_PROBE=1 \
     bash -c '. "$1"; fm_backend_agent_alive "$2" "$3"' \
     _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target"
 }

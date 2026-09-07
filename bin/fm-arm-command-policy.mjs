@@ -733,17 +733,42 @@ function evalPayload(position, context) {
   return resolved.join(" ");
 }
 
+function resolvedInvocationFields(word, context) {
+  const positional = context.positionalArguments || [];
+  let match = word.value.match(/^\$(?:\{([0-9]+)\}|([0-9]+))$/);
+  if (match) {
+    const value = positional[Number(match[1] || match[2])];
+    return value === undefined ? null : [value];
+  }
+  if (/^\$(?:\{@\}|@)$/.test(word.value)) return positional.slice(1);
+  if (/^\$(?:\{\*\}|\*)$/.test(word.value)) return word.quoted ? [positional.slice(1).join(" ")] : positional.slice(1);
+  const resolved = resolveKnownWord(word, context.knownVariables);
+  if (resolved === null) return null;
+  return word.quoted ? [resolved] : resolved.trim().split(/\s+/).filter(Boolean);
+}
+
 function isPipelineDriveInvocation(position, context) {
   if (!position.command) return false;
   const invocation = [];
   for (const word of position.words.slice(position.index)) {
-    const resolved = resolveKnownWord(word, context.knownVariables);
-    if (resolved === null) return false;
-    if (word.quoted) invocation.push(resolved);
-    else invocation.push(...resolved.trim().split(/\s+/).filter(Boolean));
+    const fields = resolvedInvocationFields(word, context);
+    if (fields === null) return false;
+    invocation.push(...fields);
     if (invocation.length >= 3) break;
   }
   return basename(invocation[0] || "") === "no-mistakes" && invocation[1] === "axi" && ["run", "respond"].includes(invocation[2]);
+}
+
+function shellPositionalArguments(position, payload, context) {
+  const payloadIndex = position.words.indexOf(payload);
+  if (payloadIndex < 0) return [];
+  const fields = [];
+  for (const word of position.words.slice(payloadIndex + 1)) {
+    const resolved = resolvedInvocationFields(word, context);
+    if (resolved === null) return [];
+    fields.push(...resolved);
+  }
+  return fields;
 }
 
 function unresolvedExecutionPayloadMentionsPipelineDrive(words) {
@@ -942,7 +967,11 @@ function analyzeProgram(command, context, depth = 0) {
         if (wordReferencesAny(shellPayload, nodeContext.protectedVariables)) nodeNestedProtected = true;
         if (unresolvedExecutionPayloadMentionsPipelineDrive([shellPayload])) pipelineDrive = true;
       } else {
-        const nested = analyzeProgram(resolvedShellPayload, nodeContext, depth + 1);
+        const nestedContext = {
+          ...nodeContext,
+          positionalArguments: shellPositionalArguments(position, shellPayload, nodeContext),
+        };
+        const nested = analyzeProgram(resolvedShellPayload, nestedContext, depth + 1);
         nodeNestedProtected ||= nested.protectedFound;
         broadKill ||= nested.broadKill;
         pipelineDrive ||= nested.pipelineDrive;
@@ -1056,7 +1085,7 @@ function blessedProgram(analysis, context) {
 }
 
 function decision(command, root, home, primary) {
-  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set(), knownVariables: new Map() };
+  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set(), knownVariables: new Map(), positionalArguments: [] };
   const analysis = analyzeProgram(command, context);
   if (primary && analysis.pipelineDrive) return deny("primary-pipeline-drive");
   if (analysis.broadKill) return deny("broad-watcher-kill");

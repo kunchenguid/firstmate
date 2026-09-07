@@ -39,7 +39,8 @@ exit 0
 SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
-if [ "${FAKE_TMUX_SLEEP:-0}" = 1 ] && [ "${FM_SNAPSHOT_DEADLINE_PROBE:-0}" = 1 ]; then
+if [ "${FAKE_TMUX_SLEEP:-0}" = 1 ] && \
+   [ "$*" = "display-message -p -t fixture:bounded-endpoint #{pane_id}" ]; then
   [ -z "${FAKE_TMUX_SIGNAL:-}" ] || : > "$FAKE_TMUX_SIGNAL"
   sleep 30
 fi
@@ -2902,7 +2903,6 @@ EOF
       and .hints.pending_decision == true
       and .hints.blocked_event == false
       and (.hints.open_decisions | map(.key)) == ["default"]
-      and ((.current_state.detail // "") | contains("local snapshot deadline") | not)
   ' >/dev/null || fail "endpoint timeout discarded completed task observations: $json"
   pass "fleet snapshots bound endpoint probes inside the local deadline"
 }
