@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 # fm-mail.py - the IMAP/SMTP engine behind bin/fm-mail.sh.
 #
-# A small, side-effect-free mail client used by fm-mail.sh:
+# A small mail client used by fm-mail.sh:
 #   read                   List unseen INBOX mail as a compact digest.
 #   send <to> <subj> <body | ->   Send one SMTP message; "-" reads stdin.
 #   poll_list              Emit unseen mail as tab-separated rows for the bash
 #                          poll, bounded to uids this home has not surfaced,
-#                          plus a retry-set of previously unfetchable uids.
+#                          plus a retry-set of previously unfetchable uids;
+#                          persists the retry-scan position and cap-1 turn flag.
 #   seen <cursor>          Print a cursor file (used by `status`).
 #
-# All configuration arrives through the environment (FM_MAIL_*), never through
-# arguments, so credentials never appear in argv or logs. read/poll use
-# BODY.PEEK so mail is never marked seen before firstmate answers it.
+# All configuration arrives through the environment, never through arguments,
+# so credentials never appear in argv or logs. read/poll use BODY.PEEK so mail
+# is never marked seen before firstmate answers it.
 import imaplib
 import os
 import re

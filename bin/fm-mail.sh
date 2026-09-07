@@ -480,8 +480,8 @@ mail_poll() {
   # is treated as ok so a legacy four-field row still wakes. Never marks
   # anything read. Overlapping polls are serialized on the mail-seen lock;
   # each poll first heals a run interrupted between its phases (mail_heal), so
-  # an overlapping poll or an interrupted run can never lose a mail or
-  # double-surface it.
+  # an overlapping poll or an interrupted run can never lose a mail. wake_for
+  # owns the remaining kill-window duplicate residual.
   local list generation uid fr subj status woke=0 need_wake line wake_rc=0
   if [ ! -f "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
     echo "fm-mail: $SCRIPT_DIR/fm-wake-lib.sh missing; cannot poll" >&2
