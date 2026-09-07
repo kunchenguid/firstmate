@@ -1531,8 +1531,14 @@ post_term_status=0
 PATH="$POST_TERM_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
   pe "$HPOST_TERM" retire post-term-src >/dev/null 2>&1 || post_term_status=$?
 [ "$post_term_status" -ne 0 ] || fail "retirement escalated after runner identity became ambiguous"
-[ "$(cat "$POST_TERM_COUNT" 2>/dev/null || printf 0)" -gt 1 ] \
-  || fail "the post-TERM identity transition did not occur"
+# Which ambiguity the escalation meets here is platform-dependent, so this
+# asserts the invariant both forms share rather than one form's internals.
+# Where the runner leader keeps waiting on its TERM-ignoring source child the
+# post-TERM check sees a live leader whose identity no longer matches, and
+# where the leader dies promptly it sees a leaderless group carrying the same
+# numeric id; fm_procevent_pid_state reaches the second verdict without
+# consulting process identity at all, so counting identity lookups pins a
+# timing- and platform-dependent internal rather than the behavior.
 kill -0 -"$POST_TERM_RUNNER" 2>/dev/null \
   || fail "an ambiguous reused-PID group was killed during escalation"
 kill -KILL -"$POST_TERM_RUNNER" 2>/dev/null || true

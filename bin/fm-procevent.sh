@@ -1048,7 +1048,7 @@ start_owner_guard() {  # <source-id>
 # proves its own owner through that home's own lease.
 cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file> <state-device> <state-inode>
   local id=${1-} pid=${2-} identity=${3-} ready=${4-} state_device=${5-} state_inode=${6-}
-  local lease tick misses=0 pid_state state_identity current_root current_device current_inode current_owner current_mode
+  local lease tick misses=0 pid_state state_identity current_device current_inode
   [ "$#" -eq 6 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$pid" in ''|*[!0-9]*) die "runner pid must be a positive integer: $pid" ;; esac
@@ -1068,7 +1068,7 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
   [ "$pid_state" -eq 0 ] || die "runner identity changed before owner guard initialization"
   state_identity=$(fm_procevent_claim_state_root_identity "$STATE") \
     || die "owning state root identity is unreadable at owner guard initialization"
-  IFS=$'\t' read -r current_root current_device current_inode current_owner current_mode <<< "$state_identity"
+  IFS=$'\t' read -r _ current_device current_inode _ _ <<< "$state_identity"
   [ "$current_device" = "$state_device" ] && [ "$current_inode" = "$state_inode" ] \
     || die "owning state root identity changed before owner guard initialization"
   fm_procevent_owner_alive "$STATE" "$lease" \
@@ -1088,7 +1088,7 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
     current_device=
     current_inode=
     [ -z "$state_identity" ] \
-      || IFS=$'\t' read -r current_root current_device current_inode current_owner current_mode <<< "$state_identity"
+      || IFS=$'\t' read -r _ current_device current_inode _ _ <<< "$state_identity"
     if [ "$current_device" = "$state_device" ] \
       && [ "$current_inode" = "$state_inode" ] \
       && fm_procevent_owner_alive "$STATE" "$lease"; then
