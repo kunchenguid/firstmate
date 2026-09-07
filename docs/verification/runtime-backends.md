@@ -1434,6 +1434,29 @@ Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verifica
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh the SDK construction, picker, renderer, and type evidence after every Pi upgrade by rerunning the applicable live guard probes, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists).
 The live guard now drives both extensions through the watcher-owned settlement handshake, requires rejected branch settlement before main delivery, and verifies successor-delivery confirmation; rerun it against the matching importable Pi package to refresh end-to-end fallback evidence.
 
+### 2026-09-07 lazy Codex branch creation after legacy outcome migration
+
+On Linux x86_64 with Node v22.22.2, the installed Pi 0.85.1 CLI and an isolated copy of `npm:pi-openai-codex-compat@0.0.10-alpha.7` and its native dependency closure passed the Luna/minimal first-notification regression.
+The fixture starts with delivered legacy endpoint outcomes and no branch pointer, lets the real primary extension reconcile history, then offers its first eligible synthetic notification through Pi's event bus.
+The fixture pins `minimal`; Pi retains its supported-level clamp, producing `low` in the current Luna request.
+It verifies lazy branch creation, provider startup, the exact `read`, guarded `bash`, and `fm_branch_report` request payload, a new report in the durable store and main's active session tree, and a persisted native compaction checkpoint.
+The portable suite separately checks that cache migration preserves authoritative history and unprocessed captain results, and that mismatched, non-semver, missing, and future version declarations do not prevent valid runtime startup.
+Package identity, provenance, containment, startup, failed tool restoration, and unexpected tool mutations retain their safe fallback regressions.
+
+```sh
+bash tests/fm-branch-supervision.test.sh
+bash tests/fm-pi-branch-extension.test.sh
+bash tests/fm-pi-primary-types.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bash tests/fm-pi-branch-live-e2e.test.sh
+```
+
+```text
+ok - real Pi CLI 0.85.1 with pi-openai-codex-compat 0.0.10-alpha.7 creates Luna/minimal branch on its first eligible wake after legacy outcome migration, with guarded tools and native compaction
+```
+
+This is CLI and persisted-state evidence with synthetic OAuth and intercepted SSE, not a new authenticated-service or TUI verification.
+No provider request left the process, and the running primary, its fleet state, the global/user installation, and the shared Herdr session were unchanged.
+
 ### 2026-09-07 Pi 0.85.1 and Codex compatibility alpha.7
 
 On Linux x86_64 with Node v22.22.2, the 46-case focused branch suite, strict Pi typecheck, and seven real-SDK probes passed against installed Pi 0.85.1 and an isolated official `pi-openai-codex-compat@0.0.10-alpha.7` package.
@@ -1465,7 +1488,7 @@ This proves the SDK branch roundtrip, not a TUI reload or activation of the runn
 
 A separate credential-free failure probe loaded the candidate with its incompatible native prebuild and observed the actual `GLIBCXX_3.4.31` loader error before any provider request.
 The real watcher extension returned that rejected branch settlement to its recording main adapter exactly once and retained the durable wake; main delivery in that failure probe used an adapter, while authenticated main processing was proven by the preceding real session.
-Private task evidence retains the exact lab programs and transcripts; [the supervision owner](../pi-supervision-branch.md) defines the version and tool boundaries, and the portable suite rejects unknown prereleases, an unverified Pi patch version, and unexpected tool mutations.
+Private task evidence retains the exact lab programs and transcripts; [the supervision owner](../pi-supervision-branch.md) defines the runtime and tool boundaries, and the portable suite rejects invalid package identity, provenance, extension containment, startup failures, and unexpected tool mutations.
 
 ### 2026-09-02 streaming-time watcher delivery
 

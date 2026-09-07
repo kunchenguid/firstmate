@@ -33,14 +33,15 @@ The supervision branch itself is Pi-only by construction:
   A fleet-wide heartbeat keeps its own all-or-nothing rule (see "Heartbeat routing" below): it takes every branch-ownable unread row or none of them.
   A co-present main-owned check row no longer defers that review to main, because it is not fleet context the branch is missing and main is woken for it on its own triggering close.
 - The branch itself: `.pi/extensions/fm-branch-supervision.ts` creates the branch session, serializes wakes, mirrors dialog, and merges outcomes.
-  Before an `openai-codex` branch can prompt, it resolves the installed user package `npm:pi-openai-codex-compat` through Pi's package manager, validates the package manifest and Pi peer range, loads exactly its declared extension entry, and binds the extension so its `session_start` provider override and native compaction hooks are active.
+  Before an `openai-codex` branch can prompt, it resolves the installed user package `npm:pi-openai-codex-compat` through Pi's package manager, validates package identity and the readable manifest, loads exactly its declared in-package extension entry from the installed user-package provenance, and binds the extension so its `session_start` provider override and native compaction hooks are active.
   Every other resource-discovery class remains disabled, and the post-start active-tool check must still equal `read`, guarded `bash`, and `fm_branch_report` in that order.
-  Pi 0.85.1 supports the explicitly verified `pi-openai-codex-compat` 0.0.10-alpha.7 prerelease: after its startup hook removes `bash`, the branch restores the registered guarded override only when the remaining tools are exactly `read` and `fm_branch_report`.
-  This adaptation does not admit other prereleases or Pi versions; stable package versions still require their declared Pi peer range.
+  If compatibility startup removes only `bash`, leaving exactly `read` and `fm_branch_report`, the branch restores the registered guarded override and verifies the full active-tool set again.
+  This is a runtime state check: package versions and declared Pi peer ranges, including mismatched, absent, or non-semver declarations, do not decide admission.
   The plugin's native runtime dependencies must load on the host; an incompatible tree-sitter prebuild needs a local source build using the package's supported build tooling before activation.
   [Runtime verification](verification/runtime-backends.md#2026-09-07-pi-0851-and-codex-compatibility-alpha7) records the checked pair and refresh commands.
-  A missing, malformed, incompatible, unresolved, unloadable, or startup-failing compatibility package makes that Codex branch fail closed before prompting and returns its accepted wake to main; non-Codex branches do not resolve or depend on the package.
+  A missing, malformed, unresolved, unloadable, or startup-failing compatibility package makes that Codex branch fail closed before prompting and returns its accepted wake to main; non-Codex branches do not resolve or depend on the package.
   The branch conversation never spans main sessions: after every main session start - a cold start, `/new`, `/resume`, `/fork`, or a reload - the next eligible wake creates a NEW branch conversation, and a conversation recorded by an earlier session is never reopened as the live one.
+  Installing or upgrading the package alone does not create `state/.branch-session`; ownership and durable-outcome reconciliation must succeed before the first eligible notification starts it.
   That keeps the branch reasoning from the current generated prompt and the current main dialog rather than from weeks of accumulated thread, where a superseded rule could still outweigh today's.
   A model or effort change inside one main session continues that session's own conversation, recorded by `state/.branch-session`; the explicit `/supervision-reset` path below retires it instead.
   Earlier conversations stay on disk under `state/branch-session/`, exactly as Pi keeps its own session files, and are never reopened as live branch context; the effort picker may only inspect the model named by the current pointer as the last-resort lookup documented in [configuration.md](configuration.md#pi-supervision-branch-model-and-effort-configsupervision-branch-model-configsupervision-branch-effort).
@@ -99,6 +100,8 @@ Status provenance added to new outcome rows distinguishes covered and genuinely 
 Legacy outcomes predate that causal position, so equal-second migration cannot prove order and deliberately favors surfacing a plausibly later event; this can rarely duplicate an already handled legacy event.
 A pathological latest status line that crosses the 64 KiB window is unclassifiable and remains silent rather than risking presentation of routine content; this is an accepted limit, not a status-line size contract.
 A missing or invalid outcome-index ready marker is rebuilt from the authoritative outcome rows by `processed-init` under the outcome lock on the next main drain, on every harness.
+Legacy outcome task labels such as endpoint identities remain valid delivery history; migration builds caches only for filename-safe task identities, without rewriting the store or advancing either delivery marker.
+This same migration runs during Pi branch startup reconciliation, so a legacy label cannot prevent the first branch conversation from starting; malformed stores and invalid cursors still fail closed.
 Only a genuine store fault keeps that backstop skipped.
 
 ## How the branch knows what the captain said

@@ -445,6 +445,40 @@ test_outcome_processed_marker_is_sequence_bound() {
   pass "the processed marker is sequence-bound, never ahead of the read cursor, never backwards, and migrates delivered history once"
 }
 
+test_outcome_index_migration_preserves_legacy_endpoint_records() {
+  local home store before unread unprocessed
+  home="$TMP_ROOT/store-legacy-endpoints"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  cat > "$store" <<'JSON'
+{"seq":1,"epoch":1,"task":"default:w90:p2","wake":"signal: old endpoint","verdict":"captain","summary":"legacy captain result"}
+{"seq":2,"epoch":2,"task":"../../outside","wake":"signal: old label","verdict":"routine","summary":"history is data, never a cache path"}
+{"seq":3,"epoch":3,"task":"old-label\n","wake":"signal: old label","verdict":"routine","summary":"non-filename history"}
+{"seq":4,"epoch":4,"task":"current-task","wake":"signal: current task","verdict":"routine","summary":"indexable task"}
+JSON
+  printf '1\n' > "$home/state/.branch-outcomes-cursor"
+  printf '0\n' > "$home/state/.branch-outcomes-processed"
+  before=$(cat "$store")
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init || fail "legacy endpoint broke outcome migration"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init || fail "legacy endpoint broke repeated migration"
+  [ "$(cat "$store")" = "$before" ] || fail "migration rewrote authoritative history"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] || fail "migration moved the read cursor"
+  [ "$(cat "$home/state/.branch-outcomes-processed")" = 0 ] || fail "migration acknowledged a captain result"
+  [ "$(cat "$home/state/.branch-outcome-index-ready")" = 4 ] || fail "migration did not publish cache readiness"
+  [ -f "$home/state/.current-task.branch-outcome-index" ] || fail "migration omitted the valid task cache"
+  [ ! -e "$home/state/.default:w90:p2.branch-outcome-index" ] || fail "migration indexed a legacy endpoint"
+  [ "$(find "$TMP_ROOT" -name '*outside.branch-outcome-index' | wc -l | tr -d ' ')" = 0 ] || fail "history escaped the cache directory"
+  unread=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "legacy unread records became unreadable"
+  [ "$(printf '%s\n' "$unread" | jq -s length)" = 3 ] || fail "migration lost unread outcomes"
+  unprocessed=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed) || fail "legacy captain result became unreadable"
+  [ "$(printf '%s\n' "$unprocessed" | jq -r '.task')" = 'default:w90:p2' ] || fail "migration lost the unprocessed captain result"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task 'default:w90:p2' --verdict routine --summary invalid >/dev/null 2>&1 \
+    && fail "migration relaxed new task identity validation"
+  [ "$(cat "$store")" = "$before" ] || fail "refused append changed history"
+  pass "outcome cache migration preserves legacy endpoint history and captain acknowledgements without using labels as paths"
+}
+
 # --- lease contract -----------------------------------------------------------
 
 test_lease_exclusivity_release_stale_and_sweep() {
@@ -846,6 +880,7 @@ test_cursor_advancement_refuses_ahead_processed_marker
 test_outcome_sequence_conflicts_fail_closed
 test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
+test_outcome_index_migration_preserves_legacy_endpoint_records
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor
