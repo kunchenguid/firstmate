@@ -500,7 +500,12 @@ test_acquired_worktree_refreshes_a_stale_local_env_file() {
   prepare_second_acquisition "$second"
   out=$(run_spawn "$second" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "spawn should refresh a stale .env.local in an acquired slot"
+  expect_code 1 "$status" "spawn should refuse to replace an existing .env.local without unforgeable ownership evidence"
+  [ -f "$POOL_DIR/.env.local" ] \
+    || fail "spawn removed the existing .env.local while refusing replacement"
+  assert_contains "$out" "cannot establish unforgeable ownership" \
+    "spawn did not explain why it preserved the existing .env.local"
+  pass "an acquired pooled worktree preserves an existing local environment file"
   source_mode=$(stat -c %a "$PROJECT_DIR/.env.local" 2>/dev/null \
     || stat -f %Lp "$PROJECT_DIR/.env.local")
   target_mode=$(stat -c %a "$POOL_DIR/.env.local" 2>/dev/null \
