@@ -220,10 +220,20 @@ emit() {
 
 update_fingerprint() {
   local identity=$1
-  # cksum is the stable fallback across the supported hosts. Do not select a
-  # digest utility from PATH: a later run must derive the same key if PATH
-  # changes between the snooze and the check.
-  printf '%s' "$identity" | cksum | awk '{print $1 ":" $2}'
+  if [ -x /usr/bin/shasum ]; then
+    printf '%s' "$identity" | /usr/bin/shasum -a 256 | awk '{print $1}'
+  elif [ -x /usr/bin/sha256sum ]; then
+    printf '%s' "$identity" | /usr/bin/sha256sum | awk '{print $1}'
+  elif [ -x /bin/sha256sum ]; then
+    printf '%s' "$identity" | /bin/sha256sum | awk '{print $1}'
+  elif [ -x /usr/bin/openssl ]; then
+    printf '%s' "$identity" | /usr/bin/openssl dgst -sha256 -r | awk '{print $1}'
+  elif [ -x /bin/openssl ]; then
+    printf '%s' "$identity" | /bin/openssl dgst -sha256 -r | awk '{print $1}'
+  else
+    printf '%s\n' 'fm-tool-update-check: no SHA-256 implementation available' >&2
+    return 1
+  fi
 }
 
 current_update_add() {
