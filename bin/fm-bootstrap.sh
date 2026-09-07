@@ -6,6 +6,8 @@
 #          exits 0.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
+#                 including "MISSING: perl-JSON-PP (...)" when the Perl
+#                 interpreter cannot load JSON::PP,
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
@@ -854,6 +856,35 @@ secondmate_handoff_detect() {
   done
 }
 
+privileged_package_install_cmd() {  # <manager> <verb> <package>
+  local manager=$1 verb=$2 package=$3 prefix=''
+  if [ "$(id -u 2>/dev/null)" != 0 ]; then
+    command -v sudo >/dev/null 2>&1 || return 1
+    prefix='sudo '
+  fi
+  printf '%s%s %s %s\n' "$prefix" "$manager" "$verb" "$package"
+}
+
+perl_json_pp_install_cmd() {
+  if command -v dnf >/dev/null 2>&1; then
+    privileged_package_install_cmd dnf install perl-JSON-PP
+  elif command -v yum >/dev/null 2>&1; then
+    privileged_package_install_cmd yum install perl-JSON-PP
+  elif command -v apt-get >/dev/null 2>&1; then
+    privileged_package_install_cmd apt-get install libjson-pp-perl
+  elif command -v apk >/dev/null 2>&1; then
+    privileged_package_install_cmd apk add perl-json-pp
+  elif command -v zypper >/dev/null 2>&1; then
+    privileged_package_install_cmd zypper install perl-JSON-PP
+  elif [ "$(uname -s 2>/dev/null)" = FreeBSD ] && command -v pkg >/dev/null 2>&1; then
+    privileged_package_install_cmd pkg install p5-JSON-PP
+  elif command -v brew >/dev/null 2>&1; then
+    echo "brew install perl"
+  else
+    return 1
+  fi
+}
+
 install_cmd() {
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
@@ -862,6 +893,7 @@ install_cmd() {
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
+    perl-JSON-PP) perl_json_pp_install_cmd ;;
     *) return 1 ;;
   esac
 }
@@ -870,12 +902,21 @@ manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
     cursor-agent) echo "https://cursor.com/cli" ;;
+    perl-JSON-PP) echo "https://metacpan.org/pod/JSON::PP" ;;
     *) return 1 ;;
   esac
 }
 
 missing_tool_diagnostic() {
   local tool=$1 instructions
+  if [ "$tool" = perl-JSON-PP ]; then
+    if instructions=$(install_cmd "$tool"); then
+      echo "MISSING: $tool (install: $instructions)"
+    else
+      echo "MISSING_MANUAL: $tool (instructions: $(manual_install_url "$tool"))"
+    fi
+    return 0
+  fi
   if instructions=$(manual_install_url "$tool"); then
     echo "MISSING_MANUAL: $tool (instructions: $instructions)"
     return 0
@@ -1411,6 +1452,7 @@ detect_local_tools() {
   for t in $COMMON_TOOLS; do
     command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
   done
+  perl -MJSON::PP -e 1 >/dev/null 2>&1 || missing_tool_diagnostic perl-JSON-PP
   # The treehouse lease-support upgrade check is only relevant when the resolved
   # backend actually requires treehouse (every backend except orca, which owns its
   # own worktrees); an orca home must not be told to upgrade a provider it never uses.
