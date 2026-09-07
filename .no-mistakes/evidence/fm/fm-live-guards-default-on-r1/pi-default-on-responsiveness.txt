@@ -1,0 +1,2 @@
+pi 0.84.4 keystroke echo, worst observed: floor 62.9 ms, extension idle 56.2 ms, extension delivering 52.4 ms
+ok - supervision outcome delivery keeps the real Pi 0.84.4 TUI echoing keystrokes at its unloaded floor

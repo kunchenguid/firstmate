@@ -1,0 +1,8 @@
+FM_TEST_BEGIN 2026-09-07T02:16:26Z tests/fm-bearings-board-lavish-live-e2e.test.sh family=live-harness-optin expected_gate_skip=live-capability
+skip: live: disabled by FM_LIVE=0
+fm-test-run: gate skip: tests/fm-bearings-board-lavish-live-e2e.test.sh: live: disabled by FM_LIVE=0
+FM_TEST_END 2026-09-07T02:16:26Z tests/fm-bearings-board-lavish-live-e2e.test.sh exit=0 duration_ms=93 gate_skip=true
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=1 duration_ms=209
+FM_TEST_SUMMARY_FAMILY family=live-harness-optin count=1 duration_ms=93 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-bearings-board-lavish-live-e2e.test.sh duration_ms=93
+fm-test-run: wrote timing artifact: /Users/kunchen/.no-mistakes/evidence/01M1WRVA898BKAC5WB7XQ9DH02/live-capability-timing.json

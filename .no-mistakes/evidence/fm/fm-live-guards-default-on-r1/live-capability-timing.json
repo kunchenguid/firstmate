@@ -1,0 +1,31 @@
+{
+  "families": [
+    {
+      "count": 1,
+      "duration_ms": 93,
+      "failed": 0,
+      "name": "live-harness-optin"
+    }
+  ],
+  "finished_at": "2026-09-07T02:16:26Z",
+  "run_id": "fm-test-run-1788747386350-86011",
+  "scripts": [
+    {
+      "duration_ms": 93,
+      "exit": 0,
+      "expected_gate_skip": "live-capability",
+      "family": "live-harness-optin",
+      "gate_skip": true,
+      "gate_skip_reason": "live: disabled by FM_LIVE=0",
+      "path": "tests/fm-bearings-board-lavish-live-e2e.test.sh"
+    }
+  ],
+  "selection": "scripts;jobs=1",
+  "started_at": "2026-09-07T02:16:26Z",
+  "summary": {
+    "duration_ms": 209,
+    "failed": 0,
+    "skipped_gate": 1,
+    "total": 1
+  }
+}

@@ -1,0 +1,3 @@
+# lavish-axi 0.1.61
+ok - lavish-axi 0.1.61 reports a captain-ended session without reopening it and without failing
+ok - the board build reopens a captain-ended session against real lavish-axi instead of arming a dead one
