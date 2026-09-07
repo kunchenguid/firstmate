@@ -39,41 +39,6 @@ set -u
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
-# fm_masked_path <dir> <tool>...: build <dir>/maskedbin as a symlink mirror of
-# the ambient base PATH with the named tools removed, and echo its path. Use
-# it where a fixture needs a tool to be genuinely ABSENT from PATH, not merely
-# absent from $fakebin: tool detection is presence-based (`command -v`), and
-# Linux workers ship binaries a macOS-authored fixture never expects to find,
-# like node, directly in /usr/bin.
-fm_masked_path() {
-  local masked_dir=$1 maskedbin entry name tool skip base_dir paths ifsave
-  maskedbin="$masked_dir/maskedbin"
-  mkdir -p "$maskedbin"
-  paths=$BASE_PATH
-  ifsave=$IFS
-  IFS=:
-  for base_dir in $paths; do
-    IFS=$ifsave
-    [ -d "$base_dir" ] || continue
-    for entry in "$base_dir"/*; do
-      [ -f "$entry" ] && [ -x "$entry" ] || continue
-      name=${entry##*/}
-      skip=""
-      for tool in "$@"; do
-        if [ "$name" = "$tool" ]; then
-          skip=1
-          break
-        fi
-      done
-      if [ -z "$skip" ] && [ ! -e "$maskedbin/$name" ]; then
-        ln -s "$entry" "$maskedbin/$name"
-      fi
-    done
-  done
-  IFS=$ifsave
-  printf '%s\n' "$maskedbin"
-}
-
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
 SESSION_START_TEST_HARNESS_PID=$$
 SESSION_START_SECOND_MATE_ID="fmtest-sm-${TMP_ROOT##*.}"

@@ -33,6 +33,9 @@
 # events fresh.
 #
 # Usage: FM_STATE_OVERRIDE=<state-dir> fm-watch-replay-gate.sh "<reason line>"
+# The reason line is the argument's first line: a replayed record's message may
+# carry appended annotation lines after it, and only the leading reason line
+# is the parseable wake.
 # Prints exactly one line: "deliver" or "drop <reason>". Both verdicts exit 0;
 # only a usage error exits non-zero, and the extension treats any non-zero or
 # unreadable answer as "deliver".
@@ -53,7 +56,7 @@ usage() {
 }
 
 [ "$#" -eq 1 ] || usage
-reason=$1
+reason=${1%%$'\n'*}
 [ -n "$reason" ] || usage
 
 deliver() {

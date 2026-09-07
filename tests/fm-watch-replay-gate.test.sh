@@ -65,6 +65,19 @@ test_gate_delivers_when_the_stale_row_is_still_queued() {
   pass "a still-queued stale row for a live task delivers the replay"
 }
 
+test_gate_delivers_annotated_stale_replay_for_a_live_queued_wake() {
+  local home out
+  home=$(new_home annotated-stale)
+  # A persist-failure replay carries the reason line plus appended annotation
+  # lines; the wake is still live (meta records the window, row unacked), so
+  # only the leading reason line may drive the verdict.
+  write_meta "$home/state" task-a default:wMA:p2
+  printf '1\t1\tstale\tdefault:wMA:p2\tstale: default:wMA:p2\n' > "$home/state/.wake-queue"
+  out=$(verdict "$home/state" "$(printf 'stale: default:wMA:p2\n\nwatcher: FAILED - Pi extension could not persist a replacement-session actionable wake\nError: ENOENT')")
+  [ "$out" = "deliver" ] || fail "an annotated stale replay for a live queued wake must deliver, got: $out"
+  pass "annotation lines after a stale reason cannot flip a live wake to a drop"
+}
+
 test_gate_drops_stale_replay_when_no_meta_records_the_window() {
   local home out
   home=$(new_home window-gone)
@@ -225,6 +238,7 @@ test_gate_drops_replay_when_queue_empty_and_episode_acked
 test_gate_drops_replay_when_queue_empty_and_no_marker
 test_gate_delivers_when_a_recovery_episode_is_still_outstanding
 test_gate_delivers_when_the_stale_row_is_still_queued
+test_gate_delivers_annotated_stale_replay_for_a_live_queued_wake
 test_gate_drops_stale_replay_when_no_meta_records_the_window
 test_gate_drops_stale_replay_when_its_row_was_acked
 test_gate_drops_signal_replay_when_every_referenced_task_is_gone
