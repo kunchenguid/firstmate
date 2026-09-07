@@ -2372,9 +2372,19 @@ EOF
 
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
-  if ! git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
-    # No origin configured: there is nothing remote to be stale against, so
-    # this local-only pooled worktree is launched as-is.
+  status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
+    echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
+    return 1
+  }
+  if [ -n "$status" ]; then
+    if describe_stale_submodule_pins "$worktree" "$status"; then
+      echo "error: pooled worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
+    else
+      echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+    fi
+    return 1
+  fi
+  if ! git -C "$worktree" config --get-regexp '^remote\.origin\.' >/dev/null 2>&1; then
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
@@ -2398,18 +2408,6 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
-    echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
-    return 1
-  }
-  if [ -n "$status" ]; then
-    if describe_stale_submodule_pins "$worktree" "$status"; then
-      echo "error: pooled worktree '$worktree' has a stale submodule checkout, not uncommitted work; refusing to launch and leaving it untouched" >&2
-    else
-      echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
-    fi
-    return 1
-  fi
   if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1

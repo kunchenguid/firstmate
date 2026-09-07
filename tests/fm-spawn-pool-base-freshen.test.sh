@@ -227,6 +227,45 @@ test_originless_pool_launches_without_a_freshness_fetch() {
   pass "an origin-less pooled worktree launches as-is, skipping the freshness gate"
 }
 
+test_originless_dirty_pool_refuses_without_discarding_work() {
+  local rec id out status before
+  id='pool-originless-dirty-r1'
+  rec=$(make_originless_case originless-dirty "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a dirty origin-less pooled worktree"
+  assert_contains "$out" "is not clean" \
+    "spawn did not clearly refuse a dirty origin-less pooled worktree"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a dirty origin-less pooled worktree"
+  assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
+    "spawn discarded local work from an origin-less pool"
+  pass "a dirty origin-less pooled worktree is refused without discarding its local work"
+}
+
+test_origin_config_without_url_refuses_pool() {
+  local rec id out status before
+  id='pool-origin-without-url-r1'
+  rec=$(make_originless_case origin-without-url "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an origin configuration with no URL"
+  assert_contains "$out" "could not fetch origin" \
+    "spawn did not refuse an origin configuration with no URL as unusable"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after finding an unusable origin configuration"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an origin configuration without a URL refuses the pooled worktree"
+}
+
 test_unreachable_origin_refuses_stale_pool_base() {
   local rec id out status before after
   id='pool-unreachable-origin-r2'
@@ -400,6 +439,7 @@ test_stale_submodule_pin_explains_itself() {
   rec=$(make_submodule_case stale-pin "$id")
   read_submodule_case "$rec"
   strand_submodule_pin_via_spawn 'pool-stale-pin-seed-r7'
+  git -C "$POOL_DIR" remote remove origin
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   before_sub=$(git -C "$POOL_DIR/ui" rev-parse HEAD)
 
@@ -425,7 +465,7 @@ test_stale_submodule_pin_explains_itself() {
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed stale-pin refusal: %s\n' "$(printf '%s\n' "$out" | grep 'submodule' | head -n 1)"
   fi
-  pass "two consecutive spawns across a moved submodule pin end in a refusal naming both pins and no remedy"
+  pass "an origin-less pool with a stale submodule pin refuses while naming both pins and no remedy"
 }
 
 test_unpushed_submodule_commit_is_still_uncommitted_work() {
@@ -547,6 +587,8 @@ test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_originless_pool_launches_without_a_freshness_fetch
+test_originless_dirty_pool_refuses_without_discarding_work
+test_origin_config_without_url_refuses_pool
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
