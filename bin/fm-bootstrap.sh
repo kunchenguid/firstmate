@@ -52,7 +52,9 @@
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
-#          "treehouse get --lease" support.
+#          "treehouse get --lease" support, or when this home needs its own pool
+#          root and the installed version lacks the global --root option
+#          (docs/configuration.md owns the per-home pool contract).
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
@@ -181,6 +183,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-treehouse-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-treehouse-lib.sh"
 
 # Network-phase selection (see the header). An unrecognized value resolves to
 # `all` so a malformed override runs every step rather than silently dropping a
@@ -911,6 +915,16 @@ treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
+# This home needs Treehouse's --root option only when it resolves a pool root of
+# its own; the primary home keeps Treehouse's default precedence and never does.
+# An unresolvable root is its own detect-only diagnostic, so treat it as needing
+# the option rather than quietly clearing the gate.
+treehouse_root_option_required() {
+  local root
+  root=$(fm_treehouse_root_for_home "$FM_ROOT" "$FM_HOME") || return 0
+  [ -n "$root" ]
+}
+
 # Shared semantic-version floor for the tool gates below. A version string that
 # cannot be parsed into exactly one major.minor.patch triple is incompatible,
 # never assumed current, so a development or vendored build cannot pass a floor
@@ -1414,8 +1428,13 @@ detect_local_tools() {
   # The treehouse lease-support upgrade check is only relevant when the resolved
   # backend actually requires treehouse (every backend except orca, which owns its
   # own worktrees); an orca home must not be told to upgrade a provider it never uses.
+  # The same backend condition covers the per-home pool root: a non-primary home
+  # cannot bind its workers to its own project clone without Treehouse's --root
+  # option (v2.2.0 or newer), and docs/configuration.md owns that contract.
   if fm_backend_list_contains "$TOOLS" treehouse \
-    && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
+    && command -v treehouse >/dev/null 2>&1 \
+    && { ! treehouse_supports_lease \
+      || { treehouse_root_option_required && ! fm_treehouse_supports_root; }; }; then
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"
   fi
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then

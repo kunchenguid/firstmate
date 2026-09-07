@@ -199,6 +199,12 @@ SH
 cat > "$FAKEBIN/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Model the pinned build's global options: a home that owns its own Treehouse
+# pool needs --root, and a stub that advertises nothing reads as too old.
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' '      --root string   Worktree root directory'
+  exit 0
+fi
 {
   first=1
   for arg in "$@"; do
@@ -1272,6 +1278,19 @@ done
 pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence"
 
 # A secondmate child binds and reclaims only inside its own home and parent.
+# Retire the original multi-home fixtures before this child gets a replacement
+# slot in the same secondmate pool.
+for META_HOME_PAIR in \
+  "a1:$SECOND_HOME_A" "a2:$SECOND_HOME_A"
+do
+  TASK_ID=${META_HOME_PAIR%%:*}
+  TASK_HOME=${META_HOME_PAIR#*:}
+  if [ -e "$TASK_HOME/state/$TASK_ID.meta" ]; then
+    teardown_task "$TASK_ID" "$TASK_HOME" > "$TMP_ROOT/td-before-cross-restart-$TASK_ID.out" 2> "$TMP_ROOT/td-before-cross-restart-$TASK_ID.err" \
+      || fail "pre-cross-restart teardown of $TASK_ID failed: $(cat "$TMP_ROOT/td-before-cross-restart-$TASK_ID.err")"
+  fi
+done
+
 CROSS_RESTART_ID=wheel-child-resume
 mkdir -p "$SECOND_HOME_A/data/$CROSS_RESTART_ID"
 write_ship_brief "$SECOND_HOME_A" "$CROSS_RESTART_ID" 'Cross-home restart fixture.'
@@ -1308,6 +1327,20 @@ pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to th
 
 # Two homes recovering concurrently serialize on the named session lock and
 # each replace only their own exact husk.
+# Release earlier live fixtures so replacement slots cannot collide with them.
+for META_HOME_PAIR in \
+  "p1:$HOME_DIR" "p2:$HOME_DIR" \
+  "a1:$SECOND_HOME_A" "a2:$SECOND_HOME_A" \
+  "b1:$SECOND_HOME_B" "b2:$SECOND_HOME_B"
+do
+  TASK_ID=${META_HOME_PAIR%%:*}
+  TASK_HOME=${META_HOME_PAIR#*:}
+  if [ -f "$TASK_HOME/state/$TASK_ID.meta" ]; then
+    teardown_task "$TASK_ID" "$TASK_HOME" > "$TMP_ROOT/td-before-recovery-$TASK_ID.out" 2> "$TMP_ROOT/td-before-recovery-$TASK_ID.err" \
+      || fail "pre-recovery teardown of $TASK_ID failed: $(cat "$TMP_ROOT/td-before-recovery-$TASK_ID.err")"
+  fi
+done
+
 PRIMARY_WAVE_ID=resume-wave-primary
 BRAVO_WAVE_ID=resume-wave-bravo
 mkdir -p "$HOME_DIR/data/$PRIMARY_WAVE_ID" "$SECOND_HOME_B/data/$BRAVO_WAVE_ID"
@@ -1382,10 +1415,10 @@ pass "real Herdr lab: legacy projection labels and flat secondmate tabs are left
 
 # Teardown multi-home projected tasks by exact pane only.
 for META_HOME_PAIR in \
-  "p1:$HOME_DIR" "p2:$HOME_DIR" "pcw:$HOME_DIR" "post-legacy:$HOME_DIR" \
-  "a1:$SECOND_HOME_A" "a2:$SECOND_HOME_A" "acw:$SECOND_HOME_A" \
+  "pcw:$HOME_DIR" "post-legacy:$HOME_DIR" \
+  "acw:$SECOND_HOME_A" \
   "alpha:$HOME_DIR" \
-  "b1:$SECOND_HOME_B" "b2:$SECOND_HOME_B" "bcw:$SECOND_HOME_B"
+  "bcw:$SECOND_HOME_B"
 do
   TASK_ID=${META_HOME_PAIR%%:*}
   TASK_HOME=${META_HOME_PAIR#*:}
