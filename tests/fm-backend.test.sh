@@ -116,8 +116,9 @@ resolve_base_ref() {
   done
   return 1
 }
-BASE_REF=$(resolve_base_ref) \
-  || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
+if ! BASE_REF=$(resolve_base_ref); then
+  fail 'fm-backend baseline requires local main or origin/main'
+fi
 
 # Newest first-parent revision whose bin/backends/tmux.sh still uses the
 # pre-exact permissive kill-window target. Content-addressed from history so the
@@ -520,6 +521,36 @@ test_backend_source_shell_portable() {
     "bash: fm_backend_source did not reject bogus with the expected error"
   pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
 }
+
+test_backend_source_missing_adapter_returns_to_caller() {
+  local saved_dir out rc had_errexit
+  saved_dir=$FM_BACKEND_LIB_DIR
+  FM_BACKEND_LIB_DIR="$TMP_ROOT/missing-adapter"
+  mkdir -p "$FM_BACKEND_LIB_DIR/backends"
+  case $- in
+    *e*) had_errexit=1 ;;
+    *) had_errexit=0 ;;
+  esac
+  set +e
+  out=$(fm_backend_source herdr 2>&1)
+  rc=$?
+  if [ "$had_errexit" -eq 1 ]; then
+    set -e
+  else
+    set +e
+  fi
+  FM_BACKEND_LIB_DIR=$saved_dir
+  [ "$rc" -ne 0 ] || fail "fm_backend_source should refuse a missing adapter"
+  [ -z "$out" ] || fail "fm_backend_source should leave refusal reporting to its caller"
+  pass "fm_backend_source: missing adapter returns non-zero without aborting its caller"
+}
+
+# The fm_backend_source missing/unreadable adapter refusal contract lives in
+# tests/fm-backend-adapter-source.test.sh. It is deliberately kept out of this
+# file: that contract only fails on stock macOS bash 3.2, so it must run on the
+# ci.yml `macos-stock-bash` lane, and this suite cannot - its old-vs-new
+# baseline needs a resolvable `main` (that lane checks out shallow) and its
+# teardown conformance case needs tasks-axi.
 
 test_backend_validate_spawn_accepts_orca() {
   local out
@@ -1148,6 +1179,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_backend_source_missing_adapter_returns_to_caller
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms

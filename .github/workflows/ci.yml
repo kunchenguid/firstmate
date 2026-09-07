@@ -407,6 +407,31 @@ jobs:
             exit 1
           }
 
+          # The adapter-source refusal contract can ONLY fail here: on bash 5 a
+          # failed `.` returns and the caller refuses correctly, so this suite
+          # passes on every other lane even with the guard deleted. It is kept
+          # dependency-free (no git history, no tasks-axi) so this job's shallow
+          # checkout and minimal PATH can run it.
+          adapter_source_output=$(/bin/bash tests/fm-backend-adapter-source.test.sh)
+          printf '%s\n' "$adapter_source_output"
+          adapter_source_count=$(printf '%s\n' "$adapter_source_output" | grep -c '^ok - ')
+          [ "$adapter_source_count" -eq 3 ] || {
+            echo "::error::expected 3 adapter-source tests, got $adapter_source_count"
+            exit 1
+          }
+
+          # Teardown guards unlanded work, and its refusal paths are exactly the
+          # kind that diverge between Bash 3.2 and Bash 5: `set -e` makes 3.2
+          # abort the shell where 5 returns, so a refusal can silently become a
+          # reported success here while every other lane stays green.
+          teardown_output=$(/bin/bash tests/fm-teardown.test.sh)
+          printf '%s\n' "$teardown_output"
+          teardown_count=$(printf '%s\n' "$teardown_output" | grep -c '^ok - ')
+          [ "$teardown_count" -eq 84 ] || {
+            echo "::error::expected 84 teardown tests, got $teardown_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
