@@ -415,45 +415,33 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def strip_trailing_metadata:
       reduce range(0; 20) as $_ (.;
         sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind|hold-until):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
-    # A local-only landing note names the branch the task actually landed on, so
-    # it is no longer always "local main". Only the SEPARATED form reads that
-    # widened, and only on a Done row, because only there is "local <word>" a
-    # note rather than prose: an unseparated tail is how an ordinary title ends
-    # ("Add support for local sockets", "Run the seeder local only"), and it is
-    # never how a non-default note arrives, since the writer that emits one puts
-    # the note on its own continuation line rather than on the row. So the
-    # unseparated form keeps reading the one literal it was always written with.
-    def note_pattern($state):
-      if $state == "done" then "local[[:space:]]+[^[:space:])]+" else "local main" end;
-    def strip_title_artifacts($state):
+    def strip_title_artifacts:
       sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
       | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
-      | sub("[[:space:]]+-[[:space:]]+" + note_pattern($state) + "$"; "")
+      | sub("[[:space:]]+-[[:space:]]+local main$"; "")
       | sub("[[:space:]]+local main$"; "")
       | sub("[[:space:]]+-[[:space:]]*$"; "");
-    def clean_title($state):
+    def clean_title:
       strip_trailing_metadata
-      | strip_title_artifacts($state)
+      | strip_title_artifacts
       | gsub("[[:space:]]+"; " ")
       | trim;
-    def title_of($rest; $state):
+    def title_of($rest):
       $rest
       | gsub(wrapped_url_pattern; "")
       | sub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$"; "")
       | gsub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+"; "")
-      | clean_title($state);
+      | clean_title;
     def blocked_by_ids($rest):
       [ $rest | scan("blocked-by:[[:space:]]+(?<id>[^[:space:])]+)") | .[0] ]
       | reduce .[] as $id ([]; if index($id) == null then . + [$id] else . end);
-    def blocked_reason($rest; $state):
+    def blocked_reason($rest):
       cap($rest; ".*blocked-by:[[:space:]]*[^[:space:])]+[[:space:]]+-[[:space:]]*(?<v>.*)$") as $reason
       | if $reason == null then null
-        else ($reason | clean_title($state) | if . == "" then null else . end)
+        else ($reason | clean_title | if . == "" then null else . end)
         end;
-    def local_note($rest; $state):
-      ($rest | strip_trailing_metadata) as $stripped
-      | cap($stripped; ".*(?:^|[[:space:]]+-[[:space:]]+)(?<v>" + note_pattern($state) + ")$")
-        // cap($stripped; ".*(?:^|[[:space:]])(?<v>local main)$");
+    def local_note($rest):
+      cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main)$");
     def completion($rest):
       (metadata_word($rest; "merged")) as $merged
       | (metadata_word($rest; "reported")) as $reported
@@ -480,7 +468,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              structured:true,
              id:($m.id | trim),
              checked:($m.check | test("[xX]")),
-             title:title_of($rest; $section),
+             title:title_of($rest),
              repo:metadata($rest; "repo"),
              kind:kind_of($rest),
              priority:metadata($rest; "priority"),
@@ -490,7 +478,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              hold_set:null,
              blocked_by:cap($rest; ".*blocked-by:[[:space:]]*(?<v>[^[:space:])]+).*"),
              blocked_by_ids:blocked_by_ids($rest),
-             blocked_reason:blocked_reason($rest; $section),
+             blocked_reason:blocked_reason($rest),
              since:metadata_word($rest; "since"),
              merged:metadata_word($rest; "merged"),
              reported:metadata_word($rest; "reported"),
@@ -499,7 +487,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              links:links($rest),
              pr_url:((links($rest) | map(select(test("/pull/[0-9]+"))) | .[0]) // null),
              report_path:cap($rest; ".*(?<v>data/[^[:space:])]+/report\\.md).*"),
-             local_note:local_note($rest; $section),
+             local_note:local_note($rest),
              raw:$line,
              body_lines:[],
              body_excerpt:null}

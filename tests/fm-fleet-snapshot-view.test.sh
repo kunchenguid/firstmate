@@ -516,15 +516,12 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [ ] dated-route - Deferred sample route (repo: sample) (kind: ship) (hold: captain sent this to later) (hold-kind: captain) (hold-until: 2026-09-01)
 - [ ] captain-gated-work - Captain-gated ship work (repo: sample) (kind: ship) (hold: captain go pending) (hold-kind: captain)
 - [ ] parked-prose - Parked captain call (repo: sample) (kind: ship) (hold: DEFERRED by captain) (hold-kind: captain)
-- [ ] local-words-queued - Add support for local sockets (repo: beta) (kind: ship)
 
 ## Done
 - [x] done-comma - Done Comma Task https://github.com/kunchenguid/firstmate/pull/42 (repo: gamma, merged 2026-07-09) (kind: ship)
 - [x] done-bracket-pr - Done Bracket PR - <https://github.com/kunchenguid/firstmate/pull/43> (repo: gamma, merged 2026-07-12) (kind: ship)
 - [x] reported-comma - Reported Scout data/reported-comma/report.md (repo: gamma, reported 2026-07-10) (kind: scout)
 - [x] done-note - Done Note local main (repo: delta, done 2026-07-11) (kind: ship)
-- [x] done-base-note - Done Base Note - local feat/stack (repo: delta, done 2026-07-13) (kind: ship)
-- [x] local-words-done - Run the seeder local only (repo: beta, done 2026-07-14) (kind: ship)
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
   fm_write_meta "$home/state/bold-task.meta" \
@@ -624,33 +621,6 @@ EOF
       and .done == "2026-07-11"
       and .completion == {verb:"done",date:"2026-07-11"}
   ' >/dev/null || fail "done closure metadata did not parse"
-  # A local-only task that lands on its recorded delivery target branch notes
-  # that branch, not main. Reading only the literal "local main" left the note
-  # uncaptured AND unstripped, so it leaked into the title and the artifact
-  # column fell back to "-" for exactly the stacking tasks the note serves.
-  # An ordinary title whose last two words happen to be "local <word>" is a
-  # title, not a landing note. A note is only ever written at completion and the
-  # row carries no separator of its own, so the widened read is confined to Done
-  # rows - and even a Done row that names no branch keeps the " - " separator
-  # form, which is what tells a note from a sentence.
-  printf '%s' "$out" | jq -e '
-    .backlog.records[] | select(.id == "local-words-queued")
-    | .title == "Add support for local sockets"
-      and .local_note == null
-  ' >/dev/null || fail "an ordinary queued title ending in local <word> was read as a landing note"
-  printf '%s' "$out" | jq -e '
-    .backlog.records[] | select(.id == "local-words-done")
-    | .title == "Run the seeder local only"
-      and .local_note == null
-  ' >/dev/null || fail "an ordinary done title ending in local <word> was read as a landing note"
-  printf '%s' "$out" | jq -e '
-    .backlog.records[] | select(.id == "done-base-note")
-    | .repo == "delta"
-      and .title == "Done Base Note"
-      and .local_note == "local feat/stack"
-      and .done == "2026-07-13"
-      and .completion == {verb:"done",date:"2026-07-13"}
-  ' >/dev/null || fail "a landing note naming a non-default delivery target branch did not parse"
   printf '%s' "$out" | jq -e --arg data "$data" '
     .tasks[] | select(.id == "bold-task")
     | .backlog.id == "bold-task"
@@ -666,8 +636,6 @@ EOF
     "view should render bracketed PR artifact outside the title"
   assert_contains "$view" "| done-note | Done Note | delta | ship | - | local main |" \
     "view should render local-only done artifact outside the title"
-  assert_contains "$view" "| done-base-note | Done Base Note | delta | ship | - | local feat/stack |" \
-    "view should render a non-default delivery target branch as the local-only artifact"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 
