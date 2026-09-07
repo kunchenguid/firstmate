@@ -451,12 +451,11 @@ do_exit() {
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
-    dead)
+    dead|missing)
       printf 'already-stopped'
       return 0
       ;;
     alive) ;;
-    missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.

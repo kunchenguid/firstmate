@@ -13,7 +13,8 @@
 #      and a record bound to another task are all refused.
 #   4. Verb allowlist: no arbitrary text, no raw keys, no resume.
 #   5. Lifecycle states: busy interrupts first, idle does not, already-stopped
-#      is idempotent success, and an agent that does not stop fails closed.
+#      and a vanished endpoint are both idempotent exit success, and an agent
+#      that does not stop fails closed.
 #   6. Marker non-regression: a control command to a kind=secondmate task
 #      carries NO from-firstmate marker and opens no pending-reply expectation,
 #      while fm-send's marking of the same task is untouched.
@@ -634,15 +635,28 @@ test_already_stopped_exit_is_idempotent() {
   pass "fm-control exit: an already-stopped agent is idempotent success with no bytes sent"
 }
 
-test_missing_endpoint_refuses() {
+test_missing_endpoint_exit_is_idempotent() {
   local dir out rc
   dir=$(new_case gone)
   add_task "$dir" t1 claude
   : > "$dir/fake/windows"
   out=$(run_control "$dir" t1 exit); rc=$?
-  expect_code 1 "$rc" "a missing endpoint should refuse"
-  assert_contains "$out" "recorded endpoint is gone" "the refusal should name the missing endpoint"
-  pass "fm-control exit: a vanished endpoint refuses instead of silently succeeding"
+  expect_code 0 "$rc" "exiting a vanished endpoint should succeed"
+  assert_contains "$out" "already-stopped t1" "the outcome should say it was already stopped"
+  [ -z "$(literals "$dir")" ] || fail "a vanished endpoint must not be sent an exit command"
+  pass "fm-control exit: a vanished endpoint is idempotent success with no bytes sent"
+}
+
+test_missing_endpoint_interrupt_refuses() {
+  local dir out rc
+  dir=$(new_case gone-interrupt)
+  add_task "$dir" t1 claude
+  : > "$dir/fake/windows"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "interrupting a vanished endpoint should refuse"
+  assert_contains "$out" "nothing to interrupt" "the refusal should say there is no agent"
+  [ -z "$(keys_sent "$dir")" ] || fail "no key should reach a vanished endpoint"
+  pass "fm-control interrupt: a vanished endpoint still refuses rather than keying a shell"
 }
 
 test_interrupt_refuses_when_no_agent_runs() {
@@ -900,7 +914,8 @@ test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
-test_missing_endpoint_refuses
+test_missing_endpoint_exit_is_idempotent
+test_missing_endpoint_interrupt_refuses
 test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command

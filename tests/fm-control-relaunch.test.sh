@@ -16,7 +16,8 @@
 #      reports the concrete state, and preserves the work.
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
-#      agent exited.
+#      agent exited. A dead or a vanished (missing) endpoint are equally
+#      agent-free and both license the relaunch.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -322,6 +323,19 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_relaunch_succeeds_from_a_missing_endpoint() {
+  local dir out rc
+  dir=$(new_case gone rl41)
+  add_ship_task "$dir" rl41 claude
+  : > "$dir/fake/windows"
+  out=$(run_control "$dir" rl41 relaunch --note "endpoint vanished, resuming"); rc=$?
+  expect_code 0 "$rc" "relaunching a task whose endpoint vanished should succeed"$'\n'"$out"
+  assert_contains "$out" "relaunched rl41 harness=claude from=claude" "the outcome should name the transition"
+  [ "$(journal_field "$dir" rl41 phase)" = complete ] \
+    || fail "the transaction journal should end complete"
+  pass "fm-control relaunch: a vanished endpoint is recovered exactly like a positively dead one"
 }
 
 test_relaunch_from_linked_home_preserves_recorded_worktree() {
@@ -1375,6 +1389,17 @@ test_spawn_relaunch_refuses_a_live_agent() {
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
 
+test_spawn_relaunch_succeeds_from_a_missing_endpoint() {
+  local dir out rc
+  dir=$(new_case gone-spawn rl40)
+  add_ship_task "$dir" rl40 claude
+  : > "$dir/fake/windows"
+  out=$(run_spawn "$dir" rl40 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunching from a vanished endpoint should succeed"$'\n'"$out"
+  assert_contains "$out" "spawned rl40 harness=claude" "the launch should report the new agent"
+  pass "fm-spawn --relaunch: a vanished endpoint is as agent-free as a positively dead one"
+}
+
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
   local dir meta target out rc
   dir=$(new_case symlink-meta rl37)
@@ -1533,6 +1558,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_succeeds_from_a_missing_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1576,6 +1602,7 @@ test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
+test_spawn_relaunch_succeeds_from_a_missing_endpoint
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close
