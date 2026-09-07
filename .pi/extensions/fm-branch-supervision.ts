@@ -1,9 +1,9 @@
 // Firstmate supervision branch for Pi (docs/pi-supervision-branch.md).
 //
 // A second AgentSession - the supervision BRANCH - inside the same pi process
-// as the captain's MAIN session, living for exactly one main session: every
-// main session start (cold start, /new, /resume, /fork, reload) opens a NEW
-// branch conversation, so the branch reasons from today's generated prompt and
+// as the captain's MAIN session. docs/pi-supervision-branch.md owns its
+// session-bounded conversation lifecycle and explicit /supervision-reset path,
+// so the branch reasons from today's generated prompt and
 // the current main dialog instead of an older thread's accumulated memory. The
 // durable outcome store, not that conversation, is what carries unacknowledged
 // captain-facing outcomes across the boundary. The watcher extension offers each
@@ -40,7 +40,7 @@
 //
 // Failure direction: every accepted path that cannot reach a working branch
 // rejects its settlement to the watcher, which retains delivery ownership and
-// routes the wake to MAIN through its consumption-acknowledged path. A broken
+// routes the wake to MAIN (delivery contract: docs/watcher-continuity.md). A broken
 // branch declines later offers, so they take that same watcher path directly.
 // The wake queue itself stays durable until the handler runs the drain's
 // acknowledgement, so a branch that dies mid-handling re-presents its rows at

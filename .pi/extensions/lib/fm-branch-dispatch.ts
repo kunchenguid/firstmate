@@ -11,7 +11,7 @@ import { runCommandAsync } from "./fm-async-exec.ts";
 // synchronously up to their first await), so after emit returns the watcher
 // reads `accepted`: true means the branch owns handling the wake, and its
 // settlement promise keeps the watcher outcome pending until handling finishes
-// or rejects back to the watcher's consumption-acknowledged main path; false
+// or rejects back to the watcher's main path (docs/watcher-continuity.md); false
 // means no branch took it and the watcher delivers to main exactly as it did
 // before the branch existed. Watcher-failure alarms are never offered - only
 // main can repair the watcher cycle (fm_watch_arm_pi lives on main).
