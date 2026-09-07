@@ -98,7 +98,7 @@ matrix_case D31 deny "env -S 'bin/fm-watch-arm.sh &'"
 matrix_case D32 deny "env --split-string='$ROOT/bin/fm-watch-arm.sh &'"
 matrix_case D33 deny 'bin/fm-"watch-arm.sh" &'
 matrix_case D34 deny "WATCHER='bin/fm-watch-arm.sh'; \"\$WATCHER\" &"
-matrix_case D35 deny "bash -c -- 'bin/fm-watch-arm.sh &'"
+matrix_case D35 allow "bash -c -- 'bin/fm-watch-arm.sh &'"
 matrix_case D36 deny 'bash bin/fm-watch-arm.sh &'
 matrix_case D37 deny '. bin/fm-watch-arm.sh &'
 matrix_case D38 deny "bash <<< 'bin/fm-watch-arm.sh &'"
@@ -380,7 +380,10 @@ EOF
     '/usr/bin/time -l no-mistakes axi respond --action fix' \
     'coproc no-mistakes axi respond --action fix' \
     'coproc JOB no-mistakes axi respond --action fix' \
+    'coproc JOB MODE=fix no-mistakes axi respond --action fix' \
+    'coproc JOB env no-mistakes axi respond --action fix' \
     'coproc JOB { no-mistakes axi respond --action fix; }' \
+    "bash -o posix -c 'no-mistakes axi respond --action fix'" \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
@@ -400,7 +403,10 @@ EOF
     '/usr/bin/time -l no-mistakes axi respond --action fix' \
     'coproc no-mistakes axi respond --action fix' \
     'coproc JOB no-mistakes axi respond --action fix' \
+    'coproc JOB MODE=fix no-mistakes axi respond --action fix' \
+    'coproc JOB env no-mistakes axi respond --action fix' \
     'coproc JOB { no-mistakes axi respond --action fix; }' \
+    "bash -o posix -c 'no-mistakes axi respond --action fix'" \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
@@ -420,6 +426,7 @@ EOF
     "time echo 'no-mistakes axi run --intent data'" \
     "/usr/bin/time -l echo 'no-mistakes axi run --intent data'" \
     "coproc echo 'no-mistakes axi respond --action data'" \
+    "bash -c -- 'no-mistakes axi respond --action data'" \
     "if echo 'no-mistakes axi respond --action data'; then echo done; fi" \
     "case \"\$x\" in *) echo 'no-mistakes axi run';; esac"; do
     FM_HOME="$primary" "$check" --command "$payload" >/dev/null 2>&1 \

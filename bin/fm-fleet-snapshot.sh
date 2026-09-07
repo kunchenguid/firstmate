@@ -138,7 +138,6 @@ esac
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-10}
-FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT=${FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT:-10}
 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=${FM_SNAPSHOT_LOCAL_READ_CONCURRENCY:-8}
 FM_SNAPSHOT_BUDGET=${FM_SNAPSHOT_BUDGET:-5}
 FM_SNAPSHOT_CACHE_DIR=${FM_SNAPSHOT_CACHE_DIR:-$STATE/secondmate-summary-cache}
@@ -172,7 +171,6 @@ case "$FM_SNAPSHOT_SECONDMATES" in
     ;;
 esac
 validate_positive_bound FM_SNAPSHOT_CREW_STATE_TIMEOUT "$FM_SNAPSHOT_CREW_STATE_TIMEOUT"
-validate_positive_bound FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT "$FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_LOCAL_READ_CONCURRENCY "$FM_SNAPSHOT_LOCAL_READ_CONCURRENCY"
 validate_positive_bound FM_SNAPSHOT_BUDGET "$FM_SNAPSHOT_BUDGET"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
@@ -244,8 +242,9 @@ reported unreadable with the reason; collection never computes a summary in
 that home.
 Each local per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIMEOUT
 (default 10 seconds); a read that hits the bound reports state unknown. Complete
-status capture and decision folding share one overall FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT
-(default 10 seconds); the deadline keeps unfinished tasks and reports their inspection unknown.
+status capture, decision folding, and current-state reads share one overall
+FM_SNAPSHOT_CREW_STATE_TIMEOUT (default 10 seconds); the deadline keeps unfinished
+tasks and reports their inspection unknown.
 Local task observations run concurrently, up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY (default 8).
 Remote secondmate endpoint liveness is not probed by this command.
 Terminal contradiction evidence uses
@@ -299,8 +298,9 @@ last_nonempty_line() {  # <file>
 # A local crew-state read is bounded so one slow child cannot extend this
 # snapshot without limit. Remote secondmate endpoint liveness is never read here.
 # A local read that hits the bound folds to state unknown.
-crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
-  local id=$1 captured_meta=${2:-} captured_status=${3:-} raw rest state source detail sep rc
+crew_state_json() {  # <id> [<captured-meta>] [<captured-status>] [<deadline-seconds>]
+  local id=$1 captured_meta=${2:-} captured_status=${3:-} deadline_seconds=${4:-$FM_SNAPSHOT_CREW_STATE_TIMEOUT}
+  local raw rest state source detail sep rc
   if raw=$(
     fm_run_timed "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" \
       env FM_ROOT_OVERRIDE="$FM_ROOT" \
@@ -324,7 +324,7 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
   source=none
   detail=
   if [ "$rc" -eq 124 ]; then
-    detail="local snapshot deadline after ${FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT}s"
+    detail="local snapshot deadline after ${deadline_seconds}s"
   elif [ "$rc" -ne 0 ]; then
     detail="crew state inspection failed"
   fi
@@ -632,6 +632,7 @@ prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
   local status_log status_capture status_decisions status_last_event status_first_pr status_inspection report_path report_capture capture_rc
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1 inspection_reason= remaining
+  local deadline_seconds=$FM_SNAPSHOT_CREW_STATE_TIMEOUT
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
@@ -650,7 +651,7 @@ prefetch_task_observations() {  # <meta> <id>
     capture_rc=$?
     if [ "$capture_rc" -ne 0 ]; then
       if [ "$capture_rc" -eq 124 ]; then
-        inspection_reason="local snapshot deadline after ${FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT}s"
+        inspection_reason="local snapshot deadline after ${FM_SNAPSHOT_CREW_STATE_TIMEOUT}s"
       else
         inspection_reason="status inspection failed"
       fi
@@ -665,10 +666,11 @@ prefetch_task_observations() {  # <meta> <id>
     agent_alive=unknown
   elif [ "$generation_current" = 1 ] && [ -z "$inspection_reason" ]; then
     if remaining=$(snapshot_local_seconds_remaining); then
-      FM_SNAPSHOT_CREW_STATE_TIMEOUT=$remaining crew_state_json "$id" "$meta" "$status_capture" > "$current_file" &
+      FM_SNAPSHOT_CREW_STATE_TIMEOUT=$remaining crew_state_json \
+        "$id" "$meta" "$status_capture" "$deadline_seconds" > "$current_file" &
       current_pid=$!
     else
-      inspection_reason="local snapshot deadline after ${FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT}s"
+      inspection_reason="local snapshot deadline after ${FM_SNAPSHOT_CREW_STATE_TIMEOUT}s"
       printf '%s\n' "$inspection_reason" > "$status_inspection" || current_rc=1
       jq -n --arg detail "$inspection_reason" \
         '{state:"unknown",source:"none",detail:$detail,raw:""}' > "$current_file" || current_rc=1
@@ -724,7 +726,7 @@ prefetch_task_current_states() {
   local -a pids=()
   snapshot_task_cleanup
   SNAPSHOT_TASK_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-tasks.XXXXXX") || return 1
-  SNAPSHOT_LOCAL_DEADLINE_EPOCH=$(( $(date +%s) + FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT ))
+  SNAPSHOT_LOCAL_DEADLINE_EPOCH=$(( $(date +%s) + FM_SNAPSHOT_CREW_STATE_TIMEOUT ))
   # Keep the metadata generation that selected each task beside its observations.
   # Publishers replace metadata atomically, so copying before workers start gives
   # composition one coherent task manifest even if publication or teardown races it.

@@ -2788,7 +2788,7 @@ EOF
 
   started=$(date +%s)
   json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT=2 \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_CREW_STATE_TIMEOUT=2 \
     FAKE_NM_SLEEP=1 FAKE_NM_SIGNAL="$signal" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
     || fail "fleet snapshot failed instead of labeling a crew-state deadline"
   elapsed=$(( $(date +%s) - started ))
@@ -2839,7 +2839,7 @@ test_local_snapshot_bounds_status_inspection_and_exposes_timeout() {
 
   started=$(date +%s)
   json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT=1 \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_CREW_STATE_TIMEOUT=1 \
     FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
     || fail "fleet snapshot failed instead of exposing bounded status timeouts"
   elapsed=$(( $(date +%s) - started ))

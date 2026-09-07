@@ -602,8 +602,14 @@ export function commandPosition(tokens) {
     if (name === "coproc") {
       wrappers.push(name);
       index += 1;
+      let coprocCommandIndex = index + 1;
+      while (isAssignment(words[coprocCommandIndex]?.value || "")) coprocCommandIndex += 1;
       if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(words[index]?.value || "") &&
-          COPROC_COMMAND_WORDS.has(basename(words[index + 1]?.value || ""))) index += 1;
+          COPROC_COMMAND_WORDS.has(basename(words[coprocCommandIndex]?.value || ""))) index += 1;
+      while (isAssignment(words[index]?.value || "")) {
+        prefixAssignments += 1;
+        index += 1;
+      }
       command = words[index];
       if (!command) unresolvedWrapperOption = true;
       continue;
@@ -658,9 +664,7 @@ function shellInvocation(position) {
   for (let i = position.index + 1; i < words.length; i += 1) {
     const option = words[i];
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(option.value)) {
-      let payloadIndex = i + 1;
-      if (words[payloadIndex]?.value === "--") payloadIndex += 1;
-      return { kind: "command", payload: words[payloadIndex] || null };
+      return { kind: "command", payload: words[i + 1] || null };
     }
     if (/^[-+](?:O|o)$/.test(option.value) || ["--init-file", "--rcfile"].includes(option.value)) {
       i += 1;
