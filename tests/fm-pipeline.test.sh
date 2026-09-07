@@ -2136,6 +2136,131 @@ EOF
   pass "fm-watch.sh: a lock-creation failure is a named refusal that reaches supervision, never a hang"
 }
 
+test_working_step_vocabulary() {
+  local root output
+  root=$(new_state working-vocabulary)
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" FM_PIPELINE_SOURCE_ONLY=1 \
+    bash -c '
+      set -u
+      source "$1"
+      line="rev=1 ts=2026-09-07T00:00:00Z step=working evidence=busy:state/task.busy-state gen=gen-1 head=unknown attempt=-"
+      pipeline_record_line_load "$line" "$2/task.pipeline" 2 gen-1
+      printf "step=%s\n" "$PIPELINE_RECORD_STEP"
+    ' _ "$SCRIPT" "$root/state") || fail "the working record vocabulary was refused"
+  assert_contains "$output" 'step=working' "working vocabulary did not load through the record parser"
+  pass "fm-pipeline.sh: working is accepted by the record parser"
+}
+
+test_working_and_report_artifacts_drive_board_json() {
+  local root gen output board rc=0
+  root=$(new_state working-artifacts)
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$root/state" ship) \
+    || fail "could not arm the ship busy fixture"
+  fm_write_meta "$root/state/ship.meta" "kind=ship" "busy_gen=$gen" "spawn_gen=s-ship"
+  "$ROOT/bin/fm-busy-event.sh" apply "$root/state" ship busy --gen "$gen" \
+    --source pi-ext --event agent-start >/dev/null \
+    || fail "could not write the non-synthetic busy event"
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" reconcile ship 2>&1) || rc=$?
+  expect_code 0 "$rc" "a current-generation non-synthetic busy event should reconcile"
+  board=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" board-json)
+  printf '%s' "$board" | jq -e '.tasks[] | select(.id == "ship") | .step == "working" and .step_proven == true' >/dev/null \
+    || fail "board-json did not project the busy ship as working"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$root/state" ship idle --gen "$gen" \
+    --source pi-ext --event agent-settled >/dev/null \
+    || fail "could not settle the busy fixture"
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" reconcile ship 2>&1) || rc=$?
+  expect_code 0 "$rc" "a settled busy event must not retroactively refuse working"
+  board=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" board-json)
+  printf '%s' "$board" | jq -e '.tasks[] | select(.id == "ship") | .step == "working" and .record_state == "ok"' >/dev/null \
+    || fail "a settled busy event regressed the recorded working step"
+
+  "$ROOT/bin/fm-busy-event.sh" retire "$root/state" ship --current-gen >/dev/null \
+    || fail "could not retire the busy wiring"
+  output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" reconcile ship 2>&1) || rc=$?
+  expect_code 0 "$rc" "retired busy wiring must not invalidate recorded working"
+  board=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" board-json)
+  printf '%s' "$board" | jq -e '.tasks[] | select(.id == "ship") | .step == "working" and .record_state == "ok"' >/dev/null \
+    || fail "retired busy wiring invalidated recorded working"
+
+  root=$(new_state synthetic-busy)
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$root/state" synthetic) \
+    || fail "could not arm the synthetic fixture"
+  fm_write_meta "$root/state/synthetic.meta" "kind=ship" "busy_gen=$gen" "spawn_gen=s-synthetic"
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" reconcile synthetic >/dev/null \
+    || fail "the synthetic fixture did not reconcile"
+  board=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" board-json)
+  printf '%s' "$board" | jq -e '.tasks[] | select(.id == "synthetic") | .step == "dispatched"' >/dev/null \
+    || fail "the synthetic launch event incorrectly derived working"
+  "$ROOT/bin/fm-busy-event.sh" apply "$root/state" synthetic idle --gen "$gen" \
+    --source fm-interrupt --event escape >/dev/null \
+    || fail "could not write the first synthetic idle event"
+  "$ROOT/bin/fm-busy-event.sh" apply "$root/state" synthetic idle --gen "$gen" \
+    --source fm-interrupt --event escape >/dev/null \
+    || fail "could not write the second synthetic idle event"
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" reconcile synthetic >/dev/null \
+    || fail "the synthetic idle fixture did not reconcile"
+  board=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" board-json)
+  printf '%s' "$board" | jq -e '.tasks[] | select(.id == "synthetic") | .step == "dispatched"' >/dev/null \
+    || fail "synthetic idle events incorrectly derived working"
+
+  root=$(new_state stale-busy)
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$root/state" stale) \
+    || fail "could not arm the stale-generation fixture"
+  fm_write_meta "$root/state/stale.meta" "kind=ship" "busy_gen=other-gen" "spawn_gen=s-stale"
+  "$ROOT/bin/fm-busy-event.sh" apply "$root/state" stale busy --gen "$gen" \
+    --source pi-ext --event agent-start >/dev/null \
+    || fail "could not write the stale-generation busy event"
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" reconcile stale >/dev/null \
+    || fail "the stale-generation fixture did not reconcile"
+  board=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" board-json)
+  printf '%s' "$board" | jq -e '.tasks[] | select(.id == "stale") | .step == "dispatched"' >/dev/null \
+    || fail "a busy event from another generation incorrectly derived working"
+
+  root=$(new_state scout-report)
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$root/state" scout) \
+    || fail "could not arm the scout busy fixture"
+  fm_write_meta "$root/state/scout.meta" "kind=scout" "busy_gen=$gen" "spawn_gen=s-scout"
+  "$ROOT/bin/fm-busy-event.sh" apply "$root/state" scout busy --gen "$gen" \
+    --source pi-ext --event agent-start >/dev/null \
+    || fail "could not write the scout busy event"
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" reconcile scout >/dev/null \
+    || fail "the scout busy fixture did not reconcile"
+  board=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" board-json)
+  printf '%s' "$board" | jq -e '.tasks[] | select(.id == "scout") | .step == "working"' >/dev/null \
+    || fail "a scout without its report did not remain working"
+  mkdir -p "$root/data/scout"
+  printf '%s\n' 'report body' > "$root/data/scout/report.md"
+  FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" reconcile scout >/dev/null \
+    || fail "the scout report fixture did not reconcile"
+  board=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" board-json)
+  printf '%s' "$board" | jq -e '.tasks[] | select(.id == "scout") | .step == "report-exists" and .step_proven == true' >/dev/null \
+    || fail "board-json did not project the written scout report"
+  pass "fm-pipeline.sh: busy and report artifacts drive board-json monotonically"
+}
+
+test_working_recorded_state_fixture() {
+  local root state board output rc=0
+  root=$(new_state working-recorded-state)
+  state="$root/state"
+  cp -R "$ROOT/tests/fixtures/fm-pipeline-recorded-state/." "$state/" \
+    || fail "could not seed the recorded busy-state fixture"
+  for id in working synthetic mismatch absent-busy; do
+    output=$(FM_HOME="$root" FM_STATE_OVERRIDE="$state" "$SCRIPT" reconcile "$id" 2>&1) || rc=$?
+    expect_code 0 "$rc" "recorded fixture task $id should reconcile"
+  done
+  board=$(FM_HOME="$root" FM_STATE_OVERRIDE="$state" "$SCRIPT" board-json)
+  printf '%s' "$board" | jq -e '
+    .tasks as $tasks
+    | ($tasks | map(select(.id == "working"))[0])
+      | .step == "working" and .step_proven == true
+    and ($tasks | map(select(.id == "synthetic"))[0].step == "dispatched")
+    and ($tasks | map(select(.id == "mismatch"))[0].step == "dispatched")
+    and ($tasks | map(select(.id == "absent-busy"))[0].step == "dispatched")
+  ' >/dev/null || fail "board-json did not classify the recorded state fixture"
+  pass "fm-pipeline.sh: recorded busy-state fixture drives board-json deterministically"
+}
+
 test_line_format_and_unknown_preservation
 test_probe_state_unavailable_is_explicit_and_noncreating
 test_probe_activity_read_failure_leaves_unknown_trace
@@ -2348,6 +2473,9 @@ test_effect_owner_rejects_invalid_receipts_and_stock_bash_retire() {
 }
 
 test_arm_lock_create_failure_watcher_reaches_supervision
+test_working_step_vocabulary
+test_working_and_report_artifacts_drive_board_json
+test_working_recorded_state_fixture
  test_effect_owner_claim_deliver_and_terminal_guards
  test_effect_owner_refuses_foreign_generation_and_corrupt_slots
 test_effect_owner_competing_claims_and_abandonment() {

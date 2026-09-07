@@ -52,6 +52,7 @@ PIPELINE_RECORD_HAS_LINE=0
 PIPELINE_META_FILE=
 PIPELINE_META_KIND=
 PIPELINE_META_GEN=
+PIPELINE_META_BUSY_GEN=
 PIPELINE_META_ATTEMPT=
 PIPELINE_META_PR_HEAD=
 PIPELINE_META_SCALAR_READY=0
@@ -104,6 +105,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 
 pipeline_state_file_valid() {
   fm_pr_regular_destination_or_absent "$1"
@@ -411,7 +414,7 @@ pipeline_disarm() {
 }
 
 pipeline_meta_cache_load() {  # <meta-file> [force]
-  local meta=$1 force=${2:-0} kind='' gen='' attempt='' pr_head='' line scalars
+  local meta=$1 force=${2:-0} kind='' gen='' busy_gen='' attempt='' pr_head='' line scalars
   if [ "$force" -ne 1 ] && [ "$PIPELINE_META_FILE" = "$meta" ] \
     && [ "$PIPELINE_META_SCALAR_READY" -eq 1 ]; then
     return 0
@@ -420,28 +423,31 @@ pipeline_meta_cache_load() {  # <meta-file> [force]
   scalars=$(awk '
     index($0, "kind=") == 1 { kind=substr($0, 6) }
     index($0, "spawn_gen=") == 1 { gen=substr($0, 11) }
+    index($0, "busy_gen=") == 1 { busy_gen=substr($0, 10) }
     index($0, "attempt=") == 1 { attempt=substr($0, 9) }
     index($0, "pr_head=") == 1 { pr_head=substr($0, 9) }
     END {
-      printf "kind=%s\ngen=%s\nattempt=%s\npr_head=%s\n", kind, gen, attempt, pr_head
+      printf "kind=%s\ngen=%s\nbusy_gen=%s\nattempt=%s\npr_head=%s\n", kind, gen, busy_gen, attempt, pr_head
     }
   ' "$meta" 2>/dev/null) || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       kind=*) kind=${line#kind=} ;;
       gen=*) gen=${line#gen=} ;;
+      busy_gen=*) busy_gen=${line#busy_gen=} ;;
       attempt=*) attempt=${line#attempt=} ;;
       pr_head=*) pr_head=${line#pr_head=} ;;
     esac
   done <<EOF
 $scalars
 EOF
-  case "$kind:$gen:$attempt:$pr_head" in
+  case "$kind:$gen:$busy_gen:$attempt:$pr_head" in
     *[[:space:]=]*) return 2 ;;
   esac
   PIPELINE_META_FILE=$meta
   PIPELINE_META_KIND=$kind
   PIPELINE_META_GEN=$gen
+  PIPELINE_META_BUSY_GEN=$busy_gen
   PIPELINE_META_ATTEMPT=$attempt
   PIPELINE_META_PR_HEAD=$pr_head
   PIPELINE_META_SCALAR_READY=1
@@ -748,7 +754,7 @@ append_event_locked() {
 
 pipeline_step_known() {
   case "$1" in
-    dispatched|pr-registered|merged) return 0 ;;
+    dispatched|ingress|working|validating|pr-registered|checks|merge-wait|merged|report-exists|gate|done|session-live|inbox-current|queue-current|reporting) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -889,6 +895,41 @@ pipeline_predicate_merged() {  # <id> <meta>
     "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER"
 }
 
+pipeline_busy_event_load() {  # <id> <meta> -> state source event seq
+  local id=$1 meta=$2 busy_gen record
+  pipeline_meta_cache_load "$meta" || return 1
+  [ -n "$PIPELINE_META_BUSY_GEN" ] || return 1
+  busy_gen=$(fm_busy_current_gen "$STATE" "$id") || return 1
+  [ "$busy_gen" = "$PIPELINE_META_BUSY_GEN" ] || return 1
+  record=$(fm_busy_record_read "$STATE" "$id") || return 1
+  IFS=' ' read -r PIPELINE_BUSY_STATE PIPELINE_BUSY_SOURCE PIPELINE_BUSY_EVENT _ <<EOF
+$record
+EOF
+}
+
+pipeline_busy_event_nonsynthetic() {
+  [ "$PIPELINE_BUSY_SOURCE" = fm-spawn ] && [ "$PIPELINE_BUSY_EVENT" = launch-brief ] && return 1
+  return 0
+}
+
+pipeline_predicate_working() {  # <id> <meta>
+  pipeline_busy_event_load "$1" "$2" || return 1
+  [ "$PIPELINE_BUSY_STATE" = busy ] || return 1
+  pipeline_busy_event_nonsynthetic
+}
+
+pipeline_predicate_working_recorded() {  # <id>
+  # The pipeline is the sole writer of this append-only record. A working line
+  # is admitted only while a non-synthetic busy event is present, then remains
+  # the durable proof after busy wiring is updated or retired.
+  [ "$PIPELINE_RECORD_STEP" = working ] \
+    && [ "$PIPELINE_RECORD_EVIDENCE" = "busy:state/$1.busy-state" ]
+}
+
+pipeline_predicate_report_exists() {  # <id>
+  test -s "$FM_HOME/data/$1/report.md"
+}
+
 pipeline_kind_has_step() {  # <kind> <step>
   local nodes edges
   IFS=$'\t' read -r nodes edges <<EOF
@@ -911,6 +952,11 @@ pipeline_step_proven() {  # <id> <meta> <kind> <step> <head>
     merged)
       pipeline_predicate_merged "$id" "$meta"
       ;;
+    working)
+      pipeline_predicate_working "$id" "$meta" \
+        || pipeline_predicate_working_recorded "$id"
+      ;;
+    report-exists) pipeline_predicate_report_exists "$id" ;;
     *) return 1 ;;
   esac
 }
@@ -1057,6 +1103,18 @@ pipeline_derived_step() {  # <id> <meta> <kind> -> step<TAB>evidence<TAB>head
     pr_head=${PIPELINE_META_PR_HEAD:-unknown}
     [ -n "$pr_head" ] || pr_head=unknown
     printf 'pr-registered\tmeta:state/%s.meta\t%s\n' "$id" "$pr_head"
+    return 0
+  fi
+  if pipeline_predicate_report_exists "$id" && pipeline_kind_has_step "$kind" report-exists; then
+    printf 'report-exists\treport:data/%s/report.md\tunknown\n' "$id"
+    return 0
+  fi
+  if pipeline_predicate_working "$id" "$meta" && pipeline_kind_has_step "$kind" working; then
+    printf 'working\tbusy:state/%s.busy-state\tunknown\n' "$id"
+    return 0
+  fi
+  if pipeline_predicate_working_recorded "$id" && pipeline_kind_has_step "$kind" working; then
+    printf 'working\tbusy:state/%s.busy-state\tunknown\n' "$id"
     return 0
   fi
   if pipeline_predicate_dispatched "$meta" && pipeline_kind_has_step "$kind" dispatched; then
