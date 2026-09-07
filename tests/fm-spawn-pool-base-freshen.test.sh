@@ -295,18 +295,27 @@ test_acquired_worktree_is_seeded_with_local_env_file() {
 # Seeding on every acquisition must refresh it, so a rotated credential never loses
 # to a stale leftover. Assert only on the resulting file's presence and metadata.
 test_acquired_worktree_refreshes_a_stale_local_env_file() {
-  local rec id out status source_mode target_mode source_uid target_uid source_gid target_gid
+  local rec id second out status source_mode target_mode source_uid target_uid source_gid target_gid
   id='pool-env-local-r3'
+  second='pool-env-local-r3b'
   rec=$(make_case env-local-stale "$id")
   read_case_record "$rec"
 
   ignore_local_env_file
   : > "$PROJECT_DIR/.env.local"
   chmod 0640 "$PROJECT_DIR/.env.local"
-  : > "$POOL_DIR/.env.local"
-  chmod 0600 "$POOL_DIR/.env.local"
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "the first acquisition should seed .env.local"
+
+  # A returned slot's existing copy is stale when the captain rotates the source.
+  # Reissue the same pooled slot so the ownership record proves the old copy was
+  # firstmate-authored, while the changed source proves refresh is required.
+  printf 'rotated\n' > "$PROJECT_DIR/.env.local"
+  chmod 0640 "$PROJECT_DIR/.env.local"
+  prepare_second_acquisition "$second"
+  out=$(run_spawn "$second" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should refresh a stale .env.local in an acquired slot"
   source_mode=$(stat -c %a "$PROJECT_DIR/.env.local" 2>/dev/null \

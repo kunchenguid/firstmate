@@ -156,7 +156,10 @@ fm_env_local_file_identity() {  # <file>
   if [ "$(uname)" = Darwin ]; then
     stat -f '%d:%i:%c' "$1" 2>/dev/null
   else
-    stat -c '%d:%i:%Z' "$1" 2>/dev/null
+    # `%Z` is whole-second ctime; `%z` preserves the filesystem timestamp's
+    # sub-second precision so a same-second in-place rewrite cannot retain the
+    # recorded identity accidentally.
+    stat -c '%d:%i:%z' "$1" 2>/dev/null
   fi
 }
 
