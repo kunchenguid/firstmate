@@ -80,7 +80,9 @@
 # tests. No side effects on source. set -u / set -e safe.
 #
 # Tunables (env):
-#   FM_PENDING_REPLY_GRACE_SECS   default 120
+#   FM_PENDING_REPLY_GRACE_SECS      default 120
+#   FM_PENDING_REPLY_OBSERVE_TIMEOUT default 30; positive whole-second bound for
+#                                    one remote observe and their shared tick budget
 #   FM_PENDING_REPLY_DIR_OVERRIDE override the pending-replies directory (tests)
 #   FM_PENDING_REPLY_SEND_HOOK    optional command template for recovery delivery
 #                                 (tests); receives task_id and full message as args
@@ -102,14 +104,15 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 # Hard bound (seconds) on one synchronous remote-secondmate observe and on all
 # remote observes in one tick. The tick runs inside the watcher's own poll cycle
 # (bin/fm-watch.sh calls fm_pending_reply_tick between two liveness-beacon
-# touches), so a remote observe
-# that hangs - a reachable host whose observe command stalls, or an ssh connect
-# with no answer - would freeze the poll loop and let the beacon go stale past
-# the guard grace, taking supervision (and every secondmate-outcome surfacing
-# path) down with it. fm-on.sh's ServerAlive keepalive only bounds a vanished
-# peer; a live-but-stalled command is unbounded without this. On the bound a
-# missed observe degrades to "unknown", which the busy-state logic already
-# tolerates and the next poll retries.
+# touches), so a remote observe that hangs - a reachable host whose observe
+# command stalls, or an ssh connect with no answer - would freeze the poll loop
+# and let the beacon go stale past the guard grace, taking supervision (and every
+# secondmate-outcome surfacing path) down with it. fm-on.sh's ServerAlive
+# keepalive only bounds a vanished peer; a live-but-stalled command is unbounded
+# without this. Distinct remote tasks are scanned cyclically from a persisted,
+# advancing cursor while the shared deadline remains. Once it expires, remaining
+# observations degrade to "unknown", which the busy-state logic already
+# tolerates; the rotated next poll retries them without permanent starvation.
 FM_PENDING_REPLY_OBSERVE_TIMEOUT=${FM_PENDING_REPLY_OBSERVE_TIMEOUT:-30}
 case "$FM_PENDING_REPLY_OBSERVE_TIMEOUT" in ''|*[!0-9]*|0) FM_PENDING_REPLY_OBSERVE_TIMEOUT=30 ;; esac
 
