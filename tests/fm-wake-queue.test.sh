@@ -14,6 +14,7 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 GRANT="$ROOT/bin/fm-wake-grant.sh"
+GUARD="$ROOT/bin/fm-guard.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
@@ -701,6 +702,103 @@ test_main_drain_excludes_rows_already_granted_to_branch() {
   [ ! -e "$state/.branch-eligible-rows" ] || fail "branch acknowledgement retained its completed grant"
 
   pass "main drain and acknowledgement exclude an active branch grant"
+}
+
+# The pending-warning condition and what a drain can actually present must name
+# the same rows. A row reserved by a live branch grant is invisible to a main
+# drain by design, so counting it as "queued for main" told main to run a drain
+# that could only print nothing - no row, no acknowledgement command - on every
+# guarded command, for as long as the branch held the grant.
+test_main_is_never_told_to_drain_rows_only_the_branch_owns() {
+  local dir state out err sequence generation
+  dir=$(make_case main-not-told-to-drain-branch-rows)
+  state="$dir/state"
+  printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
+
+  append_wake "$state" stale "fleet:w2:p3" "stale: fleet:w2:p3 (paused, awaiting external)" \
+    || fail "stale append failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" held-by-branch || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish held-by-branch 1 || fail "branch grant publication failed"
+
+  out="$dir/main-drain.out"
+  err="$dir/main-drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "main drain failed: $(cat "$err")"
+  ! grep -Fq "$(printf '\tstale\tfleet:w2:p3\t')" "$out" || fail "main drain presented a branch-granted row"
+  grep -Fq 'WAKE ROWS HELD BY SUPERVISION BRANCH' "$out" \
+    || fail "main drain went silent instead of naming who holds the queued rows"
+  ! grep -Fq 'WAKE_ACK_REQUIRED' "$err" || fail "main drain offered an acknowledgement for a row it never presented"
+  ! grep -Fq 'queued wakes pending' "$err" \
+    || fail "main was told to drain rows only the branch can present"
+  FM_STATE_OVERRIDE="$state" "$GUARD" 2> "$dir/guard-held.err" || fail "guard failed while the branch held the rows"
+  ! grep -Fq 'queued wakes pending' "$dir/guard-held.err" \
+    || fail "guard counted branch-held rows as pending for main"
+  grep -Fq "$(printf '\tstale\tfleet:w2:p3\t')" "$state/.wake-queue" \
+    || fail "the branch-held row must stay durable for its own owner"
+
+  # Disconfirming half: the same row, same kind, same stopped endpoint, with the
+  # grant released. Nothing about the row makes it unpresentable - only the
+  # live grant did - so main now presents it with an executable acknowledgement.
+  FM_STATE_OVERRIDE="$state" "$GRANT" release held-by-branch || fail "branch grant release failed"
+  out="$dir/main-drain-after.out"
+  err="$dir/main-drain-after.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "main drain failed after release: $(cat "$err")"
+  grep -Fq "$(printf '\tstale\tfleet:w2:p3\t')" "$out" || fail "main drain omitted the released row"
+  ! grep -Fq 'WAKE ROWS HELD BY SUPERVISION BRANCH' "$out" \
+    || fail "main drain reported a hold that no longer exists"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "the released row was presented without an acknowledgement command"
+  grep -Fq 'queued wakes pending' "$err" || fail "guard stopped warning about a row main can actually drain"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "acknowledgement of the released row failed"
+  [ ! -s "$state/.wake-queue" ] || fail "the acknowledged row stayed queued"
+
+  pass "a branch-held row warns only its own owner, and the same row is presented and acknowledged once the grant clears"
+}
+
+# A row that lost its structure can never be claimed, presented, or named by an
+# --ack-through cutoff, while it still counts as queued: without retirement it
+# wedges the queue permanently and keeps waking supervision.
+test_unconsumable_rows_are_retired_instead_of_wedging_the_queue() {
+  local dir state out err sequence generation
+  dir=$(make_case unconsumable-row-retirement)
+  state="$dir/state"
+  printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
+
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  printf '1788792074\t574\tstale\tfleet:w2:p3\n' >> "$state/.wake-queue"
+  printf '1788792075\tnot-a-sequence\tstale\tfleet:w2:p4\tstale: fleet:w2:p4\n' >> "$state/.wake-queue"
+
+  # A branch actor never repairs the queue: it may only touch its own grant.
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" retire-scope || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish retire-scope 1 || fail "branch grant publication failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/branch.out" 2> "$dir/branch.err" \
+    || fail "branch drain failed: $(cat "$dir/branch.err")"
+  ! grep -Fq 'retired' "$dir/branch.err" || fail "a branch drain retired rows outside its grant"
+  [ "$(awk 'END { print NR }' "$state/.wake-queue")" -eq 3 ] \
+    || fail "a branch drain changed rows it was never granted"
+  FM_STATE_OVERRIDE="$state" "$GRANT" release retire-scope || fail "branch grant release failed"
+
+  FM_STATE_OVERRIDE="$state" "$GUARD" 2> "$dir/guard-before.err" || fail "guard failed with unusable rows queued"
+  grep -Fq 'queued wakes pending' "$dir/guard-before.err" \
+    || fail "guard stayed silent about rows main still has to clear"
+
+  out="$dir/main.out"
+  err="$dir/main.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "main drain failed: $(cat "$err")"
+  grep -Fq 'retired 2 unusable queue row(s)' "$err" || fail "main drain did not report the rows it retired"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "retirement dropped a usable row"
+  [ "$(awk 'END { print NR }' "$state/.wake-queue")" -eq 1 ] || fail "unusable rows survived the drain"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "the usable row was presented without an acknowledgement command"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "the queue stayed wedged after acknowledgement"
+  FM_STATE_OVERRIDE="$state" "$GUARD" 2> "$dir/guard-after.err" || fail "guard failed after the queue drained"
+  ! grep -Fq 'queued wakes pending' "$dir/guard-after.err" || fail "guard kept warning about an empty queue"
+
+  pass "structurally unusable rows are retired by main alone, leaving every remaining row presentable and acknowledgeable"
 }
 
 test_branch_grant_refuses_rows_already_claimed_by_main() {
@@ -1592,6 +1690,8 @@ test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
 test_main_drain_excludes_rows_already_granted_to_branch
+test_main_is_never_told_to_drain_rows_only_the_branch_owns
+test_unconsumable_rows_are_retired_instead_of_wedging_the_queue
 test_branch_grant_refuses_rows_already_claimed_by_main
 test_actor_filter_precedes_same_key_deduplication
 test_main_reclaims_a_grant_whose_branch_owner_exited
