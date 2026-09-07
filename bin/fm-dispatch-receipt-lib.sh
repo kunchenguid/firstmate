@@ -7,9 +7,9 @@
 # infer providers, rank candidates, or choose a route: those remain the
 # firstmate seat's quota-array-dispatch judgment.
 #
-# Receipt schema (version 2):
+# Receipt schema (version 3):
 # {
-#   "version": 2,
+#   "version": 3,
 #   "createdAt": "2026-09-06T15:04:05Z",
 #   "task": "task-id", "harness": "codex", "model": "gpt-6-astra",
 #   "effort": "high", "effectiveWorkerModel": "gpt-6-astra",
@@ -17,7 +17,9 @@
 #   "candidates": [{"harness":"...", "model":"...", "effort":"...",
 #                   "disposition":"selected|not-selected", "rationale":"..."}],
 #   "catalogEvidence": ["authoritative catalog evidence"],
+#   "codexHome":"/absolute/path/to/codex-home-or-null",
 #   "quotaEvidence": {"source":"quota-axi", "model":"gpt-6-astra",
+#                     "codexHome":"/absolute/path/to/codex-home-or-null",
 #                     "snapshotSha256":"..."},
 #   "quotaSnapshot": {"path":"/absolute/path/to/snapshot", "sha256":"..."}
 # }
@@ -30,6 +32,7 @@
 
 fm_dispatch_selection_receipt_required() {  # <crew-dispatch.json> <harness> <model>
   local config=$1 harness=$2 model=$3 rc
+  [ "$model" != gpt-6-astra ] || return 0
   [ -f "$config" ] || return 1
   command -v jq >/dev/null 2>&1 || {
     echo "error: jq is required to evaluate a configured selection-receipt requirement" >&2
@@ -58,7 +61,22 @@ fm_dispatch_selection_receipt_required() {  # <crew-dispatch.json> <harness> <mo
 fm_dispatch_snapshot_generated_at() {  # <TOON or JSON snapshot> -> strict timestamp
   local snapshot=$1 value
   if jq -e . "$snapshot" >/dev/null 2>&1; then
-    jq -er '.generatedAt | select(type == "string")' "$snapshot" 2>/dev/null
+    jq -er '
+      . as $snapshot
+      | ((.schemaVersion | type == "number" and floor == . and . > 0)
+      and (.generatedAt | type == "string")
+      and (.providers | type == "array" and length > 0
+           and all(.[]; type == "object"
+             and (.provider | type == "string" and length > 0)
+             and (.state | type == "object"
+                  and (.status | type == "string" and length > 0))
+             and (.windows | type == "array")
+             and (.credits | type == "object")
+             and (.quotaSemantics | type == "object"
+                  and (.status | type == "string" and length > 0)
+                  and (.effectiveAvailability | type == "array"))))
+      | $snapshot.generatedAt
+    ' "$snapshot" 2>/dev/null
     return
   fi
   value=$(awk '
@@ -69,7 +87,16 @@ fm_dispatch_snapshot_generated_at() {  # <TOON or JSON snapshot> -> strict times
       sub(/"$/, "", line)
       value = line
     }
-    END { if (count == 1) print value; else exit 1 }
+    /^quota\[[0-9]+\]\{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt\}:$/ {
+      quota = 1
+    }
+    /^exhaustion\[[0-9]+\]\{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId\}:$/ {
+      exhaustion = 1
+    }
+    /^attention\[[0-9]+\]:$/ {
+      attention = 1
+    }
+    END { if (count == 1 && quota && exhaustion && attention) print value; else exit 1 }
   ' "$snapshot") || return 1
   printf '%s\n' "$value"
 }
@@ -90,8 +117,8 @@ fm_dispatch_receipt_epoch() {  # strict UTC timestamp -> epoch
     || date -u -d "$normalized" +%s 2>/dev/null
 }
 
-fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model> <effort>
-  local receipt=$1 task=$2 harness=$3 model=$4 effort=$5 max_age now created_at created_epoch
+fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model> <effort> [codex-home]
+  local receipt=$1 task=$2 harness=$3 model=$4 effort=$5 codex_home=${6:-} max_age now created_at created_epoch
   local snapshot expected actual receipt_digest snapshot_generated_at snapshot_epoch
   FM_DISPATCH_RECEIPT_PATH=
   FM_DISPATCH_RECEIPT_SHA256=
@@ -114,8 +141,8 @@ fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model>
     echo "error: jq is required to validate --selection-receipt" >&2
     return 1
   }
-  jq -e --arg task "$task" --arg harness "$harness" --arg model "$model" --arg effort "$effort" '
-    (.version == 2)
+  jq -e --arg task "$task" --arg harness "$harness" --arg model "$model" --arg effort "$effort" --arg codex_home "$codex_home" '
+    (.version == 3)
     and (.createdAt | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
     and (.task == $task) and (.harness == $harness) and (.model == $model) and (.effort == $effort)
     and (.effectiveWorkerModel == $model)
@@ -131,20 +158,29 @@ fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model>
          | ($selected | length) == 1
            and $selected[0].harness == $harness
            and $selected[0].model == $model
-           and $selected[0].effort == $effort)
+           and $selected[0].effort == $effort
+           and ($selected[0] | has("home")))
+    and (has("codexHome")
+         and (if $harness == "codex" then
+                if $codex_home == "" then .codexHome == null else .codexHome == $codex_home end
+              else .codexHome == null
+              end))
     and (.catalogEvidence | type == "array" and length > 0
          and all(.[]; type == "string" and length > 0))
     and (.quotaEvidence | type == "object"
          and (.source == "quota-axi")
          and (.model == $model)
+         and has("codexHome")
          and (.snapshotSha256 | type == "string" and test("^[a-f0-9]{64}$")))
+    and ([.candidates[] | select(.disposition == "selected")][0].home == .codexHome)
+    and (.quotaEvidence.codexHome == .codexHome)
     and (.quotaEvidence.snapshotSha256 as $quota_snapshot_sha256
          | (.quotaSnapshot | type == "object"
             and (.path | type == "string" and test("^/[^[:cntrl:]]*$"))
             and (.sha256 | type == "string" and test("^[a-f0-9]{64}$"))
             and (.sha256 == $quota_snapshot_sha256)))
   ' "$receipt" >/dev/null 2>&1 || {
-    echo "error: --selection-receipt is not a valid version 2 primary selection receipt for $harness/$model/$effort task $task" >&2
+    echo "error: --selection-receipt is not a valid version 3 primary selection receipt for $harness/$model/$effort task $task" >&2
     return 1
   }
   created_at=$(jq -r '.createdAt' "$receipt")
@@ -179,7 +215,7 @@ fm_dispatch_selection_receipt_validate() {  # <receipt> <task> <harness> <model>
     return 1
   }
   snapshot_generated_at=$(fm_dispatch_snapshot_generated_at "$snapshot") || {
-    echo "error: --selection-receipt quota snapshot has no valid generatedAt timestamp (expected quota-axi TOON or JSON)" >&2
+    echo "error: --selection-receipt quota snapshot is not valid quota-axi TOON or JSON evidence" >&2
     return 1
   }
   snapshot_epoch=$(fm_dispatch_receipt_epoch "$snapshot_generated_at") || {

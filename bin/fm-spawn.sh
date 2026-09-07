@@ -60,9 +60,10 @@
 #   and everything it runs (its no-mistakes pipeline included) use that account.
 #   The value is recorded as codex_home= in state/<id>.meta.
 #
-# --selection-receipt is the current primary selection receipt required only
-#   when the resolved dispatch profile sets requiresSelectionReceipt=true for
-#   its exact harness/model tuple. Its versioned schema, effective worker
+# --selection-receipt is the current primary selection receipt required for
+#   every Astra crewmate and for a resolved dispatch profile that sets
+#   requiresSelectionReceipt=true for its exact harness/model tuple. Its
+#   versioned schema, effective worker
 #   model, quota-axi evidence, freshness, and quota snapshot digest are owned
 #   by bin/fm-dispatch-receipt-lib.sh. A successful guarded dispatch records
 #   selection_receipt=, selection_receipt_sha256=,
@@ -1751,10 +1752,9 @@ if [ -n "$CODEX_HOME_ARG" ]; then
   fi
 fi
 
-# Astra is not inferred from a model name alone. A primary explicitly opts an
-# configured harness/model tuple into this evidence gate with
-# requiresSelectionReceipt=true. Secondmates are primary supervisors rather
-# than dispatch candidates, so they are deliberately outside the profile gate.
+# Astra and configured receipt-gated tuples require current primary evidence.
+# Secondmates are primary supervisors rather than dispatch candidates, so they
+# are deliberately outside the profile gate.
 SELECTION_RECEIPT_REQUIRED=0
 FM_DISPATCH_RECEIPT_PATH=
 FM_DISPATCH_RECEIPT_SHA256=
@@ -1779,7 +1779,7 @@ if [ "$SELECTION_RECEIPT_REQUIRED" = 0 ] && [ "$SELECTION_RECEIPT_SET" = 1 ]; th
   exit 1
 fi
 if [ "$SELECTION_RECEIPT_REQUIRED" = 1 ]; then
-  fm_dispatch_selection_receipt_validate "$SELECTION_RECEIPT_ARG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" || exit 1
+  fm_dispatch_selection_receipt_validate "$SELECTION_RECEIPT_ARG" "$ID" "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$CODEX_HOME_ARG" || exit 1
 fi
 
 case "$HARNESS" in

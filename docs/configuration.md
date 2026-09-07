@@ -431,10 +431,10 @@ It is valid only for `harness: "codex"`, and any other harness carrying it is a 
 A profile with no `home` omits `--codex-home` and launches against whatever ambient default Codex account the worker's environment resolves.
 Bootstrap and `fm-spawn.sh` both refuse a path containing control bytes, a relative path, a missing directory, or a directory holding no `auth.json`, so a mistyped home is an actionable error rather than a silent fall back to `~/.codex`; neither ever reads that file's contents.
 `requiresSelectionReceipt` is optional and can only be literal `true` on a profile with an explicit harness and model.
-It makes every effort of that exact harness/model profile refuse before a worker endpoint, worktree, or backlog record changes unless Firstmate supplies a current version-2 selection receipt.
-The receipt binds the task and selected harness/model/effort, the exact effective worker model, a task-fit rationale, candidate accounting, catalog evidence, and quota evidence that identifies `quota-axi`, that model, and the SHA-256 of one saved `quota-axi` snapshot.
+Every Astra crewmate, and every effort of an exact profile that sets this field, refuses before a worker endpoint, worktree, or backlog record changes unless Firstmate supplies a current version-3 selection receipt.
+The receipt binds the task and selected harness/model/effort, the exact effective worker model, selected Codex home, task-fit rationale, candidate accounting, catalog evidence, and quota evidence that identifies `quota-axi`, that model, the selected Codex home, and the SHA-256 of one saved `quota-axi` snapshot.
 `fm-spawn.sh` and `fm-control.sh` verify the schema, tuple, effective-worker-model equality, exactly one selected candidate that matches the tuple, quota-evidence source/model/snapshot binding, receipt and snapshot digests, and a 15-minute maximum age by default (`FM_DISPATCH_RECEIPT_MAX_AGE_SECONDS` may narrow or extend that local bound).
-The saved quota snapshot must itself carry a current `generatedAt` in normal quota-axi TOON output or the JSON fallback shape, so a fresh receipt cannot bless stale quota evidence.
+The saved quota snapshot must itself be current normal quota-axi TOON output or the normalized JSON fallback shape, including its structural quota evidence, so a fresh receipt cannot bless stale or hand-authored quota evidence.
 They record the effective worker model and quota-evidence source alongside the receipt hashes in task metadata, but do not infer a provider, score candidates, or select a route.
 Every relaunch requires a newly current receipt too, rather than reusing the task's prior dispatch evidence.
 The two refusals differ in blast radius at bootstrap: a home the file states wrongly is a schema fault that invalidates the file, while a correctly stated home this machine cannot use right now is reported per home so `codex logout` on one account never disables the other account's candidates or rules naming no home.
@@ -459,7 +459,7 @@ A two-account Codex rule looks like this, with one candidate per logged-in home:
 }
 ```
 
-An Astra profile can opt into the durable primary-evidence gate without adding a second router:
+An Astra profile is always protected by the durable primary-evidence gate, and may state the requirement explicitly for operator visibility:
 
 ```json
 {

@@ -728,7 +728,7 @@ resolve_relaunch_profile() {
     if fm_dispatch_selection_receipt_required "$CONFIG/crew-dispatch.json" "$TARGET_HARNESS" "$TARGET_MODEL"; then
       [ "$SELECTION_RECEIPT_SET" = 1 ] \
         || die "resolved dispatch profile requires a current --selection-receipt for $TARGET_HARNESS/$TARGET_MODEL/$TARGET_EFFORT; refusing to stop $ID before endpoint, worktree, or backlog mutation"
-      fm_dispatch_selection_receipt_validate "$NEW_SELECTION_RECEIPT" "$ID" "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" \
+      fm_dispatch_selection_receipt_validate "$NEW_SELECTION_RECEIPT" "$ID" "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" "$TARGET_CODEX_HOME" \
         || die "--selection-receipt validation failed; refusing to stop $ID before bin/fm-spawn.sh applies its authoritative launch validation"
       TARGET_SELECTION_RECEIPT=$NEW_SELECTION_RECEIPT
     else

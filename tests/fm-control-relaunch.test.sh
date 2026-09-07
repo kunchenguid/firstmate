@@ -231,16 +231,17 @@ journal_field() {  # <case-dir> <id> <key>
 make_control_selection_receipt() {  # <case-dir> <task-id>
   local dir=$1 id=$2 snapshot="$1/quota-axi.json" receipt="$1/selection-receipt.json" digest created_at
   created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  printf 'generatedAt: "%s"\nquota: []\n' "$created_at" > "$snapshot"
+  printf 'generatedAt: "%s"\nquota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:\n  codex,all_models,50,0,through_reset,established,weekly,"%s"\nexhaustion[0]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:\nattention[0]:\n' "$created_at" "$created_at" > "$snapshot"
   digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
   jq -n --arg id "$id" --arg created_at "$created_at" --arg snapshot "$snapshot" --arg digest "$digest" '
-    {version: 2, createdAt: $created_at, task: $id, harness: "codex",
+    {version: 3, createdAt: $created_at, task: $id, harness: "codex",
      model: "gpt-6-astra", effort: "high", effectiveWorkerModel: "gpt-6-astra",
      taskFit: "relaunch remains in scope",
-     candidates: [{harness: "codex", model: "gpt-6-astra", effort: "high",
+     candidates: [{harness: "codex", model: "gpt-6-astra", effort: "high", home: null,
                    disposition: "selected", rationale: "current primary evidence"}],
      catalogEvidence: ["synthetic catalog evidence"],
-     quotaEvidence: {source: "quota-axi", model: "gpt-6-astra", snapshotSha256: $digest},
+     codexHome: null,
+     quotaEvidence: {source: "quota-axi", model: "gpt-6-astra", codexHome: null, snapshotSha256: $digest},
      quotaSnapshot: {path: $snapshot, sha256: $digest}}' > "$receipt"
   printf '%s\n' "$receipt"
 }

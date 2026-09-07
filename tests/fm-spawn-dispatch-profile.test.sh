@@ -449,23 +449,25 @@ enable_astra_receipt_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
-make_selection_receipt() {  # <case-dir> <name> <task> <model> [created-at] [snapshot-generated-at]
-  local case_dir=$1 name=$2 task=$3 model=$4 created_at=${5:-} snapshot_at=${6:-} snapshot receipt digest
+make_selection_receipt() {  # <case-dir> <name> <task> <model> [created-at] [snapshot-generated-at] [codex-home]
+  local case_dir=$1 name=$2 task=$3 model=$4 created_at=${5:-} snapshot_at=${6:-} codex_home=${7:-} snapshot receipt digest
   snapshot="$case_dir/$name.quota-axi.json"
   receipt="$case_dir/$name.receipt.json"
   [ -n "$created_at" ] || created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   [ -n "$snapshot_at" ] || snapshot_at=$created_at
-  printf 'generatedAt: "%s"\nquota: []\n' "$snapshot_at" > "$snapshot"
+  printf 'generatedAt: "%s"\nquota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:\n  codex,all_models,50,0,through_reset,established,weekly,"%s"\nexhaustion[0]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:\nattention[0]:\n' "$snapshot_at" "$snapshot_at" > "$snapshot"
   digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
-  jq -n --arg created_at "$created_at" --arg task "$task" --arg model "$model" \
+  jq -n --arg created_at "$created_at" --arg task "$task" --arg model "$model" --arg codex_home "$codex_home" \
     --arg snapshot "$snapshot" --arg digest "$digest" '
-      {version: 2, createdAt: $created_at, task: $task, harness: "codex",
+      ($codex_home | if . == "" then null else . end) as $home
+      | {version: 3, createdAt: $created_at, task: $task, harness: "codex",
        model: $model, effort: "high", effectiveWorkerModel: $model,
        taskFit: "bounded dispatch verification",
        candidates: [{harness: "codex", model: $model, effort: "high",
-                     disposition: "selected", rationale: "current account evidence"}],
+                     home: $home, disposition: "selected", rationale: "current account evidence"}],
        catalogEvidence: ["synthetic authoritative catalog evidence"],
-       quotaEvidence: {source: "quota-axi", model: $model, snapshotSha256: $digest},
+       codexHome: $home,
+       quotaEvidence: {source: "quota-axi", model: $model, codexHome: $home, snapshotSha256: $digest},
        quotaSnapshot: {path: $snapshot, sha256: $digest}}' > "$receipt"
   printf '%s\n' "$receipt"
 }
@@ -580,8 +582,57 @@ test_codex_home_is_refused_for_other_harnesses() {
   pass "only the codex harness accepts a Codex home"
 }
 
+test_astra_without_a_profile_requires_primary_evidence() {
+  local rec id out status receipt
+  id=profile-astra-unconfigured-z3f
+  rec=$(make_spawn_case profile-astra-unconfigured codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high)
+  status=$?
+  expect_code 1 "$status" "an unconfigured Astra spawn without a receipt should refuse"
+  assert_contains "$out" "requires a current --selection-receipt" "unconfigured Astra refusal did not require primary evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "unconfigured Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unconfigured Astra refusal typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" unconfigured "$id" gpt-6-astra)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 0 "$status" "a current receipt should allow an unconfigured Astra spawn: $out"
+  pass "Astra always requires primary selection evidence"
+}
+
+test_astra_receipt_binds_the_selected_codex_home() {
+  local rec id out status receipt codex_home launch
+  id=profile-astra-home-z3g
+  rec=$(make_spawn_case profile-astra-home codex "$id")
+  read_case_record "$rec"
+  enable_astra_receipt_profile "$HOME_DIR"
+  codex_home=$(make_codex_home "$CASE_DIR/codex-personal")
+
+  receipt=$(make_selection_receipt "$CASE_DIR" wrong-home "$id" gpt-6-astra)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --codex-home "$codex_home" --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a receipt measured for the ambient Codex home should not permit a named-home Astra spawn"
+  assert_contains "$out" "not a valid version 3 primary selection receipt" "wrong-home receipt did not name the binding failure"
+  assert_absent "$HOME_DIR/state/$id.meta" "wrong-home receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "wrong-home receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" matching-home "$id" gpt-6-astra '' '' "$codex_home")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --codex-home "$codex_home" --selection-receipt "$receipt")
+  status=$?
+  expect_code 0 "$status" "a receipt bound to the selected Codex home should permit the Astra spawn: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_home'" "matching-home receipt did not reach the named Codex account launch"
+  pass "Astra receipts bind quota evidence to the selected Codex home"
+}
+
 test_astra_dispatch_requires_a_current_primary_selection_receipt() {
-  local rec id out status receipt launch
+  local rec id out status receipt launch digest
   id=profile-astra-receipt-z3f
   rec=$(make_spawn_case profile-astra-receipt codex "$id")
   read_case_record "$rec"
@@ -626,7 +677,7 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
   status=$?
   expect_code 1 "$status" "a receipt for another task should refuse"
-  assert_contains "$out" "not a valid version 2 primary selection receipt" "wrong-task refusal did not name receipt identity"
+  assert_contains "$out" "not a valid version 3 primary selection receipt" "wrong-task refusal did not name receipt identity"
   assert_absent "$HOME_DIR/state/$id.meta" "wrong-task receipt wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "wrong-task receipt typed a launch command"
 
@@ -635,7 +686,7 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
   status=$?
   expect_code 1 "$status" "a receipt for another model should refuse"
-  assert_contains "$out" "not a valid version 2 primary selection receipt" "wrong-model refusal did not name receipt identity"
+  assert_contains "$out" "not a valid version 3 primary selection receipt" "wrong-model refusal did not name receipt identity"
   assert_absent "$HOME_DIR/state/$id.meta" "wrong-model receipt wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "wrong-model receipt typed a launch command"
 
@@ -646,7 +697,7 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
   status=$?
   expect_code 1 "$status" "a receipt missing effective worker model should refuse"
-  assert_contains "$out" "not a valid version 2 primary selection receipt" "missing effective model refusal did not name receipt evidence"
+  assert_contains "$out" "not a valid version 3 primary selection receipt" "missing effective model refusal did not name receipt evidence"
   assert_absent "$HOME_DIR/state/$id.meta" "missing effective model receipt wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "missing effective model receipt typed a launch command"
 
@@ -657,7 +708,7 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
   status=$?
   expect_code 1 "$status" "a mismatched effective worker model should refuse"
-  assert_contains "$out" "not a valid version 2 primary selection receipt" "effective model mismatch did not name receipt evidence"
+  assert_contains "$out" "not a valid version 3 primary selection receipt" "effective model mismatch did not name receipt evidence"
   assert_absent "$HOME_DIR/state/$id.meta" "mismatched effective model receipt wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "mismatched effective model receipt typed a launch command"
 
@@ -668,7 +719,7 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
   status=$?
   expect_code 1 "$status" "quota evidence from another source should refuse"
-  assert_contains "$out" "not a valid version 2 primary selection receipt" "quota evidence source refusal did not name receipt evidence"
+  assert_contains "$out" "not a valid version 3 primary selection receipt" "quota evidence source refusal did not name receipt evidence"
   assert_absent "$HOME_DIR/state/$id.meta" "non-quota-axi evidence wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "non-quota-axi evidence typed a launch command"
 
@@ -679,7 +730,7 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
   status=$?
   expect_code 1 "$status" "a receipt without a selected matching candidate should refuse"
-  assert_contains "$out" "not a valid version 2 primary selection receipt" "candidate accounting refusal did not name receipt identity"
+  assert_contains "$out" "not a valid version 3 primary selection receipt" "candidate accounting refusal did not name receipt identity"
   assert_absent "$HOME_DIR/state/$id.meta" "candidate accounting refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "candidate accounting refusal typed a launch command"
 
@@ -696,7 +747,7 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
   status=$?
   expect_code 1 "$status" "a receipt with two selected candidates should refuse"
-  assert_contains "$out" "not a valid version 2 primary selection receipt" "multiple-selection refusal did not name receipt identity"
+  assert_contains "$out" "not a valid version 3 primary selection receipt" "multiple-selection refusal did not name receipt identity"
   assert_absent "$HOME_DIR/state/$id.meta" "multiple-selection receipt wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "multiple-selection receipt typed a launch command"
 
@@ -709,6 +760,19 @@ test_astra_dispatch_requires_a_current_primary_selection_receipt() {
   assert_contains "$out" "snapshot digest does not match" "tampered snapshot refusal did not name digest evidence"
   assert_absent "$HOME_DIR/state/$id.meta" "tampered receipt wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "tampered receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" malformed-snapshot "$id" gpt-6-astra)
+  printf 'generatedAt: "%s"\nquota: []\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$CASE_DIR/malformed-snapshot.quota-axi.json"
+  digest=$(shasum -a 256 "$CASE_DIR/malformed-snapshot.quota-axi.json" | awk '{print $1}')
+  jq --arg digest "$digest" '.quotaEvidence.snapshotSha256 = $digest | .quotaSnapshot.sha256 = $digest' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a timestamp-only quota snapshot should not be accepted as quota-axi evidence"
+  assert_contains "$out" "not valid quota-axi TOON or JSON evidence" "malformed snapshot refusal did not name quota-axi schema evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "malformed snapshot receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "malformed snapshot receipt typed a launch command"
 
   receipt=$(make_selection_receipt "$CASE_DIR" valid "$id" gpt-6-astra)
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
@@ -1516,6 +1580,8 @@ test_codex_without_home_launches_unchanged
 test_codex_home_refuses_unusable_paths_before_launch
 test_codex_home_refuses_control_bytes_before_launch
 test_codex_home_is_refused_for_other_harnesses
+test_astra_without_a_profile_requires_primary_evidence
+test_astra_receipt_binds_the_selected_codex_home
 test_astra_dispatch_requires_a_current_primary_selection_receipt
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
