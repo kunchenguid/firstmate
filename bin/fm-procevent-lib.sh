@@ -212,6 +212,15 @@ fm_procevent_launch_floor_seconds() {
   printf '%s\n' "$value"
 }
 
+fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id>
+  local reg stamp
+  reg=$(fm_procevent_registry_dir "$1") || return 1
+  for stamp in "$reg/$2".*.last-launch "$reg/$2.last-launch"; do
+    [ -e "$stamp" ] || [ -L "$stamp" ] || continue
+    rm -f -- "$stamp" || return 1
+  done
+}
+
 fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-identity> <seconds>
   local reg stamp
   case "$3" in *:*) ;; *) return 1 ;; esac
@@ -296,7 +305,9 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"
-  } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$dest"; then
+  } > "$tmp" && chmod 0600 "$tmp" \
+    && fm_procevent_launch_floor_reset_locked "$state" "$id" \
+    && mv -f -- "$tmp" "$dest"; then
     return 0
   fi
   rm -f -- "$tmp"
@@ -336,7 +347,9 @@ fm_procevent_extension_registration_publish_locked() {  # <state> <adapter> <sou
     printf 'registration_token=%s\n' "$registration_token"
     printf 'argc=0\n'
     printf 'argv:\n'
-  } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$dest"; then
+  } > "$tmp" && chmod 0600 "$tmp" \
+    && fm_procevent_launch_floor_reset_locked "$state" "$id" \
+    && mv -f -- "$tmp" "$dest"; then
     return 0
   fi
   rm -f -- "$tmp"

@@ -748,6 +748,10 @@ cmd_start() {
       die "extension registration owner is unreadable: $id"
       ;;
   esac
+  exec 7<"$(source_file "$id")" || {
+    fm_procevent_source_lock_release "$id"
+    die "cannot retain registration identity: $id"
+  }
   fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")" "$STATE"
   claimed=$?
   fm_procevent_source_lock_release "$id"
@@ -824,6 +828,7 @@ cmd_start() {
   local truncated=0 capture_state='' durable='' reservation_terminal='' reservation_silent=''
   fm_procevent_launch_floor_wait "$STATE" "$id" "$CLAIM_REG_IDENTITY" "$launch_floor" \
     || die "cannot enforce the source launch floor: $id"
+  exec 7<&-
   if [ "$extension_owner" -eq 1 ]; then
     capture_state=$(perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \
       9 8 6 "$id" "$adapter" "$FM_PROCEVENT_EXTENSION_ID" \
@@ -1038,7 +1043,7 @@ start_owner_guard() {  # <source-id>
 # by every home running the same adapter, and a live source in another home
 # proves its own owner through that home's own lease.
 cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file>
-  local id=${1-} pid=${2-} identity=${3-} ready=${4-} lease tick misses=0 pid_state
+  local id=${1-} pid=${2-} identity=${3-} ready=${4-} lease tick misses=0 pid_state replacement_pgid
   [ "$#" -eq 4 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$pid" in ''|*[!0-9]*) die "runner pid must be a positive integer: $pid" ;; esac
@@ -1064,6 +1069,8 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
     pid_state=$?
     case "$pid_state" in
       1)
+        replacement_pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || replacement_pgid=
+        [ "$replacement_pgid" = "$pid" ] && exit 0
         fm_procevent_group_alive "$pid" && continue
         exit 0
         ;;
