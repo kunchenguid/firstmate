@@ -1586,14 +1586,15 @@ for arg in "$@"; do
   case "$arg" in remote-*) printf '%s\n' "$arg" >> "$FM_TEST_SSH_CALLS" ;; esac
 done
 cat > /dev/null
-sleep 30
+if [ "${FM_TEST_SSH_STALL:-0}" = 1 ]; then sleep 30; else printf 'unknown\n'; fi
 SH
   chmod +x "$sshbin"
 
   started=$(date +%s)
   (
     export FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SSH_BIN="$sshbin" \
-      FM_TEST_SSH_CALLS="$dir/ssh.calls" FM_PENDING_REPLY_OBSERVE_TIMEOUT=2
+      FM_TEST_SSH_CALLS="$dir/ssh.calls" FM_TEST_SSH_STALL=1 \
+      FM_PENDING_REPLY_OBSERVE_TIMEOUT=2
     fm_pending_reply_tick "$state"
     fm_pending_reply_tick "$state"
     fm_pending_reply_tick "$state"
@@ -1607,7 +1608,23 @@ SH
     || fail "the observe cursor did not rotate fairly across all remote tasks"
   [ "$elapsed" -lt 15 ] \
     || fail "distinct stalled remote observes stacked to ${elapsed}s instead of one budget per tick"
-  pass "pending-reply: remote observes share a fair rotating per-tick deadline"
+
+  : > "$dir/ssh.calls"
+  (
+    export FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SSH_BIN="$sshbin" \
+      FM_TEST_SSH_CALLS="$dir/ssh.calls" FM_TEST_SSH_STALL=0 \
+      FM_PENDING_REPLY_OBSERVE_TIMEOUT=5
+    fm_pending_reply_tick "$state"
+    fm_pending_reply_tick "$state"
+    fm_pending_reply_tick "$state"
+  ) || fail "the ample-budget ticks failed"
+  [ "$(wc -l < "$dir/ssh.calls" | tr -d '[:space:]')" = 9 ] \
+    || fail "ample budget did not observe every remote task on every rotated tick"
+  for task in ios android web; do
+    [ "$(grep -c "^remote-$task$" "$dir/ssh.calls")" = 3 ] \
+      || fail "rotation skipped remote-$task despite ample budget"
+  done
+  pass "pending-reply: remote observes share a fair cyclic per-tick deadline"
 }
 
 # --- run --------------------------------------------------------------------
