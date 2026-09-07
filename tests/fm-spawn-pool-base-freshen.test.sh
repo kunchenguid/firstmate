@@ -549,10 +549,10 @@ test_acquired_worktree_retires_a_local_env_file_the_captain_deleted() {
 
   out=$(run_spawn "$second" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "spawn should reissue a slot whose source .env.local was deleted"
-  [ ! -e "$POOL_DIR/.env.local" ] \
-    || fail "spawn left a revoked .env.local in the reissued pool slot"
-  pass "a local environment file deleted from the primary checkout does not survive in a reissued slot"
+  expect_code 1 "$status" "spawn should refuse a slot whose source .env.local was deleted"
+  [ -e "$POOL_DIR/.env.local" ] \
+    || fail "spawn removed a local environment file without unforgeable ownership evidence"
+  pass "a deleted source local environment file preserves the pool copy and refuses reissue"
 }
 
 # A seed killed partway through must leave nothing in the working tree, because the
@@ -853,12 +853,12 @@ test_unignored_copy_matching_the_source_is_retired() {
 
   out=$(run_spawn "$second" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "spawn should retire its own unignored copy and continue"
-  [ ! -e "$POOL_DIR/.env.local" ] \
-    || fail "spawn left its own unignored copy wedging the pool slot"
-  assert_contains "$out" "no longer ignores .env.local" \
-    "spawn did not explain why it removed its own unignored copy"
-  pass "an unignored copy this seeding recorded writing is retired so the slot stays usable"
+  expect_code 1 "$status" "spawn should refuse its unignored copy without unforgeable ownership evidence"
+  [ -e "$POOL_DIR/.env.local" ] \
+    || fail "spawn removed an unignored local environment file without unforgeable ownership evidence"
+  assert_contains "$out" "not ignored by the project" \
+    "spawn did not explain why it preserved its unignored copy"
+  pass "an unignored copy is preserved when ownership evidence cannot authorize deletion"
 }
 
 # The half that content alone cannot decide. A task can legitimately author a
@@ -882,9 +882,9 @@ test_unignored_copy_matching_the_source_without_a_record_is_kept() {
     || fail "spawn deleted a file whose only evidence of authorship was its content"
   [ -f "$POOL_DIR/.env.local" ] \
     || fail "spawn removed an unignored file this seeding never recorded writing"
-  assert_contains "$out" "no record of writing that exact file" \
-    "the refusal did not say why content alone is not authorship"
-  pass "an unignored copy matching the source is still kept when nothing recorded seeding it"
+  assert_contains "$out" "not ignored by the project" \
+    "the refusal did not say why the existing file was preserved"
+  pass "an unignored copy matching the source is still kept without deletion authority"
 }
 
 # The record names one exact file. A task that rewrites the seeded copy owns it
@@ -1389,12 +1389,13 @@ test_teardown_returns_a_slot_whose_task_dropped_the_ignore_rule() {
 
   out=$(run_teardown "$id")
   status=$?
-  expect_code 0 "$status" "teardown refused a slot held only by firstmate's own seeded file"
-  [ ! -e "$POOL_DIR/.env.local" ] \
-    || fail "teardown left its own seeded copy in the slot it handed back"
-  assert_contains "$out" "no longer ignores .env.local" \
-    "teardown did not explain why it removed its own copy"
-  pass "teardown hands back a slot whose task dropped the local environment file's ignore rule"
+  [ "$status" -ne 0 ] \
+    || fail "teardown returned a slot after an unignored local environment file was preserved"
+  [ -e "$POOL_DIR/.env.local" ] \
+    || fail "teardown removed an unignored local environment file without unforgeable ownership evidence"
+  assert_contains "$out" "could not remove firstmate's own seeded" \
+    "teardown did not explain why it preserved its unignored copy"
+  pass "teardown preserves an unignored local environment file without unforgeable ownership evidence"
 }
 
 test_teardown_still_refuses_a_task_authored_local_env_file() {
@@ -1536,13 +1537,14 @@ test_teardown_reaps_before_retiring_seeded_copy() {
   : > "$FM_TEARDOWN_ORDER_LOG"
   out=$(run_teardown "$id")
   status=$?
-  expect_code 0 "$status" "teardown should retire the seeded copy after reaping"
+  [ "$status" -ne 0 ] \
+    || fail "teardown removed the seeded copy without unforgeable ownership evidence"
   lsof_line=$(awk '$0 == "lsof" { print NR; exit }' "$FM_TEARDOWN_ORDER_LOG")
   rm_line=$(awk '$0 == "rm-env-local" { print NR; exit }' "$FM_TEARDOWN_ORDER_LOG")
   [ -n "$lsof_line" ] || fail "teardown did not run the process reaper"
-  [ -n "$rm_line" ] || fail "teardown did not retire the seeded copy"
-  [ "$lsof_line" -lt "$rm_line" ] || fail "teardown retired the seeded copy before reaping task processes"
-  pass "teardown reaps task processes before retiring the seeded local environment copy"
+  [ -z "$rm_line" ] || fail "teardown removed the seeded copy without unforgeable ownership evidence"
+  [ -f "$POOL_DIR/.env.local" ] || fail "teardown removed the seeded copy while refusing cleanup"
+  pass "teardown reaps before preserving a seeded copy without unforgeable ownership evidence"
 }
 
 test_stale_pool_base_refreshes_before_branching

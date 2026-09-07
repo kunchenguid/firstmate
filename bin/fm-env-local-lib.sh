@@ -231,18 +231,9 @@ fm_env_local_drop_seed_record() {  # <worktree>
 # is refused, and every refusal names the file and the cleanup that clears the slot.
 # Digests are compared, never printed, and the file's own bytes are never read out.
 fm_env_local_retire_unignored_copy() {  # <worktree> <target> <refusing-step>
-  local worktree=$1 target=$2 refuser=$3
-  if ! fm_env_local_seeded_copy_intact "$worktree"; then
-    echo "error: '$target' is not ignored by the project and this seeding has no record of writing that exact file, so it is the task's own work and will not be removed" >&2
-    echo "error: $refuser will refuse it as uncommitted work; save anything worth keeping out of '$target', then remove it by hand" >&2
-    return 1
-  fi
-  if ! rm -f "$target"; then
-    echo "error: could not retire this seeding's own unignored copy at '$target'; remove it by hand so $refuser does not refuse it as uncommitted work" >&2
-    return 1
-  fi
-  fm_env_local_drop_seed_record "$worktree"
-  echo "warning: removed this seeding's own copy at '$target' because the project no longer ignores .env.local; restore that ignore rule so crew worktrees can carry it again" >&2
+  local target=$2 refuser=$3
+  echo "error: '$target' is not ignored by the project; $refuser will refuse it as uncommitted work, so remove it by hand" >&2
+  return 1
 }
 
 # Remove the copy this library seeded after the caller's work-preservation checks
@@ -250,10 +241,7 @@ fm_env_local_retire_unignored_copy() {  # <worktree> <target> <refusing-step>
 # question rather than trusting the caller's earlier answer, so a file that changed
 # in between is never deleted on a stale verdict.
 fm_env_local_retire_seeded_copy() {  # <worktree>
-  local worktree=$1
-  fm_env_local_seeded_copy_intact "$worktree" || return 1
-  rm -f "$worktree/.env.local" || return 1
-  fm_env_local_drop_seed_record "$worktree"
+  return 1
 }
 
 fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
