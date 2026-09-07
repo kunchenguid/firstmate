@@ -82,11 +82,20 @@ WORKER_QUARANTINE_SENTINEL='active execution could not be confirmed stopped'
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
 
 worker_path_stat() { # <path>; uid mode device inode
+  local value uid mode device inode extra
   if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
-    stat -f '%u %Lp %d %i' "$1" 2>/dev/null
+    value=$(stat -f '%u %OMp%OLp %d %i' "$1" 2>/dev/null) || return 1
   else
-    stat -c '%u %a %d %i' -- "$1" 2>/dev/null
+    value=$(stat -c '%u %a %d %i' -- "$1" 2>/dev/null) || return 1
   fi
+  read -r uid mode device inode extra <<< "$value"
+  case "$uid:$device:$inode" in *[!0-9:]*) return 1 ;; esac
+  case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+  [ -n "$uid" ] && [ -n "$device" ] && [ -n "$inode" ] || return 1
+  [ -z "${extra:-}" ] || return 1
+  while [ "${mode#0}" != "$mode" ]; do mode=${mode#0}; done
+  [ -n "$mode" ] || mode=0
+  printf '%s %s %s %s\n' "$uid" "$mode" "$device" "$inode"
 }
 
 worker_owned_mode_stat() { # <path> file|dir <mode> <uid>
@@ -318,6 +327,7 @@ worker_promote_staged_quarantine() { # <account-home>
   mv -n -- "$staged" "$WORKER_LOCK/quarantine" || return 2
   [ ! -e "$staged" ] && [ ! -L "$staged" ] || return 2
   [ "$(worker_owned_mode_stat "$WORKER_LOCK/quarantine" file 600 "$uid" 2>/dev/null || true)" = "$staged_stat" ] || return 2
+  cmp -s "$WORKER_LOCK/quarantine" <(printf '%s\n' "$WORKER_QUARANTINE_SENTINEL") || return 2
 }
 
 worker_acquire_lock() {

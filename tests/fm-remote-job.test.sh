@@ -670,6 +670,14 @@ new_staged_quarantine_fixture() { # <name>
   touch -t 200001010000 "$QUARANTINE_TEST_STATE/worker.lock"
 }
 
+quarantine_test_identity() { # <path>
+  if [ "$(uname -s)" = Darwin ]; then
+    stat -f '%u %d %i' "$1"
+  else
+    stat -c '%u %d %i' -- "$1"
+  fi
+}
+
 run_staged_quarantine_worker() { # [path]
   local worker_path=${1:-$PATH}
   set +e
@@ -869,6 +877,53 @@ chmod 640 "$QUARANTINE_TEST_STAGE"
 run_staged_quarantine_worker
 expect_code 1 "$QUARANTINE_TEST_RC" "a wrong-mode quarantine staging file was recovered"
 assert_present "$QUARANTINE_TEST_STAGE" "wrong-mode quarantine staging was removed"
+
+for SPECIAL_MODE_CASE in lock-sticky:1700 lock-setgid:2700 marker-setuid:4600; do
+  SPECIAL_MODE_NAME=${SPECIAL_MODE_CASE%%:*}
+  SPECIAL_MODE=${SPECIAL_MODE_CASE##*:}
+  new_staged_quarantine_fixture "special-mode-$SPECIAL_MODE_NAME"
+  case "$SPECIAL_MODE_NAME" in
+    lock-*) chmod "$SPECIAL_MODE" "$QUARANTINE_TEST_STATE/worker.lock" ;;
+    marker-*) chmod "$SPECIAL_MODE" "$QUARANTINE_TEST_STAGE" ;;
+  esac
+  run_staged_quarantine_worker
+  expect_code 1 "$QUARANTINE_TEST_RC" \
+    "a $SPECIAL_MODE_NAME quarantine staging fixture was recovered"
+  assert_present "$QUARANTINE_TEST_STAGE" \
+    "the $SPECIAL_MODE_NAME quarantine staging fixture was removed"
+done
+pass "quarantine staging requires exact modes including special permission bits"
+
+new_staged_quarantine_fixture changed-after-validation
+MUTATE_FAKEBIN="$QUARANTINE_TEST_DIR/fakebin"
+mkdir -p "$MUTATE_FAKEBIN"
+REAL_MV=$(command -v mv)
+cat > "$MUTATE_FAKEBIN/mv" <<'SH'
+#!/bin/bash
+last=${!#}
+case "$last" in
+  */worker.lock/quarantine) printf X >&9 ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+chmod +x "$MUTATE_FAKEBIN/mv"
+export FM_TEST_REAL_MV="$REAL_MV"
+STAGED_IDENTITY=$(quarantine_test_identity "$QUARANTINE_TEST_STAGE")
+exec 9<> "$QUARANTINE_TEST_STAGE"
+run_staged_quarantine_worker "$MUTATE_FAKEBIN:$PATH"
+exec 9>&-
+unset FM_TEST_REAL_MV
+expect_code 1 "$QUARANTINE_TEST_RC" \
+  "in-place staging content change after validation was recovered"
+assert_absent "$QUARANTINE_TEST_STAGE" \
+  "in-place changed quarantine staging was not atomically promoted"
+assert_present "$QUARANTINE_TEST_STATE/worker.lock/quarantine" \
+  "in-place changed promoted quarantine marker was deleted"
+[ "$(quarantine_test_identity "$QUARANTINE_TEST_STATE/worker.lock/quarantine")" = "$STAGED_IDENTITY" ] \
+  || fail "in-place changed quarantine marker lost its original object identity"
+cmp -s "$QUARANTINE_TEST_STATE/worker.lock/quarantine" <(printf '%s\n' "$QUARANTINE_SENTINEL") \
+  && fail "the in-place quarantine content change did not occur"
+pass "promoted quarantine content is revalidated before recovery"
 
 new_staged_quarantine_fixture symlink
 printf '%s\n' "$QUARANTINE_SENTINEL" > "$QUARANTINE_TEST_STATE/symlink-target"
