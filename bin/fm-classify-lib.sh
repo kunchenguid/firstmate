@@ -81,13 +81,15 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 #   paused: <reason>
 # to declare it is intentionally idling on a KNOWN external dependency - an
 # upstream release, a vendor rate-limit reset, a scheduled window. Unlike
-# `blocked:` (stuck, firstmate must help) an idle `paused:` pane is EXPECTED, so
-# the stale path absorbs it instead of escalating a possible wedge. It is
+# `blocked:` (stuck, firstmate must help) a `paused:` pane is EXPECTED to look
+# unattended - idle, or busy in a polling or watch loop - so the wedge path
+# absorbs it instead of escalating (status_pause_damps_wedge below). It is
 # deliberately NOT in the captain-relevant set above: a pause is a "stop
-# wedge-nagging this idle pane" signal, not work to keep surfacing. This constant
-# is the ONE definition of the verb; both the watcher and the daemon read it here
-# (status_is_paused) rather than hardcoding the literal, so the vocabulary cannot
-# drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
+# wedge-nagging this unattended pane" signal, not work to keep surfacing. This
+# constant is the ONE definition of the verb; both the watcher and the daemon
+# read it here (status_is_paused) rather than hardcoding the literal, so the
+# vocabulary cannot drift between the two consumers. FM_CLASSIFY_PAUSED_VERB
+# overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
 # Bounded re-surface cadence for a declared pause or a verified captain hold.
@@ -158,6 +160,21 @@ status_is_paused() {  # <status-line>
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
+}
+
+# 0 if <status-line> declares the current external wait that damps wedge aging.
+# The always-on watcher applies this predicate before choosing the shorter wedge
+# cadence, including when a reason already carries wedge decoration; the
+# away-mode daemon applies the same precedence through its own declared-wait
+# verdict (status_is_paused_or_captain_held below).
+# Only the latest status line is passed, so any newer non-pause line restores
+# ordinary wedge detection. Callers that already hold an authoritative run-step
+# verdict keep its existing precedence over the status declaration. Deliberately
+# narrower than status_is_paused_or_captain_held below: a pause predicts an
+# unattended pane outright, while a captain hold earns the shared bounded cadence
+# only through each caller's own liveness or idleness evidence.
+status_pause_damps_wedge() {  # <status-line>
+  status_is_paused "$1"
 }
 
 # 0 if a status line's leading verb is the verified captain-held transfer verb.
