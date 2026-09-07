@@ -288,7 +288,6 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   append_wake "$state" check startup-network 'check: startup-network'
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
-<<<<<<< HEAD
   # The recovery close is a real process exit, not a fixed wall-clock interval:
   # a single short sleep races the re-arm on a loaded machine and reports a
   # healthy recovery as "stayed live". Wait bounded for the exit instead - the

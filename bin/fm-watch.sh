@@ -973,16 +973,39 @@ esac
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <hash>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason permanent_marker marker_ts
-  # LOCAL PATCH (2026-08-19, v9 2026-08-25): if this hash was already capped,
-  # stop firing wakes for it UNTIL the cap horizon (FM_CAP_HORIZON_SECS, default
-  # 24h) passes. The marker is keyed on (window, hash) and stores its fire
-  # timestamp in the file content (date +%s); a cap older than the horizon is
-  # ignored, so a wedge that persists beyond the horizon can re-fire. A hash
-  # change also naturally invalidates the marker (different key). No auto-lift
-  # is performed on recovery - pause_state_class=working can be a steady state
-  # during a wedge, not a recovery signal, so the v6/v7 lift sites were
-  # over-eager. Operator can also `rm` the marker manually for immediate
-  # re-engagement.
+  # LOCAL PATCH (2026-08-19, v9 2026-08-25, v12 2026-09-07): cap short-circuit.
+  #
+  # Two marker schemes work together:
+  # - .wedge-permanent-<key>-<hash12> (per-hash, v2): silences the SAME hash;
+  #   a fresh stale hash in the same window can still escalate.
+  # - .wedge-permanent-<key> (window-scoped, v12): silences ALL hashes for
+  #   this window. Bounds the hash-churning busy-worker loop Greptile
+  #   flagged on the rebased PR (a pane churning its rendered hash on every
+  #   poll would otherwise rebuild the escalation counter per fresh hash and
+  #   re-fire PERMANENTLY-WEDGED on every FM_WEDGE_MAX_ESCALATIONS polls).
+  #
+  # Both are honored for FM_CAP_HORIZON_SECS (default 24h); cap horizon
+  # expiry allows re-fire on either. No auto-lift on pause_state_class=working
+  # per v5 (the verdict can be a steady state during a wedge, not a recovery
+  # signal). Genuine busy->idle recovery (the hash-change branch in the outer
+  # loop) clears the window-scoped marker before this call, so a fresh stale
+  # hash arriving after recovery escalates normally. Pause-class transitions
+  # alone do NOT clear the window-scoped marker; only an actual state
+  # transition out of busy-mode does.
+  window_marker="$STATE/.wedge-permanent-$(window_key "$win")"
+  if [ -e "$window_marker" ]; then
+    marker_ts=$(cat "$window_marker" 2>/dev/null || true)
+    case "$marker_ts" in
+      ''|*[!0-9]*) marker_ts=0 ;;
+    esac
+    if [ $(( $(date +%s) - marker_ts )) -lt "$FM_CAP_HORIZON_SECS" ]; then
+      return 0
+    fi
+    # Cap horizon passed; fall through and let the wedge re-fire.
+  fi
+  # Per-hash marker retained from v2: a stale hash in the same window that
+  # hasn't been observed at cap-level yet can still escalate. The window-
+  # scoped marker above is the primary gate; this is the secondary gate.
   if [ -z "$hash" ]; then
     # Defensive fallback: without a hash, fall back to the v1 window-scoped
     # marker name so the cap still suppresses retries for this window even if
@@ -1058,6 +1081,20 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           if ! date +%s > "$permanent_marker" 2>/dev/null; then
             triage_log "wedge permanent marker write FAILED: $permanent_marker - aborting cap without firing terminal wake (next poll will retry)"
             exit 1
+          fi
+          # v12 (2026-09-07, Greptile P1 follow-up): also write the window-
+          # scoped marker so all subsequent hashes for this window are
+          # silenced until the wedge genuinely resolves (busy->idle
+          # transition) or the cap horizon elapses. Without this, a busy
+          # pane churning its rendered hash on every poll rebuilds the
+          # escalation counter per fresh hash and re-fires PERMANENTLY-WEDGED
+          # every FM_WEDGE_MAX_ESCALATIONS polls, even with v11 counter
+          # reset. A genuine busy->idle transition clears the window-scoped
+          # marker at hash-change time (see the outer loop's hash-change
+          # branch), so a fresh stale hash arriving after recovery still
+          # escalates normally.
+          if ! date +%s > "$STATE/.wedge-permanent-$(window_key "$win")" 2>/dev/null; then
+            triage_log "wedge window-scoped marker write FAILED: $STATE/.wedge-permanent-$(window_key "$win") - per-hash marker still written, cap fires but window-churn loop may persist until next hash change"
           fi
           if ! fm_wake_append stale "$win" "$reason"; then
             rm -f "$permanent_marker"
@@ -2587,6 +2624,16 @@ EOF
         rm -f "$ssf" "$ewf"
         clear_write_tracking "$key"
       fi
+      # v12 (2026-09-07): NO auto-lift of the window-scoped marker here.
+      # The marker is the primary gate against the hash-churning busy-pane
+      # loop Greptile flagged; lifting it on every hash-change idle verdict
+      # would re-introduce the v6/v7/v8 over-eager recovery the v9 design
+      # removed (a pane can be classified idle on a hash change and still
+      # be the same underlying wedge). The window-scoped marker is lifted
+      # only by (a) FM_CAP_HORIZON_SECS elapsing, (b) operator rm, or
+      # (c) the status log advancing past the wedge-fire timestamp (the
+      # actual recovery signal - implemented at the status-presentation
+      # site below).
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
