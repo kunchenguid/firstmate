@@ -282,6 +282,80 @@ reset_fixture; : > "$FIXTURE_DIR/race"; assert_preserved "revalidation race"
 reset_fixture; printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"; assert_preserved "active target"
 reset_fixture; : > "$FIXTURE_DIR/focus-refuse"; assert_preserved "focus refusal"
 
+# The lock outcome vocabulary has three values, not two. A lock a peer holds is
+# released soon and the next session start cleans up; a lock the filesystem
+# refused to create at all leaves nothing to wait for and no peer to look for.
+# Both lock sites run against the REAL lock library on a genuinely unwritable
+# directory here, rather than the permissive stub the rest of this file uses.
+cleanup_warning_with_refused_lock() { # <task|presentation>
+  local which=$1
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    if [ "$which" = presentation ]; then
+      # shellcheck disable=SC2329 # Runtime override called by the cleanup owner.
+      fm_backend_herdr_presentation_session_lock_path() {
+        printf '%s/presentation.lock' "$TMP_ROOT/refused-parent"
+      }
+      chmod 0555 "$TMP_ROOT/refused-parent"
+    else
+      chmod 0555 "$FM_STATE_OVERRIDE"
+    fi
+    { fm_herdr_session_cleanup >/dev/null; } 2>&1
+  )
+  chmod 0755 "$FM_STATE_OVERRIDE" 2>/dev/null || true
+  chmod 0755 "$TMP_ROOT/refused-parent" 2>/dev/null || true
+}
+
+mkdir -p "$TMP_ROOT/refused-parent"
+
+reset_fixture
+REFUSAL=$(cleanup_warning_with_refused_lock task)
+case "$REFUSAL" in
+  *"its task lock could not be created - the filesystem refused the operation"*) ;;
+  *"its task lock is busy"*)
+    fail "a task lock the filesystem refused was reported as a busy peer: $REFUSAL" ;;
+  *) fail "a task lock the filesystem refused produced no usable warning: $REFUSAL" ;;
+esac
+[ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "a refused task lock retired the journal"
+[ ! -s "$CLOSE_LOG" ] || fail "a refused task lock closed the pane"
+pass "a task lock the filesystem refuses is named as a refusal, not as a busy peer"
+
+reset_fixture
+REFUSAL=$(cleanup_warning_with_refused_lock presentation)
+case "$REFUSAL" in
+  *"the shared presentation lock could not be created - the filesystem refused the operation"*) ;;
+  *"the shared presentation lock is busy"*)
+    fail "a presentation lock the filesystem refused was reported as a busy peer: $REFUSAL" ;;
+  *) fail "a presentation lock the filesystem refused produced no usable warning: $REFUSAL" ;;
+esac
+[ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "a refused presentation lock retired the journal"
+[ ! -s "$CLOSE_LOG" ] || fail "a refused presentation lock closed the pane"
+pass "a presentation lock the filesystem refuses is named as a refusal, not as a busy peer"
+
+reset_fixture
+rm -rf "$FM_STATE_OVERRIDE/.spawn-$ID.lock"
+sleep 300 &
+LOCK_HOLDER=$!
+mkdir -p "$FM_STATE_OVERRIDE/.spawn-$ID.lock"
+printf '%s\n' "$LOCK_HOLDER" > "$FM_STATE_OVERRIDE/.spawn-$ID.lock/pid"
+BUSY=$(
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    { fm_herdr_session_cleanup >/dev/null; } 2>&1
+  )
+)
+kill "$LOCK_HOLDER" 2>/dev/null || true
+wait "$LOCK_HOLDER" 2>/dev/null || true
+rm -rf "$FM_STATE_OVERRIDE/.spawn-$ID.lock"
+case "$BUSY" in
+  *"its task lock is busy"*) ;;
+  *) fail "a genuinely held task lock stopped reporting contention: $BUSY" ;;
+esac
+[ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "a busy task lock retired the journal"
+pass "a task lock a live peer holds is still reported as busy"
+
 INTEGRATION_ROOT="$TMP_ROOT/bootstrap-integration"
 mkdir -p "$INTEGRATION_ROOT/home/state" "$INTEGRATION_ROOT/home/data" "$INTEGRATION_ROOT/home/config"
 cp -R "$ROOT/bin" "$INTEGRATION_ROOT/bin"
