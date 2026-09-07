@@ -144,7 +144,7 @@ render_once() {
     def age_text: age_of(.age_seconds; .age_days);
     def what:
       if .kind == "harness-session" then "\(.id) \(if .label == "spare" then "idle spare" elif .label == "session" then "live session" else "unclassified" end)"
-      elif .kind == "worker" then "\(.id) (\(.label // "task"))"
+      elif .kind == "worker" then "\(.id) (\(.label // "task")\(if .held then ", held" else "" end))"
       else (.label // .id) end;
     def kind_text:
       if .kind == "harness-session" then "harness"
@@ -173,6 +173,8 @@ render_once() {
            warn("! the recorded session lock (\($h.lock_pid)) is no longer a live harness process")
          elif $h.lock_owner == "none" then
            dim("no live background session under harness daemon \($h.root_pid)")
+         elif $h.lock_owner == "absent" then
+           dim("no session is currently driving this home")
          elif $h.lock_owner == "single" or $h.lock_owner == "unique" then
            dim("one background session drives this home")
          else

@@ -486,8 +486,10 @@ collect_harness_sessions() {
     return 0
   fi
   if [ -z "$lock_pid" ]; then
+    # Normal for a home no session is currently driving, so this is a fact and
+    # not a warning; lock_owner already carries it.
     HARNESS_LOCK_OWNER=absent
-    note_source harness-sessions 0 'this home records no session lock, so its harness cannot be scoped'
+    note_source harness-sessions 1 'this home records no session lock, so no harness is scoped to it'
     return 0
   fi
   if ! ps_alive "$lock_pid" || ! is_harness_pid "$lock_pid"; then
