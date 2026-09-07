@@ -18,11 +18,6 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# This file starts dozens of short-lived child scripts that each source
-# tests/lib.sh; the parent already ran the global stale-fixture sweep, so the
-# children must not repeat it.
-export FM_TEST_SKIP_ORPHAN_REAP=1
-
 TMP_ROOT=$(fm_test_tmproot fm-live-gate)
 BIN="$TMP_ROOT/bin"
 mkdir -p "$BIN"
@@ -34,6 +29,17 @@ cat > "$BIN/fmfakeharness" <<'SH'
 exit 0
 SH
 chmod +x "$BIN/fmfakeharness"
+
+clean_env() {
+  env -i \
+    HOME="${HOME:-$TMP_ROOT}" \
+    PATH="${PATH:-/usr/bin:/bin}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    LANG="${LANG:-C}" \
+    TERM="${TERM:-dumb}" \
+    FM_TEST_SKIP_ORPHAN_REAP=1 \
+    "$@"
+}
 
 # guard <name> <gate args...>: write a guard script that opens with the shared
 # gate and, if the gate lets it through, reports that it ran.
@@ -60,7 +66,7 @@ run_guard() {
   shift
   local out rc
   set +e
-  out=$(env -u FM_LIVE "$@" PATH="$BIN:/usr/bin:/bin" "$path" 2>&1)
+  out=$(clean_env "$@" PATH="$BIN:/usr/bin:/bin" "$path" 2>&1)
   rc=$?
   set -e
   printf '%s\n' "$rc"
@@ -165,8 +171,7 @@ test_gate_lets_a_guard_drive_the_real_fleet_scripts_under_a_gate_marker() {
   } > "$path"
   chmod +x "$path"
   set +e
-  out=$(env -u FM_LIVE -u FM_GATE_REFUSE_BYPASS NO_MISTAKES_GATE=1 \
-    PATH="$BIN:/usr/bin:/bin" "$path" 2>&1)
+  out=$(clean_env NO_MISTAKES_GATE=1 PATH="$BIN:/usr/bin:/bin" "$path" 2>&1)
   rc=$?
   set -e
   expect_code 0 "$rc" "a guard opened with the shared gate must not be refused"
@@ -183,7 +188,7 @@ test_every_live_guard_is_wired_to_the_shared_gate() {
     script="$ROOT/$script"
     # bin/fm-test-run.sh runs every script through bash, so a guard that is not
     # marked executable is still a real suite member here.
-    out=$(FM_LIVE=0 bash "$script" 2>&1) || fail "$(basename "$script") must exit 0 when live guards are disabled"
+    out=$(clean_env FM_LIVE=0 bash "$script" 2>&1) || fail "$(basename "$script") must exit 0 when live guards are disabled"
     assert_contains "$out" "skip: live: disabled by FM_LIVE=0" \
       "$(basename "$script") must open with the shared live gate"
     checked=$((checked + 1))
