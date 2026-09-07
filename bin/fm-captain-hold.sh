@@ -1792,7 +1792,7 @@ EOF
 # printed to stderr, because a mechanical closer must never read "cannot tell"
 # as permission to close.
 command_open() {  # <task-id> [--identity] [--distinguish-absent]
-  local id='' identity=0 distinguish_absent=0 data state root file show shown_body
+  local id='' identity=0 distinguish_absent=0 data state root file config show shown_body
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --identity) identity=1 ;;
@@ -1815,6 +1815,11 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
     || { printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2; exit 2; }
   root=$(fm_backlog_root "$data") \
     || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
+  config="$root/.tasks.toml"
+  if { [ -e "$config" ] || [ -L "$config" ]; } && { [ ! -f "$config" ] || [ ! -r "$config" ]; }; then
+    printf 'fm-captain-hold: tasks-axi backend configuration cannot be read at %s\n' "$config" >&2
+    exit 2
+  fi
   if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
     file=$(fm_backlog_file "$data") \
       || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }

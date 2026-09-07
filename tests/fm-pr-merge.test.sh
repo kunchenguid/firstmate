@@ -2185,6 +2185,30 @@ test_unreadable_backlog_refuses_the_merge() {
   pass "fm-pr-merge refuses when the backlog exists but cannot be read"
 }
 
+test_unreadable_backend_config_refuses_the_merge() {
+  local case_dir rc
+  case_dir=$(make_case unreadable-backend-config-refuses)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6363636363636363636363636363636363636363
+  : > "$case_dir/gh-axi.log"
+  rm -f "$case_dir/home/data/backlog.md"
+  chmod 000 "$case_dir/home/.tasks.toml"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/63 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 644 "$case_dir/home/.tasks.toml"
+
+  expect_code 1 "$rc" "unreadable-backend-config-refuses: an unreadable authority route must refuse"
+  assert_grep 'tasks-axi backend configuration cannot be read' "$case_dir/stderr" \
+    "unreadable-backend-config-refuses: the unreadable authority route was not named"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "unreadable-backend-config-refuses: the forge was called despite an unreadable authority route"
+  pass "fm-pr-merge refuses when its configured backend cannot be read"
+}
+
 test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
@@ -2199,3 +2223,4 @@ test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
 test_absent_backlog_still_merges
 test_unreadable_backlog_refuses_the_merge
+test_unreadable_backend_config_refuses_the_merge
