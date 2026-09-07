@@ -315,7 +315,7 @@ test_secondmate_home_uses_own_treehouse_pool() {
   status=$?
   expect_code 0 "$status" "secondmate-home spawn should succeed with its own pooled worktree"
   assert_contains "$out" "spawned $id" "secondmate-home spawn did not report success"
-  assert_grep "treehouse get --root $SECOND_HOME/config" "$SECOND_LAUNCHLOG" \
+  assert_grep "treehouse get --root '$SECOND_HOME/config'" "$SECOND_LAUNCHLOG" \
     "secondmate-home spawn did not type the home-specific Treehouse root"
   assert_grep "worktree=$SECOND_HOME_WT" "$SECOND_HOME/state/$id.meta" \
     "secondmate-home spawn did not record the worktree from its own pool"
