@@ -20,6 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
 REQUIRED_REASON='watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn'
+AWAY_REQUIRED_REASON='Away mode owns watcher supervision'
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
@@ -96,6 +97,73 @@ test_predicate_source_needs_supervision() {
   [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a process-event source must not count as a task"
   [ "$FM_SUP_SOURCES" -eq 1 ] || fail "expected one registered process-event source"
   pass "fm_supervision_unhealthy: source-only home needs supervision"
+}
+
+# Register a custom check the way an operator does, through the real
+# bin/fm-check-register.sh, so these cases bind to the shipped registration
+# artifacts rather than to a hand-written imitation of them.
+register_custom_check() {
+  local state=$1 id=$2
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/$id.check.sh"
+  chmod 700 "$state/$id.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+    || fail "fm-check-register.sh could not register $id"
+}
+
+test_predicate_registered_check_needs_supervision() {
+  local state="$TMP_ROOT/pred-check/state"
+  mkdir -p "$state"
+  register_custom_check "$state" issue-comments
+  fm_supervision_needed "$state" 300 || fail "a registered custom check did not register as supervision need"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a registered custom check must not count as an in-flight task"
+  [ "$FM_SUP_CHECKS" -eq 1 ] || fail "expected one registered custom check, got $FM_SUP_CHECKS"
+  fm_supervision_unhealthy "$state" 300 || fail "a registered custom check with no beacon must be unhealthy"
+  pass "fm_supervision_needed: a registered custom check needs supervision with no task in flight"
+}
+
+test_predicate_registered_check_survives_rebinding_drift() {
+  local state="$TMP_ROOT/pred-check-drift/state"
+  mkdir -p "$state"
+  register_custom_check "$state" issue-comments
+  printf '#!/usr/bin/env bash\necho drifted\n' > "$state/issue-comments.check.sh"
+  fm_supervision_needed "$state" 300 \
+    || fail "an edited registered check must keep supervision on so the sweep can report the rejection"
+  [ "$FM_SUP_CHECKS" -eq 1 ] || fail "expected the edited check to stay counted, got $FM_SUP_CHECKS"
+  pass "fm_supervision_needed: a registered check whose bytes drifted still needs supervision"
+}
+
+test_predicate_unregistered_check_needs_nothing() {
+  local state="$TMP_ROOT/pred-check-unregistered/state"
+  mkdir -p "$state"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/rogue.check.sh"
+  chmod 700 "$state/rogue.check.sh"
+  if fm_supervision_needed "$state" 300; then
+    fail "a check with no trust binding must not arm supervision"
+  fi
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "an unregistered check must not be counted, got $FM_SUP_CHECKS"
+  pass "fm_supervision_needed: false for a check.sh with no registration binding"
+}
+
+test_predicate_task_pr_poll_is_not_a_custom_check() {
+  local state="$TMP_ROOT/pred-pr-poll/state"
+  mkdir -p "$state"
+  : > "$state/task1.meta"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/task1.check.sh"
+  chmod 700 "$state/task1.check.sh"
+  : > "$state/task1.pr-poll"
+  fm_supervision_needed "$state" 300 || fail "the in-flight task itself must need supervision"
+  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "expected the task to be the one in-flight need, got $FM_SUP_IN_FLIGHT"
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "a task PR poll must not count as a registered custom check"
+  pass "fm_supervision_needed: a task PR poll without a trust binding is not a registered custom check"
+}
+
+test_predicate_relay_shim_is_not_a_custom_check() {
+  local state="$TMP_ROOT/pred-relay-not-custom/state"
+  mkdir -p "$state"
+  : > "$state/x-watch.check.sh"
+  fm_supervision_needed "$state" 300 || fail "the relay poll must still need supervision"
+  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "the relay shim keeps its own trust path and must not be counted as a custom check"
+  pass "fm_supervision_status: the relay shim is not counted as a registered custom check"
 }
 
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
@@ -323,6 +391,7 @@ Codex|{"cwd":"$dir","stop_hook_active":false}
 OpenCode|{"stop_hook_active":false}
 Pi|{"stop_hook_active":false}
 pi-signed|{"stop_hook_active":false}
+omp|{"stop_hook_active":false}
 Grok|{"sessionId":"grok-session","stopHookActive":false}
 Kimi|{"stop_hook_active":false}
 EOF
@@ -396,6 +465,17 @@ test_hook_x_mode_only_blocks_in_default_mode() {
   expect_code 2 "$status" "default hook mode must block an X-mode-only blind turn"
   assert_contains "$out" "X-mode relay polling needs supervision" "X-mode-only blind stop must identify its supervision need"
   pass "fm-turnend-guard: X-mode-only supervision remains guarded in default mode"
+}
+
+test_hook_registered_check_only_blocks_with_check_banner() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-check-only")
+  register_custom_check "$dir/state" issue-comments
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "default hook mode must block a registered-check-only blind turn"
+  assert_contains "$out" "1 registered custom check(s), but no live watcher" "check-only blind stop must identify its supervision need"
+  assert_not_contains "$out" "X-mode relay polling needs supervision" "check-only blind stop must not be misreported as relay polling"
+  pass "fm-turnend-guard: registered-check-only supervision is named in the block banner"
 }
 
 test_hook_ignores_repo_state_when_fm_home_set() {
@@ -1750,6 +1830,156 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
+# --- AWAY MODE: the daemon owns supervision ----------------------------------
+#
+# While state/.afk exists, bin/fm-supervise-daemon.sh owns supervision and runs
+# bin/fm-watch.sh ONE-SHOT: the watcher exits on every wake and the daemon
+# starts its replacement, so a turn boundary regularly lands in a hand-off with
+# no watcher process holding the lock and nothing wrong. The guard must accept a
+# live identity-matched daemon there, and must keep blocking on every genuine
+# lapse - no daemon, a dead or pid-reused daemon, a stale beacon - and must not
+# accept a daemon at all when away mode is off.
+
+# Record a live away-mode daemon holding this home, the way the daemon does at
+# startup: its singleton lock names the daemon pid plus the process identity it
+# computed for itself (watcher_identity is that same fm_pid_identity read).
+record_daemon_lock() {  # <dir> <pid> [identity]
+  local dir=$1 pid=$2 identity=${3:-} lockdir
+  if [ -z "$identity" ]; then
+    identity=$(watcher_identity "$dir" "$pid") || return 1
+  fi
+  lockdir="$dir/state/.supervise-daemon.lock"
+  mkdir -p "$lockdir"
+  printf '%s\n' "$pid" > "$lockdir/pid"
+  printf '%s\n' "$identity" > "$lockdir/pid-identity"
+}
+
+# An away-mode home mid-watcher-cycle: away flag, work in flight, a fresh beacon
+# from the watcher that just exited, and NO watcher lock at all.
+make_away_home_between_cycles() {  # <dir-path>
+  local dir=$1
+  dir=$(make_primary_dir "$dir")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  touch "$dir/state/.last-watcher-beat"
+  printf '%s\n' "$dir"
+}
+
+test_hook_away_daemon_allows_between_watcher_cycles() {
+  local dir pid out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-daemon-live")
+  sleep 60 &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live away-mode daemon holder"
+  }
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "away mode with a live daemon must not block between watcher cycles"
+  [ -z "$out" ] || fail "away-mode daemon ownership still produced a block banner: $out"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "--claude away mode with a live daemon must not block between watcher cycles"
+  [ -z "$out" ] || fail "--claude away-mode daemon ownership still produced a block banner: $out"
+  pass "fm-turnend-guard: a live away-mode daemon satisfies supervision with no watcher holding the lock"
+}
+
+test_hook_away_daemon_allows_over_dead_watcher_lock() {
+  local dir pid dead out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-daemon-dead-watcher")
+  dead=$(nonexistent_pid)
+  record_watcher_lock "$dir" "$dead" "dead watcher identity"
+  sleep 60 &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live away-mode daemon holder"
+  }
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a live away-mode daemon must outweigh a watcher lock its exited child left behind"
+  [ -z "$out" ] || fail "away-mode daemon ownership still produced a block banner: $out"
+  pass "fm-turnend-guard: away-mode daemon ownership survives a leftover dead watcher lock"
+}
+
+test_hook_away_mode_blocks_without_any_supervisor() {
+  local dir out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-no-supervisor")
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "away mode with no daemon and no watcher must still block"
+  assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  pass "fm-turnend-guard: away mode with no daemon and no watcher still blocks"
+}
+
+test_hook_away_mode_blocks_on_dead_daemon() {
+  local dir dead out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-dead-daemon")
+  dead=$(nonexistent_pid)
+  record_daemon_lock "$dir" "$dead" "dead daemon identity"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "a daemon lock left by a dead daemon must not satisfy supervision"
+  assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  pass "fm-turnend-guard: away mode blocks on a dead away-mode daemon"
+}
+
+test_hook_away_mode_blocks_on_pid_reused_daemon() {
+  local dir pid out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-reused-daemon")
+  sleep 60 &
+  pid=$!
+  # Same pid, an identity from some earlier process: exactly what a recycled pid
+  # looks like, and the reason a bare kill -0 is not ownership evidence.
+  record_daemon_lock "$dir" "$pid" "some other process identity"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a live pid whose recorded identity does not match must not satisfy supervision"
+  assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  pass "fm-turnend-guard: away mode blocks on a pid-reused away-mode daemon lock"
+}
+
+test_hook_away_mode_blocks_on_stale_beacon() {
+  local dir pid out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-stale-beacon")
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live away-mode daemon holder"
+  }
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a live daemon that stopped restarting its watcher must block once the beacon goes stale"
+  assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  pass "fm-turnend-guard: away-mode daemon ownership never substitutes for a fresh beacon"
+}
+
+test_hook_daemon_lock_is_ignored_without_away_mode() {
+  local dir pid out status
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-no-afk-daemon-lock")
+  rm -f "$dir/state/.afk"
+  sleep 60 &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live daemon holder"
+  }
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "with away mode off the strict watcher predicate must be unchanged"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: a daemon lock proves nothing while away mode is off"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -1757,6 +1987,11 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
+test_predicate_registered_check_needs_supervision
+test_predicate_registered_check_survives_rebinding_drift
+test_predicate_unregistered_check_needs_nothing
+test_predicate_task_pr_poll_is_not_a_custom_check
+test_predicate_relay_shim_is_not_a_custom_check
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
@@ -1768,6 +2003,7 @@ test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
 test_hook_x_mode_only_blocks_in_default_mode
+test_hook_registered_check_only_blocks_with_check_banner
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
@@ -1820,3 +2056,10 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
+test_hook_away_daemon_allows_between_watcher_cycles
+test_hook_away_daemon_allows_over_dead_watcher_lock
+test_hook_away_mode_blocks_without_any_supervisor
+test_hook_away_mode_blocks_on_dead_daemon
+test_hook_away_mode_blocks_on_pid_reused_daemon
+test_hook_away_mode_blocks_on_stale_beacon
+test_hook_daemon_lock_is_ignored_without_away_mode

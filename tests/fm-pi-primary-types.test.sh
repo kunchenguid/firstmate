@@ -4,12 +4,12 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-command -v npm >/dev/null 2>&1 || { echo "skip: npm not found for Pi extension typecheck"; exit 0; }
-command -v tsc >/dev/null 2>&1 || { echo "skip: tsc not found for Pi extension typecheck"; exit 0; }
+command -v npm >/dev/null 2>&1 || { echo "skip: Pi extension typecheck prerequisite not found: npm"; exit 0; }
+command -v tsc >/dev/null 2>&1 || { echo "skip: Pi extension typecheck prerequisite not found: tsc"; exit 0; }
 
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-agent"}
 if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
-  echo "skip: installed @earendil-works/pi-coding-agent package not found"
+  echo "skip: Pi extension typecheck prerequisite not found: installed @earendil-works/pi-coding-agent package"
   exit 0
 fi
 if [ ! -d "$PI_PACKAGE_DIR/node_modules/typebox" ] || \
@@ -32,6 +32,7 @@ cp "$ROOT/.pi/extensions/fm-calm.ts" "$TMP_ROOT/fm-calm.ts"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$TMP_ROOT/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$TMP_ROOT/fm-primary-turnend-guard.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$TMP_ROOT/lib/fm-branch-dispatch.ts"
+cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$TMP_ROOT/lib/fm-async-exec.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$TMP_ROOT/lib/fm-branch-model-picker.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts" "$TMP_ROOT/lib/fm-calm-assistant-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" "$TMP_ROOT/lib/fm-calm-operational-user-layout.ts"

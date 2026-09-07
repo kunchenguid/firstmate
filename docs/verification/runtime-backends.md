@@ -55,13 +55,17 @@ Observed identities, and the resulting verdict:
 | grok | 0.2.118 | `grok-0.2.118-ma` | `grok` | alive |
 | kimi | 0.31.1 | `kimi` | `kimi` | alive |
 
-Claude Code is the harness whose title no longer attributes it at all; every other adapter is currently attributed by both sources.
+In that 2026-08-03 seven-adapter run, Claude Code was the only harness whose title did not attribute it; every other adapter was attributed by both sources.
 Codex reported `codex-aarch64-a` at 0.145.0 and `codex` at 0.146.0, and Kimi Code reported `kimi-code` as its foreground `comm` at 0.29.1 and `kimi` at 0.31.1, so these identities move between ordinary patch releases in both directions.
 That is the evidence for treating any single process name as a surface under vendor control rather than a stable contract.
 
 The crewmate-only Muse Code 0.1.0-R708.1 adapter was verified separately on 2026-08-05 against tmux on macOS arm64.
 Its installed `muse-bin-0.1.0-R708.1` foreground identity classified `alive`, while `musescore`, `amuse`, `muse-binary`, and `muse-bind` remained ambiguous in the portable regression.
 [`muse.md`](muse.md#process-identity) owns the artifact identity and launcher evidence for that verification.
+
+The crewmate/scout-only Rovo CLI 202609.1.2 adapter added `*rovo*` to the same glob family as `*grok*`/`*kimi*` in `fm_backend_tmux_classify_process_name`, and was relaunched live under tmux 3.6a in an isolated private socket.
+`#{pane_current_command}` reported the truncated on-disk binary name `atlassian_cli_r` - macOS's 15-char `comm` truncation cuts `atlassian_cli_rovodev` off just before the `rovo` substring begins, the same truncation-volatility class codex/kimi's own patch-release name drift shows above - while the foreground ps-based `comm` correctly reported `rovo`, so `fm_backend_tmux_agent_state` returned `alive` through that primary source; the two-independent-name-sources design is exactly why the truncated title does not break the verdict.
+[`rovo.md`](rovo.md#backend-liveness-tmux-verified-live-herdr-placement-verified-live-with-a-herdr-side-agent-detection-gap) owns the fuller record, including the busy/interrupt/exit facts captured in that same live tmux session and the herdr agent-detection gap found when herdr placement was verified live in an isolated lab session.
 
 Bounded observed output:
 
@@ -80,14 +84,36 @@ alive
 On macOS the pane command reflected the rewritable title while the full install path could survive in `ps -o comm=`; in the Linux portable regression those roles reversed for the version-named native executable, with the identifying path retained in argv[0].
 The classifier therefore accepts a harness basename first, then an exact harness path component in the full executable path, then the same component in argv[0], without depending on which field carries it on a given platform.
 
-The portable regression is CI-enforced, while the real-harness drift guard is opt-in under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
+The portable regression is CI-enforced.
+The real-harness drift guard spends no model tokens, so under the policy in `.agents/skills/firstmate-coding-guidelines/SKILL.md` it runs by default wherever tmux is installed and reports a capability skip elsewhere; `FM_HARNESS_LIVENESS_DRIFT=1` additionally turns an absent tool into a failure.
 Run the live guard after any harness upgrade and before trusting or refreshing the table above:
 
 ```sh
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
-Bounded output from the run that produced the table:
+### 2026-09-06 default-on drift refresh, and the Cursor editor CLI collision
+
+Running the guard with no variable set on macOS 26.5.2 arm64 checked 8 installed harnesses and classified every one `alive`:
+
+```text
+# claude 2.1.263 (Claude Code): title='2.1.263' foreground=[/Users/kunchen/.local/bin/claude <defunct> <defunct> ]
+# codex codex-cli 0.147.0: title='codex' foreground=[/opt/homebrew/bin/codex ]
+# opencode 1.18.29: title='opencode' foreground=[/opt/homebrew/bin/opencode ]
+# pi 0.84.4: title='pi-launcher' foreground=[/opt/homebrew/bin/pi-signed .../pi ]
+# pi-signed 0.84.4: title='pi-launcher' foreground=[/opt/homebrew/bin/pi-signed .../pi ]
+# grok grok 1.0.13 (5e9a58528b76) [stable]: title='grok-1.0.13-mac' foreground=[/Users/kunchen/.local/bin/grok ]
+# cursor 2026.09.02-c22c1a3: title='node' foreground=[/Users/kunchen/.local/bin/cursor-agent ]
+# muse Muse Code 1.0.3 (1.0.3-R2198.1): title='muse-bin-1.0.3-' foreground=[/Users/kunchen/.local/bin/muse-bin-1.0.3-R2198.1 ]
+# checked 8 installed harness(es)
+```
+
+The first default-on run failed on Cursor with `LIVENESS DRIFT: cursor unknown is running but classifies 'missing'`, observed title `zsh`.
+The classifier was not at fault: the guard resolved the harness through a generic `command -v cursor`, which on a machine that also has the Cursor editor finds `~/.local/bin/cursor` - the editor launcher, not the agent.
+That binary exits immediately, leaving a bare shell in the pane.
+The guard now asks `fm_cursor_resolve_binary` first for `cursor`, which is the same verified owner `bin/fm-spawn.sh` uses, so the probe launches `cursor-agent` and the editor CLI can no longer masquerade as the harness.
+
+Bounded output from the 2026-08-03 run that produced the first table above:
 
 ```text
 ok - harness liveness: claude 2.1.220 (Claude Code) classifies alive
@@ -109,6 +135,37 @@ Observed bounded output:
 pi-signed
 0.82.0
 0.82.0
+```
+
+### Harness-adapter instruction routing
+
+Two checks keep the evidence boundaries separate.
+`tests/fm-harness-adapter-references.test.sh` parses the router's declared JSON contract as normalized data and proves every selected reference is readable, which is structural evidence only.
+`tests/fm-harness-adapter-instructions-live-e2e.test.sh` is an opt-in development check that sends the directly loaded router and every operation scenario across all nine harness identities to a local Ollama model, requires the generated plan as normalized JSON, and makes no external-provider call.
+
+```sh
+FM_HARNESS_ADAPTER_INSTRUCTION_EVAL=1 FM_HARNESS_ADAPTER_LOCAL_MODEL=ambient-router-gemma4:e4b bin/fm-test-run.sh tests/fm-harness-adapter-instructions-live-e2e.test.sh
+```
+
+That local evaluation demonstrates instruction-driven scenario selection, but it does not claim that a native harness loaded the selected files.
+The guard prints the exact installed version or unavailable status for every native harness so absent tools and unexercised provider transports remain explicit rather than becoming passes.
+Native loader behavior still requires the applicable live agent-tool check; no uniform deterministic zero-provider transport currently spans Claude, Codex, OpenCode, and Pi, and the other five tools remain unavailable where their binaries are absent.
+
+Bounded output from the 2026-08-29 local run:
+
+```text
+ok - local model ambient-router-gemma4:e4b selected every operation scenario and all nine harness identities
+# native loader not claimed: claude 2.1.220 (Claude Code) is installed, but this harness-neutral evaluation does not exercise its provider transport
+# native loader not claimed: codex 0.147.0-alpha.6+local.4 is installed, but this harness-neutral evaluation does not exercise its provider transport
+# native loader not claimed: opencode 1.14.48 is installed, but this harness-neutral evaluation does not exercise its provider transport
+# native loader not claimed: pi 0.84.0 is installed, but this harness-neutral evaluation does not exercise its provider transport
+# unverified native loader: pi-signed is not installed on this machine
+# unverified native loader: grok is not installed on this machine
+# unverified native loader: kimi is not installed on this machine
+# unverified native loader: cursor is not installed on this machine
+# unverified native loader: muse is not installed on this machine
+# installed native tools recorded without overstating loader coverage: 4
+# unavailable native tools: pi-signed grok kimi cursor muse
 ```
 
 The isolated process and endpoint checks used:
@@ -173,6 +230,80 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+## Claude workspace trust
+
+Verified 2026-09-03 on Claude Code 2.1.259.
+Claude gates a folder it has never seen behind an interactive workspace-trust dialog, and the CLI documents the only bypass as non-interactive mode, which a crewmate pane is not.
+
+```sh
+claude --version
+claude --help | grep -A 5 'workspace trust dialog'
+```
+
+```
+2.1.259 (Claude Code)
+                                        pipes). Note: The workspace trust dialog
+                                        is skipped when Claude is run in
+                                        non-interactive mode (via -p, or when
+                                        stdout is not a TTY, e.g. piped or
+                                        redirected output). Only use this in
+                                        directories you trust. Settings files
+```
+
+`--dangerously-skip-permissions` is a permission control and is absent from that bypass, so an interactive worker in a fresh worktree still reaches the dialog.
+Firstmate cannot answer it either, because its key plane carries only Enter, Escape, and C-c with no arrow navigation.
+Suppression itself was then observed directly on the same date and version, with a control arm and a treatment arm.
+
+The control arm launched a fresh linked worktree with no pre-registration, the way `bin/fm-spawn.sh` launches one.
+
+```sh
+tmux new-session -d -s tp-a -c /tmp/trustproof/wt-a \
+  "CLAUDE_CONFIG_DIR=<cfg> CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions '<brief>'"
+```
+
+```
+Accessing workspace: /tmp/trustproof/wt-a
+Quick safety check: Is this a project you created or one you trust? ...
+Claude Code'll be able to read, edit, and execute files here.
+> No, exit
+  Yes, I trust this folder
+Enter to confirm . Esc to cancel
+```
+
+That pane confirms two load-bearing claims at once: the dialog fires despite `--dangerously-skip-permissions`, and the selection cursor sits on `No, exit`, so a sent Enter would have exited the worker.
+
+The treatment arm pre-registered an equivalent fresh worktree and launched it identically against the operator's real config.
+
+```sh
+bin/fm-claude-trust.sh /tmp/trustproof/wt-c /tmp/trustproof/proj
+tmux new-session -d -s tp-c -c /tmp/trustproof/wt-c \
+  "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions 'reply with exactly: BRIEF-REACHED'"
+```
+
+```
+trusted: /tmp/trustproof/wt-c
+```
+
+```
+Claude Code v2.1.259 ... /tmp/trustproof/wt-c
+> reply with exactly: BRIEF-REACHED
+. BRIEF-REACHED
+```
+
+No dialog appeared and the worker executed its brief with zero keypresses.
+The scratch repo was deleted and the test entries were removed from the store and verified absent.
+That verification is point-in-time rather than a durable guarantee, because a concurrent Claude session can re-add a path it visited: one entry reappeared after an earlier zero-residual check, most plausibly flushed by a session as it exited, and was removed again.
+
+One limitation belongs beside that result.
+An intermediate arm run against an isolated `CLAUDE_CONFIG_DIR` holding only a copied `.claude.json` cleared the trust dialog but then surfaced the separate machine-scoped Bypass Permissions warning.
+That warning rendered in the same shape as the trust dialog, with the selection cursor on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so a sent Enter would end that worker too.
+That gate is not a production blocker, because a normal environment has already accepted it and the treatment arm above ran against the real config and saw neither dialog.
+This change does not address that warning and does not claim to.
+
+`bin/fm-spawn.sh` therefore pre-registers the task worktree through `bin/fm-claude-trust.sh` before launch, and `tests/fm-claude-trust.test.sh` pins both halves of the scope contract: a fresh worktree is trusted, and an out-of-scope path is refused.
+That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
+The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
@@ -232,6 +363,211 @@ All six installed harnesses honored the doorbell contract with real model turns:
 Two findings from the run shaped the shipped behavior: an OpenCode vendor update modal swallowed the first doorbell and the single re-ring recovered it, which is exactly the watcher ladder's job; and grok 1.0.5's idle composer never classifies `empty` (a classifier drift owned by the [Composer classification matrix](#composer-classification-matrix) guard, whose refresh for grok 1.0.5 is still owed), which is why the ring's advisory pre-check skips only on an exact proven `pending` verdict - a doorbell into an ambiguous composer is a recoverable constant line, while skipping on ambiguity would starve steering for any harness the classifier cannot positively identify.
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
+
+## Gemini
+
+The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.
+Every check below ran in throwaway scratch worktrees against the real CLI; no task worktree was used and no agent was left running.
+The credential was supplied only through the `GEMINI_API_KEY` environment variable and its value appears nowhere in this record.
+
+### Trust options are not equivalent
+
+The refusal an untrusted launch produces, and its headless exit status:
+
+```sh
+gemini -p 'say OK'; echo "rc=$?"
+```
+
+```text
+Gemini CLI is not running in a trusted directory. To proceed, either use `--skip-trust`, set the `GEMINI_CLI_TRUST_WORKSPACE=true` environment variable, or trust this directory in interactive mode.
+rc=55
+```
+
+Both documented options clear that refusal, but only one loads project configuration.
+The A/B below ran twice in ONE worktree carrying a project `AfterAgent` hook, with the same config home and the same prompt, changing only the trust mechanism:
+
+```text
+--skip-trust                 project-hook-fired=NO   untrusted-warnings=0   turn=✦ ECHO
+TRUST_WORKSPACE=true         project-hook-fired=YES  untrusted-warnings=0   turn=✦ FOXTROT
+```
+
+`gemini skills list` names the cause directly in the untrusted case:
+
+```text
+Skipping project agents due to untrusted folder. To enable, ensure that the project root is trusted.
+Project hooks disabled because the folder is not trusted.
+```
+
+This is why `bin/fm-spawn.sh` launches with `GEMINI_CLI_TRUST_WORKSPACE=true` and why `--skip-trust` must not be substituted for it.
+
+### Busy signal
+
+A full turn was captured every two seconds. The status row above the separator carries the one ASCII token, and the phase text beside it is model-generated:
+
+```text
+busy_1 | 1 |  ⠸ Thinking... (esc to cancel, 1s)
+busy_5 | 1 |  ⠸ Begin Counting Methodically (esc to cancel, 9s)
+busy_6 | 1 |  ⠇ Continue Enumerating Concepts (esc to cancel, 11s)
+busy_7 | 0 |
+busy_12 | 0 |
+```
+
+The idle capture taken before the prompt also contained no `(esc to cancel,`.
+Because the phase text varies per turn and the spinner is braille, neither is usable; `(esc to cancel,` is the only stable rendered token, and the adapter uses the semantic hooks below as its actual state source.
+
+### Hook lifecycle
+
+`BeforeAgent`, `AfterAgent`, `SessionStart`, and `SessionEnd` were registered on one probe that appends its event name, then driven through a normal turn, an Escape interrupt, and `/quit`:
+
+```text
+--- after startup ---   SessionStart
+--- mid-turn ---        SessionStart, BeforeAgent
+--- after INTERRUPT --- SessionStart, BeforeAgent, AfterAgent
+--- after /quit ---     SessionStart, BeforeAgent, AfterAgent, SessionEnd, SessionEnd
+```
+
+Two facts the adapter depends on come from that run: `AfterAgent` closes a turn that was CANCELLED, not only one that completed, and `SessionEnd` fired TWICE for a single `/quit`, so the repeated idle event must be harmless.
+The `AfterAgent` payload carried the worktree as `cwd`, which is what binds a hook to its task:
+
+```text
+keys: ['cwd', 'hook_event_name', 'prompt', 'prompt_response', 'session_id', 'stop_hook_active', 'timestamp', 'transcript_path']
+hook_event_name = AfterAgent
+stop_hook_active = False
+prompt = 'Say the single word CEDAR and stop.'
+```
+
+On the cancelled turn the same payload carried `prompt_response = '[no response text]'`.
+
+### Autonomous end-to-end worker
+
+One throwaway worker was launched exactly as the spawn launches one - positional brief, `-y`, workspace trust - and observed from start to idle:
+
+```text
+t=5s   (esc to cancel, 2s)
+t=30s  busy marker present
+idle at ~34s, busy marker count 0
+worker-output.txt: DELIVERED
+turn-end hook fires: 1
+```
+
+Its pane showed `✓ WriteFile worker-output.txt → Accepted (+1, -0)` with no approval gate, confirming `-y` runs unattended, and `Executing Hook: fm-turn-end` in the status row after the turn.
+
+The adapter was then driven through the REAL `bin/fm-spawn.sh` and `bin/fm-control.sh` against a real Gemini pane in an isolated home:
+
+```text
+spawned gm-e2e harness=gemini kind=ship mode=no-mistakes yolo=off window=... worktree=...
+hooks installed by spawn (state/<id>.gemini-settings.json): ['BeforeAgent', 'AfterAgent', 'SessionEnd']
+t=4s   state: working · source: pane · harness busy (gemini-hook)
+t=8s   state: working · source: pane · harness busy (gemini-hook)
+after turn: v1 gen=... state=idle source=gemini-hook event=after-agent
+e2e-output.txt: SEAWORTHY
+interrupt-delivered gm-e2e harness=gemini backend=tmux verified=agent-alive cancel=unconfirmed
+after interrupt: v1 gen=... state=idle source=gemini-hook event=after-agent
+stopped gm-e2e harness=gemini backend=tmux endpoint=... worktree=...
+```
+
+The interrupt line is the one worth keeping: `AfterAgent` closed the record on a CANCELLED turn, which is why a gemini interrupt needs no `fm-interrupt` fallback event.
+A single Escape on a long turn printed `ℹ Request cancelled.`, dropped the busy token, and left the agent running; `/quit` then exited with status 0 and printed `To resume this session: gemini --resume <session-id>`, and resuming by that id restored the full transcript.
+
+### Identity markers
+
+Env var NAMES were read from a real Gemini tool process launched under a Claude primary; no value of `GEMINI_API_KEY` was read.
+
+```text
+GEMINI_CLI=[1]
+AI_AGENT=[claude-code_2-1-260_agent]
+TRUSTWS=[true]
+CLAUDECODE=[1]
+```
+
+`GEMINI_CLI` is unset in the launching environment, so it is Gemini's own; `CLAUDECODE` is inherited, which is why `bin/fm-harness.sh` tests `GEMINI_CLI` first.
+`AI_AGENT` carried the CLAUDE primary's value and is therefore an inherited launcher marker, never a Gemini identity.
+
+Ancestry cannot substitute for the marker on this platform:
+
+```sh
+node -e 'const{execSync}=require("child_process");console.log(execSync("ps -o comm= -p "+process.pid).toString().trim())'
+```
+
+```text
+MainThread
+```
+
+The shipped CLI is a node bundle, so its live process never presents as `node` and neither ancestry arm matches it.
+
+The same shape breaks pane liveness, which the end-to-end run surfaced as a hard refusal rather than a silent wrong answer:
+
+```text
+error: task gm-e2e's endpoint reads 'ambiguous' rather than a positively classified state; refusing to send a lifecycle key into an unattributed endpoint
+```
+
+A live gemini pane's foreground group read `comm=MainThread` and `argv0=/home/<user>/.local/node/bin/node`, so `bin/fm-gemini-lib.sh` now identifies it from argv[1] instead.
+After that change the same endpoint classified `alive` while the worker ran and `dead` once it exited, so the rule is not simply always positive.
+`tests/fm-gemini-harness.test.sh` pins that boundary so it is not later documented away, and `tests/fm-busy-adapter-wiring.test.sh` drives the generated hooks through the real writer and classifier.
+
+```sh
+bin/fm-test-run.sh tests/fm-gemini-harness.test.sh tests/fm-busy-adapter-wiring.test.sh
+```
+
+### Credential wedge and its blast radius
+
+With no resolvable credential the pane wedges on `Enter Gemini API Key` rather than failing.
+That dialog is a credential FIELD, so lifecycle text sent to a wedged pane is submitted into it and stored.
+Observed after an ordinary exit was delivered to such a pane: a `~/.gemini/gemini-credentials.json` (mode 0600) appeared that had not existed before, and a later credential-less run stopped refusing cleanly and instead reached the API:
+
+```text
+before: rc=41  When using Gemini API, you must specify the GEMINI_API_KEY environment variable.
+after : rc=1   API key not valid. Please pass a valid API key.  (API_KEY_INVALID)
+```
+
+Clearing that stored credential restored both behaviours:
+
+```text
+GEMINI_API_KEY=<from the operator's own store> gemini --skip-trust -p 'Reply with exactly the word NOVEMBER.'  ->  NOVEMBER  rc=0
+env -u GEMINI_API_KEY gemini --skip-trust -p hi                                                              ->  rc=41
+```
+
+The adapter reference records the operational rule this produces: never drive lifecycle text into a gemini pane showing that dialog; treat it as a credential blocker and retire the endpoint instead.
+The credential must also be present before the session-provider daemon starts, since a long-lived tmux or Herdr server hands panes the environment it was started with.
+
+### Settings placement
+
+Firstmate's hooks are NOT written into the worktree's `.gemini/settings.json`, because unlike Claude's `settings.local.json` that path is the project's own committed settings file.
+They go to a firstmate-owned `state/<id>.gemini-settings.json` reached through `GEMINI_CLI_SYSTEM_SETTINGS_PATH`.
+Two measurements support that choice.
+Hooks from the system layer fired under `--skip-trust` in an untrusted folder, so the busy contract does not depend on the trust decision:
+
+```text
+=== events (UNTRUSTED workspace, --skip-trust) ===
+BeforeAgent
+AfterAgent
+```
+
+And hook arrays MERGE across layers rather than overriding, so a project's own hooks keep running alongside firstmate's:
+
+```text
+=== which AfterAgent hooks ran (trusted workspace, both layers define AfterAgent) ===
+PROJECT
+SYSTEM
+```
+
+A second end-to-end spawn against a project that already committed its own `.gemini/settings.json` confirmed the file was untouched, that `git status` reported only the worker's own new output file, and that teardown removed firstmate's settings file:
+
+```text
+t=4s   state: working · source: pane · harness busy (gemini-hook)
+t=8s   state: working · source: pane · harness busy (gemini-hook)
+after turn: state=idle source=gemini-hook event=after-agent
+e2e2-output.txt: ANCHOR
+project .gemini/settings.json: {"context":{"fileName":"GEMINI.md"}}   (unchanged)
+interrupt-delivered gm2 harness=gemini backend=tmux verified=agent-alive cancel=unconfirmed
+stopped gm2 harness=gemini backend=tmux
+teardown gm2 complete; state/gm2.gemini-settings.json removed
+```
+
+### Not verified
+
+Gemini as a PRIMARY or SECONDMATE runtime is unverified and is refused by `bin/fm-spawn.sh`: no wake protocol exists under `docs/supervision-protocols/` and no turn-end guard adapter was built or exercised.
+No reasoning-effort axis was found; `gemini --help` on 0.58.0 exposes no effort, reasoning, or thinking flag, so the record-and-omit contract applies.
 
 ## Herdr
 
@@ -477,6 +813,9 @@ ok - version floor: herdr 0.8.0 protocol 19 is at or above the floor and preserv
 ok - version floor: an unconfigured home stays projected on herdr 0.8.0 and the explicit opt-in agrees
 evidence: herdr=0.8.0 protocol=19 steal_live=0 floor_verdict=0 default-session-tripwire=armed
 ```
+
+The same guarded named-lab command passed on 2026-09-03 against Herdr 0.8.2 after this regression joined the required `real-herdr-gated` lane.
+It reported `steal_live=0 floor_verdict=0 default-session-tripwire=armed`, with the fleet's default session unchanged before and after.
 
 Part C is the case the suite could not reach before: a doomed pane whose shell holds a persistent background child fails the lone-idle-shell proof on every sample, so the plan takes the plain explicit close, in the geometry where the closing workspace's right neighbour is a spacer rather than the focused anchor.
 On 0.7.5 that fallback exposed a bounded four-sample wrong-focus window and restored the anchor exactly; on 0.8.0 the same fallback exposed none, which is why default-on projection is floored at 0.8.0 rather than mitigated further below it.
@@ -945,16 +1284,17 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 
 ## Pi supervision branch
 
-The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its persistent second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage`, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
+The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
 In TUI mode, its `/supervision-model` model list is drawn with Pi's own `SelectList`, `Input`, `fuzzyFilter`, and `DynamicBorder` through the extension context's `ui.custom` surface, which is what bounds and searches a long catalog.
 
 Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
 
-- Real-SDK guard: `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against the globally installed `@earendil-works/pi-coding-agent` 0.81.1 printed `ok - real Pi SDK 0.81.1 accepts the branch session construction and preserves an unpromptable wake`.
-  The guard reads no credentials and makes no provider call: an isolated empty `PI_CODING_AGENT_DIR` leaves model resolution empty, so the branch's first prompt fails fast and must prove the fallback that returns the wake to main.
+- Historical real-SDK guard: `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against the globally installed `@earendil-works/pi-coding-agent` 0.81.1 printed `ok - real Pi SDK 0.81.1 accepts the branch session construction and preserves an unpromptable wake`.
+  The guard read no credentials and made no provider call: an isolated empty `PI_CODING_AGENT_DIR` left model resolution empty, so the branch's first prompt failed fast and exercised the former direct-branch fallback.
+  That fallback probe predates watcher-owned settlement and is not current evidence for the replacement-safe delivery boundary.
   The same run confirms that a real `ModelRegistry` over that empty agent dir still exposes the picker-facing availability surface, then pins `openai/no-such-live-model` and proves that the branch's own `ModelRuntime` refuses the unresolvable pin instead of silently running supervision on main's model.
 - Model-pin precedence: the same guard run printed `ok - real Pi SDK 0.81.1 applies an explicit branch model on create and over a reopened session's recorded model`.
-  It declares a local `fm-live-fake` provider in an isolated `models.json`, never contacts it, and proves through `session.model` that an explicit model is applied on create, still wins over the model a reopened session recorded, and is absent-pin-restorable - the exact behavior a pin that must survive `/new`, `/resume`, `/fork`, and reload depends on.
+  It declares a local `fm-live-fake` provider in an isolated `models.json`, never contacts it, and proves through `session.model` that an explicit model is applied on create, still wins over the model a reopened session recorded, and is absent-pin-restorable - the SDK behavior needed when a model or effort change reopens the current main session's branch conversation.
 - Effort-pin vendor contract: the same guard run printed `ok - real Pi SDK 0.81.1 reports its own supported effort levels and applies an explicit branch effort over a reopened session's recorded level`.
   Over its own local never-contacted provider it confirms that `getSupportedThinkingLevels` still returns `["off","minimal","low","medium","high","xhigh","max"]` for a model mapping every extended level, narrows to `["off","minimal","low","medium","high"]` for a reasoning model mapping none, returns `["off"]` for a non-reasoning model, and that `clampThinkingLevel` lowers `max` to `high` on the narrow model while collapsing an unrecognized token to `off` - which is why the extension rejects an unrecognized pin before that clamp can see it.
   It then proves through `session.thinkingLevel` that an explicit effort is applied on create, that a reopened session with no override restores its own recorded level, that an explicit effort beats that recorded level, and that an over-ceiling effort is clamped rather than refused.
@@ -963,8 +1303,9 @@ Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
   That case imports the real `SelectList`, `Input`, `fuzzyFilter`, and `DynamicBorder`, renders a 42-row catalog through the real `SelectList` at the visible bound the extension asks for, and fails naming the installed version if Pi stops exporting a primitive or stops bounding what it renders; it skips when no npm package is installed, and the portable stubbed cases in the same file hold the ordering, search, and branch-only-pin behavior everywhere.
 - Strict typecheck: `tests/fm-pi-primary-types.test.sh` printed `ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1` with the branch extension and its imported libraries included.
   This typecheck is also the enforcement for the extension's declared effort vocabulary: its bidirectional assertion against Pi's own `getThinkingLevel` return type fails the moment Pi adds or removes a thinking level, so the runtime list used to reject an unrecognized hand-edited pin cannot drift into a stale Firstmate catalog.
-- Custom-message provider conversion: on 2026-08-26, `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against installed `@earendil-works/pi-coding-agent` 0.84.1 printed `ok - real Pi SDK 0.84.1 delivers a custom message to the provider as user text carrying only content, so the captain outcome's typed envelope is what reaches the model`.
+- Historical custom-message provider conversion: on 2026-08-26, `FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh` against installed `@earendil-works/pi-coding-agent` 0.84.1 printed `ok - real Pi SDK 0.84.1 delivers a custom message to the provider as user text carrying only content, so the captain outcome's typed envelope is what reaches the model`.
   The guard passes a typed captain outcome and a plain rendered routine note through Pi's exported `convertToLlm`, proves that `customType` and `display` are not model-visible identity, and classifies the resulting provider text with `bin/fm-operational-input.sh`.
+  This evidence explains the superseded model-relay path but is no longer the captain-delivery contract.
 
 ### 2026-08-28 Pi 0.84.4 SDK compatibility refresh
 
@@ -987,5 +1328,177 @@ FM_TEST_END 2026-08-29T01:01:01Z tests/fm-pi-branch-live-e2e.test.sh exit=0 dura
 
 The focused extension suite also exercised the installed Pi 0.84.4 picker and outcome-renderer consumers; [`calm-mode-feasibility.md`](../calm-mode-feasibility.md#2026-08-28-pi-0844-outcome-renderer-compatibility-verification) owns the version-scoped renderer evidence.
 
+### 2026-08-29 deterministic captain-outcome delivery
+
+The credential-free live guard, focused extension suite, store suite, and strict typecheck were run against the locally installed `@earendil-works/pi-coding-agent` 0.84.3 package.
+No model was selected or prompted, no provider call was made, and the active Pi session was not changed.
+
+```sh
+bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh
+bin/fm-test-run.sh tests/fm-branch-supervision.test.sh
+npm exec --yes --package=typescript@5.9.3 -- bash tests/fm-pi-primary-types.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
+```
+
+```text
+ok - captain outcomes are exact and exactly once across crash, reload, busy main, compaction, and an unrelated assistant response
+ok - startup replay cannot advance the cursor across an unrendered captain outcome
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.3
+ok - real Pi SDK 0.84.3 immediately renders appendEntry in the active transcript, persists it across reopen, and excludes it from model context
+```
+
+The live probe loads the extension through Pi's real resource loader and AgentSession, subscribes a stock InteractiveMode, verifies `ExtensionAPI.appendEntry` synchronously inserts the exact registered custom row into its active chat once, reopens the resulting session file to verify exact structured data, and verifies the entry is absent from `buildSessionContext().messages`.
+The focused regression recreates the incident topology with stale compaction framing and an immediately preceding unrelated assistant response, then covers idle and busy delivery, cold startup with late fleet-lock acquisition, the crash boundary after entry persistence but before cursor advancement, and repeated reload without duplication.
+
+### 2026-09-01 sequence-keyed captain-outcome processing
+
+The focused extension suite, store suite, strict typecheck, and credential-free live guard were run against a locally installed `@earendil-works/pi-coding-agent` 0.84.4 package selected with `FM_PI_PACKAGE_DIR`, on macOS 26.5.0 arm64, Node v24.13.1.
+No model was selected or prompted, no provider call was made, and the active Pi session was not changed.
+
+```sh
+FM_PI_PACKAGE_DIR=<pi-0.84.4 package> bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh
+bin/fm-test-run.sh tests/fm-branch-supervision.test.sh
+FM_PI_PACKAGE_DIR=<pi-0.84.4 package> npm exec --yes --package=typescript@5.9.3 -- bash tests/fm-pi-primary-types.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 FM_PI_PACKAGE_DIR=<pi-0.84.4 package> bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
+```
+
+```text
+ok - a captain outcome reaches main's model as one typed, sequence-keyed processing request while routine notes stay plain
+ok - a captain outcome opens one sequence-keyed processing turn, survives empty and unrelated answers, is re-presented at run end and session start, and closes only on its acknowledgement
+ok - the processed marker is sequence-bound, never ahead of the read cursor, never backwards, and migrates delivered history once
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.4
+ok - real Pi SDK 0.84.4 immediately renders appendEntry in the active transcript, persists it across reopen, and excludes it from model context
+```
+
+The focused regression recreates the two 2026-08-31 incident shapes against the real store scripts: a delivered decision outcome whose processing turn returns an empty assistant message, and one whose turn repeats an unrelated prior answer.
+In both, the processed marker holds, the same sequence is presented again at the run boundary and after a session replacement, the triggered-turn budget gives way to a next-prompt copy without duplicates, and only `fm_branch_processed` with the presented sequence closes the outcome; a routine outcome never enters the path, and delivered history from before the marker existed is migrated once rather than re-presented.
+On this machine the globally installed npm package is 0.81.1, whose stock `ToolExecutionComponent` rendering differs from the 0.84 line and fails the suite's first rendering-consumer case before any delivery case runs, which is why `FM_PI_PACKAGE_DIR` points at the 0.84.4 install above.
+
+### 2026-09-02 historical post-construction provider-error fallback
+
+The focused extension suite, strict typecheck, and real-SDK guard were run against the npm `@earendil-works/pi-coding-agent` 0.84.4 package on macOS 26.5.0 arm64, Node v24.13.1, before fallback ownership moved from the branch extension to the watcher.
+The real-SDK case configured an isolated local OpenAI-compatible model, intercepted its only `fetch` in-process with the incident's non-retryable 429 `Monthly usage limit reached` response, read no user credential, and allowed no external provider request.
+It proved that Pi persisted an assistant message with `stopReason: "error"` and resolved the constructed branch prompt normally, after which the extension released the claimed-row grant, retained the durable queue row, and returned the exact wake to main as a follow-up.
+
+```sh
+FM_PI_PACKAGE_DIR="$HOME/.npm/_npx/1f276a68aabfc75c/node_modules/@earendil-works/pi-coding-agent" bash tests/fm-pi-branch-extension.test.sh
+FM_PI_PACKAGE_DIR="$HOME/.npm/_npx/1f276a68aabfc75c/node_modules/@earendil-works/pi-coding-agent" bash tests/fm-pi-primary-types.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 FM_PI_PACKAGE_DIR="$HOME/.npm/_npx/1f276a68aabfc75c/node_modules/@earendil-works/pi-coding-agent" bash tests/fm-pi-branch-live-e2e.test.sh
+```
+
+```text
+ok - a settled branch turn without a durable outcome falls back and releases its grant for main replay
+ok - post-construction provider errors fall back immediately and repeated failures defer later wakes directly to main
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.4
+ok - real Pi SDK 0.84.4 returns a post-construction 429 wake to main without losing its durable row
+```
+
+The current portable regression proves that only consecutive provider errors count toward the two-error broken-branch latch: a durable report between errors resets the streak, the error that reaches the threshold rejects to watcher-owned fallback, and the next wake remains on main without another branch prompt.
+`tests/fm-pi-watch-extension.test.sh` owns the provider-free integration evidence that watcher fallback remains pending until Pi accepts the main follow-up or the branch settles successfully, and that a follow-up accepted while main is streaming neither stalls the successor chain nor escapes replacement replay until Pi consumes it.
+[`pi-supervision-branch.md`](../pi-supervision-branch.md) owns the current cooldown, recovery, and re-latch contract and points to the regression that now covers it.
+
 Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
-The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running the live guard, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
+The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh the SDK construction, picker, renderer, and type evidence after every Pi upgrade by rerunning the applicable live guard probes, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists).
+The live guard now drives both extensions through the watcher-owned settlement handshake, requires rejected branch settlement before main delivery, and verifies successor-delivery confirmation; rerun it against the matching importable Pi package to refresh end-to-end fallback evidence.
+
+### 2026-09-02 streaming-time watcher delivery
+
+The focused watcher suite, strict typecheck, and credential-free live guard were run against the npm `@earendil-works/pi-coding-agent` 0.84.4 package selected with `FM_PI_PACKAGE_DIR`, on macOS 26.6.2 arm64, Node v24.14.1, after the watcher extension stopped waiting for `before_agent_start` before settling a main delivery.
+No credential was read, no request left the machine, and the active Pi session was not changed.
+
+```sh
+bin/fm-test-run.sh tests/fm-pi-watch-extension.test.sh
+FM_PI_PACKAGE_DIR=<pi-0.84.4 package> npm exec --yes --package=typescript@5.9.3 -- bash tests/fm-pi-primary-types.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 FM_PI_PACKAGE_DIR=<pi-0.84.4 package> bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
+```
+
+```text
+ok - Pi hung successor falls back to one typed actionable wake
+ok - Pi streaming-time wake delivery keeps the successor chain and replays only unconsumed wakes
+ok - Pi retries a verified successor that failed during wake delivery once that delivery settles
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.4
+ok - real Pi SDK 0.84.4 queues a streaming-time watcher wake without before_agent_start, keeps the successor chain, and surfaces consumption of both follow-ups
+```
+
+The live probe loads the tracked watcher extension through Pi's real resource loader into a real AgentSession whose only provider is a local fake with its fetch intercepted in-process and held open mid-stream.
+It proved that a follow-up the extension sends while main is streaming raises no `before_agent_start` at queue time or when the run reaches it, joins the run as a user `message_start` carrying the exact wake text in its own model turn, and is followed by a verified successor and delivery of the next close; a follow-up sent to the idle main raises `before_agent_start` with the exact text before its user `message_start`.
+The portable regression drives the same shape with a fake main that never raises `before_agent_start` while streaming, then proves a replacement replays only the follow-up Pi had not consumed and that an exhausted restoration delivers its typed failure without launching a further arm.
+A second regression holds a branch settlement open while the verified successor exits with a failure, and proves that failure takes the ordinary bounded retry once the delivery settles rather than leaving the generation with no watcher and no retry.
+
+### 2026-09-04 off-thread supervision outcome delivery
+
+The real-TUI responsiveness guard, focused extension suite, store suite, and strict typecheck were run on macOS 26.5.0 arm64, Node v24.13.1, tmux 3.6a, against the signed Pi launcher 0.82.0 for the TUI arms and the npm `@earendil-works/pi-coding-agent` 0.81.1 package for the typecheck.
+The lab used a scratch `FM_HOME`, a scratch project holding a copy of the tracked extension, a private tmux socket, a scratch session directory, and `--offline`; only `/new` was ever sent, so no model turn ran and no request left the machine, and the captain's own Pi session was not touched.
+
+```sh
+FM_PI_BRANCH_RESPONSIVENESS_E2E=1 bash tests/fm-pi-branch-responsiveness-live-e2e.test.sh
+bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh
+bin/fm-test-run.sh tests/fm-branch-supervision.test.sh
+npm exec --yes --package=typescript@5.9.3 -- bash tests/fm-pi-primary-types.test.sh
+```
+
+```text
+pi 0.82.0 keystroke echo, worst observed: floor 22.6 ms, extension idle 35.6 ms, extension delivering 36.8 ms
+ok - supervision outcome delivery keeps the real Pi 0.82.0 TUI echoing keystrokes at its unloaded floor
+ok - outcome delivery keeps the event loop running and interleaved reports stay ordered and exactly once
+ok - a session replaced mid-delivery cancels cleanly and the stored outcome still arrives exactly once
+ok - a failing store script surfaces to the branch and its outcome is neither lost nor delivered twice
+ok - a failed cursor write re-delivers a routine note exactly once more while a captain outcome stays deduplicated
+skip: installed Pi 0.81.1 predates the stock renderer contract 0.84.4 this case compares against
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.81.1
+```
+
+That skip is the renderer case declining to render a verdict on a Pi older than the contract it compares against: since 0.84.4 the stock renderer no longer supplies an implicit reset at multiline boundaries and the extension emits that reset itself, so an older installed Pi differs legitimately.
+It names the installed version and the floor rather than degrading quietly, and a package whose version cannot be read at all is still a failure.
+
+The same guard against the pre-change extension in the same lab measured a 676.9 ms worst keystroke echo while delivering two outcomes and a 295.3 ms worst echo with nothing to deliver, against a 49.2 ms extension-free floor, and failed as designed.
+Measured through the same real `fm_branch_report` tool and real `bin/` scripts with a 1 ms interval timer, the largest single block of the JavaScript thread fell from 273 ms to 2.0 ms for a routine outcome, from 286 ms to 2.0 ms for a captain outcome, and from 134 ms to 1.9 ms for main's acknowledgement, against a 1.3-2.2 ms idle-loop floor.
+Those absolute figures are specific to this host and Pi version; the guards assert the relationship (delivery must stay in the class of the same machine's own floor) rather than a remembered millisecond number.
+
+## Oh My Pi (omp)
+
+omp runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#omp-oh-my-pi-native-delivery-2026-09-05) owns the primary evidence.
+The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin/omp`, a Bun-compiled single binary) on macOS 26 arm64 through the Herdr backend with the `openai-codex/gpt-6-astra` model, building on the 2026-09-02 adapter investigation against 18.1.2.
+
+### Process identity and markers
+
+`ps -o comm=` reports the bare name `omp` for the agent process, from both its `!` bash path and the model's bash tool, so identity is the anchored name; `ompd` and `comp` never match.
+omp publishes no harness marker: `PI_CODING_AGENT` is absent from the binary, and the default profile sets neither `PI_CODING_AGENT_DIR` nor `OMP_PROFILE` in the process environment.
+`FM_OMP_HARNESS=omp` is Firstmate's own launch marker and wins over an inherited `CLAUDECODE` only under a real omp ancestor; `tests/fm-omp-harness.test.sh` pins both directions with real processes.
+
+### Composer
+
+Under the captain's `unicode` symbol preset the idle screen through Herdr was a bare `❯` (U+276F) row followed directly by the status row:
+
+```text
+❯
+ π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 15.4%/272K ⟲ · (sub)
+```
+
+Before the status-row rule the shared classifier folded that row into the bare composer's wrap region and read the idle pane `pending`, so `bin/fm-send.sh` skipped its doorbell on the first live omp worker.
+After the rule, the same live Herdr capture read `empty`, a steer's doorbell landed, and the worker opened a turn on it.
+`tests/fm-composer-lib.test.sh` pins the unicode idle row, the nerd-preset idle row, the busy spinner row, and typed text over the same fixture in both locales.
+
+### Busy state and lifecycle
+
+| Fact | Observed |
+| --- | --- |
+| Semantic source | `omp-ext`: `busy source=omp-ext event=agent-start` on the brief, `idle source=omp-ext event=agent-end` at its natural end, `busy` again on a steer, `idle` after a control-plane interrupt |
+| Rendered busy row | `⎋ Working…` (U+2026) above the composer and a braille spinner plus elapsed cell (`⠧ 36s`) in the status row; the omp busy regex accepts only those two TUI signals, not the `Working...` that headless `-p` writes to stderr, since no supervised omp pane runs headless |
+| Interrupt | `bin/fm-control.sh <id> interrupt` delivered a single Escape (`verified=agent-alive cancel=unconfirmed`), the composer read `empty`, and omp raised `agent_end` |
+| Exit | `bin/fm-control.sh <id> exit` typed `/quit`; Herdr then reported the pane `dead` |
+| Extension loading | a file named both by `-e` and by `<cwd>/.omp/extensions` loads twice; discovery is top-level and cwd-only |
+| Extension tools | the openai-codex model invokes a registered tool by writing `xd://<tool>` through omp's virtual-file bridge |
+
+### End-to-end
+
+A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --model openai-codex/gpt-6-astra --effort low` on Herdr and driven to completion:
+
+1. the launch delivered its brief positionally under the tracked posture overlay and the agent executed it with no approval prompt;
+2. the busy record moved seed, busy, idle exactly as the extension contract states;
+3. the report landed and the `done:` status line was appended;
+4. `bin/fm-send.sh` rang the doorbell once the composer read `empty`, and the worker opened a turn on the inbox record;
+5. `bin/fm-control.sh <id> interrupt` cancelled the running turn;
+6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
+
+`FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.

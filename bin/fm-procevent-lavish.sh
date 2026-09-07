@@ -7,12 +7,29 @@
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh silent <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
+#   fm-procevent-lavish.sh reconciles <result-file>
+#   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html>
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
+# read       Print a structured presentation of one already-captured result so a
+#            handler consumes every queued item without grepping the raw file.
+#            It is read-only over the capture: it does not arm, poll, or change
+#            what Lavish delivered. The session-ending freeform message
+#            (tag=message) is its own labeled field, printed first and distinct
+#            from per-element annotations. Declared and presented item counts,
+#            plus a completeness verdict, follow before all annotations so a
+#            partial read is obvious. Each annotation retains its element uid,
+#            selector, tag, and text. A non-choice freeform comment (`prompt`)
+#            is printed as its own field even when a selector is also present
+#            and even when that comment matches the element text, so typed
+#            words are never dropped. Choice Context data is not a comment.
+#            Captain-supplied body lines are visibly prefixed so they cannot
+#            forge structural labels. Empty message and annotation sections
+#            are reported explicitly.
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
@@ -60,6 +77,9 @@
 # Only rows tagged `choice` are read. A freeform captain message is prose that may
 # contain anything, and must never be able to forge a decision key.
 #
+# `read` is the presentation command summarized above; keyed intake remains
+# the separate `answers` contract described here.
+#
 # It wraps ONLY the currently published interface, verified against 0.1.45:
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
 # and that command "long-polls indefinitely" server-side. The adapter therefore
@@ -104,7 +124,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,92p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -374,7 +394,7 @@ cmd_silent() {
   [ "$content_rc" -eq 1 ]
 }
 
-# Print `key<TAB>answer<TAB>label[<TAB>mode]` for every structured choice the
+# Print `key<TAB>answer<TAB>label[<TAB>mode]` for each non-reconcile structured choice the
 # captain submitted in a captured result; the optional mode column relays the
 # card's declared close mode (`done` or `release`) to the keyed-answer intake. The published response frames queued feedback as
 # a `prompts[N]{field,...}:` header followed by exactly N indented CSV rows whose
@@ -382,18 +402,20 @@ cmd_silent() {
 # rather than assuming a fixed column, and takes only rows whose `tag` field is
 # `choice`. A freeform `message` row is captain prose and is deliberately never a
 # source of decision keys. A row that does not carry both a slug-shaped `question`
-# and an `answer` inside its `Context data:` block is skipped, so a deck that does
-# not key its forms by decision key simply yields nothing.
+# and the versioned `selection` and `note` fields inside its `Context data:` block
+# is skipped. A time-limited rollout branch accepts the old question/answer
+# shape only for ordinary answers and rejects its bare or annotated reconcile
+# values because old rows do not separate the selected option from its note.
 # The question cap is 128 so any task id fits, including the long legacy
 # `<origin>-decision-<key>` identities pre-collapse decks still carry; the
 # security property is the slug SHAPE, which is unchanged.
-cmd_answers() {
-  local file=${1-}
+cmd_choice_rows() {
+  local selection=$1 file=${2-}
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   perl -MJSON::PP -e '
     use strict; use warnings;
-    my ($path) = @ARGV;
+    my ($selection, $path) = @ARGV;
     open my $fh, "<", $path or exit 1;
     my (@fields, $want, @rows);
     while (my $line = <$fh>) {
@@ -409,7 +431,7 @@ cmd_answers() {
     }
     close $fh;
     my %seen;
-    my @out;
+    my @choices;
     for my $row (@rows) {
       $row =~ s/^\s+//;
       my @vals;
@@ -432,27 +454,209 @@ cmd_answers() {
       my $ctx = $1;
       my $data = eval { decode_json($ctx) };
       next unless ref($data) eq "HASH";
-      my $key = $data->{question};
-      my $answer = $data->{answer};
-      next if !defined($key) || ref($key) || !defined($answer) || ref($answer);
+      my ($key, $selected, $note, $answer, $legacy);
+      if (defined($data->{schema}) && !ref($data->{schema})
+          && $data->{schema} eq "fm-bearings-answer.v1") {
+        $key = $data->{question};
+        $selected = $data->{selection};
+        $note = $data->{note};
+        next if !defined($key) || ref($key) || !defined($selected) || ref($selected)
+          || !defined($note) || ref($note);
+        next unless $selected eq "" || $selected =~ /\A[A-Za-z0-9._-]{1,128}\z/;
+        next unless length($note) <= 512;
+        next unless length($selected) || length($note);
+        $answer = length($selected) ? $selected : $note;
+        $legacy = 0;
+      # Time-limited compatibility for captures from pre-change boards; remove
+      # once no board carrying the old question/answer context can remain armed.
+      } elsif (!exists($data->{schema}) && !exists($data->{selection})
+          && !exists($data->{note})) {
+        $key = $data->{question};
+        $answer = $data->{answer};
+        next if !defined($key) || ref($key) || !defined($answer) || ref($answer);
+        next unless length($answer) && length($answer) <= 512;
+        next if $answer eq "reconcile" || index($answer, "reconcile - ") == 0;
+        $selected = "";
+        $note = "";
+        $legacy = 1;
+      } else {
+        next;
+      }
+      next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
       my $mode = "";
       if (exists $data->{close}) {
         next if !defined($data->{close}) || ref($data->{close})
           || ($data->{close} ne "done" && $data->{close} ne "release");
         $mode = $data->{close};
       }
-      next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
-      next unless length $answer && length($answer) <= 512;
       my $label = defined $f{text} ? $f{text} : "";
-      s/[\x00-\x1f\x7f]/ /g for ($answer, $label);
+      s/[\x00-\x1f\x7f]/ /g for ($answer, $note, $label);
       $label = substr($label, 0, 512);
-      # A re-answered form appears again later in the queue; the last submission wins.
-      if (defined $seen{$key}) { $out[$seen{$key}] = undef }
-      $seen{$key} = scalar @out;
-      push @out, length $mode ? "$key\t$answer\t$label\t$mode" : "$key\t$answer\t$label";
+      if (defined $seen{$key}) { $choices[$seen{$key}] = undef }
+      $seen{$key} = scalar @choices;
+      push @choices, {
+        key => $key, selection => $selected, note => $note, legacy => $legacy,
+        answer => $answer, label => $label, mode => $mode
+      };
     }
-    print "$_\n" for grep { defined } @out;
-  ' "$file"
+    for my $choice (grep { defined } @choices) {
+      if ($selection eq "reconciles") {
+        next if $choice->{legacy};
+        if ($choice->{selection} eq "reconcile") {
+          print length($choice->{note})
+            ? "$choice->{key}\t$choice->{note}\n"
+            : "$choice->{key}\n";
+        }
+        next;
+      }
+      next if $choice->{selection} eq "reconcile";
+      print length $choice->{mode}
+        ? "$choice->{key}\t$choice->{answer}\t$choice->{label}\t$choice->{mode}\n"
+        : "$choice->{key}\t$choice->{answer}\t$choice->{label}\n";
+    }
+  ' "$selection" "$file"
+}
+
+cmd_answers() { cmd_choice_rows answers "$@"; }
+cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
+
+# Present one already-captured result for a handler. Body lines are prefixed
+# so a captain-supplied string cannot forge a section label. The session-ending
+# message is printed before the count line and before any annotation, because
+# that is the field a truncated grep of the raw capture historically dropped.
+# A non-choice annotation that carries a freeform `prompt` prints that comment
+# as its own field; a selector must not hide the typed words, even when the
+# comment matches the captured element text. Choice rows keep Context data
+# out of that field. A pure annotation has no prompt.
+cmd_read() {
+  local file=${1-} lifecycle session_ended
+  [ -n "$file" ] || usage
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  lifecycle=$(cmd_classify "$file")
+  session_ended=$(session_field "$file" session_ended)
+  perl -e '
+    use strict; use warnings;
+    my ($path, $lifecycle, $session_ended) = @ARGV;
+    open my $fh, "<", $path or exit 1;
+    my (@fields, $want, @rows);
+    while (my $line = <$fh>) {
+      if (!@fields) {
+        next unless $line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/;
+        ($want, @fields) = ($1, split /,/, $2);
+        next;
+      }
+      last unless $line =~ /^\s/;
+      last if defined($want) && @rows >= $want;
+      chomp $line;
+      push @rows, $line;
+    }
+    close $fh;
+    $want = 0 unless defined $want;
+    my @parsed;
+    my $malformed = 0;
+    for my $row (@rows) {
+      $row =~ s/^\s+//;
+      my @vals;
+      while (length $row) {
+        if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
+          push @vals, $1;
+        } else {
+          $row =~ s/^([^,]*)//;
+          push @vals, $1;
+        }
+        last unless $row =~ s/^,//;
+      }
+      if (@vals > @fields) {
+        my ($preserve) = grep { $fields[$_] eq "prompt" } 0 .. $#fields;
+        ($preserve) = grep { $fields[$_] eq "text" } 0 .. $#fields unless defined $preserve;
+        if (defined $preserve) {
+          my $count = @vals - @fields + 1;
+          my @parts = splice @vals, $preserve, $count;
+          splice @vals, $preserve, 0, join(",", @parts);
+        }
+      }
+      if (@vals != @fields) {
+        $malformed++;
+        next;
+      }
+      s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @vals;
+      my %f;
+      $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
+      push @parsed, \%f;
+    }
+    my $presented = scalar @parsed;
+    my $complete = ($presented == $want && !$malformed) ? "yes" : "no";
+    my @messages;
+    my @annotations;
+    for my $f (@parsed) {
+      my $tag = defined $f->{tag} ? $f->{tag} : "";
+      if ($tag eq "message") {
+        push @messages, $f;
+      } else {
+        push @annotations, $f;
+      }
+    }
+    sub emit_body {
+      my ($text) = @_;
+      $text = "" unless defined $text;
+      $text =~ s/\r\n/\n/g;
+      $text =~ s/\r/\n/g;
+      my @lines = split /\n/, $text, -1;
+      pop @lines if @lines && $lines[-1] eq "";
+      return if !@lines || (@lines == 1 && $lines[0] eq "");
+      print "| $_\n" for @lines;
+    }
+    if (@messages) {
+      print "SESSION-ENDING MESSAGE\n";
+      for my $i (0 .. $#messages) {
+        print "SESSION-ENDING MESSAGE PART ", ($i + 1), " of ", scalar(@messages), "\n" if @messages > 1;
+        my $body = defined $messages[$i]{prompt} && length $messages[$i]{prompt}
+          ? $messages[$i]{prompt}
+          : (defined $messages[$i]{text} ? $messages[$i]{text} : "");
+        emit_body($body);
+      }
+      print "END SESSION-ENDING MESSAGE\n";
+    } else {
+      print "SESSION-ENDING MESSAGE: (none)\n";
+    }
+    print "\n";
+    print "declared_items: $want\n";
+    print "presented_items: $presented\n";
+    print "malformed_items: $malformed\n";
+    print "complete: $complete\n";
+    print "lifecycle: $lifecycle\n";
+    print "session_ended: ", (length $session_ended ? $session_ended : "(unset)"), "\n";
+    print "annotation_count: ", scalar(@annotations), "\n";
+    print "session_ending_message_count: ", scalar(@messages), "\n";
+    print "\n";
+    if (@annotations) {
+      print "ANNOTATIONS\n";
+      my $n = 0;
+      for my $f (@annotations) {
+        $n++;
+        my $uid = defined $f->{uid} ? $f->{uid} : "";
+        my $selector = defined $f->{selector} ? $f->{selector} : "";
+        my $tag = defined $f->{tag} ? $f->{tag} : "";
+        print "ANNOTATION $n of ", scalar(@annotations), "\n";
+        print "element_uid: $uid\n";
+        print "element_selector: $selector\n";
+        print "tag: $tag\n";
+        print "text:\n";
+        my $elem = defined $f->{text} ? $f->{text} : "";
+        my $comment = defined $f->{prompt} ? $f->{prompt} : "";
+        my $body = length $elem ? $elem : $comment;
+        emit_body($body);
+        if ($tag ne "choice" && length $comment) {
+          print "prompt:\n";
+          emit_body($comment);
+        }
+      }
+      print "END ANNOTATIONS\n";
+    } else {
+      print "ANNOTATIONS: (none)\n";
+    }
+    print "END LAVISH RESULT ($presented of $want)\n";
+  ' "$file" "$lifecycle" "$session_ended"
 }
 
 case "${1-}" in
@@ -464,6 +668,8 @@ case "${1-}" in
   terminal)  shift; cmd_terminal "$@" ;;
   silent)    shift; cmd_silent "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
+  reconciles) shift; cmd_reconciles "$@" ;;
+  read)      shift; cmd_read "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac

@@ -31,14 +31,14 @@
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
 #                       diagnostics always run. Bootstrap's six MUTATING sweeps
-#                       (legacy PR-check migration, secondmate convergence,
-#                       secondmate liveness, pending remote handoff retry,
-#                       X-mode artifact writes, fleet sync) also run only when
+#                       (same-home backlog reconciliation,
+#                       secondmate convergence, secondmate liveness, pending remote
+#                       handoff retry, X-mode artifact writes, fleet sync) also run only when
 #                       locked; the four network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
-#   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
-#                       reconciliation before presenting durable wakes and advancing
-#                       recovery handling state, so both only run when locked.
+#   3. wake-drain     - presents durable wakes and advances recovery handling
+#                       state, so it only runs when locked. The local bounded
+#                       inactive-outcome startup scan runs in the deferred worker.
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
@@ -69,11 +69,14 @@
 # call. The five that did - `gh auth status`, secondmate liveness, secondmate
 # convergence, pending remote handoff delivery, and the fleet-sync fetch - are
 # started as one detached bounded worker right after the lock (step 1) and
-# harvested at step 7 without ever blocking on it. bin/fm-startup-network.sh
-# owns that stage and its safety argument; bin/fm-bootstrap.sh remains the owner
-# of the sweeps themselves and still runs every one of them.
-# The digest is therefore composed from local reads and local subprocesses only,
-# and an unreachable host now delays a reported check rather than the startup.
+# harvested at step 7 without ever blocking on it. The bounded inactive-outcome
+# startup scan joins that worker because its local current-state reads can also
+# be slow. bin/fm-startup-network.sh owns that stage and its safety argument;
+# bin/fm-bootstrap.sh and bin/fm-inactive-reconcile.sh remain the owners of the
+# work itself and still run it.
+# The digest is therefore composed from bounded local reads and local
+# subprocesses only, while slow network or inactive-state reconciliation delays
+# a reported check rather than startup.
 # What this deliberately trades: on a slow network the digest prints "IN
 # PROGRESS" and names exactly which checks are not yet confirmed, instead of
 # waiting for them. It never reports an unconfirmed check as passed.
@@ -190,8 +193,9 @@
 #             only lost its context (a /clear or a compaction). Skip the
 #             mutating sweeps that startup already reconciled - the stale Herdr
 #             projection cleanup and bootstrap's six mutating sweeps (fleet
-#             sync, secondmate convergence and liveness, PR-check migration,
-#             pending remote handoff retry, X-mode artifact writes) - and
+#             sync, same-home backlog reconciliation, secondmate convergence and
+#             liveness, pending remote handoff retry, X-mode
+#             artifact writes) - and
 #             re-emit the rest. Wake-queue presentation is NOT skipped: queued
 #             records are this turn's work queue, they arrived after startup,
 #             and a session that owns the lock is exactly the session that must
@@ -612,7 +616,7 @@ if [ "$REEMIT" -eq 1 ]; then
   printf 'This session already took the helm at its own startup and has only lost its\n'
   printf 'context. Lock ownership is re-verified and the durable records below are\n'
   printf 'reprinted, but the sweeps startup already reconciled - project clone refresh,\n'
-  printf 'secondmate convergence and liveness, PR-check migration, pending remote handoff\n'
+  printf 'secondmate convergence and liveness, pending remote handoff\n'
   printf 'retry, X-mode artifact writes, and stale Herdr child cleanup - are NOT repeated.\n'
   printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
 else
@@ -632,7 +636,7 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
     printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
     printf '●  %s\n' "$LOCK_OUT"
-    printf '●  Skipping every mutating step: PR-check migration, stale Herdr child cleanup,\n'
+    printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
     printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
     printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
@@ -655,9 +659,10 @@ if [ "$READ_ONLY" -eq 0 ]; then
   if [ "$REEMIT" -eq 0 ]; then
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   fi
-  # Every network call this session start owes is launched HERE, detached and
-  # bounded, so it runs concurrently with the whole digest below instead of in
-  # front of it. Step 7 harvests whatever it has finished, without ever waiting.
+  # Every network call and the potentially slow inactive-outcome startup scan
+  # are launched HERE, detached and bounded, so they run concurrently with the
+  # whole digest below instead of in front of it. Step 7 harvests whatever has
+  # finished, without ever waiting.
   # --reemit passes --locked 0 for the same reason it runs bootstrap detect-only:
   # this process already ran the mutating sweeps at its own startup, so only the
   # read-only GitHub-auth probe is owed. A read-only session starts nothing at
@@ -694,10 +699,11 @@ else
   printf '(silent - all good)\n'
 fi
 
-# --- 3. inactive outcomes + wake-drain -----------------------------------
-# The existing locked session-start path runs the same local inactive-outcome
-# reconciliation as the watcher poll before it presents the resulting durable
-# wake, without adding a daemon or external-network call.
+# --- 3. wake-drain ---------------------------------------------------------
+# The inactive-outcome startup scan runs in the deferred worker launched above,
+# where its potentially slow current-state reads cannot block this digest. It
+# publishes findings through the same durable queue drained here; the watcher's
+# separate 900-second cadence remains unchanged.
 # Presented records are this turn's first work queue and remain durable until
 # post-handling acknowledgement. The drain's separate OPEN DECISIONS section
 # remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
@@ -716,11 +722,6 @@ if [ "$READ_ONLY" -eq 1 ]; then
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
-  INACTIVE_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan --startup 2>&1) || INACTIVE_OUT=
-  if [ -n "$INACTIVE_OUT" ]; then
-    printf 'inactive outcome reconciliation: %s\n' "$INACTIVE_OUT"
-  fi
   # Pi supervision-branch recovery, locked path only: clear leases whose
   # supervising session died, and surface outcomes the branch stored durably
   # that never reached main (docs/pi-supervision-branch.md). Gated to the
@@ -762,6 +763,24 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   if ! fm_pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
     || ! fm_pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
+  fi
+fi
+# omp (Oh My Pi) has no project-trust gate: it auto-discovers <cwd>/.omp/extensions
+# with no dialog, so the only ways both tracked primary extensions fail to load
+# are a session started outside this home, an extension disabled in the omp
+# config, or a build older than the tracked file. The markers carry the loaded
+# build plus the loading pid, exactly as the Pi ones do (bin/fm-wake-lib.sh).
+if [ "$PRIMARY_HARNESS" = omp ]; then
+  OMP_EXT="$FM_ROOT/.omp/extensions/fm-primary-omp-watch.ts"
+  OMP_TURNEND_EXT="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  OMP_WATCH_MARKER="$STATE/.omp-watch-extension-loaded"
+  OMP_TURNEND_MARKER="$STATE/.omp-turnend-extension-loaded"
+  OMP_LOCK="$STATE/.lock"
+  OMP_WATCH_VERSION=$(fm_pi_extension_version "$OMP_EXT" || printf '')
+  OMP_TURNEND_VERSION=$(fm_pi_extension_version "$OMP_TURNEND_EXT" || printf '')
+  if ! fm_pi_extension_loaded "$OMP_WATCH_MARKER" "$OMP_WATCH_VERSION" "$OMP_LOCK" \
+    || ! fm_pi_extension_loaded "$OMP_TURNEND_MARKER" "$OMP_TURNEND_VERSION" "$OMP_LOCK"; then
+    printf 'OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory so %s and %s auto-load from .omp/extensions/ for turn-end guard and background wake coverage; pass -e %s -e %s only when omp must start from another directory, never together with auto-discovery (omp loads a file named both ways twice)\n' "$OMP_TURNEND_EXT" "$OMP_EXT" "$OMP_TURNEND_EXT" "$OMP_EXT"
   fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \

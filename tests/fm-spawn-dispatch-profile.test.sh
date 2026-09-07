@@ -7,8 +7,8 @@
 # command firstmate would run without starting any real harness.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
@@ -32,34 +32,7 @@ SH
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
-  fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys)
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
-      for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
-        fi
-        prev=$a
-      done
-    fi
-    exit 0
-    ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fakebin=$(fm_test_make_spawn_fakebin "$dir")
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -88,13 +61,10 @@ make_spawn_case() {
   wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
-  printf '%s\n' "$harness" > "$home/config/crew-harness"
+  fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
-  touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
-    mkdir -p "$home/data/$id"
-    printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    fm_test_spawn_brief "$home" "$id"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -121,16 +91,12 @@ run_spawn() {
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
   # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+  CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
-    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" 2>&1
+    GROK_HOME="$home/grok-home" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
 }
 
 # Ship spawns carry an explicit delivery contract (AGENTS.md section 7); these
@@ -165,7 +131,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -181,7 +147,7 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
   status=$?
   expect_code 0 "$status" "claude spawn under Cursor markers should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
+  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI" \
     "non-cursor launch must clear both inherited Cursor identity markers"
   pass "non-cursor launches clear inherited Cursor identity markers"
 }
@@ -210,7 +176,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$id.pi-ext.ts'" \
     "relative FM_STATE_OVERRIDE leaked into Pi's cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$id/brief.md'" \
+  assert_contains "$launch" "< '$home_real/data/$id/launch-brief.md'" \
     "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
   pass "relative home overrides ignore CDPATH and become absolute before spawn launch construction"
 }
@@ -239,7 +205,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$relative_id.pi-ext.ts'" \
     "relative FM_HOME leaked into Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
+  assert_contains "$launch" "< '$home_real/data/$relative_id/launch-brief.md'" \
     "relative FM_HOME leaked into the default cross-process brief path"
 
   linked_home="$CASE_DIR/home-link"
@@ -259,7 +225,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$absolute_id.pi-ext.ts'" \
     "absolute FM_HOME spelling changed in Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$absolute_id/brief.md'" \
+  assert_contains "$launch" "< '$linked_home/data/$absolute_id/launch-brief.md'" \
     "absolute FM_HOME spelling changed in the default cross-process brief path"
   pass "FM_HOME defaults resolve relative paths and preserve absolute spellings"
 }
@@ -287,7 +253,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$id.pi-ext.ts'" \
     "absolute FM_STATE_OVERRIDE spelling changed in Pi's cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$id/brief.md'" \
+  assert_contains "$launch" "< '$linked_home/data/$id/launch-brief.md'" \
     "absolute FM_DATA_OVERRIDE spelling changed in the cross-process brief path"
   pass "absolute override spellings are preserved in spawn launch paths"
 }
@@ -429,7 +395,7 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   assert_not_contains "$launch" "--tui-mode" "non-Pi launches must not receive Pi's TUI mode override"
   pass "claude receives --model and --effort profile flags"
@@ -727,6 +693,8 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
   sm=$(cd "$sm" && pwd -P)
+  cp "$ROOT/AGENTS.md" "$sm/AGENTS.md"
+  cp "$sm/data/charter.md" "$CASE_DIR/charter-before"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
@@ -734,9 +702,19 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   assert_contains "$out" "spawned $id harness=pi-signed kind=secondmate" \
     "pi-signed secondmate spawn did not preserve its runtime identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
+  cmp -s "$ROOT/AGENTS.md" "$sm/AGENTS.md" || fail "secondmate launch rewrote the supervisor contract"
+  cmp -s "$CASE_DIR/charter-before" "$sm/data/charter.md" || fail "secondmate launch rewrote the charter"
+  assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
   launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "< '$sm/data/charter.md'" "secondmate launch lost its original charter"
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# evidence begin: persistent secondmate\n%s\n' "$out"
+    printf 'launch command:\n%s\noriginal charter:\n' "$launch"
+    cat "$sm/data/charter.md"
+    printf 'supervisor AGENTS.md and charter remain byte-identical; no worker overlay created\n# evidence end\n'
+  fi
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
@@ -765,12 +743,15 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   rec=$(make_spawn_case profile-claude-cfgdir claude "$id")
   read_case_record "$rec"
 
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+  # A creatable path: this spawn now pre-registers workspace trust in that store
+  # (bin/fm-claude-trust.sh), so an unwritable directory is a genuine blocker.
+  # The forwarding assertion below is what this case proves and is unchanged.
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -826,6 +807,292 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+# Execute the actual emitted command in a synthetic pane environment: the
+# fake backend records delivery, while real shells exercise the env boundary.
+# No developer environment or credential values are inspected by these probes.
+test_launch_environment_allowlist() {
+  local setting rec id out status probe result expected launch value pane_shell pane_path
+  # shellcheck disable=SC2016
+  value='synthetic value; $(touch SHOULD_NOT_EXIST) `false` "quoted"'
+  for setting in absent missing-config enabled empty; do
+    id="env-$setting"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    case "$setting" in
+      missing-config) rm "$HOME_DIR/config/crew-harness"; rmdir "$HOME_DIR/config" ;;
+      enabled) printf '# Synthetic credential name\nFM_TEST_ALLOWED\nFM_TEST_EMPTY\nFM_TEST_UNSET\n' > "$HOME_DIR/config/launch-env-allowlist" ;;
+      empty) : > "$HOME_DIR/config/launch-env-allowlist" ;;
+    esac
+    probe="$CASE_DIR/probe.sh"
+    cat > "$probe" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "${FM_TEST_ALLOWED-unset}" \
+  "${FM_TEST_EMPTY-unset}" "${FM_TEST_UNSET-unset}" "$HOME" "$PATH" "$TERM" "$TMUX" "$GOTMPDIR"
+SH
+    out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness "/bin/sh '$probe'")
+    status=$?
+    expect_code 0 "$status" "allowlist=$setting spawn should succeed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    for pane_shell in /bin/sh /bin/bash /bin/zsh; do
+      [ -x "$pane_shell" ] || continue
+      pane_path=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+        TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
+        "$pane_shell" -c "printf %s \"\$PATH\"") \
+        || fail "could not read $pane_shell startup PATH"
+      result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
+      FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED="$value" FM_TEST_EMPTY='' \
+      "$pane_shell" -c "$launch") || fail "allowlist=$setting emitted launch failed in $pane_shell"
+      case "$setting" in
+        absent|missing-config) expected=$(printf '%s\n' synthetic-unrelated "$value" '' unset) ;;
+        enabled) expected=$(printf '%s\n' unset "$value" '' unset) ;;
+        empty) expected=$(printf '%s\n' unset unset unset unset) ;;
+      esac
+      expected="$expected"$'\n'"$HOME_DIR/user-home"$'\n'"$pane_path"$'\nxterm\nsynthetic-pane\n/synthetic/gotmp'
+      [ "$result" = "$expected" ] || fail "allowlist=$setting worker environment mismatch: $result"
+    done
+    pass "allowlist=$setting preserves the operational floor and filters only when opted in"
+  done
+}
+
+test_launch_environment_invalid_config_refuses() {
+  local rec id bad out status
+  id=env-invalid
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  for bad in 'FM_TEST_ALLOWED=value' 'NAME;false' '1INVALID' '*'; do
+    printf '%s\n' "$bad" > "$HOME_DIR/config/launch-env-allowlist"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "invalid allowlist must refuse spawn"
+    assert_contains "$out" 'launch-env-allowlist' "refusal must identify the config file"
+    [ ! -s "$LAUNCH_LOG" ] || fail "invalid allowlist delivered a launch command"
+    [ ! -f "$HOME_DIR/state/$id.meta" ] || fail "invalid allowlist published a task"
+  done
+  pass "invalid allowlist names refuse before launch or task publication"
+}
+
+test_launch_environment_inaccessible_config_refuses() {
+  local setting presence rec id blocked out status
+  if [ "$(id -u)" = 0 ]; then
+    printf '# skip - inaccessible launch configuration requires a non-root user\n'
+    return
+  fi
+  for setting in config ancestor; do
+    for presence in present absent; do
+      id="env-inaccessible-$setting-$presence"
+      rec=$(make_spawn_case "$id" codex "$id")
+      read_case_record "$rec"
+      if [ "$presence" = present ]; then
+        printf 'FM_TEST_ALLOWED\n' > "$HOME_DIR/config/launch-env-allowlist"
+      fi
+      blocked="$HOME_DIR/config"
+      if [ "$setting" = ancestor ]; then
+        blocked="$HOME_DIR/config-parent"
+        mkdir "$blocked"
+        mv "$HOME_DIR/config" "$blocked/config"
+        ln -s config-parent/config "$HOME_DIR/config"
+      fi
+      chmod 600 "$blocked" || fail "could not remove configuration search permission"
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "$id" "$PROJ_DIR" --harness codex --backend tmux)
+      status=$?
+      chmod 700 "$blocked" || fail "could not restore configuration search permission"
+      expect_code 1 "$status" "inaccessible $setting with $presence allowlist must refuse spawn: $out"
+      assert_contains "$out" 'launch-env-allowlist' "refusal must identify the launch configuration"
+      [ ! -s "$LAUNCH_LOG" ] || fail "inaccessible configuration delivered a launch command"
+      [ ! -f "$HOME_DIR/state/$id.meta" ] || fail "inaccessible configuration published a task"
+      pass "inaccessible $setting with $presence allowlist refuses before launch or task publication"
+    done
+  done
+}
+
+test_launch_environment_inherited_by_secondmate() {
+  local rec id sm out status result
+  id=env-secondmate
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  printf 'FM_TEST_ALLOWED\n' > "$HOME_DIR/config/launch-env-allowlist"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate with an allowlist should spawn: $out"
+  cmp -s "$HOME_DIR/config/launch-env-allowlist" "$sm/config/launch-env-allowlist" \
+    || fail "secondmate did not inherit the launch environment contract"
+  cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "$FM_TEST_ALLOWED" "$FM_HOME" "${FM_STATE_OVERRIDE-unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/codex"
+  result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" \
+    FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED=synthetic-provider \
+    /bin/sh -c "$(cat "$LAUNCH_LOG")") || fail "secondmate's emitted command failed"
+  [ "$result" = "unset"$'\nsynthetic-provider\n'"$sm" ] \
+    || fail "secondmate's environment lost filtering or explicit home assignments: $result"
+  # Exercise the same inheritance owner used by local and remote transfers;
+  # removal must restore absence downstream as well as copying an opt-in.
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-config-inherit-lib.sh"
+    rm "$HOME_DIR/config/launch-env-allowlist"
+    propagate_secondmate_inheritance "$HOME_DIR" "$sm" >/dev/null
+  ) || fail "allowlist removal failed to converge"
+  [ ! -e "$sm/config/launch-env-allowlist" ] || fail "secondmate retained a removed allowlist"
+  pass "secondmate launch inherits the allowlist for subsequent worker launches"
+}
+
+run_launch_environment_inheritance() {
+  local route=$1 home=$2 dest=$3 fakebin=$4 generation=$5
+  if [ "$route" = local ]; then
+    (
+      # shellcheck source=/dev/null
+      . "$ROOT/bin/fm-config-inherit-lib.sh"
+      FM_INHERITABLE_CONFIG=launch-env-allowlist \
+        propagate_inheritable_config "$home/config" "$dest/config"
+    )
+  else
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_DATA_OVERRIDE="$home/data" FM_INHERITABLE_CONFIG=launch-env-allowlist \
+      FM_SSH_BIN="$fakebin/inherit-ssh" \
+      "$ROOT/bin/fm-remote-inherit-push.sh" inherited-env "$generation"
+  fi
+}
+
+test_launch_environment_inheritance_preserves_on_source_errors() {
+  local route rec id dest out status
+  if [ "$(id -u)" = 0 ]; then
+    printf '# skip - inaccessible inheritance sources require a non-root user\n'
+    return
+  fi
+  for route in local remote; do
+    id="env-inherit-$route"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    dest="$CASE_DIR/inherited-home"
+    mkdir -p "$dest/config"
+    printf 'FM_TEST_ALLOWED\n' > "$HOME_DIR/config/launch-env-allowlist"
+    printf -- '- inherited-env - Test route (host: inherit-host; root: %s; home: %s; scope: test; projects: ; added 2026-09-05)\n' \
+      "$ROOT" "$dest" > "$HOME_DIR/data/secondmates.md"
+    cat > "$FAKEBIN_DIR/inherit-ssh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+[ "$#" -eq 6 ] && [ "$1" = inherit-host ] && [ "$2" = fm-remote-entrypoint.sh ] && [ "$3" = 1 ] || exit 91
+remote_root=$(printf '%s' "$4" | base64 --decode)
+remote_home=$(printf '%s' "$5" | base64 --decode)
+args=()
+while IFS= read -r -d '' arg; do args+=("$arg"); done < <(printf '%s' "$6" | base64 --decode)
+[ "${args[0]}" = fm-remote-inherit.sh ] || exit 92
+FM_HOME="$remote_home" FM_STATE_OVERRIDE="$remote_home/state" \
+  exec "$remote_root/bin/${args[0]}" "${args[@]:1}"
+SH
+    chmod +x "$FAKEBIN_DIR/inherit-ssh"
+    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 1 2>&1)
+    status=$?
+    expect_code 0 "$status" "$route allowlist inheritance should succeed: $out"
+    [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
+      || fail "$route inheritance did not publish the allowlist"
+
+    chmod 600 "$HOME_DIR/config" || fail "could not remove source search permission"
+    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 2 2>&1)
+    status=$?
+    chmod 700 "$HOME_DIR/config" || fail "could not restore source search permission"
+    expect_code 1 "$status" "$route inheritance must refuse an inaccessible source: $out"
+    assert_contains "$out" launch-env-allowlist "$route inspection error must identify the allowlist"
+    [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
+      || fail "$route inheritance removed or changed the allowlist after an inspection error"
+
+    rm "$HOME_DIR/config/launch-env-allowlist"
+    ln -s missing-allowlist "$HOME_DIR/config/launch-env-allowlist"
+    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 3 2>&1)
+    status=$?
+    expect_code 1 "$status" "$route inheritance must refuse a dangling source link: $out"
+    [ "$(cat "$dest/config/launch-env-allowlist")" = FM_TEST_ALLOWED ] \
+      || fail "$route inheritance treated a dangling source link as absence"
+
+    rm "$HOME_DIR/config/launch-env-allowlist"
+    out=$(run_launch_environment_inheritance "$route" "$HOME_DIR" "$dest" "$FAKEBIN_DIR" 4 2>&1)
+    status=$?
+    expect_code 0 "$status" "$route inheritance should mirror proven absence: $out"
+    [ ! -e "$dest/config/launch-env-allowlist" ] || fail "$route inheritance retained a removed allowlist"
+    pass "$route inheritance preserves the allowlist on source errors and mirrors proven absence"
+  done
+}
+
+test_launch_environment_allowlist
+test_launch_environment_invalid_config_refuses
+test_launch_environment_inaccessible_config_refuses
+test_launch_environment_inherited_by_secondmate
+test_launch_environment_inheritance_preserves_on_source_errors
+
+test_worker_launch_delivers_role_scope() {
+  local rec id out launch kind prompt brief_kind brief content
+  for brief_kind in heading legacy scaffold; do
+  for kind in no-mistakes direct-PR local-only scout; do
+    [ "$brief_kind" = heading ] && [ "$kind" != no-mistakes ] && continue
+    id="role-launch-$brief_kind-$kind"
+    rec=$(make_spawn_case "$id" codex)
+    read_case_record "$rec"
+    if [ "$brief_kind" != scaffold ]; then
+      fm_test_spawn_brief "$HOME_DIR" "$id"
+      if [ "$brief_kind" = heading ]; then
+        printf '\n# Worker role\nFollow the project instructions.\n' >> "$HOME_DIR/data/$id/brief.md"
+      fi
+    else
+      if [ "$kind" = scout ]; then
+        FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" arbitrary-project-name --scout >/dev/null || fail "scout scaffold failed"
+      else
+        FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" arbitrary-project-name --mode "$kind" >/dev/null || fail "$kind scaffold failed"
+      fi
+      brief="$HOME_DIR/data/$id/brief.md"
+      content=$(cat "$brief")
+      content=${content//'{TASK}'/brief for $id}
+      content=${content//'{FIRSTMATE_SPEC}'/Exercise the spawn behavior under test.}
+      printf '%s\n' "$content" > "$brief"
+    fi
+    cp "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/brief-before"
+    cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FM_ROLE_PROMPT"
+SH
+    chmod +x "$FAKEBIN_DIR/codex"
+    if [ "$kind" = scout ]; then
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+    else
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode "$kind" --yolo off)
+    fi
+    expect_code 0 "$?" "$kind worker spawn failed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    prompt="$CASE_DIR/prompt"
+    FM_ROLE_PROMPT="$prompt" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" || fail "could not consume $kind launch command"
+    # The final prompt delivered to the harness is the generated interface.
+    # An authored role heading must neither suppress nor duplicate the current
+    # worker contract; the launch section is its single, superseding owner.
+    assert_grep 'follow this brief instead of that supervisor contract' "$prompt" "$kind command did not deliver the role correction"
+    assert_grep 'brief for' "$prompt" "$kind command lost the task"
+    [ "$(grep -c '^# Current worker role contract$' "$prompt")" -eq 1 ] ||
+      fail "$brief_kind $kind duplicated the delivered worker contract"
+    if [ "$brief_kind" = heading ]; then
+      assert_grep 'Follow the project instructions' "$prompt" "$kind command dropped the authored role section"
+    fi
+    cmp -s "$CASE_DIR/brief-before" "$HOME_DIR/data/$id/brief.md" || fail "spawn rewrote the authored brief"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# evidence begin: %s %s worker\n%s\n' "$brief_kind" "$kind" "$out"
+      printf 'launch command executed with an argv-capture harness:\n%s\nreceived arguments and final prompt:\n' "$launch"
+      cat "$prompt"
+      printf 'authored brief remains byte-identical\n# evidence end\n'
+    fi
+  done
+  done
+  pass "fm-spawn: actual ship/scout launch commands deliver the worker role contract"
+}
+
+test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
