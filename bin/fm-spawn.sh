@@ -1335,6 +1335,14 @@ shell_quote() {
   printf "'"
 }
 
+# Commands typed into an existing pane shell need quoting that treats an
+# apostrophe literally in both POSIX shells and fish.
+pane_shell_quote() {
+  printf '"'
+  printf '%s' "$1" | sed 's/[\\$`"]/\\&/g'
+  printf '"'
+}
+
 resolve_pi_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
@@ -3018,7 +3026,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       echo "error: this home needs its own Treehouse pool root, but the installed treehouse has no --root option; upgrade treehouse to v2.2.0 or newer and rerun" >&2
       exit 1
     fi
-    TREEHOUSE_GET_COMMAND="treehouse get --root $(shell_quote "$TREEHOUSE_HOME_ROOT")"
+    TREEHOUSE_GET_COMMAND="treehouse get --root $(pane_shell_quote "$TREEHOUSE_HOME_ROOT")"
   else
     TREEHOUSE_GET_COMMAND='treehouse get'
   fi

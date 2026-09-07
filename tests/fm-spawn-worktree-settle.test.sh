@@ -110,11 +110,12 @@ EOF
 # make_secondmate_pool_case <name> <id> builds a real linked Firstmate home and
 # matching project clones whose worktree common dirs are intentionally distinct.
 make_secondmate_pool_case() {
-  local name=$1 id=$2 case_dir code_root home source origin project primary_project
+  local name=$1 id=$2 home_leaf=${3:-secondmate-home}
+  local case_dir code_root home source origin project primary_project
   local primary_wt home_wt fakebin countfile launchlog
   case_dir="$TMP_ROOT/$name"
   code_root="$case_dir/code-root"
-  home="$case_dir/secondmate-home"
+  home="$case_dir/$home_leaf"
   source="$case_dir/project-source"
   origin="$case_dir/project-origin.git"
   project="$home/projects/widget"
@@ -315,11 +316,28 @@ test_secondmate_home_uses_own_treehouse_pool() {
   status=$?
   expect_code 0 "$status" "secondmate-home spawn should succeed with its own pooled worktree"
   assert_contains "$out" "spawned $id" "secondmate-home spawn did not report success"
-  assert_grep "treehouse get --root '$SECOND_HOME/config'" "$SECOND_LAUNCHLOG" \
+  assert_grep "treehouse get --root \"$SECOND_HOME/config\"" "$SECOND_LAUNCHLOG" \
     "secondmate-home spawn did not type the home-specific Treehouse root"
   assert_grep "worktree=$SECOND_HOME_WT" "$SECOND_HOME/state/$id.meta" \
     "secondmate-home spawn did not record the worktree from its own pool"
   pass "a linked secondmate home scopes Treehouse get to its own project pool and passes Claude trust"
+}
+
+test_secondmate_home_quotes_apostrophe_in_treehouse_root() {
+  local rec id out status
+  id=settle-secondmate-apostrophe-z4
+  rec=$(make_secondmate_pool_case settle-secondmate-apostrophe "$id" "secondmate-home's-copy")
+  read_secondmate_pool_record "$rec"
+
+  out=$(run_secondmate_pool_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "secondmate-home spawn should preserve an apostrophe in its pool root"
+  assert_contains "$out" "spawned $id" "apostrophe-path spawn did not report success"
+  assert_grep "treehouse get --root \"$SECOND_HOME/config\"" "$SECOND_LAUNCHLOG" \
+    "apostrophe-path spawn did not quote its home-specific Treehouse root"
+  assert_grep "worktree=$SECOND_HOME_WT" "$SECOND_HOME/state/$id.meta" \
+    "apostrophe-path spawn did not record the worktree from its own pool"
+  pass "a secondmate home preserves an apostrophe in the Treehouse root passed to its pane shell"
 }
 
 test_secondmate_home_refuses_treehouse_without_root_option() {
@@ -351,6 +369,7 @@ test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_secondmate_home_uses_own_treehouse_pool
+test_secondmate_home_quotes_apostrophe_in_treehouse_root
 test_secondmate_home_refuses_treehouse_without_root_option
 
 echo "# all fm-spawn-worktree-settle tests passed"
