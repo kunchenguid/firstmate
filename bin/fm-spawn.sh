@@ -1648,6 +1648,50 @@ launch_template() {
   esac
 }
 
+fm_raw_launch_shell_simple() {
+  case "$1" in
+    *[\;\|\&\<\>\`\$\\\(\)\{\}\[\]\*\?\!\~\'\"]*) return 1 ;;
+  esac
+}
+
+fm_raw_launch_mentions_codex() {
+  local launch=$1 word
+  local -a words
+  IFS=$' \t\n' read -r -a words <<< "$launch"
+  for word in "${words[@]}"; do
+    [ "${word##*/}" = codex ] && return 0
+  done
+  return 1
+}
+
+fm_raw_launch_canonical_codex_model() {
+  local launch=$1 model= word index=1 model_count=0
+  local -a words
+  IFS=$' \t\n' read -r -a words <<< "$launch"
+  [ "${words[0]:-}" = codex ] || return 1
+  while [ "$index" -lt "${#words[@]}" ]; do
+    word=${words[$index]}
+    case "$word" in
+      --model)
+        index=$((index + 1))
+        [ "$index" -lt "${#words[@]}" ] || return 1
+        model=${words[$index]}
+        model_count=$((model_count + 1))
+        ;;
+      --model=*)
+        model=${word#--model=}
+        model_count=$((model_count + 1))
+        ;;
+    esac
+    index=$((index + 1))
+  done
+  [ "$model_count" -eq 1 ] || return 1
+  case "$model" in
+    ''|*[!A-Za-z0-9._/-]*) return 1 ;;
+  esac
+  printf '%s\n' "$model"
+}
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     RAW_LAUNCH=1
@@ -1761,6 +1805,23 @@ if [ -n "$CODEX_HOME_ARG" ]; then
 fi
 
 if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  RAW_LAUNCH_UNQUOTED=${LAUNCH//\'/}
+  RAW_LAUNCH_UNQUOTED=${RAW_LAUNCH_UNQUOTED//\"/}
+  RAW_LAUNCH_UNQUOTED=${RAW_LAUNCH_UNQUOTED//\\/}
+  if fm_raw_launch_mentions_codex "$RAW_LAUNCH_UNQUOTED"; then
+    if ! fm_raw_launch_shell_simple "$LAUNCH"; then
+      echo "error: raw launch commands selecting Codex must use shell-simple syntax so their effective model is inspectable; use the verified harness and --model instead" >&2
+      exit 1
+    fi
+    RAW_CODEX_MODEL=$(fm_raw_launch_canonical_codex_model "$LAUNCH") || {
+      echo "error: raw Codex launch commands must be one canonical codex invocation with exactly one explicit --model before dispatch" >&2
+      exit 1
+    }
+    if fm_dispatch_model_is_astra "$RAW_CODEX_MODEL"; then
+      echo "error: raw launch commands selecting Astra are not inspectable for selection receipts; use the verified harness and --model instead" >&2
+      exit 1
+    fi
+  fi
   if fm_dispatch_harness_receipt_required "$CONFIG/crew-dispatch.json" "$HARNESS"; then
     echo "error: raw launch commands for configured receipt-gated harnesses are not inspectable for selection receipts; use the verified harness and --model instead" >&2
     exit 1
@@ -1768,12 +1829,6 @@ if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     receipt_requirement_rc=$?
     [ "$receipt_requirement_rc" -eq 1 ] || exit "$receipt_requirement_rc"
   fi
-  case "$LAUNCH" in
-    *gpt-6-astra*)
-      echo "error: raw launch commands selecting Astra are not inspectable for selection receipts; use the verified harness and --model instead" >&2
-      exit 1
-      ;;
-  esac
 fi
 
 # Astra and configured receipt-gated tuples require current primary evidence.

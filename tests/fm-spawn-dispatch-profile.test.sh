@@ -620,6 +620,14 @@ test_astra_without_a_profile_requires_primary_evidence() {
   assert_absent "$HOME_DIR/state/$id.meta" "unconfigured Astra refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "unconfigured Astra refusal typed a launch command"
 
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "codex --model gpt-6-a''stra")
+  status=$?
+  expect_code 1 "$status" "an obfuscated raw Astra spawn without a profile should refuse"
+  assert_contains "$out" "must use shell-simple syntax" "unconfigured obfuscated Astra refusal did not identify the uninspectable command"
+  assert_absent "$HOME_DIR/state/$id.meta" "unconfigured obfuscated Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unconfigured obfuscated Astra refusal typed a launch command"
+
   receipt=$(make_selection_receipt "$CASE_DIR" unconfigured "$id" gpt-6-astra)
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
@@ -662,7 +670,7 @@ test_astra_qualified_and_raw_models_cannot_bypass_evidence() {
 }
 
 test_raw_codex_home_override_is_refused() {
-  local rec id out status codex_home
+  local rec id out status codex_home launch
   id=profile-raw-codex-home-z3fh
   rec=$(make_spawn_case profile-raw-codex-home codex "$id")
   read_case_record "$rec"
@@ -675,6 +683,21 @@ test_raw_codex_home_override_is_refused() {
   assert_contains "$out" "cannot assign CODEX_HOME" "raw home override refusal did not identify the conflicting account selection"
   assert_absent "$HOME_DIR/state/$id.meta" "raw home override refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "raw home override refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "codex --model gpt-5; env CODEX_HO''ME=/wrong-account codex --model gpt-5" --codex-home "$codex_home")
+  status=$?
+  expect_code 1 "$status" "a compound raw Codex command should refuse for a selected home"
+  assert_contains "$out" "must use shell-simple syntax" "compound raw Codex refusal did not identify the non-canonical command"
+  assert_absent "$HOME_DIR/state/$id.meta" "compound raw Codex command wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "compound raw Codex command typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "codex --model gpt-5" --codex-home "$codex_home")
+  status=$?
+  expect_code 0 "$status" "a canonical non-Astra raw Codex command should retain the selected home"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_home'" "canonical raw Codex launch did not retain the selected home"
   pass "a named Codex home cannot be overridden by a raw command"
 }
 
