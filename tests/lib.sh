@@ -33,6 +33,19 @@ FM_TEST_LIB_SOURCED=1
 # suite's fixtures were written against.
 umask 022
 
+# Scrub the ambient Paseo runtime markers. fm_backend_detect selects the paseo
+# backend from PASEO_AGENT_ID or PASEO_TERMINAL_ID, and Paseo exports the agent
+# id into every process an agent session starts - including a tmux server, and
+# therefore including this suite whenever it is run from a Paseo-hosted
+# firstmate. Left in place, that ambient marker would silently change what an
+# unpinned spawn resolves to and make results depend on which desktop app the
+# developer happened to launch their terminal from. Every paseo-detection
+# assertion sets these explicitly instead. This mirrors why the backend suite
+# already pins TMUX/HERDR_ENV/CMUX_WORKSPACE_ID per case; those markers stay
+# per-case because tests routinely set them deliberately, while nothing in the
+# suite wants an inherited Paseo id.
+unset PASEO_AGENT_ID PASEO_TERMINAL_ID
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every
