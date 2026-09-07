@@ -548,22 +548,26 @@ __FM_BEARINGS_BOARD_DATA__
       var fd = new FormData(form);
       var value = fd.get("answer");
       var note = (fd.get("note") || "").trim();
-      /* picked option, optionally annotated; a bare note is itself the answer */
-      var answer = value ? (note ? value + " - " + note : value) : note;
-      if (!answer) return;
-      if (utf8ByteLength(answer) > 512) {
+      var displayAnswer = value ? (note ? value + " - " + note : value) : note;
+      if (!displayAnswer) return;
+      if (utf8ByteLength(displayAnswer) > 512) {
         answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
         answerLimit.classList.add("is-visible");
         return;
       }
       if (window.lavish && window.lavish.queuePrompt) {
-        /* close carries the composer-declared close mode: "release" frees a
-           captain-gated work item instead of completing a question task */
-        var ctxData = { question: item.key, answer: answer };
+        /* The versioned context keeps the selected option separate from its
+           note, while close carries the composer-declared completion mode. */
+        var ctxData = {
+          schema: "fm-bearings-answer.v1",
+          question: item.key,
+          selection: value || "",
+          note: note
+        };
         if (item.close) ctxData.close = item.close;
         window.lavish.queuePrompt(
-          "Captain's Call answer - " + item.title + ": " + answer,
-          { tag: "choice", text: item.title + " -> " + answer, element: form,
+          "Captain's Call answer - " + item.title + ": " + displayAnswer,
+          { tag: "choice", text: item.title + " -> " + displayAnswer, element: form,
             data: ctxData }
         );
       }

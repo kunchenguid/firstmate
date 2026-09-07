@@ -137,7 +137,9 @@
 # captain chose; the intake owns every rule about what happens next. This runner
 # names no adapter, parses no result, and knows no decision rule, so a future
 # built-in source needs nothing here beyond an `answers` command and a binding.
-# External binding responses never enter this authority-bearing intake.
+# Reconcile selections use the parallel `reconciles` adapter command and the
+# binding-verified `reconcile-requests` intake, never the keyed-answer value.
+# External binding responses never enter either authority-bearing intake.
 #
 # Feeding is deliberately independent of handling: it never acknowledges a result
 # and never suppresses a wake. Recording the captain's answer is transcription,
@@ -146,10 +148,11 @@
 #
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
-# only a claim whose whole generation is gone is reclaimed. A runner leads its
-# own process group, so a crashed leader whose group still has members is not
-# stale: reconcile stops that surviving group and releases its generation before
-# any replacement starts, and keeps the claim for a later retry when it cannot.
+# only a claim whose stale owner and independently absent process group prove
+# its whole generation gone is reclaimed. A runner leads its own process group,
+# so a crashed leader or reused pid whose old group still has members cannot
+# relax ownership cleanup. Reconcile stops a safely identified surviving group
+# before replacement and keeps the claim for a later retry when it cannot.
 #
 # Durability boundary: see bin/fm-procevent-lib.sh. This runner proves capture
 # before publication and bounded re-announcement until handled, and nothing
@@ -358,6 +361,19 @@ feed_keyed_answers() {  # <adapter> <source-id> <result-file>
   "$script" answers "$result" 2>/dev/null \
     | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
         --source "the captured result $id sequence $seq" >/dev/null 2>&1
+}
+
+feed_reconcile_requests() {  # <adapter> <source-id> <result-file>
+  local adapter=$1 id=$2 result=$3 script origin seq rows
+  script=$(adapter_script "$adapter")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
+  [ -n "$origin" ] || return 1
+  seq=$(fm_procevent_result_sequence "$result") || return 1
+  rows=$("$script" reconciles "$result" 2>/dev/null) || return 1
+  printf '%s\n' "$rows" \
+    | "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests \
+        --source-id "$id" --source "the captured result $id sequence $seq" >/dev/null 2>&1
 }
 
 read_adapter() {  # <source-id>
@@ -817,6 +833,10 @@ EOF
   # Independent of publication and acknowledgement, so it runs once per capture
   # for every adapter and cannot change what the handler receives.
   if [ "$extension_owner" -eq 0 ] \
+    && feed_reconcile_requests "$adapter" "$id" "$durable"; then
+    printf 'reconciles-fed: %s\n' "$id"
+  fi
+  if [ "$extension_owner" -eq 0 ] \
     && feed_keyed_answers "$adapter" "$id" "$durable"; then
     printf 'answers-fed: %s\n' "$id"
   fi
@@ -892,7 +912,7 @@ retire_owned_terminal_source() {  # <source-id>
     && [ "$current_identity" = "$CLAIM_REG_IDENTITY" ] \
     && fm_procevent_claim_mark_terminal_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN"; then
     if rm -f -- "$registration" && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
-      fm_procevent_claim_release_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" || status=1
+      fm_procevent_claim_release_terminal_self_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" || status=1
     else
       status=1
     fi
@@ -942,7 +962,7 @@ cmd_reconcile() {
     stop_state=$?
     case "$stop_state" in
       0|1)
-        if fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+        if fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
           rm -f -- "$(staging_file "$id" "$token")"
           rm -f -- "$(runner_file "$id")"
           stopped=$((stopped + 1))
@@ -982,7 +1002,7 @@ cmd_reconcile() {
             && rm -f -- "$(source_file "$id")" \
             && [ ! -e "$(source_file "$id")" ] \
             && [ ! -L "$(source_file "$id")" ] \
-            && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+            && fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
             stopped=$((stopped + 1))
           else
             uncertain=$((uncertain + 1))
@@ -1004,7 +1024,7 @@ cmd_reconcile() {
           fi
           if [ "$stop_state" -eq 0 ] \
             && cleanup_extension_registration_invocations_locked "$id" \
-            && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+            && fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
             rm -f -- "$(staging_file "$id" "$token")"
             rm -f -- "$(runner_file "$id")"
             fm_procevent_source_lock_release "$id"
@@ -1193,7 +1213,7 @@ cmd_retire() {
         fm_procevent_source_lock_release "$id"
         die "cannot prove external adapter cleanup; source remains registered: $id"
       fi
-      if ! fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token"; then
+      if ! fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token"; then
         fm_procevent_source_lock_release "$id"
         die "cannot release source ownership: $id"
       fi
