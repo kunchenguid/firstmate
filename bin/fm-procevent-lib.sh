@@ -262,6 +262,8 @@ fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-ide
     sleep($floor - $elapsed) if defined($elapsed) && $elapsed < $floor;
   ' "$stamp" "$floor" || return 1
 
+  # Registration publication holds this same source lock while replacing and
+  # pruning pacing state, so a superseded sleeper cannot recreate its stamp.
   fm_procevent_source_lock_acquire "$id" || return 1
   registration="$reg/$id.source"
   current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null) || current_identity=
@@ -584,7 +586,7 @@ fm_procevent_claim_capture_reservation_remove_locked() {
 # independently has no members left. The separate group check also covers a
 # reused live pid whose identity differs while the old generation survives.
 # A live matched owner (state 0), an unreadable identity (state 2), and a
-# crashed leader whose owned group is still running (state 3) all return false.
+# crashed leader with a still-live ambiguous group (state 3) all return false.
 fm_procevent_claim_generation_gone_locked() {
   local state=0
   fm_procevent_pid_state "${FM_PROCEVENT_CLAIM_PID:-}" "${FM_PROCEVENT_CLAIM_IDENTITY:-}" || state=$?
@@ -607,10 +609,9 @@ fm_procevent_claim_capture_reservation_reclaim_locked() {
 }
 
 # fm_procevent_group_alive <pid>
-# True while any process remains in the process group a runner leads. A runner
-# started by reconcile is its own group leader, so this is what distinguishes a
-# generation that is really gone from one whose leader died while its blocking
-# source child kept running.
+# True while any process remains in the runner's numeric process group. A runner
+# starts as its own group leader, but after that leader exits a same-numbered
+# group may be reused, so group presence prevents proving the generation gone.
 fm_procevent_group_alive() {
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 -"$1" 2>/dev/null
