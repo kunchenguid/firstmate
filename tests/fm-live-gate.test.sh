@@ -175,21 +175,21 @@ test_gate_lets_a_guard_drive_the_real_fleet_scripts_under_a_gate_marker() {
 }
 
 test_every_live_guard_is_wired_to_the_shared_gate() {
-  local script out checked=0
-  for script in "$ROOT"/tests/*-live-e2e.test.sh "$ROOT"/tests/*-herdr-e2e.test.sh; do
-    [ -f "$script" ] || continue
-    case "$(basename "$script")" in
-      # The AFK herdr end-to-end test is capability-gated on herdr itself and
-      # belongs to the AFK family, not to the live-harness family.
-      fm-afk-inject-herdr-e2e.test.sh) continue ;;
-    esac
+  local script out listing checked=0
+  listing=$("$ROOT/bin/fm-test-run.sh" --family live-harness-optin --list) \
+    || fail "could not list the live-harness family"
+  while IFS= read -r script; do
+    [ -n "$script" ] || continue
+    script="$ROOT/$script"
     # bin/fm-test-run.sh runs every script through bash, so a guard that is not
     # marked executable is still a real suite member here.
     out=$(FM_LIVE=0 bash "$script" 2>&1) || fail "$(basename "$script") must exit 0 when live guards are disabled"
     assert_contains "$out" "skip: live: disabled by FM_LIVE=0" \
       "$(basename "$script") must open with the shared live gate"
     checked=$((checked + 1))
-  done
+  done <<EOF
+$listing
+EOF
   [ "$checked" -ge 20 ] || fail "expected the whole live-guard family to be swept, saw only $checked"
   pass "all $checked live guards refuse together on FM_LIVE=0"
 }
