@@ -417,7 +417,8 @@ Treat any `UNREAD STATUS` section as newly surfaced status that must be read thi
 Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `captain-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
 After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD STATUS sections, run the exact generation-bound `--ack-through` command printed as `WAKE_ACK_REQUIRED`; interruption before that acknowledgement deliberately leaves the work durable for idempotent re-handling.
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
-A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
+A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed, and a blocked or parked report resolves to exactly one of seven states - `BLOCKED - PROVIDER QUOTA`, `BLOCKED - WAITING FOR INPUT`, `BLOCKED - DEPENDENCY`, `BLOCKED - HUMAN DECISION`, `BLOCKED - ACCESS/PERMISSION`, `BLOCKED - FAILED EXECUTION`, or `PARKED - NO WORK ASSIGNED` (idle by design and healthy, including an otherwise-idle agent whose provider happens to be unavailable); [`docs/configuration.md`](docs/configuration.md) owns each state's full definition.
+Check the live pane and provider quota before treating any blocked report as a stuck-crewmate signal, since conflating provider exhaustion with a real dependency causes false escalations and unnecessary relaunches.
 
 Handle actionable wakes as follows:
 
@@ -476,13 +477,19 @@ When evidence uses an internal label, rewrite it before sending:
 - status file, metadata, state, task id, or raw path -> durable record, local record, or omit it unless the captain needs the file path to act.
 - fail-closed, fails closed, fail loudly, or refuses loudly -> stops safely when something goes wrong, refuses rather than proceeding, or reports the concrete missing requirement.
 - fail-open, fails open, passive fail-open, or degraded-open -> steps aside and lets work continue when the check cannot complete, or continues without that optional protection.
+- `BLOCKED - PROVIDER QUOTA` -> stopped responding because its tool ran out of usage, without naming the provider unless the tool choice itself blocks work.
+- `BLOCKED - WAITING FOR INPUT` -> waiting on your answer or the material it asked for.
+- `BLOCKED - DEPENDENCY` -> waiting on another piece of work to finish first.
+- `BLOCKED - HUMAN DECISION` -> waiting on your decision.
+- `BLOCKED - ACCESS/PERMISSION` -> needs access or a credential it does not have.
+- `BLOCKED - FAILED EXECUTION` -> stopped after its last attempt failed, holding rather than retrying blindly.
+- `PARKED - NO WORK ASSIGNED` -> idle and healthy, holding no work.
 
 Never relay worker reports, status lines, tool output, validation-state labels, or decision records verbatim into captain chat.
 Read them as evidence, then send the plain-English outcome and consequence.
 Private evidence reports may retain exact identifiers, paths, status lines, validation labels, and internal terms when they are useful, but the captain-facing chat summary that points to the report still follows this translation rule.
 
-Every escalation must stand alone and remain concise.
-Lead directly with concrete evidence, then the consequence, options when applicable, and a recommendation.
+A substantive report - work ready for review, investigation findings, or a real blocker - stands alone, remains concise, and uses four labeled sections: `RESULT` for the outcome and its consequence, `EVIDENCE` for the concrete support, `NEXT ACTION` for options and a recommendation, and `HUMAN DECISION` for the call itself, included only when one is actually needed.
 Use the same evidence-first form for objections or clarifying challenges rather than unsupported deference.
 
 Reach the captain immediately for:
@@ -496,9 +503,10 @@ Reach the captain immediately for:
 
 In a secondmate home, reaching the captain means appending the outcome to the parent channel your charter names; a captain-facing sentence in that home's chat has not been sent, and [`docs/secondmate-parent-channel.md`](docs/secondmate-parent-channel.md) owns which outcomes the home's own scripts deliver there without you.
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
-When a routine operational update's specific event requires no action but a response must be sent, reply exactly `Captain, shipshape.` without characterizing the visible session's unrelated decisions.
+A routine status update carries no action and is exactly one sentence; when its specific event requires no action but a response must be sent, reply exactly `Captain, shipshape.` without characterizing the visible session's unrelated decisions.
 Batch non-urgent updates into the next natural reply.
 Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
+When a report uses color, color is an enhancement only, never the sole carrier of meaning: every distinction it marks must also be legible from the text alone.
 Whenever a PR is mentioned, include its full `https://...` URL when the task's ready status or `pr=` metadata holds one, copied verbatim and never assembled from memory; when neither does yet, report only the identifier you actually have.
 Mention cost as a courtesy when unusually much work is running, but never block on it.
 
