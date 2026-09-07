@@ -32,7 +32,7 @@
 # the check that protects unlanded work has already passed on it.
 #
 # Authorship is proved by a record, never by content. When the seed phase publishes
-# a copy it records that copy's digest in the worktree's own git directory, and a
+# a copy it records that copy's digest in Firstmate's state directory, and a
 # retire happens only when that record exists and the file still matches it. Bytes
 # alone prove nothing: a task can legitimately author a .env.local whose content
 # equals the project checkout's, and deleting that without the captain's explicit
@@ -125,19 +125,24 @@ fm_env_local_ignored_verdict() {  # <worktree> <target> <refused-action>
   return "$ignored"
 }
 
-# Where the seed record lives, and what it holds. The worktree's own git directory
-# is git's private storage for that worktree: git never reports it as working-tree
-# content, it travels with a pooled slot across a return and a reissue, and it is
-# already where this library stages its copy. The record holds a digest and never
+# Where the seed record lives, and what it holds. The record is outside the
+# worktree and keyed by its path, so task-side access to the worktree's git
+# directory cannot rewrite the ownership evidence. It holds a digest and never
 # the seeded bytes, so it cannot outlive a revoked credential the way a kept copy
-# would. The name deliberately sits outside the fm-env-local.* scratch glob the
-# seed phase sweeps, because that sweep must not destroy the evidence teardown
-# needs.
+# would.
 fm_env_local_seed_record_path() {  # <worktree>
-  local gitdir
-  gitdir=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return 1
-  [ -n "$gitdir" ] || return 1
-  printf '%s\n' "$gitdir/fm-env-local-seed-record"
+  local worktree=$1 key state_dir
+  state_dir=${STATE:-}
+  [ -n "$state_dir" ] || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    key=$(printf '%s' "$worktree" | shasum -a 256 2>/dev/null | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    key=$(printf '%s' "$worktree" | sha256sum 2>/dev/null | awk '{print $1}')
+  else
+    return 1
+  fi
+  [ -n "$key" ] || return 1
+  printf '%s\n' "$state_dir/fm-env-local/$key"
 }
 
 fm_env_local_digest() {  # <file>
@@ -194,8 +199,10 @@ fm_env_local_seeded_copy_intact() {  # <worktree>
 # direction, while a stale one would authorize deleting a file this library did not
 # write.
 fm_env_local_write_seed_record() {  # <worktree> <seeded-file>
-  local record digest identity
+  local record digest identity record_dir
   record=$(fm_env_local_seed_record_path "$1") || return 1
+  record_dir=${record%/*}
+  mkdir -p "$record_dir" 2>/dev/null || return 1
   digest=$(fm_env_local_digest "$2") || digest=""
   identity=$(fm_env_local_file_identity "$2") || identity=""
   if [ -z "$digest" ] || [ -z "$identity" ]; then
@@ -265,9 +272,7 @@ fm_env_local_apply() {  # <worktree> <project> <retire|seed> <refusing-step>
   # return. The scratch is invisible to git, so a leftover directory here is
   # harmless and must never become a refusal of its own.
   gitdir=$(git -C "$worktree" rev-parse --absolute-git-dir 2>/dev/null) || gitdir=""
-  # Keep the seed record: only mktemp's six-character suffix names staging
-  # scratch, while fm-env-local-seed-record is the retire phase's ownership
-  # evidence and must survive until that phase has read it.
+  # Keep the seed record until the retire phase has read it.
   [ -z "$gitdir" ] || rm -f "$gitdir"/fm-env-local.?????? 2>/dev/null || true
   # Every seed-phase path that returns below leaves no copy of this library's own
   # in the worktree except the one published at the very end, so the record is

@@ -611,7 +611,7 @@ test_interrupted_local_env_seed_leaves_the_slot_acquirable() {
 # teardown cannot safely identify. Make the record path unusable and assert that
 # acquisition refuses after removing only the copy it just staged.
 test_unrecordable_local_env_seed_refuses_without_leaving_a_copy() {
-  local rec id out status gitdir record_path
+  local rec id out status record_path
   id='pool-env-local-unrecordable'
   rec=$(make_case env-local-unrecordable "$id")
   read_case_record "$rec"
@@ -619,8 +619,10 @@ test_unrecordable_local_env_seed_refuses_without_leaving_a_copy() {
   ignore_local_env_file
   : > "$PROJECT_DIR/.env.local"
   chmod 0640 "$PROJECT_DIR/.env.local"
-  gitdir=$(git -C "$POOL_DIR" rev-parse --absolute-git-dir)
-  record_path="$gitdir/fm-env-local-seed-record"
+  record_path=$(STATE="$HOME_DIR/state" bash -c '. "$1"; fm_env_local_seed_record_path "$2"' _ \
+    "$ROOT/bin/fm-env-local-lib.sh" "$POOL_DIR") \
+    || fail "could not resolve the local environment seed record path"
+  mkdir -p "${record_path%/*}"
   mkdir "$record_path"
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
