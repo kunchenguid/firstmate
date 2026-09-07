@@ -182,9 +182,9 @@
 #   fm-prepush-voice-guard.sh --list-patterns  print the rule table
 #   fm-prepush-voice-guard.sh --help           print this usage
 #
-# The default range is bounded by origin/main when it resolves and by local main
-# only as a fallback, so an ahead local main cannot shrink the set and hide a
-# commit the default branch does not yet carry.
+# The default range requires origin/main as its authoritative publication ref.
+# A local main can contain unpublished history, so it is usable only when an
+# operator explicitly designates it as an authorized bound with --range.
 set -u
 
 SELF_DIR=
@@ -401,19 +401,17 @@ fm_voice_append_scan() {  # <label> <path> <report>
   return "$scan_rc"
 }
 
-# The default-branch ref, probed the same way bin/fm-lint.sh's own
-# fm_lint_changed_base_ref probes candidates. The remote-tracking ref is the
-# publication boundary; local main is only a fallback when it does not resolve.
+# The remote-tracking publication ref that bounds the default pre-push scan.
+# Local main is not an authoritative fallback because it may carry the very
+# unpublished commit the scan must refuse.
 fm_voice_default_ref() {
   if git rev-parse --verify -q origin/main >/dev/null 2>&1; then
     printf '%s\n' origin/main
-  elif git rev-parse --verify -q main >/dev/null 2>&1; then
-    printf '%s\n' main
   fi
 }
 
-# Commits on HEAD that the authoritative default-branch ref does not carry.
-# Preferring origin/main prevents an ahead local main from shrinking that set.
+# Commits on HEAD that the authoritative publication ref does not carry.
+# A local main is never used implicitly because it can shrink the set to empty.
 # The set is not "commits never pushed anywhere"; see the header for why the
 # broader set is the deliberate one.
 #
@@ -426,8 +424,8 @@ fm_voice_commits_off_default_branch() {  # <destination>
   base_ref=$(fm_voice_default_ref)
 
   if [ -z "$base_ref" ]; then
-    printf 'fm-prepush-voice-guard.sh: cannot determine which commits are not yet on the default branch: no default-branch ref resolved (tried origin/main, main).\n' >&2
-    printf 'fm-prepush-voice-guard.sh: fetch the default branch (git fetch origin main), or name the bound with --range <a>..<b>, then re-run. An unknown range is not a clean range.\n' >&2
+    printf 'fm-prepush-voice-guard.sh: cannot establish the default range: no authoritative publication ref resolved because origin/main is missing.\n' >&2
+    printf 'fm-prepush-voice-guard.sh: fetch it (git fetch origin main), or explicitly designate an authorized publication ref with --range <publication-ref>..HEAD, then re-run. An unknown range is not a clean range.\n' >&2
     return 3
   fi
 

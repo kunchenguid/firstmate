@@ -38,6 +38,7 @@ fm_voice_repo() {
   printf '# fixture\n' > "$dir/README.md"
   git -C "$dir" add README.md
   git -C "$dir" commit -qm 'initial'
+  git -C "$dir" update-ref refs/remotes/origin/main HEAD
   git -C "$dir" checkout -q -b feature
 }
 
@@ -453,6 +454,7 @@ test_scans_only_commits_off_the_default_branch() {
   # every later run fail on history nobody can still change.
   fm_voice_commit "$tmp/repo" 'fix(ci): Captain, this already shipped'
   git -C "$tmp/repo" branch -f main feature
+  git -C "$tmp/repo" update-ref refs/remotes/origin/main main
   fm_voice_commit "$tmp/repo" 'fix(bin): bound the scan'
 
   out=$(fm_voice_scan "$tmp/repo") || rc=$?
@@ -514,6 +516,29 @@ test_prefers_origin_main_over_an_ahead_local_main() {
   assert_contains "$out" "this local-main commit has not shipped" \
     "refusal did not identify the hidden commit"
   pass "prefers origin/main when local main is ahead"
+}
+
+test_fails_closed_when_local_main_is_not_authoritative() {
+  local tmp out rc=0
+  tmp=$(fm_test_tmproot fm-voice-local-main-only)
+  mkdir -p "$tmp/repo"
+  git -C "$tmp/repo" init -q -b main
+  git -C "$tmp/repo" config user.name 'Firstmate Tests'
+  git -C "$tmp/repo" config user.email 'tests@example.invalid'
+  printf '# fixture\n' > "$tmp/repo/README.md"
+  git -C "$tmp/repo" add README.md
+  git -C "$tmp/repo" commit -qm 'initial'
+  fm_voice_commit "$tmp/repo" 'fix(ci): Captain, local main has not been published'
+  git -C "$tmp/repo" checkout -q -b feature
+  fm_voice_commit "$tmp/repo" 'fix: clean descendant'
+
+  out=$(fm_voice_scan "$tmp/repo") || rc=$?
+  expect_code 3 "$rc" "an unverified local main produced a clean default range"$'\n'"$out"
+  assert_contains "$out" "no authoritative publication ref" \
+    "fail-closed diagnostic did not name the missing publication ref"
+  assert_contains "$out" "--range <publication-ref>..HEAD" \
+    "fail-closed diagnostic did not explain how to designate an authorized ref"
+  pass "fails closed when local main is not authoritative"
 }
 
 test_fails_closed_when_the_range_cannot_be_determined() {
@@ -767,6 +792,7 @@ test_refusal_names_what_matched_and_how_to_fix_it
 test_scans_only_commits_off_the_default_branch
 test_still_refuses_a_leak_already_on_a_feature_remote
 test_prefers_origin_main_over_an_ahead_local_main
+test_fails_closed_when_local_main_is_not_authoritative
 test_fails_closed_when_the_range_cannot_be_determined
 test_fails_closed_when_the_commit_list_is_unusable
 test_fails_closed_when_the_scanner_errors
