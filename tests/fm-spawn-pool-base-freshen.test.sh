@@ -4,8 +4,8 @@
 # A treehouse pool can return a clean detached worktree whose origin/main was
 # advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin tip, launches a clean origin-less
-# pool as-is, or stops when a configured origin is unusable.
+# starts the worker from the current base tip, refreshes a clean origin-less
+# pool, or stops when a configured origin is unusable.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -246,8 +246,8 @@ test_non_main_default_branch_refreshes_before_branching() {
   pass "a stale pooled worktree resolves and refreshes a non-main default branch"
 }
 
-make_originless_case() {  # <name> <id>
-  local name=$1 id=$2 case_dir home project pool fakebin initial
+make_originless_case() {  # <name> <id> [advance-primary]
+  local name=$1 id=$2 advance=${3:-0} case_dir home project pool fakebin initial
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
@@ -265,6 +265,12 @@ make_originless_case() {  # <name> <id>
   git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
   initial=$(git -C "$project" rev-parse HEAD)
   git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  if [ "$advance" = 1 ]; then
+    printf 'originless advanced main\n' > "$project/advanced-local.txt"
+    git -C "$project" add advanced-local.txt
+    git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-originless-main
+  fi
 
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
 }
@@ -291,6 +297,27 @@ test_originless_pool_launches_without_a_freshness_fetch() {
     printf '# observed origin-less launch: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
   fi
   pass "an origin-less pooled worktree launches as-is, skipping the freshness gate"
+}
+
+test_originless_linked_pool_refreshes_from_primary() {
+  local rec id out status before current branch_head
+  id='pool-originless-linked-stale-r1'
+  rec=$(make_originless_case originless-linked-stale "$id" 1)
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  current=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  [ "$before" != "$current" ] || fail "fixture did not leave the linked pool behind primary main"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh a stale linked origin-less pool"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "spawn did not report success for the stale linked pool"
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$current" ] || fail "spawn left the linked pool on stale history"
+  assert_grep 'originless advanced main' "$POOL_DIR/advanced-local.txt" \
+    "the refreshed linked pool omitted primary's advanced content"
+  [ ! -e "$POOL_DIR/.git/FETCH_HEAD" ] || fail "spawn fetched against a linked origin-less pool"
+  pass "a stale linked origin-less pool refreshes to primary default branch"
 }
 
 test_originless_dirty_pool_refuses_without_discarding_work() {
@@ -739,6 +766,7 @@ test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_originless_pool_launches_without_a_freshness_fetch
+test_originless_linked_pool_refreshes_from_primary
 test_originless_dirty_pool_refuses_without_discarding_work
 test_origin_config_without_url_refuses_pool
 test_empty_origin_config_section_refuses_pool

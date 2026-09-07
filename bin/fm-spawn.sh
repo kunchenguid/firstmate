@@ -185,9 +185,9 @@
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch, and resets to its tip. When none
-#   is detected, a pool repository separate from the primary is fetched from the
-#   primary checkout's default branch and reset to that commit, while a pool
-#   sharing the primary repository launches from its clean current HEAD.
+#   is detected, the pool is reset to the primary checkout's current
+#   default-branch commit, fetching that commit only when the pool uses a
+#   separate repository from the primary.
 #   Relaunch reuses the recorded worktree without fetching or resetting its base.
 #   An unreachable detected origin, unresolved default branch, or non-clean
 #   worktree refuses a fresh spawn rather than risking a PR based on stale history
@@ -2429,11 +2429,6 @@ freshen_spawn_worktree_base() {  # <worktree> <primary-checkout>
       echo "error: pooled worktree '$worktree' has no origin remote and no primary checkout was provided; refusing to launch from an unverifiable base" >&2
       return 1
     fi
-    worktree_git_dir=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-    primary_git_dir=$(git -C "$primary" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-    if [ -n "$worktree_git_dir" ] && [ -n "$primary_git_dir" ] && [ "$worktree_git_dir" = "$primary_git_dir" ]; then
-      return 0
-    fi
     default=$(default_branch "$primary") || {
       echo "error: could not determine default branch for primary checkout '$primary'; refusing to launch from a potentially stale base" >&2
       return 1
@@ -2442,9 +2437,13 @@ freshen_spawn_worktree_base() {  # <worktree> <primary-checkout>
       echo "error: could not resolve default branch '$default' commit for primary checkout '$primary'; refusing to launch from a potentially stale base" >&2
       return 1
     }
-    if ! git -C "$worktree" fetch --quiet "$primary" "refs/heads/$default"; then
-      echo "error: could not fetch default branch '$default' from primary checkout '$primary' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-      return 1
+    worktree_git_dir=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    primary_git_dir=$(git -C "$primary" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    if [ -z "$worktree_git_dir" ] || [ -z "$primary_git_dir" ] || [ "$worktree_git_dir" != "$primary_git_dir" ]; then
+      if ! git -C "$worktree" fetch --quiet "$primary" "refs/heads/$default"; then
+        echo "error: could not fetch default branch '$default' from primary checkout '$primary' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+        return 1
+      fi
     fi
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
