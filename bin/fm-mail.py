@@ -339,11 +339,20 @@ def cmd_poll_list():
         out = []
         new_emitted = 0
         retry_emitted = 0
+        retry_examined = 0
         for u in new_candidates + retry_candidates:
             is_retry = u in retry and u in seen
             if is_retry:
                 if retry_emitted >= retry_budget:
+                    # Past the retry budget: leave this candidate in the scan
+                    # (do not advance past it) so a later poll reaches it once
+                    # budget frees up. Advancing the durable position by the
+                    # full window while emitting only the budgeted prefix would
+                    # revisit the same prefix forever and strand later
+                    # recovered uids (a scan is a cursor over the whole retry
+                    # set, and every uid must be reachable).
                     continue
+                retry_examined += 1
             elif new_emitted >= new_budget:
                 continue
             # A raised or empty FETCH is treated as a failure for THIS uid only,
@@ -392,8 +401,15 @@ def cmd_poll_list():
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
         sys.stdout.flush()
-        if retry_budget > 0:
-            save_retry_pos(retry_pos_path, len(retry_order), window, retry_pos)
+        if retry_budget > 0 and len(retry_candidates) > 0:
+            # Advance the durable retry-scan position by the retry candidates
+            # actually examined within budget this poll (fetched or rotated),
+            # never by the full window. Scanning N retry uids but emitting only
+            # the budgeted prefix and advancing by N re-visits the same prefix
+            # forever; advancing by the examined count makes the position a
+            # cursor, every retry uid reachable within ceil(N/budget) polls.
+            save_retry_pos(retry_pos_path, len(retry_order),
+                           max(1, retry_examined), retry_pos)
         return 0
     except Exception as e:
         # stderr, not stdout: the bash poll's command substitution captures
