@@ -251,25 +251,32 @@ mail_prune_journal() {
 }
 
 mail_record_evidence() {
-  # Write the journal and cursor records; return 0 when at least one landed.
-  # At least one must survive with a queued wake row, or the drain could
-  # acknowledge the wake with no durable record of its uid. A non-empty $3
-  # tags the journal line (retry) so a later poll can skip re-appending.
-  local generation=$1 id=$2 tag=${3:-} journal_ok=0 cursor_ok=0
+  # Write the journal and cursor records; return 0 only when the journal (the
+  # proof a wake was published) committed. The journal is written FIRST and is
+  # mandatory: a mail can never be marked surfaced in the cursor without the
+  # journal recording its wake, so a crash or write failure can never leave a
+  # uid cursor-recorded but silently suppressed (cursor-without-journal). If
+  # the journal write fails, the cursor is NOT written and this returns 1, so
+  # wake_for rolls back / fails closed and the next poll legitimately re-wakes
+  # the mail instead of treating it as already surfaced.
+  # A non-empty $3 tags the journal line (retry) so a later poll can skip
+  # re-appending.
+  local generation=$1 id=$2 tag=${3:-}
   if [ -n "$tag" ]; then
-    if printf '%s\t%s\t%s\n' "$generation" "$id" "$tag" >> "$WOKEN"; then
-      journal_ok=1
+    if ! printf '%s\t%s\t%s\n' "$generation" "$id" "$tag" >> "$WOKEN"; then
+      return 1
     fi
-  elif printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN"; then
-    journal_ok=1
+  elif ! printf '%s\t%s\n' "$generation" "$id" >> "$WOKEN"; then
+    return 1
   fi
-  if printf '%s\n' "$id" >> "$CURSOR"; then
-    cursor_ok=1
-  fi
-  if [ "$journal_ok" -eq 1 ] || [ "$cursor_ok" -eq 1 ]; then
+  if ! printf '%s\n' "$id" >> "$CURSOR"; then
+    # Journal committed but the cursor did not: the wake is still proven by the
+    # journal and healed into the cursor on the next poll (journal recovery is
+    # exactly-once). Returning 0 keeps the durable contract: a journal entry
+    # always means the wake was published.
     return 0
   fi
-  return 1
+  return 0
 }
 
 mail_rollback_wake_locked() {
