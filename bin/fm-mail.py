@@ -222,13 +222,11 @@ def retry_scan_window(order, pos, window):
     the durable position advances after this window is considered."""
     if not order:
         return []
-    if len(order) <= window:
-        return list(order)
     start = pos % len(order)
-    cands = order[start:start + window]
-    if len(cands) < window:
-        cands += order[:window - len(cands)]
-    return cands
+    rotated = order[start:] + order[:start]
+    if len(order) <= window:
+        return rotated
+    return rotated[:window]
 
 
 def save_retry_pos(pos_path, order_len, window, pos):
@@ -317,17 +315,19 @@ def cmd_poll_list():
         # retry set.
         retry_window = retry_scan_window(retry_order, retry_pos, window)
         retry_candidates = [u for u in retry_window if u in seen]
+        turn_path = os.environ.get('FM_MAIL_TURN', '')
+        next_turn = None
         if cap == 1 and new_candidates and retry_candidates:
             # A single contended slot alternates between new surfacing and
             # retry recovery, so a sustained new-mail flood can never starve
             # recovered metadata indefinitely, and a retry backlog can never
             # delay new mail for more than one poll.
-            if load_turn(os.environ.get('FM_MAIL_TURN', '')) == 0:
+            if load_turn(turn_path) == 0:
                 new_budget, retry_budget = 1, 0
-                save_turn(os.environ.get('FM_MAIL_TURN', ''), 1)
+                next_turn = 1
             else:
                 new_budget, retry_budget = 0, 1
-                save_turn(os.environ.get('FM_MAIL_TURN', ''), 0)
+                next_turn = 0
         else:
             # Reserve a quarter of the cap (at least one) for retry successes
             # so a sustained new-mail flood cannot starve recovered metadata,
@@ -339,8 +339,12 @@ def cmd_poll_list():
         new_emitted = 0
         retry_emitted = 0
         retry_examined = 0
+        retry_idx = -1
+        first_retry_emitted_index = -1
         for u in new_candidates + retry_candidates:
             is_retry = u in retry and u in seen
+            if is_retry:
+                retry_idx += 1
             if is_retry:
                 if retry_emitted >= retry_budget:
                     # Past the retry budget: leave this candidate in the scan
@@ -377,6 +381,8 @@ def cmd_poll_list():
             out.append((uid, idate, fr, subj, status))
             if is_retry:
                 retry_emitted += 1
+                if first_retry_emitted_index == -1:
+                    first_retry_emitted_index = retry_idx
             else:
                 new_emitted += 1
         # Finish every IMAP round-trip before emit or persist so a hung
@@ -404,13 +410,30 @@ def cmd_poll_list():
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
         sys.stdout.flush()
+        # Persist the cap-one alternation turn only after the rows are emitted
+        # and flushed, so a kill between the decision and the emit can never
+        # skip an unspent turn.
+        if next_turn is not None:
+            save_turn(turn_path, next_turn)
         # The retry-scan cursor must keep marching so every retry uid is
-        # reachable. Two cases advance it:
-        #  1. budget > 0     -> by the candidates actually examined within
-        #                      budget (fetched or rotated), never the full
-        #                      window (Greptile 'Retry cursor skips
-        #                      candidates').
-        #  2. budget == 0 because the window held only unseen uids (none
+        # reachable, but it must never advance past a uid whose wake did not
+        # durably publish. Rows are handed to the bash wake layer immediately
+        # below; Python cannot observe whether every wake_for succeeded, so the
+        # durable position advances only up to (never past) the first emitted
+        # retry uid. If that uid's wake fails to publish, it stays at the head
+        # of the scan for the next poll; if the wake succeeds, the bash layer
+        # removes it from the retry set and the same numeric start scans the
+        # next remaining uid. When no retry row was emitted, candidates were
+        # examined (unfetchable) or the window held only unseen uids, and the
+        # position advances so the scan does not stall.
+        # Three cases advance it:
+        #  1. budget > 0 and a retry row was emitted -> by the number of
+        #     unfetchable retry candidates before the first emitted one,
+        #     landing the cursor on that uid (never past it).
+        #  2. budget > 0 but no retry row emitted -> by the candidates actually
+        #     examined within budget (fetched or rotated), never the full
+        #     window (Greptile 'Retry cursor skips candidates').
+        #  3. budget == 0 because the window held only unseen uids (none
         #      qualified as a seen retry) -> by the scanned window itself, so
         #      a leading stale window cannot stall the march and strand a
         #      later eligible retry uid (Greptile 'Retry cursor stalls
@@ -419,9 +442,13 @@ def cmd_poll_list():
         # retry_budget 0 with retry_candidates non-empty) leaves the position
         # unchanged so an unexamined window is never skipped.
         if retry_budget > 0 and len(retry_candidates) > 0:
-            save_retry_pos(retry_pos_path, len(retry_order),
-                           max(1, retry_examined), retry_pos)
-        elif len(retry_window) > 0 and len(retry_candidates) == 0:
+            if first_retry_emitted_index > 0:
+                save_retry_pos(retry_pos_path, len(retry_order),
+                               first_retry_emitted_index, retry_pos)
+            elif not out:
+                save_retry_pos(retry_pos_path, len(retry_order),
+                               max(1, retry_examined), retry_pos)
+        elif len(retry_window) > 0 and len(retry_candidates) == 0 and not out:
             save_retry_pos(retry_pos_path, len(retry_order),
                            len(retry_window), retry_pos)
         return 0
