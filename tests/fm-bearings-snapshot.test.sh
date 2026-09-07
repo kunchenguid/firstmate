@@ -31,7 +31,10 @@ make_fakebin() {  # <dir>
   fb=$(fm_fakebin "$1")
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-[ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30
+if [ "${FAKE_NM_SLEEP:-0}" = 1 ]; then
+  [ -z "${FAKE_NM_SIGNAL:-}" ] || : > "$FAKE_NM_SIGNAL"
+  sleep 30
+fi
 exit 0
 SH
   cat > "$fb/tmux" <<'SH'
@@ -2762,6 +2765,48 @@ SH
   pass "large local snapshot overlaps local reads with byte-identical serial and concurrent projections"
 }
 
+test_local_snapshot_labels_crew_state_deadline_timeout() {
+  local home fakebin worktree signal json started elapsed
+  home=$(make_home crew-state-deadline)
+  worktree="$home/projects/crew-state-deadline"
+  fm_git_init_commit "$worktree"
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] crew-state-deadline - Crew state deadline fixture (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/crew-state-deadline.meta" \
+    "worktree=$worktree" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  printf 'working: status inspection completes before crew state stalls\n' \
+    > "$home/state/crew-state-deadline.status"
+  signal="$home/crew-state-started"
+
+  started=$(date +%s)
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT=2 \
+    FAKE_NM_SLEEP=1 FAKE_NM_SIGNAL="$signal" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot failed instead of labeling a crew-state deadline"
+  elapsed=$(( $(date +%s) - started ))
+  [ -f "$signal" ] || fail "crew-state deadline fixture never entered no-mistakes status"
+  [ "$elapsed" -lt 7 ] || fail "crew-state read exceeded the overall two-second deadline: ${elapsed}s"
+  printf '%s' "$json" | jq -e '
+    .tasks[] | select(.id == "crew-state-deadline")
+    | .current_state.state == "unknown"
+      and (.current_state.detail | contains("local snapshot deadline after 2s"))
+      and .hints.inspection.complete == true
+      and .hints.inspection.reason == null
+      and .hints.pending_decision == false
+      and .hints.blocked_event == false
+      and .hints.open_decisions == []
+  ' >/dev/null || fail "crew-state timeout omitted its deadline reason: $json"
+  pass "fleet snapshots label crew-state deadline timeouts"
+}
+
 test_local_snapshot_bounds_status_inspection_and_exposes_timeout() {
   local home fakebin worktree template json started elapsed i
   home=$(make_home bounded-status-inspection)
@@ -2980,6 +3025,7 @@ test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state
 test_large_local_snapshot_overlaps_local_reads_without_projection_drift
+test_local_snapshot_labels_crew_state_deadline_timeout
 test_local_snapshot_bounds_status_inspection_and_exposes_timeout
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute

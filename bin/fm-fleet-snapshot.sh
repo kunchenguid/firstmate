@@ -300,8 +300,8 @@ last_nonempty_line() {  # <file>
 # snapshot without limit. Remote secondmate endpoint liveness is never read here.
 # A local read that hits the bound folds to state unknown.
 crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
-  local id=$1 captured_meta=${2:-} captured_status=${3:-} raw rest state source detail sep
-  raw=$(
+  local id=$1 captured_meta=${2:-} captured_status=${3:-} raw rest state source detail sep rc
+  if raw=$(
     fm_run_timed "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" \
       env FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
@@ -311,13 +311,23 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
-  )
+      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null
+  ); then
+    rc=0
+  else
+    rc=$?
+    raw=
+  fi
   raw=$(printf '%s\n' "$raw" | head -1)
   sep=' · '
   state=unknown
   source=none
   detail=
+  if [ "$rc" -eq 124 ]; then
+    detail="local snapshot deadline after ${FM_SNAPSHOT_STATUS_INSPECTION_TIMEOUT}s"
+  elif [ "$rc" -ne 0 ]; then
+    detail="crew state inspection failed"
+  fi
   case "$raw" in
     state:\ *"$sep"source:\ *)
       rest=${raw#state: }
