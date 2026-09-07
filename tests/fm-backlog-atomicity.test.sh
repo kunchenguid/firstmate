@@ -2118,7 +2118,11 @@ test_close_marker_note_refuses_a_leading_dash() {
   pass "the landing-note validator refuses a branch a replay could read as a flag"
 }
 
-test_close_marker_note_refuses_a_control_character() {
+# This pins the OUTCOME, not one arm: a control byte in the note never reaches a
+# replay. The marker-wide control-byte guard rejects the record before any
+# per-argument check runs, so the note's own control-character arm is defence in
+# depth behind it rather than the thing under test here.
+test_close_marker_note_with_a_control_character_never_publishes_a_close() {
   local case_dir id rc=0
   id=atomic-note-control-b9
   case_dir=$(make_home note-control)
@@ -2126,7 +2130,7 @@ test_close_marker_note_refuses_a_control_character() {
   [ "$rc" -ne 0 ] || fail "a landing note carrying a control character was accepted"
   assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
     "a control-character landing note still published a pending close"
-  pass "the landing-note validator refuses a control character in the branch"
+  pass "a landing note carrying a control byte never publishes a pending close"
 }
 
 test_close_marker_note_refuses_a_branch_past_the_length_cap() {
@@ -3198,7 +3202,7 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_replays_a_landing_note_naming_its_delivery_target_branch
 test_close_marker_note_refuses_whitespace_in_the_branch
 test_close_marker_note_refuses_a_leading_dash
-test_close_marker_note_refuses_a_control_character
+test_close_marker_note_with_a_control_character_never_publishes_a_close
 test_close_marker_note_refuses_a_branch_past_the_length_cap
 test_close_marker_note_round_trips_a_branch_containing_a_percent
 test_recovery_backfills_a_recorded_link_on_an_already_done_item

@@ -956,8 +956,10 @@ test_unresolvable_recorded_base_refuses_and_names_the_branch() {
   set -e
 
   expect_code 1 "$rc" "base-unresolvable: teardown must refuse when it cannot measure the landing"
-  assert_grep "does not resolve in worktree" "$case_dir/stderr" \
+  assert_grep "does not resolve to a local branch in worktree" "$case_dir/stderr" \
     "base-unresolvable: refusal did not report that the delivery target branch is missing"
+  assert_grep "fast-forwards refs/heads/feat/never-created" "$case_dir/stderr" \
+    "base-unresolvable: refusal did not name the ref the guarded landing actually needs"
   assert_grep "feat/never-created" "$case_dir/stderr" \
     "base-unresolvable: refusal did not name the branch that failed to resolve"
   assert_grep "The git index is readable" "$case_dir/stderr" \
@@ -972,6 +974,34 @@ test_unresolvable_recorded_base_refuses_and_names_the_branch() {
 # content check simply reports "not landed", which reads as a genuine unlanded-work
 # refusal for a branch that exists nowhere - the same false positive that trains
 # the operator to reach for --force. Both paths must name the real cause.
+# A local-only task lands through bin/fm-merge-local.sh, which fast-forwards
+# refs/heads/<base> and refuses without it, so the remote copy of that branch
+# cannot stand in: measuring it would name a landing that refuses for a different
+# reason. Reaching this block already means HEAD is on no remote, so this can
+# only ever sharpen a refusal, never turn one into an allow.
+test_local_only_does_not_measure_the_remote_copy_of_the_landing_branch() {
+  local case_dir rc
+  case_dir=$(make_case base-remote-only-local-task)
+  write_meta "$case_dir" local-only ship feat/stack
+  add_origin_branch "$case_dir" feat/stack
+  wt_commit "$case_dir" "work for a branch that exists only on origin"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-remote-only: teardown must refuse when the landing branch has no local ref"
+  assert_grep "does not resolve to a local branch in worktree" "$case_dir/stderr" \
+    "base-remote-only: refusal did not report the missing local landing branch"
+  assert_grep "fast-forwards refs/heads/feat/stack" "$case_dir/stderr" \
+    "base-remote-only: refusal did not name the ref bin/fm-merge-local.sh requires"
+  assert_no_grep "not yet merged into feat/stack" "$case_dir/stderr" \
+    "base-remote-only: refusal pointed at a landing that would refuse for another reason"
+  assert_present "$case_dir/wt" "base-remote-only: a refusal removed the worktree"
+  pass "a local-only task never measures the remote copy of its landing branch"
+}
+
 test_unresolvable_recorded_base_refuses_on_the_ship_path_too() {
   local case_dir rc
   case_dir=$(make_case base-unresolvable-ship)
@@ -3890,6 +3920,7 @@ test_absent_base_still_measures_the_default_branch
 test_recorded_base_content_fallback_allows
 test_content_on_the_default_branch_is_not_landed_for_a_base_task
 test_unresolvable_recorded_base_refuses_and_names_the_branch
+test_local_only_does_not_measure_the_remote_copy_of_the_landing_branch
 test_unresolvable_recorded_base_refuses_on_the_ship_path_too
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line

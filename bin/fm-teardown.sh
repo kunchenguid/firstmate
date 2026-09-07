@@ -1177,11 +1177,18 @@ delivery_target_source() {
 # exactly like a real one: `git log --not <missing-ref>` exits 128 as an
 # unreadable index does, and content_in_target_branch just reports "not landed".
 # Classifying it once here is what lets both refusals name the real cause.
-delivery_target_ref() {  # <branch>
-  local name=$1
+# A `local` scope accepts refs/heads/<branch> alone: a local-only task lands
+# through bin/fm-merge-local.sh, which fast-forwards exactly that ref and refuses
+# without it, so measuring the remote copy there would name a ref the landing
+# never touches.
+delivery_target_ref() {  # <branch> [local]
+  local name=$1 scope=${2:-any}
   if git -C "$WT" rev-parse --verify --quiet "refs/heads/$name^{commit}" >/dev/null 2>&1; then
     printf 'refs/heads/%s\n' "$name"
     return 0
+  fi
+  if [ "$scope" = local ]; then
+    return 1
   fi
   if git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$name^{commit}" >/dev/null 2>&1; then
     printf 'refs/remotes/origin/%s\n' "$name"
@@ -1191,10 +1198,16 @@ delivery_target_ref() {  # <branch>
 }
 
 # One refusal for that one cause, so the local-only and ship paths report an
-# unresolvable delivery target branch identically. It stays a refusal: --force
-# is named only to say it is not the answer here.
-delivery_target_unresolvable_refusal() {  # <branch> <source-description>
-  echo "REFUSED: cannot measure this task's landing: the delivery target branch $1 ($2) does not resolve in worktree $WT." >&2
+# unresolvable delivery target branch identically. The `local` scope says which
+# ref set was required, because there the remote copy existing changes nothing.
+# It stays a refusal: --force is named only to say it is not the answer here.
+delivery_target_unresolvable_refusal() {  # <branch> <source-description> [local]
+  if [ "${3:-any}" = local ]; then
+    echo "REFUSED: cannot measure this task's landing: the delivery target branch $1 ($2) does not resolve to a local branch in worktree $WT." >&2
+    echo "A local-only task lands through bin/fm-merge-local.sh, which fast-forwards refs/heads/$1, so no remote copy can stand in for it here." >&2
+  else
+    echo "REFUSED: cannot measure this task's landing: the delivery target branch $1 ($2) does not resolve in worktree $WT." >&2
+  fi
   echo "The git index is readable; the branch is what is missing." >&2
   echo "Fetch or create $1, or correct the recorded base= in $META, then re-run teardown." >&2
   echo "--force does not answer this: it would discard this worktree's work without ever measuring it." >&2
@@ -1755,8 +1768,8 @@ validate_worktree_teardown_safety() {
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
     TARGET=$(delivery_target_branch) || { echo "REFUSED: cannot determine the delivery target branch for $PROJ; the task records none and origin/HEAD, main, and master are all absent." >&2; return 1; }
     target_desc=$(delivery_target_source)
-    if ! target_ref=$(delivery_target_ref "$TARGET"); then
-      delivery_target_unresolvable_refusal "$TARGET" "$target_desc"
+    if ! target_ref=$(delivery_target_ref "$TARGET" local); then
+      delivery_target_unresolvable_refusal "$TARGET" "$target_desc" local
       return 1
     fi
     if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$target_ref" -- 2>/dev/null); then
