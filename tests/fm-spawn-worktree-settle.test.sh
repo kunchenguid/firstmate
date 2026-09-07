@@ -340,6 +340,22 @@ test_secondmate_home_quotes_apostrophe_in_treehouse_root() {
   pass "a secondmate home preserves an apostrophe in the Treehouse root passed to its pane shell"
 }
 
+test_secondmate_home_quotes_history_expansion_in_treehouse_root() {
+  local rec id out status expected_root
+  id=settle-secondmate-history-z5
+  rec=$(make_secondmate_pool_case settle-secondmate-history "$id" "secondmate-home!copy")
+  read_secondmate_pool_record "$rec"
+
+  out=$(run_secondmate_pool_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "secondmate-home spawn should preserve history expansion in its pool root"
+  assert_contains "$out" "spawned $id" "history-expansion-path spawn did not report success"
+  expected_root=$(printf '%s' "$SECOND_HOME/config" | sed 's/!/\\!/g')
+  assert_grep "treehouse get --root \"$expected_root\"" "$SECOND_LAUNCHLOG" \
+    "history-expansion-path spawn did not escape ! for the pane shell"
+  pass "a secondmate home escapes history expansion in the Treehouse root passed to its pane shell"
+}
+
 test_secondmate_home_refuses_treehouse_without_root_option() {
   local rec id out status
   id=settle-secondmate-pool-oldth-z4
@@ -370,6 +386,7 @@ test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_secondmate_home_uses_own_treehouse_pool
 test_secondmate_home_quotes_apostrophe_in_treehouse_root
+test_secondmate_home_quotes_history_expansion_in_treehouse_root
 test_secondmate_home_refuses_treehouse_without_root_option
 
 echo "# all fm-spawn-worktree-settle tests passed"
