@@ -151,7 +151,13 @@ fm_env_local_digest() {  # <file>
 }
 
 fm_env_local_file_identity() {  # <file>
-  stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1" 2>/dev/null
+  # Include ctime so an in-place rewrite is not mistaken for the untouched
+  # seeded file merely because it preserved the inode and bytes.
+  if [ "$(uname)" = Darwin ]; then
+    stat -f '%d:%i:%c' "$1" 2>/dev/null
+  else
+    stat -c '%d:%i:%Z' "$1" 2>/dev/null
+  fi
 }
 
 # The single authorship question, asked read-only: is the worktree's .env.local
