@@ -415,8 +415,8 @@ jobs:
           adapter_source_output=$(/bin/bash tests/fm-backend-adapter-source.test.sh)
           printf '%s\n' "$adapter_source_output"
           adapter_source_count=$(printf '%s\n' "$adapter_source_output" | grep -c '^ok - ')
-          [ "$adapter_source_count" -eq 2 ] || {
-            echo "::error::expected 2 adapter-source tests, got $adapter_source_count"
+          [ "$adapter_source_count" -eq 3 ] || {
+            echo "::error::expected 3 adapter-source tests, got $adapter_source_count"
             exit 1
           }
 
