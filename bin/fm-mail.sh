@@ -48,8 +48,8 @@
 #   FM_SMTP_PORT=<smtp port>     (default 465, implicit TLS)
 #   FM_MAIL_TIMEOUT=<seconds>    (default 20; IMAP/SMTP socket timeout)
 # FM_HOME falls back to the repo root when unset. This script carries no secret
-# and no default endpoint that could resolve against a wrong home; the four
-# FM_MAIL_* credential and endpoint values are always required, and
+# and no default endpoint that could resolve against a wrong home; FM_MAIL_USER,
+# FM_MAIL_PASS, FM_IMAP_HOST, and FM_SMTP_HOST are always required, and
 # FM_MAIL_PASS is never logged. The wake library is sourced from next to this
 # script, not from $FM_HOME/bin; cursor, journal, retry set, and queue stay
 # under $FM_HOME/state.

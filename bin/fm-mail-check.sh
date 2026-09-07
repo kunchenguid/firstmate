@@ -20,10 +20,10 @@
 # `disarm` removes the shim, its trust binding, and the report record.
 #
 # Mail configuration is read from the home's own .env by the poll, so arming
-# needs no configuration of its own. An home that is armed before its .env has
-# the four FM_MAIL_* values is reported once for the missing value until the
-# .env is fixed, which makes a partially configured channel a wake instead of
-# a silent gap.
+# needs no configuration of its own. A home that is armed before its .env has
+# FM_MAIL_USER, FM_MAIL_PASS, FM_IMAP_HOST, and FM_SMTP_HOST is reported once
+# for the missing value until the .env is fixed, which makes a partially
+# configured channel a wake instead of a silent gap.
 #
 # Reporting is by difference against the last reported state stored in
 # state/.mail-check: a poll that keeps failing reports its line once, and a
