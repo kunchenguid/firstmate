@@ -2146,7 +2146,152 @@ test_latest_status_subshell_work_does_not_grow_with_history() {
   for ((i = 0; i < 500; i++)); do printf 'continuation prose %s\n' "$i" >> "$d/state/task.status"; done
   [ "$(last_status_line "$d/state/task.status")" = 'paused: awaiting a long quiet tail' ] \
     || fail "a declared pause buried under a long prose tail was hidden"
-  pass "latest status subprocess work stays bounded and still reads past a long prose tail"
+  pass "latest status subprocess work stays bounded and still reads past a long prose tail"# --- a declared wait is STANDING, not the log's last event --------------------
+#
+# The masking defect: this helper derived current state from the log's newest
+# recognized line, so ANY later append by ANY producer - the crew's own armed
+# background reporter, a pipeline step notice, a firstmate note - flipped the
+# state away from the declaration. crew_absorb_class below then lost the pause,
+# and the watcher restarted its possible-wedge ladder against a crew that had
+# said, and still says, that it is waiting on something external. Measured in the
+# live fleet: 73% of possible-wedge wakes named an already-declared crew, one of
+# them 30 times over four days.
+#
+# fm-classify-lib.sh's status_standing_wait_line owns the fold and the retraction
+# rule; these cases pin what this helper does with it, in BOTH directions, and
+# pin that the fold changed no source precedence.
+
+test_declared_pause_survives_a_foreign_append() {
+  reset_fakes
+  local d out; d=$(new_case pause-masked-by-append)
+  make_repo_on_branch "$d/wt" fm/feat-masked
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-masked.meta" "window=fm:fm-feat-masked" "worktree=$d/wt" "kind=ship" "harness=claude"
+  # The live shape from state/firstmate-attest-upstream-pr3753.status: a declared
+  # wait, then an automatic append from a step reporter the crew had armed itself.
+  {
+    printf 'paused: waiting on the upstream maintainer\n'
+    printf 'working: run 01M1T9RF188DHFWHN5YRQVXZ8Q step ci,failed\n'
+  } > "$d/state/feat-masked.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-masked
+  out=$(run_crew_state "$d" feat-masked)
+  assert_contains "$out" "state: paused" "a foreign append after a declared pause masked the pause"
+  assert_contains "$out" "waiting on the upstream maintainer" "the standing declaration's own reason was not carried"
+
+  # The consumer that decides suppression. This is the predicate the watcher and
+  # the away-mode daemon both read, so it is the one that must not lose the pause.
+  local class
+  class=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_absorb_class feat-masked)
+  [ "$class" = paused ] || fail "crew_absorb_class read [$class], not paused, under a masked declaration"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_paused feat-masked     || fail "crew_is_paused lost a declaration masked by a later foreign append"
+  pass "a declared pause survives a later append from another producer, and crew_absorb_class still reads paused"
+}
+
+test_declared_pause_is_retracted_by_the_crew_own_terminal_line() {
+  reset_fakes
+  local d out class spec verb state tag; d=$(new_case pause-retracted)
+  make_repo_on_branch "$d/wt" fm/feat-retract
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-retract.meta" "window=fm:fm-feat-retract" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-retract
+  # Every terminal captain verb retracts. Each is captain-relevant in its own
+  # right, so retracting on it costs no wedge coverage - the event surfaces anyway.
+  #
+  # And the crew's RESOLVED STATE must be the one it last declared about itself,
+  # not merely "not paused": a crew that wrote `blocked:` has to read as blocked
+  # here, because this is the reader fm-inactive-reconcile.sh and the daemon's
+  # stale classifier both consume. The keyed pass is the regression that matters -
+  # a worker carries `[key=<work-slug>]` across its lines (bin/fm-brief.sh), so a
+  # terminal line whose key does not happen to match the earlier pause's is
+  # ordinary output, and it must still end the wait.
+  for spec in 'done|done' 'failed|failed' 'blocked|blocked' 'needs-decision|parked'; do
+    verb=${spec%%|*}; state=${spec#*|}
+    for tag in '' ' [key=route]'; do
+      {
+        printf 'paused: waiting on the upstream maintainer\n'
+        printf '%s%s: the wait is over\n' "$verb" "$tag"
+      } > "$d/state/feat-retract.status"
+      out=$(run_crew_state "$d" feat-retract)
+      assert_contains "$out" "state: $state" \
+        "a '$verb$tag:' line the crew wrote did not resolve to state: $state"
+      class=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_absorb_class feat-retract)
+      [ "$class" != paused ] || fail "crew_absorb_class still absorbed a pause retracted by '$verb$tag:'"
+    done
+  done
+  pass "a declared pause is retracted by the crew's own done/failed/blocked/needs-decision line, keyed or not, and the crew reads back as what it declared"
+}
+
+# The other declaring verb has to resolve to a real state too. A standing
+# captain-held transfer masked by later progress lines used to fall through every
+# arm and report `unknown`, which bin/fm-inactive-reconcile.sh cannot act on and
+# which tells a dashboard nothing about a crew that is in fact waiting on a human.
+test_standing_captain_held_reads_as_parked() {
+  reset_fakes
+  local d out class; d=$(new_case captain-held-standing)
+  make_repo_on_branch "$d/wt" fm/feat-held
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-held.meta" "window=fm:fm-feat-held" "worktree=$d/wt" "kind=ship" "harness=claude"
+  {
+    printf 'captain-held [key=route]: awaiting the captain on the routing call\n'
+    printf 'working: run 01M1T9RF188DHFWHN5YRQVXZ8Q step ci,running\n'
+  } > "$d/state/feat-held.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-held
+  out=$(run_crew_state "$d" feat-held)
+  assert_contains "$out" "state: parked" "a standing captain hold did not resolve to a real state"
+  assert_contains "$out" "awaiting the captain on the routing call" \
+    "the standing hold's own reason was not carried"
+
+  # It is a hold on the CAPTAIN, not an external-wait pause, so it must not widen
+  # the absorb class that suppresses the possible-wedge ladder.
+  class=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_absorb_class feat-held)
+  [ "$class" = none ] || fail "a standing captain hold read as absorb class [$class], not none"
+  pass "a standing captain hold reads as parked rather than unknown, without widening the absorb class"
+}
+
+test_undeclared_idle_crew_still_reads_none() {
+  reset_fakes
+  local d class; d=$(new_case pause-undeclared-idle)
+  make_repo_on_branch "$d/wt" fm/feat-undeclared
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-undeclared.meta" "window=fm:fm-feat-undeclared" "worktree=$d/wt" "kind=ship" "harness=claude"
+  # The disconfirming case, and the one the fold must not weaken: a crew that
+  # never declared anything, sitting idle. It must still classify as `none`, which
+  # is what routes it to the possible-wedge ladder.
+  printf 'working: implementing the fix\n' > "$d/state/feat-undeclared.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-undeclared
+  class=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_absorb_class feat-undeclared)
+  [ "$class" = none ] || fail "an undeclared idle crew classified [$class], not none - the wedge ladder would be skipped"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_paused feat-undeclared     && fail "an undeclared idle crew was read as paused"
+  pass "an undeclared idle crew still classifies none, so the possible-wedge ladder is unchanged for it"
+}
+
+test_declared_pause_never_outranks_an_active_run() {
+  reset_fakes
+  local d out class; d=$(new_case pause-vs-run)
+  make_repo_on_branch "$d/wt" fm/feat-pause-run
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pause-run.meta" "window=fm:fm-feat-pause-run" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: waiting on the upstream maintainer\n' > "$d/state/feat-pause-run.status"
+  # Source precedence, unchanged by the fold: the run-step is authoritative and the
+  # log is consulted only after it and the pane decline. A crew that declared a
+  # wait and then genuinely STARTED a run reports working, never paused.
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-pause-run)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-pause-run
+  out=$(run_crew_state "$d" feat-pause-run)
+  assert_contains "$out" "state: working" "an active run did not outrank a standing declaration"
+  assert_contains "$out" "source: run-step" "the authoritative source was not the run step"
+  class=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_absorb_class feat-pause-run)
+  [ "$class" = working ] || fail "crew_absorb_class read [$class] for a declared crew with an active run"
+  pass "the standing declaration does not disturb source precedence: an active run still reports working"
 }
 
 test_no_run_idle_pane_custom_paused_verb() {
@@ -2994,6 +3139,11 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
+test_declared_pause_survives_a_foreign_append
+test_declared_pause_is_retracted_by_the_crew_own_terminal_line
+test_standing_captain_held_reads_as_parked
+test_undeclared_idle_crew_still_reads_none
+test_declared_pause_never_outranks_an_active_run
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log

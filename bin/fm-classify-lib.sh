@@ -190,14 +190,21 @@ _fm_classify_matches() {  # <line> <pattern>
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
 # (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
 # callers that need legacy free-text matching use status_is_captain_relevant.
-status_is_terminal_verb() {
-  local line=$1 verb
-  [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
-  case "$verb" in
+# The terminal captain verbs, as a set, taking an already-extracted VERB. Split
+# out so status_standing_wait_line can fold a whole log with ONE verb extraction
+# per line while this list keeps exactly one owner.
+_fm_verb_is_terminal() {  # <verb>
+  case "$1" in
     done|needs-decision|blocked|failed) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+status_is_terminal_verb() {
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  status_line_verb "$line" verb
+  _fm_verb_is_terminal "$verb"
 }
 
 # 0 if the given (last) status line matches a captain-relevant verb.
@@ -229,7 +236,7 @@ status_is_captain_relevant() {
 status_is_paused() {  # <status-line>
   local line=$1 verb
   [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
+  status_line_verb "$line" verb
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
@@ -242,7 +249,7 @@ status_is_paused() {  # <status-line>
 status_is_captain_held() {  # <status-line>
   local line=$1 verb
   [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
+  status_line_verb "$line" verb
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
@@ -253,9 +260,112 @@ status_is_captain_held() {  # <status-line>
 # ages a pause marker instead, and the watcher applies its bounded pause cadence
 # once pause_state_class has admitted the wait (fm-watch.sh owns which liveness
 # evidence each kind of crew must supply for that).
+# The two declaring verbs, as a set, taking an already-extracted VERB - the same
+# split, and for the same reason, as _fm_verb_is_terminal above. Both read the
+# configurable constants rather than the literals, so a home that renames a verb
+# renames it everywhere.
+_fm_verb_is_declared_wait() {  # <verb>
+  case "$1" in
+    "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") return 0 ;;
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 status_is_paused_or_captain_held() {  # <status-line>
-  local line=$1
-  status_is_paused "$line" || status_is_captain_held "$line"
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  status_line_verb "$line" verb
+  _fm_verb_is_declared_wait "$verb"
+}
+
+# The STANDING declaration a status file currently carries, or the empty string.
+#
+# A declared wait is an INTENT, not an event. Reading it last-event-wins (via
+# last_status_line above) makes any later append from any producer cancel it: the
+# crew's own automatic reporter, a pipeline step notice, a firstmate note. Current
+# state then flips away from the declaration, the possible-wedge ladder restarts
+# from zero, and nothing reports that the suppression was voided. Measured in the
+# live fleet, 73% of possible-wedge wakes named a crew that had already declared a
+# wait, one of them 30 times over four days.
+#
+# So the declaration is folded over the log instead, the same shape
+# status_open_decisions below already uses for keyed decisions: a paused: or
+# captain-held: line DECLARES the wait, and only a later line the crew writes to
+# say its situation CHANGED retracts it. A later declaration replaces an earlier
+# one, and everything else - working:, note:, and free-text prose - leaves the
+# declaration standing.
+#
+# `working:` deliberately does NOT retract, and that is the whole fix. It is this
+# repo's nonterminal progress verb - status_is_captain_relevant excludes it, and a
+# brief tells the worker not to end a turn on it - and a status log carries no
+# producer attribution, so a `working:` line from a worker's own armed background
+# reporter is indistinguishable from one the worker wrote itself. Letting it
+# retract is what cancelled live declarations and restarted the possible-wedge
+# ladder against workers that were still waiting.
+#
+# TWO RETRACTION RULES, because two different things can end a wait.
+#
+# A TERMINAL captain verb (done, failed, blocked, needs-decision - the set
+# _fm_verb_is_terminal above owns) retracts UNCONDITIONALLY, whatever key it
+# carries. Each states that the crew is no longer in an external wait at all, and
+# each is captain-relevant on its own, so the event surfaces whether or not it
+# also retracts. This must not depend on a busy worker keying its terminal line
+# to match its earlier pause: a crew that declared itself blocked reading back as
+# paused would misreport current state to bin/fm-crew-state.sh and let the
+# daemon's stale classifier self-handle it on the hour cadence.
+#
+# `resolved:` retracts only when its key matches the standing declaration's (an
+# unkeyed declaration is retracted only by an unkeyed resolution, both being the
+# "default" key). It is the ONLY way a worker says "the thing I declared is over"
+# without also ending its task - bin/fm-brief.sh already instructs one to append
+# `resolved: {how it cleared}` when a blocker or wait clears without a firstmate
+# reply - but it is also the one retraction verb OTHER producers write into the
+# worker's own log: firstmate answering an unrelated decision through
+# bin/fm-send.sh --resolve-key, and bin/fm-pending-reply-lib.sh closing a
+# consumed pending reply. Keyless, that would let answering one question silently
+# cancel a wait on something else, which is this defect one producer over. The
+# key is read from the declaration only when a resolution actually arrives, and
+# an unparsable slug falls back to the shared "default" bucket on both sides: a
+# malformed key must never be able to drop a declaration, because losing the
+# declaration is the failure this whole fold exists to remove.
+#
+# THIS IS NOT AN UNCONDITIONAL SUPPRESSION, which matters because a real wedge
+# under a stale declaration must still be reachable. Two paths remain, both
+# pre-existing: fm-watch.sh's pause_state_class answers `none` (surface) for any
+# declared wait whose agent is not confirmed dead, and every absorbed declared
+# wait re-surfaces for a recheck once per FM_PAUSE_RESURFACE_SECS. The cost of a
+# standing declaration is therefore a wedge noticed on the hour-long recheck
+# cadence instead of the ~4-minute wedge cadence, never a wedge gone silent.
+#
+# A forward read with ONE verb extraction per line and no command substitution on
+# the common path - hence the verb-taking predicates above rather than the
+# line-taking ones. That is not a micro-optimisation: each line-taking predicate
+# captures status_line_verb through `$(...)`, which forks, and folding three of
+# those over a several-hundred line log cost seconds of CPU per gate. The watcher
+# runs this gate for every window on every poll, so a fold that forks would have
+# replaced the wake cost this change removes with a poll cost just as large. The
+# key reads are the only `$(...)`, and they are reached only by a `resolved:` line
+# arriving while a wait actually stands - not by the `working:` run that makes a
+# log long, and not by the declaration itself.
+status_standing_wait_line() {  # <status-file> -> the standing declaration line, or empty
+  local f=$1 line verb resolve standing=''
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  [ -e "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    status_line_verb "$line" verb
+    if _fm_verb_is_declared_wait "$verb"; then
+      standing=$line
+    elif _fm_verb_is_terminal "$verb"; then
+      standing=''
+    elif [ -n "$standing" ] && [ "$verb" = "$resolve" ] \
+      && [ "$(_fm_decision_key "$line" || printf 'default')" \
+         = "$(_fm_decision_key "$standing" || printf 'default')" ]; then
+      standing=''
+    fi
+  done < "$f"
+  printf '%s' "$standing"
 }
 
 # A condition-aware declared wait: a `paused:` line may say WHEN it expects to

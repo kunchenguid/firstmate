@@ -88,8 +88,9 @@
 #      to reattach, not by escalating.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the resolved status declaration
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      (open decisions first, else a standing declared wait, else the latest
+#      recognized line) when its verb maps to a recognized run-state. Decision-only
+#      events such as `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -184,6 +185,10 @@ map_log_state() {  # <line>
     echo paused
     return
   fi
+  if status_is_captain_held "$1"; then
+    echo parked
+    return
+  fi
   case "$(status_line_verb "$1")" in
     working)        echo working ;;
     needs-decision) echo parked ;;
@@ -194,7 +199,19 @@ map_log_state() {  # <line>
   esac
 }
 
-LOG_LINE=$(status_current_line "$LOG" "$KIND")
+# A declared wait (paused:/captain-held:) is a standing declaration layered on
+# the open-decision current-line fold. Open keyed decisions still win: they are
+# a different concept already present on upstream main. When none are open, a
+# standing paused:/captain-held: declaration outranks an unrelated later append.
+# fm-classify-lib.sh's status_standing_wait_line owns which later line retracts
+# one; status_current_line owns the open-decision fold.
+open_decisions=$(status_open_decisions "$LOG" "$KIND")
+if [ -n "$open_decisions" ]; then
+  LOG_LINE=$(status_current_line "$LOG" "$KIND")
+else
+  LOG_LINE=$(status_standing_wait_line "$LOG")
+  [ -n "$LOG_LINE" ] || LOG_LINE=$(status_current_line "$LOG" "$KIND")
+fi
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 # --- remote secondmate: the true source is the remote endpoint ---------------

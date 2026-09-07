@@ -743,20 +743,38 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
   grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
     && fail "the pause-window recheck was mislabeled a possible wedge"
 
-  # A later status append that stops declaring the wait ends the routing: the same
-  # enriched wedge escalates again, unchanged.
+  # A later `working:` append does NOT end the routing. That is the whole point of
+  # reading the STANDING declaration rather than the log's last line
+  # (status_standing_wait_line in bin/fm-classify-lib.sh): this exact shape - a
+  # declared wait followed by a `working:` line from the crew's own armed reporter -
+  # is what used to cancel the declaration and restart this ladder against a crew
+  # that was still waiting. The wait is still bounded by the PAUSE_RESURFACE_SECS
+  # recheck asserted just above, so it re-surfaces rather than going silent.
   : > "$state/.subsuper-escalations"
-  printf 'working: the audit finished, resuming\n' >> "$state/$task.status"
+  printf 'working: still waiting on the audit engine\n' >> "$state/$task.status"
   reason="stale: $win (idle 250s, possible wedge, escalation 6)"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an append from another producer cancelled the declaration and re-escalated the wedge: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-paused-$key" ] \
+    || fail "pause tracking was dropped by an append that does not retract the declaration"
+
+  # The crew's OWN terminal line does end the routing: the same enriched wedge
+  # escalates again, unchanged. This is the direction that must not get quieter.
+  : > "$state/.subsuper-escalations"
+  printf 'done: the audit finished, report written\n' >> "$state/$task.status"
   LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_PAUSE_RESURFACE_SECS=3600 \
     housekeeping "$state"
   grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
-    || fail "wedge escalation was not restored after the crew left its declared wait"
+    || fail "wedge escalation was not restored after the crew retracted its declared wait"
   [ ! -e "$state/.subsuper-paused-$key" ] \
-    || fail "pause tracking survived a status append that no longer declares the wait"
-  pass "an enriched wedge under a declared wait uses the pause cadence and restores wedge detection on resume"
+    || fail "pause tracking survived the crew's own retracting line"
+  pass "an enriched wedge under a declared wait uses the pause cadence, survives a foreign append, and restores wedge detection when the crew itself retracts"
 }
 
 test_stale_terminal_escalates() {
@@ -795,15 +813,34 @@ test_stale_actionable_wait_escalates_and_keeps_pause_cadence() {
   [ ! -e "$state/.subsuper-stale-$key" ] \
     || fail "an actionable current wait was also aged as a wedge"
 
+  # A resumed crew returns to ordinary stale aging - but it says so with the verb
+  # bin/fm-brief.sh gives it for exactly this, `resolved:`, not with a bare
+  # `working:` line. A status log carries no producer attribution, so a `working:`
+  # line is indistinguishable from one a reporter the crew armed emitted, and
+  # treating it as a retraction is what cancelled live declarations and restarted
+  # this ladder (status_standing_wait_line in bin/fm-classify-lib.sh owns the rule).
   resumed_win="sess:fm-resumed-r10"; resumed_key=$(printf '%s' resumed-r10 | tr ':/.' '___')
-  printf 'paused: old wait\nworking: resumed after access arrived\n' > "$state/resumed-r10.status"
+  printf 'paused: old wait\nresolved: access arrived\nworking: resumed the sweep\n' \
+    > "$state/resumed-r10.status"
   printf '1' > "$state/.subsuper-paused-$resumed_key"
   FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: $resumed_win" "$state"
   [ ! -e "$state/.subsuper-paused-$resumed_key" ] \
     || fail "an older pause declaration kept a resumed crew on pause cadence"
   [ -e "$state/.subsuper-stale-$resumed_key" ] \
     || fail "a resumed crew did not return to ordinary stale aging"
-  pass "stale escalation and current wait cadence remain independent"
+
+  # The boundary, on an otherwise identical crew: the same resume WITHOUT the
+  # retracting line keeps the declaration, and so keeps the pause cadence.
+  local masked_win masked_key
+  masked_win="sess:fm-masked-r10"; masked_key=$(printf '%s' masked-r10 | tr ':/.' '___')
+  printf 'paused: old wait\nworking: resumed the sweep\n' > "$state/masked-r10.status"
+  printf '1' > "$state/.subsuper-paused-$masked_key"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: $masked_win" "$state"
+  [ -e "$state/.subsuper-paused-$masked_key" ] \
+    || fail "a progress append cancelled the declaration and dropped the pause cadence"
+  [ ! -e "$state/.subsuper-stale-$masked_key" ] \
+    || fail "a progress append put a still-declared crew back on wedge aging"
+  pass "stale escalation and current wait cadence remain independent, and only the crew's own retracting line ends the wait"
 }
 
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
@@ -993,9 +1030,9 @@ test_housekeeping_captain_held_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a forgotten captain hold on the long cadence and resets its window"
 }
 
-# A crew that RESUMED - whose latest status line no longer declares the wait - drops
+# A crew that RESUMED - which retracted its wait with the resolution verb - drops
 # its pause tracking without escalating. The dimension pinned here is that pane busy
-# state does not GATE that clear: the status append alone ends the wait, on the
+# state does not GATE that clear: the retracting append alone ends the wait, on the
 # reconcile path the loop head runs before the pause recheck ever reads a pane, so a
 # crew that resumed into a genuinely busy pane cannot hold a stale window open. The
 # fixture asserts its own busy verdict first, so it cannot silently decay into an
@@ -1007,7 +1044,7 @@ test_housekeeping_paused_resumed_cleared() {
   dir=$(make_supercase paused-resumed)
   state="$dir/state"; fakebin="$dir/fakebin"
   win="sess:fm-held-w12"; pane="$dir/pane.txt"
-  printf 'paused: holding for the upstream tool release\nworking: upstream landed, resuming\n' \
+  printf 'paused: holding for the upstream tool release\nresolved: upstream landed\nworking: resuming\n' \
     > "$state/held-w12.status"
   printf 'Working...\n' > "$pane"
   fm_write_meta "$state/held-w12.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
@@ -1156,15 +1193,15 @@ test_housekeeping_declared_time_controls_pause_recheck() {
   pass "housekeeping bounds a distant declared time, defers to a near one, and rechecks a passed one at once"
 }
 
-# A pane still idle but whose status is no longer a pause (the crew changed state
-# without becoming busy) drops the marker - the signal path owns the new state, so
-# the pause recheck must not re-surface a stale pause reason.
+# A pane still idle but whose crew retracted its wait (changing state without
+# becoming busy) drops the marker - the signal path owns the new state, so the pause
+# recheck must not re-surface a wait that is over.
 test_housekeeping_paused_unpaused_cleared() {
   local dir state fakebin win pane key
   dir=$(make_supercase paused-unpaused)
   state="$dir/state"; fakebin="$dir/fakebin"
   win="sess:fm-held-w13"; pane="$dir/pane.txt"
-  printf 'paused: holding for the upstream release\nworking: resumed, upstream landed\n' > "$state/held-w13.status"
+  printf 'paused: holding for the upstream release\nresolved: upstream landed\nworking: resumed\n' > "$state/held-w13.status"
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "held-w13" | tr ':/.' '___')
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
