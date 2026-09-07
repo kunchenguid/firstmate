@@ -230,6 +230,33 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# A blocked headless capture must route a Codex worker to the captain's signed-in
+# Chrome instead of letting the worker discard or downgrade the reference.
+test_ship_and_scout_briefs_render_browser_fallback_rule() {
+  local home kind id brief
+  home="$TMP_ROOT/browser-fallback-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-browser-fallback-$kind"
+    if [ "$kind" = ship ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "Try chrome-devtools-axi or your own headless browser first." "$brief" \
+      "$kind brief did not start with the ordinary browser routes"
+    assert_grep "The moment a site blocks capture (Cloudflare wall, 403, 429, bot challenge, blank page), a Codex worker switches to the captain's signed-in Chrome through ChatGPT.app computer use and captures there, no approval needed." "$brief" \
+      "$kind brief did not route a blocked capture through ChatGPT.app"
+    assert_grep "Never drop, downgrade, or score a reference lower because it blocked, and say which route captured it." "$brief" \
+      "$kind brief did not protect blocked references and require capture-route reporting"
+    assert_grep "One worker on the captain's Chrome at a time." "$brief" \
+      "$kind brief did not serialize use of the captain's Chrome"
+  done
+  pass "fm-brief.sh: ship and scout briefs render the Codex Chrome fallback rule"
+}
+
 test_upstream_sync_template_renders_direct_pr_delivery() {
   local home brief task rendered
   home="$TMP_ROOT/upstream-sync-home"
@@ -997,6 +1024,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_ship_and_scout_briefs_render_browser_fallback_rule
 test_upstream_sync_template_renders_direct_pr_delivery
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
