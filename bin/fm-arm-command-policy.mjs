@@ -555,11 +555,24 @@ function consumeWrapperOptions(name, words, index) {
   return { index: next, unresolved: false, embeddedPayloads };
 }
 
+const CONTROL_COMMAND_PREFIXES = new Set(["if", "then", "elif", "else", "while", "until", "do", "!"]);
+
 export function commandPosition(tokens) {
   const words = wordsInNode(tokens);
   let index = 0;
-  while (index < words.length && isAssignment(words[index].value)) index += 1;
-  const prefixAssignments = index;
+  let prefixAssignments = 0;
+  while (index < words.length) {
+    if (isAssignment(words[index].value)) {
+      prefixAssignments += 1;
+      index += 1;
+      continue;
+    }
+    if (CONTROL_COMMAND_PREFIXES.has(words[index].value) && !words[index].quoted) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
   const wrappers = [];
   let unresolvedWrapperOption = false;
   const wrapperPayloads = [];

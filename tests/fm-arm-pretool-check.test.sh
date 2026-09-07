@@ -377,7 +377,10 @@ EOF
     'no-mistakes axi respond --action fix' \
     'time no-mistakes axi respond --action fix' \
     'time -p no-mistakes axi respond --action fix' \
-    'coproc no-mistakes axi respond --action fix'; do
+    'coproc no-mistakes axi respond --action fix' \
+    'coproc JOB { no-mistakes axi respond --action fix; }' \
+    'if no-mistakes axi respond --action fix; then echo done; fi' \
+    'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
       --command "$payload" >"$dir/worker.out" 2>"$dir/worker.err"
     rc=$?
@@ -392,7 +395,10 @@ EOF
     "bash -lc 'no-mistakes axi respond --action fix'" \
     'time no-mistakes axi respond --action fix' \
     'time -p no-mistakes axi respond --action fix' \
-    'coproc no-mistakes axi respond --action fix'; do
+    'coproc no-mistakes axi respond --action fix' \
+    'coproc JOB { no-mistakes axi respond --action fix; }' \
+    'if no-mistakes axi respond --action fix; then echo done; fi' \
+    'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
     rc=$?
     [ "$rc" -eq 2 ] || fail "the primary pipeline drive must deny through recognized execution wrappers, got $rc for: $payload"
@@ -402,7 +408,8 @@ EOF
   for payload in \
     "echo 'no-mistakes axi respond --action fix'" \
     "time echo 'no-mistakes axi run --intent data'" \
-    "coproc echo 'no-mistakes axi respond --action data'"; do
+    "coproc echo 'no-mistakes axi respond --action data'" \
+    "if echo 'no-mistakes axi respond --action data'; then echo done; fi"; do
     FM_HOME="$primary" "$check" --command "$payload" >/dev/null 2>&1 \
       || fail "a pipeline command mentioned only as data must remain allowed: $payload"
   done
