@@ -1335,8 +1335,10 @@ for META_HOME_PAIR in \
 do
   TASK_ID=${META_HOME_PAIR%%:*}
   TASK_HOME=${META_HOME_PAIR#*:}
-  teardown_task "$TASK_ID" "$TASK_HOME" > "$TMP_ROOT/td-before-recovery-$TASK_ID.out" 2> "$TMP_ROOT/td-before-recovery-$TASK_ID.err" \
-    || fail "pre-recovery teardown of $TASK_ID failed: $(cat "$TMP_ROOT/td-before-recovery-$TASK_ID.err")"
+  if [ -f "$TASK_HOME/state/$TASK_ID.meta" ]; then
+    teardown_task "$TASK_ID" "$TASK_HOME" > "$TMP_ROOT/td-before-recovery-$TASK_ID.out" 2> "$TMP_ROOT/td-before-recovery-$TASK_ID.err" \
+      || fail "pre-recovery teardown of $TASK_ID failed: $(cat "$TMP_ROOT/td-before-recovery-$TASK_ID.err")"
+  fi
 done
 
 PRIMARY_WAVE_ID=resume-wave-primary
