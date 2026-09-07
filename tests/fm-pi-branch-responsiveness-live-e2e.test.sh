@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Opt-in live guard for the ONE thing only a real Pi TUI can answer: whether
+# Default-on live guard for the ONE thing only a real Pi TUI can answer: whether
 # the captain can still type and see the screen repaint while a supervision
 # outcome is being delivered into his session.
 #
@@ -31,7 +31,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate opt-in FM_PI_BRANCH_RESPONSIVENESS_E2E pi tmux node
+fm_live_gate default-on FM_PI_BRANCH_RESPONSIVENESS_E2E pi tmux node
 
 PI_VERSION=$(pi --version 2>/dev/null || printf 'unknown')
 TMUX=$(command -v tmux)
