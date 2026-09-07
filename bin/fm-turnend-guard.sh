@@ -75,11 +75,19 @@
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
+#      before that wait, if recovery is not already proven, this guard primes
+#      bin/fm-claude-stop-autoarm.sh --ensure-watcher so a refusal cannot abort
+#      the only process that could restore a watcher (Claude Code starts the
+#      registered asyncRewake hook in parallel, then cancels sibling hooks when
+#      a Stop is blocked);
 #   3. only when neither materializes is the auto-arm genuinely absent: re-block
 #      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
-#      fail-open only for an already verified failure episode.
+#      fail-open only for an already verified failure episode. The primed
+#      watcher, if it is still coming up, survives that refusal and can satisfy
+#      the next Stop, so two consecutive refusals cannot be guaranteed by the
+#      first.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -435,6 +443,21 @@ failure_episode_verified() {
     *) return 1 ;;
   esac
 }
+
+# Prime recovery before the wait/refuse path. A blocked Stop aborts Claude's
+# in-flight asyncRewake hook, which is what turned one missed claim into a
+# deadlock: the arm never ran, the epoch could freeze or advance, and every
+# later Stop refused. --ensure-watcher uses this hook's harness ancestry, starts
+# a session-detached watcher, and takes no generation claim, so the registered
+# asyncRewake hook still owns rewake once a Stop is allowed.
+# Do not call autoarm_owns_recovery here: that accounts the failed-epoch budget.
+if ! fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" \
+  && ! fm_autoarm_claim_open "$STATE" "$GRACE" \
+  && [ -x "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" ]; then
+  printf '%s' "$PAYLOAD" \
+    | "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" --ensure-watcher >/dev/null 2>&1 \
+    || true
+fi
 
 i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do

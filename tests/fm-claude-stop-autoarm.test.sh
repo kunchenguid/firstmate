@@ -79,6 +79,17 @@ run_autoarm() {
   return "$rc"
 }
 
+run_autoarm_ensure_watcher() {
+  local dir=$1 rc=0
+  printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh" --ensure-watcher
+      ' 2>&1 || rc=$?
+  printf 'RC=%s\n' "$rc" >&2
+  return "$rc"
+}
+
 # Arm fixture variants, installed per test as <dir>/bin/fm-watch-arm.sh.
 write_arm_fixture() {
   local dir=$1 kind=$2
@@ -1191,6 +1202,88 @@ test_long_poll_grace_reaches_arm_wrapper() {
   pass "auto-arm: a long FM_POLL with FM_GUARD_GRACE unset reaches fm-watch-arm.sh with the derived grace"
 }
 
+write_ensure_watch_fixture() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+WATCH_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-watch.sh"
+# shellcheck source=/dev/null
+. "$FM_HOME/bin/fm-wake-lib.sh"
+pid=${BASHPID:-$$}
+identity=$(fm_pid_identity "$pid") || identity="ensure-watch-$pid"
+mkdir -p "$STATE/.watch.lock"
+printf '%s\n' "$pid" > "$STATE/.watch.lock/pid"
+printf '%s\n' "$FM_HOME" > "$STATE/.watch.lock/fm-home"
+printf '%s\n' "$WATCH_PATH" > "$STATE/.watch.lock/watcher-path"
+printf '%s\n' "$identity" > "$STATE/.watch.lock/pid-identity"
+touch "$STATE/.last-watcher-beat"
+printf '%s\n' "$pid" > "$STATE/ensure-watch-pid"
+sleep 60
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+}
+
+kill_ensure_watch_fixture() {
+  local dir=$1 pid
+  pid=$(cat "$dir/state/ensure-watch-pid" 2>/dev/null || true)
+  if [ -z "$pid" ]; then
+    pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+  fi
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+}
+
+test_ensure_watcher_starts_detached_watcher_without_claim() {
+  local dir out status i pid
+  command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach the primed watcher"
+  dir=$(make_primary_dir "$TMP_ROOT/ensure-watcher")
+  : > "$dir/state/task.meta"
+  write_ensure_watch_fixture "$dir"
+  out=$(run_autoarm_ensure_watcher "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "--ensure-watcher must exit 0 and never rewake"
+  [ -z "$out" ] || fail "--ensure-watcher produced output: $out"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "--ensure-watcher took a generation claim"
+  i=0
+  pid=
+  while [ "$i" -lt 50 ]; do
+    pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$pid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "$pid" ] || fail "--ensure-watcher did not start a detached watcher"
+  kill_ensure_watch_fixture "$dir"
+  pass "auto-arm --ensure-watcher: starts a detached watcher and takes no generation claim"
+}
+
+test_ensure_watcher_inert_without_session_lock() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/ensure-watcher-no-lock")
+  : > "$dir/state/task.meta"
+  write_ensure_watch_fixture "$dir"
+  out=$(printf '%s\n' '{"session_id":"s"}' \
+    | FM_HOME="$dir" bash "$dir/bin/fm-claude-stop-autoarm.sh" --ensure-watcher 2>&1); status=$?
+  expect_code 0 "$status" "--ensure-watcher must stay inert without a session lock"
+  [ ! -e "$dir/state/.watch.lock/pid" ] || fail "--ensure-watcher started a watcher without a session lock"
+  pass "auto-arm --ensure-watcher: inert with no session lock"
+}
+
+test_ensure_watcher_inert_when_afk() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/ensure-watcher-afk")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.afk"
+  write_ensure_watch_fixture "$dir"
+  out=$(run_autoarm_ensure_watcher "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "--ensure-watcher must stay inert while away mode is on"
+  [ ! -e "$dir/state/.watch.lock/pid" ] || fail "--ensure-watcher started a watcher while AFK"
+  pass "auto-arm --ensure-watcher: inert while away mode owns supervision"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -1238,4 +1331,7 @@ test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
+test_ensure_watcher_starts_detached_watcher_without_claim
+test_ensure_watcher_inert_without_session_lock
+test_ensure_watcher_inert_when_afk
 test_fm_lock_status_still_works_with_shared_lib
