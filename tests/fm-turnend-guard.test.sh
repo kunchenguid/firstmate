@@ -1970,6 +1970,49 @@ test_hook_claude_mode_refused_stop_recovers_without_epoch_progress() {
   pass "fm-turnend-guard --claude: a refused stop still recovers when the epoch does not advance"
 }
 
+# The second authorized deadlock variant: intermittent recovery with an epoch
+# that keeps advancing (166 failed -> 167 rewake). The advancing sequence
+# interleaves Stops the guard ALLOWS - a fresh failed epoch spending its one
+# handoff - with the Stops it refuses once that epoch ages out, and only a
+# refusing Stop primes. A refusal that follows an epoch transition must still
+# leave a path for the watcher, exactly as a frozen epoch does.
+test_hook_claude_mode_advancing_epoch_refusal_cannot_guarantee_a_second_refusal() {
+  local dir out status count
+  command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach the primed watcher"
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-advancing-epoch-primes")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_gated_watch_fixture "$dir"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=166 owner_pid=999 outcome=failed updated_at=%s\n' "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  expect_code 0 "$status" "the fresh failed epoch 166 must spend its one automatic handoff"
+  [ -z "$out" ] || fail "the epoch-166 handoff stop produced output: $out"
+  [ ! -e "$dir/state/.claude-autoarm-prime.out" ] \
+    || fail "an allowed handoff stop primed a watcher: $(cat "$dir/state/.claude-autoarm-prime.out")"
+
+  printf 'epoch=167 owner_pid=41746 outcome=rewake updated_at=2\n' \
+    > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  expect_code 2 "$status" "the aged rewake epoch 167 must refuse while the watcher is not yet healthy"
+  assert_contains "$out" "TURN WOULD END BLIND" "the advancing-epoch refusal lost the blind-turn banner"
+  count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+  [ "$count" = 1 ] || fail "the refusal after an epoch transition did not advance the bounded count, got $count"
+  release_and_await_primed_watcher "$dir" \
+    || fail "the watcher primed by the refused stop never claimed the home lock"
+
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  kill_fixture_watcher "$dir"
+  expect_code 0 "$status" "a refusal that follows an epoch transition must still leave a path for the primed watcher"
+  [ -z "$out" ] || fail "recovery allow after an advancing-epoch refusal produced output: $out"
+  grep -F 'epoch=167 owner_pid=41746 outcome=rewake updated_at=2' \
+    "$dir/state/.claude-autoarm-epoch" >/dev/null \
+    || fail "advancing-epoch recovery mutated the auto-arm epoch instead of priming a watcher"
+  pass "fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (advancing-epoch variant)"
+}
+
 # The 2026-09-06 budget half of the same deadlock: state/.turnend-claude-blocks
 # stayed count=1 epoch=165 for forty minutes because the epoch identity that
 # deduplicates one Stop's several observations also suppressed the count across
@@ -2329,6 +2372,7 @@ test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_ordinary_stop_does_not_prime
 test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal
 test_hook_claude_mode_refused_stop_recovers_without_epoch_progress
+test_hook_claude_mode_advancing_epoch_refusal_cannot_guarantee_a_second_refusal
 test_hook_claude_mode_frozen_epoch_still_reaches_the_bounded_fail_open
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_away_daemon_allows_between_watcher_cycles
