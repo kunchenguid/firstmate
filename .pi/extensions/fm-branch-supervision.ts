@@ -159,8 +159,8 @@ const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
 const PROCESSING_MESSAGE_TYPE = "fm-branch-process";
 // Triggered re-presentations per unprocessed sequence set before the request
 // stops opening turns of its own and instead rides the captain's next prompt
-// (deliverAs nextTurn). Bounded so an answer that repeatedly ignores the
-// request cannot become an unbounded loop of empty turns.
+// via before_agent_start, not an already-pending nextTurn message. Bounded so
+// ignored requests cannot loop or prevent a newer outcome opening a turn.
 const PROCESSING_TRIGGERED_ATTEMPTS = 2;
 // One provider failure rejects immediately to watcher-owned fallback but leaves
 // room for a transient outage to recover on the next wake. A second consecutive
@@ -625,11 +625,11 @@ export default function (pi: ExtensionAPI) {
   let currentMainSession: ReadonlyEntries | null = null;
   // Volatile view of the open processing request: the sequences it presented,
   // how many turns it has opened for that set, whether a
-  // presentation is still pending its run boundary, and whether a copy is
-  // queued for the captain's next prompt. The durable truth is the store's
+  // presentation is still pending its run boundary, and content staged locally
+  // for the next actual prompt. The durable truth is the store's
   // processed marker; this only paces re-presentation and resets with the
   // session generation.
-  type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
+  type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; deferredContent?: string };
   let processing: ProcessingState | null = null;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
@@ -1032,14 +1032,13 @@ export default function (pi: ExtensionAPI) {
     if (processing?.pending) return true;
     // Encoding the request body shells out, so it is done before the volatile
     // processing state is touched: the queue keeps another delivery out, but
-    // main's own agent_start still runs during that await and clears
-    // nextTurnQueued, and a decision recorded before the await could be acted
-    // on after it.
+    // main's own run may start during that await. Only requests actually
+    // handed to a run are pending; an exhausted budget is not a delivery.
     const content = await processingRequestInput(rows);
     if (!(await generationOwnsLock(expectedGeneration))) return false;
     if (processing?.pending) return true;
     if (!processing || processing.sequences !== sequences) {
-      processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false };
+      processing = { sequences, through, triggered: 0, pending: false };
     }
     // A presentation already sent is consumed by the run it joins or opens;
     // until that run settles, sending a widened or identical copy would hand
@@ -1049,10 +1048,12 @@ export default function (pi: ExtensionAPI) {
       processing.triggered += 1;
       processing.pending = true;
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
-    } else if (!processing.nextTurnQueued) {
-      processing.nextTurnQueued = true;
-      processing.pending = true;
-      pi.sendMessage(message, { deliverAs: "nextTurn" });
+    } else {
+      // Do not reserve Pi's nextTurn queue here: it cannot be replaced, and
+      // treating that passive copy as pending starves NEW sequence sets until
+      // a captain prompt arrives. Stage it locally so new outcomes can reset
+      // the budget, and inject only when a real prompt starts below.
+      processing.deferredContent = content;
     }
     return true;
   }
@@ -1567,8 +1568,17 @@ ${context.command}
     rememberMainModel(ctx);
     currentMainSession = ctx?.sessionManager ?? null;
     const promptGeneration = generation;
-    if (!(await enqueueDelivery(() => actingAsOwner(promptGeneration)))) return;
-    if (promptGeneration !== generation || !currentMainSession || !collectCurrentMainDialog()) return;
+    const deferred = await enqueueDelivery(async () => {
+      if (!(await actingAsOwner(promptGeneration))) return null;
+      if (processing?.pending || !processing?.deferredContent) return undefined;
+      const message = { customType: PROCESSING_MESSAGE_TYPE, content: processing.deferredContent, display: false };
+      processing.deferredContent = undefined;
+      processing.pending = true;
+      return message;
+    });
+    if (deferred === null || promptGeneration !== generation || !currentMainSession) return;
+    const injected = deferred ? { message: deferred } : undefined;
+    if (!collectCurrentMainDialog()) return injected;
 
     // This event is Pi's authoritative complete current prompt. At this point
     // SessionManager still contains only the preceding dialog, so relying on
@@ -1576,18 +1586,16 @@ ${context.command}
     // Stage it verbatim and remember the future persisted index for turn_end's
     // duplicate suppression. Operational extension injections are not dialog.
     const prompt = event.prompt.trim();
-    if (!prompt || isOperationalUserText(prompt)) return;
+    if (!prompt || isOperationalUserText(prompt)) return injected;
     const file = currentMainSession.getSessionFile() ?? "";
     const index = mirrorCollection.collectAnchor?.index ?? currentMainSession.getEntries().length;
     pendingMirror.push({ tag: "captain", text: prompt });
     mirrorCollection.stagedCaptain = { file, index, text: prompt };
+    return injected;
   });
 
   pi.on?.("agent_start", () => {
     mainStreaming = true;
-    // Pi delivers a queued nextTurn copy with the prompt that starts this run,
-    // so a fresh copy may be queued again once this run settles unacknowledged.
-    if (processing) processing.nextTurnQueued = false;
   });
   pi.on?.("agent_end", () => {
     mainStreaming = false;
