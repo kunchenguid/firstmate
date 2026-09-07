@@ -201,6 +201,13 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Branch-currency dispatch (config/pr-refresh)
+
+The optional local, gitignored `config/pr-refresh` presence flag opts this home into a default-off control that keeps a task's open pull request current with its base automatically, instead of leaving the captain to press the forge's own "Update branch" by hand.
+With it present, the watcher's registered PR poll reacting to a `behind` or `conflict` head runs the four-state dispatch lifecycle (Observed, Refused, Dispatched, Resolved) that `bin/fm-watch.sh`'s `pr_refresh_dispatch` owns; with it absent, behind/conflict is still detected and logged for triage exactly as before, with no dispatch attempted and no state recorded.
+The flag answers the class-gate objection that this is new always-on behavior: a home that has not asked for it sees no behavior change at all.
+[`architecture.md`](architecture.md) owns the state machine and its safety properties, and `bin/fm-watch.sh`'s `pr_refresh_dispatch` header owns the exact mechanics.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.

@@ -1236,7 +1236,9 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
-pr_refresh_state_write() {  # <path> <prepared|dispatched|resolved> <head> <attempt> <record|->
+# Four-state branch-currency dispatch (Observed/Refused/Dispatched/Resolved).
+# docs/architecture.md owns the state machine and its safety properties.
+pr_refresh_state_write() {  # <path> <dispatched|resolved> <head> <attempt> <record>
   local path=$1 status=$2 head=$3 attempt=$4 record=$5 tmp
   tmp=$(mktemp "$STATE/.pr-refresh-state.XXXXXX") || return 1
   if printf '%s\t%s\t%s\t%s\n' "$status" "$head" "$attempt" "$record" > "$tmp" \
@@ -1252,16 +1254,12 @@ pr_refresh_state_read() {  # <path>; sets PR_REFRESH_*
   tab=$(printf '\t')
   IFS="$tab" read -r PR_REFRESH_STATUS PR_REFRESH_HEAD PR_REFRESH_ATTEMPT PR_REFRESH_RECORD extra < "$path" \
     || return 1
-  case "$PR_REFRESH_STATUS" in prepared|dispatched|resolved) ;; *) return 1 ;; esac
+  case "$PR_REFRESH_STATUS" in dispatched|resolved) ;; *) return 1 ;; esac
   case "${#PR_REFRESH_HEAD}" in 40|64) ;; *) return 1 ;; esac
   case "$PR_REFRESH_HEAD" in *[!0-9a-f]*) return 1 ;; esac
   case "$PR_REFRESH_ATTEMPT" in ''|*[!0-9]*|0) return 1 ;; esac
   [ -z "$extra" ] || return 1
-  case "$PR_REFRESH_STATUS:$PR_REFRESH_RECORD" in
-    prepared:-) ;;
-    prepared:*|dispatched:-|resolved:-) return 1 ;;
-    *) fm_task_inbox_seq_of "$PR_REFRESH_RECORD" >/dev/null || return 1 ;;
-  esac
+  fm_task_inbox_seq_of "$PR_REFRESH_RECORD" >/dev/null || return 1
 }
 
 pr_refresh_record_state() {  # <task-id> <record>; prints pending|resolved|missing
@@ -1279,31 +1277,64 @@ pr_refresh_record_state() {  # <task-id> <record>; prints pending|resolved|missi
   fi
 }
 
-pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
-  local id=$1 url=$2 condition=$3 head=$4 state_line state mode spawn_gen poll_spawn_gen message
-  local marker="$STATE/$id.pr-refresh-state" meta="$STATE/$id.meta" attempt record record_path record_state
-  spawn_gen=$(fm_meta_get "$meta" spawn_gen)
-  poll_spawn_gen=$(fm_meta_get "$meta" pr_poll_spawn_gen)
-  if [ -z "$spawn_gen" ] || [ "$spawn_gen" != "$poll_spawn_gen" ]; then
-    printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=worker-generation-changed\n' \
-      "$url" "$head" "$condition"
-    return 1
+# Deduplicated refusal: an unchanged (head, reason) never wakes twice. Never
+# touches $id.pr-refresh-state, so a refusal can't erase the attempt count a
+# prior dispatch on this head earned.
+pr_refresh_refuse() {  # <task-id> <url> <condition> <head> <reason>
+  local id=$1 url=$2 condition=$3 head=$4 reason=$5
+  local refused="$STATE/$id.pr-refresh-refused" tab prev_head prev_reason extra
+  tab=$(printf '\t')
+  if [ -f "$refused" ] \
+    && IFS="$tab" read -r prev_head prev_reason extra < "$refused" \
+    && [ -z "$extra" ] && [ "$prev_head" = "$head" ] && [ "$prev_reason" = "$reason" ]; then
+    printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=%s\n' "$url" "$head" "$condition" "$reason"
+    return 2
   fi
+  printf '%s\t%s\n' "$head" "$reason" > "$refused" 2>/dev/null || true
+  printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=%s\n' "$url" "$head" "$condition" "$reason"
+  return 1
+}
+
+pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
+  local id=$1 url=$2 condition=$3 head=$4
+  local marker="$STATE/$id.pr-refresh-state" meta="$STATE/$id.meta"
+  local state_line state mode spawn_gen message attempt record record_path record_state
+
+  if [ -f "$marker" ] && pr_refresh_state_read "$marker" && [ "$PR_REFRESH_HEAD" = "$head" ] \
+    && [ "$PR_REFRESH_STATUS" != resolved ]; then
+    record_state=$(pr_refresh_record_state "$id" "$PR_REFRESH_RECORD")
+    case "$record_state" in
+      pending)
+        printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-pending\n' \
+          "$url" "$head" "$condition"
+        return 2
+        ;;
+      resolved)
+        pr_refresh_state_write "$marker" resolved "$head" "$PR_REFRESH_ATTEMPT" "$PR_REFRESH_RECORD" || {
+          pr_refresh_refuse "$id" "$url" "$condition" "$head" state-write-failed
+          return $?
+        }
+        printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-resolved\n' \
+          "$url" "$head" "$condition"
+        return 2
+        ;;
+      *)
+        pr_refresh_refuse "$id" "$url" "$condition" "$head" dispatch-record-missing
+        return $?
+        ;;
+    esac
+  fi
+
   mode=$(fm_meta_get "$meta" mode)
+  # Captured before the state check, per attempt, and handed unchanged to
+  # fm-send's own live delivery-time guard - never persisted, never compared
+  # here. docs/architecture.md "Branch-currency dispatch" owns why.
+  spawn_gen=$(fm_meta_get "$meta" spawn_gen)
   state_line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || state_line=
   state=${state_line#state: }
   state=${state%% *}
   case "$state" in
     working)
-      if [ -f "$marker" ] && pr_refresh_state_read "$marker" \
-        && [ "$PR_REFRESH_STATUS" = dispatched ] && [ "$PR_REFRESH_HEAD" = "$head" ] \
-        && [ "$(pr_refresh_record_state "$id" "$PR_REFRESH_RECORD")" = resolved ]; then
-        pr_refresh_state_write "$marker" resolved "$head" "$PR_REFRESH_ATTEMPT" "$PR_REFRESH_RECORD" || {
-          printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-failed\n' \
-            "$url" "$head" "$condition"
-          return 1
-        }
-      fi
       printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=active-work\n' \
         "$url" "$head" "$condition"
       return 2
@@ -1313,104 +1344,52 @@ pr_refresh_dispatch() {  # <task-id> <url> <behind|conflict> <head>
     *) state=unknown ;;
   esac
   if [ "$state" != "done" ]; then
-    printf 'branch-refresh-refused pr=%s head=%s condition=%s task-state=%s\n' \
-      "$url" "$head" "$condition" "$state"
-    return 1
+    pr_refresh_refuse "$id" "$url" "$condition" "$head" "task-state-$state"
+    return $?
   fi
-
   case "$mode" in no-mistakes|direct-PR) ;; *)
-    printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=unsupported-mode\n' \
-      "$url" "$head" "$condition"
-    return 1
+    pr_refresh_refuse "$id" "$url" "$condition" "$head" unsupported-mode
+    return $?
   esac
-  case "$condition" in behind|conflict) ;; *) return 1 ;; esac
-  if [ -f "$marker" ]; then
-    if ! pr_refresh_state_read "$marker"; then
-      printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-invalid\n' \
-        "$url" "$head" "$condition"
-      return 1
-    fi
-    if [ "$PR_REFRESH_HEAD" = "$head" ] && [ "$PR_REFRESH_STATUS" = dispatched ]; then
-      record_state=$(pr_refresh_record_state "$id" "$PR_REFRESH_RECORD")
-      case "$record_state" in
-        pending)
-          printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-pending\n' \
-            "$url" "$head" "$condition"
-          return 2
-          ;;
-        resolved)
-          if ! pr_refresh_state_write "$marker" resolved "$head" "$PR_REFRESH_ATTEMPT" "$PR_REFRESH_RECORD"; then
-            printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-failed\n' \
-              "$url" "$head" "$condition"
-            return 1
-          fi
-          printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-resolved\n' \
-            "$url" "$head" "$condition"
-          return 2
-          ;;
-        *)
-          printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-missing\n' \
-            "$url" "$head" "$condition"
-          return 1
-          ;;
-      esac
-    fi
-    if [ "$PR_REFRESH_HEAD" = "$head" ] && [ "$PR_REFRESH_STATUS" = prepared ]; then
-      attempt=$PR_REFRESH_ATTEMPT
-    elif [ "$PR_REFRESH_HEAD" = "$head" ] && [ "$PR_REFRESH_STATUS" = resolved ]; then
-      attempt=$((PR_REFRESH_ATTEMPT + 1))
-    else
-      attempt=1
-    fi
+
+  if [ -f "$marker" ] && pr_refresh_state_read "$marker" \
+    && [ "$PR_REFRESH_HEAD" = "$head" ] && [ "$PR_REFRESH_STATUS" = resolved ]; then
+    attempt=$((PR_REFRESH_ATTEMPT + 1))
   else
     attempt=1
   fi
-  if [ ! -f "$marker" ] || [ "$PR_REFRESH_STATUS" != prepared ] \
-    || [ "$PR_REFRESH_HEAD" != "$head" ]; then
-    if ! pr_refresh_state_write "$marker" prepared "$head" "$attempt" -; then
-      printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-failed\n' \
-        "$url" "$head" "$condition"
-      return 1
-    fi
-  fi
+
   if [ "$mode" = no-mistakes ]; then
     message="FIRSTMATE_OP: v1 branch-currency attempt $attempt: Your open pull request $url is not current with its base (behind or in conflict) at head $head. Re-run this brief's no-mistakes delivery contract with its exact serialized captain intent. Before any edit or branch movement, inspect no-mistakes axi status and do not act while an active run owns the branch. Let the pipeline's rebase step bring the branch current and re-establish every check on the resulting head. If rebase conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
   else
     message="FIRSTMATE_OP: v1 branch-currency attempt $attempt: Your open pull request $url is not current with its base (behind or in conflict) at head $head. Refresh it through this brief's direct-PR delivery path. Before any edit or branch movement, confirm no active validation run owns the branch. Fetch and merge the pull request's base without force, run the project checks on the resulting head, push normally, and wait for current-head checks. If the merge conflicts, report blocked and name the conflicted paths. Report done again only after the current-head checks are green."
   fi
 
-  # A prepared attempt retries with the same body; a resolved attempt increments
-  # the body identity so all-history transport dedup cannot swallow new work.
   if ! record_path=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     FM_SEND_EXPECTED_SPAWN_GEN="$spawn_gen" FM_SEND_IDEMPOTENT=1 FM_SEND_PRINT_INBOX_RECORD=1 \
     "$FM_PR_REFRESH_SEND_BIN" "$id" "$message" 2>/dev/null); then
-    printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=worker-dispatch-failed\n' \
-      "$url" "$head" "$condition"
-    return 1
+    pr_refresh_refuse "$id" "$url" "$condition" "$head" worker-dispatch-failed
+    return $?
   fi
   case "$record_path" in
     "$STATE/$id.inbox/"*.msg|"$STATE/$id.inbox/handled/"*.msg) record=${record_path##*/} ;;
     *)
-      printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=worker-dispatch-receipt-invalid\n' \
-        "$url" "$head" "$condition"
-      return 1
+      pr_refresh_refuse "$id" "$url" "$condition" "$head" worker-dispatch-receipt-invalid
+      return $?
       ;;
   esac
   fm_task_inbox_seq_of "$record" >/dev/null || {
-    printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=worker-dispatch-receipt-invalid\n' \
-      "$url" "$head" "$condition"
-    return 1
+    pr_refresh_refuse "$id" "$url" "$condition" "$head" worker-dispatch-receipt-invalid
+    return $?
   }
   record_state=$(pr_refresh_record_state "$id" "$record")
   case "$record_state" in pending) record_state=dispatched ;; resolved) ;; *)
-    printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-missing\n' \
-      "$url" "$head" "$condition"
-    return 1
+    pr_refresh_refuse "$id" "$url" "$condition" "$head" dispatch-record-missing
+    return $?
   esac
   if ! pr_refresh_state_write "$marker" "$record_state" "$head" "$attempt" "$record"; then
-    printf 'branch-refresh-refused pr=%s head=%s condition=%s reason=dispatch-record-failed\n' \
-      "$url" "$head" "$condition"
-    return 1
+    pr_refresh_refuse "$id" "$url" "$condition" "$head" state-write-failed
+    return $?
   fi
   if [ "$record_state" = resolved ]; then
     printf 'branch-refresh-deferred pr=%s head=%s condition=%s reason=dispatch-resolved\n' \
@@ -1907,7 +1886,7 @@ while :; do
           fi
           wake "$reason"
         fi
-        if [ "$is_pr_poll" -eq 1 ]; then
+        if [ "$is_pr_poll" -eq 1 ] && [ -e "$CONFIG/pr-refresh" ]; then
           condition=${out%% *}
           head=${out#* }
           case "$condition" in
