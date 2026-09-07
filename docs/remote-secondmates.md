@@ -99,6 +99,8 @@ bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
 Over the plain SSH doctor bootstrap, it writes and reloads the Firstmate-owned `dev.firstmate.remote-job` and `dev.firstmate.herdr.fm-remote` launch agents on macOS, both scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
 It starts the same workers directly on Linux, recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent, and creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target, stopping after one harness satisfies the at-least-one requirement.
 It never installs packages or overwrites a non-Firstmate file at a reserved wrapper path.
+Worker startup can recover an interrupted quarantine publication only when the lock contains one exact completed staging marker with account ownership, restrictive modes, unchanged nonsymlink identity, no conflicting entries, and no live worker or recorded job execution under the existing quarantine checks.
+Malformed, ambiguous, foreign, or entry-conflicting staging candidates remain untouched, while an otherwise valid marker that reaches a live-execution refusal remains published as official quarantine for investigation.
 The dedicated Herdr launch agent owns only the remote-secondmate `fm-remote` server and does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
 It re-derives every check from the host afterwards, so what it prints is the state after the repair rather than the intent of one.
 

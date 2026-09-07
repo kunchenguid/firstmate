@@ -20,6 +20,8 @@ OTHER_PID=
 RECOVERY_WORKER_PID=
 REPEAT_WORKER_PID=
 RESTART_SUPERVISOR_PID=
+QUARANTINE_TEST_WORKER_PID=
+QUARANTINE_TEST_AUX_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -29,6 +31,8 @@ cleanup_remote_job_fixture() {
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
   [ -z "$REPEAT_WORKER_PID" ] || kill "$REPEAT_WORKER_PID" 2>/dev/null || true
   [ -z "$RESTART_SUPERVISOR_PID" ] || kill -KILL "$RESTART_SUPERVISOR_PID" 2>/dev/null || true
+  [ -z "$QUARANTINE_TEST_WORKER_PID" ] || kill -KILL "$QUARANTINE_TEST_WORKER_PID" 2>/dev/null || true
+  [ -z "$QUARANTINE_TEST_AUX_PID" ] || kill -KILL "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -647,6 +651,358 @@ RECOVERY_WORKER_PID=
 kill "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
 wait "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
 pass "quarantine recovery refuses unverifiable supervisors and ignores reused pids"
+
+QUARANTINE_SENTINEL='active execution could not be confirmed stopped'
+
+new_staged_quarantine_fixture() { # <name>
+  local name=$1
+  QUARANTINE_TEST_DIR="$TMP_ROOT/quarantine-$name"
+  QUARANTINE_TEST_HOME="$QUARANTINE_TEST_DIR/home"
+  QUARANTINE_TEST_STATE="$QUARANTINE_TEST_DIR/state"
+  QUARANTINE_TEST_STAGE="$QUARANTINE_TEST_STATE/worker.lock/.quarantine.A1b2C3"
+  mkdir -p "$QUARANTINE_TEST_HOME" "$QUARANTINE_TEST_STATE/jobs" \
+    "$QUARANTINE_TEST_STATE/logs" "$QUARANTINE_TEST_STATE/worker.lock"
+  chmod 700 "$QUARANTINE_TEST_HOME" "$QUARANTINE_TEST_STATE" \
+    "$QUARANTINE_TEST_STATE/jobs" "$QUARANTINE_TEST_STATE/logs" \
+    "$QUARANTINE_TEST_STATE/worker.lock"
+  printf '%s\n' "$QUARANTINE_SENTINEL" > "$QUARANTINE_TEST_STAGE"
+  chmod 600 "$QUARANTINE_TEST_STAGE"
+  touch -t 200001010000 "$QUARANTINE_TEST_STATE/worker.lock"
+}
+
+run_staged_quarantine_worker() { # [path]
+  local worker_path=${1:-$PATH}
+  set +e
+  HOME="$QUARANTINE_TEST_HOME" PATH="$worker_path" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+    FM_REMOTE_JOB_STATE_ROOT="$QUARANTINE_TEST_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+    > "$QUARANTINE_TEST_DIR/worker.out" 2> "$QUARANTINE_TEST_DIR/worker.err"
+  QUARANTINE_TEST_RC=$?
+  set -e
+}
+
+start_staged_quarantine_worker() { # [path]
+  local worker_path=${1:-$PATH}
+  HOME="$QUARANTINE_TEST_HOME" PATH="$worker_path" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+    FM_REMOTE_JOB_STATE_ROOT="$QUARANTINE_TEST_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+    > "$QUARANTINE_TEST_DIR/worker.out" 2> "$QUARANTINE_TEST_DIR/worker.err" &
+  QUARANTINE_TEST_WORKER_PID=$!
+}
+
+wait_for_quarantine_recovery() {
+  local i=0
+  while [ "$i" -lt 300 ]; do
+    if [ ! -e "$QUARANTINE_TEST_STAGE" ] && [ ! -L "$QUARANTINE_TEST_STAGE" ] \
+      && [ ! -e "$QUARANTINE_TEST_STATE/worker.lock/quarantine" ] \
+      && [ ! -L "$QUARANTINE_TEST_STATE/worker.lock/quarantine" ]; then
+      return 0
+    fi
+    kill -0 "$QUARANTINE_TEST_WORKER_PID" 2>/dev/null || return 1
+    i=$((i + 1))
+    sleep 0.05
+  done
+  return 1
+}
+
+stop_quarantine_test_worker() {
+  [ -n "$QUARANTINE_TEST_WORKER_PID" ] || return 0
+  kill -KILL "$QUARANTINE_TEST_WORKER_PID" 2>/dev/null || true
+  wait "$QUARANTINE_TEST_WORKER_PID" 2>/dev/null || true
+  QUARANTINE_TEST_WORKER_PID=
+}
+
+new_staged_quarantine_fixture live-owner
+sleep 30 &
+QUARANTINE_TEST_AUX_PID=$!
+printf '%s\n' "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.lock/pid"
+fm_remote_job_process_start "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.lock/start"
+fm_remote_job_process_command "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.lock/command"
+chmod 600 "$QUARANTINE_TEST_STATE/worker.lock/pid" "$QUARANTINE_TEST_STATE/worker.lock/start" \
+  "$QUARANTINE_TEST_STATE/worker.lock/command"
+run_staged_quarantine_worker
+expect_code 75 "$QUARANTINE_TEST_RC" "a completed staging marker displaced its matching live lock owner"
+assert_present "$QUARANTINE_TEST_STATE/worker.lock/quarantine" \
+  "a matching live lock owner lost the published quarantine protection"
+kill -0 "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || fail "staged recovery signalled the matching live lock owner"
+kill "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+wait "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+QUARANTINE_TEST_AUX_PID=
+pass "completed quarantine staging preserves a matching live lock owner"
+
+new_staged_quarantine_fixture live-job
+QUARANTINE_JOB="$QUARANTINE_TEST_STATE/jobs/job-live-staged-quarantine"
+mkdir -p "$QUARANTINE_JOB/.claim"
+chmod 700 "$QUARANTINE_JOB" "$QUARANTINE_JOB/.claim"
+sleep 30 &
+QUARANTINE_TEST_AUX_PID=$!
+printf 'running\n' > "$QUARANTINE_JOB/state"
+printf '%s\n' "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_JOB/.claim/supervisor"
+fm_remote_job_process_start "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_JOB/.claim/supervisor_start"
+chmod 600 "$QUARANTINE_JOB/state" "$QUARANTINE_JOB/.claim/supervisor" \
+  "$QUARANTINE_JOB/.claim/supervisor_start"
+run_staged_quarantine_worker
+expect_code 75 "$QUARANTINE_TEST_RC" "a completed staging marker displaced a matching live job supervisor"
+assert_present "$QUARANTINE_TEST_STATE/worker.lock/quarantine" \
+  "a matching live job supervisor lost the published quarantine protection"
+kill -0 "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || fail "staged recovery signalled the live job supervisor"
+kill "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+wait "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+QUARANTINE_TEST_AUX_PID=
+pass "completed quarantine staging enters the existing live-job safety checks"
+
+new_staged_quarantine_fixture reused-owner-pid
+sleep 30 &
+QUARANTINE_TEST_AUX_PID=$!
+printf '%s\n' "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.lock/pid"
+printf 'stale process start identity\n' > "$QUARANTINE_TEST_STATE/worker.lock/start"
+fm_remote_job_process_command "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.lock/command"
+chmod 600 "$QUARANTINE_TEST_STATE/worker.lock/pid" "$QUARANTINE_TEST_STATE/worker.lock/start" \
+  "$QUARANTINE_TEST_STATE/worker.lock/command"
+start_staged_quarantine_worker
+wait_for_quarantine_recovery || fail "a reused owner pid prevented exact staged-quarantine promotion"
+kill -0 "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || fail "staged recovery signalled a reused owner pid"
+stop_quarantine_test_worker
+kill "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+wait "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+QUARANTINE_TEST_AUX_PID=
+pass "staged quarantine recovery distinguishes pid reuse by process start identity"
+
+new_staged_quarantine_fixture live-legacy-worker
+LEGACY_WORKER="$QUARANTINE_TEST_DIR/fm-remote-job-worker.sh"
+cat > "$LEGACY_WORKER" <<'SH'
+#!/bin/bash
+sleep 30
+SH
+chmod +x "$LEGACY_WORKER"
+"$LEGACY_WORKER" &
+QUARANTINE_TEST_AUX_PID=$!
+printf '%s\n' "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.pid"
+chmod 600 "$QUARANTINE_TEST_STATE/worker.pid"
+run_staged_quarantine_worker
+expect_code 1 "$QUARANTINE_TEST_RC" "a completed staging marker displaced a live legacy worker"
+assert_present "$QUARANTINE_TEST_STAGE" "a live legacy worker lost its staged quarantine protection"
+kill -0 "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || fail "staged recovery signalled a live legacy worker"
+kill "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+wait "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+QUARANTINE_TEST_AUX_PID=
+pass "completed quarantine staging refuses a live legacy worker"
+
+new_staged_quarantine_fixture wrong-content
+printf 'not the quarantine sentinel\n' > "$QUARANTINE_TEST_STAGE"
+run_staged_quarantine_worker
+expect_code 1 "$QUARANTINE_TEST_RC" "a wrong-content quarantine staging file was recovered"
+assert_present "$QUARANTINE_TEST_STAGE" "wrong-content quarantine staging was removed"
+
+new_staged_quarantine_fixture wrong-mode
+chmod 640 "$QUARANTINE_TEST_STAGE"
+run_staged_quarantine_worker
+expect_code 1 "$QUARANTINE_TEST_RC" "a wrong-mode quarantine staging file was recovered"
+assert_present "$QUARANTINE_TEST_STAGE" "wrong-mode quarantine staging was removed"
+
+new_staged_quarantine_fixture symlink
+printf '%s\n' "$QUARANTINE_SENTINEL" > "$QUARANTINE_TEST_STATE/symlink-target"
+rm -f "$QUARANTINE_TEST_STAGE"
+ln -s "$QUARANTINE_TEST_STATE/symlink-target" "$QUARANTINE_TEST_STAGE"
+run_staged_quarantine_worker
+expect_code 1 "$QUARANTINE_TEST_RC" "a symlinked quarantine staging file was recovered"
+[ -L "$QUARANTINE_TEST_STAGE" ] || fail "symlinked quarantine staging was removed"
+
+new_staged_quarantine_fixture multiple
+printf '%s\n' "$QUARANTINE_SENTINEL" > "$QUARANTINE_TEST_STATE/worker.lock/.quarantine.D4e5F6"
+chmod 600 "$QUARANTINE_TEST_STATE/worker.lock/.quarantine.D4e5F6"
+run_staged_quarantine_worker
+expect_code 1 "$QUARANTINE_TEST_RC" "multiple quarantine staging files were recovered ambiguously"
+assert_present "$QUARANTINE_TEST_STAGE" "ambiguous quarantine staging was removed"
+
+new_staged_quarantine_fixture unexpected-entry
+printf 'unknown\n' > "$QUARANTINE_TEST_STATE/worker.lock/mystery"
+chmod 600 "$QUARANTINE_TEST_STATE/worker.lock/mystery"
+run_staged_quarantine_worker
+expect_code 1 "$QUARANTINE_TEST_RC" "quarantine staging with an unknown lock entry was recovered"
+assert_present "$QUARANTINE_TEST_STAGE" "quarantine staging beside an unknown entry was removed"
+
+new_staged_quarantine_fixture malformed-name
+mv "$QUARANTINE_TEST_STAGE" "$QUARANTINE_TEST_STATE/worker.lock/.quarantine.short"
+touch -t 200001010000 "$QUARANTINE_TEST_STATE/worker.lock"
+run_staged_quarantine_worker
+expect_code 1 "$QUARANTINE_TEST_RC" "a malformed quarantine staging name was recovered"
+assert_present "$QUARANTINE_TEST_STATE/worker.lock/.quarantine.short" \
+  "malformed quarantine staging was removed"
+
+new_staged_quarantine_fixture ambiguous-owner
+sleep 30 &
+QUARANTINE_TEST_AUX_PID=$!
+printf '%s\n' "$QUARANTINE_TEST_AUX_PID" > "$QUARANTINE_TEST_STATE/worker.lock/pid"
+chmod 600 "$QUARANTINE_TEST_STATE/worker.lock/pid"
+run_staged_quarantine_worker
+expect_code 1 "$QUARANTINE_TEST_RC" "a partial live owner identity permitted staged recovery"
+assert_present "$QUARANTINE_TEST_STAGE" "ambiguous live ownership lost quarantine staging"
+kill "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+wait "$QUARANTINE_TEST_AUX_PID" 2>/dev/null || true
+QUARANTINE_TEST_AUX_PID=
+
+new_staged_quarantine_fixture wrong-owner
+WRONG_OWNER_BIN="$QUARANTINE_TEST_DIR/fakebin"
+mkdir -p "$WRONG_OWNER_BIN"
+REAL_ID=$(command -v id)
+cat > "$WRONG_OWNER_BIN/id" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = -u ]; then
+  printf '%s\n' "$FM_TEST_OTHER_UID"
+  exit 0
+fi
+exec "$FM_TEST_REAL_ID" "$@"
+SH
+chmod +x "$WRONG_OWNER_BIN/id"
+export FM_TEST_REAL_ID="$REAL_ID"
+export FM_TEST_OTHER_UID="$(( $(id -u) + 1 ))"
+run_staged_quarantine_worker "$WRONG_OWNER_BIN:$PATH"
+unset FM_TEST_REAL_ID FM_TEST_OTHER_UID
+expect_code 1 "$QUARANTINE_TEST_RC" "a foreign-owner quarantine staging file was recovered"
+assert_present "$QUARANTINE_TEST_STAGE" "foreign-owner quarantine staging was removed"
+pass "malformed, ambiguous, symlinked, and foreign quarantine staging remains untouched"
+
+PUBLISH_FAKEBIN="$TMP_ROOT/quarantine-publish-fakebin"
+mkdir -p "$PUBLISH_FAKEBIN"
+REAL_CHMOD=$(command -v chmod)
+REAL_MV=$(command -v mv)
+cat > "$PUBLISH_FAKEBIN/chmod" <<'SH'
+#!/bin/bash
+last=${!#}
+case "${FM_TEST_QUARANTINE_PUBLISH_ACTION:-}:$last" in
+  chmod:*/worker.lock/.quarantine.??????)
+    printf 'chmod: No space left on device\n' >&2
+    exit 1
+    ;;
+esac
+exec "$FM_TEST_REAL_CHMOD" "$@"
+SH
+cat > "$PUBLISH_FAKEBIN/mv" <<'SH'
+#!/bin/bash
+last=${!#}
+case "${FM_TEST_QUARANTINE_PUBLISH_ACTION:-}:$last" in
+  mv:*/worker.lock/quarantine)
+    printf 'mv: No space left on device\n' >&2
+    exit 1
+    ;;
+  crash:*/worker.lock/quarantine)
+    kill -KILL "$PPID" 2>/dev/null || true
+    sleep 0.1
+    exit 1
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+chmod +x "$PUBLISH_FAKEBIN/chmod" "$PUBLISH_FAKEBIN/mv"
+export FM_TEST_REAL_CHMOD="$REAL_CHMOD"
+export FM_TEST_REAL_MV="$REAL_MV"
+
+for PUBLISH_FAILURE in chmod mv; do
+  new_staged_quarantine_fixture "publish-$PUBLISH_FAILURE"
+  rm -rf "$QUARANTINE_TEST_STATE/worker.lock"
+  export FM_TEST_QUARANTINE_PUBLISH_ACTION=$PUBLISH_FAILURE
+  start_staged_quarantine_worker "$PUBLISH_FAKEBIN:$PATH"
+  for _ in $(seq 1 300); do
+    [ -f "$QUARANTINE_TEST_STATE/worker.ready" ] && break
+    sleep 0.05
+  done
+  assert_present "$QUARANTINE_TEST_STATE/worker.ready" \
+    "the $PUBLISH_FAILURE publication-failure worker did not become ready"
+  printf 'preserve\n' > "$QUARANTINE_TEST_STATE/worker.lock/keep"
+  chmod 600 "$QUARANTINE_TEST_STATE/worker.lock/keep"
+  kill -TERM "$QUARANTINE_TEST_WORKER_PID"
+  for _ in $(seq 1 100); do
+    grep -F 'cannot guard worker ownership for shutdown' "$QUARANTINE_TEST_DIR/worker.err" >/dev/null 2>&1 && break
+    sleep 0.05
+  done
+  assert_grep 'cannot guard worker ownership for shutdown' "$QUARANTINE_TEST_DIR/worker.err" \
+    "the $PUBLISH_FAILURE publication failure was not reported"
+  [ "$(find "$QUARANTINE_TEST_STATE/worker.lock" -maxdepth 1 -name '.quarantine.??????' | wc -l | tr -d ' ')" -eq 0 ] \
+    || fail "the $PUBLISH_FAILURE publication failure retained its temporary artifact"
+  assert_present "$QUARANTINE_TEST_STATE/worker.lock/keep" \
+    "the $PUBLISH_FAILURE publication failure removed an unrelated lock artifact"
+  stop_quarantine_test_worker
+done
+unset FM_TEST_QUARANTINE_PUBLISH_ACTION
+pass "reported chmod and ENOSPC rename failures clean only their publisher temporary artifact"
+
+new_staged_quarantine_fixture interrupted-publication
+rm -rf "$QUARANTINE_TEST_STATE/worker.lock"
+export FM_TEST_QUARANTINE_PUBLISH_ACTION=crash
+start_staged_quarantine_worker "$PUBLISH_FAKEBIN:$PATH"
+for _ in $(seq 1 300); do
+  [ -f "$QUARANTINE_TEST_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$QUARANTINE_TEST_STATE/worker.ready" "the interrupted-publication worker did not become ready"
+kill -TERM "$QUARANTINE_TEST_WORKER_PID"
+wait "$QUARANTINE_TEST_WORKER_PID" 2>/dev/null || true
+QUARANTINE_TEST_WORKER_PID=
+unset FM_TEST_QUARANTINE_PUBLISH_ACTION
+INTERRUPTED_STAGE=$(find "$QUARANTINE_TEST_STATE/worker.lock" -maxdepth 1 -name '.quarantine.??????' -print)
+[ -n "$INTERRUPTED_STAGE" ] && [ "$(printf '%s\n' "$INTERRUPTED_STAGE" | wc -l | tr -d ' ')" -eq 1 ] \
+  || fail "the interruption did not leave one completed quarantine staging artifact"
+cmp -s "$INTERRUPTED_STAGE" <(printf '%s\n' "$QUARANTINE_SENTINEL") \
+  || fail "the interrupted quarantine staging artifact was incomplete"
+QUARANTINE_TEST_STAGE=$INTERRUPTED_STAGE
+start_staged_quarantine_worker
+wait_for_quarantine_recovery || fail "a worker could not safely recover interrupted quarantine publication"
+stop_quarantine_test_worker
+pass "the next worker safely recovers interruption between staging and quarantine publication"
+
+unset FM_TEST_REAL_CHMOD FM_TEST_REAL_MV
+
+new_staged_quarantine_fixture doctor-recovery
+DOCTOR_BIN="$QUARANTINE_TEST_HOME/.local/bin"
+DOCTOR_FM_HOME="$QUARANTINE_TEST_HOME/project-home"
+mkdir -p "$DOCTOR_BIN" "$DOCTOR_FM_HOME"
+ln -s "$(command -v git)" "$DOCTOR_BIN/git"
+ln -s "$(command -v jq)" "$DOCTOR_BIN/jq"
+cat > "$DOCTOR_BIN/herdr" <<'SH'
+#!/bin/bash
+case "${1:-}:${2:-}" in
+  status:--json) printf '{"client":{"version":"test","protocol":16},"server":{"running":true}}\n' ;;
+esac
+SH
+cat > "$DOCTOR_BIN/tasks-axi" <<'SH'
+#!/bin/bash
+case "${1:-}:${2:-}" in
+  --version:*) printf '0.2.4\n' ;;
+  update:--help) printf '%s\n' --archive-body ;;
+  mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
+esac
+SH
+for tool in treehouse claude; do
+  cat > "$DOCTOR_BIN/$tool" <<'SH'
+#!/bin/bash
+exit 0
+SH
+done
+chmod +x "$DOCTOR_BIN/herdr" "$DOCTOR_BIN/tasks-axi" "$DOCTOR_BIN/treehouse" "$DOCTOR_BIN/claude"
+set +e
+DOCTOR_RECOVERY_OUT=$(
+  HOME="$QUARANTINE_TEST_HOME" FM_HOME="$DOCTOR_FM_HOME" \
+    PATH="$ROOT/bin:$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_REMOTE_JOB_STATE_ROOT="$QUARANTINE_TEST_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    "$ROOT/bin/fm-remote-doctor.sh" --fix 2>&1
+)
+DOCTOR_RECOVERY_RC=$?
+set -e
+expect_code 0 "$DOCTOR_RECOVERY_RC" \
+  "the supported doctor did not recover one exact completed quarantine staging marker: $DOCTOR_RECOVERY_OUT"
+assert_contains "$DOCTOR_RECOVERY_OUT" \
+  'check remote-job-probe=ok: the remote job worker completed the required-tool probe' \
+  "the recovered doctor did not complete a fresh worker tool probe"
+assert_absent "$QUARANTINE_TEST_STATE/worker.lock/quarantine" \
+  "the successful doctor probe retained the official quarantine marker"
+[ "$(find "$QUARANTINE_TEST_STATE/worker.lock" -maxdepth 1 -name '.quarantine.??????' | wc -l | tr -d ' ')" -eq 0 ] \
+  || fail "the successful doctor probe retained quarantine staging"
+QUARANTINE_TEST_WORKER_PID=$(cat "$QUARANTINE_TEST_STATE/worker.pid")
+fm_remote_job_stop_worker_tree "$QUARANTINE_TEST_WORKER_PID" \
+  || fail "the doctor-recovery worker did not stop cleanly"
+QUARANTINE_TEST_WORKER_PID=
+pass "the supported doctor reaches a fresh required-tool probe after safe staged-quarantine recovery"
 
 # A replacement stops a Linux worker by signalling its whole isolated group, and
 # the supervisor in that group forwards a second stop signal to the same serving
