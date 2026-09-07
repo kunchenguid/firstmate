@@ -101,6 +101,7 @@ Every such check needs two tests, because they fail for different reasons:
 - A live guard in the `live-harness-optin` family (`bin/fm-test-run.sh`) that exercises every INSTALLED harness for real and fails naming the harness and version.
   Report an absent harness explicitly rather than passing silently over it, and refuse a pass that checked nothing.
   Open it with `fm_live_gate` from `tests/lib.sh`, which is the single owner of that decision: a guard that spends no model tokens runs by default wherever its tools are installed, a guard that submits prompts stays opt-in, and its own variable or `FM_LIVE` forces it on (an absent tool then fails rather than skips) or off.
+  A token-free guard whose verdict also depends on host state that installing its tools does not establish, such as whether the operator has already trusted this checkout, may stay opt-in with that reason stated in its header, because a guard that is permanently red on a healthy machine is one the fleet learns to ignore.
   Standard CI still has no harness binaries or credentials, so these guards report a capability skip there; run a prompt-submitting guard after every harness upgrade and before trusting refreshed per-harness evidence.
 
 Record the dated per-harness result in `docs/verification/runtime-backends.md`, and point at the live guard as the command that refreshes it, rather than leaving a version-scoped observation to rot into a false claim.

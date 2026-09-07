@@ -25,6 +25,15 @@
 # Folder trust: harnesses are launched with the repo root as cwd, which the
 # operator's machine has normally already trusted; a trust dialog is a real
 # unreadable-composer state and correctly fails that harness's check.
+#
+# Why this token-free guard is opt-in anyway, against the default in
+# fm_live_gate's contract: its verdict also depends on whether the operator's
+# machine has already trusted this checkout for every installed harness, which
+# no change here can make true. A harness sitting on its own trust dialog fails
+# this guard by design (the paragraph above), so default-on would make it
+# permanently red on a machine that is otherwise healthy, and a permanently red
+# guard is one the fleet learns to ignore. Flip it to default-on once it passes
+# unasked on the machine that runs the fleet.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -32,7 +41,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fm_live_gate default-on FM_COMPOSER_MATRIX_LIVE tmux
+fm_live_gate opt-in FM_COMPOSER_MATRIX_LIVE tmux
 
 SOCKET="fm-cmx-live-$$"
 SESSION="cmxlive"
