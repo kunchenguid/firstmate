@@ -978,6 +978,8 @@ test_forge_host_resolver_expands_safe_includes() {
   mkdir -p "$config_dir" "$fakebin"
   cat > "$config_dir/config" <<EOF
 Include included.conf
+Match host github-work
+  HostName github.com
 Match exec "touch $marker"
   HostName should-not-be-used.example
 EOF
@@ -987,10 +989,14 @@ EOF
 EOF
   cat > "$fakebin/ssh" <<'SH'
 #!/usr/bin/env bash
-if grep -F -q 'HostName should-not-be-used.example' >/dev/null; then
+config=$(cat)
+if grep -F -q 'HostName should-not-be-used.example' <<<"$config"; then
   printf '%s\n' 'hostname should-not-be-used.example'
-else
+elif grep -F -q 'Match host github-work' <<<"$config" \
+  && grep -F -q 'HostName github.com' <<<"$config"; then
   printf '%s\n' 'hostname github.com'
+else
+  printf '%s\n' 'hostname missing.example'
 fi
 SH
   chmod +x "$fakebin/ssh"

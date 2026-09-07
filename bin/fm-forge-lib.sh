@@ -73,7 +73,7 @@ fm_forge_safe_ssh_config() {
 # Match exec commands while resolving a remote's provider alias.
 fm_forge_safe_ssh_config_file() {
   local config=${1:-} depth=${2:-0} dir line key rest pattern candidate included
-  local in_host=0 in_match=0
+  local in_host=0 in_match=0 match_safe=1
 
   [ -r "$config" ] || return 0
   [ "$depth" -lt 16 ] || return 0
@@ -90,17 +90,27 @@ fm_forge_safe_ssh_config_file() {
       host)
         in_host=1
         in_match=0
+        match_safe=1
         printf '%s\n' "$line"
         ;;
       match)
         in_match=1
+        match_safe=1
+        for pattern in $rest; do
+          [ "$pattern" = exec ] || continue
+          match_safe=0
+          break
+        done
+        [ "$match_safe" -eq 1 ] && printf '%s\n' "$line"
         ;;
       hostname)
-        [ "$in_host" -eq 1 ] && [ "$in_match" -eq 0 ] || continue
+        [ "$in_host" -eq 1 ] && {
+          [ "$in_match" -eq 0 ] || [ "$match_safe" -eq 1 ]
+        } || continue
         printf '%s\n' "$line"
         ;;
       include)
-        [ "$in_match" -eq 0 ] || continue
+        [ "$in_match" -eq 0 ] || [ "$match_safe" -eq 1 ] || continue
         for pattern in $rest; do
           case "$pattern" in
             ~/*) candidate="${HOME:-}/${pattern#~/}" ;;
