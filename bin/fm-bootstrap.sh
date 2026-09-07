@@ -10,6 +10,7 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
+#                 "CREW_DISPATCH: codex home unavailable: <path> - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
@@ -1092,7 +1093,7 @@ EOF
 }
 
 crew_dispatch_validate() {
-  local file err
+  local file report line value
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
   if ! command -v jq >/dev/null 2>&1; then
@@ -1103,7 +1104,7 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
-  err=$(jq -r '
+  report=$(jq -r '
     def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","muse","rovo","omp"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
@@ -1136,6 +1137,14 @@ crew_dispatch_validate() {
       | map(select(. as $p | effort_ok($p.h; $p.e) | not))
       | map("\(.h):\(.e)")
       | unique;
+    def home_profiles: configured_profiles | map(select(has("home")));
+    def receipt_profiles: configured_profiles | map(select(has("requiresSelectionReceipt")));
+    def unusable_homes:
+      home_profiles
+      | map(.home)
+      | map(select(test("^/[^[:cntrl:]]*$") | not))
+      | unique;
+    def validation_errors: [
     if type != "object" then "top-level value must be an object"
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
@@ -1159,24 +1168,71 @@ crew_dispatch_validate() {
         | map(select(. != null))
         | map(select(. as $h | verified($h) | not))
         | unique) as $bad_harnesses
+      | (home_profiles | map(select(.harness != "codex")) | map(.harness) | unique) as $non_codex_homes
       | if ($bad_harnesses | length) > 0 then "unverified harness: " + ($bad_harnesses | join(", "))
         elif (bad_efforts | length) > 0 then "invalid effort: " + (bad_efforts | join(", "))
+        elif (home_profiles | any(((.home | type) != "string") or ((.home | length) == 0))) then "profile home must be a non-empty string when present"
+        elif ($non_codex_homes | length) > 0 then "home is only valid for the codex harness: " + ($non_codex_homes | join(", "))
+        elif (unusable_homes | length) > 0 then "home must be an absolute path: " + (unusable_homes | join(", "))
+        elif (receipt_profiles | any(.requiresSelectionReceipt != true)) then "requiresSelectionReceipt must be true when present"
+        elif (receipt_profiles | any((.harness | type) != "string" or (.harness | length) == 0 or (.model | type) != "string" or (.model | length) == 0)) then "requiresSelectionReceipt needs a profile with non-empty harness and model"
         else empty
         end
     end
+    ];
+    validation_errors as $errors
+    | if ($errors | length) > 0 then "error:" + $errors[0]
+      else (home_profiles | map(.home) | unique | .[] | "home:" + .)
+      end
   ' "$file" 2>/dev/null || true)
-  if [ -n "$err" ]; then
-    echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
-    return 0
-  fi
+  # jq answers everything readable from the file itself; each configured Codex
+  # home then needs the two filesystem facts jq cannot see. auth.json is only
+  # ever tested for presence - its contents are never read.
+  #
+  # The two classes of home problem are deliberately reported differently. A home
+  # the FILE gets wrong (non-codex harness, empty, relative, control bytes) is a
+  # malformed schema and invalidates the whole file, like any other schema fault.
+  # A home the file states correctly but that this MACHINE cannot use right now
+  # (never created, or logged out) is one candidate's eligibility fact:
+  # `codex logout` on one of two accounts must not disable the other account's
+  # candidates or rules that name no home at all, so it is reported per home and
+  # never as file-wide invalidity.
+  while IFS= read -r line; do
+    case "$line" in
+      error:*)
+        echo "CREW_DISPATCH: invalid config/crew-dispatch.json - ${line#error:}"
+        return 0
+        ;;
+      home:*)
+        value=${line#home:}
+        if [ ! -d "$value" ]; then
+          echo "CREW_DISPATCH: codex home unavailable: $value - directory not found; candidates naming this home are ineligible, every other profile still dispatches"
+          continue
+        fi
+        if [ ! -f "$value/auth.json" ]; then
+          echo "CREW_DISPATCH: codex home unavailable: $value - no auth.json (log that account in with CODEX_HOME=$value codex login); candidates naming this home are ineligible, every other profile still dispatches"
+          continue
+        fi
+        ;;
+    esac
+  done <<EOF
+$report
+EOF
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+    # A configured home is rendered as an "@<home>" suffix because the whole
+    # point of the two-account rule is candidates that agree on every other
+    # axis: without it the two sides of "codex/gpt-5.5/high, codex/gpt-5.5/high"
+    # are indistinguishable in the fact that is supposed to show the operator
+    # what is configured. Only the path the file states is printed - nothing
+    # under that home, and never any credential, is read here.
     jq -r '
     def profile($p):
       ($p.harness | tostring)
       + (if ($p.model? != null) then "/" + ($p.model | tostring)
          elif ($p.effort? != null) then "/default"
          else "" end)
-      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
+      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end)
+      + (if ($p.home? != null) then "@" + ($p.home | tostring) else "" end);
     def profile_set($value; $selector):
       if ($value | type) == "array" then
         (($selector // "quota-balanced") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")

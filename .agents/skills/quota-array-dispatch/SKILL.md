@@ -33,10 +33,11 @@ Authoritative multi-provider routing - including provider discovery from the har
 Use it only when the brief already fixed the candidate order and every candidate's provider is the harness's primary family.
 It does not replace the reasoning-class, runway-feasibility, or authentication gates above.
 Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
+That watch measures this home's ambient credential home only, so its wake is never per-home evidence about a candidate naming its own `home`; re-measure that home here instead.
 
 ## Read the default TOON
 
-Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate.
+Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate that runs on this home's ambient credentials.
 Post-consolidation quota-axi (the floor owned by `bin/fm-quota-axi-lib.sh`) puts `spendPriority` in the default `quota[]` block beside `effectivePercentRemaining`, `runway`, `confidence`, `limitedBy`, and `resetsAt`.
 Sparse `exhaustion[]` carries finite-runway seconds only for `projected_exhaustion` and `exhausted_now`.
 Sparse `attention[]` names auth, stale, and unmeasurable facts.
@@ -51,7 +52,19 @@ Below-floor is rare: bootstrap enforces `FM_QUOTA_AXI_MIN` and normally reports 
 `--json` is a defensive belt, not a habit; never reach for it because it feels more complete.
 Read `quota-axi auth --json` only when a candidate's credential surface is in question.
 
-For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
+For each candidate, preserve explicit `harness`, `model`, `effort`, `provider`, and optional `home`; `harness-adapters` owns identity, and model/provider never infer harness.
+
+### Candidates that name a Codex home
+
+A codex candidate may carry `home`, the absolute Codex home it runs against, which is how one fleet dispatches across two logged-in Codex accounts (`docs/configuration.md` owns that schema).
+`quota-axi` reads exactly one Codex home per invocation, so measure such a candidate with `CODEX_HOME=<candidate.home> quota-axi` as its own default-TOON snapshot.
+That is the one sanctioned extra snapshot: take it once per DISTINCT home per intake and reuse it for every candidate naming that home, exactly as the shared intake snapshot is reused for everything else.
+A candidate with no `home` keeps using the shared intake snapshot.
+The account row from that home's `quota-axi --full` is the evidence that the home resolves to the account you intended, and is the one use of `--full` this skill sanctions: it establishes identity, never the economics `spendPriority` already computed.
+An unconfirmable account is disclosed uncertainty, while a home whose own credential quota-axi reports as unusable is concrete evidence against that candidate alone and never against the other home's candidates.
+A session-start `CREW_DISPATCH: codex home unavailable: <path>` line carries that same candidate-local weight: eliminate the candidates naming that home and rank the rest normally, rather than treating the array or the dispatch file as unusable.
+Rank the surviving candidates by `spendPriority` through the same three gates as any other array, and name each candidate's home beside its `harness` and `model` when you account for it.
+`bin/fm-quota-choose.sh` cannot represent per-home candidates, so resolve these yourself rather than passing them to that helper.
 
 ## Three gates, then spendPriority
 
@@ -130,3 +143,4 @@ Report duplicate concrete profiles as a configuration error.
 Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, `spendPriority`, and runway-versus-horizon result.
 A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
 Never conclude with an unexplained "best quota" label.
+After selecting, pass the winning candidate's concrete `harness`, `model`, and `effort` as `--harness`, `--model`, and `--effort`, and pass its `home` as `--codex-home` when present.

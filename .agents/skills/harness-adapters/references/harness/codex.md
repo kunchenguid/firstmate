@@ -14,6 +14,11 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Model flag | `--model <model>`. |
 | Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertises only these four values while omitting `max`. |
 | Model discovery | Open the current interactive session's `/model` picker. |
+| Account home | `CODEX_HOME` selects which home, and therefore which logged-in account, the CLI uses; unset means `~/.codex`. |
+
+A dispatch profile may name that home per candidate, so one fleet can run two logged-in Codex accounts.
+`bin/fm-spawn.sh --codex-home` owns the validation and the `CODEX_HOME=` launch prefix, and everything the pane starts (its no-mistakes pipeline included) inherits it.
+`docs/configuration.md` owns the profile schema, and `quota-array-dispatch` owns how each home's quota is measured before a candidate is chosen.
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
