@@ -856,28 +856,31 @@ secondmate_handoff_detect() {
   done
 }
 
-privileged_package_install_cmd() {  # <manager> <verb> <package>
-  local manager=$1 verb=$2 package=$3 prefix=''
+privileged_package_install_cmd() {
+  local manager=$1 prefix=''
+  shift
   if [ "$(id -u 2>/dev/null)" != 0 ]; then
     command -v sudo >/dev/null 2>&1 || return 1
     prefix='sudo '
   fi
-  printf '%s%s %s %s\n' "$prefix" "$manager" "$verb" "$package"
+  printf '%s%s' "$prefix" "$manager"
+  printf ' %s' "$@"
+  printf '\n'
 }
 
 perl_json_pp_install_cmd() {
   if command -v dnf >/dev/null 2>&1; then
-    privileged_package_install_cmd dnf install perl-JSON-PP
+    privileged_package_install_cmd dnf install -y perl-JSON-PP
   elif command -v yum >/dev/null 2>&1; then
-    privileged_package_install_cmd yum install perl-JSON-PP
+    privileged_package_install_cmd yum install -y perl-JSON-PP
   elif command -v apt-get >/dev/null 2>&1; then
-    privileged_package_install_cmd apt-get install libjson-pp-perl
+    privileged_package_install_cmd apt-get install -y libjson-pp-perl
   elif command -v apk >/dev/null 2>&1; then
     privileged_package_install_cmd apk add perl-json-pp
   elif command -v zypper >/dev/null 2>&1; then
-    privileged_package_install_cmd zypper install perl-JSON-PP
+    privileged_package_install_cmd zypper --non-interactive install perl-JSON-PP
   elif [ "$(uname -s 2>/dev/null)" = FreeBSD ] && command -v pkg >/dev/null 2>&1; then
-    privileged_package_install_cmd pkg install p5-JSON-PP
+    privileged_package_install_cmd pkg install -y p5-JSON-PP
   elif command -v brew >/dev/null 2>&1; then
     echo "brew install perl"
   else
@@ -1380,7 +1383,7 @@ if [ "${1:-}" = "install" ]; then
     fi
     cmd=${cmd%%  #*}
     echo "installing $t: $cmd"
-    eval "$cmd"
+    eval "$cmd" || exit $?
   done
   exit 0
 fi

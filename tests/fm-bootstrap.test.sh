@@ -511,12 +511,10 @@ SH
   rm -f "$fakebin/perl.bak"
   chmod +x "$fakebin/perl"
 
-  cat > "$fakebin/tasks-axi" <<'SH'
-#!/usr/bin/env bash
-PATH='@BASE_PATH@' exec '@REAL_TASKS_AXI@' "$@"
-SH
-  sed -i.bak "s|@BASE_PATH@|$BASE_PATH|g; s|@REAL_TASKS_AXI@|$real_tasks_axi|g" "$fakebin/tasks-axi"
-  rm -f "$fakebin/tasks-axi.bak"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf 'PATH=%q exec %q "$@"\n' "$PATH" "$real_tasks_axi"
+  } > "$fakebin/tasks-axi"
   chmod +x "$fakebin/tasks-axi"
 
   cat > "$fakebin/id" <<'SH'
@@ -528,7 +526,18 @@ SH
   cat > "$fakebin/dnf" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "@MANAGER_LOG@"
-[ "$#" -eq 2 ] && [ "$1" = install ] && [ "$2" = perl-JSON-PP ] || exit 1
+[ "${1:-}" = install ] || exit 2
+shift
+if [ "${1:-}" != -y ]; then
+  printf '%s\n' 'Operation aborted: transaction confirmation required.' >&2
+  exit 1
+fi
+shift
+[ "$#" -eq 1 ] && [ "$1" = perl-JSON-PP ] || exit 2
+if [ "${FM_FAKE_DNF_EXIT:-0}" -ne 0 ]; then
+  printf '%s\n' 'DNF transaction failed.' >&2
+  exit "$FM_FAKE_DNF_EXIT"
+fi
 : > "@MARKER@"
 SH
   sed -i.bak "s|@MANAGER_LOG@|$manager_log|g; s|@MARKER@|$marker|g" "$fakebin/dnf"
@@ -593,17 +602,32 @@ EOF
     FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
     FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ "$out" = "MISSING: perl-JSON-PP (install: sudo dnf install perl-JSON-PP)" ] \
+  [ "$out" = "MISSING: perl-JSON-PP (install: sudo dnf install -y perl-JSON-PP)" ] \
     || fail "bootstrap did not report the missing Fedora split package exactly: $out"
   assert_absent "$marker" "dependency detection installed JSON::PP before explicit consent"
   assert_absent "$manager_log" "dependency detection invoked the package manager before explicit consent"
 
-  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-bootstrap.sh" install perl-JSON-PP) \
+  if PATH="$fakebin:$BASE_PATH" FM_FAKE_DNF_EXIT=23 "$ROOT/bin/fm-bootstrap.sh" \
+    install perl-JSON-PP perl-JSON-PP < /dev/null \
+    > "$case_dir/install-failed.out" 2> "$case_dir/install-failed.err"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 23 ] || fail "bootstrap did not propagate the failed transaction's exit status: $rc"
+  assert_grep 'DNF transaction failed.' "$case_dir/install-failed.err" \
+    "bootstrap hid the package manager's failure diagnostic"
+  assert_absent "$marker" "the failed transaction made JSON::PP available"
+  [ "$(wc -l < "$manager_log")" -eq 1 ] \
+    || fail "bootstrap continued installing after a failed transaction"
+  rm -f "$manager_log"
+
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-bootstrap.sh" install perl-JSON-PP < /dev/null) \
     || fail "the approved JSON::PP installation path failed"
-  [ "$out" = "installing perl-JSON-PP: sudo dnf install perl-JSON-PP" ] \
+  [ "$out" = "installing perl-JSON-PP: sudo dnf install -y perl-JSON-PP" ] \
     || fail "the JSON::PP installation path reported an unexpected command: $out"
   assert_present "$marker" "the explicit install did not make JSON::PP available"
-  assert_grep 'install perl-JSON-PP' "$manager_log" \
+  assert_grep 'install -y perl-JSON-PP' "$manager_log" \
     "the Fedora install path did not request the split JSON::PP package"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
