@@ -10,7 +10,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
-`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
+`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, the scout report index, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 `state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, enabled extension working namespaces under `state/extensions/`, away-mode state, generated Relay artifacts, parent-side remote ledger copies under `state/secondmate-summary-cache/`, one-shot Bearings reconcile requests under `state/reconcile-notify/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
@@ -224,6 +224,14 @@ Shared captain preferences that apply across secondmate domains live only in the
 Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and printed after the captain-preference files in the session-start context digest.
 The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
 There is no shared learnings file by captain decision.
+
+## Scout report index (data/report-index.md)
+
+`data/report-index.md` is a privacy-safe catalog of the home's scout reports so a new session can discover which reports exist and what each concludes without injecting any report body into context; `bin/fm-report-index.sh` is its single schema owner.
+Each entry is one line recording only the report id, date, project, title, a short summary, and the `data/<id>/report.md` path - never report bodies, and never a second LLM: extraction is deterministic `grep`/`awk` over each report's bounded head plus the `data/<id>/brief.md` worktree line for the project.
+`bin/fm-teardown.sh` rebuilds the index after a scout's report is finalized, so a fresh home with pre-existing reports resyncs with one `bin/fm-report-index.sh rebuild`; the session-start digest never rebuilds, it only prints a bounded tail of the prebuilt file in the fleet-state section.
+A report that is missing, titleless, unreadable, or oversized is skipped to `data/report-index.skipped` as `id | reason` rather than failing the rebuild, so one bad report never blocks the rest.
+Override the oversized cap with `FM_REPORT_INDEX_MAX_BYTES` (default 1048576) and the manual `show --tail N` bound with `FM_REPORT_INDEX_TAIL` (default 8).
 
 ## Startup memory budget (config/startup-memory-budget)
 

@@ -3390,6 +3390,15 @@ fi
 if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
+# Best-effort: refresh the scout report index so the next session's digest can
+# surface this report. A scout report survives teardown (it is the deliverable),
+# so it is present and stable here. Non-fatal: an index rebuild never blocks
+# task cleanup, and bin/fm-report-index.sh skips unreadable/malformed/oversized
+# reports itself rather than failing. Gated on the report existing so a ship or
+# secondmate teardown pays nothing.
+if [ -f "$DATA/$ID/report.md" ]; then
+  "$SCRIPT_DIR/fm-report-index.sh" rebuild >/dev/null 2>&1 || true
+fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window $T, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 else

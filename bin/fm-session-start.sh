@@ -353,6 +353,12 @@ if fm_tasks_axi_compatible; then TASKS_AXI_COMPATIBLE=1; else TASKS_AXI_COMPATIB
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
+# Bounded tail of the scout report index (data/report-index.md, built by
+# bin/fm-report-index.sh). Like STATUS_TAIL it bounds only how many catalog
+# lines the digest shows; it never reads report bodies, and an absent index
+# prints an ABSENT marker rather than triggering a rebuild on the blocking path.
+REPORT_INDEX_TAIL=${FM_SESSION_START_REPORT_INDEX_TAIL:-8}
+case "$REPORT_INDEX_TAIL" in ''|*[!0-9]*) REPORT_INDEX_TAIL=8 ;; esac
 QUEUED_LIMIT=${FM_SESSION_START_QUEUED_LIMIT:-20}
 case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
 BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
@@ -532,6 +538,27 @@ print_status_tail() {
   while IFS= read -r line || [ -n "$line" ]; do
     fm_cap_line "$line"
   done < <(tail -n "$STATUS_TAIL" "$status")
+}
+
+# print_report_index_tail: a bounded catalog of scout reports, read from the
+# prebuilt data/report-index.md (bin/fm-report-index.sh owns the schema and
+# rebuilds it at scout teardown). The digest never rebuilds here, so startup
+# stays off any scan; an absent index prints ABSENT. Each entry line is capped
+# by the shared fm_cap_line, id-first so truncation keeps the report id (the
+# path is data/<id>/report.md and is also carried in the line). This mirrors
+# print_status_tail's shape on purpose: the index is a flat one-line-per-report
+# file, exactly as status logs are flat one-line-per-event files.
+print_report_index_tail() {
+  local index="$DATA/report-index.md" line
+  if [ ! -f "$index" ]; then
+    printf 'report index: ABSENT (run bin/fm-report-index.sh rebuild to index existing reports)\n'
+    return 0
+  fi
+  printf 'report index (last %s, one line per scout report; read <path> for a body):\n' "$REPORT_INDEX_TAIL"
+  # Skip the schema-owner header comments and blanks, then bound the tail.
+  while IFS= read -r line || [ -n "$line" ]; do
+    fm_cap_line "$line"
+  done < <(grep -v '^#' "$index" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n "$REPORT_INDEX_TAIL")
 }
 
 hash_file_sha256() {
@@ -800,6 +827,7 @@ section "READ-ONCE CONTRACT"
 cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
+a bounded tail of data/report-index.md (the scout report catalog),
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
 and data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
@@ -812,6 +840,9 @@ Go to a source directly only when:
   - an individual full status log is needed for older wake-event history, or a
     status line was capped and its tail matters (each task's full log path is
     printed with its tail),
+  - a scout report body is needed: the report index line names the report id
+    and path (data/<id>/report.md), so read that one report rather than
+    bulk-reading every report,
   - a full task body is needed (tasks-axi show <id> --full, or data/backlog.md),
   - the backlog listing disclosed omitted queued items and this turn needs them,
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
@@ -876,6 +907,9 @@ if [ -e "$STATE/.afk" ]; then
 else
   printf 'absent\n'
 fi
+
+subsection "Scout report index (data/report-index.md)"
+print_report_index_tail
 
 # Public commitments made through the myfirstmate relay. A promise to reply in a
 # public thread must survive compaction and restart, so it is surfaced from disk

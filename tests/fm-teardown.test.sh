@@ -3655,7 +3655,46 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+# A scout teardown finalizes the report, then bin/fm-teardown.sh rebuilds the
+# scout report index (bin/fm-report-index.sh) so the next session's digest can
+# surface it. The hook is non-fatal and gated on the report existing; this
+# proves it fires end to end and that the report survives (it is the
+# deliverable).
+test_scout_teardown_rebuilds_report_index() {
+  local case_dir rc index
+  case_dir=$(make_case scout-report-index)
+  write_meta "$case_dir" no-mistakes scout
+  # A scout teardown runs fm-captain-hold.sh verify, which requires the
+  # decisions_reviewed=1 marker this fixture's write_meta does not set. A scout
+  # with no captain calls clears the gate once that marker is present and its
+  # status log has no open needs-decision lines.
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir" scout
+  mkdir -p "$case_dir/data/task-x1"
+  printf '# Scout report for task-x1\n\n## Summary (TL;DR)\n\nThe scout concluded X.\n' \
+    > "$case_dir/data/task-x1/report.md"
+  printf 'You are in a disposable git worktree of firstmate, at a detached HEAD on a clean default branch.\n' \
+    > "$case_dir/data/task-x1/brief.md"
+  printf 'done: report at data/task-x1/report.md\n' > "$case_dir/state/task-x1.status"
+  printf 'fm-branch-outcome-index-v1\t5\t0\t-\n' > "$case_dir/state/.task-x1.branch-outcome-index"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scout-report-index: scout teardown should succeed"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "scout-report-index: teardown refused: $(cat "$case_dir/stderr")"
+  index="$case_dir/data/report-index.md"
+  assert_present "$index" "scout teardown did not build the report index"
+  assert_grep "task-x1 | " "$index" "scout teardown index did not catalog the scout report"
+  assert_grep "Scout report for task-x1" "$index" "scout teardown index did not capture the title"
+  assert_present "$case_dir/data/task-x1/report.md" "scout teardown removed the report"
+  pass "scout teardown rebuilds the report index and preserves the report"
+}
+
 test_local_only_fork_remote_allows
+test_scout_teardown_rebuilds_report_index
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
