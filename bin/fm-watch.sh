@@ -1066,6 +1066,17 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           fi
           rm -f "$since_file"
           clear_write_tracking "$(window_key "$win")"
+          # v11 (2026-09-07, Greptile P1): reset the wedge-escalation counter
+          # when the cap fires. Without this, a subsequent fresh-hash poll
+          # (busy pane churning its elapsed-time footer, pane re-rendering
+          # for any other reason) reads n=$(( $(cat $escalation_file) + 1 ))
+          # = $max + 1 = saturated, fires PERMANENTLY-WEDGED immediately on
+          # the new hash, and continues to fire on every subsequent hash. The
+          # per-hash marker for the OLD hash is still in place so the SAME
+          # hash is silenced by the early-return at the top of this function;
+          # a NEW hash needs the counter fresh so its wedge escalates
+          # independently and re-engages the cap on its own merits.
+          : > "$escalation_file"
           triage_log "wedge permanently capped: $win (escalation $n, max $FM_WEDGE_MAX_ESCALATIONS, hash ${hash:0:12})"
           wake "$reason"
           return 0

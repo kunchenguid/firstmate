@@ -368,24 +368,58 @@ test_wedge_cap_expires_after_horizon() {
   [ -e "$marker" ] || fail "cap marker missing before horizon test"
 
   # Backdate the marker so it appears older than FM_CAP_HORIZON_SECS. The cap
-  # is now stale; the next wedge_timer_check call should re-fire the cap.
+  # is now stale; subsequent wedge_timer_check calls must NOT be suppressed
+  # by the marker anymore.
   old_ts=$(( $(date +%s) - 90000 ))
   printf '%s\n' "$old_ts" > "$marker"
-  # Backdate .stale-since so wedge_timer_check sees the wedge is old enough
-  # to escalate (otherwise the empty-since branch resets the timer and the
-  # counter never increments toward the cap).
-  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
 
+  # The first poll after horizon expiry must re-engage the wedge path (the
+  # marker no longer short-circuits). The wedge-escalation counter is reset
+  # to 0 when the cap fires (v11, Greptile P1 regression test), so this
+  # first poll reports escalation 1, NOT a re-fire of PERMANENTLY-WEDGED.
+  # Re-firing the cap requires FM_WEDGE_MAX_ESCALATIONS fresh polls, which
+  # is what the v11 reset is meant to bound: a single hash gets one terminal
+  # cap, and a future hash starts accumulating on its own merits.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max FM_CAP_HORIZON_SECS=86400 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher did not re-fire the cap after horizon"; }
-  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null || fail "watcher did not emit PERMANENTLY-WEDGED after cap horizon"
+  if ! wait_for_exit "$pid" 100; then
+    reap "$pid"; fail "watcher did not exit on the first post-horizon poll (marker may still be short-circuiting): $(cat "$out")"
+  fi
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null && fail "first post-horizon poll re-fired the cap immediately - counter was not reset when the original cap fired: $(cat "$out")"
+  grep -F "escalation 1" "$out" >/dev/null || fail "first post-horizon poll did not report fresh escalation count (expected escalation 1): $(cat "$out")"
   ack_stopped_cycle "$state" || true
+
+  # Now drive FM_WEDGE_MAX_ESCALATIONS more polls to confirm the wedge re-fires
+  # the cap on its own merits after the horizon. This is the bounded behavior:
+  # the cap horizon allows the wedge to re-engage, and if it wedges again the
+  # cap fires again - exactly once per fresh accumulation cycle, no continuous
+  # saturated re-fire.
+  n=2
+  while [ "$n" -le "$max" ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max FM_CAP_HORIZON_SECS=86400 "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_for_exit "$pid" 100; then
+      reap "$pid"; fail "post-horizon round $n watch failed: $(cat "$out")"
+    fi
+    if [ "$n" -lt "$max" ]; then
+      grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null && fail "post-horizon round $n fired PERMANENTLY-WEDGED before the cap"
+    else
+      grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null || fail "post-horizon round $max did not re-fire the cap: $(cat "$out")"
+    fi
+    ack_stopped_cycle "$state" || fail "post-horizon round $n ack failed"
+    n=$((n + 1))
+  done
+
   unset FM_FAKE_CREW_STATE
-  pass "the cap is bound by FM_CAP_HORIZON_SECS and re-fires after the horizon elapses"
+  pass "the cap is bound by FM_CAP_HORIZON_SECS and the wedge can re-engage and re-fire the cap on its own merits"
 }
 
 test_wedge_cap_holds_within_horizon() {
@@ -553,7 +587,11 @@ test_wedge_cap_operator_can_rm_marker() {
   [ -e "$marker" ] || fail "cap marker missing before operator-rm test"
 
   # Operator manually removes the marker (immediate re-engagement, bypassing
-  # the horizon). The next wedge_timer_check call should re-fire the cap.
+  # the horizon). The wedge-escalation counter is reset to 0 when the cap
+  # fires (v11), so the wedge must re-accumulate from 1 toward max before
+  # re-firing. Verify the wedge engages on the first post-rm poll (escalation
+  # 1, no marker block) and then re-fires the cap on the $max-th poll, with
+  # the marker recreated.
   rm -f "$marker"
 
   : > "$out"
@@ -561,16 +599,37 @@ test_wedge_cap_operator_can_rm_marker() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
   pid=$!
-  # The counter is at FM_WEDGE_MAX_ESCALATIONS (=max=3); with the marker gone,
-  # the next wedge_timer_check call increments to max+1 and re-fires the cap
-  # once FM_STALE_ESCALATE_SECS elapses. Verify the re-fire actually reaches
-  # the drain as a fresh PERMANENTLY-WEDGED wake.
-  wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher did not exit after operator rm"; }
-  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null || fail "operator rm did not result in a fresh PERMANENTLY-WEDGED wake: $(cat "$out")"
-  [ -e "$marker" ] || fail "cap marker was not recreated after operator rm re-fire"
+  if ! wait_for_exit "$pid" 100; then
+    reap "$pid"; fail "watcher did not exit on the first post-rm poll (marker may still be short-circuiting): $(cat "$out")"
+  fi
+  grep -F "escalation 1" "$out" >/dev/null || fail "first post-rm poll did not report fresh escalation count (expected escalation 1): $(cat "$out")"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null && fail "first post-rm poll re-fired the cap immediately - counter was not reset when the original cap fired: $(cat "$out")"
   ack_stopped_cycle "$state" || true
+
+  # Drive FM_WEDGE_MAX_ESCALATIONS - 1 more polls so the wedge re-accumulates
+  # and re-fires the cap on the final round.
+  n=2
+  while [ "$n" -le "$max" ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_for_exit "$pid" 100; then
+      reap "$pid"; fail "post-rm round $n watch failed: $(cat "$out")"
+    fi
+    if [ "$n" -lt "$max" ]; then
+      grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null && fail "post-rm round $n fired PERMANENTLY-WEDGED before the cap"
+    else
+      grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null || fail "post-rm round $max did not re-fire the cap: $(cat "$out")"
+    fi
+    ack_stopped_cycle "$state" || fail "post-rm round $n ack failed"
+    n=$((n + 1))
+  done
+  [ -e "$marker" ] || fail "cap marker was not recreated after operator rm re-fire"
   unset FM_FAKE_CREW_STATE
-  pass "the operator can manually remove the cap marker for immediate re-engagement and a fresh PERMANENTLY-WEDGED wake fires"
+  pass "the operator can manually remove the cap marker for immediate re-engagement and a fresh PERMANENTLY-WEDGED wake fires once the wedge re-accumulates"
 }
 
 test_wedge_cap_validates_invalid_override() {
@@ -641,11 +700,74 @@ test_wedge_cap_validates_invalid_override() {
   pass "FM_WEDGE_MAX_ESCALATIONS and FM_CAP_HORIZON_SECS both reject 0 and non-integer values, falling back to defaults"
 }
 
+test_wedge_cap_escalation_counter_resets_on_cap_fire() {
+  # Regression for Greptile P1 on the rebased PR: the wedge-escalation counter
+  # in .wedge-escalations-<key> MUST be reset to 0 (or removed) when the cap
+  # fires. Otherwise a pane that later produces a fresh hash (a busy worker
+  # ticking its elapsed footer, a pane re-rendering for any unrelated reason)
+  # sees n already at FM_WEDGE_MAX_ESCALATIONS and fires PERMANENTLY-WEDGED on
+  # the FIRST poll of the new hash, then on every subsequent poll as the cap
+  # continues to fire. The cap exists to bound that exact loop; this test pins
+  # the reset by inspecting the counter file directly after the cap fires.
+  local dir state fakebin out capture_file window key pane_hash sig pid n max marker_a ewf_after_cap
+  dir=$(make_case wedge-cap-counter-reset); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-cap-counter-reset"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-counter-reset.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-counter-reset.status"
+  sig=$(seen_sig "$state/wedge-cap-counter-reset.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-counter-reset_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  max=3
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  marker_a="$state/.wedge-permanent-$key-${pane_hash:0:12}"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "priming watch failed: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "priming ack failed"
+  n=1
+  while [ "$n" -le "$max" ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_for_exit "$pid" 100; then
+      reap "$pid"; fail "round $n watch failed: $(cat "$out")"
+    fi
+    ack_stopped_cycle "$state" || fail "round $n ack failed"
+    n=$((n + 1))
+  done
+  [ -e "$marker_a" ] || fail "cap marker missing after firing"
+
+  if [ -e "$state/.wedge-escalations-$key" ]; then
+    ewf_after_cap=$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)
+    case "$ewf_after_cap" in
+      ''|0|0\\n) ;;
+      *) fail "wedge-escalation counter was not reset when the cap fired (still holds '$ewf_after_cap' = saturation value) - a fresh hash will re-fire the cap immediately"
+         ;;
+    esac
+  fi
+  unset FM_FAKE_CREW_STATE
+  pass "the wedge-escalation counter resets to 0 when the cap fires"
+}
+
 test_wedge_cap_fires_permanently_wedged_after_max_escalations
 test_wedge_cap_suppresses_subsequent_polls_for_same_hash
 test_wedge_cap_persists_across_pause_class_transitions
 test_wedge_cap_expires_after_horizon
 test_wedge_cap_holds_within_horizon
 test_wedge_cap_hash_change_invalidates_marker
+test_wedge_cap_escalation_counter_resets_on_cap_fire
 test_wedge_cap_operator_can_rm_marker
 test_wedge_cap_validates_invalid_override
