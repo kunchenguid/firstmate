@@ -866,8 +866,9 @@ function analyzeProgram(command, context, depth = 0) {
   const protectedFound = directProtected || nestedProtected || unclassifiableProtected;
   if (unclassifiableProtected) unsupported = true;
   const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
-  if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound)) {
-    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pipelineDrive: pipelineDrive || rawMentionsPipelineDrive(command), pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  const rawPipelineDriveFound = unsupported && rawMentionsPipelineDrive(command);
+  if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound || rawPipelineDriveFound)) {
+    return { error: "unsupported compound grammar", protectedFound: protectedFound || rawMentionsProtected(command) || broadKillFound, broadKill: broadKillFound, pipelineDrive: pipelineDrive || rawPipelineDriveFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
   }
   return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pipelineDrive, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }

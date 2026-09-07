@@ -373,17 +373,24 @@ EOF
 kind=ship
 worktree=$worker
 EOF
-  FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
-    --command 'no-mistakes axi respond --action fix' >"$dir/worker.out" 2>"$dir/worker.err"
-  rc=$?
-  [ "$rc" -eq 0 ] || fail "an exactly recorded ship worker must retain its pipeline drive call, got $rc: $(cat "$dir/worker.err")"
-  [ ! -s "$dir/worker.out" ] && [ ! -s "$dir/worker.err" ] \
-    || fail "an allowed task-worker pipeline drive must stay silent"
+  for payload in \
+    'no-mistakes axi respond --action fix' \
+    'time no-mistakes axi respond --action fix' \
+    'coproc no-mistakes axi respond --action fix'; do
+    FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
+      --command "$payload" >"$dir/worker.out" 2>"$dir/worker.err"
+    rc=$?
+    [ "$rc" -eq 0 ] || fail "an exactly recorded ship worker must retain its pipeline drive call, got $rc for: $payload"
+    [ ! -s "$dir/worker.out" ] && [ ! -s "$dir/worker.err" ] \
+      || fail "an allowed task-worker pipeline drive must stay silent"
+  done
 
   for payload in \
     'no-mistakes axi run --intent test' \
     'env NO_COLOR=1 no-mistakes axi respond --action fix' \
-    "bash -lc 'no-mistakes axi respond --action fix'"; do
+    "bash -lc 'no-mistakes axi respond --action fix'" \
+    'time no-mistakes axi respond --action fix' \
+    'coproc no-mistakes axi respond --action fix'; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
     rc=$?
     [ "$rc" -eq 2 ] || fail "the primary pipeline drive must deny through recognized execution wrappers, got $rc for: $payload"
