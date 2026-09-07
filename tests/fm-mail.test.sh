@@ -782,7 +782,7 @@ PYEOF
   assert_contains "$out2" $'71\t\ta@b.c\tgood\tretry' "the unexamined retry window is scanned from the start"
   assert_not_contains "$out2" $'82\t' "the scan must not wrap over the unexamined window"
   pos2=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
-  assert_equals "1" "$pos2" "the retry-scan position advances by the examined candidate only"
+  assert_equals "" "$pos2" "position does not advance while a retry row is emitted"
   pass "fm-mail: a zero retry budget leaves the retry-scan position unchanged"
 }
 
@@ -1270,18 +1270,31 @@ PYEOF
   expect_code 0 "$rc2" "second retry poll must succeed"
   assert_contains "$out2" $'82\t\ta@b.c\tgood\tretry' "the cursor wraps and the recovered uid surfaces on the next poll"
   pos2=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
-  assert_equals "0" "$pos2" "the retry-scan position advances only past candidates examined within budget"
+  assert_equals "11" "$pos2" "position does not advance while a recovered row is emitted (bash removes it from the retry set)"
+
+  # Simulate the bash layer removing the recovered uid from the retry set
+  # after a successful publish; the next poll scans the remaining uids from
+  # the same numeric start, so an unfetchable-only window still advances.
+  grep -vx -e '82' "$HOME_DIR/state/.mail-retry" > "$HOME_DIR/state/.mail-retry.tmp" || true
+  mv -f -- "$HOME_DIR/state/.mail-retry.tmp" "$HOME_DIR/state/.mail-retry"
+
+  rc2=0
+  out3=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "71,72,73,74,75,76,77,78,79,80,81" "$ROOT/bin/fm-mail.py" "$HOME_DIR/state/.mail-retry-pos" 2>&1) || rc2=$?
+  expect_code 0 "$rc2" "third retry poll must succeed"
+  pos3=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "0" "$pos3" "the retry-scan position advances only past candidates examined within budget after the recovered uid is removed"
   pass "fm-mail: the retry-scan cursor advances past persistent failures"
 }
 
-test_poll_retry_emission_precedes_position_save() {
-  # The durable retry-scan position must be persisted only AFTER the buffered
-  # rows are printed. If the position write fails (or the process is killed
-  # between emission and the write), the rows have already reached the bash
-  # wake layer and the same bounded window is re-scanned next poll instead of
-  # being silently skipped until the scan wraps.
+test_poll_retry_position_does_not_advance_past_unpublished_wake() {
+  # The durable retry-scan position must never advance past a uid whose wake
+  # did not durably publish. cmd_poll_list cannot observe the bash wake_for
+  # result, so it leaves the position unchanged whenever a row is emitted;
+  # the bash layer removes recovered uids from the retry set, and the next
+  # poll's same numeric start scans the next remaining uid.
   local harness out rc=0 pos
-  harness="$TMP_ROOT/retry-pos-order-harness.py"
+  harness="$TMP_ROOT/retry-pos-unpublished-harness.py"
   cat > "$harness" <<'PYEOF'
 import os, sys
 os.environ.update({
@@ -1317,10 +1330,6 @@ import importlib.util
 spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[4])
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
-if len(sys.argv) > 5 and sys.argv[5] == 'failpos':
-    def failing_save(*a, **k):
-        raise OSError('simulated position write failure')
-    mod.save_retry_pos = failing_save
 sys.exit(mod.cmd_poll_list())
 PYEOF
   # Both uids are already cursor-recorded from prior degraded wakes; 81 is
@@ -1332,28 +1341,41 @@ PYEOF
   printf '81\n82\n' > "$HOME_DIR/state/.mail-retry"
   : > "$HOME_DIR/state/.mail-retry-pos"
 
-  # Simulate an interruption after emission but before the position is saved:
-  # the recovered row must still be emitted, the poll must fail closed, and
-  # the position must not advance.
+  # The recovered row is emitted, but the wake has not yet been published.
+  # The durable position must advance only up to the first emitted uid (index 1
+  # because 81 is still unfetchable), never past it, so a failed publish would
+  # re-scan 82 on the next poll instead of dropping it until the cursor wraps.
   out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
-    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" failpos 2>&1) || rc=$?
-  expect_code 1 "$rc" "poll must fail closed when the position write fails"
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  expect_code 0 "$rc" "poll must succeed while emitting the recovered row"
   assert_contains "$out" $'82\t\tbob@x.com\trecovered\tretry' \
-    "row is emitted before the failing position write"
+    "recovered row is emitted to the bash wake layer"
   pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
-  assert_equals "" "$pos" "position must not advance when the write fails"
+  assert_equals "1" "$pos" "cursor lands on the first emitted uid, not past it"
 
-  # A subsequent successful poll re-emits the same recovered row and advances
-  # the position, proving the recovered metadata was never lost or delayed.
+  # Simulate a failed wake publish: 82 is still in the retry set, and the next
+  # poll must start at 82 again rather than skipping it.
   rc=0
   out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
     "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
-  expect_code 0 "$rc" "retry poll must succeed once the position write is restored"
+  expect_code 0 "$rc" "retry poll must re-scan the uid whose wake did not publish"
   assert_contains "$out" $'82\t\tbob@x.com\trecovered\tretry' \
-    "recovered row surfaces once the position write succeeds"
+    "recovered uid is re-scanned while its wake is still unpublished"
   pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
-  assert_equals "0" "$pos" "position advances past the candidates examined within budget (wrapped in the two-uid set)"
-  pass "fm-mail: retry-scan position is saved only after rows are emitted"
+  assert_equals "1" "$pos" "cursor stays on the unpublished uid"
+
+  # Simulate the bash layer removing the recovered uid after a successful
+  # publish; the next poll scans the remaining uid from the same numeric start
+  # and advances only when no row is emitted.
+  printf '81\n' > "$HOME_DIR/state/.mail-retry"
+  rc=0
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  expect_code 0 "$rc" "retry poll must succeed after the recovered uid is removed"
+  assert_not_contains "$out" $'82\t' "recovered uid is no longer in the retry set"
+  pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "0" "$pos" "position advances only after an emission-free poll"
+  pass "fm-mail: retry-scan position does not advance past an unpublished wake"
 }
 
 test_poll_retry_budget_advances_by_examined_not_window() {
@@ -1377,7 +1399,7 @@ os.environ.update({
     # emit per poll while the window (max(4*4, 4+10) = 16) holds all 12.
     'FM_MAIL_POLL_MAX_WAKES': '4',
 })
-RETRY = sys.argv[5].split(',') if len(sys.argv) > 5 else []
+FAILING = set(sys.argv[5].split(',')) if len(sys.argv) > 5 else set()
 class FakeConn:
     untagged_responses = {'UIDVALIDITY': [b'90009']}
     def __init__(self, *a, **k):
@@ -1390,11 +1412,12 @@ class FakeConn:
         if cmd == 'search':
             return ('OK', [b'101 102 103 104 105 106 107 108 109 110 111 112'])
         if cmd == 'fetch':
-            # Every retry candidate is fetchable, so the emit loop must
-            # respect the retry budget (cap=4 -> budget=1): it emits the first
-            # in-budget candidate and leaves the rest in the scan, so the
-            # durable position advances by the examined count, never the full
-            # window.
+            # The first three uids are still unfetchable; the rest have
+            # recovered. The durable position must advance by the examined
+            # prefix (3), never the full window (16), so the recovered uid
+            # behind the unfetchable prefix is reached promptly.
+            if args[0].decode() in FAILING:
+                return ('NO', None)
             return ('OK', [(b'', b'Subject: r\r\nFrom: a@b.c\r\n\r\n')])
     def logout(self):
         pass
@@ -1406,9 +1429,10 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 sys.exit(mod.cmd_poll_list())
 PYEOF
-  # All 12 uids are cursor-recorded and in the retry set; none has recovered
-  # yet so the first poll emits nothing but must still examine candidates
-  # within budget and leave the position pointing past them.
+  # All 12 uids are cursor-recorded and in the retry set; the first three are
+  # still unfetchable and the rest have recovered. The durable position must
+  # advance by the examined prefix (3), never the full window (16), so the
+  # recovered uid behind the unfetchable prefix is reached promptly.
   mkdir -p "$HOME_DIR/state"
   {
     printf 'uidvalidity=90009\n'
@@ -1420,11 +1444,14 @@ PYEOF
   : > "$HOME_DIR/state/.mail-retry-pos"
 
   out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
-    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" "101,102,103,104,105,106,107,108,109,110,111,112" 2>&1) || rc=$?
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" "101,102,103" 2>&1) || rc=$?
   expect_code 0 "$rc" "first retry poll must succeed"
+  assert_contains "$out" $'104\t\ta@b.c\tr\tretry' \
+    "the first recovered uid after the unfetchable prefix is emitted within budget"
+  assert_not_contains "$out" $'105\t' "only the budgeted retry uid is emitted"
   pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
-  assert_equals "1" "$pos" \
-    "position advances by the budget-examined count, never the full window"
+  assert_equals "3" "$pos" \
+    "position advances by the examined prefix, never the full window"
   pass "fm-mail: retry budget advances the scan by examined candidates, not the window"
 }
 
@@ -1553,12 +1580,14 @@ PYEOF
   pass "fm-mail: hung logout cannot advance the retry-scan position"
 }
 
-test_poll_retry_flush_before_position_save() {
-  # Under a pipe, CPython block-buffers stdout. Persist then SIGKILL must still
-  # leave the recovered row in the capture, which only happens if stdout was
-  # flushed before the position write.
+test_poll_retry_position_not_saved_when_row_emitted() {
+  # When a retry row is emitted, cmd_poll_list must not persist the retry-scan
+  # position at all: a kill in the position-write window cannot drop a uid
+  # whose wake has not yet durably published. Wrapping save_retry_pos so that
+  # any call SIGKILLs the process proves the call is skipped when rows are
+  # emitted.
   local harness out rc=0 pos
-  harness="$TMP_ROOT/retry-flush-order-harness.py"
+  harness="$TMP_ROOT/retry-no-save-on-emit-harness.py"
   cat > "$harness" <<'PYEOF'
 import os, signal, sys
 os.environ.update({
@@ -1582,8 +1611,10 @@ class FakeConn:
         if cmd == 'search':
             return ('OK', [b'81 82'])
         if cmd == 'fetch':
-            if args[0] == b'81':
-                return ('NO', None)
+            # The first fetchable retry uid is emitted; the cursor does not
+            # advance when a row is emitted, so a save would write the same
+            # position. The kill wrapper proves save_retry_pos is still called
+            # and flushed stdout survives it.
             return ('OK', [(b'', b'Subject: recovered\r\nFrom: bob@x.com\r\n\r\n')])
     def logout(self):
         pass
@@ -1609,12 +1640,172 @@ PYEOF
 
   out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
     "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "poll_list must not exit 0 when killed after persist"
-  assert_contains "$out" $'82\t\tbob@x.com\trecovered\tretry' \
-    "flushed rows survive a kill immediately after the position write"
+  expect_code 0 "$rc" "poll_list must not call save_retry_pos when a row is emitted"
+  assert_contains "$out" $'81\t\tbob@x.com\trecovered\tretry' \
+    "the recovered row is emitted without persisting the position"
   pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
-  assert_equals "0" "$pos" "position write completes before the kill (advanced by examined count, wrapped)"
-  pass "fm-mail: stdout is flushed before the retry-scan position is saved"
+  assert_equals "" "$pos" "position must remain unchanged while a row is emitted"
+  pass "fm-mail: retry-scan position is not saved when a row is emitted"
+}
+
+test_poll_retry_small_window_rotates_past_unfetchable_prefix() {
+  # Greptile regression: when the retry set fits inside the scan window, the
+  # durable position must still rotate the scan. A persistently unfetchable
+  # leading uid must not monopolize the retry budget and strand later
+  # recovered uids.
+  local harness out rc=0 pos
+  harness="$TMP_ROOT/retry-small-window-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_RETRY_POS': sys.argv[3],
+    # cap=4 -> window = max(4*4, 4+10) = 16, which is larger than the retry set.
+    'FM_MAIL_POLL_MAX_WAKES': '4',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'101 102 103 104 105'])
+        if cmd == 'fetch':
+            # 101 is persistently unfetchable; every other uid has recovered.
+            if args[0] == b'101':
+                return ('NO', None)
+            return ('OK', [(b'', b'Subject: ok\r\nFrom: a@b.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[4])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  mkdir -p "$HOME_DIR/state"
+  {
+    printf 'uidvalidity=90009\n'
+    for u in 101 102 103 104 105; do
+      printf '%s\n' "$u"
+    done
+  } > "$HOME_DIR/state/.mail-seen"
+  printf '101\n102\n103\n104\n105\n' > "$HOME_DIR/state/.mail-retry"
+  : > "$HOME_DIR/state/.mail-retry-pos"
+
+  # With the unfixed small-window branch, every poll would start at 101 and
+  # emit 102 repeatedly; with the fix each recovered uid surfaces in turn.
+  # The durable cursor advances only up to the first emitted uid, so the first
+  # poll moves from 101 to 102 (index 1) and then stays there while recovered
+  # uids are removed by the bash layer.
+  for expected in 102 103 104 105; do
+    local want
+    rc=0
+    out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+      "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+    expect_code 0 "$rc" "poll for $expected must succeed"
+    want=$(printf '%s\t\ta@b.c\tok\tretry' "$expected")
+    assert_contains "$out" "$want" "recovered uid $expected surfaces after the unfetchable prefix"
+    assert_not_contains "$out" $'101\t' "unfetchable uid 101 is not emitted as retry"
+    pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+    assert_equals "1" "$pos" "cursor advances only up to the first emitted retry uid"
+    # Simulate the bash layer removing the just-recovered uid from the retry set.
+    grep -vx -e "$expected" "$HOME_DIR/state/.mail-retry" > "$HOME_DIR/state/.mail-retry.tmp" || true
+    mv -f -- "$HOME_DIR/state/.mail-retry.tmp" "$HOME_DIR/state/.mail-retry"
+  done
+
+  # Only the unfetchable uid remains; an emission-free poll advances the
+  # cursor so the scan does not stall.
+  rc=0
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  expect_code 0 "$rc" "poll with only the unfetchable uid must succeed"
+  assert_not_contains "$out" $'101\t' "unfetchable uid still is not emitted"
+  pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "0" "$pos" "emission-free poll advances the position past the small window"
+
+  # A non-zero starting position must rotate the small scan too: starting at
+  # position 4 puts uid 105 first in the rotated order.
+  printf '101\n102\n103\n104\n105\n' > "$HOME_DIR/state/.mail-retry"
+  printf '4\n' > "$HOME_DIR/state/.mail-retry-pos"
+  rc=0
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  expect_code 0 "$rc" "wrap poll must succeed"
+  assert_contains "$out" $'105\t\ta@b.c\tok\tretry' \
+    "a non-zero starting position wraps within the small retry set"
+
+  pass "fm-mail: small retry window rotates past an unfetchable prefix"
+}
+
+test_poll_cap_one_turn_not_saved_before_emit() {
+  # At cap==1 with both new and retry candidates, the alternating turn must be
+  # persisted only after the rows are emitted and flushed. A kill in the
+  # logout/emit window must not advance the turn, so the next poll still gets
+  # the new-mail turn it was owed.
+  local harness out rc=0 turn
+  harness="$TMP_ROOT/cap-one-turn-kill-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, signal, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_TURN': sys.argv[3],
+    'FM_MAIL_POLL_MAX_WAKES': '1',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'90 100'])
+        if cmd == 'fetch':
+            return ('OK', [(b'', b'Subject: good\r\nFrom: a@b.c\r\n\r\n')])
+    def logout(self):
+        # Kill the process between the fetch decision and the emit/flush,
+        # before the turn can be persisted.
+        os.kill(os.getpid(), signal.SIGKILL)
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[4])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  {
+    printf 'uidvalidity=90009\n'
+    printf '90\n'
+  } > "$HOME_DIR/state/.mail-seen"
+  printf '90\n' > "$HOME_DIR/state/.mail-retry"
+  : > "$HOME_DIR/state/.mail-turn"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-turn" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "poll_list must not exit 0 when logout is killed before emit"
+  assert_not_contains "$out" $'100\t' "a killed logout must not emit rows"
+  assert_not_contains "$out" $'90\t' "a killed logout must not emit rows"
+  turn=$(cat "$HOME_DIR/state/.mail-turn" 2>/dev/null || printf '')
+  assert_equals "" "$turn" "the alternating turn must not advance when emit is killed"
+  pass "fm-mail: cap-one turn is not saved before emit/flush"
 }
 
 test_poll_skips_unfetchable_uid_but_keeps_progress() {
@@ -2172,11 +2363,13 @@ test_poll_bounded_fetch_progresses_large_backlog
 test_poll_skips_unfetchable_uid_but_keeps_progress
 test_poll_retries_transient_fetch_and_surfaces_real_metadata
 test_poll_retry_cursor_advances_past_failures
-test_poll_retry_emission_precedes_position_save
+test_poll_retry_position_does_not_advance_past_unpublished_wake
 test_poll_retry_budget_advances_by_examined_not_window
 test_poll_retry_window_of_unseen_never_stalls_cursor
 test_poll_retry_logout_before_emit_and_position_save
-test_poll_retry_flush_before_position_save
+test_poll_retry_position_not_saved_when_row_emitted
+test_poll_retry_small_window_rotates_past_unfetchable_prefix
+test_poll_cap_one_turn_not_saved_before_emit
 test_poll_retry_surfaces_under_new_mail_flood
 test_poll_resurfaces_degraded_uid_whose_wake_never_recorded
 test_poll_cap_one_never_suppresses_new_mail
