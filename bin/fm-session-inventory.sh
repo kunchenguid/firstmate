@@ -52,10 +52,15 @@
 #   age_source    where the age came from: "process", "backlog-since",
 #                 "file-mtime", or null.
 #   stale         true when age_days >= stale_after_days.
-#   notify        true when the row is stale AND has a close command. A row with
-#                 no single safe close command is not something a human can act
-#                 on by age, so long-lived shared infrastructure stays visible in
-#                 the view without occupying the unasked session-start line.
+#   held          true when the captain is deliberately holding this work.
+#   notify        true when the row is stale, has a close command, and is not
+#                 held. A row with no single safe close command is not something
+#                 a human can act on by age, so long-lived shared infrastructure
+#                 stays visible in the view without occupying the unasked
+#                 session-start line. A captain hold is excluded for a different
+#                 reason: it is deliberate, and the backlog captain-hold
+#                 lifecycle already owns surfacing it, so repeating it here would
+#                 report one parked decision from two places.
 #   close         exact command a human may run to close it, or null.
 #   close_safety  safe | confirm | manual. "confirm" means closing it can lose
 #                 work in progress and needs an explicit decision first;
@@ -148,10 +153,11 @@ note_source() {  # <name> <ok:0|1> <reason>
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$SOURCES"
 }
 
-# One row per line. Empty field = null in JSON.
-emit_row() {  # kind id label belongs_to detail pid age_seconds age_source close close_safety close_note
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" >> "$ROWS"
+# One row per line. Empty field = null in JSON. The trailing `held` column is 1
+# for work the captain is deliberately holding.
+emit_row() {  # kind id label belongs_to detail pid age_seconds age_source close close_safety close_note [held]
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12:-0}" >> "$ROWS"
 }
 
 # --- the one process-table read ----------------------------------------------
@@ -214,8 +220,9 @@ collect_workers() {
     return 0
   fi
   note_source fleet-snapshot 1 ''
-  local id kind repo window worktree since meta_path state busy close safety cnote age age_source
-  while IFS=$'\t' read -r id kind repo window worktree since meta_path state; do
+  local id kind repo window worktree since meta_path state hold_kind
+  local busy close safety cnote age age_source held
+  while IFS=$'\t' read -r id kind repo window worktree since meta_path state hold_kind; do
     [ -n "$id" ] || continue
     age=''
     age_source=''
@@ -250,8 +257,10 @@ collect_workers() {
           ;;
       esac
     fi
+    held=0
+    [ "$hold_kind" != captain ] || held=1
     emit_row worker "$id" "$kind" "${repo:-$id}" "${window:+window $window}${worktree:+ in $worktree}" \
-      '' "${age:-}" "$age_source" "$close" "$safety" "$cnote"
+      '' "${age:-}" "$age_source" "$close" "$safety" "$cnote" "$held"
   done < <(jq -r '
       .tasks[]? |
       [ .id,
@@ -261,7 +270,8 @@ collect_workers() {
         (.paths.worktree.path // .paths.home.path // ""),
         (.backlog.since // ""),
         (.paths.meta.path // ""),
-        (.current_state.state // "")
+        (.current_state.state // ""),
+        (.backlog.hold_kind // "")
       ] | @tsv' "$snapshot_file")
 }
 
@@ -584,10 +594,11 @@ JSON=$(
          age_source: (.[7] | blank_null),
          close: (.[8] | blank_null),
          close_safety: (.[9] // "manual"),
-         close_note: (.[10] | blank_null)}
+         close_note: (.[10] | blank_null),
+         held: (.[11] == "1")}
         | .age_days = (if .age_seconds == null then null else (.age_seconds / 86400 | floor) end)
         | .stale = (.age_days != null and .age_days >= $stale_days)
-        | .notify = (.stale and .close != null)
+        | .notify = (.stale and .close != null and (.held | not))
         | .started = (if .age_seconds == null then null
                       else (($now - .age_seconds) | strftime("%Y-%m-%dT%H:%M:%SZ")) end)
       );
@@ -634,11 +645,14 @@ fi
 # --stale-lines: nothing at all when nothing is old. One short line each,
 # bounded, because a session start pays for every line it prints.
 printf '%s\n' "$JSON" | jq -r --argjson cap 8 '
-  def row_label($r): if $r.kind == "harness-session" then "background session (\($r.label))"
-                 elif $r.kind == "worker" then "worker \($r.id)"
-                 elif $r.kind == "review" then "review page \($r.label)"
-                 else "service \($r.label // $r.id)" end;
-  [.rows[] | select(.notify)] as $stale
+  def row_label($r):
+    if $r.kind == "harness-session" then "background session (\($r.label))"
+    elif $r.kind == "worker" then "worker \($r.id)"
+    elif $r.kind == "review" then "review page \($r.label)"
+    else "service \($r.label // $r.id)" end;
+  # Oldest first across every kind, so the cap below can only ever drop the
+  # least overdue lines.
+  [.rows[] | select(.notify)] | sort_by(-(.age_seconds // 0)) as $stale
   | if ($stale | length) == 0 then empty
     else
       ($stale[:$cap][] |

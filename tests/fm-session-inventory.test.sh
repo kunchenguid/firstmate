@@ -34,15 +34,43 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
 ln -s /bin/bash "$FAKEBIN/claude"
 FAKE_CLAUDE="$FAKEBIN/claude"
 
+# The fleet snapshot underneath asks the backend and the validation daemon about
+# every task it finds. Left to the real tools, each fixture task waits out a
+# per-task bound against a window that was never created. Stub both: this suite
+# is about the inventory built ON TOP of that snapshot, not about backend
+# liveness, which tests/fm-fleet-snapshot-view.test.sh already owns.
+fm_fake_exit0 "$FAKEBIN" no-mistakes
+cat > "$FAKEBIN/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta 2>/dev/null ;;
+  display-message) printf '%%1\n' ;;
+  capture-pane) printf 'all quiet\n> \n' ;;
+esac
+exit 0
+SH
+chmod +x "$FAKEBIN/tmux"
+
 # A fixed observation clock: 2026-09-06T12:00:00Z.
 NOW_EPOCH=1788696000
 DAY=86400
 
 SPAWNED=""
+# Kill the whole fixture tree, not just the daemon. Each fake session parents a
+# sleeping process of its own, and a survivor both lingers for minutes and holds
+# this suite stdout open - which is exactly how a seven-second run reports two
+# minutes to the runner.
+kill_tree() {  # <pid>
+  local pid=$1 child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    kill_tree "$child"
+  done
+  kill -TERM "$pid" 2>/dev/null || true
+}
 kill_spawned() {
   local pid
   for pid in $SPAWNED; do
-    kill -TERM "$pid" 2>/dev/null || true
+    kill_tree "$pid"
   done
   for pid in $SPAWNED; do
     wait "$pid" 2>/dev/null || true
@@ -119,31 +147,62 @@ run_view() {  # <home> <args...>
     PATH="$FAKEBIN:$PATH" "$VIEW" "$@"
 }
 
-# Start a fake harness daemon and return its pid. Its children are started from
-# inside it so the kernel really records the daemon as their parent.
+# The daemon body: read one argv line per child and launch each as its own
+# harness-named process, so the kernel really records this process as their
+# parent. Kept as a file rather than an inline -c string because the child argv
+# has to reach ps unmangled.
+# Every `sleep` below is followed by `:` on purpose. Given a single simple
+# command, bash exec-collapses itself into it, and the child would show up as a
+# bare `sleep` - losing both the harness name and the argv this fixture exists
+# to present. The extra no-op keeps each fake session a real, correctly named
+# process.
+DAEMON_BODY="$TMP_ROOT/fm-fake-daemon.sh"
+cat > "$DAEMON_BODY" <<'SH'
+#!/usr/bin/env bash
+spec=$1
+fake=$2
+ready=$3
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  # shellcheck disable=SC2086 # deliberate: the spec line IS the child argv
+  "$fake" -c 'sleep 120; :' $line &
+done < "$spec"
+: > "$ready"
+sleep 120
+:
+SH
+
+# Start a fake harness daemon and publish its pid in DAEMON_PID.
+#
+# Deliberately NOT `daemon=$(start_daemon_tree ...)`: a command substitution runs
+# in a subshell that inherits this file EXIT trap, so the tree would be torn down
+# by kill_spawned the instant the substitution returned.
+DAEMON_PID=
 start_daemon_tree() {  # <home> <child-argv-file>
-  local home=$1 spec=$2 daemon_pid
-  "$FAKE_CLAUDE" -c '
-      while IFS= read -r line; do
-        [ -n "$line" ] || continue
-        # shellcheck disable=SC2086
-        eval "\"$FAKE_CLAUDE\" -c \x27sleep 120\x27 $line &"
-      done < "$1"
-      sleep 120
-    ' fm-fake-daemon "$spec" &
+  local home=$1 spec=$2 daemon_pid want waited=0 ready seen=0
+  want=$(grep -c '[^[:space:]]' "$spec")
+  ready="$home/daemon-ready"
+  rm -f "$ready"
+  # Detached from this suite stdio on purpose: a fixture process must never be
+  # able to hold the test output pipe open.
+  "$FAKE_CLAUDE" "$DAEMON_BODY" "$spec" "$FAKE_CLAUDE" "$ready" </dev/null >/dev/null 2>&1 &
   daemon_pid=$!
   SPAWNED="$SPAWNED $daemon_pid"
-  # Wait for the children to exist before observing the tree.
-  local waited=0
-  while [ "$waited" -lt 100 ]; do
-    if [ "$(pgrep -P "$daemon_pid" 2>/dev/null | wc -l | tr -d ' ')" -ge \
-      "$(grep -c '[^[:space:]]' "$spec")" ]; then
-      break
+  # Wait until every fake session is a live, harness-named child of the daemon,
+  # so no case observes a half-built tree.
+  while [ "$waited" -lt 200 ]; do
+    if [ -e "$ready" ]; then
+      seen=$(pgrep -P "$daemon_pid" 2>/dev/null | while IFS= read -r c; do
+        ps -o args= -p "$c" 2>/dev/null | grep -c -- "$FAKE_CLAUDE" || true
+      done | LC_ALL=C awk '{ n += $1 } END { print n + 0 }')
+      [ "${seen:-0}" -lt "$want" ] || break
     fi
     sleep 0.05
     waited=$((waited + 1))
   done
-  printf '%s\n' "$daemon_pid"
+  [ "${seen:-0}" -ge "$want" ] \
+    || fail "fixture did not build a $want-child harness tree under pid $daemon_pid (saw ${seen:-0})"
+  DAEMON_PID=$daemon_pid
 }
 
 # --- cases -------------------------------------------------------------------
@@ -159,7 +218,8 @@ sess-a --session-id aaaa --agent claude --permission-mode bypassPermissions
 sess-b --session-id bbbb --agent claude --permission-mode bypassPermissions
 pool-a --bg-spare /tmp/cc-daemon/spare/1111.claim.sock
 EOF
-  daemon=$(start_daemon_tree "$home" "$spec")
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
   printf '%s\n' "$daemon" > "$home/state/.lock"
 
   json=$(run_inventory "$home" --json) || fail "inventory failed for two concurrent sessions"
@@ -201,7 +261,8 @@ sess-a --session-id aaaa --agent claude --permission-mode bypassPermissions
 pool-a --bg-spare /tmp/cc-daemon/spare/1111.claim.sock
 pool-b --bg-spare /tmp/cc-daemon/spare/2222.claim.sock
 EOF
-  daemon=$(start_daemon_tree "$home" "$spec")
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
   printf '%s\n' "$daemon" > "$home/state/.lock"
 
   json=$(run_inventory "$home" --json) || fail "inventory failed for a single session"
@@ -228,7 +289,8 @@ test_conflicting_argv_is_reported_unknown() {
   cat > "$spec" <<'EOF'
 odd --session-id cccc --bg-spare /tmp/cc-daemon/spare/3333.claim.sock
 EOF
-  daemon=$(start_daemon_tree "$home" "$spec")
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
   printf '%s\n' "$daemon" > "$home/state/.lock"
 
   json=$(run_inventory "$home" --json) || fail "inventory failed for a conflicting argv"
@@ -331,6 +393,54 @@ test_row_without_a_safe_close_stays_out_of_the_unasked_line() {
   pass "inventory: a row with no safe close command stays visible but out of the unasked line"
 }
 
+# A task the captain is deliberately holding is not an overdue running session.
+# The backlog captain-hold lifecycle already surfaces it, so repeating it in the
+# unasked session-start line would report one parked decision from two places.
+test_captain_held_work_stays_out_of_the_unasked_line() {
+  local home json out
+  home=$(make_home held)
+  mkdir -p "$home/data"
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+- [ ] held-task - Held Task (repo: alpha) (kind: ship) (since $(date_days_ago 40)) (hold: captain choice pending) (hold-kind: captain)
+- [ ] plain-task - Plain Task (repo: alpha) (kind: ship) (since $(date_days_ago 40))
+
+## Queued
+
+## Done
+EOF
+  local id
+  for id in held-task plain-task; do
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" \
+      "worktree=$home/projects/$id-worktree" \
+      "project=alpha" \
+      "harness=claude" \
+      "kind=ship" \
+      "mode=no-mistakes" \
+      "yolo=off"
+  done
+  write_lavish_stub "$FAKEBIN"
+
+  json=$(run_inventory "$home" --json) || fail "inventory failed for captain-held work"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "held-task") | "\(.held) \(.stale) \(.notify)"')" \
+    = "true true false" ] \
+    || fail "captain-held work must stay visible and stale but out of the unasked notice"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "plain-task") | "\(.held) \(.stale) \(.notify)"')" \
+    = "false true true" ] \
+    || fail "unheld work of the same age must still be reported"
+
+  out=$(run_inventory "$home" --stale-lines) || fail "--stale-lines failed"
+  assert_contains "$out" "worker plain-task" "unheld overdue work must be named"
+  assert_not_contains "$out" "held-task" \
+    "a task the captain is holding must not be reported again as an overdue session"
+
+  out=$(COLUMNS=100 run_view "$home" --color never)
+  assert_contains "$out" "held-task" "the view must still show captain-held work with its age"
+
+  pass "inventory: captain-held work stays visible but out of the unasked line"
+}
+
 test_review_pages_are_listed_and_aged() {
   local home json artifact
   home=$(make_home reviews)
@@ -408,12 +518,17 @@ test_view_is_readable_narrow_and_without_colour() {
   esac
   assert_contains "$plain" "! worker" "a stale row must be marked with text, not colour alone"
 
-  # Narrow pane: every rendered table line fits, and the close command is still
-  # printed whole so it stays pasteable.
+  # Narrow pane: every TABLE line fits the pane. The title, a source
+  # diagnostic, and the close commands are deliberately left whole to wrap
+  # rather than be cut, because a truncated home path, reason, or command is
+  # worse than a wrapped one.
   narrow=$(COLUMNS=50 run_view "$home" --color never)
-  longest=$(printf '%s\n' "$narrow" | sed -n '/^To close/q;p' | LC_ALL=C awk '{ print length }' | sort -n | tail -1)
+  longest=$(printf '%s\n' "$narrow" | LC_ALL=C awk '
+      /^ *KIND +WHAT/ { intable = 1 }
+      /^To close/ { intable = 0 }
+      intable { print length }' | sort -n | tail -1)
   [ -n "$longest" ] && [ "$longest" -le 50 ] \
-    || fail "the table must fit a 50-column pane, longest line was ${longest:-unknown}"
+    || fail "the table must fit a 50-column pane, longest table line was ${longest:-unknown}"
   assert_contains "$narrow" "FM_HOME=$home bin/fm-teardown.sh a-very-long-worker-identifier-for-width" \
     "a close command must never be truncated, however narrow the pane"
 
@@ -446,7 +561,8 @@ test_inventory_closes_nothing_it_reports() {
 sess-a --session-id aaaa --agent claude
 pool-a --bg-spare /tmp/cc-daemon/spare/1111.claim.sock
 EOF
-  daemon=$(start_daemon_tree "$home" "$spec")
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
   printf '%s\n' "$daemon" > "$home/state/.lock"
   children=$(pgrep -P "$daemon" | tr '\n' ' ')
 
@@ -472,6 +588,7 @@ test_stale_lock_pid_is_not_attributed
 test_nothing_old_prints_nothing_at_session_start
 test_stale_rows_carry_their_exact_close_command
 test_row_without_a_safe_close_stays_out_of_the_unasked_line
+test_captain_held_work_stays_out_of_the_unasked_line
 test_review_pages_are_listed_and_aged
 test_review_page_with_queued_notes_needs_confirmation
 test_unreadable_source_is_disclosed_not_counted_as_zero

@@ -271,10 +271,10 @@ For a pane you leave open, `--watch` redraws in place:
 bin/fm-session-view.sh --watch
 ```
 
-In WezTerm, one line opens that pane and keeps it there:
+In WezTerm, one line opens that pane beside the current one and keeps it there:
 
 ```sh
-wezterm cli split-pane --right --percent 35 -- bash -lc 'cd ~/Projects/firstmate && exec bin/fm-session-view.sh --watch'
+wezterm cli split-pane --right --percent 35 --cwd /path/to/firstmate -- bash -lc 'exec bin/fm-session-view.sh --watch'
 ```
 
 `--interval` sets the redraw cadence; it defaults to 60 seconds and refuses anything under 15, because a faster redraw would poll harder than supervision itself for a display that changes on the scale of minutes.

@@ -26,9 +26,11 @@
 # harness-session verdict is spelled out in words. Colour is decoration on top of
 # that, auto-enabled only on a terminal and suppressed by NO_COLOR. Columns are
 # computed from the real terminal width, the "belongs to" column is dropped
-# below 60 columns, and long values are truncated with a trailing ellipsis -
-# while every close command is printed unabridged on its own line so it stays
-# pasteable at any width.
+# below 60 columns, and long table values are truncated with a trailing
+# ellipsis. Three things are deliberately left whole and allowed to wrap
+# instead: the home path, an unreadable-source reason, and every close command.
+# A cut-off path, reason, or command is worse than a wrapped one - the command
+# in particular has to stay pasteable at any width.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

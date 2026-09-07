@@ -873,6 +873,70 @@ test_routine_bootstrap_confirmations_are_silent() {
   pass "bootstrap keeps routine tasks-axi, harness, dispatch, and already-live liveness confirmations silent"
 }
 
+# Anything that has been running for days is surfaced unasked at session start,
+# and nothing else is. The inventory itself is owned by
+# tests/fm-session-inventory.test.sh; what this pins is the WIRING - that the
+# detect-only half of bootstrap reports it, and that it stays silent otherwise.
+test_stale_sessions_are_reported_unasked() {
+  local case_dir fixture root home fakebin out
+  case_dir="$TMP_ROOT/stale-sessions"
+  fixture=$(make_routine_bootstrap_fixture "$case_dir")
+  root=${fixture%%|*}
+  fixture=${fixture#*|}
+  home=${fixture%%|*}
+  fakebin=${fixture#*|}
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "SESSIONS_STALE:" \
+    "a home with nothing old must say nothing about running sessions"
+
+  # One worker in flight for a fortnight, through the ordinary backlog record.
+  mkdir -p "$home/data"
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+- [ ] ancient-task - Ancient Task (repo: alpha) (kind: ship) (since 2020-01-01)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/ancient-task.meta" \
+    "window=firstmate:fm-ancient-task" \
+    "worktree=$case_dir/wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "yolo=off"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "SESSIONS_STALE: worker ancient-task" \
+    "a worker running for years must be named at session start without being asked"
+  assert_contains "$out" "bin/fm-teardown.sh ancient-task" \
+    "the reported line must carry the guarded cleanup command"
+
+  # The detect-only half runs in a read-only session too, which is exactly when
+  # a second concurrent session exists to be noticed.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=0 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "SESSIONS_STALE: worker ancient-task" \
+    "a read-only session must still report what has been running for days"
+
+  # And it stays opt-outable for a home that does not want the notice.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_STALE_SESSIONS=0 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "SESSIONS_STALE:" \
+    "FM_BOOTSTRAP_STALE_SESSIONS=0 must opt a home out of the unasked notice"
+
+  pass "bootstrap reports what has been running for days, unasked, and only that"
+}
+
 test_routine_bootstrap_contract_runs_under_system_bash() {
   local out
   [ -x /bin/bash ] || { pass "bootstrap routine contract skipped without /bin/bash"; return; }
@@ -1176,6 +1240,7 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
+test_stale_sessions_are_reported_unasked
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times

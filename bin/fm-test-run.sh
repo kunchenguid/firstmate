@@ -345,6 +345,7 @@ family_for_basename() {
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
+    fm-session-inventory-live-e2e.test.sh|\
     fm-herdr-submit-confirm-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
@@ -366,7 +367,8 @@ family_for_basename() {
       printf '%s\n' afk
       ;;
     fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|\
-    fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh)
+    fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh|\
+    fm-session-inventory.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
     fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
@@ -750,6 +752,8 @@ tests/fm-send-remote-delivery.test.sh 27686
 tests/fm-send-resolve-key.test.sh 19619
 tests/fm-send-secondmate-marker-herdr-e2e.test.sh 51
 tests/fm-send-secondmate-marker.test.sh 6252
+tests/fm-session-inventory-live-e2e.test.sh 19
+tests/fm-session-inventory.test.sh 7427
 tests/fm-session-lock-ancestry.test.sh 1414
 tests/fm-session-start.test.sh 156952
 tests/fm-sessionstart-hook-live-e2e.test.sh 20
@@ -1363,6 +1367,7 @@ families_for_changed_path() {
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
     bin/fm-gate-refuse*|bin/fm-lock*)
       printf '%s\n' session-bootstrap
+      printf '%s\n' "__script__:fm-session-inventory.test.sh"
       ;;
     bin/fm-quota-axi-lib.sh)
       printf '%s\n' session-bootstrap
@@ -1473,6 +1478,16 @@ families_for_changed_path() {
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh|\
     bin/fm-home-summary-refresh.sh)
       printf '%s\n' snapshot-bearings
+      ;;
+    bin/fm-session-inventory.sh|bin/fm-session-view.sh)
+      # The running-session overview renders the fleet snapshot (snapshot-bearings)
+      # and is surfaced unasked by bootstrap (session-bootstrap). Its one
+      # vendor-shaped verdict - live session vs pooled spare - is only provable
+      # against real installed harnesses, so a change here re-selects the live
+      # guard too.
+      printf '%s\n' snapshot-bearings
+      printf '%s\n' session-bootstrap
+      printf '%s\n' live-harness-optin
       ;;
     bin/fm-install-herdr.sh|bin/fm-install-treehouse.sh|bin/fm-herdr-ci-cleanup.sh)
       printf '%s\n' pure-contract-unit
