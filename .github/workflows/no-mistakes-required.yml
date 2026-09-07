@@ -10,18 +10,17 @@ on:
 permissions:
   contents: read
 
-# GitHub concurrency groups retain at most one pending run, replacing older
-# pending runs even when cancel-in-progress is false. Give body-bearing events
-# an immutable per-event group so first-time-fork approvals can never collapse
-# opened/edited checks. Keep synchronize/reopened coalescing as before.
+# One lightweight check per PR: superseded pushes cancel the prior run instead
+# of stacking four workflows on every no-mistakes fix round.
 concurrency:
-  group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}
+  group: no-mistakes-required-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   check:
     name: PR must be raised via no-mistakes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: >-
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'

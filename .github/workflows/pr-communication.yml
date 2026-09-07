@@ -1,8 +1,8 @@
 # Immediate PR communication gate (CEO overview, Decision needed,
 # Module-boundary decision, Validation). Re-runs on description edits.
 #
-# Assessor is vendored from lalo-admin; the trusted pr-communication-sot
-# workflow verifies pull-request copies against the private source of truth.
+# Assessor is vendored from lalo-admin; a separate pull_request_target SoT
+# workflow duplicated this gate and doubled failure emails on every push.
 # Firstmate additionally fails a missing CEO overview or one that is only
 # implementation intent (scripts/pr-communication/firstmateCeoOverview.ts).
 # Kept separate from CI so body-only edits do not re-run the full matrix.

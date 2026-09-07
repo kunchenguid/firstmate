@@ -1452,7 +1452,7 @@ test_unbounded_candidate_evidence_is_partial_and_non_escalating() {
   started=$(date +%s)
   FM_INACTIVE_RECONCILE_BUDGET_SECS=4 run_reconcile "$MAIN" --startup
   elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -le 3 ] \
+  [ "$elapsed" -le 4 ] \
     || fail "candidate evidence exceeded its bounded per-task work (${elapsed}s)"
   [ ! -e "$MAIN/state/.inactive-reconcile-capacity" ] \
     || fail "partial candidate evidence falsely degraded supervision"

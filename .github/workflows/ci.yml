@@ -5,9 +5,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# Superseded PR pushes should not keep burning minutes on the full matrix.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
@@ -351,6 +357,9 @@ jobs:
 
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
+    # macOS runners bill at 10x; keep the stock Bash snapshot on main pushes
+    # and manual reruns only, never on every PR synchronize.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     # The full stock Bash 3.2 compatibility suite, retaining the 14 x 180 KB
     # ARG_MAX fixture, took 12m53s on the measured host, so 20 minutes leaves
