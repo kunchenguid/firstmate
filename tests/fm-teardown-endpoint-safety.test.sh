@@ -283,13 +283,6 @@ test_supported_backend_endpoint_records_validate() {
     "backend=cmux" "cmux_workspace_id=workspace-1" "cmux_surface_id=surface-2"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid cmux endpoint refused"
 
-  id=paseo-task
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=wks_abc:11111111-2222-3333-4444-555555555555" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "backend=paseo" \
-    "paseo_workspace_id=wks_abc" "paseo_terminal_id=11111111-2222-3333-4444-555555555555"
-  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid paseo endpoint refused"
-
   for backend in tmux herdr zellij orca cmux paseo; do
     set +e
     fm_backend_kill "$backend" "" >/dev/null 2>&1
@@ -297,7 +290,25 @@ test_supported_backend_endpoint_records_validate() {
     set -e
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
-  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, and paseo records validate while every empty backend target refuses"
+  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
+}
+
+test_paseo_teardown_refuses_instead_of_orphaning_the_terminal() {
+  # Regression: a well-formed backend=paseo record used to pass endpoint
+  # validation, after which teardown swallowed fm_backend_kill's "no kill
+  # implementation" failure, returned the worktree, deleted the metadata and
+  # reported completion - while the Paseo terminal was still running and its
+  # only durable identity was gone. Drives the real fm-teardown.sh end to end.
+  local dir id=paseo-task
+  dir=$(make_case paseo-orphan)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=wks_abc:11111111-2222-3333-4444-555555555555" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=paseo" "kind=scout" \
+    "paseo_workspace_id=wks_abc" "paseo_terminal_id=11111111-2222-3333-4444-555555555555"
+  assert_refused_without_mutation "$dir" "$id" "paseo endpoint without a lifecycle adapter"
+  assert_contains "$(cat "$dir/stderr")" "no lifecycle adapter" \
+    "the paseo teardown refusal should name the missing adapter as the reason"
+  pass "fm-teardown: a paseo endpoint refuses and keeps every record, rather than reporting completion over a still-running terminal"
 }
 
 test_tmux_empty_target_refuses_without_invocation() {
@@ -610,6 +621,7 @@ test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
+test_paseo_teardown_refuses_instead_of_orphaning_the_terminal
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup
