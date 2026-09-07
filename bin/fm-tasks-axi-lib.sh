@@ -135,22 +135,42 @@ fm_tasks_axi_backend_from_toml() {  # <toml-path>
 }
 
 # Resolve the active tasks-axi backend with the same precedence as tasks-axi.
-fm_tasks_axi_backend() {  # <tasks-axi-working-directory>
+fm_tasks_axi_backend_resolve() {  # <tasks-axi-working-directory>
   local root=$1 backend
   if [ "${TASKS_AXI_BACKEND+x}" = x ]; then
     printf '%s\n' "$TASKS_AXI_BACKEND"
     return 0
   fi
-  if backend=$(fm_tasks_axi_backend_from_toml "$root/.tasks.toml"); then
+  local config="$root/.tasks.toml"
+  if { [ -e "$config" ] || [ -L "$config" ]; } && { [ ! -f "$config" ] || [ ! -r "$config" ]; }; then
+    printf 'tasks-axi backend configuration cannot be read at %s\n' "$config" >&2
+    return 2
+  fi
+  if backend=$(fm_tasks_axi_backend_from_toml "$config"); then
     printf '%s\n' "$backend"
     return 0
   fi
-  if [ -n "${HOME:-}" ] \
-    && backend=$(fm_tasks_axi_backend_from_toml "$HOME/.tasks-axi/config.toml"); then
-    printf '%s\n' "$backend"
-    return 0
+  if [ -n "${HOME:-}" ]; then
+    config="$HOME/.tasks-axi/config.toml"
+    if { [ -e "$config" ] || [ -L "$config" ]; } && { [ ! -f "$config" ] || [ ! -r "$config" ]; }; then
+      printf 'tasks-axi backend configuration cannot be read at %s\n' "$config" >&2
+      return 2
+    fi
+    if backend=$(fm_tasks_axi_backend_from_toml "$config"); then
+      printf '%s\n' "$backend"
+      return 0
+    fi
   fi
   printf '%s\n' markdown
+}
+
+fm_tasks_axi_backend() {  # <tasks-axi-working-directory>
+  local backend
+  if backend=$(fm_tasks_axi_backend_resolve "$1" 2>/dev/null); then
+    printf '%s\n' "$backend"
+  else
+    printf '%s\n' markdown
+  fi
 }
 
 fm_backlog_backend_value() {

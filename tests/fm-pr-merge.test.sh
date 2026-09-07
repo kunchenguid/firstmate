@@ -367,6 +367,7 @@ run_pr_merge() {
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
+  HOME="${FM_TEST_USER_HOME:-$case_dir/user-home}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -2209,6 +2210,58 @@ test_unreadable_backend_config_refuses_the_merge() {
   pass "fm-pr-merge refuses when its configured backend cannot be read"
 }
 
+test_unreadable_user_backend_config_refuses_the_merge() {
+  local case_dir rc user_config
+  case_dir=$(make_case unreadable-user-backend-config-refuses)
+  user_config="$case_dir/user-home/.tasks-axi/config.toml"
+  mkdir -p "$case_dir/wt" "${user_config%/*}"
+  add_gh_mocks "$case_dir" 6464646464646464646464646464646464646464
+  : > "$case_dir/gh-axi.log"
+  rm -f "$case_dir/home/.tasks.toml" "$case_dir/home/data/backlog.md"
+  printf '%s\n' 'backend = "beads"' > "$user_config"
+  chmod 000 "$user_config"
+
+  set +e
+  FM_TEST_USER_HOME="$case_dir/user-home" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/64 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 644 "$user_config"
+
+  expect_code 1 "$rc" "unreadable-user-backend-config-refuses: an unreadable authority route must refuse"
+  assert_grep "tasks-axi backend configuration cannot be read at $user_config" "$case_dir/stderr" \
+    "unreadable-user-backend-config-refuses: the unreadable authority route was not named"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "unreadable-user-backend-config-refuses: the forge was called despite an unreadable authority route"
+  pass "fm-pr-merge refuses when its user backend configuration cannot be read"
+}
+
+test_backend_override_bypasses_unreadable_user_config() {
+  local case_dir rc user_config
+  case_dir=$(make_case backend-override-bypasses-unreadable-user-config)
+  user_config="$case_dir/user-home/.tasks-axi/config.toml"
+  mkdir -p "$case_dir/wt" "${user_config%/*}"
+  add_gh_mocks "$case_dir" 6565656565656565656565656565656565656565
+  : > "$case_dir/gh-axi.log"
+  rm -f "$case_dir/home/.tasks.toml" "$case_dir/home/data/backlog.md"
+  printf '%s\n' 'backend = "beads"' > "$user_config"
+  chmod 000 "$user_config"
+
+  set +e
+  TASKS_AXI_BACKEND=markdown FM_TEST_USER_HOME="$case_dir/user-home" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/65 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 644 "$user_config"
+
+  expect_code 0 "$rc" "backend-override-bypasses-unreadable-user-config: an explicit backend must bypass config"
+  grep -qxF 'pr merge 65 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "backend-override-bypasses-unreadable-user-config: the merge was not attempted"
+  pass "fm-pr-merge honors a backend override over an unreadable user configuration"
+}
+
 test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
@@ -2224,3 +2277,5 @@ test_secondmate_without_parent_binding_is_loud
 test_absent_backlog_still_merges
 test_unreadable_backlog_refuses_the_merge
 test_unreadable_backend_config_refuses_the_merge
+test_unreadable_user_backend_config_refuses_the_merge
+test_backend_override_bypasses_unreadable_user_config
