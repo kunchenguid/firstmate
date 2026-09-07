@@ -2894,6 +2894,67 @@ SH
   pass "fleet snapshots preserve captured decisions when incremental reads fail"
 }
 
+test_local_snapshot_keeps_status_generations_separate_during_incremental_fold() {
+  local home fakebin worktree reader replacement probe json
+  home=$(make_home decision-status-generation-race)
+  worktree="$home/projects/decision-status-generation-race"
+  fm_git_init_commit "$worktree"
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] decision-status-generation-race - Status generation race fixture (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/decision-status-generation-race.meta" \
+    "worktree=$worktree" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "spawn_gen=stable-generation"
+  printf 'needs-decision [key=old-generation]: captured captain choice remains open\n' \
+    > "$home/state/decision-status-generation-race.status"
+  replacement="$home/replacement.status"
+  printf 'needs-decision [key=replacement-generation]: replacement-only captain choice must stay isolated with padding padding padding\n' \
+    > "$replacement"
+
+  reader="$home/replace-status-span"
+  probe="$home/status-generation-race"
+  cat > "$reader" <<'SH'
+#!/usr/bin/env bash
+if [ ! -e "$FM_STATUS_RACE_PROBE" ]; then
+  mv "$FM_STATUS_REPLACEMENT" "$1" || exit 1
+  printf replaced > "$FM_STATUS_RACE_PROBE"
+fi
+perl -MFcntl=:DEFAULT -e '
+  my ($path, $start, $length) = @ARGV;
+  sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+  sysseek($file, $start, 0) == $start or exit 1;
+  while ($length > 0) {
+    my $read = sysread($file, my $chunk, $length);
+    defined($read) && $read > 0 or exit 1;
+    print $chunk or exit 1;
+    $length -= $read;
+  }
+' "$1" "$2" "$3"
+SH
+  chmod +x "$reader"
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_STATUS_SPAN_READER="$reader" \
+    FM_STATUS_REPLACEMENT="$replacement" FM_STATUS_RACE_PROBE="$probe" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot failed during the status generation race"
+  [ -f "$probe" ] || fail "status generation race fixture did not replace the live status inode"
+  printf '%s' "$json" | jq -e '
+    .tasks[] | select(.id == "decision-status-generation-race")
+    | .spawn_gen == "stable-generation"
+      and .hints.pending_decision == true
+      and (.hints.open_decisions | any(.key == "old-generation" and .verb == "needs-decision"))
+      and (.hints.open_decisions | all(.key != "replacement-generation"))
+  ' >/dev/null || fail "replacement-only decisions crossed status generations: $json"
+  pass "fleet snapshots keep replacement status decisions out of captured generations"
+}
+
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
   local parent fakebin json i remote_home pid collector_pid sleeper_pid duplicate_base cache_file candidate tmp
   parent=$(make_home concurrent-remote-ledgers)
@@ -3063,6 +3124,7 @@ test_large_local_snapshot_overlaps_local_reads_without_projection_drift
 test_local_snapshot_advances_open_decisions_without_refolding_lifetime_history
 test_local_snapshot_preserves_decisions_when_cursor_publish_fails
 test_local_snapshot_preserves_decisions_when_incremental_read_fails
+test_local_snapshot_keeps_status_generations_separate_during_incremental_fold
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
 test_domain_alpha_stale_parent_event_does_not_become_current_work

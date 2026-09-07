@@ -575,21 +575,36 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
   fi
 }
 
+snapshot_task_status_is_current() {
+  local captured_meta=$1 id=$2 expected_identity=$3 current_identity
+  [ -n "$expected_identity" ] || return 1
+  snapshot_task_generation_is_current "$captured_meta" "$id" || return 1
+  current_identity=$(_fm_open_decisions_file_ident "$STATE/$id.status" 2>/dev/null) || return 1
+  [ "$current_identity" = "$expected_identity" ]
+}
+
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
-  local status_log status_capture report_path report_capture
+  local status_log status_capture status_identity_file status_identity_before status_identity_after report_path report_capture
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
   status_log="$STATE/$id.status"
   status_capture="$SNAPSHOT_TASK_DIR/$id.status"
+  status_identity_file="$SNAPSHOT_TASK_DIR/$id.status-ident"
   report_path="$DATA/$id/report.md"
   report_capture="$SNAPSHOT_TASK_DIR/$id.report"
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
+    status_identity_before=$(_fm_open_decisions_file_ident "$status_log" 2>/dev/null || true)
     snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
+    status_identity_after=$(_fm_open_decisions_file_ident "$status_log" 2>/dev/null || true)
+    if [ -f "$status_capture" ] && [ -n "$status_identity_before" ] && \
+       [ "$status_identity_before" = "$status_identity_after" ]; then
+      printf '%s\n' "$status_identity_before" > "$status_identity_file" || current_rc=1
+    fi
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
   fi
 
@@ -623,7 +638,7 @@ prefetch_task_observations() {  # <meta> <id>
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
-    rm -f -- "$status_capture" "$report_capture"
+    rm -f -- "$status_capture" "$status_identity_file" "$report_capture"
     jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     endpoint_exists=null
@@ -692,7 +707,8 @@ task_json_lines() {
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json captured_status_size
+  local open_decisions_tsv open_decisions_json captured_status_size captured_status_identity status_identity_file
+  local use_incremental
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -763,15 +779,23 @@ task_json_lines() {
     # open decision surfacing.
     captured_status_size=$(_fm_status_file_size "$status_log" 2>/dev/null || true)
     captured_status_size=${captured_status_size//[[:space:]]/}
+    status_identity_file="$SNAPSHOT_TASK_DIR/$id.status-ident"
+    captured_status_identity=$(LC_ALL=C command cat "$status_identity_file" 2>/dev/null || true)
+    use_incremental=0
     case "$captured_status_size" in
-      ''|*[!0-9]*) open_decisions_tsv=$(status_open_decisions "$status_log") ;;
+      ''|*[!0-9]*) ;;
       *)
-        if ! open_decisions_tsv=$(status_open_decisions_incremental \
-          "$STATE/$id.status" "$captured_status_size" true); then
-          open_decisions_tsv=$(status_open_decisions "$status_log")
+        if snapshot_task_status_is_current "$meta" "$id" "$captured_status_identity" && \
+           open_decisions_tsv=$(status_open_decisions_incremental \
+             "$STATE/$id.status" "$captured_status_size" true) && \
+           snapshot_task_status_is_current "$meta" "$id" "$captured_status_identity"; then
+          use_incremental=1
         fi
         ;;
     esac
+    if [ "$use_incremental" -ne 1 ]; then
+      open_decisions_tsv=$(status_open_decisions "$status_log")
+    fi
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
