@@ -315,9 +315,12 @@ def cmd_poll_list():
         # retry re-fetch. A retry-set uid that is not yet in the cursor is a
         # degraded wake that failed to record - it stays a new candidate so
         # the next poll surfaces it again as degraded instead of silently
-        # dropping it.
-        retry_candidates = [u for u in retry_scan_window(retry_order, retry_pos, window)
-                            if u in seen]
+        # dropping it. The window itself (regardless of seen membership) is
+        # kept so a scan window of only unseen uids can still advance the
+        # durable cursor past itself, never stalling the march over the whole
+        # retry set.
+        retry_window = retry_scan_window(retry_order, retry_pos, window)
+        retry_candidates = [u for u in retry_window if u in seen]
         if cap == 1 and new_candidates and retry_candidates:
             # A single contended slot alternates between new surfacing and
             # retry recovery, so a sustained new-mail flood can never starve
@@ -391,8 +394,12 @@ def cmd_poll_list():
         # cursor over rows that never reached the bash wake layer. A failed
         # position write still fails the poll loudly, so the same bounded
         # window is re-scanned on the next poll rather than silently
-        # restarting from the old head. Leave the retry-scan position unchanged
-        # when retry_budget is 0 so an unexamined window is not skipped.
+        # restarting from the old head. The retry-scan position advances when
+        # retry_budget > 0 (by the candidates examined within budget), and also
+        # when the scanned window held only unseen uids (so a stale window can
+        # never stall the cursor); it is left unchanged only when the budget is
+        # 0 by a cap=1 new-mail turn (qualifiers exist but yield) or when no
+        # retry window was scanned.
         try:
             m.logout()
         except Exception:
@@ -401,15 +408,26 @@ def cmd_poll_list():
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
         sys.stdout.flush()
+        # The retry-scan cursor must keep marching so every retry uid is
+        # reachable. Two cases advance it:
+        #  1. budget > 0     -> by the candidates actually examined within
+        #                      budget (fetched or rotated), never the full
+        #                      window (Greptile 'Retry cursor skips
+        #                      candidates').
+        #  2. budget == 0 because the window held only unseen uids (none
+        #      qualified as a seen retry) -> by the scanned window itself, so
+        #      a leading stale window cannot stall the march and strand a
+        #      later eligible retry uid (Greptile 'Retry cursor stalls
+        #      permanently').
+        # A cap=1 new-mail turn (qualifiers exist but yield deliberately,
+        # retry_budget 0 with retry_candidates non-empty) leaves the position
+        # unchanged so an unexamined window is never skipped.
         if retry_budget > 0 and len(retry_candidates) > 0:
-            # Advance the durable retry-scan position by the retry candidates
-            # actually examined within budget this poll (fetched or rotated),
-            # never by the full window. Scanning N retry uids but emitting only
-            # the budgeted prefix and advancing by N re-visits the same prefix
-            # forever; advancing by the examined count makes the position a
-            # cursor, every retry uid reachable within ceil(N/budget) polls.
             save_retry_pos(retry_pos_path, len(retry_order),
                            max(1, retry_examined), retry_pos)
+        elif len(retry_window) > 0 and len(retry_candidates) == 0:
+            save_retry_pos(retry_pos_path, len(retry_order),
+                           len(retry_window), retry_pos)
         return 0
     except Exception as e:
         # stderr, not stdout: the bash poll's command substitution captures

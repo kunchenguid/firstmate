@@ -1428,6 +1428,73 @@ PYEOF
   pass "fm-mail: retry budget advances the scan by examined candidates, not the window"
 }
 
+test_poll_retry_window_of_unseen_never_stalls_cursor() {
+  # Greptile regression: when a retry scan window holds only uids absent from
+  # the seen cursor while an eligible retry uid lies beyond that window, the
+  # durable position must still advance so the later recovered uid is
+  # reachable. A window of unseen uids must never stall the cursor
+  # permanently (retry_candidates empty would otherwise keep budget 0 and the
+  # position would never move).
+  local harness out1 out2 rc1=0 rc2=0 pos
+  harness="$TMP_ROOT/retry-stall-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_RETRY_POS': sys.argv[3],
+    'FM_MAIL_POLL_MAX_WAKES': '4',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            # Nothing is unseen (all server-seen); only uid 320 is in our
+            # cursor and retry-eligible, beyond the first 16-uid window.
+            return ('OK', [b''])
+        if cmd == 'fetch':
+            return ('OK', [(b'', b'Subject: rec\r\nFrom: z@x.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[4])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  # Retry set 301..320; cursor records ONLY 320 (the recovered uid). The first
+  # scan window (301..316) therefore holds only unseen uids, yet the cursor
+  # must advance past it so 320 is reached on a later window.
+  mkdir -p "$HOME_DIR/state"
+  printf 'uidvalidity=90009\n320\n' > "$HOME_DIR/state/.mail-seen"
+  for u in $(seq 301 320); do printf '%s\n' "$u"; done > "$HOME_DIR/state/.mail-retry"
+  : > "$HOME_DIR/state/.mail-retry-pos"
+
+  out1=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc1=$?
+  expect_code 0 "$rc1" "first poll must succeed"
+  pos=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
+  assert_equals "16" "$pos" "the stale unseen window advances the cursor by the scanned window (cap=4 window=16)"
+
+  out2=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc2=$?
+  expect_code 0 "$rc2" "second poll must succeed"
+  assert_contains "$out2" $'320\t\tz@x.c\trec\tretry' \
+    "the recovered uid beyond the stale window surfaces once the cursor advances"
+  pass "fm-mail: a retry window of unseen uids never stalls the cursor"
+}
+
 test_poll_retry_logout_before_emit_and_position_save() {
   # A standing check can SIGKILL poll_list while IMAP logout is still blocked.
   # Logout must finish before any emit or persist so that kill cannot advance
@@ -2107,6 +2174,7 @@ test_poll_retries_transient_fetch_and_surfaces_real_metadata
 test_poll_retry_cursor_advances_past_failures
 test_poll_retry_emission_precedes_position_save
 test_poll_retry_budget_advances_by_examined_not_window
+test_poll_retry_window_of_unseen_never_stalls_cursor
 test_poll_retry_logout_before_emit_and_position_save
 test_poll_retry_flush_before_position_save
 test_poll_retry_surfaces_under_new_mail_flood
