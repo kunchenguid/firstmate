@@ -196,6 +196,20 @@
 #   containment test reads local refs only and never fetches, so this gate stays
 #   usable offline; a stale remote-tracking ref can therefore make an unpushed
 #   commit look contained, which is exactly why no remedy command is printed.
+#   That same fresh ship/scout acquisition also carries the project checkout's
+#   git-ignored .env.local into the task worktree, on a newly created slot and a
+#   reissued one alike and on every backend, because no worktree provider seeds
+#   git-ignored files. The copy is refreshed on each acquisition and retired once
+#   the captain's own file is gone, so a slot never serves a revoked credential.
+#   A .env.local the project tracks is version-controlled content this seeding
+#   never writes over and never deletes, and a path the project does not ignore
+#   is reported rather than seeded. A state that cannot be positively established
+#   refuses the spawn instead of guessing, a genuine cross-device layout degrades
+#   to a loud skip, and contents are never printed; bin/fm-env-local-lib.sh owns
+#   the full edge-by-edge contract - including the retire phase teardown shares,
+#   so a copy the project stops ignoring mid-task never strands the slot - and
+#   docs/configuration.md "Project-local environment file" owns what the captain
+#   sets for it.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -389,6 +403,8 @@ if [ -e "$STATE" ] || [ -L "$STATE" ]; then
     exit 1
   }
 fi
+# shellcheck source=bin/fm-env-local-lib.sh
+. "$SCRIPT_DIR/fm-env-local-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -3045,7 +3061,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  fm_env_local_apply "$WT" "$PROJ_ABS" retire "the base refresh of '$WT'" || exit 1
   freshen_spawn_worktree_base "$WT" || exit 1
+  fm_env_local_apply "$WT" "$PROJ_ABS" seed "the next acquisition of '$WT'" || exit 1
 fi
 
 # Pre-register Claude's workspace trust for the worktree, at the first point the
