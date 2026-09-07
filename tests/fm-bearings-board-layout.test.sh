@@ -8,6 +8,15 @@ set -u
 
 BOARD="$ROOT/bin/fm-bearings-board.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings-board-layout)
+LAYOUT_HOME="$TMP_ROOT/home"
+
+layout_teardown() {
+  FM_HOME="$LAYOUT_HOME" FM_STATE_OVERRIDE="$LAYOUT_HOME/state" FM_DATA_OVERRIDE="$LAYOUT_HOME/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$LAYOUT_HOME/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+  fm_test_cleanup
+}
+trap layout_teardown EXIT
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
@@ -76,7 +85,7 @@ smoke_browser() {
 }
 
 make_board() {
-  local home="$TMP_ROOT/home" fakebin data long_title long_reason long_level long_detail board
+  local home="$LAYOUT_HOME" fakebin data long_title long_reason long_level long_detail board
   mkdir -p "$home/state" "$home/data"
   fakebin=$(fm_fakebin "$home")
   # The build proves the board session is live before it arms anything, so the
