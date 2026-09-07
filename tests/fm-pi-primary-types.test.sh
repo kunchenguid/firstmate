@@ -4,12 +4,12 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-command -v npm >/dev/null 2>&1 || { echo "skip: npm not found for Pi extension typecheck"; exit 0; }
-command -v tsc >/dev/null 2>&1 || { echo "skip: tsc not found for Pi extension typecheck"; exit 0; }
+command -v npm >/dev/null 2>&1 || { echo "skip: Pi extension typecheck prerequisite not found: npm"; exit 0; }
+command -v tsc >/dev/null 2>&1 || { echo "skip: Pi extension typecheck prerequisite not found: tsc"; exit 0; }
 
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-agent"}
 if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
-  echo "skip: installed @earendil-works/pi-coding-agent package not found"
+  echo "skip: Pi extension typecheck prerequisite not found: installed @earendil-works/pi-coding-agent package"
   exit 0
 fi
 if [ ! -d "$PI_PACKAGE_DIR/node_modules/typebox" ] || \

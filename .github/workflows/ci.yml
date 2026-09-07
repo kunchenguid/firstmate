@@ -79,7 +79,7 @@ jobs:
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
           bin/fm-test-run.sh --lane portable-parallel-1 \
-            --fail-on-gate-skip 'installed @earendil-works/pi-coding-agent package not found' \
+            --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
         if: always()
@@ -189,10 +189,10 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          # The Pi package is installed above, so a skip for its absence means
-          # the install broke rather than that this host cannot run the test.
+          # The Pi package is installed above and CI provides npm and tsc, so
+          # any missing typecheck prerequisite is a broken lane, not a valid skip.
           bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
-            --fail-on-gate-skip 'installed @earendil-works/pi-coding-agent package not found' \
+            --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
       - name: Upload portable serial shard ${{ matrix.shard }} timing artifact
         if: always()
