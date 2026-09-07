@@ -1458,7 +1458,7 @@ fm_pending_reply_tick() {  # <state-dir>
     [ -f "$meta" ] || continue
     [ -n "$(fm_meta_get "$meta" remote_host)" ] || continue
     found=0
-    for remote_task in "${remote_tasks[@]}"; do
+    for remote_task in ${remote_tasks[@]+"${remote_tasks[@]}"}; do
       [ "$remote_task" = "$task_id" ] && found=1 && break
     done
     [ "$found" = 1 ] || remote_tasks+=("$task_id")
