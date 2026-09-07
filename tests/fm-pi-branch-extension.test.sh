@@ -182,7 +182,7 @@ export class DefaultPackageManager {
     const root = this.getInstalledPath(sources[0], "user");
     return {
       extensions: root
-        ? [{ path: `${root}/extensions/index.ts`, enabled: true, metadata: { source: sources[0], scope: "user", origin: "package", baseDir: root } }]
+        ? [{ path: `${root}/extensions/index.ts`, enabled: true, metadata: { source: sources[0], scope: "user", origin: "package", baseDir: root }, ...globalThis.__fmCompatResolutionOverride }]
         : [],
       skills: [],
       prompts: [],
@@ -357,6 +357,7 @@ export async function createAgentSession(options) {
       return [...session.activeTools];
     },
     setActiveToolsByName(names) {
+      if (globalThis.__fmRefuseToolRestore) return;
       session.activeTools = names.filter((name) => options.tools.includes(name));
     },
     activeTools: [...options.tools],
@@ -2682,27 +2683,39 @@ EOF
 
 test_codex_branch_initializes_only_the_compat_package_before_prompting() {
   local mode repo home out status
-  for mode in stable alpha7; do
+  for mode in stable alpha7 peer-mismatch non-semver future missing-version-metadata; do
     repo="$TMP_ROOT/codex-compat-$mode-root"
     home="$TMP_ROOT/codex-compat-$mode-home"
     mkdir -p "$home/state" "$home/config"
     install_pi_branch_extension_fixture "$repo"
     PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
       COMPAT_MODE="$mode" DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
-if (process.env.COMPAT_MODE === "alpha7") globalThis.__fmPiVersion = "0.85.1";
+globalThis.__fmPiVersion = process.env.COMPAT_MODE === "future" ? "future-pi-build" : "0.85.1";
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, registryModels, home }; })()`);
 const { fire, dispatch, settle, makeCtx, registryModels, home } = globalThis.__t;
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
-if (process.env.COMPAT_MODE === "alpha7") {
-  const path = `${process.env.FM_TEST_AGENT_DIR}/npm/node_modules/pi-openai-codex-compat/package.json`;
-  const manifest = JSON.parse(readFileSync(path, "utf8"));
-  manifest.version = "0.0.10-alpha.7";
-  manifest.peerDependencies["@earendil-works/pi-coding-agent"] = ">=0.84.0 <0.86.0";
-  writeFileSync(path, JSON.stringify(manifest));
-  globalThis.__fmCompatActiveTools = ["read", "fm_branch_report"];
+const mode = process.env.COMPAT_MODE;
+const path = `${process.env.FM_TEST_AGENT_DIR}/npm/node_modules/pi-openai-codex-compat/package.json`;
+const manifest = JSON.parse(readFileSync(path, "utf8"));
+const versions = {
+  stable: ["0.0.9", ">=0.84.0 <0.86.0"],
+  alpha7: ["0.0.10-alpha.7", ">=0.84.0 <0.86.0"],
+  "peer-mismatch": ["0.0.9", ">=99.0.0"],
+  "non-semver": ["local-compatible-build", "workspace:compatible"],
+  future: ["0.0.10-alpha.8", "not-a-semver-range"],
+};
+if (mode === "missing-version-metadata") {
+  delete manifest.version;
+  delete manifest.peerDependencies;
+} else {
+  [manifest.version, manifest.peerDependencies["@earendil-works/pi-coding-agent"]] = versions[mode];
 }
+writeFileSync(path, JSON.stringify(manifest));
+// The same observed startup state must restore the guarded bash independent
+// of release strings, while a package retaining it needs no adaptation.
+if (mode !== "stable") globalThis.__fmCompatActiveTools = ["read", "fm_branch_report"];
 
 registryModels.push(
   { provider: "anthropic", id: "main-model", api: "anthropic-messages" },
@@ -2710,6 +2723,10 @@ registryModels.push(
 );
 writeFileSync(`${home}/config/supervision-branch-model`, "openai-codex/codex-branch\n");
 fire("session_start", {}, makeCtx());
+await new Promise((resolve) => setTimeout(resolve, 25));
+if (existsSync(`${home}/state/.branch-session`) || (globalThis.__fmSessions ?? []).length) {
+  throw new Error("Codex branch was created before its first eligible notification");
+}
 dispatch("signal: codex compat create");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "Codex branch prompt");
 
@@ -2769,7 +2786,7 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
     expect_code 0 "$status" "Codex branch compatibility initialization must precede every prompt: $out"
   done
-  pass "Codex branch create and reopen initialize only pi-openai-codex-compat before prompting without widening tools"
+  pass "Codex branch lazily initializes only its installed compatibility package regardless of version declarations without widening tools"
 }
 
 test_non_codex_branch_does_not_depend_on_the_compat_package() {
@@ -2802,7 +2819,7 @@ EOF
 
 test_codex_compat_package_failures_return_the_wake_to_main() {
   local mode repo home out status
-  for mode in absent malformed incompatible resolve load startup unknown-prerelease unverified-pi unexpected-tools; do
+  for mode in absent malformed identity no-entry multiple-entries outside-entry resolve wrong-source wrong-scope wrong-origin wrong-path load startup unexpected-tools unrestorable-bash; do
     repo="$TMP_ROOT/codex-failure-$mode-root"
     home="$TMP_ROOT/codex-failure-$mode-home"
     mkdir -p "$home/state" "$home/config"
@@ -2810,8 +2827,6 @@ test_codex_compat_package_failures_return_the_wake_to_main() {
     PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
       DRIVER_PRELUDE="$DRIVER_PRELUDE" FAILURE_MODE="$mode" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const mode = process.env.FAILURE_MODE;
-if (["unknown-prerelease", "unexpected-tools"].includes(mode)) globalThis.__fmPiVersion = "0.85.1";
-if (mode === "unverified-pi") globalThis.__fmPiVersion = "0.85.2";
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatchThroughWatcher, settle, makeCtx, registryModels, mainUserMessages, home }; })()`);
 const { fire, dispatchThroughWatcher, settle, makeCtx, registryModels, mainUserMessages, home } = globalThis.__t;
@@ -2819,22 +2834,26 @@ import { writeFileSync } from "node:fs";
 const manifest = `${process.env.FM_TEST_AGENT_DIR}/npm/node_modules/pi-openai-codex-compat/package.json`;
 if (mode === "absent") globalThis.__fmCompatAbsent = true;
 if (mode === "malformed") writeFileSync(manifest, "{not-json\n");
-if (mode === "incompatible") {
-  writeFileSync(manifest, JSON.stringify({
-    name: "pi-openai-codex-compat",
-    version: "0.0.9",
-    peerDependencies: { "@earendil-works/pi-coding-agent": ">=0.85.0 <0.86.0" },
-    pi: { extensions: ["./extensions/index.ts"] },
-  }));
+const metadata = {
+  name: mode === "identity" ? "another-package" : "pi-openai-codex-compat",
+  version: "local-build",
+  peerDependencies: { "@earendil-works/pi-coding-agent": "not-semver" },
+  pi: { extensions: mode === "no-entry" ? [] : mode === "multiple-entries" ?
+    ["./extensions/index.ts", "./extensions/extra.ts"] : mode === "outside-entry" ?
+    ["../outside.ts"] : ["./extensions/index.ts"] },
+};
+if (["identity", "no-entry", "multiple-entries", "outside-entry"].includes(mode)) {
+  writeFileSync(manifest, JSON.stringify(metadata));
 }
-if (["unknown-prerelease", "unverified-pi", "unexpected-tools"].includes(mode)) {
-  writeFileSync(manifest, JSON.stringify({
-    name: "pi-openai-codex-compat",
-    version: mode === "unknown-prerelease" ? "0.0.10-alpha.8" : "0.0.10-alpha.7",
-    peerDependencies: { "@earendil-works/pi-coding-agent": ">=0.84.0 <0.86.0" },
-    pi: { extensions: ["./extensions/index.ts"] },
-  }));
-  globalThis.__fmCompatActiveTools = ["read", "fm_branch_report", "exec_command"];
+if (mode.startsWith("wrong-")) {
+  globalThis.__fmCompatResolutionOverride = mode === "wrong-path" ? { path: "/outside/index.ts" } :
+    { metadata: { source: "npm:pi-openai-codex-compat", scope: "user", origin: "package",
+      [mode.slice(6)]: "untrusted" } };
+}
+if (mode === "unexpected-tools") globalThis.__fmCompatActiveTools = ["read", "fm_branch_report", "exec_command"];
+if (mode === "unrestorable-bash") {
+  globalThis.__fmCompatActiveTools = ["read", "fm_branch_report"];
+  globalThis.__fmRefuseToolRestore = true;
 }
 if (mode === "resolve") globalThis.__fmCompatResolveError = "synthetic resolver failure";
 if (mode === "load") globalThis.__fmCompatLoadError = "synthetic extension load failure";
@@ -2860,7 +2879,7 @@ EOF
     out=$(cat "$TMP_ROOT/node-output")
     expect_code 0 "$status" "Codex compatibility $mode failure must fail closed: $out"
   done
-  pass "package, startup, unverified-version, and unexpected-tool failures return Codex wakes to main before prompting"
+  pass "package identity, provenance, containment, startup, and unexpected-tool failures return Codex wakes to main before prompting"
 }
 
 test_supervision_reset_aborts_rotates_and_reanchors_without_touching_main_or_feishu() {

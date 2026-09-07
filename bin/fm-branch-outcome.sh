@@ -44,6 +44,9 @@
 #     before append and published only after the cache update; processed-init
 #     rebuilds every cache before publishing it, so interruption or upgrade
 #     fails closed without making each drain scan lifetime history.
+#     Legacy task labels outside today's filename-safe task identity (such as
+#     endpoint names) remain in the store and delivery cursors but have no task
+#     cache. Migration filters them before interpreting any label as a path.
 #     bin/fm-teardown.sh removes a retired task's cache with its other records,
 #     and append skips the cache for a task that has neither a live meta nor a
 #     status log (the outcome itself is still stored), so the branch's report
@@ -259,7 +262,7 @@ rebuild_outcome_indexes() {
   rm -f -- "$OUTCOME_INDEX_READY" || return 1
   [ -s "$STORE" ] || { publish_outcome_index_ready 0; return; }
   rows=$(jq -r -s '
-    map(select(.task != "fleet"))
+    map(select(.task != "fleet" and (.task | length > 0 and (test("[^A-Za-z0-9._-]") | not))))
     | group_by(.task)
     | map(.[-1])[]
     | [.task, (.seq | tostring), (.epoch | tostring),

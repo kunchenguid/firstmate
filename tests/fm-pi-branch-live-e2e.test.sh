@@ -21,9 +21,9 @@
 # cannot run, and an explicit thinking level must beat the level a reopened
 # session recorded. Finally, an isolated copy of the installed
 # pi-openai-codex-compat package is driven through the branch dispatch boundary.
-# A peer-compatible package uses intercepted SSE responses to prove startup
-# precedes prompting and persists the native remote-compaction checkpoint; a
-# peer-incompatible package must reject before any provider or delivery work.
+# The real Pi CLI uses intercepted SSE responses to prove lazy creation after
+# legacy outcome reconciliation, startup before prompting, and persistence of
+# the native remote-compaction checkpoint, regardless of version declarations.
 #
 # No provider call leaves the machine. The first branch probe points
 # PI_CODING_AGENT_DIR at an empty directory, so it reads no credentials and
@@ -1053,282 +1053,227 @@ then
   fail "could not isolate the installed compatibility dependency tree"
 fi
 
-PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$compathome" FM_ROOT_OVERRIDE="$ROOT" \
-  PI_CODING_AGENT_DIR="$compatagentdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
-  node --input-type=module > "$TMP_ROOT/compat-output" 2>&1 <<'EOF'
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+# Match the installed npm provenance without installing or discovering anything
+# in main. Both extensions below are explicit, loaded by the real CLI.
+printf '{"packages":["npm:pi-openai-codex-compat@%s"]}\n' "$compat_version" > "$compatagentdir/settings.json"
+cat > "$repo/compat-probe.ts" <<'EOF'
+import { ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { zstdDecompressSync } from "node:zlib";
 
-const home = resolve(process.env.FM_HOME);
-const root = resolve(process.env.FM_ROOT_OVERRIDE);
-const agentDir = resolve(process.env.PI_CODING_AGENT_DIR);
-const approvedProject = `${home}/projects/compat-live`;
-mkdirSync(approvedProject, { recursive: true });
-writeFileSync(`${home}/state/compat-live.meta`, `project=${approvedProject}\nwindow=fm-compat-live\n`);
-writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tcompat-live.status\tsignal: compat package probe\n");
-writeFileSync(`${home}/config/supervision-branch-model`, "openai-codex/gpt-5.4\n");
+export default async function compatProbe(pi) {
+  const home = resolve(process.env.FM_HOME);
+  const agentDir = resolve(process.env.PI_CODING_AGENT_DIR);
+  const approvedProject = `${home}/projects/compat-live`;
+  mkdirSync(approvedProject, { recursive: true });
+  writeFileSync(`${home}/state/compat-live.meta`, `project=${approvedProject}\nwindow=fm-compat-live\n`);
+  writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tcompat-live.status\tsignal: compat package probe\n");
+  writeFileSync(`${home}/config/supervision-branch-model`, "openai-codex/gpt-5.6-luna\n");
+  writeFileSync(`${home}/config/supervision-branch-effort`, "minimal\n");
 
-const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
-const access = `${encode({ alg: "none", typ: "JWT" })}.${encode({
-  "https://api.openai.com/auth": { chatgpt_account_id: "fm-live-account" },
-})}.signature`;
-writeFileSync(`${agentDir}/auth.json`, `${JSON.stringify({
-  "openai-codex": { type: "oauth", access, refresh: "unused", expires: Date.now() + 3_600_000 },
-})}\n`);
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const access = `${encode({ alg: "none", typ: "JWT" })}.${encode({
+    "https://api.openai.com/auth": { chatgpt_account_id: "fm-live-account" },
+  })}.signature`;
+  writeFileSync(`${agentDir}/auth.json`, `${JSON.stringify({
+    "openai-codex": { type: "oauth", access, refresh: "unused", expires: Date.now() + 3_600_000 },
+  })}\n`);
 
-const pkg = pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href;
-const { ModelRuntime, SessionManager, SettingsManager } = await import(pkg);
-const probeRuntime = await ModelRuntime.create();
-const probeModel = probeRuntime.getModel("openai-codex", "gpt-5.4");
-if (!probeModel || probeModel.api !== "openai-codex-responses") {
-  throw new Error("the installed Pi catalog no longer exposes openai-codex/gpt-5.4 on the Codex Responses API");
-}
-if (probeModel.contextWindow <= 5000) throw new Error("the Codex probe model cannot support its test threshold");
-
-// The production branch intentionally uses an in-memory manager. Narrow its
-// values here so the real AgentSession takes deterministic SSE and crosses a
-// small threshold after the synthetic final response. The extension under
-// test still creates and shares the manager through its production path.
-const originalInMemory = SettingsManager.inMemory.bind(SettingsManager);
-SettingsManager.inMemory = (settings = {}, options = {}) => originalInMemory({
-  ...settings,
-  transport: "sse",
-  compaction: {
-    enabled: true,
-    reserveTokens: probeModel.contextWindow - 5000,
-    keepRecentTokens: 50,
-  },
-  retry: { enabled: false },
-}, options);
-
-// Seed a valid persistent branch with discardable history. Its final low-usage
-// assistant message stays below the threshold, so no compaction can happen
-// before the package has started and the real branch prompt begins.
-const sessionsDir = `${home}/state/branch-session`;
-const seeded = SessionManager.create(root, sessionsDir);
-const oldText = (label) => `${label}: ${"discardable context ".repeat(80)}`;
-for (let index = 1; index <= 3; index += 1) {
-  seeded.appendMessage({ role: "user", content: [{ type: "text", text: oldText(`old user ${index}`) }], timestamp: Date.now() - 10_000 + index });
-  seeded.appendMessage({
-    role: "assistant",
-    content: [{ type: "text", text: oldText(`old assistant ${index}`) }],
-    api: "openai-codex-responses",
-    provider: "openai-codex",
-    model: "gpt-5.4",
-    usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-    stopReason: "stop",
-    timestamp: Date.now() - 9_000 + index,
-  });
-}
-writeFileSync(`${home}/state/.branch-session`, `${seeded.getSessionFile()}\n`);
-
-const requestRecords = [];
-const sse = (events) => `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`;
-async function requestBody(init) {
-  const headers = new Headers(init?.headers);
-  const raw = init?.body;
-  let bytes;
-  if (typeof raw === "string") bytes = Buffer.from(raw);
-  else if (raw instanceof Uint8Array) bytes = Buffer.from(raw);
-  else if (raw instanceof ArrayBuffer) bytes = Buffer.from(raw);
-  else if (raw) bytes = Buffer.from(await new Response(raw).arrayBuffer());
-  else bytes = Buffer.alloc(0);
-  if (headers.get("content-encoding") === "zstd") bytes = zstdDecompressSync(bytes);
-  return { body: JSON.parse(bytes.toString("utf8")), headers };
-}
-globalThis.fetch = async (input, init) => {
-  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-  if (!url.startsWith("https://chatgpt.com/backend-api/")) {
-    throw new Error(`unexpected external request in compatibility probe: ${url}`);
+  const probeRuntime = await ModelRuntime.create();
+  const probeModel = probeRuntime.getModel("openai-codex", "gpt-5.6-luna");
+  if (!probeModel || probeModel.api !== "openai-codex-responses") {
+    throw new Error("the installed Pi catalog no longer exposes openai-codex/gpt-5.6-luna on the Codex Responses API");
   }
-  const { body, headers } = await requestBody(init);
-  const metadataRaw = body.client_metadata?.["x-codex-turn-metadata"];
-  if (typeof metadataRaw !== "string") {
-    throw new Error(`compatibility provider metadata absent before request: ${JSON.stringify(body.client_metadata)}`);
-  }
-  const metadata = JSON.parse(metadataRaw);
-  requestRecords.push({ body, headers: Object.fromEntries(headers), metadata, url });
+  if (probeModel.contextWindow <= 5000) throw new Error("the Codex probe model cannot support its test threshold");
 
-  if (metadata.request_kind === "compaction") {
-    return new Response(sse([
-      { type: "response.output_item.done", output_index: 0, item: { type: "compaction", encrypted_content: "fm-native-checkpoint" } },
-      { type: "response.completed", response: { id: "resp_compact", status: "completed", usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 } } },
-    ]), { status: 200, headers: { "content-type": "text/event-stream" } });
-  }
+  // The production branch intentionally uses an in-memory manager. Narrow its
+  // values here so the real AgentSession takes deterministic SSE and crosses a
+  // small threshold after the synthetic final response. The extension under
+  // test still creates and shares the manager through its production path.
+  const originalInMemory = SettingsManager.inMemory.bind(SettingsManager);
+  SettingsManager.inMemory = (settings = {}, options = {}) => originalInMemory({
+    ...settings,
+    transport: "sse",
+    compaction: {
+      enabled: true,
+      reserveTokens: probeModel.contextWindow - 5000,
+      keepRecentTokens: 50,
+    },
+    retry: { enabled: false },
+  }, options);
 
-  const turnNumber = requestRecords.filter((record) => record.metadata.request_kind === "turn").length;
-  if (turnNumber === 1) {
-    const args = JSON.stringify({
-      task: "compat-live",
-      verdict: "routine",
-      summary: "installed Codex compatibility provider handled the branch",
-      wake: "signal: compat package probe",
-    });
-    return new Response(sse([
-      { type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: "fc_report", call_id: "call_report", name: "fm_branch_report", arguments: args } },
-      { type: "response.completed", response: { id: "resp_report", status: "completed", end_turn: true, usage: { input_tokens: 50, output_tokens: 10, total_tokens: 60 } } },
-    ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+  // Legacy endpoint labels are valid outcome history but cannot name task caches.
+  // Ownership at session_start reproduces the primary startup reconciliation path.
+  const legacy = {
+    seq: 1, epoch: 1, task: "default:w90:p2", wake: "signal: historical endpoint",
+    verdict: "routine", summary: "legacy outcome",
+  };
+  writeFileSync(`${home}/state/branch-outcomes.jsonl`, `${JSON.stringify(legacy)}\n`);
+  writeFileSync(`${home}/state/.branch-outcomes-cursor`, "1\n");
+  writeFileSync(`${home}/state/.branch-outcomes-processed`, "1\n");
+  writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+  const sessionsDir = `${home}/state/branch-session`;
+  const requestRecords = [];
+  const sse = (events) => `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`;
+  async function requestBody(init) {
+    const headers = new Headers(init?.headers);
+    const raw = init?.body;
+    let bytes;
+    if (typeof raw === "string") bytes = Buffer.from(raw);
+    else if (raw instanceof Uint8Array) bytes = Buffer.from(raw);
+    else if (raw instanceof ArrayBuffer) bytes = Buffer.from(raw);
+    else if (raw) bytes = Buffer.from(await new Response(raw).arrayBuffer());
+    else bytes = Buffer.alloc(0);
+    if (headers.get("content-encoding") === "zstd") bytes = zstdDecompressSync(bytes);
+    return { body: JSON.parse(bytes.toString("utf8")), headers };
   }
-  if (turnNumber === 2) {
-    return new Response(sse([
-      { type: "response.output_item.done", output_index: 0, item: { type: "message", id: "msg_done", role: "assistant", status: "completed", phase: "final_answer", content: [{ type: "output_text", text: "reported", annotations: [] }] } },
-      { type: "response.completed", response: { id: "resp_done", status: "completed", end_turn: true, usage: { input_tokens: 5900, output_tokens: 100, total_tokens: 6000 } } },
-    ]), { status: 200, headers: { "content-type": "text/event-stream" } });
-  }
-  throw new Error(`unexpected extra Codex turn request: ${turnNumber}`);
-};
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (!url.startsWith("https://chatgpt.com/backend-api/")) {
+      throw new Error(`unexpected external request in compatibility probe: ${url}`);
+    }
+    const { body, headers } = await requestBody(init);
+    const metadataRaw = body.client_metadata?.["x-codex-turn-metadata"];
+    if (typeof metadataRaw !== "string") {
+      throw new Error(`compatibility provider metadata absent before request: ${JSON.stringify(body.client_metadata)}`);
+    }
+    const metadata = JSON.parse(metadataRaw);
+    requestRecords.push({ body, headers: Object.fromEntries(headers), metadata, url });
 
-const busHandlers = new Map();
-const bus = {
-  on(channel, handler) {
-    busHandlers.set(channel, [...(busHandlers.get(channel) ?? []), handler]);
-    return () => {};
-  },
-  emit(channel, data) {
-    for (const handler of busHandlers.get(channel) ?? []) handler(data);
-  },
-};
-const piHandlers = new Map();
-const mainUserMessages = [];
-const mainMessages = [];
-let settlementState = "not-accepted";
-const pi = {
-  events: bus,
-  on(event, handler) {
-    piHandlers.set(event, [...(piHandlers.get(event) ?? []), handler]);
-  },
-  registerTool() {},
-  registerCommand() {},
-  registerMessageRenderer() {},
-  sendMessage(message, options) { mainMessages.push({ message, options: options ?? {} }); },
-  sendUserMessage(content, options) { mainUserMessages.push({ content, options: options ?? {} }); },
-  getThinkingLevel() { return "off"; },
-};
-const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-mod.default(pi);
-const sessionCtx = {
-  model: probeModel,
-  sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => [] },
-};
-for (const handler of piHandlers.get("session_start") ?? []) await handler({}, sessionCtx);
-if (requestRecords.length !== 0) throw new Error("compatibility package contacted the provider during primary startup");
-writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
-const offer = {
-  message: "signal: compat package probe",
-  projects: [approvedProject],
-  heartbeat: false,
-  eligible: true,
-  accepted: false,
-  settlement: null,
-  accept(settlement) {
-    offer.accepted = true;
-    offer.settlement = settlement;
-    settlementState = "pending";
-    settlement.then(
-      () => { settlementState = "resolved"; },
-      (error) => { settlementState = `rejected: ${error instanceof Error ? error.message : String(error)}`; },
-    );
-  },
-  reportAlreadyOwned() {},
-};
-bus.emit("fm-branch-supervision:dispatch", offer);
-if (!offer.accepted) throw new Error("Codex compatibility wake was not accepted");
-if (requestRecords.length !== 0) throw new Error("Codex provider ran synchronously before branch startup completed");
+    if (metadata.request_kind === "compaction") {
+      return new Response(sse([
+        { type: "response.output_item.done", output_index: 0, item: { type: "compaction", encrypted_content: "fm-native-checkpoint" } },
+        { type: "response.completed", response: { id: "resp_compact", status: "completed", usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 } } },
+      ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+    }
 
-let entries = [];
-for (let index = 0; index < 600; index += 1) {
-  try {
-    const pointer = readFileSync(`${home}/state/.branch-session`, "utf8").trim();
-    entries = SessionManager.open(pointer, sessionsDir).getEntries();
-  } catch {}
-  const routinePublished = mainMessages.some((sent) => (
-    sent.message?.customType === "fm-branch-merge"
-    && sent.message?.content?.includes("installed Codex compatibility provider handled the branch")
-  ));
-  if (settlementState.startsWith("rejected: ") || (entries.some((entry) => entry.type === "compaction") && routinePublished)) break;
-  await new Promise((resolveWait) => setTimeout(resolveWait, 50));
-}
+    const turnNumber = requestRecords.filter((record) => record.metadata.request_kind === "turn").length;
+    if (turnNumber === 1) {
+      const args = JSON.stringify({
+        task: "compat-live",
+        verdict: "routine",
+        summary: "installed Codex compatibility provider handled the branch",
+        wake: "signal: compat package probe",
+      });
+      return new Response(sse([
+        { type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: "fc_report", call_id: "call_report", name: "fm_branch_report", arguments: args } },
+        { type: "response.completed", response: { id: "resp_report", status: "completed", end_turn: true, usage: { input_tokens: 50, output_tokens: 10, total_tokens: 60 } } },
+      ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+    }
+    if (turnNumber === 2) {
+      return new Response(sse([
+        { type: "response.output_item.done", output_index: 0, item: { type: "message", id: "msg_done", role: "assistant", status: "completed", phase: "final_answer", content: [{ type: "output_text", text: "reported", annotations: [] }] } },
+        { type: "response.completed", response: { id: "resp_done", status: "completed", end_turn: true, usage: { input_tokens: 5900, output_tokens: 100, total_tokens: 6000 } } },
+      ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+    }
+    throw new Error(`unexpected extra Codex turn request: ${turnNumber}`);
+  };
 
-if (settlementState.startsWith("rejected: pi-openai-codex-compat requires Pi ")) {
-  if (requestRecords.length !== 0 || mainMessages.length !== 0 || mainUserMessages.length !== 0) {
-    throw new Error(`a peer-incompatible compatibility package did not fail before provider or delivery: ${JSON.stringify({
-      settlementState,
-      requestKinds: requestRecords.map((record) => record.metadata.request_kind),
-      mainMessages,
-      mainUserMessages,
-    })}`);
-  }
-  console.log("CODEX_COMPAT_INCOMPATIBLE");
-  process.exit(0);
+  pi.registerCommand("branch-probe", { handler: async (_args, ctx) => {
+    if (existsSync(`${home}/state/.branch-session`)) throw new Error("pointer existed before eligible wake");
+    if (requestRecords.length !== 0) throw new Error("request before eligible wake");
+    let settlementState = "not-accepted";
+    let settlement;
+    const offer = {
+      message: "signal: compat package probe", projects: [approvedProject],
+      heartbeat: false, eligible: true, accepted: false,
+      accept(promise) {
+        this.accepted = true;
+        settlement = promise;
+        settlementState = "pending";
+        promise.then(
+          () => { settlementState = "resolved"; },
+          (error) => { settlementState = `rejected: ${error.message}`; },
+        );
+      },
+      reportAlreadyOwned() {},
+    };
+    pi.events.emit("fm-branch-supervision:dispatch", offer);
+    console.log(`PROBE_ADMISSION ${offer.accepted}`);
+    if (!offer.accepted) {
+      console.log(`PROBE_LOADED ${existsSync(`${home}/state/.pi-branch-extension-loaded`)} PROBE_POINTER ${existsSync(`${home}/state/.branch-session`)} REQUESTS ${requestRecords.length}`);
+      throw new Error("eligible offer was not accepted");
+    }
+    let entries = [];
+    for (let index = 0; index < 600; index += 1) {
+      try {
+        const pointer = readFileSync(`${home}/state/.branch-session`, "utf8").trim();
+        entries = SessionManager.open(pointer, sessionsDir).getEntries();
+      } catch {}
+      const routinePublished = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").includes("installed Codex compatibility provider handled the branch");
+      if (settlementState.startsWith("rejected: ") || (entries.some((entry) => entry.type === "compaction") && routinePublished)) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    }
+
+    console.log(`PROBE_SETTLEMENT ${settlementState}`);
+    console.log(`PROBE_POINTER ${existsSync(`${home}/state/.branch-session`)}`);
+    if (settlementState.startsWith("rejected:")) throw new Error(settlementState);
+    const turns = requestRecords.filter((record) => record.metadata.request_kind === "turn");
+    const compactions = requestRecords.filter((record) => record.metadata.request_kind === "compaction");
+    if (turns.length !== 2 || compactions.length !== 1 || requestRecords.length !== 3) {
+      throw new Error(`unexpected compatibility request sequence: ${requestRecords.map((record) => record.metadata.request_kind).join(",")}`);
+    }
+    const expectedTools = ["read", "bash", "fm_branch_report"];
+    for (const [index, turn] of turns.entries()) {
+      const toolNames = Array.isArray(turn.body.tools) ? turn.body.tools.map((tool) => tool.name) : [];
+      if (JSON.stringify(toolNames) !== JSON.stringify(expectedTools)) {
+        throw new Error(`Codex turn ${index + 1} changed the branch tool payload: ${JSON.stringify(toolNames)}`);
+      }
+      const beta = turn.headers["x-codex-beta-features"] ?? "";
+      if (!beta.split(",").map((item) => item.trim()).includes("remote_compaction_v2")) {
+        throw new Error(`Codex turn ${index + 1} lacks the compatibility startup hook: ${beta}`);
+      }
+    }
+    if (!turns[1].body.input.some((item) => item.type === "function_call_output" && item.call_id === "call_report")) {
+      throw new Error("the installed compatibility provider did not continue after the branch report tool");
+    }
+    const compactRequest = compactions[0];
+    if (compactRequest.body.input.at(-1)?.type !== "compaction_trigger") {
+      throw new Error(`native compaction request lacks its trigger: ${JSON.stringify(compactRequest.body.input.at(-1))}`);
+    }
+    if (!String(compactRequest.headers["x-codex-beta-features"] ?? "").split(",").map((item) => item.trim()).includes("remote_compaction_v2")) {
+      throw new Error("native compaction request lacks the remote_compaction_v2 feature header");
+    }
+    if (compactRequest.metadata.compaction?.implementation !== "responses_compaction_v2" ||
+        compactRequest.metadata.compaction?.phase !== "pre_turn") {
+      throw new Error(`native compaction metadata is wrong: ${JSON.stringify(compactRequest.metadata)}`);
+    }
+    const checkpoint = entries.find((entry) => entry.type === "compaction");
+    if (!checkpoint || checkpoint.fromHook !== true || checkpoint.details?.kind !== "openai-codex-compat-remote-compaction") {
+      throw new Error(`the real branch did not persist a compatibility checkpoint: ${JSON.stringify(checkpoint)}`);
+    }
+    const nativeItems = checkpoint.details.history?.filter((item) => item.type === "compaction") ?? [];
+    if (nativeItems.length !== 1 || nativeItems[0].encrypted_content !== "fm-native-checkpoint") {
+      throw new Error(`the persisted compatibility checkpoint lost native history: ${JSON.stringify(checkpoint.details)}`);
+    }
+    if (!readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").includes("installed Codex compatibility provider handled the branch")) {
+      throw new Error("the executable branch boundary did not persist its report");
+    }
+    await settlement;
+    const visible = ctx.sessionManager.getEntries().filter((entry) => entry.type === "custom_message" &&
+      entry.customType === "fm-branch-merge" &&
+      JSON.stringify(entry.content).includes("installed Codex compatibility provider handled the branch"));
+    if (visible.length !== 1) throw new Error(`expected one routine outcome in real main, got ${visible.length}`);
+    const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map(JSON.parse);
+    if (rows.length !== 2 || rows[0].task !== "default:w90:p2" || rows[1].task !== "compat-live") {
+      throw new Error("legacy history or new outcome was lost");
+    }
+    console.log("CODEX_COMPAT_OK");
+    ctx.shutdown();
+  }});
 }
-if (mainUserMessages.length !== 0) {
-  throw new Error(`Codex compatibility probe fell back to main: ${JSON.stringify(mainUserMessages)}`);
-}
-const routine = mainMessages.find((sent) => sent.message?.customType === "fm-branch-merge");
-if (!routine?.message?.content?.includes("installed Codex compatibility provider handled the branch")) {
-  let outcomes = "absent";
-  try { outcomes = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8"); } catch {}
-  throw new Error(`the real branch tool call did not publish its routine outcome: ${JSON.stringify({
-    mainMessages,
-    settlementState,
-    requestKinds: requestRecords.map((record) => record.metadata.request_kind),
-    entries,
-    outcomes,
-  })}`);
-}
-const turns = requestRecords.filter((record) => record.metadata.request_kind === "turn");
-const compactions = requestRecords.filter((record) => record.metadata.request_kind === "compaction");
-if (turns.length !== 2 || compactions.length !== 1 || requestRecords.length !== 3) {
-  throw new Error(`unexpected compatibility request sequence: ${requestRecords.map((record) => record.metadata.request_kind).join(",")}`);
-}
-const expectedTools = ["read", "bash", "fm_branch_report"];
-for (const [index, turn] of turns.entries()) {
-  const toolNames = Array.isArray(turn.body.tools) ? turn.body.tools.map((tool) => tool.name) : [];
-  if (JSON.stringify(toolNames) !== JSON.stringify(expectedTools)) {
-    throw new Error(`Codex turn ${index + 1} changed the branch tool payload: ${JSON.stringify(toolNames)}`);
-  }
-  const beta = turn.headers["x-codex-beta-features"] ?? "";
-  if (!beta.split(",").map((item) => item.trim()).includes("remote_compaction_v2")) {
-    throw new Error(`Codex turn ${index + 1} lacks the compatibility startup hook: ${beta}`);
-  }
-}
-if (!turns[1].body.input.some((item) => item.type === "function_call_output" && item.call_id === "call_report")) {
-  throw new Error("the installed compatibility provider did not continue after the branch report tool");
-}
-const compactRequest = compactions[0];
-if (compactRequest.body.input.at(-1)?.type !== "compaction_trigger") {
-  throw new Error(`native compaction request lacks its trigger: ${JSON.stringify(compactRequest.body.input.at(-1))}`);
-}
-if (!String(compactRequest.headers["x-codex-beta-features"] ?? "").split(",").map((item) => item.trim()).includes("remote_compaction_v2")) {
-  throw new Error("native compaction request lacks the remote_compaction_v2 feature header");
-}
-if (compactRequest.metadata.compaction?.implementation !== "responses_compaction_v2" ||
-    compactRequest.metadata.compaction?.phase !== "pre_turn") {
-  throw new Error(`native compaction metadata is wrong: ${JSON.stringify(compactRequest.metadata)}`);
-}
-const checkpoint = entries.find((entry) => entry.type === "compaction");
-if (!checkpoint || checkpoint.fromHook !== true || checkpoint.details?.kind !== "openai-codex-compat-remote-compaction") {
-  throw new Error(`the real branch did not persist a compatibility checkpoint: ${JSON.stringify(checkpoint)}`);
-}
-const nativeItems = checkpoint.details.history?.filter((item) => item.type === "compaction") ?? [];
-if (nativeItems.length !== 1 || nativeItems[0].encrypted_content !== "fm-native-checkpoint") {
-  throw new Error(`the persisted compatibility checkpoint lost native history: ${JSON.stringify(checkpoint.details)}`);
-}
-if (!readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").includes("installed Codex compatibility provider handled the branch")) {
-  throw new Error("the executable branch boundary did not persist its report");
-}
-console.log("CODEX_COMPAT_OK");
-process.exit(0);
 EOF
+pi_cli_entry=$(jq -er '.bin.pi' "$PI_PACKAGE_DIR/package.json") || fail "installed Pi CLI entry is absent"
+FM_HOME="$compathome" FM_ROOT_OVERRIDE="$ROOT" PI_CODING_AGENT_DIR="$compatagentdir" PI_OFFLINE=1 \
+  node "$PI_PACKAGE_DIR/$pi_cli_entry" --offline --no-context-files --no-skills \
+  --no-prompt-templates --no-themes --no-extensions \
+  -e "$repo/.pi/extensions/fm-branch-supervision.ts" -e "$repo/compat-probe.ts" \
+  --provider openai-codex --model gpt-5.6-luna --thinking minimal \
+  --session-dir "$compathome/main" -p /branch-probe > "$TMP_ROOT/compat-output" 2>&1
 status=$?
 out=$(cat "$TMP_ROOT/compat-output")
-if [ "$status" -ne 0 ] || { [ "$out" != "CODEX_COMPAT_OK" ] && [ "$out" != "CODEX_COMPAT_INCOMPATIBLE" ]; }; then
+if [ "$status" -ne 0 ] || ! printf '%s\n' "$out" | grep -qx 'CODEX_COMPAT_OK'; then
   fail "real installed pi-openai-codex-compat $compat_version branch guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-if [ "$out" = "CODEX_COMPAT_INCOMPATIBLE" ]; then
-  pass "real installed pi-openai-codex-compat $compat_version rejects peer-incompatible pi-coding-agent $PI_VERSION before provider or delivery"
-else
-  pass "real installed pi-openai-codex-compat $compat_version initializes before prompting and persists native Codex compaction"
-fi
+pass "real Pi CLI $PI_VERSION with pi-openai-codex-compat $compat_version creates Luna/minimal branch on its first eligible wake after legacy outcome migration, with guarded tools and native compaction"

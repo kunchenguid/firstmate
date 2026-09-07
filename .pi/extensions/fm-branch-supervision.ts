@@ -82,7 +82,6 @@ import {
   SessionManager,
   SettingsManager,
   ToolExecutionComponent,
-  VERSION,
   type AgentSession,
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -242,81 +241,7 @@ type BranchModelResolution = { ok: true; selection: PinnedBranchModel } | { ok: 
 type CodexCompatResources = {
   extensionPath: string;
   settingsManager: SettingsManager;
-  restoreGuardedBash: boolean;
 };
-type VersionTuple = readonly [number, number, number];
-
-function parseVersion(value: string): VersionTuple | null {
-  const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(value.trim());
-  if (!match) return null;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-function compareVersions(left: VersionTuple, right: VersionTuple): number {
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) return left[index] < right[index] ? -1 : 1;
-  }
-  return 0;
-}
-
-// Package manifests use npm semver syntax, but Pi does not export its semver
-// dependency to extensions. Recognize the exact, comparator, caret, tilde,
-// and wildcard forms needed for a conservative fail-closed peer check.
-function versionSatisfiesRange(version: string, range: string): boolean | null {
-  const current = parseVersion(version);
-  if (!current) return null;
-  const alternatives = range.split("||").map((part) => part.trim()).filter(Boolean);
-  if (alternatives.length === 0) return null;
-
-  let understood = true;
-  const matched = alternatives.some((alternative) => {
-    if (alternative === "*") return true;
-    const clauses = alternative.split(/\s+/).filter(Boolean);
-    if (clauses.length === 0) {
-      understood = false;
-      return false;
-    }
-    return clauses.every((clause) => {
-      const match = /^(>=|<=|>|<|=|\^|~)?v?(\d+)(?:\.(\d+|x|X|\*))?(?:\.(\d+|x|X|\*))?$/.exec(clause);
-      if (!match) {
-        understood = false;
-        return false;
-      }
-      const operator = match[1] ?? "";
-      const minorToken = match[3];
-      const patchToken = match[4];
-      const minor = minorToken && !/[xX*]/.test(minorToken) ? Number(minorToken) : 0;
-      const patch = patchToken && !/[xX*]/.test(patchToken) ? Number(patchToken) : 0;
-      const target: VersionTuple = [Number(match[2]), minor, patch];
-      const comparison = compareVersions(current, target);
-      if (operator === ">=") return comparison >= 0;
-      if (operator === "<=") return comparison <= 0;
-      if (operator === ">") return comparison > 0;
-      if (operator === "<") return comparison < 0;
-      if (operator === "=") return comparison === 0;
-      if (operator === "^") {
-        const upper: VersionTuple = target[0] > 0
-          ? [target[0] + 1, 0, 0]
-          : target[1] > 0
-            ? [0, target[1] + 1, 0]
-            : [0, 0, target[2] + 1];
-        return comparison >= 0 && compareVersions(current, upper) < 0;
-      }
-      if (operator === "~") {
-        const upper: VersionTuple = minorToken === undefined
-          ? [target[0] + 1, 0, 0]
-          : [target[0], target[1] + 1, 0];
-        return comparison >= 0 && compareVersions(current, upper) < 0;
-      }
-      if (minorToken === undefined || /[xX*]/.test(minorToken)) return current[0] === target[0];
-      if (patchToken === undefined || /[xX*]/.test(patchToken)) {
-        return current[0] === target[0] && current[1] === target[1];
-      }
-      return comparison === 0;
-    });
-  });
-  return understood ? matched : null;
-}
 
 async function resolveCodexCompatResources(model: BranchModel | undefined): Promise<CodexCompatResources | null> {
   if (model?.provider !== "openai-codex") return null;
@@ -337,34 +262,17 @@ async function resolveCodexCompatResources(model: BranchModel | undefined): Prom
   }
   const packageManifest = manifest as {
     name?: unknown;
-    version?: unknown;
-    peerDependencies?: Record<string, unknown>;
     pi?: { extensions?: unknown };
   };
   const extensionEntries = packageManifest.pi?.extensions;
-  const piPeer = packageManifest.peerDependencies?.["@earendil-works/pi-coding-agent"];
-  // This upstream prerelease needs a command-tool adaptation. Do not
-  // generalize the observed startup transition to untested prereleases or
-  // Pi versions. Stable packages still require their declared peer range.
-  const restoreGuardedBash = packageManifest.version === "0.0.10-alpha.7" && VERSION === "0.85.1";
   if (
     packageManifest.name !== CODEX_COMPAT_PACKAGE ||
-    typeof packageManifest.version !== "string" ||
-    (parseVersion(packageManifest.version) === null && !restoreGuardedBash) ||
-    typeof piPeer !== "string" ||
     !Array.isArray(extensionEntries) ||
     extensionEntries.length !== 1 ||
     typeof extensionEntries[0] !== "string" ||
     extensionEntries[0].trim() === ""
   ) {
     throw new Error(`${CODEX_COMPAT_PACKAGE} has malformed package metadata`);
-  }
-  const compatible = versionSatisfiesRange(VERSION, piPeer);
-  if (compatible === null) {
-    throw new Error(`${CODEX_COMPAT_PACKAGE} has an unsupported Pi peer range: ${piPeer}`);
-  }
-  if (!compatible) {
-    throw new Error(`${CODEX_COMPAT_PACKAGE} requires Pi ${piPeer}, but this branch runs Pi ${VERSION}`);
   }
 
   const packageRoot = resolve(installedPath);
@@ -384,7 +292,7 @@ async function resolveCodexCompatResources(model: BranchModel | undefined): Prom
   ) {
     throw new Error(`${CODEX_COMPAT_PACKAGE} did not resolve to its declared user-package extension`);
   }
-  return { extensionPath: expectedExtensionPath, settingsManager, restoreGuardedBash };
+  return { extensionPath: expectedExtensionPath, settingsManager };
 }
 
 // Pi owns the effort vocabulary. The picker's options and every clamp still
@@ -1434,12 +1342,11 @@ ${context.command}
         throw new Error(`${CODEX_COMPAT_PACKAGE} session startup failed: ${startupErrors.join("; ")}`);
       }
       let activeTools = created.session.getActiveToolNames();
-      // alpha.7 removes bash in session_start to offer its own command tools.
-      // The SDK's tools allowlist already excludes those replacements. Restore
-      // only this observed transition, using the registered guarded override;
-      // every other mutation must still fail the exact allowlist check below.
+      // Some compatibility startup hooks remove bash to offer their own command
+      // tools. The SDK allowlist excludes those replacements. If only bash was
+      // removed, restore our registered guarded override, then verify the exact
+      // active set again. This depends on runtime state, not release metadata.
       if (
-        codexCompat.restoreGuardedBash &&
         activeTools.length === 2 && activeTools[0] === "read" && activeTools[1] === "fm_branch_report"
       ) {
         created.session.setActiveToolsByName([...BRANCH_TOOL_NAMES]);
