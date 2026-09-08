@@ -778,7 +778,6 @@ $first
 EOF
   control_herdr_pi_session_generation_valid "$kind" "$generation" \
     || { printf 'refused'; return 0; }
-  command -v node >/dev/null 2>&1 || { printf 'refused'; return 0; }
   command -v python3 >/dev/null 2>&1 || { printf 'refused'; return 0; }
   schema=$(control_herdr_cli "$session" api schema --json 2>/dev/null) \
     || { printf 'refused'; return 0; }
@@ -788,7 +787,7 @@ EOF
   fm_backend_source herdr || { printf 'refused'; return 0; }
   socket=$(fm_backend_herdr_presentation_session_socket_path "$session" 2>/dev/null) \
     || { printf 'refused'; return 0; }
-  authority_seq=$(node -e 'process.stdout.write(String(Date.now() * 1000))' 2>/dev/null) \
+  authority_seq=$(python3 -c 'import time; print(int(time.time() * 1000) * 1000, end="")' 2>/dev/null) \
     || { printf 'refused'; return 0; }
   case "$authority_seq" in ''|*[!0-9]*) printf 'refused'; return 0 ;; esac
   clearer=${FM_CONTROL_HERDR_PI_AUTHORITY_CLEARER:-$SCRIPT_DIR/backends/herdr-clear-agent-authority.py}

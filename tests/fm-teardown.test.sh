@@ -2390,6 +2390,72 @@ SH
   pass "forced secondmate teardown holds every descendant lifecycle and metadata lock"
 }
 
+# A steering doorbell takes the same .control-<id>.lock across one liveness read
+# and one submission, so a hold of that length is an ordinary steer rather than a
+# concurrent lifecycle action.
+test_forced_secondmate_teardown_waits_out_a_doorbell_length_lock_hold() {
+  local case_dir home lock ready observed holder_pid rc waited=0
+  case_dir=$(make_case descendant-lock-wait)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  : > "$case_dir/kill.log"
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/kill.log"
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+
+  lock="$home/state/.control-child-b.lock"
+  ready="$case_dir/lock-ready"
+  observed="$case_dir/lock-observed"
+  # child-a's control lock appears first in the preflight's preorder, so it
+  # marks the moment forced teardown reaches the contended child-b lock.
+  ROOT="$ROOT" LOCK="$lock" READY="$ready" OBSERVED="$observed" \
+    PEER="$home/state/.control-child-a.lock" HOME_STATE="$home/state" OWNER_PID="$$" bash -c '
+    export FM_STATE_OVERRIDE="$HOME_STATE"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$LOCK" || exit 1
+    : > "$READY"
+    held=0
+    while [ ! -e "$PEER" ] && [ "$held" -lt 300 ] && kill -0 "$OWNER_PID" 2>/dev/null; do
+      sleep 0.1
+      held=$((held + 1))
+    done
+    if [ -e "$PEER" ]; then
+      : > "$OBSERVED"
+    fi
+    sleep 0.3
+    fm_lock_release "$LOCK"
+  ' &
+  holder_pid=$!
+  while [ ! -e "$ready" ] && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$ready" ] || fail "descendant-lock-wait: the doorbell holder never acquired its lock"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  wait "$holder_pid" 2>/dev/null || true
+  assert_present "$observed" "descendant-lock-wait: the hold never overlapped the descendant preflight"
+  assert_no_grep "has a lifecycle action in flight" "$case_dir/stderr" \
+    "descendant-lock-wait: a bounded doorbell hold was reported as a concurrent lifecycle action"
+  expect_code 0 "$rc" "descendant-lock-wait: a doorbell-length hold should be waited out"
+  [ ! -e "$case_dir/state/task-x1.meta" ] && [ ! -d "$home" ] \
+    || fail "descendant-lock-wait: the waited-out teardown retained retired task state"
+  [ -s "$case_dir/kill.log" ] && [ -s "$case_dir/treehouse.log" ] \
+    || fail "descendant-lock-wait: the waited-out teardown did not perform endpoint and worktree cleanup"
+  pass "forced secondmate teardown waits out a doorbell-length descendant lock hold"
+}
+
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   local case_dir home log closed rc
   case_dir=$(make_case herdr-child-unconfirmed-close)
@@ -3672,6 +3738,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
+test_forced_secondmate_teardown_waits_out_a_doorbell_length_lock_hold
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close

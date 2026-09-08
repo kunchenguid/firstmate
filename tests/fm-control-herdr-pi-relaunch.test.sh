@@ -170,6 +170,11 @@ case "${1:-} ${2:-}" in
       foreground=404
       name=pi
       argv0=pi
+      if [ "$scenario" = cross-none ]; then
+        foreground=303
+        name=zsh
+        argv0=/bin/zsh
+      fi
     else
       case "$scenario" in
         # A fresh nested-shell pid on every sample, so the churn refusal never
@@ -250,6 +255,14 @@ EOF
 303 202 303 S zsh /bin/zsh
 404 303 404 S codex /usr/local/bin/codex
 406 303 406 S codex /usr/local/bin/codex
+EOF
+  elif [ "$phase" = new ] && [ "$scenario" = cross-none ]; then
+    # Nothing started below the nested shell: the pane holds only the released
+    # shell chain Herdr still labels as a live Pi.
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
 EOF
   elif [ "$phase" = new ] && [ "$scenario" = cross-lingering-pi ]; then
     cat <<'EOF'

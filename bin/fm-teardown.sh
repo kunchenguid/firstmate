@@ -2592,7 +2592,7 @@ preflight_descendant_task_locks() {
       echo "REFUSED: descendant task $task_id has an invalid metadata lock path; forced teardown changed nothing" >&2
       return 1
     }
-    if ! fm_lock_try_acquire "$control_lock"; then
+    if ! fm_lock_acquire_task_control "$control_lock"; then
       echo "REFUSED: descendant task $task_id has a lifecycle action in flight (control lock is held); forced teardown changed nothing" >&2
       return 1
     fi
