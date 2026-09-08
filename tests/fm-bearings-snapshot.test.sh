@@ -181,9 +181,34 @@ EOF
   printf 'needs-decision [key=race]: pick subscribe order\n' > "$mate/state/mate.status"
 }
 
+# Every fixture run observes this one fixed clock, so elapsed-time expectations
+# stay deterministic.
+FIXTURE_NOW=2026-07-11T18:00:00Z
+FIXTURE_NOW_EPOCH=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$FIXTURE_NOW" +%s 2>/dev/null \
+  || date -u -d "$FIXTURE_NOW" +%s)
+
 run() {  # <home> <fakebin> <args...>
   local home=$1 fakebin=$2; shift 2
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW="$FIXTURE_NOW" NET_LOG="$home/net.log" "$BEARINGS" "$@"
+}
+
+# One in-flight ship task whose recorded start is exactly the given spawn_gen
+# token; an empty token writes a meta with no recorded start at all.
+write_running_task() {  # <home> <id> <spawn-gen-or-empty>
+  local home=$1 id=$2 gen=$3
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$home/projects/ship-wt" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  if [ -n "$gen" ]; then
+    printf 'spawn_gen=%s\n' "$gen" >> "$home/state/$id.meta"
+  fi
+  printf 'working: building the thing\n' > "$home/state/$id.status"
+  printf -- '- [ ] %s - Ship %s (repo: firstmate) (kind: ship) (since 2026-07-11)\n' "$id" "$id" \
+    >> "$home/data/backlog.md"
 }
 
 # End-to-end Domain Alpha regression fixture.
@@ -899,6 +924,41 @@ test_default_is_bounded_and_local_only() {
   # Valid JSON, correct schema.
   printf '%s' "$json" | jq -e '.schema == "fm-bearings.v1"' >/dev/null || fail "json schema wrong"
   pass "default output is bounded, local-only, and marks omitted surfaces"
+}
+
+test_running_elapsed_is_rendered_or_explicitly_unknown() {
+  local home fakebin toon json
+  home=$(make_home running-elapsed)
+  mkdir -p "$home/projects/ship-wt"
+  printf '## In flight\n' > "$home/data/backlog.md"
+  write_running_task "$home" recent "s$((FIXTURE_NOW_EPOCH - 45)).111.1"
+  write_running_task "$home" within-hour "s$((FIXTURE_NOW_EPOCH - 840)).111.2"
+  write_running_task "$home" long-run "s$((FIXTURE_NOW_EPOCH - 4440)).111.3"
+  write_running_task "$home" multi-day "s$((FIXTURE_NOW_EPOCH - 183600)).111.4"
+  write_running_task "$home" no-start ""
+  write_running_task "$home" legacy-token "legacy-9f3c"
+  write_running_task "$home" future-start "s$((FIXTURE_NOW_EPOCH + 600)).111.5"
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --json)
+  toon=$(run "$home" "$fakebin")
+  printf '%s' "$json" | jq -e '
+    (.in_flight | map({key:.id, value:.running}) | from_entries) as $r
+    | $r["recent"] == "45s"
+      and $r["within-hour"] == "14m"
+      and $r["long-run"] == "1h 14m"
+      and $r["multi-day"] == "2d 3h"
+  ' >/dev/null || fail "a recorded start must render as elapsed running time: $json"
+  printf '%s' "$json" | jq -e '
+    (.in_flight | map({key:.id, value:.running}) | from_entries) as $r
+    | $r["no-start"] == "unknown"
+      and $r["legacy-token"] == "unknown"
+      and $r["future-start"] == "unknown"
+  ' >/dev/null || fail "an unreadable start must say unknown, never a number or a blank: $json"
+  assert_contains "$toon" 'in_flight[7]{id,kind,state,running,doing}' \
+    "TOON in_flight rows must carry the running column"
+  assert_contains "$toon" ',1h 14m,' "the rendered elapsed time must reach the TOON rows"
+  pass "in_flight reports elapsed running time and names an unreadable start"
 }
 
 test_toon_json_parity() {
@@ -1908,6 +1968,7 @@ test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
+test_running_elapsed_is_rendered_or_explicitly_unknown
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_default_balances_dominant_and_sparse_homes

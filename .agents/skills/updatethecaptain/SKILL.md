@@ -3,7 +3,7 @@ name: updatethecaptain
 description: >-
   Keep the captain updated on every worker under way, in plain English, on a repeating ten-minute timer.
   Use when the captain invokes /updatethecaptain or asks to be kept posted on what the workers are doing.
-  Every report covers every worker with what it has finished, what it is doing now, what it still has to do, and how long it needs.
+  Every report covers every worker with how long it has been running, what it has finished, what it is doing now, what it still has to do, and how long it needs.
   The loop reports once immediately, repeats every ten minutes, picks up workers started since the last report, and ends by itself when no worker is left running or when the captain invokes /updatethecaptain-stop.
 user-invocable: true
 metadata:
@@ -74,7 +74,11 @@ The line lands on the first monitoring pass at or after ten minutes, never befor
 Report **every** worker on the list.
 Never summarise the fleet in aggregate, never drop a worker for having nothing new, and never merge two workers into one entry.
 
-Give each worker exactly these four parts, in this order, in plain English:
+Head each worker's entry with the job it is doing and how long it has been running, taken from the snapshot in step 2.
+For a worker rebuilding the login page, that heading reads `**The login-page worker - running 1h 14m**`.
+When the snapshot reports that worker's running time as unknown, say that instead of guessing a number.
+
+Under that heading, give each worker exactly these four parts, in this order, in plain English:
 
 - **(a) What it has finished** - the work that is actually done, described as an outcome rather than as the steps taken.
 - **(b) What it is working on now** - the one thing occupying it at this moment.

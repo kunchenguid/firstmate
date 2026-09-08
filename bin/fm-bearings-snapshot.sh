@@ -19,6 +19,12 @@
 # explicitly (the prs: line and the omitted[] surfaces) what was not requested, so an
 # absence is never ambiguous.
 #
+# Each in_flight row carries a rendered `running` elapsed time ("45s", "14m",
+# "1h 14m", "2d 3h") so no reader repeats that arithmetic. It comes from the
+# canonical snapshot's runtime.running_seconds and reads `unknown` whenever that
+# start is absent, including for a secondmate row, whose active child work started
+# in another home and has no start recorded here.
+#
 # This wrapper consumes canonical status decisions plus canonically normalized
 # backlog roles, unresolved blockers, and captain actionability. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
@@ -105,7 +111,7 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
+Default fields: schema, home, generated, prs, in_flight{id,kind,state,running,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
@@ -301,6 +307,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  # The projection owns the rendered elapsed time so no reader has to do this
+  # arithmetic; "unknown" is the honest answer when no start is recorded.
+  def running_label:
+    if . == null then "unknown"
+    else . as $s
+      | ($s / 86400 | floor) as $d
+      | (($s % 86400) / 3600 | floor) as $h
+      | (($s % 3600) / 60 | floor) as $m
+      | if $d > 0 then "\($d)d \($h)h"
+        elif $h > 0 then "\($h)h \($m)m"
+        elif $m > 0 then "\($m)m"
+        else "\($s)s" end
+    end;
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -372,12 +391,14 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.backlog.current_role != "held" or .current_state.state == "working")
        | {id, kind,
         state: .current_state.state,
+        running: (.runtime.running_seconds | running_label),
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
          | {id,kind:"secondmate",state:.bearings_state,
+            running:"unknown",
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)

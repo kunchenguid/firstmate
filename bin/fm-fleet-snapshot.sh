@@ -25,6 +25,10 @@
 #     state, source, detail, and raw line separately.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
+#     runtime.started_epoch and runtime.running_seconds come from the meta's
+#     spawn_gen incarnation token written by bin/fm-spawn.sh. Both are null when
+#     no start is recorded or the recorded start is later than the observation
+#     time, so a consumer never renders a fabricated elapsed time.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -190,6 +194,20 @@ path_present_json() {  # <path>
 
 meta_value() {  # <meta-file> <key>
   fm_meta_get "$1" "$2"
+}
+
+# bin/fm-spawn.sh writes spawn_gen=s<epoch>.<pid>.<n> on every fresh spawn and
+# relaunch. A token from an older or hand-written meta may carry no start, so an
+# unparsable token yields nothing rather than a guessed epoch.
+spawn_started_epoch() {  # <spawn-gen>
+  local token
+  case "$1" in s*) token=${1#s} ;; *) return 1 ;; esac
+  token=${token%%.*}
+  case "$token" in ''|*[!0-9]*) return 1 ;; esac
+  # Keep the value inside signed 64-bit range so the elapsed subtraction below
+  # cannot overflow on a corrupt token.
+  [ "${#token}" -le 18 ] || return 1
+  printf '%s\n' "$token"
 }
 
 last_nonempty_line() {  # <file>
@@ -405,7 +423,7 @@ task_json_lines() {
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json started_epoch running_seconds
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -429,6 +447,11 @@ task_json_lines() {
     else
       backend=$(fm_backend_of_meta "$meta")
       target=$(fm_backend_target_of_meta "$meta")
+    fi
+    started_epoch=$(spawn_started_epoch "$(meta_value "$meta" spawn_gen)" || true)
+    running_seconds=""
+    if [ -n "$started_epoch" ] && [ "$started_epoch" -le "$SNAPSHOT_EPOCH" ]; then
+      running_seconds=$((SNAPSHOT_EPOCH - started_epoch))
     fi
     status_log="$STATE/$id.status"
     report_path="$DATA/$id/report.md"
@@ -554,6 +577,8 @@ task_json_lines() {
       --argjson worktree_path "$worktree_json" \
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
+      --argjson started_epoch "${started_epoch:-null}" \
+      --argjson running_seconds "${running_seconds:-null}" \
       --argjson open_decisions "$open_decisions_json" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
@@ -576,6 +601,7 @@ task_json_lines() {
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
+        runtime:{started_epoch:$started_epoch,running_seconds:$running_seconds},
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
           status:(if $endpoint_exists == false then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
