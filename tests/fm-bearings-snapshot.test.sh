@@ -1579,8 +1579,9 @@ test_large_task_decision_inventory_avoids_argument_transport() {
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
     FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH=1783792800 \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
-  [ "$(printf '%s' "$canonical" | wc -c | tr -d ' ')" -gt 131072 ] \
-    || fail "large task-decision fixture did not exceed the per-argument limit"
+  printf '%s' "$canonical" | jq -e '
+    ([.tasks[] | select(.id == "mate")][0].hints.open_decisions | tojson | length) > 131072
+  ' >/dev/null || fail "large task-decision component did not exceed the per-argument limit"
   printf '%s' "$canonical" | jq -e '
     .schema == "fm-fleet-snapshot.v1"
       and ([.tasks[] | select(.id == "mate")][0].hints.open_decisions | length) == 101
@@ -1631,6 +1632,53 @@ test_task_component_failure_fails_closed() {
   grep -F 'task snapshot failed' "$err" >/dev/null \
     || fail "a failed task component lacked a diagnostic: $(cat "$err")"
   pass "a failed per-task component fails the snapshot instead of dropping tasks"
+}
+
+# Fail the Nth scout-report record composition, so one report in the middle of
+# the inventory drops out while its neighbours stay intact.
+install_failing_scout_report() {  # <fakebin> <counter-file> <occurrence>
+  local fakebin=$1 counter=$2 occurrence=$3 real
+  real=$(command -v jq)
+  rm -f "$counter"
+  cat > "$fakebin/jq" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'{id:\$id,path:\$path}'*)
+    count=0
+    [ ! -f "$counter" ] || count=\$(cat "$counter")
+    count=\$((count + 1))
+    printf '%s' "\$count" > "$counter"
+    [ "\$count" -ne $occurrence ] || exit 9
+    ;;
+esac
+exec "$real" "\$@"
+SH
+  chmod +x "$fakebin/jq"
+}
+
+# The scout-report collector sorts its input, so a record failure that only
+# aborts a subshell leaves the collector succeeding on the truncated prefix and
+# publishes an exit-0 snapshot whose scout_reports silently omit a finished
+# report the captain is waiting on.
+test_scout_report_failure_fails_closed() {
+  local home fakebin out err rc
+  home=$(make_home scout-report-fail-closed); write_fixture "$home"
+  mkdir -p "$home/data/scout-y" "$home/data/scout-z"
+  printf '# Scout Y\n' > "$home/data/scout-y/report.md"
+  printf '# Scout Z\n' > "$home/data/scout-z/report.md"
+  fakebin=$(make_fakebin "$home")
+  install_failing_scout_report "$fakebin" "$home/scout.count" 2
+  err="$home/scout-report.err"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH=1783792800 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json 2> "$err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed scout-report record published an exit-0 snapshot: $out"
+  if printf '%s' "$out" | jq -e '.scout_reports' >/dev/null 2>&1; then
+    fail "a failed scout-report record still emitted a report inventory: $out"
+  fi
+  grep -F 'scout report snapshot failed' "$err" >/dev/null \
+    || fail "a failed scout-report record lacked a diagnostic: $(cat "$err")"
+  pass "a failed scout-report record fails the snapshot instead of dropping reports"
 }
 
 install_failing_jq() {  # <fakebin> <model|toon>
@@ -3082,4 +3130,5 @@ test_per_repository_pr_cap_is_disclosed
 test_large_candidate_pr_inventory_avoids_argument_transport
 test_large_task_decision_inventory_avoids_argument_transport
 test_task_component_failure_fails_closed
+test_scout_report_failure_fails_closed
 test_projection_and_toon_fail_closed

@@ -736,10 +736,7 @@ task_json_lines() {
   # must fail this function rather than abort a subshell and leave a sorted
   # truncated prefix as the published inventory.
   lines_file="$SNAPSHOT_TASK_DIR/task-lines.jsonl"
-  : > "$lines_file" || {
-    snapshot_task_cleanup
-    return 1
-  }
+  : > "$lines_file" || return 1
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
     index=$((index + 1))
@@ -779,10 +776,7 @@ task_json_lines() {
     fi
 
     current_file="$SNAPSHOT_TASK_DIR/$id.json"
-    current_json=$(<"$current_file") || {
-      snapshot_task_cleanup
-      return 1
-    }
+    current_json=$(<"$current_file") || return 1
     event_json=$(status_event_json "$status_log" "$STATE/$id.status")
     read -r current_state current_source < <(
       printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
@@ -827,10 +821,7 @@ task_json_lines() {
         endpoint_exists=*) endpoint_exists=${observation_line#*=} ;;
         agent_alive=*) agent_alive=${observation_line#*=} ;;
       esac
-    done < "$endpoint_file" || {
-      snapshot_task_cleanup
-      return 1
-    }
+    done < "$endpoint_file" || return 1
     [ -f "$report_path" ] && report_present=1 || report_present=0
     meta_json=$(path_present_json "$original_meta" "$meta")
     status_json=$event_json
@@ -851,10 +842,7 @@ task_json_lines() {
       report "$report_json" \
       worktree_path "$worktree_json" \
       home_path "$home_json" \
-      open_decisions "$open_decisions_json" || {
-      snapshot_task_cleanup
-      return 1
-    }
+      open_decisions "$open_decisions_json" || return 1
 
     jq -n \
       --arg id "$id" \
@@ -931,10 +919,7 @@ task_json_lines() {
              steer:"bin/fm-send.sh fm-\($id) \u0027<instruction>\u0027",
              return_channel_note:null}
           end)
-      }' >> "$lines_file" || {
-      snapshot_task_cleanup
-      return 1
-    }
+      }' >> "$lines_file" || return 1
   done
   jq -s 'sort_by(.id)' < "$lines_file"
 }
@@ -1710,7 +1695,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
   local tasks_file=$1 output_file=$2 registry_file union_file records_file rows total_registered total shown truncated
   local row id home host remote registered registry_error task sampled_spawn_gen status_file status_observation_file event_raw event_note event_epoch event_age
   local activity_scan reconciliation provenance freshness reason summary_file evidence_file summary_sampled summary_valid summary_invalidity state terminal terminal_contradiction contradiction
-  local summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot summary_index=0
+  local summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot note_file summary_index=0
   local seen_homes=''
   registry_file="$JSON_TRANSPORT_DIR/secondmate-registry.json"
   union_file="$JSON_TRANSPORT_DIR/secondmate-union.json"
@@ -1850,14 +1835,25 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
       json_envelope_file "$evidence_file" \
         task "$task" \
         activity_scan "$activity_scan" || return 1
-      reconciliation=$(parent_evidence_reconciliation_json "$summary_file" "$evidence_file")
-      contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
-      terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r \
-        --slurpfile evidence "$evidence_file" \
-        "$JQ_ENVELOPE_PRELUDE"'
-        (envelope($evidence; "parent evidence") | member("task")
-         | .paths.status_log.last_event.note // "") as $note
-        | any(.activities[]; .verdict == "contradicts" and .summary == $note)')
+      reconciliation=$(parent_evidence_reconciliation_json "$summary_file" "$evidence_file") || {
+        echo "fm-fleet-snapshot: parent evidence reconciliation failed for $id" >&2
+        return 1
+      }
+      contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction') || {
+        echo "fm-fleet-snapshot: parent evidence contradiction read failed for $id" >&2
+        return 1
+      }
+      # The status-log note has no enforced byte limit, so it reaches jq through a
+      # file rather than argv; $event_note is already the value the record and the
+      # terminal capture use, so it is not re-derived from the evidence envelope.
+      note_file="$SNAPSHOT_COLLECT_DIR/parent-event-note-$summary_index"
+      printf '%s' "$event_note" > "$note_file" || return 1
+      terminal_contradiction=$(printf '%s' "$reconciliation" \
+        | jq -r --rawfile note "$note_file" \
+          'any(.activities[]; .verdict == "contradicts" and .summary == $note)') || {
+        echo "fm-fleet-snapshot: parent activity contradiction check failed for $id" >&2
+        return 1
+      }
       if [ "$terminal_contradiction" = true ]; then
         terminal=$(terminal_evidence_json "$task" "$event_note" true)
       else
@@ -1979,19 +1975,28 @@ secondmate_landed_from_current_json() {  # <secondmate-current-json-file> <outpu
     | .records |= sort_by([(.completion.date // ""), .id]) | .records |= reverse' > "$2"
 }
 
+# Same fail-closed shape as task_json_lines: an unreadable task directory or a
+# single failed record composition must fail this function rather than publish a
+# silently truncated report inventory that the captain reads as complete.
 scout_report_lines() {
-  local report id
+  local report id paths_file sorted_file lines_file
   if [ ! -d "$DATA" ]; then
     jq -n '[]'
     return 0
   fi
+  paths_file="$JSON_TRANSPORT_DIR/scout-report-paths"
+  sorted_file="$JSON_TRANSPORT_DIR/scout-report-paths.sorted"
+  lines_file="$JSON_TRANSPORT_DIR/scout-report-lines.jsonl"
   LC_ALL=C find "$DATA" -mindepth 2 -maxdepth 2 -type f -name report.md -print \
-    | sort \
-    | while IFS= read -r report; do
-      id=$(basename "$(dirname "$report")")
-      jq -n --arg id "$id" --arg path "$report" '{id:$id,path:$path}'
-    done \
-    | jq -s 'sort_by(.id)'
+    > "$paths_file" || return 1
+  LC_ALL=C sort "$paths_file" > "$sorted_file" || return 1
+  : > "$lines_file" || return 1
+  while IFS= read -r report; do
+    [ -n "$report" ] || continue
+    id=$(basename "$(dirname "$report")")
+    jq -n --arg id "$id" --arg path "$report" '{id:$id,path:$path}' >> "$lines_file" || return 1
+  done < "$sorted_file" || return 1
+  jq -s 'sort_by(.id)' < "$lines_file"
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
