@@ -240,8 +240,16 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+fm_dod_block() {  # <mode> <task-id> [idle-compact-enabled]
+  local mode=$1 id=$2 idle_compact_enabled=${3:-0}
+  local post_commit
+  if [ "$idle_compact_enabled" = 1 ]; then
+    # shellcheck disable=SC2016  # single quotes are deliberate: this is literal brief text whose backtick-wrapped commands must reach the reading agent verbatim, not expand here.
+    post_commit='Right after that implementation commit lands, append `paused: awaiting compaction before validation` to the status file and stop for this turn - do NOT run `no-mistakes axi run` yet. A worker cannot self-trigger compaction (`/compact` is a terminal built-in, not a tool you can invoke), so firstmate'"'"'s idle-compact watcher reads that line - the phrase must START the line, and any detail you want to note (your measured lane size, the commit) may follow it - compacts your context while it is still warm, then rings you with a durable inbox message telling you to start the validation run - resume from that ring instead of waiting on a reply.'
+  else
+    # shellcheck disable=SC2016  # single quotes are deliberate: this is literal brief text whose backtick-wrapped commands must reach the reading agent verbatim, not expand here.
+    post_commit='Right after that implementation commit lands, start `no-mistakes axi run` yourself and continue driving it below - this host has no `config/idle-compact` configured, so a worker that stopped and waited here would never be resumed.'
+  fi
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -269,7 +277,7 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
-Right after that implementation commit lands, append \`paused: awaiting compaction before validation\` to the status file and stop for this turn - do NOT run \`no-mistakes axi run\` yet. A worker cannot self-trigger compaction (\`/compact\` is a terminal built-in, not a tool you can invoke), so firstmate's idle-compact watcher reads that line - the phrase must START the line, and any detail you want to note (your measured lane size, the commit) may follow it - compacts your context while it is still warm, then rings you with a durable inbox message telling you to start the validation run - resume from that ring instead of waiting on a reply.
+$post_commit
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.

@@ -22,16 +22,13 @@
 # this guard's output after any Herdr or Claude Code upgrade.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [ "${FM_IDLE_COMPACT_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_IDLE_COMPACT_LIVE=1 to run the live idle-compact guard"
-  exit 0
-fi
+fm_live_gate opt-in FM_IDLE_COMPACT_LIVE herdr jq claude
 
-command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
-command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
-command -v claude >/dev/null 2>&1 || { echo "not ok - FM_IDLE_COMPACT_LIVE=1 but claude is not installed" >&2; exit 1; }
 CLAUDE_VERSION=$(claude --version 2>/dev/null | head -1) || CLAUDE_VERSION='version-unknown'
 [ -n "$CLAUDE_VERSION" ] || CLAUDE_VERSION='version-unknown'
 

@@ -451,7 +451,8 @@ test_ship_project_memory_wording() {
 test_no_mistakes_dod_carries_quota_efficiency_rules() {
   local home id brief
   home="$TMP_ROOT/quota-efficiency-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/config"
+  : > "$home/config/idle-compact"
   id="brief-quota-nm1"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
@@ -498,6 +499,31 @@ test_no_mistakes_dod_carries_quota_efficiency_rules() {
   pass "fm-brief.sh: no-mistakes DOD carries the quota-efficiency worker rules, absent from direct-PR/local-only/scout"
 }
 
+# idle-compact ships inert (docs/configuration.md "Idle-worker
+# pre-compaction"): an absent/invalid config/idle-compact means
+# fm_idle_compact_tick never runs for any task, so nothing would ever resume
+# a worker told to pause and wait for a compaction ring. The no-mistakes DOD
+# must only promise that ring when this host actually has the feature
+# configured; otherwise it must tell the worker to drive no-mistakes
+# immediately.
+test_no_mistakes_dod_runs_immediately_without_idle_compact_configured() {
+  local home id brief
+  home="$TMP_ROOT/no-idle-compact-home"
+  mkdir -p "$home/data"
+  id="brief-no-idlec1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  assert_no_grep "paused: awaiting compaction before validation" "$brief" \
+    "an unconfigured host must never promise the declared-state compaction ring"
+  assert_grep "start \`no-mistakes axi run\` yourself" "$brief" \
+    "an unconfigured host must tell the worker to drive no-mistakes immediately after committing"
+  assert_grep "no \`config/idle-compact\` configured" "$brief" \
+    "an unconfigured host must say why it is not using the pause-and-wait path"
+
+  pass "fm-brief.sh: no-mistakes DOD skips the compaction pause when config/idle-compact is not configured"
+}
 
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
@@ -1040,6 +1066,7 @@ test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_no_mistakes_dod_carries_quota_efficiency_rules
+test_no_mistakes_dod_runs_immediately_without_idle_compact_configured
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
