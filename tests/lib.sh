@@ -116,29 +116,10 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
 # tracking nothing and left every runner it started behind.
 #
 # A suite that forgets to declare still leaks its runner. What bounds that leak
-# is the claim root: FM_PROCEVENT_CLAIM_ROOT defaults here to a private per-run
-# directory this library owns, so an undeclared home's claims and locks land in
-# a fixture directory instead of the developer's real
-# ${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/procevent-claims, where they
-# would write into and contend with live runners that have nothing to do with
-# this suite. A suite that sets its own claim root - and a child that inherits
-# one from its parent test process - keeps that value. Teardown removes the
-# exact directory this library created, held in FM_TEST_OWNED_CLAIM_ROOT, and
-# never whatever FM_PROCEVENT_CLAIM_ROOT points at by then: a suite is free to
-# repoint that variable after sourcing, and the path it repoints to is its own
-# to remove.
+# is the claim root this library defaults FM_PROCEVENT_CLAIM_ROOT to, below,
+# once fm_test_tmproot is defined.
 
 FM_TEST_PROCEVENT_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-procevent.$$.XXXXXX") || return 1
-
-FM_TEST_OWNED_CLAIM_ROOT=
-if [ -z "${FM_PROCEVENT_CLAIM_ROOT:-}" ]; then
-  FM_TEST_OWNED_CLAIM_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/.fm-test-procevent-claims.$$.XXXXXX") || {
-    rm -f "$FM_TEST_CLEANUP_REGISTRY" "$FM_TEST_PROCEVENT_REGISTRY"
-    return 1
-  }
-  FM_PROCEVENT_CLAIM_ROOT=$FM_TEST_OWNED_CLAIM_ROOT
-fi
-export FM_PROCEVENT_CLAIM_ROOT
 
 fm_test_track_procevent_home() {  # <home> [claim-root]
   [ -n "${1:-}" ] || return 1
@@ -186,7 +167,6 @@ fm_test_cleanup() {
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
-  [ -z "${FM_TEST_OWNED_CLAIM_ROOT:-}" ] || rm -rf "$FM_TEST_OWNED_CLAIM_ROOT"
 }
 
 fm_test_tmproot() {
@@ -202,6 +182,24 @@ fm_test_tmproot() {
   fi
   printf '%s\n' "$root"
 }
+
+# The machine-wide claim root, defaulted into a fixture root this run owns. A
+# suite that neither declares its home nor names its own claim root would
+# otherwise resolve to the developer's real
+# ${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/procevent-claims and write
+# claims into, and take locks in, the store the live boards' runners use. Taking
+# it from fm_test_tmproot keeps one owner for it: it is registered for teardown
+# like every other fixture root, carries the marker identifying this shell, and
+# is reaped as a stale orphan by a later run if this one is killed outright.
+# A value the suite sets, and one a child inherits from its parent test process,
+# is neither created nor removed here.
+if [ -z "${FM_PROCEVENT_CLAIM_ROOT:-}" ]; then
+  FM_PROCEVENT_CLAIM_ROOT=$(fm_test_tmproot fm-test-procevent-claims) || {
+    rm -f "$FM_TEST_CLEANUP_REGISTRY" "$FM_TEST_PROCEVENT_REGISTRY"
+    return 1
+  }
+fi
+export FM_PROCEVENT_CLAIM_ROOT
 
 trap fm_test_cleanup EXIT
 trap 'fm_test_cleanup; exit 130' INT
