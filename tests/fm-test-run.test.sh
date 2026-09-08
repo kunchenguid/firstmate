@@ -1611,7 +1611,7 @@ test_shard_balance_fails_on_drifted_hints() {
   # The two signals carry different remedies, so a drift failure must not be
   # reported as a shard-count problem.
   case "$out" in
-    *"outgrown its shard count"*)
+    *"raise PORTABLE_SERIAL_SHARDS"*)
       rm -rf "$tmp"
       fail "a drift-only shard must not be reported as outgrowing its shard count: $out"
       ;;
@@ -1620,16 +1620,37 @@ test_shard_balance_fails_on_drifted_hints() {
   pass "shard balance guard fails on drifted hints and names what to re-measure"
 }
 
+# How many serial shards the runner is configured for, read from the lanes it
+# actually offers. A complete set of artifacts is what lets the guard answer
+# whether an even repack over that many shards would fit.
+configured_serial_shards() {
+  "$RUNNER" --list-lanes | sed -n 's/^portable-serial-[0-9][0-9]*of\([0-9][0-9]*\)$/\1/p' \
+    | head -n 1
+}
+
+# Writes one synthetic artifact per configured shard, all the same size.
+write_even_shard_timing_jsons() {
+  local dir=$1 count=$2 each=$3 shards shard
+  shards=$(configured_serial_shards)
+  [ -n "$shards" ] || fail "could not read the configured serial shard count from --list-lanes"
+  shard=1
+  while [ "$shard" -le "$shards" ]; do
+    write_shard_timing_json "$dir/$shard.json" "$shard" "$count" "$each"
+    shard=$((shard + 1))
+  done
+}
+
 test_shard_balance_fails_on_lost_headroom() {
   local tmp out rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-headroom.XXXXXX")
-  # Fifty scripts running just under their default weight keep the hints
-  # accurate, so only the headroom signal is left to notice that the shard now
-  # fills the whole job cap. Refreshing hints cannot fix this one.
-  write_shard_timing_json "$tmp/3.json" 3 50 24000
-  out=$("$RUNNER" --check-shard-balance "$tmp/3.json" 2>&1) && rc=0 || rc=$?
+  # Every shard runs fifty scripts just under their default weight: the hints
+  # stay accurate and each shard fills the whole job cap, so an even repack over
+  # the same shard count would not fit either. Only another runner fixes this.
+  write_even_shard_timing_jsons "$tmp" 50 24000
+  out=$("$RUNNER" --check-shard-balance "$tmp"/*.json 2>&1) && rc=0 || rc=$?
   [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "a shard filling the job cap must fail: $out"; }
-  assert_contains "$out" "outgrown its shard count" \
+  assert_contains "$out" "shard balance guard failed" "headroom failure must say it failed"
+  assert_contains "$out" "raise PORTABLE_SERIAL_SHARDS" \
     "headroom failure must name the shard-count remedy"
   assert_contains "$out" "job cap" "headroom failure must name the cap it measured against"
   case "$out" in
@@ -1640,6 +1661,64 @@ test_shard_balance_fails_on_lost_headroom() {
   esac
   rm -rf "$tmp"
   pass "shard balance guard fails when a shard loses its job-cap headroom"
+}
+
+test_shard_balance_warns_before_it_fails() {
+  local tmp out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-warn.XXXXXX")
+  # Forty accurately hinted scripts per shard sit above the warning share and
+  # below the failure share. The guard must say so loudly and still leave the
+  # suite green: a lane this size needs another shard soon, not a red badge for
+  # one slow runner.
+  write_even_shard_timing_jsons "$tmp" 40 24000
+  out=$("$RUNNER" --check-shard-balance "$tmp"/*.json 2>&1) && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] \
+    || { rm -rf "$tmp"; fail "a shard between the warn and fail shares must not fail: $out"; }
+  assert_contains "$out" "shard balance guard warning" "the warning must be reported as one"
+  assert_contains "$out" "raise PORTABLE_SERIAL_SHARDS" \
+    "the warning must still name the remedy it established"
+  assert_contains "$out" "FM_TEST_SHARD_BALANCE warn" \
+    "a warned run must be distinguishable from a clean one"
+  case "$out" in
+    *"shard balance guard failed"*)
+      rm -rf "$tmp"
+      fail "a warned shard must not also be reported as failed: $out"
+      ;;
+  esac
+  rm -rf "$tmp"
+  pass "shard balance guard warns above its warning share without failing the suite"
+}
+
+test_shard_balance_headroom_names_scripts_when_a_repack_would_fit() {
+  local tmp out rc shard shards
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-heavy.XXXXXX")
+  shards=$(configured_serial_shards)
+  [ -n "$shards" ] || { rm -rf "$tmp"; fail "could not read the configured serial shard count"; }
+  # One shard carries most of the lane while the rest sit nearly idle, and its
+  # scripts run over their hints by less than the drift bound. The lane is
+  # nowhere near needing another runner, so the guard must not prescribe one: it
+  # must say a repack fits and name the scripts whose hints let it pack heavy.
+  write_shard_timing_json "$tmp/1.json" 1 32 30000
+  shard=2
+  while [ "$shard" -le "$shards" ]; do
+    write_shard_timing_json "$tmp/$shard.json" "$shard" 4 30000
+    shard=$((shard + 1))
+  done
+  out=$("$RUNNER" --check-shard-balance "$tmp"/*.json 2>&1) && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] \
+    || { rm -rf "$tmp"; fail "an imbalanced but repackable lane must not fail: $out"; }
+  assert_contains "$out" "shard balance guard warning" "the heavy shard must be reported"
+  assert_contains "$out" "which fits" "the guard must report what an even repack gives"
+  assert_contains "$out" "tests/fm-balance-fixture-1-" \
+    "a heavy shard must name the scripts to re-measure"
+  case "$out" in
+    *"raise PORTABLE_SERIAL_SHARDS"*)
+      rm -rf "$tmp"
+      fail "a lane an even repack would fit must not be told to add a shard: $out"
+      ;;
+  esac
+  rm -rf "$tmp"
+  pass "shard balance guard names drifted scripts rather than asserting shard exhaustion"
 }
 
 test_shard_balance_reports_missing_and_foreign_artifacts() {
@@ -1691,6 +1770,50 @@ test_shard_balance_refuses_a_disagreeing_job_cap() {
   assert_contains "$out" "FM_TEST_SHARD_BALANCE ok" "matching cap must pass"
   rm -rf "$tmp"
   pass "shard balance guard refuses a job cap that disagrees with ci.yml"
+}
+
+test_portable_serial_job_cap_has_one_owner() {
+  # The headroom share is only meaningful against the cap CI actually enforces,
+  # so bind all three records of it: the tests-portable-serial job's real
+  # timeout-minutes key, the value the aggregate job hands the guard, and the
+  # cap the runner reports measuring against. Parse the workflow as YAML and
+  # read the step's own command line, so a nested key or a comment cannot stand
+  # in for either.
+  command -v ruby >/dev/null 2>&1 \
+    || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
+  local json job_cap step_cap runner_cap tmp
+  json=$(ruby -ryaml -rjson -e '
+doc = YAML.load_file(ARGV[0])
+job = doc.fetch("jobs").fetch("tests-portable-serial")
+aggregate = doc.fetch("jobs").fetch("tests-timing-aggregate")
+step = aggregate.fetch("steps").find { |s|
+  s.is_a?(Hash) && s["name"] == "Check portable serial shard balance"
+}
+raise "missing shard balance step" if step.nil?
+argv = step.fetch("run").split
+i = argv.index("--job-timeout-minutes")
+raise "shard balance step does not pass --job-timeout-minutes" if i.nil?
+puts JSON.generate(
+  "job_cap" => job.fetch("timeout-minutes"),
+  "step_cap" => Integer(argv.fetch(i + 1))
+)
+' "$ROOT/.github/workflows/ci.yml") \
+    || fail "could not parse the portable serial job cap from ci.yml"
+  job_cap=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job_cap"])' <<<"$json") \
+    || fail "could not read the serial job timeout from the parsed workflow"
+  step_cap=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["step_cap"])' <<<"$json") \
+    || fail "could not read the balance step's job cap from the parsed workflow"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-owner.XXXXXX")
+  write_shard_timing_json "$tmp/1.json" 1 6 1000
+  runner_cap=$("$RUNNER" --check-shard-balance "$tmp/1.json" \
+    | sed -n 's/.*bound=\([0-9][0-9]*\)min.*/\1/p')
+  rm -rf "$tmp"
+  [ -n "$runner_cap" ] || fail "the balance guard must report the cap it measured against"
+  [ "$step_cap" = "$job_cap" ] \
+    || fail "the balance step passes $step_cap but tests-portable-serial caps at $job_cap"
+  [ "$runner_cap" = "$job_cap" ] \
+    || fail "the runner measures against $runner_cap but tests-portable-serial caps at $job_cap"
+  pass "the portable serial job cap agrees across ci.yml, the balance step, and the runner"
 }
 
 test_aggregate_json() {
@@ -1773,5 +1896,8 @@ test_aggregate_json
 test_shard_balance_passes_and_reports_bound
 test_shard_balance_fails_on_drifted_hints
 test_shard_balance_fails_on_lost_headroom
+test_shard_balance_warns_before_it_fails
+test_shard_balance_headroom_names_scripts_when_a_repack_would_fit
 test_shard_balance_reports_missing_and_foreign_artifacts
 test_shard_balance_refuses_a_disagreeing_job_cap
+test_portable_serial_job_cap_has_one_owner

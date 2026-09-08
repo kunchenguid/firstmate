@@ -371,9 +371,12 @@ jobs:
             echo "::warning::no portable serial timing JSON found; shard balance unchecked"
             exit 0
           fi
-          # Same literal as the tests-portable-serial job cap above:
-          # bin/fm-test-run.sh refuses when the two disagree rather than
-          # measuring headroom against a cap that has since moved.
+          # The tests-portable-serial job cap above, handed back so the guard
+          # measures headroom against the cap this workflow actually sets.
+          # bin/fm-test-run.sh refuses a value that disagrees with its own
+          # record, and the suite parses this workflow and refuses when either
+          # disagrees with that job's real timeout-minutes key, so the cap
+          # cannot move in one place only.
           bin/fm-test-run.sh --check-shard-balance --job-timeout-minutes 20 "${serial[@]}"
       - name: Upload aggregate timing artifact
         if: always()

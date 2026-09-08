@@ -204,11 +204,18 @@ PORTABLE_SERIAL_MAX_UNHINTED_PERCENT=15
 # refresh, and the guard names the scripts that drifted most.
 PORTABLE_SERIAL_MAX_HINT_DRIFT_PERCENT=15
 
-# Headroom: the worst shard's measured duration against this share of the job
-# cap. Accurate hints cannot fix a lane that has simply outgrown its shard
-# count, so this is the property actually being protected and the remedy is
-# another shard. It degrades gracefully as the suite grows.
-PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT=75
+# Headroom: the worst shard's measured duration against a share of the job cap.
+# This is the property actually being protected, and it degrades gracefully as
+# the suite grows. Two shares, because the guard has to speak long before the
+# badge goes red and still not redden a suite that is merely unlucky.
+#
+# Warn: loud, non-fatal, and low enough that a lane growing at a few minutes a
+# day is told about it with days of margin left to add a shard in.
+PORTABLE_SERIAL_WARN_SHARD_BUDGET_PERCENT=75
+# Fail: far enough above the warning that ordinary hosted-runner spread cannot
+# turn an otherwise green suite red. Per-script noise on this lane reaches 3x,
+# and a guard that cries wolf gets switched off.
+PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT=90
 
 # The tests-portable-serial job cap the headroom share is taken against, in
 # minutes. .github/workflows/ci.yml owns that job's timeout-minutes and passes
@@ -1057,20 +1064,23 @@ check_portable_serial_balance() {
   shift
   [ "$#" -gt 0 ] || die "--check-shard-balance requires at least one timing JSON"
   command -v python3 >/dev/null 2>&1 || die "--check-shard-balance requires python3"
+  rc=0
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-shard-balance.XXXXXX") || die "mktemp failed"
   portable_serial_weight_hints >"$tmp/hints"
   python3 - "$tmp/hints" "$bound_minutes" "$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS" \
     "$PORTABLE_SERIAL_MAX_HINT_DRIFT_PERCENT" \
+    "$PORTABLE_SERIAL_WARN_SHARD_BUDGET_PERCENT" \
     "$PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT" \
-    "$PORTABLE_SERIAL_SHARDS" "$@" <<'PY'
+    "$PORTABLE_SERIAL_SHARDS" "$@" <<'PY' || rc=$?
 import json, sys
 from pathlib import Path
 
-hints_path, bound_s, default_s, drift_s, budget_s, shards_s = sys.argv[1:7]
-inputs = [Path(p) for p in sys.argv[7:]]
+hints_path, bound_s, default_s, drift_s, warn_budget_s, budget_s, shards_s = sys.argv[1:8]
+inputs = [Path(p) for p in sys.argv[8:]]
 bound_ms = int(bound_s) * 60000
 default_ms = int(default_s)
 max_drift = int(drift_s)
+warn_budget = int(warn_budget_s)
 max_budget = int(budget_s)
 expected_shards = int(shards_s)
 
@@ -1130,32 +1140,104 @@ if not shards:
     sys.exit(0)
 
 shards.sort(key=lambda s: s["lane"])
-if len(shards) < expected_shards:
+complete = len(shards) >= expected_shards
+if not complete:
     print(
         "FM_TEST_SHARD_BALANCE partial %d of %d portable serial shards reported "
         "a timing artifact; a cancelled shard uploads none, so the rest are "
         "unchecked" % (len(shards), expected_shards)
     )
-failures = []
+
 for s in shards:
-    share = s["measured"] * 100.0 / bound_ms
-    s["share"] = share
+    s["share"] = s["measured"] * 100.0 / bound_ms
     s["drift"] = (
         (s["measured"] - s["hinted"]) * 100.0 / s["hinted"] if s["hinted"] else 0.0
     )
-    if share > max_budget:
-        failures.append(
-            "shard balance guard: %s measured %s, %.0f%% of the %s min job cap "
-            "(max %s%%)\n"
-            "  accurate hints cannot fix this: the lane has outgrown its shard "
-            "count, so raise PORTABLE_SERIAL_SHARDS and the ci.yml matrix "
-            "(docs/fm-test-portable-shards.md)"
-            % (s["lane"], minutes(s["measured"]), share, bound_s, max_budget)
+    s["drifted"] = s["hinted"] >= MIN_HINTED_MS and s["drift"] > max_drift
+
+# What an even repack of the reported work would put on each shard. Only that
+# answers whether the lane has outgrown its shard count, so the headroom report
+# never asserts that remedy without it.
+even_ms = sum(s["measured"] for s in shards) / expected_shards if complete else None
+
+
+def drifted_rows(s):
+    lines = []
+    for delta, path, real, hint, unhinted in sorted(s["rows"], reverse=True)[:5]:
+        if delta <= 0:
+            continue
+        lines.append(
+            "    %s measured %.1fs hint %.1fs (%+.1fs)%s"
+            % (
+                path,
+                real / 1000.0,
+                hint / 1000.0,
+                delta / 1000.0,
+                " [no hint, default weight]" if unhinted else "",
+            )
         )
-    if s["hinted"] >= MIN_HINTED_MS and s["drift"] > max_drift:
-        worst = sorted(s["rows"], reverse=True)[:5]
+    return lines
+
+
+# A shard can be heavy with every hint accurate, so the header is only printed
+# when there is something under it to read.
+def labelled_rows(s, header):
+    rows = drifted_rows(s)
+    return [header] + rows if rows else []
+
+
+# States what was measured against the cap, then the cause the guard could
+# actually establish: a shard over its budget is not by itself evidence that the
+# lane needs another runner.
+def headroom_report(s, limit, label):
+    lines = [
+        "shard balance guard %s: %s measured %s, %.0f%% of the %s min job cap "
+        "(over %d%%)"
+        % (label, s["lane"], minutes(s["measured"]), s["share"], bound_s, limit)
+    ]
+    if s["drifted"]:
+        lines.append(
+            "  it also ran %.0f%% over its own hint weight, so refresh the hints "
+            "and repack before adding a shard; the drift report below names the "
+            "scripts to re-measure" % s["drift"]
+        )
+    elif even_ms is None:
+        lines.append(
+            "  only %d of %d shards reported, so whether an even repack would fit "
+            "could not be determined (docs/fm-test-portable-shards.md)"
+            % (len(shards), expected_shards)
+        )
+        lines += labelled_rows(s, "  the scripts furthest over their hints:")
+    elif even_ms * 100.0 / bound_ms > limit:
+        lines.append(
+            "  an even repack across %d shards still gives %s each, so the lane has "
+            "outgrown its shard count: raise PORTABLE_SERIAL_SHARDS and the ci.yml "
+            "matrix (docs/fm-test-portable-shards.md)"
+            % (expected_shards, minutes(even_ms))
+        )
+    else:
+        lines.append(
+            "  an even repack across %d shards gives %s each, which fits, so this "
+            "shard is packed heavy rather than the lane having outgrown its shard "
+            "count (docs/fm-test-portable-shards.md)"
+            % (expected_shards, minutes(even_ms))
+        )
+        lines += labelled_rows(s, "  re-measure these scripts:")
+    return "\n".join(lines)
+
+
+warnings = []
+failures = []
+for s in shards:
+    # Warn well below the cap so the guard speaks before the badge goes red, and
+    # fail only where hosted-runner spread can no longer explain the shard.
+    if s["share"] > max_budget:
+        failures.append(headroom_report(s, max_budget, "failed"))
+    elif s["share"] > warn_budget:
+        warnings.append(headroom_report(s, warn_budget, "warning"))
+    if s["drifted"]:
         lines = [
-            "shard balance guard: %s measured %s against %s of hint weight "
+            "shard balance guard failed: %s measured %s against %s of hint weight "
             "(+%.0f%%, max +%s%%)\n"
             "  the hint table is stale; re-measure these scripts "
             "(docs/fm-test-portable-shards.md):"
@@ -1167,21 +1249,11 @@ for s in shards:
                 max_drift,
             )
         ]
-        for delta, path, real, hint, unhinted in worst:
-            if delta <= 0:
-                continue
-            lines.append(
-                "    %s measured %.1fs hint %.1fs (%+.1fs)%s"
-                % (
-                    path,
-                    real / 1000.0,
-                    hint / 1000.0,
-                    delta / 1000.0,
-                    " [no hint, default weight]" if unhinted else "",
-                )
-            )
+        lines += drifted_rows(s)
         failures.append("\n".join(lines))
 
+for w in warnings:
+    print(w, file=sys.stderr)
 if failures:
     for f in failures:
         print(f, file=sys.stderr)
@@ -1190,9 +1262,10 @@ if failures:
 worst_share = max(shards, key=lambda s: s["share"])
 worst_drift = max(shards, key=lambda s: s["drift"])
 print(
-    "FM_TEST_SHARD_BALANCE ok shards=%d worst_share=%s@%.0f%% "
+    "FM_TEST_SHARD_BALANCE %s shards=%d worst_share=%s@%.0f%% "
     "worst_drift=%s@%+.0f%% bound=%smin"
     % (
+        "warn" if warnings else "ok",
         len(shards),
         worst_share["lane"],
         worst_share["share"],
@@ -1202,7 +1275,6 @@ print(
     )
 )
 PY
-  rc=$?
   rm -rf "$tmp"
   return $rc
 }

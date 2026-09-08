@@ -125,10 +125,16 @@ It checks two properties, because they fail for different reasons and call for d
 
 - Accuracy: a shard whose measured duration exceeds its hinted weight by more than `PORTABLE_SERIAL_MAX_HINT_DRIFT_PERCENT` fails, naming the scripts whose hints drifted most.
   The remedy is a hint refresh.
-- Headroom: a shard whose measured duration exceeds `PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT` of the job cap fails.
-  The remedy is another shard, because accurate hints cannot fix a lane that has outgrown its shard count.
+- Headroom: a shard whose measured duration exceeds `PORTABLE_SERIAL_WARN_SHARD_BUDGET_PERCENT` of the job cap warns without failing the run, and one that exceeds `PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT` fails.
+  The warning sits well below the failure on purpose: the guard has to speak before the badge goes red, and per-script noise on this lane reaches 3x, so a failure line just above the worst healthy shard would redden green suites until someone switched the guard off.
+
+A shard over its budget is not by itself evidence that the lane needs another runner, so the headroom report states what it measured against the cap and then only the cause it could establish.
+It divides the reported work evenly across the configured shard count: when even that does not fit, the lane has outgrown its shard count and the remedy is raising `PORTABLE_SERIAL_SHARDS` and the `ci.yml` matrix; when it does fit, the shard is packed heavy rather than the lane being too big, and the report names the scripts that ran over their hints.
+A shard that trips the headroom bound while its own hints have also drifted is reported under both bounds, so the drifted scripts are named either way.
+Both remain visible and distinguishable: the estimates being wrong and the lane being too big have different remedies.
 
 `PORTABLE_SERIAL_JOB_TIMEOUT_MINUTES` records the cap the headroom share is taken against, and `.github/workflows/ci.yml` passes its own `tests-portable-serial` `timeout-minutes` back through `--job-timeout-minutes`, which is refused when the two disagree.
+`tests/fm-test-run.test.sh` parses the workflow and refuses when that job's real `timeout-minutes` key, the value the aggregate step passes, and the cap the runner reports do not all agree, so the cap cannot move in one place only.
 The `tests-timing-aggregate` job runs the check after building the aggregate summary.
 A cancelled shard uploads no artifact, so the check reports how many shards it could read and leaves the rest unchecked rather than guessing.
 
