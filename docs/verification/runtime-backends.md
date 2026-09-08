@@ -303,7 +303,7 @@ This change does not address that warning and does not claim to.
 `bin/fm-spawn.sh` therefore pre-registers the task worktree through `bin/fm-claude-trust.sh` before launch, and `tests/fm-claude-trust.test.sh` pins what that registration writes and what it refuses: a fresh worktree is recorded with `hasTrustDialogAccepted`, and an out-of-scope path is refused.
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 
-### A second prompt in projects with hooks or allow rules
+### A second prompt the registration does not cover
 
 Observed 2026-09-07 on Claude Code 2.1.263, in production rather than in a built arm.
 `bin/fm-spawn.sh` launched workers into fresh treehouse worktrees with `hasTrustDialogAccepted` already pre-registered for each path, and the workspace-trust dialog above did not appear.
@@ -377,16 +377,24 @@ tmux capture-pane -p -t tp-h1
 
 The arm is only usable if that pane shows the Quick safety check; if it does not, the project does not reproduce and no candidate can be tested on it.
 
-Treatment arm - answer the prompt by hand in that pane, then diff the store to see what the acceptance actually wrote:
+Treatment arm - snapshot the store FIRST, then answer the prompt by hand in that pane, then diff the two snapshots to see what the acceptance actually wrote:
 
 ```sh
-cp ~/.claude.json /tmp/claude-store-before.json   # before answering
-node -e 'const a=JSON.parse(require("node:fs").readFileSync("/tmp/claude-store-before.json","utf8")).projects[process.argv[1]]||{},
-b=JSON.parse(require("node:fs").readFileSync(process.env.HOME+"/.claude.json","utf8")).projects[process.argv[1]]||{};
-for(const k of new Set([...Object.keys(a),...Object.keys(b)]))if(JSON.stringify(a[k])!==JSON.stringify(b[k]))console.log(k,JSON.stringify(a[k]),"->",JSON.stringify(b[k]));' <worktree>
+cp ~/.claude.json /tmp/claude-store-before.json   # must run BEFORE answering
+# answer "Yes, I trust this folder" by hand in the pane, then:
+node -e 'const fs=require("node:fs");
+const walk=(x,y,p)=>{const o=v=>v&&typeof v==="object"&&!Array.isArray(v);
+if(o(x)&&o(y)){for(const k of new Set([...Object.keys(x),...Object.keys(y)]))walk(x[k],y[k],p.concat(k));return;}
+if(JSON.stringify(x)!==JSON.stringify(y))console.log(p.join("."),JSON.stringify(x),"->",JSON.stringify(y));};
+walk(JSON.parse(fs.readFileSync("/tmp/claude-store-before.json","utf8")),
+     JSON.parse(fs.readFileSync(process.env.HOME+"/.claude.json","utf8")),[]);'
 ```
 
+Diff the WHOLE parsed store, not `projects[<worktree>]` alone.
+The two slots the captain answered by hand were already observed holding exactly `{"hasTrustDialogAccepted": true}` afterwards, so that per-project object is known NOT to change: a per-project diff returns nothing because of where it looked, not because the acceptance persists nothing, and reading its empty output as "no candidate keys" is the wrong conclusion.
+The whole-store walk also surfaces ordinary session bookkeeping written by any concurrent Claude session, so quiet the machine first and read the output for a newly appearing trust or permission key rather than for a single line.
 The keys that change there are the candidates; pre-register one, clear the entry, and rerun the control arm to see whether the prompt is gone.
+If nothing outside that bookkeeping changes, the acceptance is persisted somewhere other than `~/.claude.json`, or not persisted at all, and the search moves off this file.
 Rerun this after a Claude Code upgrade rather than trusting the version above.
 
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.

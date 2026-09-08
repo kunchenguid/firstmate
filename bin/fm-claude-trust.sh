@@ -21,20 +21,15 @@
 #
 # THIS COVERS THE FIRST DIALOG ONLY. Claude Code 2.1.263 was observed on
 # 2026-09-07 to show a SECOND prompt, after this registration had already
-# suppressed the trust dialog, in a project whose .claude/settings.json carries
-# hooks and permissions.allow rules: "Quick safety check ... This folder
-# pre-approves N tool permissions in .claude/settings.json". Firstmate's key
-# plane cannot move its cursor, exactly as with the first dialog, but the
-# consequence of a sent Enter differs: the first dialog's cursor sits on "No,
-# exit" so Enter kills the worker, while this one's sits on "No, continue
-# without these permissions", which by its own label would leave a live worker
-# running without the folder's pre-approved commands. That outcome is UNTESTED,
-# and whether such a degraded worker is an acceptable unwedge is an open
-# captain decision, so no key is sent to either prompt until he rules.
-# Nothing here pre-registers that prompt, hasTrustDialogHooksAccepted is ruled
-# out as the key that would, and what persists that acceptance is unknown.
+# suppressed the trust dialog: "Quick safety check ... This folder pre-approves
+# N tool permissions in .claude/settings.json". The one project observed
+# reaching it carried both PreToolUse hooks and permissions.allow rules in its
+# tracked .claude/settings.json, but what configuration reaches that prompt is
+# UNESTABLISHED, so no settings shape is exempt. Nothing here pre-registers it,
+# and hasTrustDialogHooksAccepted is ruled out as the key that would.
 # docs/verification/runtime-backends.md under "Claude workspace trust" owns the
-# dated measurement behind that, the observation, and its reproduction.
+# figures, the settings-shape table, the sent-Enter analysis, the open captain
+# question, and the reproduction.
 #
 # THE SCOPE TEST IS THE SAFETY PROPERTY, and it is STRUCTURAL rather than a
 # path policy. <worktree> must be a LINKED git worktree - its own git dir,
