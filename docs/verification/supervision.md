@@ -411,10 +411,11 @@ FM_TEST_SUMMARY total=4 failed=1 skipped_gate=0 duration_ms=149279
 `bin/fm-lint.sh` exited 0.
 `bin/fm-doc-audience-check.sh` exited 0.
 `bin/fm-test-run.sh` over the four suites exited 1 - `tests/fm-turnend-guard.test.sh` failed and the other three passed.
-The failing case is `test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace`, which arrived from main in `891dc51` (#3946) and is byte-identical here to its state at this branch's base commit `b84e0e3`, so the deadlock correction neither introduced it nor touches it.
+The failing case is `test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace`, which arrived from main in `891dc51` (#3946) and was byte-identical at `073a41f` to its state at this branch's base commit `b84e0e3`, so the deadlock correction neither introduced it nor touched it.
 It is a host portability failure rather than a supervision defect: the case ages the beacon with `touch -d "@<epoch>"`, BSD touch on this Darwin host rejects that GNU-only form with the `out of range or illegal time specification` line above, the beacon therefore stays fresh, and the guard correctly allows the stop the case expected it to block.
-It reproduced with the same single failure on two consecutive runs, so it is deterministic on this host rather than flaky, and it remains open against `tests/fm-turnend-guard.test.sh` rather than against this correction.
+It reproduced with the same single failure on two consecutive runs, so it was deterministic on this host rather than flaky.
 `tests/lib.sh` defines `fail()` as a `printf` plus `exit 1`, so that failure aborted the whole script, and `test_hook_no_afk_ignores_poll_derived_grace` - the only case invoked after it - therefore never ran at all in the run above.
+It is closed on this branch rather than left open: `9fa7179` replaces that `touch -d` form with a portable helper, and the full-script run recorded at the end of this entry executes and passes both cases.
 
 That abort left this correction's own guard-side cases with no stated result, because they are invoked earlier in the same script, so they were re-run on their own.
 `bin/fm-test-run.sh` selects whole scripts and has no per-case filter, so the isolated run used a copy of `tests/fm-turnend-guard.test.sh` truncated above its runner list - every function definition and helper intact, only the list of cases to invoke replaced.
@@ -438,7 +439,7 @@ It says nothing about any other case in that script; the full-script result abov
 
 Two commits land after the trees named above, and neither has a fresh full-script run of its own.
 `1474acb` follows the `073a41f` full-script run: it removed the banner's second primed-recovery line and re-pointed the three assertions that named it in the same change, which is why the guard-side cases were re-run in isolation on that newer tree rather than left on the older one.
-It leaves `test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace` byte-identical to its state at `073a41f`, but no run at `1474acb` invoked that case, so the full-script failure above remains the only observation of it.
+It leaves `test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace` byte-identical to its state at `073a41f`, and no run at `1474acb` invoked that case, so at that point the full-script failure above was still the only observation of it.
 The review commit that follows `1474acb` changes documentation only - the tree named for the isolated run just above, and one removed sentence in `docs/turnend-guard.md` - so it touches no code or test path any command in this entry exercises, and no re-run was taken for it.
 
 `d8e407d` does change code, and it invalidates part of the isolated block above.
@@ -457,13 +458,41 @@ ok - fm-turnend-guard --claude: a frozen auto-arm epoch still reaches the bounde
 ```
 
 That copy exited 0, and the whole of `tests/fm-claude-stop-autoarm.test.sh` was run unmodified on the same tree: 46 cases, exit 0, including the two inert `--ensure-watcher` cases whose expected status returned to 0 with the contract gone.
-No full-script run of `tests/fm-turnend-guard.test.sh` was taken on that tree, so the `touch -d` failure above is still the only observation of that case.
+No full-script run of `tests/fm-turnend-guard.test.sh` was taken on that tree; the `touch -d` failure above stayed the only observation of that case until the run recorded at the end of this entry.
 
 The review commit carrying this paragraph changes code once more, and it does not invalidate the six-case block above.
 It moves the priming call below `terminal_fail_open` so it sits immediately before the final `block_stop`, because above that point the attended fail-open could allow the same Stop that had just forked a handling successor - and that successor could both consume the unacknowledged downtime episode and win the home lock in time to answer the health check the fail-open decides on.
 It adds `test_hook_claude_mode_fail_open_allows_without_priming_a_cycle` for exactly that sequence, which was observed failing against the pre-move placement with the forked arm and watcher pids named in its message, and passing after the move.
 All six cases in the block above were re-run on this tree by the same truncated-copy method and still print those same `ok` lines, alongside the new case, so that record holds here as written.
 No full-script run of `tests/fm-turnend-guard.test.sh` was taken on this tree either.
+
+`9fa7179` is the commit that closes the `touch -d` failure.
+It replaces that GNU-only form in the three away-mode poll-derived-grace cases with a portable `set_mtime` helper - the same shape `tests/fm-inactive-reconcile.test.sh` and `tests/fm-watch-triage.test.sh` already use - and otherwise changes documentation only.
+The four suites were re-run in full on that tree, so `tests/fm-turnend-guard.test.sh` reached the end of the script for the first time on this branch.
+
+```sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-guard-stale-banner.test.sh tests/fm-turnend-guard.test.sh tests/fm-supervision-instructions.test.sh
+```
+
+Observed output, tail of the run - the `...` stands for the 46 `ok` lines of `tests/fm-claude-stop-autoarm.test.sh`, which ran in full between the two `FM_TEST_END` lines:
+
+```text
+ok - fm-turnend-guard: a dead away-mode daemon still blocks under the poll-derived grace
+ok - fm-turnend-guard: the poll-derived grace is bounded, not unlimited
+ok - fm-turnend-guard: with away mode off, the poll-derived grace never applies
+FM_TEST_END 2026-09-08T23:07:30Z tests/fm-turnend-guard.test.sh exit=0 duration_ms=103893 gate_skip=false
+...
+FM_TEST_END 2026-09-08T23:08:22Z tests/fm-claude-stop-autoarm.test.sh exit=0 duration_ms=51099 gate_skip=false
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=156304
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=612 failed=0
+FM_TEST_SUMMARY_FAMILY family=standalone count=1 duration_ms=51099 failed=0
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=2 duration_ms=121733 failed=0
+```
+
+`bin/fm-test-run.sh` over the four suites exited 0.
+`test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace` is the `the poll-derived grace is bounded, not unlimited` line, and `test_hook_no_afk_ignores_poll_derived_grace` - the case the earlier abort skipped, so no run on this host had ever executed it - is the line after it, so both are proven rather than merely unblocked.
+That also gives every other case in `tests/fm-turnend-guard.test.sh`, not only this correction's, a stated result on this host.
+The review commit carrying this paragraph changes documentation only - this entry and two added lines in `docs/turnend-guard.md` naming the block-budget-lock refusal that returns before priming - so it touches no code or test path the run above exercises, and no re-run was taken for it.
 
 The Pi extension-model pull-guard correction (`bin/fm-guard.sh` no longer reports a false watcher-down on a Pi primary during the extension's own watcher hand-off) was verified on 2026-08-13 with the installed ShellCheck 0.11.0 and isolated behavior suites.
 The guard verdict itself reads only state files and process liveness, so the portable suites are the enforcing evidence; `bin/fm-harness.sh`'s Pi marker detection, which selects the model, is exercised in the same suite through `PI_CODING_AGENT`.
