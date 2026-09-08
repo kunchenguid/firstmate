@@ -2325,6 +2325,28 @@ printf 'orphan payload\n'
 SH
 chmod +x "$ORPHAN_STUB"
 
+# The same shape without the spawn churn, for the home that exercises explicit
+# retirement rather than the storm. Retirement refuses instead of signalling
+# when it cannot confirm the runner's identity, that identity is read through
+# `ps`, and the churning stub above starves that read often enough to make a
+# single retirement attempt a race. The storm itself is already covered against
+# the churning stub by the owner-loss reaping above, which asserts the tick log
+# stops, so this home only needs a reparented listener holding a real
+# descendant in its group.
+QUIET_STUB="$TMP_ROOT/quiet-stub.sh"
+cat > "$QUIET_STUB" <<'SH'
+#!/usr/bin/env bash
+marker=$1
+( sleep "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ) &
+printf '%s\n' "$!" > "$marker.descendant"
+while [ ! -e "$marker.trigger" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+  sleep 0.1
+done
+printf 'orphan payload\n'
+SH
+chmod +x "$QUIET_STUB"
+
 # Short enough to observe, and driven through the same environment a real home
 # uses, so the bound under test is the shipped one rather than a test-only path.
 orphan_pe() {  # <home> <command...>
@@ -2348,7 +2370,7 @@ fm_test_track_procevent_home "$HORPHAN"
 HKEEP="$TMP_ROOT/orphan-live-owner"; new_home "$HKEEP"
 fm_test_track_procevent_home "$HKEEP"
 orphan_pe "$HORPHAN" register lavish orphan-src -- "$ORPHAN_STUB" "$TMP_ROOT/orphan-dead" >/dev/null
-orphan_pe "$HKEEP" register lavish keep-src -- "$ORPHAN_STUB" "$TMP_ROOT/orphan-live" >/dev/null
+orphan_pe "$HKEEP" register lavish keep-src -- "$QUIET_STUB" "$TMP_ROOT/orphan-live" >/dev/null
 orphan_pe "$HORPHAN" reconcile >/dev/null
 orphan_pe "$HKEEP" reconcile >/dev/null
 
