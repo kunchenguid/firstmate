@@ -387,15 +387,21 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  [ "$verdict" != send-failed ] || return 2
   case "$verdict" in
-    pending|pending-unproven)
-      retries=$FM_TASK_INBOX_COMMIT_RETRIES
-      case "$retries" in ''|*[!0-9]*|0) retries=3 ;; esac
-      [ "$retries" -gt 1 ] || return 1
-      fm_task_inbox_commit_pending_doorbell "$backend" "$target" "$rec" "$label" "$((retries - 1))" || return 1
+    send-failed)
+      if ! fm_task_inbox_composer_holds_doorbell "$backend" "$target" "$rec" "$label"; then
+        cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+        [ "$cstate" = empty ] && return 2
+        return 1
+      fi
       ;;
+    pending|pending-unproven|unknown) ;;
+    *) return 0 ;;
   esac
+  retries=$FM_TASK_INBOX_COMMIT_RETRIES
+  case "$retries" in ''|*[!0-9]*|0) retries=3 ;; esac
+  [ "$retries" -gt 1 ] || return 1
+  fm_task_inbox_commit_pending_doorbell "$backend" "$target" "$rec" "$label" "$((retries - 1))" || return 1
   return 0
 }
 

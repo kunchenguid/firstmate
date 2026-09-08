@@ -45,6 +45,16 @@ inbox_lib() {  # <state> <function> [args...]
   shift
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
+    if [ -n "${FM_FAKE_SUBMIT_VERDICT:-}" ]; then
+      fm_backend_send_text_submit() {
+        local backend=$1 target=$2 text=$3 settle=$6 label=${7:-}
+        fm_backend_source "$backend" || { printf send-failed; return 0; }
+        fm_backend_tmux_send_literal "$target" "$text" "$label" || { printf send-failed; return 0; }
+        sleep "$settle"
+        fm_backend_send_key "$backend" "$target" Enter "$label" || true
+        printf %s "$FM_FAKE_SUBMIT_VERDICT"
+      }
+    fi
     fn=$2
     shift 2
     "$fn" "$@"
@@ -79,12 +89,31 @@ case "${1:-}" in
       if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
         mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
       fi
+      if [ -n "${FM_FAKE_TMUX_CAPTURE_AFTER_LITERAL:-}" ] && [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
+        cp "$FM_FAKE_TMUX_CAPTURE_AFTER_LITERAL" "$FM_FAKE_TMUX_CAPTURE"
+      fi
     else
       printf '%s\n' "${1:-}" >> "${FM_KEY_LOG:-/dev/null}"
+      if [ "${1:-}" = Enter ] && [ -n "${FM_FAKE_TMUX_FAIL_FIRST_ENTER_FILE:-}" ] \
+        && [ ! -e "$FM_FAKE_TMUX_FAIL_FIRST_ENTER_FILE" ]; then
+        : > "$FM_FAKE_TMUX_FAIL_FIRST_ENTER_FILE"
+        if [ -n "${FM_FAKE_TMUX_CAPTURE_AFTER_FAILED_ENTER:-}" ] && [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
+          cp "$FM_FAKE_TMUX_CAPTURE_AFTER_FAILED_ENTER" "$FM_FAKE_TMUX_CAPTURE"
+        fi
+        exit 1
+      fi
       # A committed Enter clears the composer, exactly as a real one does.
       if [ "${1:-}" = Enter ] && [ -n "${FM_FAKE_TMUX_CAPTURE_AFTER_ENTER:-}" ] \
         && [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
-        cp "$FM_FAKE_TMUX_CAPTURE_AFTER_ENTER" "$FM_FAKE_TMUX_CAPTURE"
+        if [ -n "${FM_FAKE_TMUX_ENTER_COUNT_FILE:-}" ]; then
+          count=$(cat "$FM_FAKE_TMUX_ENTER_COUNT_FILE" 2>/dev/null || printf 0)
+          count=$((count + 1))
+          printf '%s\n' "$count" > "$FM_FAKE_TMUX_ENTER_COUNT_FILE"
+          [ "$count" = "${FM_FAKE_TMUX_CAPTURE_AFTER_ENTER_AT:-1}" ] \
+            && cp "$FM_FAKE_TMUX_CAPTURE_AFTER_ENTER" "$FM_FAKE_TMUX_CAPTURE"
+        else
+          cp "$FM_FAKE_TMUX_CAPTURE_AFTER_ENTER" "$FM_FAKE_TMUX_CAPTURE"
+        fi
       fi
     fi
     exit 0 ;;
@@ -370,6 +399,76 @@ test_ring_stops_enter_retries_when_composer_changes() {
   [ "$(grep -c '^Enter$' "$keylog")" = 1 ] || fail "initial submission must not retry Enter after draft text appears:"$'\n'"$(cat "$keylog")"
   [ "$(wc -l < "$log" | tr -d ' ')" = 1 ] || fail "initial submission must type the doorbell exactly once:"$'\n'"$(cat "$log")"
   pass "inbox: Enter retries stop when the composer content changes"
+}
+
+test_ring_guards_unknown_and_failed_enter_retries() {
+  local dir state rec doorbell log keylog rc
+  dir="$TMP_ROOT/ring-submit-verdicts"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  make_composer_capture "$dir/capture-empty.txt" ""
+  make_composer_capture "$dir/capture-doorbell.txt" "$doorbell"
+  make_composer_capture "$dir/capture-mixed.txt" "$doorbell finish the release notes"
+  log="$dir/send.log"
+  keylog="$dir/key.log"
+
+  cp "$dir/capture-empty.txt" "$dir/capture.txt"
+  : > "$log"; : > "$keylog"; : > "$dir/enter-count"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_LITERAL="$dir/capture-doorbell.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-empty.txt" \
+    FM_FAKE_TMUX_ENTER_COUNT_FILE="$dir/enter-count" FM_FAKE_TMUX_CAPTURE_AFTER_ENTER_AT=2 \
+    FM_FAKE_SUBMIT_VERDICT=unknown FM_TASK_INBOX_COMMIT_SLEEP=0 \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "an unknown verdict with the exact doorbell should retry safely, got $rc"
+  [ "$(grep -c '^Enter$' "$keylog")" = 2 ] || fail "an unknown verdict should get one guarded retry:"$'\n'"$(cat "$keylog")"
+  [ "$(wc -l < "$log" | tr -d ' ')" = 1 ] || fail "an unknown verdict retry must not retype the doorbell"
+
+  cp "$dir/capture-empty.txt" "$dir/capture.txt"
+  : > "$log"; : > "$keylog"; : > "$dir/enter-count"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_LITERAL="$dir/capture-doorbell.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-mixed.txt" \
+    FM_FAKE_TMUX_ENTER_COUNT_FILE="$dir/enter-count" FM_FAKE_TMUX_CAPTURE_AFTER_ENTER_AT=1 \
+    FM_FAKE_SUBMIT_VERDICT=unknown FM_TASK_INBOX_COMMIT_SLEEP=0 \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "an unknown verdict with changed composer text should remain undelivered, got $rc"
+  [ "$(grep -c '^Enter$' "$keylog")" = 1 ] || fail "an unknown verdict must not retry Enter over changed text:"$'\n'"$(cat "$keylog")"
+
+  cp "$dir/capture-empty.txt" "$dir/capture.txt"
+  : > "$log"; : > "$keylog"; rm -f "$dir/failed-enter"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_LITERAL="$dir/capture-doorbell.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-empty.txt" \
+    FM_FAKE_TMUX_FAIL_FIRST_ENTER_FILE="$dir/failed-enter" \
+    FM_FAKE_SUBMIT_VERDICT=send-failed FM_TASK_INBOX_COMMIT_SLEEP=0 \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "a failed first Enter with the exact doorbell should retry safely, got $rc"
+  [ "$(grep -c '^Enter$' "$keylog")" = 2 ] || fail "a failed first Enter should get one guarded retry:"$'\n'"$(cat "$keylog")"
+  [ "$(wc -l < "$log" | tr -d ' ')" = 1 ] || fail "a failed Enter retry must not retype the doorbell"
+
+  cp "$dir/capture-empty.txt" "$dir/capture.txt"
+  : > "$log"; : > "$keylog"; rm -f "$dir/failed-enter"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_LITERAL="$dir/capture-doorbell.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_FAILED_ENTER="$dir/capture-mixed.txt" \
+    FM_FAKE_TMUX_FAIL_FIRST_ENTER_FILE="$dir/failed-enter" \
+    FM_FAKE_SUBMIT_VERDICT=send-failed FM_TASK_INBOX_COMMIT_SLEEP=0 \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "a failed first Enter with changed composer text should remain undelivered, got $rc"
+  [ "$(grep -c '^Enter$' "$keylog")" = 1 ] || fail "a failed first Enter must not retry over changed text:"$'\n'"$(cat "$keylog")"
+  pass "inbox: unknown and failed first Enter retries preserve composer text"
 }
 
 # The other direction, and the one that must never regress: a composer holding
@@ -839,6 +938,7 @@ test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_commits_its_own_swallowed_doorbell
 test_ring_stops_enter_retries_when_composer_changes
+test_ring_guards_unknown_and_failed_enter_retries
 test_ring_never_submits_foreign_composer_text
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
