@@ -44,10 +44,14 @@ GLOBAL_CLEANUP() {
 }
 trap GLOBAL_CLEANUP EXIT
 
+confirm_posture() {  # <home>
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$CONTRACT" confirm >/dev/null 2>&1
+}
+
 # ---------------------------------------------------------------------------
 # UNIT 0: the away-posture record is the entry. `propose` reads the mandate
 # back, `confirm` records it and announces hold-for-return; on Pi the entry
-# ends there, and every daemon path confirms the record before launching.
+# ends there, and every daemon path requires that confirmed record.
 # ---------------------------------------------------------------------------
 unit_propose_confirm_records_the_posture_without_a_daemon() {
   local st out rc
@@ -59,7 +63,7 @@ unit_propose_confirm_records_the_posture_without_a_daemon() {
   rc=$?
   if [ "$rc" -eq 3 ] && [ -f "$st/state/.afk-contract.proposed" ] \
     && printf '%s' "$out" | grep -F '1. merge task fix-windows PR when checks green' >/dev/null \
-    && printf '%s' "$out" | grep -F '2. "merge regardless" - refused: missing when' >/dev/null \
+    && printf '%s' "$out" | grep -F '2. "merge regardless" - refused: missing object' >/dev/null \
     && [ ! -e "$st/state/.afk-contract" ]; then
     pass "propose: the read-back lists accepted and refused clauses and writes only a proposal"
   else
@@ -108,51 +112,41 @@ unit_pi_never_launches_the_daemon() {
   done
 }
 
-unit_daemon_entry_confirms_the_record_first() {
-  local st
+unit_daemon_entry_requires_confirmation() {
+  local st out rc
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-entry-record.XXXXXX")
   mkdir -p "$st/state"
-  # A pending proposal is promoted by the daemon entry; with none, the default
-  # record is written; with a standing record, nothing is rewritten.
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" propose --clause 'merge task a PR when checks green' >/dev/null 2>&1
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
-    && [ -f "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk-contract.proposed" ] && [ -e "$st/state/.afk" ] \
-    && [ "$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" clauses | cut -f2)" = merge ]; then
-    pass "daemon entry: a pending proposal is confirmed into the record before the daemon is prepared"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ -f "$st/state/.afk-contract.proposed" ] && [ ! -e "$st/state/.afk-contract" ] \
+    && [ ! -e "$st/state/.afk" ] && printf '%s' "$out" | grep -F 'a confirmed away-posture record is required' >/dev/null; then
+    pass "daemon entry: a pending proposal cannot bypass captain confirmation"
   else
-    fail "daemon entry: the pending proposal was not confirmed into the record"
+    fail "daemon entry: pending proposal was promoted or refusal was unclear (rc=$rc): $out"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" confirm >/dev/null 2>&1
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+    && [ -e "$st/state/.afk" ]; then
+    pass "daemon entry: an explicitly confirmed record permits lifecycle preparation"
+  else
+    fail "daemon entry: rejected an explicitly confirmed record"
   fi
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
-  rm -rf "$st/state/afk-contracts"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
-    && [ -f "$st/state/.afk-contract" ] && [ -z "$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" clauses)" ]; then
-    pass "daemon entry: with no proposal the default record is written"
-  else
-    fail "daemon entry: the default record was not written"
-  fi
   rm -rf "$st"
 }
 
-unit_failed_daemon_launch_archives_the_record_it_created() {
+unit_failed_daemon_launch_preserves_confirmed_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-failed-record.XXXXXX")
   mkdir -p "$st/state"
-  if ! FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
-    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1 \
-    && [ ! -e "$st/state/.afk-contract" ] && [ -n "$(ls "$st/state/afk-contracts" 2>/dev/null)" ]; then
-    pass "failed start: the record this entry created is archived, not left standing"
-  else
-    fail "failed start: left a posture record standing with no daemon behind it"
-  fi
-  # A record that stood BEFORE the failed launch is not the launch's to archive.
-  rm -rf "$st/state/afk-contracts"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" confirm >/dev/null 2>&1
   if ! FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
     FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1 \
     && [ -f "$st/state/.afk-contract" ] && [ ! -e "$st/state/afk-contracts" ]; then
-    pass "failed start: a record that already stood is preserved"
+    pass "failed start: preserves the pre-confirmed posture record"
   else
-    fail "failed start: a pre-existing posture record was archived by a failed launch"
+    fail "failed start: changed the pre-confirmed posture record"
   fi
   rm -rf "$st"
 }
@@ -161,6 +155,7 @@ unit_stop_archives_the_record_last() {
   local st epoch
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-archive.XXXXXX")
   mkdir -p "$st/state"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" confirm >/dev/null 2>&1
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 || fail "stop archive: native entry failed"
   epoch=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" field entered_epoch)
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 \
@@ -355,6 +350,7 @@ unit_failed_start_rolls_back_state() {
   mkdir -p "$st/state"
   printf 'pending\n' > "$st/state/.subsuper-escalations"
   printf 'wedged\n' > "$st/state/.subsuper-inject-wedged"
+  confirm_posture "$st" || fail "failed start: could not confirm fixture posture"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
     FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1; then
     fail "failed start: unsupported backend unexpectedly succeeded"
@@ -376,6 +372,7 @@ unit_concurrent_start_serialized() {
   tmux new-session -d -s "$cap_session" 2>/dev/null || { fail "concurrent start: captain session creation failed"; rm -rf "$st"; return 0; }
   TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $cap_session"
   cap_pane=$(tmux display-message -p -t "$cap_session" '#{pane_id}')
+  confirm_posture "$st" || fail "concurrent start: could not confirm fixture posture"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$cap_pane" \
     FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start >/dev/null 2>&1 &
   # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
@@ -632,6 +629,7 @@ unit_native_lifecycle() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
+  confirm_posture "$st" || fail "native lifecycle: could not confirm fixture posture"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
     && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ] \
     && [ -e "$st/state/.afk" ] \
@@ -1010,6 +1008,7 @@ e2e_herdr() {
   cap_pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty')
   if [ -z "$cap_ws" ] || [ -z "$cap_pane" ]; then E2E_HERDR_CLEANUP; fail "herdr e2e: could not create captain workspace"; return 0; fi
   target="$SESSION:$cap_pane"
+  confirm_posture "$home_tmp" || fail "herdr e2e: could not confirm fixture posture"
   before=$(fm_backend_herdr_cli "$SESSION" pane list --workspace "$cap_ws" 2>/dev/null | jq --arg t "$cap_tab" '[.result.panes[]?|select(.tab_id==$t)]|length')
   ws_before=$(fm_backend_herdr_cli "$SESSION" workspace list 2>/dev/null | jq '[.result.workspaces[]?]|length')
 
@@ -1051,6 +1050,7 @@ e2e_tmux() {
   tmux new-session -d -s "$cap_session" 2>/dev/null || { fail "tmux e2e: could not create captain session"; rm -rf "$home_tmp"; return 0; }
   TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $cap_session"
   cap_pane=$(tmux display-message -p -t "$cap_session" '#{pane_id}')
+  confirm_posture "$home_tmp" || fail "tmux e2e: could not confirm fixture posture"
   before=$(tmux list-panes -t "$cap_session" | wc -l | tr -d ' ')
 
   FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
@@ -1078,8 +1078,8 @@ e2e_tmux() {
 unit_clear_stale
 unit_propose_confirm_records_the_posture_without_a_daemon
 unit_pi_never_launches_the_daemon
-unit_daemon_entry_confirms_the_record_first
-unit_failed_daemon_launch_archives_the_record_it_created
+unit_daemon_entry_requires_confirmation
+unit_failed_daemon_launch_preserves_confirmed_record
 unit_stop_archives_the_record_last
 unit_relative_paths_are_absolute_before_daemon_launch
 unit_fresh_vs_refresh

@@ -38,7 +38,8 @@
 #       missing: <part - reason>
 # A proposal (state/.afk-contract.proposed) has the same shape without the
 # confirmed fields. Archived records live under state/afk-contracts/ as
-# <entered_epoch>.afk-contract.
+# <entered_epoch>.afk-contract. Durable record identity and unambiguous lookup
+# for same-second records are deferred to phase 4 (fm-afk-clauses-execute-r1).
 #
 # CLAUSE GRAMMAR. One clause per --clause argument, on one line:
 #   <action> <object> when <condition> [stop <condition>]
@@ -147,6 +148,45 @@ fm_afk_contract_oneline() {  # <text>
 
 # --- clause compiler --------------------------------------------------------
 
+fm_afk_contract_object_is_named() {  # <action> <object>
+  local action=$1 object
+  object=$(fm_afk_contract_lower "$2")
+  if [[ "$object" =~ (^|[[:space:]])task[[:space:]]+[^[:space:]]+ ]]; then
+    return 0
+  fi
+  if [[ "$object" =~ (^|[[:space:]])repo[[:space:]]+[^[:space:]]+ ]]; then
+    return 0
+  fi
+  if [[ "$object" =~ (^|[[:space:]])machine[[:space:]]+[^[:space:]]+ ]]; then
+    return 0
+  fi
+  if [[ "$object" =~ ^[^[:space:]].*[[:space:]]run([[:space:]].*)?$ ]]; then
+    return 0
+  fi
+  if [ "$action" = install ] && [[ "$object" =~ [[:space:]]on[[:space:]]+[^[:space:]]+ ]]; then
+    return 0
+  fi
+  return 1
+}
+
+fm_afk_contract_condition_is_verifiable() {  # <condition>
+  local condition lower timestamp
+  condition=$(fm_afk_contract_oneline "$1")
+  lower=$(fm_afk_contract_lower "$condition")
+  case "$lower" in
+    "checks green"|"checks are green") return 0 ;;
+    "red on "?*) return 0 ;;
+    "after clause "[0-9]*)
+      case "${lower#after clause }" in *[!0-9]*) ;; *) return 0 ;; esac ;;
+    "at "*)
+      timestamp=${condition#???}
+      fm_afk_contract_validate_iso "$timestamp" && return 0 ;;
+    *" is red")
+      [ -n "${lower% is red}" ] && return 0 ;;
+  esac
+  [[ "$lower" =~ ^.+[[:space:]](deadlocks|fails|failed|succeeds|succeeded|completes|completed|lands|landed|ships|shipped|finishes|finished|exits|exited|returns|returned|starts|started|stops|stopped)([[:space:]].+)?$ ]]
+}
+
 # Parse one clause into C_ACTION C_OBJECT C_WHEN C_STOP, then validate against
 # the grammar above. On refusal C_MISSING names the part and the reason.
 # <accepted-ids> is a space-separated list of earlier accepted ordinals, for
@@ -190,7 +230,12 @@ fm_afk_contract_clause_compile() {  # <ordinal> <text> <accepted-ids>
   esac
   C_OBJECT=$(fm_afk_contract_oneline "$C_OBJECT")
   rest_lower=$(fm_afk_contract_lower "$rest")
-  case " $rest_lower " in
+  case "$rest_lower" in
+    *" stop")
+      cond_lower=${rest_lower% stop}
+      C_WHEN=${rest:0:${#cond_lower}}
+      C_STOP=
+      ;;
     *" stop "*)
       cond_lower=${rest_lower%% stop *}
       C_WHEN=${rest:0:${#cond_lower}}
@@ -231,6 +276,10 @@ fm_afk_contract_clause_compile() {  # <ordinal> <text> <accepted-ids>
         return 1 ;;
     esac
   done
+  if ! fm_afk_contract_object_is_named "$C_ACTION" "$C_OBJECT"; then
+    C_MISSING="object - no named task, PR role, repo, machine, or run: name the thing to act on"
+    return 1
+  fi
   # when
   if [ -z "$C_WHEN" ]; then
     C_MISSING='when - no verifiable condition: name the check, event, clause, or time'
@@ -244,6 +293,14 @@ fm_afk_contract_clause_compile() {  # <ordinal> <text> <accepted-ids>
         return 1 ;;
     esac
   done
+  if ! fm_afk_contract_condition_is_verifiable "$C_WHEN"; then
+    case "$C_ACTION:$cond_lower" in
+      merge:*red*|merge:*fail*|land:*red*|land:*fail*) ;;
+      *)
+        C_MISSING="when - no verifiable condition: name the check, event, clause, or UTC time"
+        return 1 ;;
+    esac
+  fi
   case "$cond_lower" in
     "after clause "*|*" after clause "*)
       ref=${cond_lower##*after clause }
@@ -285,6 +342,10 @@ fm_afk_contract_clause_compile() {  # <ordinal> <text> <accepted-ids>
     *" stop "*|"stop "*)
       if [ "$C_STOP" = - ]; then
         C_MISSING='stop - "stop" was given with no condition after it'
+        return 1
+      fi
+      if ! fm_afk_contract_condition_is_verifiable "$C_STOP"; then
+        C_MISSING='stop - no verifiable condition: name the check, event, clause, or UTC time'
         return 1
       fi
       ;;

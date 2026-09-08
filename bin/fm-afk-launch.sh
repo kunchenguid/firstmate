@@ -15,9 +15,8 @@
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. Every other harness still runs the daemon
-# for now, so `start` and `start-native` confirm the record first (a pending
-# proposal, or the default no-words record when none exists) and then launch
-# the daemon; a failed daemon launch archives a record this call created.
+# for now, so `start` and `start-native` require the confirmed record before they
+# launch the daemon.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -214,26 +213,17 @@ fm_afk_launch_catchup_pending() {
   return 1
 }
 
-# Make sure the posture record exists before a daemon launches: promote a
-# pending proposal, write the default record when there is none, or refresh
-# nothing when one already stands. FM_AFK_LAUNCH_RECORD_CREATED=1 tells a
-# failed launch to archive what this call created.
-fm_afk_launch_record_ensure() {
-  FM_AFK_LAUNCH_RECORD_CREATED=0
-  if fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
-    [ -f "$(fm_afk_contract_proposal_path "$FM_AFK_LAUNCH_STATE")" ] || return 0
+fm_afk_launch_record_require() {
+  local record
+  record=$(fm_afk_contract_path "$FM_AFK_LAUNCH_STATE")
+  if ! fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
+    fm_afk_launch_log "a confirmed away-posture record is required; run propose and confirm before starting the daemon"
+    return 1
   fi
-  "$FM_AFK_CONTRACT_CMD" confirm || return 1
-  FM_AFK_LAUNCH_RECORD_CREATED=1
-}
-
-fm_afk_launch_record_rollback() {
-  [ "${FM_AFK_LAUNCH_RECORD_CREATED:-0}" -eq 1 ] || return 0
-  if "$FM_AFK_CONTRACT_CMD" archive >/dev/null; then
-    fm_afk_launch_log "archived the away-posture record this failed entry created"
-  else
-    fm_afk_launch_log "could not archive the away-posture record this failed entry created; it still stands"
-  fi
+  fm_afk_contract_validate "$record" 1 || {
+    fm_afk_launch_log "the away-posture record is not confirmed; run confirm before starting the daemon"
+    return 1
+  }
 }
 
 fm_afk_launch_propose() {
@@ -559,15 +549,13 @@ fm_afk_launch_start() {
   local captain_target captain_backend backup artifact had_afk=0 result
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
-  fm_afk_launch_record_ensure || return 1
+  fm_afk_launch_record_require || return 1
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
     fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
-    fm_afk_launch_record_rollback
     return 1; }
   captain_backend=$(discover_supervisor_backend) || {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
-    fm_afk_launch_record_rollback
     return 1; }
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
@@ -621,7 +609,6 @@ fm_afk_launch_start() {
   fi
   if [ "$result" -ne 0 ]; then
     fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
-    fm_afk_launch_record_rollback
   else
     rm -rf "$backup" || result=1
   fi
@@ -633,7 +620,7 @@ fm_afk_launch_start_native() {
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
-  fm_afk_launch_record_ensure || return 1
+  fm_afk_launch_record_require || return 1
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
@@ -664,7 +651,6 @@ fm_afk_launch_start_native() {
   fi
   if [ "$result" -ne 0 ]; then
     fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
-    fm_afk_launch_record_rollback
   else
     rm -rf "$backup" || result=1
   fi

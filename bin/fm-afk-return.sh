@@ -24,11 +24,11 @@
 # `resolved [key=...]`, or explicitly reclassified in the status stream with a
 # durable reason, before an ordinary captain request may proceed.
 # `needs-decision:` is deliberately not part of this blocker gate. The gate
-# keeps that principle and shrinks to what the away session could not fix: an
-# open blocker whose task the away session already escalated to the captain (a
-# captain-verdict outcome row covering the whole status log since the posture
-# was entered) is the captain's call, not firstmate's remediation, so it is
-# listed under "waiting on you" instead of gating ordinary work.
+# keeps every open blocker until that blocker's own resolution is proven.
+# Captain-verdict outcomes are listed under "waiting on you", but cannot exempt
+# a blocker because decision-key provenance is deferred to phase 4
+# (fm-afk-clauses-execute-r1). Away-window attribution uses second-resolution
+# epochs; a durable sequence boundary is deferred to that phase as well.
 #
 # The durable state/.afk-return-catchup file is written BEFORE daemon shutdown,
 # so a crash between stopping, wake presentation, and blocker handling fails
@@ -103,9 +103,8 @@ window_start_epoch() {
   case "$epoch" in ''|*[!0-9]*) printf '' ;; *) printf '%s' "$epoch" ;; esac
 }
 
-# The latest outcome row for <task> at or after <since> with <verdict>, as
-# "<statusEndpoint>\t<summary>"; empty when none. Reads the store through its
-# owner so a malformed store refuses rather than misleads.
+# Reads the store through its owner so a malformed store refuses rather than
+# misleads.
 STORE_ROWS=
 store_rows_load() {  # <since-epoch>
   local since=$1
@@ -118,29 +117,7 @@ store_rows_load() {  # <since-epoch>
     || { STORE_ROWS=; return 1; }
 }
 
-store_latest_for() {  # <task> <verdict> -> "<endpoint>\t<summary>"
-  printf '%s\n' "$STORE_ROWS" | awk -F '\t' -v task="$1" -v verdict="$2" \
-    '$2 == task && $3 == verdict { end = $4; summary = $5 } END { if (end != "") printf "%s\t%s\n", end, summary }'
-}
-
-status_size() {  # <path>
-  LC_ALL=C wc -c < "$1" 2>/dev/null | tr -d '[:space:]'
-}
-
-# 0 when the away session escalated <task> to the captain after reading its
-# whole status log: the newest captain-verdict row since the window opened
-# covers the log's current end.
-session_escalated_to_captain() {  # <task>
-  local task=$1 row endpoint size
-  row=$(store_latest_for "$task" captain)
-  [ -n "$row" ] || return 1
-  endpoint=${row%%$'\t'*}
-  size=$(status_size "$STATE/$task.status")
-  case "$endpoint$size" in *[!0-9]*|'') return 1 ;; esac
-  [ "$endpoint" -ge "$size" ]
-}
-
-scan_open_blockers() {  # -> tab-separated blocker rows; captain-escalated ones go to the brief
+scan_open_blockers() {  # -> tab-separated blocker rows
   local meta id status key verb summary clean_summary
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -151,11 +128,7 @@ scan_open_blockers() {  # -> tab-separated blocker rows; captain-escalated ones 
     while IFS="$(printf '\t')" read -r key verb summary; do
       [ "$verb" = blocked ] || continue
       clean_summary=$(printf '%s' "$summary" | clean_field)
-      if session_escalated_to_captain "$id"; then
-        printf 'escalated\t%s\t%s\t%s\n' "$id" "$key" "$clean_summary"
-      else
-        printf 'blocker\t%s\t%s\t%s\n' "$id" "$key" "$clean_summary"
-      fi
+      printf 'blocker\t%s\t%s\t%s\n' "$id" "$key" "$clean_summary"
     done <<EOF
 $(status_open_decisions "$status")
 EOF
@@ -337,11 +310,6 @@ EOF
     held_err=$(printf '%s' "$held" | head -1 | clean_field)
     printf '  held listing unavailable: %s\n' "$held_err"
   fi
-  while IFS="$(printf '\t')" read -r tag task key summary; do
-    [ "$tag" = escalated ] || continue
-    count=$((count + 1))
-    printf '  - %s [key=%s] blocked, escalated to you by the away session: %s\n' "$task" "$key" "$summary"
-  done < "$blockers"
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     task=$(basename "$meta"); task=${task%.meta}

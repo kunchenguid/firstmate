@@ -61,6 +61,8 @@ test_grammar_refuses_each_missing_part_by_name() {
   compile_refusal 'land task x branch when checks fail' 'when - the failing check is not named' 'red landing without a named check'
   compile_refusal 'rerun task z when after clause 7' "when - 'after clause 7' names this clause or a later one" 'forward clause reference'
   compile_refusal 'merge task x PR when checks green stop' 'stop - "stop" was given with no condition after it' 'empty stop'
+  compile_refusal 'merge PR when checks green' 'object - no named task, PR role, repo, machine, or run' 'unnamed PR'
+  compile_refusal 'merge task x PR when looks okay' 'when - no verifiable condition' 'unverifiable condition'
   compile_refusal 'answer the credential prompt on task q when asked' 'object - the never-set refuses it' 'never-set: credentials'
   compile_refusal 'answer the legal acceptance on task q when asked' 'object - the never-set refuses it' 'never-set: legal'
   compile_refusal 'answer the attended prompt on task q when asked' 'object - the never-set refuses it' 'never-set: attended prompt'
@@ -70,6 +72,8 @@ test_grammar_refuses_each_missing_part_by_name() {
 test_grammar_accepts_the_legal_shapes() {
   compile_accept 'merge task nm-windows-fix-r1 PR when checks green' \
     '1. merge task nm-windows-fix-r1 PR when checks green' 'green merge'
+  compile_accept "merge task x's PR when checks green" \
+    "1. merge task x's PR when checks green" 'possessive PR role'
   compile_accept 'Merge task y PR when red on nm-ci-windows' \
     '1. merge task y PR when red on nm-ci-windows' 'red merge with the failing check named'
   compile_accept 'merge task y PR when even if nm-ci-windows is red stop the captain returns' \
@@ -81,6 +85,21 @@ test_grammar_accepts_the_legal_shapes() {
   compile_accept 'discard the worktree of task w when its rerun fails twice' \
     '1. discard the worktree of task w when its rerun fails twice' 'named discard'
   pass "the legal clause shapes compile and read back as given"
+}
+
+test_grammar_accepts_dependent_legal_shapes() {
+  local home out
+  home=$(make_home dependent-legal)
+  out=$(contract "$home" compile \
+    --clause "merge task x's PR when checks green" \
+    --clause 'prerelease repo no-mistakes when after clause 1' \
+    --clause 'install the prerelease on mini and macbook when after clause 2' \
+    --clause 'rerun task y when after clause 3' 2>&1) \
+    || fail "dependent legal clauses were refused: $out"
+  assert_contains "$out" '2. prerelease repo no-mistakes when after clause 1' 'repo clause'
+  assert_contains "$out" '3. install the prerelease on mini and macbook when after clause 2' 'machine clause'
+  assert_contains "$out" '4. rerun task y when after clause 3' 'rerun clause'
+  pass "dependent repo, machine, and task clauses compile"
 }
 
 test_clause_ids_are_input_ordinals_and_references_bind_to_accepted_clauses() {
@@ -97,7 +116,7 @@ test_clause_ids_are_input_ordinals_and_references_bind_to_accepted_clauses() {
   set -e
   [ "$rc" -eq 3 ] || fail "a mixed compile should exit 3 (rc=$rc): $out"
   assert_contains "$out" '1. merge task a PR when checks green' 'clause 1 accepted'
-  assert_contains "$out" '2. "merge regardless" - refused: missing when - no verifiable condition' 'clause 2 refused for its condition'
+  assert_contains "$out" '2. "merge regardless" - refused: missing object - no named task, PR role, repo, machine, or run' 'clause 2 refused for its unnamed object'
   assert_contains "$out" '3. prerelease repo r when after clause 1' 'clause 3 accepted against clause 1'
   assert_contains "$out" "4. \"install the prerelease on mini when after clause 2\" - refused: missing when - 'after clause 2' names a refused clause" 'clause 4 refused for referencing a refused clause'
   assert_contains "$out" '5. rerun task t when after clause 3' 'clause 5 accepted against clause 3, keeping its input ordinal'
@@ -122,7 +141,7 @@ test_readback_renders_words_verbatim_and_both_lists() {
   assert_contains "$out" '  accepted clauses:' 'accepted list header'
   assert_contains "$out" '    1. merge task nm-windows-fix-r1 PR when checks green' 'accepted clause'
   assert_contains "$out" '  refused clauses:' 'refused list header'
-  assert_contains "$out" '    2. "merge regardless of checks" - refused: missing when' 'refused clause'
+  assert_contains "$out" '    2. "merge regardless of checks" - refused: missing object' 'refused clause'
   assert_contains "$out" 'every clause expires at return' 'the never-set reminder'
   assert_contains "$out" 'recorded clauses are held for the return brief and are not executed by this release' 'the not-executed notice'
   assert_contains "$out" 'Say go to confirm' 'confirmation prompt'
@@ -241,6 +260,7 @@ test_inputs_are_validated() {
 
 test_grammar_refuses_each_missing_part_by_name
 test_grammar_accepts_the_legal_shapes
+test_grammar_accepts_dependent_legal_shapes
 test_clause_ids_are_input_ordinals_and_references_bind_to_accepted_clauses
 test_readback_renders_words_verbatim_and_both_lists
 test_propose_confirm_writes_the_record_and_announces_hold_for_return

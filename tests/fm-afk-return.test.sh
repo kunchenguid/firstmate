@@ -324,9 +324,8 @@ test_return_brief_composes_from_record_store_and_held_set() {
     --clause 'prerelease repo no-mistakes when after clause 1' \
     --clause 'merge everything when regardless' >/dev/null 2>&1 || true
   contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the away-posture record"
-  # Two live blockers: one the away session escalated to the captain after
-  # reading its whole log (a captain-verdict row covering the log), one it never
-  # reached. A third task failed outright.
+  # Two live blockers, one on a task with a captain-verdict outcome and one on a
+  # task with a routine outcome. A third task failed outright.
   printf 'window=synthetic:fm-fix-windows\nbackend=tmux\nkind=ship\n' > "$dir/home/state/fix-windows.meta"
   printf 'blocked [key=token]: firstmate can refresh the token\n' > "$dir/home/state/fix-windows.status"
   printf 'window=synthetic:fm-other\nbackend=tmux\nkind=ship\n' > "$dir/home/state/other.meta"
@@ -366,22 +365,23 @@ test_return_brief_composes_from_record_store_and_held_set() {
   assert_contains "$out" 'merge the windows fix when green, then cut a prerelease' "the captain's verbatim words were not carried into the brief"
   assert_contains "$out" 'fix-windows,queued,task' "the held backlog item was not listed under waiting on you"
   assert_contains "$out" 'awaiting the captain on the merge' "the hold reason was not listed"
-  assert_contains "$out" 'fix-windows [key=token] blocked, escalated to you by the away session' "the escalated blocker was not moved under waiting on you"
   assert_contains "$out" 'other [key=pick] needs your decision: choose the target' "the open decision was not listed under waiting on you"
   assert_contains "$out" 'fix-windows: blocked on a token only the captain holds; held for return' "the captain-verdict outcome was not listed"
+  assert_contains "$out" 'fix-windows [key=token] still blocked, firstmate remediates before ordinary work' "the blocker sharing a task with a captain outcome was exempted"
   assert_contains "$out" 'other [key=dep] still blocked, firstmate remediates before ordinary work' "the unreached blocker was not listed as could-not-fix"
   assert_contains "$out" 'dead: failed: the reproduction never compiled' "the failed task was not listed"
   assert_contains "$out" '1 routine outcome(s) recorded' "the routine outcome count was not reported"
   assert_contains "$out" 'other: resent the steer; worker resumed' "the routine outcome was not listed"
   assert_contains "$out" 'Cost: 2 supervision outcome(s) recorded (1 routine, 1 captain); 3 task(s) live at return.' "the cost line is wrong"
   assert_contains "$out" 'firstmate-actionable blocker: other [key=dep]' "the unreached blocker did not gate"
-  assert_not_contains "$out" 'firstmate-actionable blocker: fix-windows' "a blocker the away session escalated to the captain still gated ordinary work"
+  assert_contains "$out" 'firstmate-actionable blocker: fix-windows [key=token]' "a captain outcome incorrectly exempted an open blocker"
   grep -F "$(printf 'contract\t')" "$gate" >/dev/null || fail "the gate did not retain the posture-record window"
   grep -F "$(printf 'evidence\thealth\t')" "$gate" >/dev/null || fail "the gate did not retain the health snapshot"
 
-  # Remediate the one real blocker; the check re-renders the same brief from the
+  # Remediate both blockers; the check re-renders the same brief from the
   # archived record and clears.
   printf 'resolved [key=dep]: the upstream dependency landed\n' >> "$dir/home/state/other.status"
+  printf 'resolved [key=token]: the token was refreshed\n' >> "$dir/home/state/fix-windows.status"
   second=$(run_return "$dir" check) || fail "the remediated return did not clear: $second"
   assert_contains "$second" '1. merge task fix-windows PR when checks green - recorded, not executed by this release' "check did not re-render the mandate from the archived record"
   assert_contains "$second" 'supervision ran through the away window with no detected gap' "check lost the health snapshot taken at begin"
