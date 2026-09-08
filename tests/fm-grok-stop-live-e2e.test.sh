@@ -147,6 +147,16 @@ EOF
   cat > "$lab/run.sh" <<EOF
 #!/usr/bin/env bash
 set -u
+# MSYS ps rejects -o entirely; the Cygwin procfs pgid file answers for MSYS pids.
+# Without the fallback the recorded child_pgid is empty and every consumer of
+# process.identity reads a group id that was never captured. Inlined rather than
+# shared from the test library because this runs as its own process.
+fixture_pgid() {  # <pid>
+  local out
+  out=\$(ps -o pgid= -p "\$1" 2>/dev/null | tr -d '[:space:]')
+  [ -n "\$out" ] || out=\$(tr -d '[:space:]' 2>/dev/null < "/proc/\$1/pgid")
+  printf '%s' "\$out"
+}
 cd '$lab/project' || exit 70
 env -u TMUX -u TMUX_PANE HOME='$lab/home' GROK_HOME='$lab/grok-home' GROK_AGENT=1 \
   FM_HOME='$lab/fmhome' FM_ROOT_OVERRIDE='$lab/project' FM_GROK_E2E_ROOT='$lab' \
@@ -156,7 +166,7 @@ env -u TMUX -u TMUX_PANE HOME='$lab/home' GROK_HOME='$lab/grok-home' GROK_AGENT=
     > '$lab/outer.json' 2> '$lab/outer.err' &
 child=\$!
 printf 'child_pid=%s\n' "\$child" > '$lab/process.identity'
-pgid=\$(ps -o pgid= -p "\$child" 2>/dev/null | tr -d ' ')
+pgid=\$(fixture_pgid "\$child")
 printf 'child_pgid=%s\n' "\$pgid" >> '$lab/process.identity'
 wait "\$child"; rc=\$?
 printf 'rc=%s\n' "\$rc" > '$lab/done'

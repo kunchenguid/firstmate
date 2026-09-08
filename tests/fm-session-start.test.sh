@@ -246,7 +246,11 @@ case "$*" in
     ;;
   *"ppid="*)
     [ -n "${FM_FAKE_HARNESS_PID:-}" ] || exit 1
-    /bin/ps -o ppid= -p "$pid"
+    # This shim IS `ps` on PATH, so the delegation and its MSYS fallback both
+    # name /bin/ps and the procfs directly rather than recursing into itself.
+    out=$(/bin/ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$out" ] || out=$(tr -d '[:space:]' 2>/dev/null < "/proc/$pid/ppid")
+    printf '%s\n' "$out"
     ;;
 esac
 exit 1
@@ -2059,7 +2063,13 @@ case "$*" in
     if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then printf '%s\n' claude
     else printf '%s\n' bash; fi
     ;;
-  *"ppid="*) /bin/ps -o ppid= -p "$pid" ;;
+  *"ppid="*)
+    # This shim IS `ps` on PATH; MSYS ps rejects -o, so fall back to procfs here
+    # rather than recursing into this same script.
+    out=$(/bin/ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$out" ] || out=$(tr -d '[:space:]' 2>/dev/null < "/proc/$pid/ppid")
+    printf '%s\n' "$out"
+    ;;
   *) exit 1 ;;
 esac
 SH

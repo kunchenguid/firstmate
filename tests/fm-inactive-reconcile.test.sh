@@ -114,6 +114,36 @@ run_report() { # <home> <child>
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" report "$child"
 }
 
+# Reconciling one child costs a state read, a durable record write, and a
+# wake-queue append. That cost is host-dependent - process creation on Windows
+# is an order of magnitude dearer than on Linux - and a budget smaller than it
+# cuts every scan short before a single child finishes, leaving nothing for a
+# later scan to resume from. The bounded-scan tests below therefore derive their
+# budget from the measured cost instead of hardcoding a constant that only holds
+# on the machine it was written on. The probe itself runs at the maximum budget
+# so the measurement is never the thing truncating the scan it is timing.
+measure_scan_budget() {
+  local started elapsed
+  make_world budget-probe
+  write_child "$MAIN" probe 'done: green'
+  started=$(date +%s)
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=30 FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  elapsed=$(( $(date +%s) - started ))
+  grep -Fq 'child=probe state=done' "$MAIN/state/.wake-queue" \
+    || fail "scan budget probe did not reconcile its single child"
+  # Headroom for the next scan's own fixed invocation cost and for scheduling
+  # jitter; the floor keeps a fast host from deriving a budget so tight that
+  # jitter alone truncates a pass that was meant to complete.
+  SCAN_BUDGET=$((elapsed + 3))
+  [ "$SCAN_BUDGET" -ge 4 ] || SCAN_BUDGET=4
+  # The stalled-read fixture below sleeps 30 seconds and the helper rejects a
+  # budget above 30. A budget close to either bound would stop proving that the
+  # scan gives up at its own deadline rather than because the fixture ended, so
+  # refuse loudly instead of running a test that no longer tests anything.
+  [ "$SCAN_BUDGET" -le 20 ] \
+    || fail "one child costs ${elapsed}s here; no scan budget both fits it and stays under the 30s stall"
+}
+
 wake_count() { # <home> <key prefix>
   grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
 }
@@ -692,13 +722,19 @@ fi
 SH
   chmod +x "$WORLD/fakebin/fm-crew-state.sh"
 
+  # The fixture stalls for 30 seconds, which is longer than any budget this
+  # helper accepts, so the scan is still cut short by its own deadline rather
+  # than by the stall ending. The bound is the budget plus the one-second
+  # process-group backstop plus jitter, not a constant, because the budget is
+  # now derived from the host's measured per-child cost.
   started=$(date +%s)
-  FM_INACTIVE_RECONCILE_BUDGET_SECS=1 run_reconcile "$MAIN" --startup
+  FM_INACTIVE_RECONCILE_BUDGET_SECS="$SCAN_BUDGET" run_reconcile "$MAIN" --startup
   elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -le 3 ] || fail "stalled state read exceeded aggregate scan budget (${elapsed}s)"
+  [ "$elapsed" -le $((SCAN_BUDGET + 3)) ] \
+    || fail "stalled state read exceeded aggregate scan budget (${elapsed}s)"
 
   write_child "$MAIN" b 'done: green'
-  FM_INACTIVE_RECONCILE_BUDGET_SECS=1 run_reconcile "$MAIN" --startup
+  FM_INACTIVE_RECONCILE_BUDGET_SECS="$SCAN_BUDGET" run_reconcile "$MAIN" --startup
   grep -Fq 'child=b state=done' "$MAIN/state/.wake-queue" \
     || fail "next bounded scan did not resume with the following child"
   pass "stalled state reads are bounded without starving later children"
@@ -718,14 +754,21 @@ test_full_scan_budget_includes_wake_lock_wait() {
   while [ "$i" -lt 30 ] && [ ! -e "$WORLD/lock-ready" ]; do sleep 0.1; i=$((i + 1)); done
   [ -e "$WORLD/lock-ready" ] || fail "wake lock holder did not start"
 
+  # The budget must cover a whole child, or the backstop kills the scan before
+  # it ever reaches the wake queue and the lock wait is never exercised at all.
   started=$(date +%s)
-  FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  FM_INACTIVE_RECONCILE_BUDGET_SECS="$SCAN_BUDGET" FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   elapsed=$(( $(date +%s) - started ))
   reap "$holder"
   # The unbounded wake-lock wait is ended by the process-group backstop, which
   # fires one second after the budget; the bound proves the scan cannot ride
   # the 30-second lock hold.
-  [ "$elapsed" -le 4 ] || fail "wake lock wait exceeded aggregate scan budget (${elapsed}s)"
+  [ "$elapsed" -le $((SCAN_BUDGET + 3)) ] || fail "wake lock wait exceeded aggregate scan budget (${elapsed}s)"
+  # An unblocked child finishes in well under the budget, so consuming the whole
+  # budget is what proves the scan actually reached the durable wake operation
+  # and blocked there. Without this the test would also pass if the scan never
+  # got that far.
+  [ "$elapsed" -ge "$SCAN_BUDGET" ] || fail "scan finished before it reached the wake lock (${elapsed}s)"
   pass "aggregate scan budget includes durable wake operations"
 }
 
@@ -785,6 +828,9 @@ test_reconciliation_never_calls_forge() {
   [ ! -s "$WORLD/forge.log" ] || fail "reconciliation invoked a forge command: $(cat "$WORLD/forge.log")"
   pass "reconciliation makes zero forge or PR API calls"
 }
+
+# Derives SCAN_BUDGET for the two bounded-scan tests below; must run first.
+measure_scan_budget
 
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line

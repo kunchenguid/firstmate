@@ -189,24 +189,42 @@ test_guard_warnings() {
 }
 
 test_lock_single_winner_under_concurrency() {
-  local dir state lockdir marker i pids pid wins
+  local dir state lockdir marker attempts contenders i pids pid wins
   dir=$(make_case lock-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  # Every contender records that it finished its attempt, and the winner holds
+  # the lock until all of them have. A fixed sleep cannot express that: under
+  # Git Bash/MSYS a backgrounded shell can begin executing well after `&`
+  # returns (starting 40 of them costs about 1.5s), so a one-second hold lets
+  # the winner exit before the last contender even runs. A late contender then
+  # CORRECTLY reclaims a dead-pid lock and scores as a second "winner" for
+  # behaving exactly as designed, which says nothing about mutual exclusion.
+  attempts="$dir/attempts"
+  contenders=40
   : > "$marker"
+  : > "$attempts"
   pids=
   i=1
-  while [ "$i" -le 40 ]; do
+  while [ "$i" -le "$contenders" ]; do
     FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
+      won=0
       if fm_lock_try_acquire "$2"; then
+        won=1
         printf "%s\n" "$$" >> "$3"
-        # Stay alive so the held lock names a live pid for the whole window;
-        # otherwise a late contender could legitimately reclaim a dead-pid lock.
-        sleep 1
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+      printf "x\n" >> "$4"
+      if [ "$won" = 1 ]; then
+        n=0
+        while [ "$(wc -l < "$4" 2>/dev/null || echo 0)" -lt "$5" ] && [ "$n" -lt 900 ]; do
+          sleep 0.1
+          n=$((n + 1))
+        done
+        sleep 0.5
+      fi
+    ' _ "$LIB" "$lockdir" "$marker" "$attempts" "$contenders" &
     pids="$pids $!"
     i=$((i + 1))
   done
@@ -434,7 +452,7 @@ test_watch_restart_rejects_reused_pid() {
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
   pid=$!
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$pid"; do
+  while [ "$i" -lt $((80 * FM_TEST_PROC_WAIT_SCALE)) ] && is_live_non_zombie "$pid"; do
     sleep 0.1
     i=$((i + 1))
   done
@@ -716,7 +734,7 @@ test_arm_hup_cleans_child_and_temp_output() {
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do
+  while [ "$i" -lt $((80 * FM_TEST_PROC_WAIT_SCALE)) ] && is_live_non_zombie "$lock_pid"; do
     sleep 0.1
     i=$((i + 1))
   done

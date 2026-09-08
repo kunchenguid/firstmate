@@ -101,9 +101,7 @@ assert_contains "$out" "armed: when-arm-test" "arm reports the canonical source 
 assert_present "$H/state/when/when-arm-test.spec" "arm writes the private spec"
 assert_present "$H/state/when/when-arm-test.trust" "arm writes the trust binding"
 assert_present "$H/state/procevent/when-arm-test.source" "arm registers the process-event source"
-mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
-  '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$H/state/when/when-arm-test.spec")
-assert_contains "$mode" 600 "the spec is private"
+fm_test_assert_private_mode "$H/state/when/when-arm-test.spec" 600 "the spec is private"
 if when "$H" arm arm-test --condition true --action true 2>"$TMP_ROOT/dup.err"; then
   fail "re-arming an existing watch must be refused"
 fi
@@ -300,11 +298,11 @@ assert_grep 'action_exit: 124' "$RESULT" "the action timeout uses the shared tim
 wait_for_file "$DESCENDANT_PID" || fail "the timeout fixture did not record its descendant"
 descendant_pid=$(cat "$DESCENDANT_PID")
 for _ in $(seq 1 20); do
-  descendant_state=$(ps -o stat= -p "$descendant_pid" 2>/dev/null | tr -d ' ' || true)
+  descendant_state=$(fm_test_pstate "$descendant_pid" || true)
   case "$descendant_state" in ''|Z*) break ;; esac
   sleep 0.1
 done
-descendant_state=$(ps -o stat= -p "$descendant_pid" 2>/dev/null | tr -d ' ' || true)
+descendant_state=$(fm_test_pstate "$descendant_pid" || true)
 case "$descendant_state" in
   ''|Z*) ;;
   *)

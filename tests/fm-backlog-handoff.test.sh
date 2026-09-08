@@ -276,6 +276,16 @@ EOF
   fm_fake_crash_injector "$fakebin"
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
+# MSYS ps rejects -o entirely, so field selection yields nothing there and the
+# kill below would target an empty pid instead of crashing the handoff. The
+# Cygwin procfs answers for MSYS pids. Inlined rather than shared from the test
+# library because this runs as its own process, not in the sourcing shell.
+fixture_ppid() {  # <pid>
+  local out
+  out=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$out" ] || out=$(tr -d '[:space:]' 2>/dev/null < "/proc/$1/ppid")
+  printf '%s' "$out"
+}
 "$FM_REAL_TASKS_AXI" "$@"
 rc=$?
 case " $* " in
@@ -283,7 +293,7 @@ case " $* " in
     if [ "$rc" -eq 0 ] && [ "${1:-}" = mv ]; then
       # Crash AFTER the durable move lands, and only return once the handoff is
       # observably gone so it cannot run its own post-move bookkeeping.
-      handoff_pid=$(ps -o ppid= -p "$PPID" | tr -d '[:space:]')
+      handoff_pid=$(fixture_ppid "$PPID")
       fm-crash-inject "$handoff_pid" || exit 1
     fi
     ;;
@@ -352,13 +362,25 @@ EOF
   fm_fake_crash_injector "$fakebin"
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
+# MSYS ps rejects -o entirely, so field selection yields nothing there and the
+# kill below would target an empty pid instead of crashing the handoff. The
+# Cygwin procfs answers for MSYS pids. Inlined rather than shared from the test
+# library because this runs as its own process, not in the sourcing shell.
+fixture_ppid() {  # <pid>
+  local out
+  out=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$out" ] || out=$(tr -d '[:space:]' 2>/dev/null < "/proc/$1/ppid")
+  printf '%s' "$out"
+}
 case " $* " in
   *" --file "*" --to "*)
     if [ "${1:-}" = mv ]; then
       # Crash BEFORE the move and never run it. This fake outlives the handoff
       # it kills, so delegating to the real binary at all - even after a pause -
-      # lets an orphan complete the move the case requires left undone.
-      handoff_pid=$(ps -o ppid= -p "$PPID" | tr -d '[:space:]')
+      # lets an orphan complete the move the case requires left undone. The
+      # explicit exit below is what keeps it from falling through to the
+      # passthrough exec.
+      handoff_pid=$(fixture_ppid "$PPID")
       fm-crash-inject "$handoff_pid" || exit 1
       exit 137
     fi

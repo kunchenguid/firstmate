@@ -53,6 +53,13 @@ unset FM_TASK_ID
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The one owner of "does an exact mode mean anything here", shared with
+# production. Sourced here rather than per-suite so fm_test_assert_private_mode
+# below asks the same question fm_pr_private_file_valid does, from the same
+# code. The library has no side effects on source.
+# shellcheck source=bin/fm-platform-lib.sh disable=SC1091
+. "$ROOT/bin/fm-platform-lib.sh"
+
 # --- reporters --------------------------------------------------------------
 
 fail() {
@@ -141,19 +148,34 @@ fm_test_reap_orphans() {
   now=$(date +%s)
   for marker in "${TMPDIR:-/tmp}"/fm-*/.fm-test-fixture; do
     [ -e "$marker" ] || continue
+    # Both gates below are side-effect-free reads ANDed together, so their order
+    # cannot change which markers are reaped - but it dominates what sourcing
+    # this file costs. The age gate is one stat; the ownership gate spawns a
+    # bash per marker to source a 1500-line library, which under MSYS's emulated
+    # fork costs seconds rather than milliseconds. Ordering age first means a
+    # marker too young to reap - which is every marker belonging to a concurrent
+    # or recent run - is discarded before anything expensive runs.
+    mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
+    [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     owner_pid=$(sed -n '1p' "$marker" 2>/dev/null) || owner_pid=
     owner_identity=$(sed -n '2,$p' "$marker" 2>/dev/null) || owner_identity=
     case "$owner_pid" in
       '' | *[!0-9]*) ;;
       *)
-        current_identity=$(fm_test_pid_identity "$owner_pid" 2>/dev/null) || current_identity=
-        if [ -n "$owner_identity" ] && [ "$current_identity" = "$owner_identity" ]; then
-          continue
+        # A pid the kernel no longer knows cannot match the recorded identity:
+        # fm_pid_identity finds no process to describe, yields nothing, and both
+        # branches below then fall through to the reap. Asking kill -0 first
+        # reaches that same verdict for the price of a builtin, and it skips the
+        # per-marker library source in precisely the case this function exists to
+        # clean up, where the run that left the marker is already gone.
+        if kill -0 "$owner_pid" 2>/dev/null; then
+          current_identity=$(fm_test_pid_identity "$owner_pid" 2>/dev/null) || current_identity=
+          if [ -n "$owner_identity" ] && [ "$current_identity" = "$owner_identity" ]; then
+            continue
+          fi
         fi
         ;;
     esac
-    mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
-    [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
     if [ -d "$dir" ] && [ ! -L "$dir" ]; then
       find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
@@ -168,6 +190,94 @@ fm_test_reap_orphans() {
 if [ "${FM_TEST_SKIP_ORPHAN_REAP:-0}" != 1 ]; then
   fm_test_reap_orphans
 fi
+
+# --- process field reads ----------------------------------------------------
+#
+# MSYS ps rejects field selection outright - `ps -o ppid= -p <pid>` exits 1 with
+# "unknown option -- o" and prints nothing - so every predicate built on it reads
+# empty there and silently concludes whatever empty happens to mean. The Cygwin
+# procfs answers for MSYS pids, so these read it as a fallback. Field selection
+# is still attempted first, so a POSIX host never reaches the fallback and its
+# behavior is unchanged.
+#
+# The optional ps-command argument exists for the call sites that deliberately
+# invoke /bin/ps to bypass a fake ps shim on PATH; it keeps that bypass intact.
+#
+# These are standalone-script-unfriendly by construction: a helper defined in the
+# sourcing shell cannot reach a fixture written to disk and executed as its own
+# process, so such fixtures inline the same shape instead of calling these.
+
+fm_test_ppid() {  # <pid> [ps-command]
+  local out
+  out=$("${2:-ps}" -o ppid= -p "$1" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$out" ] || out=$(tr -d '[:space:]' 2>/dev/null < "/proc/$1/ppid")
+  printf '%s' "$out"
+}
+
+fm_test_pgid() {  # <pid> [ps-command]
+  local out
+  out=$("${2:-ps}" -o pgid= -p "$1" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$out" ] || out=$(tr -d '[:space:]' 2>/dev/null < "/proc/$1/pgid")
+  printf '%s' "$out"
+}
+
+# Empty means "no such process" and callers depend on that, so a dead pid must
+# stay empty rather than gain a placeholder. Procfs delivers that for free: the
+# whole /proc/<pid> directory is gone once the process is. The comm field is
+# parenthesized and may itself contain spaces, so the state letter is taken as
+# the first field after the last ") " rather than by a positional cut.
+fm_test_pstate() {  # <pid> [ps-command]
+  local out
+  out=$("${2:-ps}" -o stat= -p "$1" 2>/dev/null | tr -d '[:space:]')
+  if [ -z "$out" ] && [ -r "/proc/$1/stat" ]; then
+    out=$(cat "/proc/$1/stat" 2>/dev/null)
+    out=${out##*') '}
+    out=${out%% *}
+  fi
+  printf '%s' "$out"
+}
+
+# --- private-artifact assertion ---------------------------------------------
+#
+# fm_test_assert_private_mode <path> <expected-mode> <label> [file|dir]
+#
+# The test-side twin of fm_pr_private_file_valid: assert the exact mode where a
+# mode can actually be stored, and assert the structure that still holds where
+# it cannot. On a Git Bash noacl mount chmod is a silent no-op - a file chmod
+# 0600 reads back 644 and a directory chmod 0700 reads back 755 - so an exact
+# 0600/0700 equality there fails for a reason that has nothing to do with the
+# behavior under test. (The read-only bit IS stored: chmod 0444 reads back 444
+# and blocks writes, so a 0444 contract is real everywhere and must NOT come
+# through here.)
+#
+# The kind argument is deliberately explicit rather than inferred. Inferring it
+# from the path would make the structural branch assert only "it is whatever it
+# happens to be", which can never fail - exactly the vacuous green tick this
+# helper exists to avoid - and the expected mode is no signal either, since
+# 0700 is both a private directory and a private executable shim.
+#
+# Where the mode is unstorable this prints its own weakened ok line. A silent
+# pass would let a reader scanning the log read the suite's ordinary tick as
+# proof of privacy; the line says in words which weaker property was checked.
+fm_test_assert_private_mode() {  # <path> <expected-mode> <label> [file|dir]
+  local path=$1 expected=$2 label=$3 kind=${4:-file} actual
+  # Symlink first: a link to a real file passes -f, and a dangling one would
+  # otherwise be reported as merely missing.
+  [ ! -L "$path" ] || fail "$label: $path is a symlink"
+  [ -e "$path" ] || fail "$label: $path does not exist"
+  case "$kind" in
+    file) [ -f "$path" ] || fail "$label: $path is not a regular file" ;;
+    dir) [ -d "$path" ] || fail "$label: $path is not a directory" ;;
+    *) fail "fm_test_assert_private_mode: unknown kind '$kind'" ;;
+  esac
+  if fm_platform_fs_honors_modes "$path"; then
+    actual=$(fm_platform_file_mode "$path")
+    [ "$actual" = "$expected" ] \
+      || fail "$label: expected mode $expected, got ${actual:-<unreadable>}"
+    return 0
+  fi
+  printf 'ok - %s (mode unstorable on this filesystem; structure checked)\n' "$label"
+}
 
 # --- live-capability gate ---------------------------------------------------
 #
@@ -316,7 +426,18 @@ esac
 kill -KILL "$target" 2>/dev/null || true
 waited=0
 while [ "$waited" -lt 600 ]; do
-  case "$(ps -o state= -p "$target" 2>/dev/null | tr -d '[:space:]')" in
+  # MSYS ps rejects -o outright, so field selection reads empty there and an
+  # empty read would be mistaken for "the target is gone". The Cygwin procfs
+  # answers for MSYS pids; /proc/<pid> disappears with the process, so an
+  # unreadable stat file is the real "gone". Same shape as fm_test_pstate,
+  # inlined because this shim runs as its own process.
+  state=$(ps -o state= -p "$target" 2>/dev/null | tr -d '[:space:]')
+  if [ -z "$state" ] && [ -r "/proc/$target/stat" ]; then
+    state=$(cat "/proc/$target/stat" 2>/dev/null)
+    state=${state##*') '}
+    state=${state%% *}
+  fi
+  case "$state" in
     ''|Z*) exit 0 ;;
   esac
   waited=$((waited + 1))
