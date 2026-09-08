@@ -880,8 +880,9 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     # a compaction ring, not just the sweep itself) that must not trust a
     # generation-time snapshot, since config/idle-compact can be added or
     # removed at any point afterward. Exit 0 and print the threshold minutes
-    # when enabled; exit 1 with no output otherwise (absent, empty-invalid,
-    # non-numeric, or zero) - the same validation fm_idle_compact_threshold_minutes
+    # when enabled; exit 1 with no output otherwise (absent, invalid/non-
+    # numeric, or zero - an empty-but-present file is valid, not a disabling
+    # case) - the same validation fm_idle_compact_threshold_minutes
     # already owns, so this never duplicates that logic.
     enabled) fm_idle_compact_threshold_minutes "$CONFIG" ;;
     *)

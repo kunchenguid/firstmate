@@ -545,9 +545,15 @@ test_no_mistakes_dod_checks_idle_compact_live_not_at_generation_time() {
     "no-mistakes DOD must gate the declared-state pause on the live check, not on generation-time state"
   assert_grep "If not armed, start \`no-mistakes axi run\` yourself" "$brief_with" \
     "no-mistakes DOD must tell the worker to drive no-mistakes immediately when the live check reports not armed"
-  assert_grep "Bounded fallback: if 60 minutes pass with no ring" "$brief_with" \
+  assert_grep "You never schedule your own wake for this" "$brief_with" \
+    "no-mistakes DOD must make explicit a stopped worker cannot self-time its own wait"
+  assert_grep "Bounded fallback, applied only when you are ever resumed while still in this paused state" "$brief_with" \
+    "no-mistakes DOD must evaluate the bounded fallback only on an actual re-wake, never on a self-scheduled timer"
+  assert_grep "compare now to the status file's own mtime for the \`paused: awaiting compaction before validation\` line" "$brief_with" \
+    "no-mistakes DOD must measure elapsed time against the declared status line's own timestamp, not a countdown the worker runs itself"
+  assert_grep "if more than 60 minutes have passed with no ring, re-run" "$brief_with" \
     "no-mistakes DOD must bound how long a worker waits, in case idle-compact is disarmed while it is already waiting"
-  assert_grep "your wait passes 90 minutes regardless of that check, stop waiting and start \`no-mistakes axi run\` yourself" "$brief_with" \
+  assert_grep "or more than 90 minutes have passed regardless of that check, stop waiting and start \`no-mistakes axi run\` yourself" "$brief_with" \
     "no-mistakes DOD must give a worker an unconditional escape from an indefinite wait"
 
   pass "fm-brief.sh: no-mistakes DOD checks idle-compact live at wait time, never at brief-generation time"
