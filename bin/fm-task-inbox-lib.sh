@@ -39,7 +39,8 @@
 #                              (the session and the away daemon)
 #   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
 #   <task>.inbox/.defer-state  lifecycle-deferral horizon, held OUTSIDE the
-#                              ladder: "<msg>\t<first-defer-epoch>\t<escalated|>"
+#                              ladder: "<msg>\t<first>\t<last>\t<escalated|>",
+#                              the span of CONSECUTIVELY OBSERVED deferrals
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
 #
@@ -72,9 +73,16 @@
 #
 # Lifecycle-deferral horizon (fm_task_inbox_defer_action): a ring the task's
 # lifecycle lock deferred spends no ladder budget, so it needs its own bound.
-# The first deferral of a message records an epoch, and once deferrals have
-# spanned FM_TASK_INBOX_DEFER_HORIZON_SECS the caller surfaces the record as an
-# ordinary stale wake exactly once, under the same wake-before-marker ordering.
+# The horizon measures only CONTINUOUSLY OBSERVED deferral: each observation
+# records its own epoch, and the span restarts whenever the previous observation
+# is not adjacent - a caller that polled and did NOT observe a deferral breaks
+# the span through fm_task_inbox_clear_defer, and a gap wider than the caller's
+# stated observation cadence breaks it here. Time in which the doorbell was
+# never attempted at all - a busy worker, a stopped watcher - therefore never
+# accumulates, so a later brief lock can never be reported as a long-held one.
+# Once continuously observed deferrals have spanned
+# FM_TASK_INBOX_DEFER_HORIZON_SECS the caller surfaces the record as an ordinary
+# stale wake exactly once, under the same wake-before-marker ordering.
 # That escalation deliberately writes no `.escalated` marker: unlike a dead
 # endpoint, this worker was never read at all, so the steer stays pending and is
 # rung normally on the first poll after the lifecycle lock is released.
@@ -90,7 +98,8 @@
 #   FM_TASK_INBOX_GRACE_SECS   default 90; delivery-attempt grace and spacing
 #   FM_TASK_INBOX_RING_MAX     default 3; delivery attempts before escalation
 #   FM_TASK_INBOX_DEFER_HORIZON_SECS  default grace * (ring max + 2); how long
-#                              lifecycle deferrals may span before one stale wake
+#                              continuously observed lifecycle deferrals may span
+#                              before one stale wake
 
 _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Both dependencies are canonical lint roots in their own right. Keep them as
@@ -105,6 +114,10 @@ FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
 FM_TASK_INBOX_RING_MAX_DEFAULT=3
 FM_TASK_INBOX_LOCK_WAIT_DEFAULT=5
+# Widest gap between two deferral observations that still counts as continuous
+# when the caller states no cadence of its own. Callers that poll on a known
+# interval pass it instead, because only they know how often they look.
+FM_TASK_INBOX_DEFER_GAP_DEFAULT=60
 
 fm_task_inbox_grace_secs() {
   local g=${FM_TASK_INBOX_GRACE_SECS:-$FM_TASK_INBOX_GRACE_DEFAULT}
@@ -493,36 +506,42 @@ EOF
     return 1
   fi
   # An attempt reached the endpoint, so no lifecycle deferral is outstanding.
-  rm -f "$dir/.defer-state" 2>/dev/null || true
+  fm_task_inbox_clear_defer "$1" "$2"
 }
 
 # Record one lifecycle deferral (a ring the task's control lock refused) and
 # report whether its bounded horizon is now spent. Prints exactly one of:
 #   wait       inside the horizon, or already surfaced once for this message
 #   escalate   the horizon is spent and this is the first poll to see that
+# <max-gap> is the caller's own observation cadence: two deferrals further apart
+# than that were not observed continuously, so the span restarts at this one
+# rather than counting time nobody watched.
 # Failure means the horizon itself could not be persisted while the record
 # stays unhandled - the deferral cannot be bounded - and the caller surfaces
 # that instead of deferring silently forever; a concurrently removed inbox is a
 # quiet no-op. This never touches the re-ring ladder: nothing was typed and
 # nothing about the worker was read.
-fm_task_inbox_defer_action() {  # <state-dir> <task-id> <record-path>
-  local dir base line rec_base first flag now horizon
+fm_task_inbox_defer_action() {  # <state-dir> <task-id> <record-path> [max-gap]
+  local dir base line rec_base first last flag now horizon gap=${4:-}
   dir=$(fm_task_inbox_dir "$1" "$2")
   base=${3##*/}
   now=$(date +%s)
+  case "$gap" in ''|*[!0-9]*) gap=$FM_TASK_INBOX_DEFER_GAP_DEFAULT ;; esac
   line=$(cat "$dir/.defer-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base first flag <<EOF
+  IFS=$(printf '\t') read -r rec_base first last flag <<EOF
 $line
 EOF
   case "$first" in ''|*[!0-9]*) first=0 ;; esac
-  if [ "$rec_base" != "$base" ] || [ "$first" -eq 0 ]; then
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  [ "$flag" = escalated ] || flag=
+  if [ "$rec_base" != "$base" ] || [ "$first" -eq 0 ] || [ "$((now - last))" -gt "$gap" ]; then
     first=$now
     flag=
+  fi
+  [ -d "$dir" ] || { printf 'wait'; return 0; }
+  if ! { printf '%s\t%s\t%s\t%s\n' "$base" "$first" "$now" "$flag" > "$dir/.defer-state"; } 2>/dev/null; then
     [ -d "$dir" ] || { printf 'wait'; return 0; }
-    if ! { printf '%s\t%s\t%s\n' "$base" "$first" "" > "$dir/.defer-state"; } 2>/dev/null; then
-      [ -d "$dir" ] || { printf 'wait'; return 0; }
-      return 1
-    fi
+    return 1
   fi
   horizon=$(fm_task_inbox_defer_horizon_secs)
   if [ "$flag" != escalated ] && [ "$((now - first))" -ge "$horizon" ]; then
@@ -532,23 +551,40 @@ EOF
   printf 'wait'
 }
 
+# End the current deferral span for <task>: this poll did not positively observe
+# the doorbell being deferred by the task's lifecycle lock, so nothing about a
+# held lock was learned and the span that was accumulating is over. A later
+# deferral starts its own span rather than inheriting time the worker spent
+# busy, unpolled, or already served. A missing inbox or state is a no-op.
+fm_task_inbox_clear_defer() {  # <state-dir> <task-id>
+  local dir
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  rm -f "$dir/.defer-state" 2>/dev/null || true
+}
+
 # Mark this message's lifecycle deferral as surfaced, after its stale wake is
 # durably queued, so later deferrals of the same message stay quiet. The
 # message itself is deliberately NOT marked escalated: it was never delivered
 # and never read, so the ordinary ladder must still ring it once control
 # releases.
 fm_task_inbox_record_defer_escalated() {  # <state-dir> <task-id> <record-path>
-  local dir base line rec_base first _
+  local dir base line rec_base first last now
   dir=$(fm_task_inbox_dir "$1" "$2")
   base=${3##*/}
+  now=$(date +%s)
   line=$(cat "$dir/.defer-state" 2>/dev/null || true)
-  IFS=$(printf '\t') read -r rec_base first _ <<EOF
+  IFS=$(printf '\t') read -r rec_base first last <<EOF
 $line
 EOF
   case "$first" in ''|*[!0-9]*) first=0 ;; esac
-  [ "$rec_base" = "$base" ] && [ "$first" -gt 0 ] || first=$(date +%s)
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  if [ "$rec_base" != "$base" ] || [ "$first" -eq 0 ]; then
+    first=$now
+    last=$now
+  fi
+  [ "$last" -gt 0 ] || last=$now
   [ -d "$dir" ] || return 0
-  if ! { printf '%s\t%s\t%s\n' "$base" "$first" escalated > "$dir/.defer-state"; } 2>/dev/null; then
+  if ! { printf '%s\t%s\t%s\t%s\n' "$base" "$first" "$last" escalated > "$dir/.defer-state"; } 2>/dev/null; then
     [ -d "$dir" ] || return 0
     return 1
   fi

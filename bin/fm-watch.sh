@@ -167,6 +167,12 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
+# Widest gap between two steer-deferral observations that still counts as one
+# continuous span (bin/fm-task-inbox-lib.sh owns what the span means). Derived
+# from this watcher's own cycle because only the poller knows how often it
+# looks: a few missed cycles stay continuous, a stopped or restarted watcher
+# does not.
+INBOX_DEFER_MAX_GAP=$(awk -v p="$POLL" 'BEGIN{g = p * 3 + 5; printf "%d", (g < 1 ? 1 : g)}')
 # The liveness beacon is touched once per cycle, immediately before the
 # terminal wait below (event_wait_or_sleep) as well as at the top of the next
 # one, so a healthy cycle's beacon can legitimately age up to POLL seconds
@@ -365,7 +371,7 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # after the lock is released.
 inbox_steer_escalate_deferred() {  # <window> <task> <record>
   local w=$1 task=$2 rec=$3 reason
-  reason="stale: $w (unread firstmate instruction: $rec is unhandled and a lifecycle action has owned task $task for more than $(fm_task_inbox_defer_horizon_secs)s, so the doorbell has never been typed; release or clear the stuck lifecycle action - $STATE/.control-$task.lock names its owner)"
+  reason="stale: $w (unread firstmate instruction: $rec is unhandled and a lifecycle action has owned task $task on every poll for more than $(fm_task_inbox_defer_horizon_secs)s, so the doorbell has never been typed; release or clear the stuck lifecycle action - $STATE/.control-$task.lock names its owner)"
   if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
     fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
     return 0
@@ -394,7 +400,12 @@ inbox_steer_escalate_deferred() {  # <window> <task> <record>
 # blocking. Runs for secondmates
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
-inbox_steer_check() {  # <window> <task>
+# One steer-inbox poll for one window. Returns 4 - and only 4 - when it
+# positively observed the doorbell deferred by the task's lifecycle lock and
+# recorded that observation; every other outcome, including a busy worker, a
+# quiet ladder, and a delivered or escalated record, returns 0 so the caller can
+# end the deferral span. A path that wakes exits the cycle as it always did.
+inbox_steer_poll() {  # <window> <task>
   local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state defer_action
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
@@ -436,7 +447,7 @@ inbox_steer_check() {  # <window> <task>
       # the holder need not be bounded: a lock nothing will ever release would
       # otherwise suppress a healthy steer forever with no wake at all.
       if [ "$ring_rc" -eq 4 ]; then
-        if ! defer_action=$(fm_task_inbox_defer_action "$STATE" "$task" "$rec"); then
+        if ! defer_action=$(fm_task_inbox_defer_action "$STATE" "$task" "$rec" "$INBOX_DEFER_MAX_GAP"); then
           if [ -f "$rec" ] && [ -d "${rec%/*}" ]; then
             reason="stale: $w (steering-inbox lifecycle-deferral bookkeeping unwritable: ${rec%/*}/.defer-state cannot be written while $rec stays unhandled and a lifecycle action owns the task, so the deferral cannot be bounded - inspect the inbox directory)"
             fm_wake_append stale "$w" "$reason" || exit 1
@@ -446,10 +457,10 @@ inbox_steer_check() {  # <window> <task>
         fi
         if [ "$defer_action" = escalate ]; then
           inbox_steer_escalate_deferred "$w" "$task" "$rec"
-          return 0
+          return 4
         fi
         triage_log "steer-inbox delivery deferred (lifecycle control owns the task): $task ${rec##*/}"
-        return 0
+        return 4
       fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
         if [ ! -f "$rec" ]; then
@@ -478,6 +489,17 @@ inbox_steer_check() {  # <window> <task>
       wake "$reason"
       ;;
   esac
+}
+
+# The steer-inbox entry point: one poll, then the deferral-span rule the horizon
+# depends on. Any poll that did not observe a deferral ends the span, so the
+# horizon can only ever measure lock deferral this watcher actually watched -
+# never a busy worker's turn, and never a record that was served in between.
+inbox_steer_check() {  # <window> <task>
+  local rc=0
+  inbox_steer_poll "$1" "$2" || rc=$?
+  [ "$rc" -eq 4 ] || fm_task_inbox_clear_defer "$STATE" "$2"
+  return 0
 }
 
 # 0 (benign/absorb) if EVERY task in a no-verb "signal:" wake has positive work

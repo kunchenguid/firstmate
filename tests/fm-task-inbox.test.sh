@@ -32,7 +32,9 @@
 #      no re-ring budget, so a bounded lifecycle action cannot escalate a
 #      healthy steer into recovery. A holder that outlives the bounded deferral
 #      horizon surfaces the steer once as a stale wake while keeping it
-#      deliverable, so an unreleasable lock cannot suppress it forever.
+#      deliverable, so an unreleasable lock cannot suppress it forever, and that
+#      horizon spans only deferrals the watcher consecutively observed, so a busy
+#      worker's turn is never charged to a later transient lock.
 #   8. An idempotent enqueue that dedups onto an already acknowledged record
 #      rings as delivered rather than as a transport failure.
 set -u
@@ -863,6 +865,74 @@ test_watcher_lifecycle_deferral_horizon_surfaces_once_and_keeps_the_steer() {
   pass "watcher: an unreleasable lifecycle lock surfaces the steer once and still delivers it when released"
 }
 
+# The horizon must measure only deferral this watcher actually watched. A worker
+# that starts a long turn skips the doorbell entirely on every poll, so that time
+# says nothing about any lock: if it accumulated, a brief lock held again once
+# the turn ended would be reported to recovery as one held for the whole span,
+# naming a lifecycle action that is already gone.
+test_watcher_lifecycle_deferral_horizon_ignores_a_busy_gap() {
+  local dir state out log pid rec holder capture i=0
+  dir=$(setup_watch_case lifecycle-gap)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  capture="$dir/toggle.capture"
+  printf '╭────╮\n│    │\n╰────╯\n' > "$capture"
+  sleep 120 &
+  holder=$!
+  mkdir -p "$state/.control-t1.lock"
+  printf '%s\n' "$holder" > "$state/.control-t1.lock/pid"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$capture" FM_BUSY_REGEX=BUSYTOKEN \
+    FM_TASK_INBOX_RING_MAX=1 FM_TASK_INBOX_DEFER_HORIZON_SECS=6
+  pid=$!
+  while [ "$i" -lt 100 ]; do
+    [ -s "$state/t1.inbox/.defer-state" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$state/t1.inbox/.defer-state" ] || {
+    kill "$pid" "$holder" 2>/dev/null
+    fail "the transient lock was never observed as a deferral:"$'\n'"$(cat "$out")"
+  }
+  # The steer's worker starts a long turn: every poll now skips the doorbell
+  # before reaching the lock at all, for longer than the whole horizon.
+  printf 'some output\nBUSYTOKEN active\n' > "$capture"
+  sleep 8
+  [ ! -e "$state/t1.inbox/.defer-state" ] || {
+    kill "$pid" "$holder" 2>/dev/null
+    fail "a busy worker kept a deferral span alive:"$'\n'"$(cat "$state/t1.inbox/.defer-state")"
+  }
+  # The turn ends while the same kind of brief lock happens to be held again.
+  printf '╭────╮\n│    │\n╰────╯\n' > "$capture"
+  sleep 2
+  kill -0 "$pid" 2>/dev/null || {
+    kill "$holder" 2>/dev/null
+    fail "busy time was charged to a transient lock and escalated:"$'\n'"$(cat "$out")"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  }
+  [ ! -s "$state/.wake-queue" ] || {
+    kill "$pid" "$holder" 2>/dev/null
+    fail "a transient lock was reported as a long-held one:"$'\n'"$(cat "$state/.wake-queue")"
+  }
+  # It was transient: gone before anyone could look, and the steer is delivered.
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  rm -rf "$state/.control-t1.lock"
+  i=0
+  while [ "$i" -lt 150 ]; do
+    grep -qF 'Firstmate instruction waiting' "$log" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'Firstmate instruction waiting' "$log" \
+    || { kill "$pid" 2>/dev/null; fail "the steer was never delivered after the lock cleared:"$'\n'"$(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] \
+    || { kill "$pid" 2>/dev/null; fail "the delivered steer still queued a wake:"$'\n'"$(cat "$state/.wake-queue")"; }
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  pass "watcher: a busy worker's turn never accumulates into the lifecycle-deferral horizon"
+}
+
 test_watcher_dead_pane_ignores_stale_busy_state() {
   local dir state out log pid rec
   dir=$(setup_watch_case dead-pane-busy)
@@ -909,3 +979,4 @@ test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state
 test_watcher_lifecycle_deferral_spends_no_ring_budget
 test_watcher_lifecycle_deferral_horizon_surfaces_once_and_keeps_the_steer
+test_watcher_lifecycle_deferral_horizon_ignores_a_busy_gap
