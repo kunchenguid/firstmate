@@ -487,6 +487,7 @@ function wordsInNode(tokens) {
 }
 
 const WRAPPER_OPTIONS = {
+  caffeinate: { noArgument: new Set(["d", "i", "m", "s", "u"]), takesArgument: new Set(["t", "w"]) },
   command: { noArgument: new Set(["p", "v", "V"]), takesArgument: new Set() },
   time: { noArgument: new Set(["a", "h", "l", "p", "q", "v"]), takesArgument: new Set(["f", "o"]) },
   env: { noArgument: new Set(["0", "i", "P", "v"]), takesArgument: new Set(["a", "C", "S", "u"]) },
@@ -498,6 +499,7 @@ const WRAPPER_OPTIONS = {
 };
 
 const WRAPPER_LONG_OPTIONS = {
+  caffeinate: { noArgument: new Set(), takesArgument: new Set() },
   command: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
   time: { noArgument: new Set(["append", "help", "portability", "quiet", "verbose", "version"]), takesArgument: new Set(["format", "output"]) },
   env: { noArgument: new Set(["ignore-environment", "null", "help", "version"]), takesArgument: new Set(["argv0", "block-signal", "chdir", "default-signal", "ignore-signal", "split-string", "unset"]) },
@@ -558,7 +560,7 @@ function consumeWrapperOptions(name, words, index) {
 }
 
 const CONTROL_COMMAND_PREFIXES = new Set(["if", "then", "elif", "else", "while", "until", "do", "!"]);
-const COPROC_COMMAND_WORDS = new Set(["bash", "command", "env", "exec", "gtimeout", "nice", "nohup", "no-mistakes", "sh", "sudo", "time", "timeout", "zsh"]);
+const COPROC_COMMAND_WORDS = new Set(["bash", "caffeinate", "command", "env", "exec", "gtimeout", "nice", "nohup", "no-mistakes", "sh", "sudo", "time", "timeout", "zsh"]);
 
 export function commandPosition(tokens) {
   const words = wordsInNode(tokens);
@@ -583,7 +585,7 @@ export function commandPosition(tokens) {
   while (command) {
     const name = basename(command.value);
     if (name === "time" && wrappers.includes("command")) break;
-    if (name === "exec" || name === "command" || name === "sudo" || name === "nice" || name === "nohup" || name === "time") {
+    if (name === "exec" || name === "command" || name === "sudo" || name === "nice" || name === "caffeinate" || name === "nohup" || name === "time") {
       wrappers.push(name === "time" && command.value.includes("/") ? "system-time" : name);
       const options = consumeWrapperOptions(name, words, index + 1);
       unresolvedWrapperOption ||= options.unresolved;
@@ -786,21 +788,18 @@ function isPipelineDriveInvocation(position, context) {
   for (let index = 0; index < words.length; index += 1) {
     const fields = resolvedInvocationFields(words[index], context);
     if (fields === null) {
-      const commandGroup = resolvedInvocationFields(words[index + 1], context);
-      const actionGroup = resolvedInvocationFields(words[index + 2], context);
-      if (commandGroup?.length === 1 && commandGroup[0] === "axi" &&
-          actionGroup?.length === 1 && ["run", "respond"].includes(actionGroup[0])) return true;
-      if (basename(invocation.at(-2) || "") === "no-mistakes" && invocation.at(-1) === "axi") return true;
-      invocation.push(null);
-      continue;
+      if (invocation.length === 0) {
+        const commandGroup = resolvedInvocationFields(words[index + 1], context);
+        const actionGroup = resolvedInvocationFields(words[index + 2], context);
+        return commandGroup?.length === 1 && commandGroup[0] === "axi" &&
+          actionGroup?.length === 1 && ["run", "respond"].includes(actionGroup[0]);
+      }
+      return basename(invocation[0] || "") === "no-mistakes" && invocation[1] === "axi" && invocation.length === 2;
     }
     invocation.push(...fields);
+    if (invocation.length >= 3) break;
   }
-  const commandName = basename(resolveKnownWord(position.command, context.knownVariables) || position.command.value);
-  const mayForwardArguments = !["bash", "echo", "sh", "zsh"].includes(commandName);
-  return invocation.some((field, index) => basename(field || "") === "no-mistakes" &&
-    invocation[index + 1] === "axi" && ["run", "respond"].includes(invocation[index + 2]) &&
-    (index === 0 || mayForwardArguments));
+  return basename(invocation[0] || "") === "no-mistakes" && invocation[1] === "axi" && ["run", "respond"].includes(invocation[2]);
 }
 
 function shellPositionalArguments(position, payload, context) {
@@ -960,18 +959,17 @@ function isWatcherPgrep(position, context) {
 
 function analyzeProgram(command, context, depth = 0) {
   if (depth > 12) {
-    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pipelineDrive: rawMentionsPipelineDrive(command), foregroundPipelineDrive: rawMentionsPipelineDrive(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pipelineDrive: rawMentionsPipelineDrive(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const lexed = new Lexer(command).tokenize();
   if (lexed.error) {
-    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pipelineDrive: rawMentionsPipelineDrive(command), foregroundPipelineDrive: rawMentionsPipelineDrive(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pipelineDrive: rawMentionsPipelineDrive(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const program = splitProgram(lexed.tokens);
   const nodeInfos = [];
   let nestedProtected = false;
   let broadKill = false;
   let pipelineDrive = false;
-  let foregroundPipelineDrive = false;
   let pgrepWatcher = false;
   let unsupported = false;
   let activeContext = {
@@ -1051,7 +1049,6 @@ function analyzeProgram(command, context, depth = 0) {
     }
 
     let nodeNestedProtected = false;
-    let nodeForegroundPipelineDrive = false;
     let nodePgrepWatcher = false;
     const substitutionResults = new Map();
     for (const payload of position.wrapperPayloads) {
@@ -1059,7 +1056,6 @@ function analyzeProgram(command, context, depth = 0) {
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
       pipelineDrive ||= nested.pipelineDrive;
-      nodeForegroundPipelineDrive ||= nested.foregroundPipelineDrive;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -1069,8 +1065,7 @@ function analyzeProgram(command, context, depth = 0) {
         nodeNestedProtected ||= nested.protectedFound;
         broadKill ||= nested.broadKill;
         pipelineDrive ||= nested.pipelineDrive;
-        nodeForegroundPipelineDrive ||= nested.foregroundPipelineDrive;
-        nodePgrepWatcher ||= nested.pgrepWatcher;
+          nodePgrepWatcher ||= nested.pgrepWatcher;
         if (nested.error && rawMentionsProtected(token.content)) unsupported = true;
       }
       if (token.type === "word") {
@@ -1080,8 +1075,7 @@ function analyzeProgram(command, context, depth = 0) {
           nodeNestedProtected ||= nested.protectedFound;
           broadKill ||= nested.broadKill;
           pipelineDrive ||= nested.pipelineDrive;
-          nodeForegroundPipelineDrive ||= nested.foregroundPipelineDrive;
-          nodePgrepWatcher ||= nested.pgrepWatcher;
+              nodePgrepWatcher ||= nested.pgrepWatcher;
           if (nested.error && rawMentionsProtected(substitution.content)) unsupported = true;
         }
       }
@@ -1105,7 +1099,6 @@ function analyzeProgram(command, context, depth = 0) {
         if (wordReferencesAny(shellPayload, nodeContext.protectedVariables)) nodeNestedProtected = true;
         if (unresolvedExecutionPayloadMentionsPipelineDrive([shellPayload])) {
           pipelineDrive = true;
-          nodeForegroundPipelineDrive = true;
         }
       } else {
         const nestedContext = {
@@ -1116,15 +1109,13 @@ function analyzeProgram(command, context, depth = 0) {
         nodeNestedProtected ||= nested.protectedFound;
         broadKill ||= nested.broadKill;
         pipelineDrive ||= nested.pipelineDrive;
-        nodeForegroundPipelineDrive ||= nested.foregroundPipelineDrive;
-        nodePgrepWatcher ||= nested.pgrepWatcher;
+          nodePgrepWatcher ||= nested.pgrepWatcher;
         if (nested.error && rawMentionsProtected(resolvedShellPayload)) unsupported = true;
       }
     }
     if (basename(position.command?.value || "") === "eval" && resolvedEvalPayload === null &&
         unresolvedExecutionPayloadMentionsPipelineDrive(position.words.slice(position.index + 1))) {
       pipelineDrive = true;
-      nodeForegroundPipelineDrive = true;
     }
     for (const payload of [resolvedEvalPayload, ...heredocPayloads, ...hereStringPayloads]) {
       if (payload === null) continue;
@@ -1132,7 +1123,6 @@ function analyzeProgram(command, context, depth = 0) {
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
       pipelineDrive ||= nested.pipelineDrive;
-      nodeForegroundPipelineDrive ||= nested.foregroundPipelineDrive;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -1144,7 +1134,6 @@ function analyzeProgram(command, context, depth = 0) {
     const args = position.words.slice(position.index + 1);
     if (isPipelineDriveInvocation(position, nodeContext)) {
       pipelineDrive = true;
-      nodeForegroundPipelineDrive = true;
     }
     if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, nodeContext.watcherPatterns))) broadKill = true;
     if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, nodeContext.watcherPids)))) broadKill = true;
@@ -1198,8 +1187,6 @@ function analyzeProgram(command, context, depth = 0) {
       }
     }
     if (position.unresolvedWrapperOption) unsupported = true;
-    const asynchronousNode = program.separators[nodeIndex] === "&" || position.wrappers.includes("coproc");
-    if (!asynchronousNode) foregroundPipelineDrive ||= nodeForegroundPipelineDrive;
     nodeInfos.push({
       tokens,
       position,
@@ -1215,9 +1202,9 @@ function analyzeProgram(command, context, depth = 0) {
   if (unclassifiableProtected) unsupported = true;
   const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
   if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound)) {
-    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pipelineDrive, foregroundPipelineDrive, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pipelineDrive, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
   }
-  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pipelineDrive, foregroundPipelineDrive, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pipelineDrive, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
 function xModePathAllowed(value, home) {
@@ -1268,7 +1255,7 @@ function blessedProgram(analysis, context) {
 function decision(command, root, home, primary) {
   const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set(), knownVariables: new Map(), positionalArguments: [] };
   const analysis = analyzeProgram(command, context);
-  if (primary && analysis.foregroundPipelineDrive) return deny("primary-pipeline-drive");
+  if (primary && analysis.pipelineDrive) return deny("primary-pipeline-drive");
   if (analysis.broadKill) return deny("broad-watcher-kill");
   if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
   if (!analysis.protectedFound) return { decision: "allow" };

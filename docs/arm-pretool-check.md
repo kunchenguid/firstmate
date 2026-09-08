@@ -8,9 +8,9 @@ The tracked harness adapters forward command text without classifying it.
 
 ## Purpose and boundary
 
-A firstmate primary leaves foreground `no-mistakes axi run` and `no-mistakes axi respond` calls with the task worker that owns the run.
-Those foreground commands block until the next decision or outcome, so running either in the primary conversation prevents captain input for the whole wait.
-The seatbelt denies both foreground commands in a genuine primary home and tells the primary to send the decision to the worker.
+A firstmate primary leaves `no-mistakes axi run` and `no-mistakes axi respond` with the task worker that owns the run.
+Those commands block until the next decision or outcome, so running either in the primary conversation prevents captain input for the whole wait and violates pipeline ownership.
+The seatbelt denies both commands in a genuine primary home and tells the primary to send the decision to the worker.
 It stays inert in a linked task worktree, where the worker must retain both commands, and it leaves read-only status and explicit recovery commands available to the primary.
 
 A firstmate primary must also arm `bin/fm-watch-arm.sh` or run `bin/fm-watch-checkpoint.sh` through an observable harness call.
@@ -61,8 +61,8 @@ Malformed or unsupported shell syntax that contains a protected command is a sem
 ## Primary pipeline ownership
 
 An executed `no-mistakes` command whose first two arguments are `axi run` or `axi respond` is a pipeline drive.
-The classifier follows recognized wrappers, control-flow command positions, and literal nested-shell execution, and conservatively treats a resolved drive sequence behind an unknown foreground command as forwarded execution, so `env`, `nice`, `caffeinate`, shell or system `time`, `if`/loop/`case` bodies, and `bash -lc` cannot evade the responsiveness boundary.
-A foreground pipeline drive denies with `primary-pipeline-drive` only when `bin/fm-primary-scope-lib.sh` proved the checker is running in a genuine primary home. An explicitly backgrounded shell-list node or `coproc` remains allowed because it does not occupy the primary tool call.
+The classifier follows recognized wrappers, control-flow command positions, and literal nested-shell execution, so `env`, `nice`, `caffeinate`, shell or system `time`, named or unnamed `coproc`, `if`/loop/`case` bodies, and `bash -lc` cannot evade the ownership boundary.
+A pipeline drive denies with `primary-pipeline-drive` only when `bin/fm-primary-scope-lib.sh` proved the checker is running in a genuine primary home.
 The identical command is allowed from a linked task worktree because that worker owns the run.
 Commands such as `no-mistakes axi status` and `no-mistakes axi abort` remain available in the primary for supervision and explicit recovery.
 A data mention in an argument to `echo`, `rg`, or another non-execution command remains allowed.

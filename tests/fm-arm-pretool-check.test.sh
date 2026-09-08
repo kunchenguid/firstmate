@@ -387,6 +387,7 @@ EOF
     'coproc JOB MODE=fix no-mistakes axi respond --action fix' \
     'coproc JOB env no-mistakes axi respond --action fix' \
     'coproc JOB { no-mistakes axi respond --action fix; }' \
+    'no-mistakes axi respond --action fix & wait' \
     "bash -o posix -c 'no-mistakes axi respond --action fix'" \
     "CMD='no-mistakes axi respond --action fix'; bash -c \"\$CMD\"" \
     "CMD='no-mistakes axi respond --action fix'; eval \"\$CMD\"" \
@@ -437,6 +438,12 @@ EOF
     'time no-mistakes axi respond --action fix' \
     'time -p no-mistakes axi respond --action fix' \
     '/usr/bin/time -l no-mistakes axi respond --action fix' \
+    'coproc no-mistakes axi respond --action fix' \
+    'coproc JOB no-mistakes axi respond --action fix' \
+    'coproc JOB MODE=fix no-mistakes axi respond --action fix' \
+    'coproc JOB env no-mistakes axi respond --action fix' \
+    'coproc JOB { no-mistakes axi respond --action fix; }' \
+    'no-mistakes axi respond --action fix & wait' \
     "bash -o posix -c 'no-mistakes axi respond --action fix'" \
     "CMD='no-mistakes axi respond --action fix'; bash -c \"\$CMD\"" \
     "CMD='no-mistakes axi respond --action fix'; eval \"\$CMD\"" \
@@ -482,6 +489,7 @@ EOF
     "$dir/case.err" >/dev/null || fail "the case-body pipeline deny omitted its stable reason"
   for payload in \
     "echo 'no-mistakes axi respond --action fix'" \
+    "printf '%s %s %s\\n' no-mistakes axi respond" \
     "time echo 'no-mistakes axi run --intent data'" \
     "/usr/bin/time -l echo 'no-mistakes axi run --intent data'" \
     "coproc echo 'no-mistakes axi respond --action data'" \
@@ -498,10 +506,6 @@ EOF
     FM_HOME="$primary" "$check" --command "$payload" >/dev/null 2>&1 \
       || fail "a pipeline command mentioned only as data must remain allowed: $payload"
   done
-  FM_HOME="$primary" "$check" --command 'no-mistakes axi respond --action fix &' >/dev/null 2>&1 \
-    || fail "an explicitly backgrounded pipeline drive must remain allowed"
-  FM_HOME="$primary" "$check" --command 'coproc no-mistakes axi respond --action fix' >/dev/null 2>&1 \
-    || fail "an asynchronous coprocess pipeline drive must remain allowed"
   FM_HOME="$primary" "$check" --command 'no-mistakes axi status' >/dev/null 2>&1 \
     || fail "the primary must retain read-only pipeline status"
   FM_HOME="$primary" "$check" --command "bash -c -- 'no-mistakes axi status'" >/dev/null 2>&1 \
