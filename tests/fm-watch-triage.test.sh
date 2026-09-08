@@ -2645,6 +2645,15 @@ arm_hold_merge_poll() {  # <dir> [url]
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pr-check.sh" held-merge "$url" \
     >/dev/null 2>&1 || return 1
   [ -f "$state/held-merge.pr-poll" ] && [ -f "$state/held-merge.check.sh" ] || return 1
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "$(cat "$FM_HOME/poll-response" 2>/dev/null)" in
+  fail) exit 1 ;;
+  malformed) printf '%s\n' unknown ;;
+  *) printf '%s\n' OPEN ;;
+esac
+SH
+  chmod +x "$dir/fakebin/gh"
   touch "$state/.last-check"
 }
 
@@ -2717,6 +2726,32 @@ test_an_armed_merge_poll_never_bounds_an_unreported_event() {
     done
   done
   pass "an armed merge poll bounds nothing but a delivery: blockers, open decisions, failures, and pollless deliveries keep alarming on every hash"
+}
+
+test_broken_merge_poll_does_not_bound_delivery() {
+  local mode dir state out capture wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (broken merge poll)"; return 0; }
+  for mode in missing-registration invalid-registration fail malformed; do
+    dir=$(make_hold_home "broken-poll-$mode" 'done: PR https://github.com/example/repo/pull/1 checks green' nohold) \
+      || fail "could not build broken poll fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    arm_hold_merge_poll "$dir" || fail "could not arm merge poll"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, initial' || fail "first delivery did not surface"
+    ack_stopped_cycle "$state" || fail "could not acknowledge delivery"
+    hold_watch_churn "$dir" "$out" "$capture" 'idle, healthy' 2 || fail "healthy poll did not absorb churn"
+    [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail "healthy poll re-alarmed"
+    case "$mode" in
+      missing-registration) rm "$state/held-merge.pr-poll-registration" ;;
+      invalid-registration) printf 'invalid\n' > "$state/held-merge.pr-poll-registration" ;;
+      *) printf '%s\n' "$mode" > "$dir/poll-response" ;;
+    esac
+    [ -f "$state/held-merge.pr-poll" ] && [ -f "$state/held-merge.check.sh" ] || fail "poll files disappeared"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, broken' || fail "[$mode] broken poll silenced delivery"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] || fail "[$mode] expected one stale reminder, got $wakes"
+  done
+  pass "failed lookups and unauthenticated polls retain delivery reminders"
 }
 
 # The residue question this bound raises. Every per-window marker the watcher
@@ -4591,6 +4626,7 @@ test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
+test_broken_merge_poll_does_not_bound_delivery
 test_delivered_work_with_an_armed_merge_poll_bounds_stale_churn
 test_an_armed_merge_poll_never_bounds_an_unreported_event
 test_merge_poll_residue_never_silences_the_next_task_on_that_window
