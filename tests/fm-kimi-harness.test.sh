@@ -6,11 +6,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
-# from inside Cursor, Claude, Copilot, Gemini, Pi, or Grok inherits those
-# markers, which outrank the fake ancestry the detection cases set up. Drop the
-# ambient markers so the asserted verdict does not depend on which harness
-# launched the suite.
-unset CLAUDECODE COPILOT_CLI COPILOT_AGENT_SESSION_ID COPILOT_LOADER_PID COPILOT_CLI_BINARY_VERSION GEMINI_CLI PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+# from inside Cursor, Claude, Copilot, Gemini, Rovo, Pi, or Grok inherits
+# those markers, which outrank the fake ancestry the detection cases set up.
+# Drop the ambient markers so the asserted verdict does not depend on which
+# harness launched the suite.
+unset CLAUDECODE COPILOT_CLI COPILOT_AGENT_SESSION_ID COPILOT_LOADER_PID COPILOT_CLI_BINARY_VERSION GEMINI_CLI PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS ATLASSIAN_AGENT_TYPE ROVODEV_CLI
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -558,6 +558,9 @@ SH
     -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
     CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+    COPILOT_CLI=1 CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = kimi ] || fail "real Kimi ancestry lost to inherited Copilot markers, got '$out'"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -580,7 +583,7 @@ SH
     -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u GROK_AGENT -u PI_CODING_AGENT -u FM_PI_HARNESS \
     CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "Claude marker fallback changed without recognized ancestry, got '$out'"
-  pass "fm-harness: Kimi ancestry resolves without markers while verified markers keep precedence"
+  pass "fm-harness: Kimi ancestry stays authoritative while verified markers keep precedence"
 }
 
 test_kimi_session_lock_identity() {

@@ -504,19 +504,23 @@ SH
 # run_session_start <home> <root> <path>
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
-# Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
-# (Pi family), GROK_AGENT (grok).
-# codex and opencode have no env markers (ancestry only). Without this, a local
-# claude/pi/grok session fails cases that pin a different fake harness while CI
-# (no ambient markers) still passes.
+# Markers today: CLAUDECODE; COPILOT_CLI plus its session sidecars;
+# CURSOR_AGENT plus CURSOR_INVOKED_AS; GEMINI_CLI; ATLASSIAN_AGENT_TYPE plus
+# ROVODEV_CLI; PI_CODING_AGENT plus FM_PI_HARNESS; GROK_AGENT. codex,
+# opencode, kimi, muse, and omp are ancestry-only here.
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID \
+      -u COPILOT_CLI_BINARY_VERSION -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+      -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u GROK_AGENT \
+      PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
-    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    env -u CLAUDECODE -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID \
+      -u COPILOT_CLI_BINARY_VERSION -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+      -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
@@ -525,7 +529,10 @@ run_session_start() {
 run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
   local home=$1 root=$2 path=$3
   shift 3
-  env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
+  env -u CLAUDECODE -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID \
+    -u COPILOT_CLI_BINARY_VERSION -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+    -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u GROK_AGENT \
+    PI_CODING_AGENT=true FM_PI_HARNESS=pi \
     FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"
@@ -534,7 +541,9 @@ run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
 run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-session-start args...]
   local harness=$1 home=$2 root=$3 path=$4
   shift 4
-  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+  env -u CLAUDECODE -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID \
+    -u COPILOT_CLI_BINARY_VERSION -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+    -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     FM_FAKE_HARNESS="$harness" FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"

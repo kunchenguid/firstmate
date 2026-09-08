@@ -5,6 +5,13 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
+# from inside Cursor, Claude, Gemini, Rovo, Pi, or Grok inherits those
+# markers, which can outrank the fake ancestry many cases set up. Drop the
+# ambient markers so the asserted verdict does not depend on which harness
+# launched the suite.
+unset CLAUDECODE COPILOT_CLI COPILOT_AGENT_SESSION_ID COPILOT_LOADER_PID COPILOT_CLI_BINARY_VERSION GEMINI_CLI PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS ATLASSIAN_AGENT_TYPE ROVODEV_CLI
+
 HARNESS="$ROOT/bin/fm-harness.sh"
 LOCK_LIB="$ROOT/bin/fm-session-lock-lib.sh"
 TMUX_LIB="$ROOT/bin/fm-tmux-lib.sh"
@@ -37,7 +44,16 @@ test_environment_marker_wins() {
   out=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT PATH="$fakebin:$PATH" \
     FM_FAKE_PS_COMM=bash FM_FAKE_PS_ARGS='bash' COPILOT_CLI=1 CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent "$HARNESS")
   [ "$out" = copilot ] || fail "COPILOT_CLI marker lost to inherited Cursor markers: '$out'"
-  pass "Copilot's verified environment marker identifies the current harness"
+  out=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT PATH="$fakebin:$PATH" \
+    FM_FAKE_PS_COMM=bash FM_FAKE_PS_ARGS='bash' COPILOT_CLI=1 GEMINI_CLI=1 "$HARNESS")
+  [ "$out" = gemini ] || fail "GEMINI_CLI lost to inherited Copilot markers: '$out'"
+  out=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT PATH="$fakebin:$PATH" \
+    FM_FAKE_PS_COMM=bash FM_FAKE_PS_ARGS='bash' COPILOT_CLI=1 ATLASSIAN_AGENT_TYPE=rovo "$HARNESS")
+  [ "$out" = rovo ] || fail "ATLASSIAN_AGENT_TYPE=rovo lost to inherited Copilot markers: '$out'"
+  out=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT PATH="$fakebin:$PATH" \
+    FM_FAKE_PS_COMM=bash FM_FAKE_PS_ARGS='bash' COPILOT_CLI=1 ROVODEV_CLI=1 "$HARNESS")
+  [ "$out" = rovo ] || fail "ROVODEV_CLI lost to inherited Copilot markers: '$out'"
+  pass "Copilot fallback yields only to actual ancestry and established Gemini or Rovo markers"
 }
 
 test_process_shapes_are_anchored() {
@@ -198,10 +214,16 @@ test_actual_host_overrides_inherited_markers() {
     FM_FAKE_PS_ARGS="$versioned_claude --dangerously-skip-permissions" "$HARNESS")
   [ "$out" = claude ] || fail "version-named Claude ancestry lost to inherited Copilot markers: '$out'"
 
+  out=$(COPILOT_CLI=1 PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=cursor-agent FM_FAKE_PS_ARGS='cursor-agent --trust' "$HARNESS")
+  [ "$out" = cursor ] || fail "real Cursor ancestry lost to inherited Copilot markers: '$out'"
+
+  out=$(COPILOT_CLI=1 CLAUDECODE=1 PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=/opt/kimi/bin/kimi FM_FAKE_PS_ARGS='kimi --auto' "$HARNESS")
+  [ "$out" = kimi ] || fail "real Kimi ancestry lost to inherited Copilot markers: '$out'"
+
   out=$(COPILOT_CLI=1 CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PATH="$fakebin:$PATH" \
     FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='/opt/copilot/bin/copilot --allow-all' "$HARNESS")
   [ "$out" = copilot ] || fail "real Copilot ancestry lost to inherited foreign markers: '$out'"
-  pass "Copilot-marked processes use actual Claude or Copilot ancestry to resolve inherited marker conflicts"
+  pass "Copilot-marked processes use actual ancestry to resolve inherited marker conflicts"
 }
 
 test_session_lock_identity_matches_copilot() {
