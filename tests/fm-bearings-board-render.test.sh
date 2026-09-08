@@ -399,9 +399,6 @@ test_an_aged_delivery_reaches_the_captain_as_a_nudge_card() {
   pass "an aged delivery rises into the captain's call carrying its wait and its link"
 }
 
-# Rollout safety: a board published before the delivered section existed is
-# still open in the captain's browser. It must keep rendering, not turn into a
-# load error, until the next rebuild adds the section.
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued

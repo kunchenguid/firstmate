@@ -473,9 +473,8 @@ __FM_BEARINGS_BOARD_DATA__
   }
 
   /* stat strip */
-  /* Owner labels are a payload field, never words read out of a title. "(main)"
-     is the snapshot's marker for this home; the strip prints it as "main". */
-  /* "3 main · 2 fm-self", most rows first. A tile owned entirely by one home
+  /* Preserve the structural owner labels required by bearings/SKILL.md. */
+  /* "3 (main) · 2 fm-self", most rows first. A tile owned entirely by one home
      still names it: hiding ownership in the commonest case is the very defect
      this sub-line exists to correct. `omitted` says the counts describe only
      the rows on screen, so a truncated section cannot imply a false total. */

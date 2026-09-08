@@ -48,18 +48,14 @@ Board answers are acted on later under the normal authority rules; this skill's 
    The same structural-only rule governs the delivered bucket and ownership.
    The snapshot's `awaiting` rows with `nudge: false` are the whole of the Delivered section; rows with `nudge: true` belong in Captain's Call on chat, report, and board alike.
    A row qualifies for `awaiting` only when BOTH halves hold: the worker declared a bounded external wait, and no captain action is outstanding on that task.
-   The delivery needs validated poll artifacts matching the captured task metadata and its URL, the latest recorded event must declare the external-wait verb owned by `fm-classify-lib.sh` (`FM_CLASSIFY_PAUSED_VERB`, default `paused`) as defined by AGENTS.md section 8, and the current state must be `paused`, `done`, or `unknown` with source `endpoint-gone` from the current-state reader's authoritative death classification.
-   An unverified run state, a failed run lookup, or an unreadable endpoint never qualifies.
-   A later event supersedes the declaration, and a current working, failed, blocked, or parked state is never eligible.
-   The declared wait must also pass the structured captain-hold classification and have no canonical unresolved decision; absence of a hold alone never establishes outside ownership.
+   [`bin/fm-bearings-snapshot.sh`](../../../bin/fm-bearings-snapshot.sh)'s header owns the exact declared-wait eligibility, age fields, and delivery bounds; compose from its classification rather than re-deriving them.
    The state was first specified too loosely, with prose standing in for structure, then narrowed once to what structure proves, and corrected AGAIN during review when that narrowing still left the captain window open: the normal PR-ready flow arms a merge watch after `done` before asking for the captain's approval in chat, without creating a hold.
    A `done` event without a declared wait therefore stays in flight, as does a genuine outside wait nobody declared; under-populating Delivered preserves visibility, while mis-populating it hides the captain's work.
    Repository merge ownership is a registered project posture tracked separately, never inferred from project descriptions, yolo, or any other proxy.
    The snapshot removes a qualifying row from `in_flight` and from `gates`, so the same work is counted once.
    `age_days` is how long this delivery has been waiting, measured from its own durable record and preserved when the same PR is re-recorded; `nudge` is the snapshot's own exit rule at `awaiting_nudge_days`: a row at or past it stops being a delivered row and becomes a Captain's Call nudge instead.
-   Age only grows, so a row that crosses never crosses back; only the merge retires it.
-   Home summaries retain every delivery identity, timestamp, and request link so cached evidence can still age into a nudge.
-   Bearings computes current age before applying its delivery bound and retains every overdue row, exceeding the normal limit when necessary; only younger deliveries may be omitted, with their truncation disclosed in `omitted[]`.
+   For the same still-eligible delivery and threshold, advancing time cannot clear `nudge`; answering it does not reset the clock.
+   A fresh snapshot can reclassify work whose declared wait or current state changed; never preserve an old nudge in place of the task's current state.
    Every `in_flight`, `awaiting`, `landed`, and `gates` row carries a structured `owner`, and `pr_url` carries the recorded request link.
    Never read ownership, delivery, or a link out of a title, a status sentence, or any other prose.
    A `live` hold appears in Captain's Call; `blocked`, `dated`, and `aged` holds appear as disclosed Charted Next gates stating their structured reason.
@@ -97,7 +93,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
    - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
    - **Captain's Call** - every unsuppressed open decision summarized with its options from the structured decision record, plus each PR ready to merge, each needed credential or login, and every `awaiting` row with `nudge: true` as an overdue-delivery call carrying its age and owner, every PR with the full `https://...` URL, never a bare `#number`.
    - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main fleet and every registered secondmate home, rendered in full on every run.
-   - **Underway** - each live direct report still making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
+   - **Underway** - the rows defined by the chat-response contract below, with their current state and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
    - **Delivered** - only `awaiting` rows with `nudge: false`, each with its wait in whole days, its owning home, and its full `https://...` PR URL.
    - **Charted Next** - queued or gated work, including deferred or aged captain-hold safety gates and any main-inventory integrity warning, with each item's blocker, date, age, or integrity reason.
    After writing the file, return the concise five-section chat digest and include the report path or link without adding a sixth section.
@@ -122,8 +118,9 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - Every Underway, Delivered, Recently Landed, and Charted Next row carries an explicit `owner`, copied from the snapshot's structured owner for that row - `(main)` for this home, the registered secondmate id otherwise. The board renders those structural owner values verbatim and breaks each tile's count down by owner underneath it; `(main)` and a secondmate named `main` remain distinct.
 - NOTHING THAT NEEDS THE CAPTAIN MAY BE HIDDEN. That is one guarantee with two faces, and both are pinned by `tests/fm-bearings-board-render.test.sh` and `tests/fm-bearings-snapshot.test.sh` rather than left in prose. It may not be hidden by SPLITTING: the needs-you tile is never divided by owner and never filtered by owner, so Captain's Call carries no ownership breakdown and counts every home's calls in one tile. And it may not be hidden by RE-LABELLING: a task the captain still owes an answer on is his call whatever else is true of it, so it never enters the delivered state, never ages, and never wears a waiting badge, however it arrived there. Honour one and defeat the other and the guarantee is gone.
 - `awaiting` carries the Delivered section, one row per snapshot `awaiting` row with `nudge: false`: `id`, `repo`, `owner`, `what`, the required `pr_url`, and `age_days`. `awaiting_nudge_days` is the snapshot's `awaiting_nudge_days` verbatim, and `build` refuses any `awaiting` row that has already reached it. Never add a row the snapshot did not classify.
-- A row the snapshot marks `nudge` therefore never goes into `awaiting`: compose it as a Captain's Call card of type `nudge`, carrying `age_days`, the required `pr_url`, a `detail` line, and authored options such as nudging the maintainer or leaving it. It stays there until the PR merges.
-- A nudge card's key is its complete recorded `pr_url`, verbatim; compose one card per request URL even when several tasks delivered the same PR. Nudge submissions carry tag `nudge` and schema `fm-bearings-nudge.v1` with `pr_url`, `selection`, and `note`, and are excluded from the task-answer and reconcile intakes.
+- A row the snapshot marks `nudge` therefore never goes into `awaiting`: compose it as a Captain's Call card of type `nudge`, carrying `age_days`, the required `pr_url`, a `detail` line, and authored options such as nudging the maintainer or leaving it.
+- A nudge card's key is its complete recorded `pr_url`, verbatim; compose one card per request URL even when several tasks delivered the same PR.
+  [`bin/fm-procevent-lavish.sh`](../../../bin/fm-procevent-lavish.sh)'s header owns the separate nudge submission and extraction contract.
 - `pr_url` is the same shape everywhere it appears - the recorded PR URL, verbatim. Fill it on every Underway and Charted Next row whose task has one, from the snapshot's own `pr_url` field; it is required only on `awaiting` rows and `nudge` cards, where a row without a link cannot be acted on at all.
 - Every Captain's Call item and every Underway, Delivered, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.
 
@@ -149,10 +146,10 @@ A remote-secondmate card whose task is absent from the main backlog remains on t
 Route the non-decision keys yourself:
 
 - `merge.<task-id>` is the captain's explicit merge order; follow the merge ruling below.
-- Read nudge answers with `bin/fm-procevent-lavish.sh nudges <result-file>`. Each JSON line carries the full `pr_url`, `selection`, `note`, and `label`. Resolve that request against the fresh snapshot, act on the captain's words, and never treat a nudge as merge authority over a repository we do not merge into.
+- Read nudge answers through the adapter's `nudges` command, resolve the request against the fresh snapshot, act on the captain's words, and never treat a nudge as merge authority over a repository we do not merge into.
 - `dispatch.charted` carries comma-separated task ids the captain picked to start now; verify each id against the current backlog - still queued, blocker and time gate actually clear - then dispatch through the normal lifecycle, and report any id that no longer qualifies instead of forcing it.
 
-After handling, rebuild the board from a fresh snapshot so acted-on items leave Captain's Call, and echo every action taken in chat so the board and chat never diverge silently.
+After handling, rebuild the board from a fresh snapshot so Captain's Call reflects current state, and echo every action taken in chat so the board and chat never diverge silently.
 
 ### The merge-click ruling (captain-decided)
 
@@ -170,7 +167,7 @@ Every `/bearings` chat response renders EXACTLY these five sections, in THIS ord
    Empty-state: "Nothing needs your action right now."
 2. **Recently Landed** - the bounded current recent-completions baseline: merged PRs, completed scouts, and finished local-only merges across the main fleet and every registered secondmate home.
    Empty-state: "No recent completions are in the current baseline."
-3. **Underway** - live work progressing on its own, one line of current state per direct report.
+3. **Underway** - the snapshot's `in_flight` rows, including recorded deliveries that do not qualify for Delivered, one line preserving each direct report's current state without implying progress when it is paused, parked, blocked, failed, done, or unknown.
    Empty-state: "Nothing is underway."
 4. **Delivered** - work that shipped and now waits on a merge we do not control: the snapshot's `awaiting` rows with `nudge: false`, each carrying how long it has waited and its full PR URL.
    Nothing here is the captain's to answer and nothing in it is progressing, which is exactly why it is neither Underway nor Captain's Call.

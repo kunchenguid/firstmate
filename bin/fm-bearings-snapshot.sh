@@ -67,28 +67,25 @@
 # hidden, whether by splitting a tile or by re-labelling a row.
 #
 # Qualifying rows leave in_flight and gates, so the same work is counted once.
-# age_days is the wait measured from this delivery's own durable record, which
-# bin/fm-pr-check.sh preserves when the SAME pull request is re-recorded, so an
-# ordinary re-registration cannot turn a three-week wait into zero. nudge is the
-# exit rule at FM_BEARINGS_AWAITING_NUDGE_DAYS: past it the row stops being a
-# delivered row and becomes the captain's to nudge. Age only grows, so the exit
-# is one-way and no row can oscillate between the two. Overdue and oldest rows
-# sort first and remain visible even when their count exceeds the bound.
+# age_days is the whole-day wait from pr.merge_poll.armed_epoch, whose record
+# binding is owned by bin/fm-fleet-snapshot.sh. At or past
+# FM_BEARINGS_AWAITING_NUDGE_DAYS, a row remains in snapshot.awaiting with nudge
+# true; .agents/skills/bearings/SKILL.md owns its placement in Captain's Call.
+# Home summaries retain every delivery identity, timestamp, and request link.
+# Bearings computes current age, including from cached ledgers, before sorting
+# overdue then oldest rows and applying FM_BEARINGS_AWAITING (default 20).
+# Every overdue row survives even when their count exceeds that bound; only
+# younger deliveries may be omitted, with truncation disclosed in omitted[].
 #
-# The state was first specified too loosely, with prose standing in for
-# structure. It was narrowed once to what structure proves, then corrected
-# AGAIN during review: a PR-ready done event plus an armed watch and no hold
-# still left open the window before asking the captain for approval in chat.
-# Requiring a declared paused wait closes that window; an undeclared outside
-# wait stays in flight. Repository merge ownership is a registered project
-# posture tracked separately, never inferred from descriptions, yolo, or proxies.
+# .agents/skills/bearings/SKILL.md owns the delivery rationale and separate
+# repository merge-ownership posture.
 #
 # OWNERSHIP IS STRUCTURAL. Every in_flight, awaiting, landed, and gates row
 # carries owner - "(main)" for this home, the registered secondmate id for a
 # child - because a fleet whose homes work the SAME repository cannot be told
 # apart by repo. Renderers must read that field and never a title's prose.
-# Every such row also carries pr_url wherever a PR is recorded, from the same
-# meta record recorded_prs is built from.
+# Every such row also carries pr_url wherever a PR is recorded in structured
+# backlog fields or task metadata; title and status prose never supply it.
 #
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
@@ -148,10 +145,8 @@ FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
 # 0.1 days at the median, 0.3 at the 75th percentile, 0.8 at the 90th, and 10.2 at its single
 # extreme, so a full week is roughly nine times the 90th percentile, absorbs a
 # weekend and a busy week, and still fires well before the longest merge this
-# repository has ever completed. Provisional: only four of those merges were
+# sample contains. Provisional: only four of those merges were
 # our own deliveries, so a few dozen of ours would refine it.
-# Age only grows, so nudge is monotone: a row that crosses never crosses back,
-# and it leaves the awaiting bucket for good until the PR merges.
 case "$FM_BEARINGS_PR_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_PR_TIMEOUT=20 ;; esac
 validate_bound() {  # <name> <value>
   case "$2" in ''|*[!0-9]*|0) echo "fm-bearings-snapshot: $1 must be a positive integer" >&2; exit 2 ;; esac
@@ -212,7 +207,7 @@ awaiting holds work that shipped and now waits on a merge we do not control: the
   age_days is that wait in whole days, preserved when the same
   PR is re-recorded, and nudge marks a row at or past awaiting_nudge_days
   (FM_BEARINGS_AWAITING_NUDGE_DAYS), which belongs in Captain's Call instead.
-  Overdue then oldest rows sort first; overdue rows are exempt from both delivery bounds.
+  See bin/fm-bearings-snapshot.sh's header for delivery retention and bounds.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight, --all-awaiting,
   --all-decisions (all open decisions and captain holds in the bounded snapshot),
   --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,

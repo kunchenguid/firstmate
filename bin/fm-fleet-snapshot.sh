@@ -59,20 +59,21 @@
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
-#     against current_state; hints.pending_decision and hints.blocked_event are
-#     booleans derived from that set.
+#     against current_state. Only a non-secondmate's working state from run-step
+#     or pane clears the projected set; completion or failure does not answer
+#     an unresolved approval. hints.pending_decision and hints.blocked_event
+#     are booleans derived from that set.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
-#     pr.merge_poll records the DELIVERY fact, not a display choice: armed is
-#     true exactly while this task carries a committed merge-poll registration
-#     (bin/fm-pr-lib.sh writes it after a PR-ready signal, and retires it when
-#     the PR merges), and armed_epoch is that record's own creation time, which
-#     bin/fm-pr-check.sh carries forward when the SAME pull request is
-#     re-recorded. So "delivered, waiting for the merge" and how long it has
-#     waited are read from the record instead of from a title or a status
-#     sentence, and an ordinary re-registration cannot reset that wait.
+#     pr.merge_poll.armed is true only when fm_pr_poll_artifacts_valid in
+#     bin/fm-pr-lib.sh validates the complete poll against the captured task
+#     metadata. A registration alone is insufficient. armed_epoch is the valid
+#     registration's modification time, or null when unavailable; the clock's
+#     same-PR preservation is owned by bin/fm-pr-check.sh. Neither an armed poll
+#     nor its age establishes an outside wait without the eligibility contract
+#     in bin/fm-bearings-snapshot.sh.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -87,6 +88,10 @@
 #     untrusted supplements only and never override readable structured-home facts.
 #     Each structured-home record carries active_children, awaiting_merge,
 #     decisions_open, holds, queued, landed, endpoints, counts, and omitted.
+#     active_children retains working children plus unheld metadata-backed PR
+#     tasks that do not qualify for awaiting_merge, preserving their actual
+#     states and recorded pr_url. Working children sort first, and only those
+#     children establish active_child_work; the array length is not activity.
 #     awaiting_merge is that home's DELIVERED work under the declared-wait
 #     eligibility contract in bin/fm-bearings-snapshot.sh. Only such a child is a recognized
 #     terminal-facing state rather than an inventory fault; one that resumed and

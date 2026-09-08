@@ -57,9 +57,10 @@
 # THE RECONCILE CHOICE. Every decision card carries the standard `reconcile`
 # option, injected here so the guarantee does not depend on the composer's
 # memory, and the payload validator reserves that value across every card type.
-# The validator's reservation scope must equal the adapter's reconcile
-# classification scope, which is all card types because the captured payload
-# carries no card type. Its meaning, and the reason it can never reach the
+# Ordinary choice captures carry no card type, so every ordinary card reserves
+# the value; nudge captures use the separate adapter contract in
+# bin/fm-procevent-lavish.sh and cannot enter reconcile intake. The meaning of
+# reconcile, and the reason it can never reach the
 # keyed-answer intake as a blind close, are owned by
 # docs/captain-hold-lifecycle.md.
 #
@@ -84,8 +85,8 @@
 # snapshot's own threshold carried verbatim. A row that has already reached it
 # is refused: past that wait it is the captain's to nudge and belongs in
 # Captain's Call as a `nudge` card, so the delivered box cannot become a
-# graveyard for the rows that most need him. Age only grows, so that move is
-# one-way and a row can never oscillate between the two.
+# graveyard for the rows that most need him. The skill's fresh-snapshot rule
+# governs later reclassification if the task's wait or current state changes.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish

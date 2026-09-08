@@ -580,7 +580,9 @@ fm_pr_poll_publish_prepared() {
   fi
 }
 
-fm_pr_poll_artifacts_valid() {
+# Optional captured metadata keeps validation bound to the snapshot's task
+# identity instead of a live metadata file that may have changed during probes.
+fm_pr_poll_artifacts_valid() {  # <state> <id> <template> [captured-meta]
   local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash data_identity check_identity
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1

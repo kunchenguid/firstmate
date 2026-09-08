@@ -95,7 +95,7 @@ trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 # THE DELIVERY CLOCK MUST SURVIVE A RE-RECORDING. The registration is
-# republished wholesale on every run, and its creation time is the only durable
+# republished wholesale on every run, and its modification time is the durable
 # local record of when a reader could first say "this was delivered and is now
 # waiting". Re-recording the SAME pull request is an ordinary supported
 # operation - a re-verified head, a repaired watch - and it must not turn a

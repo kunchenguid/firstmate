@@ -490,11 +490,7 @@ test_invalid_entrypoints_have_zero_side_effects() {
   pass "PR and teardown entrypoints reject invalid arguments before every side effect"
 }
 
-# THE DELIVERY CLOCK. The registration record is republished wholesale on every
-# run, and its creation time is the only durable local record of when a delivery
-# began waiting. Re-recording the SAME pull request is an ordinary operation and
-# must not reset that wait; a DIFFERENT pull request is a different delivery and
-# must start its own clock.
+# Exercise the delivery-clock invariant owned by bin/fm-pr-check.sh.
 test_rerecording_the_same_pr_preserves_the_delivery_clock() {
   local dir reg first second third old
   dir=$(make_case delivery-clock)

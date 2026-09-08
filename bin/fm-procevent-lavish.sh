@@ -75,7 +75,12 @@
 # intake in bin/fm-captain-hold.sh, which the runner feeds. A Lavish review is
 # just an ephemeral discussion format that happens to carry answers.
 #
-# Only rows tagged `choice` are read. A freeform captain message is prose that may
+# `answers` and `reconciles` read only rows tagged `choice`.
+# `nudges` reads only tag `nudge` with schema `fm-bearings-nudge.v1`, a full HTTPS
+# pr_url, selection, and note, rejecting captures with a close field. It prints
+# one JSON line per request with pr_url, selection, note, and label. These
+# request-keyed answers never enter the task-answer or reconcile intakes.
+# A freeform captain message is prose that may
 # contain anything, and must never be able to forge a decision key.
 #
 # `read` is the presentation command summarized above; keyed intake remains
