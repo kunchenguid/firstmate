@@ -1758,7 +1758,8 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
-# run it only on no-verb signal and first-sighting stale paths, never every wake.
+# run it only on no-verb signal and first-sighting stale paths, never every poll.
+# The at-threshold wedge branch uses crew_run_activity_is_recent instead.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
   local id=$1 line state src
@@ -1786,6 +1787,31 @@ crew_absorb_class() {  # <id>
 # working/paused/none decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
+}
+
+# 0 iff crew <id>'s current-state line is a working run-step whose first detail
+# field is activity: recent. That is the single checkable condition the wedge
+# timer may use to treat pane idleness as accounted for by a live pipeline:
+# the daemon currently confirms this attributed run, and the pipeline's own
+# recency verdict (an active_steps table with no quiet prefix) is fresh.
+# Fail closed on every other line: a working record without the field, activity:
+# quiet, a pane or status-log source, a terminal or parked run, an unreadable
+# verdict, and an empty id are not this evidence. Reads fm-crew-state.sh once,
+# the same owner crew_absorb_class uses; FM_CREW_STATE_BIN stubs the verdict.
+crew_run_activity_is_recent() {  # <id>
+  local id=$1 line state src rest
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = "run-step" ] || return 1
+  rest=${line#*"source: $src"}
+  case "$rest" in
+    " · activity: recent"|" · activity: recent · "*) return 0 ;;
+  esac
+  return 1
 }
 
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.

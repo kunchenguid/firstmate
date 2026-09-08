@@ -41,6 +41,12 @@
 #                          the run step cannot show; that deferral still
 #                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
 #                          that writes nothing keeps the unchanged schedule.
+#                          Independently, a pane whose attributed run currently
+#                          reports recent pipeline activity (crew_run_activity_is_recent:
+#                          working, run-step, activity: recent) is deferred the
+#                          same way (wedge_defer_live_run); a working record
+#                          without that field, a quiet step, a terminal run, and
+#                          no run at all keep the unchanged schedule.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -845,25 +851,51 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
   triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
 }
 
-# Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
-# the bounded re-surface cadence is measured from the CURRENT quiet stretch and a
-# long-finished one cannot make the next deferral resurface immediately.
+# Drop a window's write-deferral and live-run deferral chains wherever its stale
+# bookkeeping resets, so the bounded re-surface cadence is measured from the
+# CURRENT quiet stretch and a long-finished one cannot make the next deferral
+# resurface immediately.
 clear_write_tracking() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
+  rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key" \
+    "$STATE/.run-alive-since-$key" "$STATE/.run-alive-resurfaced-$key"
+}
+
+# Defer ONE wedge escalation for a pane that went quiet while its attributed
+# no-mistakes run still reports recent pipeline activity (crew_run_activity_is_recent
+# in fm-classify-lib.sh, which reads fm-crew-state.sh). That is the single
+# checkable condition: a live axi-status active_steps table with no quiet prefix,
+# not a working run-step record, not a pane busy verdict, and not a worktree write.
+# Deliberately a DEFERRAL, not a cancellation, matching wedge_defer_writing: the
+# idle timer restarts so the next window re-asks the daemon, and a
+# .run-alive-since-<key> marker ages the whole chain so the pane still re-surfaces
+# once every PAUSE_RESURFACE_SECS through resurface_absorbed. The escalation
+# counter is left alone, as with the write deferral.
+wedge_defer_live_run() {  # <window> <since-file> <triage-label> <idle-age>
+  local win=$1 since_file=$2 label=$3 age=$4 key rsf rage
+  key=$(window_key "$win")
+  rsf="$STATE/.run-alive-since-$key"
+  [ -e "$rsf" ] || date +%s > "$rsf"
+  rage=$(age_of "$rsf")
+  date +%s > "$since_file"
+  resurface_absorbed "$win" "$STATE/.run-alive-resurfaced-$key" "$rage" \
+    "stale: $win (idle ${age}s, pipeline run still active for ${rage}s, rechecked on a long cadence not a wedge)"
+  triage_log "absorbed $label (pipeline run still active, idle ${age}s): $win"
 }
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
-# The worktree write probe runs ONLY here, inside the at-threshold branch that is
-# about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
-# never per poll.
+# escalates once STALE_ESCALATE_SECS have elapsed. Shared by both places a hash
+# can be absorbed this way: the plain non-terminal path, and the
+# stale_is_terminal-overridden path (a captain-relevant status-log line that an
+# active run/busy pane outranked).
+# The at-threshold branch is the only place that re-asks current state: one
+# crew_run_activity_is_recent read, then at most one worktree walk, never per
+# poll. A live run with recent pipeline activity defers; a worktree still being
+# written defers; every other idle pane, including a working-looking record the
+# daemon no longer confirms, a quiet step, a terminal run, and no run at all,
+# keeps the existing escalation schedule.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -878,6 +910,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        if crew_run_activity_is_recent "$task"; then
+          wedge_defer_live_run "$win" "$since_file" "$label" "$age"
+          return 0
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
@@ -2161,8 +2197,9 @@ EOF
           # Decided once per distinct stale hash (the costly state reads run only
           # on first sight, never every poll) via pause_state_class, which returns:
           #   - working: an actively-running pipeline legitimately sits on a static
-          #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
-          #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
+          #     pane (e.g. waiting on CI), so absorb and start the wedge timer; a
+          #     frozen or quiet run still escalates past STALE_ESCALATE_SECS, while
+          #     recent pipeline activity defers that escalation (wedge_timer_check);
           #   - paused: a declared wait pause_state_class admits (its header owns which
           #     liveness evidence each kind of crew must supply), so absorb on the long
           #     PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;

@@ -8,6 +8,8 @@
 # provably-working no-verb wakes absorbed (no exit, no queue entry, suppressor
 # advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
 # provably-working stale panes absorbed-then-escalated past the threshold,
+# a live pipeline run with recent activity deferred from that wedge, while a
+# missing, quiet, or terminal run still escalates on the unchanged cadence,
 # terminal-looking stale status lines overridden by an active run, the heartbeat
 # backstop fail-safe, and afk coherence (no double-triage while the away-mode
 # daemon owns supervision).
@@ -468,6 +470,34 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+}
+
+# crew_run_activity_is_recent: the one condition the wedge timer may use to treat
+# pane idleness as accounted for by a live pipeline. Fail closed on every other
+# line, including a working run-step without the field and a terminal run that
+# happens to carry the token.
+test_crew_run_activity_is_recent_classifier() {
+  local dir fakebin
+  dir=$(make_case run-activity-recent); fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+  FM_FAKE_CREW_STATE='state: working · source: run-step · activity: recent · validating (running)'
+  crew_run_activity_is_recent a || fail "working run-step with activity: recent was not recent"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  ! crew_run_activity_is_recent a || fail "working run-step without the activity field counted as recent"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · activity: quiet · validating (running)'
+  ! crew_run_activity_is_recent a || fail "working run-step with activity: quiet counted as recent"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · activity: recent · checks green'
+  ! crew_run_activity_is_recent a || fail "a terminal run counted as recent because the token appeared"
+  FM_FAKE_CREW_STATE='state: working · source: pane · activity: recent · harness busy'
+  ! crew_run_activity_is_recent a || fail "a pane-sourced working line counted as pipeline activity"
+  FM_FAKE_CREW_STATE='state: working · source: status-log · activity: recent · working: compiling'
+  ! crew_run_activity_is_recent a || fail "a status-log working line counted as pipeline activity"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · activity: recent · parked at review'
+  ! crew_run_activity_is_recent a || fail "a parked run counted as recent"
+  ! crew_run_activity_is_recent "" || fail "an empty id counted as recent"
+  unset FM_FAKE_CREW_STATE
+  pass "crew_run_activity_is_recent: only working+run-step+activity: recent is fresh; quiet, missing, pane, terminal, parked, empty are not"
 }
 
 # The wedge detector's third liveness input: writes inside the crew's own recorded
@@ -1914,7 +1944,8 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
 
   # Phase B: backdate the idle timer past the threshold; the next run escalates.
-  # (The subsequent-sight timer path does not re-read the crew state.)
+  # This fake is working run-step without activity: recent, so the at-threshold
+  # recency check does not defer.
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -3595,9 +3626,9 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   # Already-classified hash with an idle window that opened 500s ago, so the very
-  # first stale poll lands straight on the at-threshold wedge branch (this repeat
-  # path never re-reads crew state, so the worktree evidence is the only input
-  # that can change the outcome).
+  # first stale poll lands straight on the at-threshold wedge branch. The default
+  # fake crew-state is unknown (not recent pipeline activity), so only the
+  # worktree evidence can change the outcome.
   printf '%s' "$pane_hash" > "$state/.stale-$key"
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
@@ -3687,6 +3718,149 @@ test_write_deferral_resurfaces_on_the_bounded_cadence() {
   pass "a write deferral re-surfaces once on the bounded pause cadence, so a churning worktree cannot stay invisible"
 }
 
+# --- quiet pane, attributed run still reporting recent pipeline activity ------
+# The live 2026-09-08 case: a worker blocked on a no-mistakes review-plus-fix
+# round sat on an unchanged pane for forty minutes. The wedge timer treated that
+# as a possible stuck worker and climbed to demand-deep-inspection, while every
+# inspection found the daemon's active_steps table still live. The one condition
+# that may slow that escalation is crew_run_activity_is_recent: working plus
+# run-step plus an activity: recent field the live axi status produced. A working
+# record without that field, a quiet step, a terminal run, and no run at all must
+# keep the unchanged 240s wedge cadence. All four cases share this already-
+# classified at-threshold fixture so only the crew-state line differs.
+
+_prime_at_threshold_idle_pane() {  # <case-name> <task> -> sets dir/state/fakebin/out/drain_out/capture_file/window/key/pane_hash/back
+  local name=$1 task=$2
+  dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-$task"
+  printf 'idle while the pipeline round runs' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/$task.meta"
+  printf 'working: driving no-mistakes\n' > "$state/$task.status"
+  printf '%s' "$(seen_sig "$state/$task.status")" > "$state/.seen-${task}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle while the pipeline round runs")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+}
+
+test_wedge_escalation_deferred_while_run_activity_is_recent() {
+  local dir state fakebin out drain_out capture_file window key pane_hash pid back
+  _prime_at_threshold_idle_pane wedge-live-run live
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · activity: recent · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher wedge-escalated a quiet pane whose pipeline run is still active: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a live-run deferral printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a live-run deferral enqueued a wake"; }
+  [ -e "$state/.run-alive-since-$key" ] || { reap "$pid"; fail "the live-run deferral chain marker was not recorded"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "a live-run deferral advanced the wedge escalation counter"; }
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || echo 0)" -gt "$back" ] \
+    || { reap "$pid"; fail "a live-run deferral did not restart the idle timer"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional live-run deferral stop"
+  unset FM_FAKE_CREW_STATE
+  pass "a quiet pane whose attributed run still reports recent pipeline activity is deferred, not wedge-escalated"
+}
+
+test_wedge_escalation_still_fires_with_no_run() {
+  local dir state fakebin out drain_out capture_file window key pane_hash pid back
+  _prime_at_threshold_idle_pane wedge-no-run none
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a quiet pane with no run did not wedge-escalate on the existing schedule"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the no-run escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the no-run escalation did not flag a possible wedge"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the no-run escalation was not counted"
+  [ ! -e "$state/.run-alive-since-$key" ] || fail "a no-run pane started a live-run deferral chain"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the idle timer was not cleared after a no-run escalation"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the no-run escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the no-run escalation was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a quiet pane with no pipeline run still wedge-escalates on the unchanged schedule"
+}
+
+test_wedge_escalation_still_fires_when_run_is_terminal() {
+  local dir state fakebin out drain_out capture_file window key pane_hash pid back
+  _prime_at_threshold_idle_pane wedge-terminal-run term
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a quiet pane whose run is terminal did not wedge-escalate on the existing schedule"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the terminal-run escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the terminal-run escalation did not flag a possible wedge"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the terminal-run escalation was not counted"
+  [ ! -e "$state/.run-alive-since-$key" ] || fail "a terminal run started a live-run deferral chain"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the idle timer was not cleared after a terminal-run escalation"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the terminal-run escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the terminal-run escalation was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a quiet pane whose pipeline run is terminal still wedge-escalates on the unchanged schedule"
+}
+
+test_wedge_escalation_still_fires_when_run_activity_is_quiet() {
+  local dir state fakebin out drain_out capture_file window key pane_hash pid back
+  _prime_at_threshold_idle_pane wedge-quiet-run quiet
+  # A working run-step record without the pipeline's own recency verdict is a
+  # stale word, not evidence the worker is working. activity: quiet is the shape
+  # axi status emits after its quiet warning; omitting the field is the same.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · activity: quiet · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a quiet run-step record did not wedge-escalate on the existing schedule"
+  grep -F "possible wedge" "$out" >/dev/null || fail "a quiet run-step record was not flagged a possible wedge"
+  [ ! -e "$state/.run-alive-since-$key" ] || fail "a quiet run-step record started a live-run deferral chain"
+  unset FM_FAKE_CREW_STATE
+  pass "a working run-step whose activity is quiet still wedge-escalates; a stale record is not alive"
+}
+
+test_live_run_deferral_resurfaces_on_the_bounded_cadence() {
+  local dir state fakebin out drain_out capture_file window key pane_hash pid back
+  _prime_at_threshold_idle_pane wedge-live-run-resurface live
+  : > "$state/.run-alive-since-$key"
+  set_mtime "$back" "$state/.run-alive-since-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · activity: recent · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a long-running live-run deferral never re-surfaced on the bounded cadence"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the live-run recheck did not print a stale wake"
+  grep -F "pipeline run still active" "$out" >/dev/null || fail "the live-run recheck was not labeled as such"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a live-run recheck was mislabeled a possible wedge"
+  [ -e "$state/.run-alive-resurfaced-$key" ] || fail "the live-run re-surface throttle marker was not recorded"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a live-run recheck advanced the wedge escalation counter"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the live-run recheck failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the live-run recheck was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a live-run deferral re-surfaces once on the bounded pause cadence, so a quiet pane cannot stay invisible"
+}
+
 # The worktree recorded for a secondmate is a provisioned firstmate home, and that
 # home runs its OWN supervision inside itself: its watcher beacon, pane hashes and
 # heartbeats keep state/ churning whether or not the mate produced anything. Reading
@@ -3763,6 +3937,8 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
   back=$(( $(date +%s) - 5000 ))
   : > "$state/.writing-since-$key"
   set_mtime "$back" "$state/.writing-since-$key"
+  : > "$state/.run-alive-since-$key"
+  set_mtime "$back" "$state/.run-alive-since-$key"
   # The idle-window timer is corrupt, so this poll repairs it and opens a NEW quiet
   # window without probing the worktree at all.
   printf 'corrupt\n' > "$state/.stale-since-$key"
@@ -3779,6 +3955,8 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
     || { reap "$pid"; fail "the corrupt idle-window timer was not repaired"; }
   [ ! -e "$state/.writing-since-$key" ] \
     || { reap "$pid"; fail "an idle-window timer repair kept a finished write-deferral chain"; }
+  [ ! -e "$state/.run-alive-since-$key" ] \
+    || { reap "$pid"; fail "an idle-window timer repair kept a finished live-run deferral chain"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the idle-window timer repair enqueued a wake"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional timer-repair watcher stop"
@@ -4379,6 +4557,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_run_activity_is_recent_classifier
 test_crew_worktree_written_since_classifier
 test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe
@@ -4455,6 +4634,11 @@ test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence
+test_wedge_escalation_deferred_while_run_activity_is_recent
+test_wedge_escalation_still_fires_with_no_run
+test_wedge_escalation_still_fires_when_run_is_terminal
+test_wedge_escalation_still_fires_when_run_activity_is_quiet
+test_live_run_deferral_resurfaces_on_the_bounded_cadence
 test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain

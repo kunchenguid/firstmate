@@ -15,7 +15,14 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · [activity: recent|quiet · ]<detail>
+#
+# When state is working and source is run-step, the first detail field is the
+# pipeline's own recency verdict: activity: recent when the live axi-status
+# active_steps table is present with no quiet prefix, otherwise activity: quiet.
+# That field is the one checkable condition the watcher may use to slow a
+# pane-idleness wedge; a working record without it is not evidence the run is
+# alive. Other states omit the field.
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -743,6 +750,24 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # A working run-step is not by itself evidence the pipeline is still executing.
+  # The watcher wedge timer needs the pipeline's own recency verdict, so a working
+  # line always carries activity: recent or activity: quiet as the first detail
+  # field. recent is only the live axi-status active_steps table with no quiet
+  # prefix on a full (not coarse) attribution; everything else is quiet, including
+  # a coarse runs-list status word, a missing table, and a quiet-prefixed row.
+  if [ "$RUN_STATE" = working ]; then
+    if [ "$RUN_SOURCE" = full ] && nm_run_activity_is_recent; then
+      act="activity: recent"
+    else
+      act="activity: quiet"
+    fi
+    if [ -n "$RUN_DETAIL" ]; then
+      RUN_DETAIL="${act}${SEP}${RUN_DETAIL}"
+    else
+      RUN_DETAIL="$act"
+    fi
+  fi
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
