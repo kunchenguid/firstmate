@@ -1654,6 +1654,13 @@ fm_raw_launch_shell_simple() {
   esac
 }
 
+fm_raw_launch_has_unprovable_shell_syntax() {
+  case "$1" in
+    *'$'*|*'`'*|*\\*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*|*'('*|*')'*|*'{'*|*'}'*|*'['*|*']'*|*'*'*|*'?'*|*'!'*|*'~'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_raw_launch_mentions_codex() {
   local launch=$1 word
   local -a words
@@ -1805,6 +1812,10 @@ if [ -n "$CODEX_HOME_ARG" ]; then
 fi
 
 if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  if fm_raw_launch_has_unprovable_shell_syntax "$LAUNCH"; then
+    echo "error: raw launch commands with shell substitutions or compound syntax cannot prove their effective model; use the verified harness and --model instead" >&2
+    exit 1
+  fi
   RAW_LAUNCH_UNQUOTED=${LAUNCH//\'/}
   RAW_LAUNCH_UNQUOTED=${RAW_LAUNCH_UNQUOTED//\"/}
   RAW_LAUNCH_UNQUOTED=${RAW_LAUNCH_UNQUOTED//\\/}

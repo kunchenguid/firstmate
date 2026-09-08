@@ -111,8 +111,10 @@ fm_dispatch_snapshot_normalized_json() {
 fm_dispatch_quota_account_hash() {
   local snapshot=$1 provider=$2 account
   account=$(printf '%s\n' "$snapshot" | jq -cer --arg provider "$provider" '
-    [.providers[]? | select(.provider == $provider) | .account
-      | select(type == "object" and length > 0)] as $accounts |
+    [.accounts[]?
+      | select(type == "object" and .provider == $provider)
+      | select(.accountId | type == "string" and length > 0 and . != "none")
+    ] as $accounts |
     if ($accounts | length) == 1 then $accounts[0] else empty end
   ' 2>/dev/null) || return 1
   printf '%s\n' "$account" | jq -cS . | shasum -a 256 | awk '{print $1}'

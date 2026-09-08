@@ -52,10 +52,11 @@ set -u
 account_id=${CODEX_HOME##*/}
 jq -n --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg account_id "$account_id" '
   {schemaVersion: 5, generatedAt: $generated_at,
-   providers: [{provider: "codex", account: {accountId: $account_id},
-     quotaSemantics: {status: "known", effectiveAvailability: [{
+   providers: [{provider: "codex", quotaSemantics: {status: "known", effectiveAvailability: [{
        scope: "all_models", status: "known", effectivePercentRemaining: 50,
-       runway: {status: "through_reset"}}]}}]}'
+       runway: {status: "through_reset"}}]}}],
+   accounts: [{provider: "codex", email: "hidden", organization: "none",
+               accountId: $account_id, identityStatus: "verified"}]}'
 SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/quota-axi"
   make_spawn_pi_probe "$fakebin" pi
@@ -470,11 +471,12 @@ make_selection_receipt() {  # <case-dir> <name> <task> <model> [created-at] [sna
     account_id=${codex_home##*/}
     jq -n --arg generated_at "$snapshot_at" --arg account_id "$account_id" '
       {schemaVersion: 5, generatedAt: $generated_at,
-       providers: [{provider: "codex", account: {accountId: $account_id},
-         quotaSemantics: {status: "known", effectiveAvailability: [{
+       providers: [{provider: "codex", quotaSemantics: {status: "known", effectiveAvailability: [{
            scope: "all_models", status: "known", effectivePercentRemaining: 50,
-           runway: {status: "through_reset"}}]}}]}' > "$snapshot"
-    account_hash=$(jq -cS '.providers[] | select(.provider == "codex") | .account' "$snapshot" | shasum -a 256 | awk '{print $1}')
+           runway: {status: "through_reset"}}]}}],
+       accounts: [{provider: "codex", email: "hidden", organization: "none",
+                   accountId: $account_id, identityStatus: "verified"}]}' > "$snapshot"
+    account_hash=$(jq -cS '.accounts[] | select(.provider == "codex")' "$snapshot" | shasum -a 256 | awk '{print $1}')
   else
     printf 'bin: quota-axi\ngeneratedAt: "%s"\nquota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:\n  codex,all_models,50,0,through_reset,established,weekly,"%s"\nexhaustion[0]:\nattention[0]:\n' "$snapshot_at" "$snapshot_at" > "$snapshot"
     account_hash=
@@ -628,6 +630,14 @@ test_astra_without_a_profile_requires_primary_evidence() {
   assert_absent "$HOME_DIR/state/$id.meta" "unconfigured obfuscated Astra refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "unconfigured obfuscated Astra refusal typed a launch command"
 
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    '$(printf codex) --model gpt-6-astra')
+  status=$?
+  expect_code 1 "$status" "a command-substituted raw Astra spawn without a profile should refuse"
+  assert_contains "$out" "cannot prove their effective model" "command-substituted raw Astra refusal did not identify the uninspectable command"
+  assert_absent "$HOME_DIR/state/$id.meta" "command-substituted Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "command-substituted Astra refusal typed a launch command"
+
   receipt=$(make_selection_receipt "$CASE_DIR" unconfigured "$id" gpt-6-astra)
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
@@ -663,7 +673,7 @@ test_astra_qualified_and_raw_models_cannot_bypass_evidence() {
     "codex --model gpt-6-a''stra")
   status=$?
   expect_code 1 "$status" "a shell-obfuscated raw Astra command should refuse before launch"
-  assert_contains "$out" "configured receipt-gated harnesses" "obfuscated raw Astra refusal did not identify the uninspectable command"
+  assert_contains "$out" "must use shell-simple syntax" "obfuscated raw Astra refusal did not identify the uninspectable command"
   assert_absent "$HOME_DIR/state/$id.meta" "obfuscated raw Astra refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "obfuscated raw Astra refusal typed a launch command"
   pass "qualified and raw Astra launch paths cannot bypass primary evidence"
@@ -688,7 +698,7 @@ test_raw_codex_home_override_is_refused() {
     "codex --model gpt-5; env CODEX_HO''ME=/wrong-account codex --model gpt-5" --codex-home "$codex_home")
   status=$?
   expect_code 1 "$status" "a compound raw Codex command should refuse for a selected home"
-  assert_contains "$out" "must use shell-simple syntax" "compound raw Codex refusal did not identify the non-canonical command"
+  assert_contains "$out" "cannot prove their effective model" "compound raw Codex refusal did not identify the non-canonical command"
   assert_absent "$HOME_DIR/state/$id.meta" "compound raw Codex command wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "compound raw Codex command typed a launch command"
 
@@ -720,10 +730,10 @@ test_astra_receipt_binds_the_selected_codex_home() {
 
   receipt=$(make_selection_receipt "$CASE_DIR" wrong-account "$id" gpt-6-astra '' '' "$codex_home")
   snapshot=$(jq -r '.quotaSnapshot.path' "$receipt")
-  jq '.providers[0].account.accountId = "different-account"' "$snapshot" > "$snapshot.tmp"
+  jq '.accounts[0].accountId = "different-account"' "$snapshot" > "$snapshot.tmp"
   mv "$snapshot.tmp" "$snapshot"
   digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
-  account_hash=$(jq -cS '.providers[] | select(.provider == "codex") | .account' "$snapshot" | shasum -a 256 | awk '{print $1}')
+  account_hash=$(jq -cS '.accounts[] | select(.provider == "codex")' "$snapshot" | shasum -a 256 | awk '{print $1}')
   jq --arg digest "$digest" --arg account_hash "$account_hash" \
     '.quotaEvidence.snapshotSha256 = $digest | .quotaEvidence.accountSha256 = $account_hash | .quotaSnapshot.sha256 = $digest' "$receipt" > "$receipt.tmp"
   mv "$receipt.tmp" "$receipt"
