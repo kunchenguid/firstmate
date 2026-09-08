@@ -2,9 +2,12 @@
 # fm-heavy-suite.sh - serialize one machine's heavy frontend and browser suites.
 # Usage: fm-heavy-suite.sh -- <suite command> [args...]
 #
-# The portable advisory lock is shared by worktrees through the process TMPDIR,
-# which is stable for terminals owned by one local user. A contender waits,
-# reports that wait as intentional serialization, and runs after the holder exits.
+# The portable advisory lock is keyed on one fixed machine-local path, so a
+# caller's private TMPDIR never splits contention. FM_HEAVY_SUITE_LOCK_ROOT
+# overrides the lock directory for tests, and the override is resolved to its
+# physical path so two spellings of one directory still name one lock. A
+# contender waits, reports that wait as intentional serialization, and runs
+# after the holder exits.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,7 +20,12 @@ if [ "${1:-}" != -- ] || [ "$#" -lt 2 ]; then
 fi
 shift
 
-LOCK="${TMPDIR:-/tmp}/firstmate-heavy-frontend-suite-$(id -u).lock"
+LOCK_ROOT="${FM_HEAVY_SUITE_LOCK_ROOT:-/tmp}"
+LOCK_ROOT=$(CDPATH='' cd -- "$LOCK_ROOT" 2>/dev/null && pwd -P) || {
+  echo "heavy-suite: lock root ${FM_HEAVY_SUITE_LOCK_ROOT:-/tmp} cannot be resolved" >&2
+  exit 1
+}
+LOCK="$LOCK_ROOT/firstmate-heavy-frontend-suite-$(id -u).lock"
 LOCK_HELD=0
 
 release_lock() {
