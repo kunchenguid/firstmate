@@ -198,10 +198,10 @@ test_actual_host_overrides_inherited_markers() {
     FM_FAKE_PS_ARGS="$versioned_claude --dangerously-skip-permissions" "$HARNESS")
   [ "$out" = claude ] || fail "version-named Claude ancestry lost to inherited Copilot markers: '$out'"
 
-  out=$(CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PATH="$fakebin:$PATH" \
+  out=$(COPILOT_CLI=1 CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PATH="$fakebin:$PATH" \
     FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='/opt/copilot/bin/copilot --allow-all' "$HARNESS")
   [ "$out" = copilot ] || fail "real Copilot ancestry lost to inherited foreign markers: '$out'"
-  pass "Actual Claude and Copilot ancestry outrank inherited foreign markers"
+  pass "Copilot-marked processes use actual Claude or Copilot ancestry to resolve inherited marker conflicts"
 }
 
 test_session_lock_identity_matches_copilot() {

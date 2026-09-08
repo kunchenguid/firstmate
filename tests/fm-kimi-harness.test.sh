@@ -557,7 +557,7 @@ SH
   out=$(env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION \
     -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
     CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
-  [ "$out" = kimi ] || fail "recognized Kimi ancestry must outrank an inherited Claude marker, got '$out'"
+  [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -580,7 +580,7 @@ SH
     -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u GROK_AGENT -u PI_CODING_AGENT -u FM_PI_HARNESS \
     CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "Claude marker fallback changed without recognized ancestry, got '$out'"
-  pass "fm-harness: recognized Kimi ancestry outranks inherited markers while Claude still falls back"
+  pass "fm-harness: Kimi ancestry resolves without markers while verified markers keep precedence"
 }
 
 test_kimi_session_lock_identity() {

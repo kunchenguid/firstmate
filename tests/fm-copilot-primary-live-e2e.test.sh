@@ -2,16 +2,10 @@
 # Opt-in live guard for Copilot CLI's primary hook contract.
 set -u
 
-if [ "${FM_COPILOT_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_COPILOT_LIVE_E2E=1 to run the credentialed Copilot CLI hook guard"
-  exit 0
-fi
-
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-command -v copilot >/dev/null 2>&1 || fail "copilot is not installed"
-command -v jq >/dev/null 2>&1 || fail "jq is required"
+fm_live_gate opt-in FM_COPILOT_LIVE_E2E copilot jq
 
 if [ -n "${FM_COPILOT_LIVE_TMP_ROOT:-}" ]; then
   TMP_ROOT=$FM_COPILOT_LIVE_TMP_ROOT

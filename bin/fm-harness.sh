@@ -24,8 +24,10 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
-# Detection prefers the nearest verified process ancestry, then verified
-# environment markers as fallbacks.
+# Detection keeps established verified environment-marker precedence, then
+# falls back to process ancestry.
+# Copilot-marked processes resolve ancestry first because COPILOT_CLI can be
+# inherited by a nested foreign harness.
 # Record each newly verified env marker and ancestry shape here.
 set -u
 
@@ -39,13 +41,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
 
-detect_own() {
+detect_ancestry() {
   local pid=$$ comm args ancestry=''
-  # Prefer the nearest actual harness process in ancestry before consulting any
-  # inherited marker. This keeps a real Claude session authoritative inside a
-  # Copilot shell and a real Copilot, Cursor, Gemini, Rovo, or omp process
-  # authoritative under inherited foreign markers, while preserving the
-  # verified marker fallbacks when ancestry cannot prove the host.
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
@@ -82,17 +79,31 @@ detect_own() {
       break
     fi
   done
-  if [ -n "$ancestry" ]; then
-    if [ "$ancestry" = pi ] && [ "${PI_CODING_AGENT:-}" = "true" ] \
-       && [ "${FM_PI_HARNESS:-}" = pi-signed ]; then
-      echo pi-signed
-    else
+  [ -n "$ancestry" ] || return 1
+  if [ "$ancestry" = pi ] && [ "${PI_CODING_AGENT:-}" = "true" ] \
+     && [ "${FM_PI_HARNESS:-}" = pi-signed ]; then
+    echo pi-signed
+  else
+    echo "$ancestry"
+  fi
+}
+
+detect_own() {
+  local ancestry=''
+  # COPILOT_CLI reaches nested child harnesses, so a Copilot-marked process
+  # first asks ancestry which harness is actually running.
+  # This exception is deliberately local to Copilot and does not reorder the
+  # established marker-first contract for any other harness.
+  if [ "${COPILOT_CLI:-}" = "1" ]; then
+    ancestry=$(detect_ancestry 2>/dev/null || true)
+    if [ -n "$ancestry" ]; then
       echo "$ancestry"
+    else
+      echo copilot
     fi
     return
   fi
 
-  [ "${COPILOT_CLI:-}" = "1" ] && { echo copilot; return; }
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
   # Gemini is checked BEFORE claude for exactly cursor's reason above: the
@@ -142,11 +153,15 @@ detect_own() {
   # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
   # a per-session log PATH rather than an identity, and its export to tool
   # subprocesses is unverified (verified: muse 0.1.0-R708.1), so muse is detected
-  # by ancestry alone above rather than by any inherited MUSE_* env. Do NOT
+  # by ancestry alone below rather than by any inherited MUSE_* env. Do NOT
   # promote MUSE_CURRENT_SESSION_LOG to a marker without verifying it reaches
   # children AND that it cannot survive in a multiplexer's stored environment,
   # which is the precedence hazard above.
-  echo unknown
+  if ancestry=$(detect_ancestry 2>/dev/null); then
+    echo "$ancestry"
+  else
+    echo unknown
+  fi
 }
 
 # True when an exact `omp` process sits within eight parents of this one. The

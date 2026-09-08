@@ -24,7 +24,7 @@ Accept the remembered trust choice only for a repository the captain intends to 
 
 ## Detection and liveness
 
-`../../../bin/fm-harness.sh` prefers the nearest real Copilot process in ancestry and falls back to `COPILOT_CLI=1` only when ancestry cannot prove the host.
+When `COPILOT_CLI=1` is present, `../../../bin/fm-harness.sh` resolves the nearest verified process ancestry first and falls back to Copilot only when ancestry cannot prove a nested harness.
 It also recognizes the Linux process shapes observed across releases: command name `copilot`, argv zero ending in `/copilot`, or the bundled executable's `MainThread` command with Copilot argv zero.
 The anchored argv-zero rule deliberately does not match editor extensions, plugin paths, or an unrelated command whose later arguments merely mention Copilot.
 

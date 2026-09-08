@@ -39,7 +39,7 @@ Muse and Gemini are verified only for crewmate and scout work, never a secondmat
 
 ## Detection
 
-`../../../bin/fm-harness.sh` prints firstmate's own harness from the nearest verified process ancestry first, then falls back to harness markers only when ancestry cannot prove the host.
+`../../../bin/fm-harness.sh` keeps established verified harness-marker precedence and falls back to process ancestry, while a `COPILOT_CLI`-marked process resolves actual ancestry first to distinguish Copilot from a nested foreign harness that inherited its marker.
 Only `FM_PI_HARNESS=pi-signed` at the launch boundary together with `PI_CODING_AGENT=true` selects Pi-signed; shared unmarked launcher ancestry remains Pi.
 omp publishes no marker of its own; `FM_OMP_HARNESS=omp` is Firstmate's launch marker and the anchored process name `omp` is its ancestry evidence, as `references/harness/omp.md` records.
 `../../../bin/fm-spawn.sh` owns worker marker establishment, while the README launch command owns the signed-primary boundary.
