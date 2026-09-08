@@ -121,6 +121,11 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+if [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
+  CONFIG=$(resolve_directory_input FM_CONFIG_OVERRIDE "$FM_CONFIG_OVERRIDE") || exit 1
+else
+  CONFIG="$FM_HOME/config"
+fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -222,7 +227,7 @@ INBOX_SECTION=${INBOX_SECTION%$'\n'}
 # A worker needs the rule at the precise point a
 # third-party native child-agent facility may be available, while the complete
 # policy, schema, and enforcement boundary remain with the configuration doc.
-ROUTING_CONFIG="\`$FM_HOME/config/crew-dispatch.json\`"
+ROUTING_CONFIG="\`$CONFIG/crew-dispatch.json\`"
 QUOTA_ARRAY_SKILL="\`$FM_ROOT/.agents/skills/quota-array-dispatch/SKILL.md\`"
 IFS= read -r -d '' NESTED_ROUTING_SECTION <<EOF || true
 # Nested delegation and model routing

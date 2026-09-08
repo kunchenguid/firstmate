@@ -442,7 +442,7 @@ test_ship_project_memory_wording() {
 }
 
 test_nested_delegation_model_routing_contract() {
-  local home id brief kind routing_config quota_skill
+  local home id brief kind routing_config quota_skill override_config override_routing_config
   home="$TMP_ROOT/nested routing home"
   mkdir -p "$home/data"
   routing_config="\`$home/config/crew-dispatch.json\`"
@@ -479,6 +479,18 @@ test_nested_delegation_model_routing_contract() {
     assert_grep 'cannot intercept every third-party native child facility' "$brief" \
       "$kind brief overclaims Firstmate runtime enforcement"
   done
+
+  override_config="$TMP_ROOT/override routing config"
+  mkdir -p "$override_config"
+  override_routing_config="\`$override_config/crew-dispatch.json\`"
+  id=brief-nested-routing-override
+  FM_HOME="$home" FM_CONFIG_OVERRIDE="$override_config" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "$override_routing_config is the active firstmate home's current worker-routing authority" "$brief" \
+    "ship brief did not identify the effective overridden routing file"
+  assert_no_grep "$routing_config is the active firstmate home's current worker-routing authority" "$brief" \
+    "ship brief ignored FM_CONFIG_OVERRIDE for nested routing"
 
   pass "fm-brief.sh: ship and scout briefs require configured nested model routing without overclaiming enforcement"
 }
