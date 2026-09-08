@@ -201,12 +201,14 @@ PORTABLE_SERIAL_MAX_UNHINTED_PERCENT=15
 # Drift: a shard runs further over its hint weight than this. The hints are what
 # the packer balances on, so once they read low the packer keeps reporting a
 # perfect split while one runner carries the excess. The remedy is a hint
-# refresh, and the guard names the scripts that drifted most.
+# refresh, and the guard names the scripts that drifted most. Only scripts that
+# actually carry a hint are compared: a missing hint is not a stale one, and the
+# unhinted share above already owns those.
 PORTABLE_SERIAL_MAX_HINT_DRIFT_PERCENT=15
 
-# Headroom: the worst shard's measured duration against a share of the job cap.
-# This is the property actually being protected, and it degrades gracefully as
-# the suite grows. Two shares, because the guard has to speak long before the
+# Headroom: the worst shard's own recorded wall time against a share of the job
+# cap, since the wall clock is what that cap bounds. This is the property
+# actually being protected, and it degrades gracefully as the suite grows. Two shares, because the guard has to speak long before the
 # badge goes red and still not redden a suite that is merely unlucky.
 #
 # Warn: loud, non-fatal, and low enough that a lane growing at a few minutes a
@@ -1072,7 +1074,7 @@ check_portable_serial_balance() {
     "$PORTABLE_SERIAL_WARN_SHARD_BUDGET_PERCENT" \
     "$PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT" \
     "$PORTABLE_SERIAL_SHARDS" "$@" <<'PY' || rc=$?
-import json, sys
+import json, os, re, sys
 from pathlib import Path
 
 hints_path, bound_s, default_s, drift_s, warn_budget_s, budget_s, shards_s = sys.argv[1:8]
@@ -1086,6 +1088,17 @@ expected_shards = int(shards_s)
 
 # Below this a percentage says more about rounding than about balance.
 MIN_HINTED_MS = 60000
+
+# A numbered serial shard lane. The count may differ from this runner's own, so
+# an artifact from an earlier partition stays readable; what cannot be mixed is
+# two partitions in one invocation, because a shard number means different work
+# in each.
+LANE_RE = re.compile(r"^portable-serial-([0-9]+)of([0-9]+)$")
+
+# The warning is the signal that has to arrive before the badge goes red, so
+# under Actions it is raised as an annotation instead of a line only someone who
+# opens the step log would ever read.
+ANNOTATE = os.environ.get("GITHUB_ACTIONS") == "true"
 
 hints = {}
 for line in Path(hints_path).read_text().splitlines():
@@ -1107,13 +1120,33 @@ def minutes(ms):
     return "%.2f min" % (ms / 60000.0)
 
 
-shards = []
+# What the job cap actually bounds is the shard's wall clock, and the runner
+# records exactly that. The per-script sum only stands in for an artifact that
+# carries no usable one.
+def wall_ms_of(data, fallback):
+    summary = data.get("summary")
+    value = summary.get("duration_ms") if isinstance(summary, dict) else None
+    try:
+        wall = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return wall if wall > 0 else fallback
+
+
+by_index = {}
+partitions = {}
+ignored = 0
+deduped = 0
 for path in inputs:
     if not path.exists():
         continue
     data = json.loads(path.read_text())
     lane = lane_of(data)
     if not lane.startswith("portable-serial-"):
+        continue
+    match = LANE_RE.match(lane)
+    if match is None:
+        ignored += 1
         continue
     scripts = [s for s in data.get("scripts", []) if s.get("path")]
     if not scripts:
@@ -1123,15 +1156,53 @@ for path in inputs:
         real = int(s["duration_ms"])
         hint = hints.get(s["path"], default_ms)
         rows.append((real - hint, s["path"], real, hint, s["path"] not in hints))
-    shards.append(
-        {
-            "lane": lane,
-            "measured": sum(r[2] for r in rows),
-            "hinted": sum(r[3] for r in rows),
-            "rows": rows,
-        }
+    # A script with no hint is not a stale hint, so it is excluded from the
+    # drift comparison on both sides; the coverage guard's unhinted share owns
+    # those. It still counts in full toward the wall time below.
+    hinted = [r for r in rows if not r[4]]
+    partitions.setdefault(int(match.group(2)), lane)
+    shard = {
+        "lane": lane,
+        "wall": wall_ms_of(data, sum(r[2] for r in rows)),
+        "hinted_measured": sum(r[2] for r in hinted),
+        "hinted": sum(r[3] for r in hinted),
+        "hinted_count": len(hinted),
+        "unhinted_count": len(rows) - len(hinted),
+        "rows": rows,
+    }
+    index = int(match.group(1))
+    previous = by_index.get(index)
+    if previous is not None:
+        # Several runs globbed together supply the same shard more than once.
+        # Keep the slowest copy, the same worst-case rule the hint table itself
+        # is refreshed on, so a repeat can never inflate the lane total.
+        deduped += 1
+        if previous["wall"] >= shard["wall"]:
+            continue
+    by_index[index] = shard
+
+if len(partitions) > 1:
+    print(
+        "shard balance guard: inputs mix %d serial partitions (%s), whose shard "
+        "numbers cover different work; check one partition at a time "
+        "(docs/fm-test-portable-shards.md)"
+        % (len(partitions), ", ".join(sorted(partitions.values()))),
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+if ignored:
+    print(
+        "FM_TEST_SHARD_BALANCE ignored %d artifact(s) that name no numbered "
+        "portable serial shard" % ignored
+    )
+if deduped:
+    print(
+        "FM_TEST_SHARD_BALANCE deduped %d repeated shard artifact(s); the "
+        "slowest copy of each shard was kept" % deduped
     )
 
+shards = [by_index[index] for index in sorted(by_index)]
 if not shards:
     print(
         "FM_TEST_SHARD_BALANCE skipped no portable serial timing artifacts "
@@ -1139,7 +1210,6 @@ if not shards:
     )
     sys.exit(0)
 
-shards.sort(key=lambda s: s["lane"])
 complete = len(shards) >= expected_shards
 if not complete:
     print(
@@ -1149,21 +1219,24 @@ if not complete:
     )
 
 for s in shards:
-    s["share"] = s["measured"] * 100.0 / bound_ms
+    s["share"] = s["wall"] * 100.0 / bound_ms
     s["drift"] = (
-        (s["measured"] - s["hinted"]) * 100.0 / s["hinted"] if s["hinted"] else 0.0
+        (s["hinted_measured"] - s["hinted"]) * 100.0 / s["hinted"]
+        if s["hinted"]
+        else 0.0
     )
     s["drifted"] = s["hinted"] >= MIN_HINTED_MS and s["drift"] > max_drift
 
 # What an even repack of the reported work would put on each shard. Only that
 # answers whether the lane has outgrown its shard count, so the headroom report
 # never asserts that remedy without it.
-even_ms = sum(s["measured"] for s in shards) / expected_shards if complete else None
+even_ms = sum(s["wall"] for s in shards) / expected_shards if complete else None
 
 
-def drifted_rows(s):
+def drifted_rows(s, hinted_only=False):
+    rows = [r for r in s["rows"] if not r[4]] if hinted_only else s["rows"]
     lines = []
-    for delta, path, real, hint, unhinted in sorted(s["rows"], reverse=True)[:5]:
+    for delta, path, real, hint, unhinted in sorted(rows, reverse=True)[:5]:
         if delta <= 0:
             continue
         lines.append(
@@ -1181,8 +1254,8 @@ def drifted_rows(s):
 
 # A shard can be heavy with every hint accurate, so the header is only printed
 # when there is something under it to read.
-def labelled_rows(s, header):
-    rows = drifted_rows(s)
+def labelled_rows(s, header, hinted_only=False):
+    rows = drifted_rows(s, hinted_only)
     return [header] + rows if rows else []
 
 
@@ -1191,15 +1264,15 @@ def labelled_rows(s, header):
 # lane needs another runner.
 def headroom_report(s, limit, label):
     lines = [
-        "shard balance guard %s: %s measured %s, %.0f%% of the %s min job cap "
+        "shard balance guard %s: %s ran %s, %.0f%% of the %s min job cap "
         "(over %d%%)"
-        % (label, s["lane"], minutes(s["measured"]), s["share"], bound_s, limit)
+        % (label, s["lane"], minutes(s["wall"]), s["share"], bound_s, limit)
     ]
     if s["drifted"]:
         lines.append(
-            "  it also ran %.0f%% over its own hint weight, so refresh the hints "
-            "and repack before adding a shard; the drift report below names the "
-            "scripts to re-measure" % s["drift"]
+            "  its hinted scripts also ran %.0f%% over their hint weight, so "
+            "refresh the hints and repack before adding a shard; the drift "
+            "report below names the scripts to re-measure" % s["drift"]
         )
     elif even_ms is None:
         lines.append(
@@ -1236,24 +1309,35 @@ for s in shards:
     elif s["share"] > warn_budget:
         warnings.append(headroom_report(s, warn_budget, "warning"))
     if s["drifted"]:
+        excluded = (
+            "; %d unhinted script(s) excluded, the coverage guard owns those"
+            % s["unhinted_count"]
+            if s["unhinted_count"]
+            else ""
+        )
         lines = [
-            "shard balance guard failed: %s measured %s against %s of hint weight "
-            "(+%.0f%%, max +%s%%)\n"
+            "shard balance guard failed: %s ran %s against %s of hint weight "
+            "over its %d hinted scripts (+%.0f%%, max +%s%%%s)\n"
             "  the hint table is stale; re-measure these scripts "
             "(docs/fm-test-portable-shards.md):"
             % (
                 s["lane"],
-                minutes(s["measured"]),
+                minutes(s["hinted_measured"]),
                 minutes(s["hinted"]),
+                s["hinted_count"],
                 s["drift"],
                 max_drift,
+                excluded,
             )
         ]
-        lines += drifted_rows(s)
+        lines += drifted_rows(s, hinted_only=True)
         failures.append("\n".join(lines))
 
 for w in warnings:
-    print(w, file=sys.stderr)
+    if ANNOTATE:
+        print("::warning::" + w.replace("\n", "%0A"))
+    else:
+        print(w, file=sys.stderr)
 if failures:
     for f in failures:
         print(f, file=sys.stderr)

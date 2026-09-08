@@ -125,8 +125,13 @@ It checks two properties, because they fail for different reasons and call for d
 
 - Accuracy: a shard whose measured duration exceeds its hinted weight by more than `PORTABLE_SERIAL_MAX_HINT_DRIFT_PERCENT` fails, naming the scripts whose hints drifted most.
   The remedy is a hint refresh.
-- Headroom: a shard whose measured duration exceeds `PORTABLE_SERIAL_WARN_SHARD_BUDGET_PERCENT` of the job cap warns without failing the run, and one that exceeds `PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT` fails.
+  Only scripts that carry a hint are compared, on both sides of the ratio: a hint that was never written is not a stale hint, the coverage guard's `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT` above already owns those, and charging them here would make one new slow test a red aggregate job.
+  When a shard's comparison excludes any script, the failure says how many, so the ratio is not read against a denominator other than the one it used.
+- Headroom: a shard whose duration exceeds `PORTABLE_SERIAL_WARN_SHARD_BUDGET_PERCENT` of the job cap warns without failing the run, and one that exceeds `PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT` fails.
+  The duration here is the shard's own recorded wall time (`summary.duration_ms` in its artifact), because the job cap bounds the wall clock rather than the sum of the scripts; an artifact carrying no usable wall time falls back to that sum.
+  Unhinted scripts count in full toward this bound, so a slow new test still shows the lane outgrowing its shard count even though it never counts as drift.
   The warning sits well below the failure on purpose: the guard has to speak before the badge goes red, and per-script noise on this lane reaches 3x, so a failure line just above the worst healthy shard would redden green suites until someone switched the guard off.
+  Under GitHub Actions the warning is raised as a `::warning::` annotation, so it reaches the run summary rather than only the step log; it still leaves the step green.
 
 A shard over its budget is not by itself evidence that the lane needs another runner, so the headroom report states what it measured against the cap and then only the cause it could establish.
 It divides the reported work evenly across the configured shard count: when even that does not fit, the lane has outgrown its shard count and the remedy is raising `PORTABLE_SERIAL_SHARDS` and the `ci.yml` matrix; when it does fit, the shard is packed heavy rather than the lane being too big, and the report names the scripts that ran over their hints.
@@ -137,6 +142,11 @@ Both remain visible and distinguishable: the estimates being wrong and the lane 
 `tests/fm-test-run.test.sh` parses the workflow and refuses when that job's real `timeout-minutes` key, the value the aggregate step passes, and the cap the runner reports do not all agree, so the cap cannot move in one place only.
 The `tests-timing-aggregate` job runs the check after building the aggregate summary.
 A cancelled shard uploads no artifact, so the check reports how many shards it could read and leaves the rest unchecked rather than guessing.
+
+Reading several downloaded runs at once is the documented refresh workflow, so the guard is explicit about what it accepts.
+An artifact whose lane is not a numbered serial shard is ignored and counted rather than accumulated.
+The same shard supplied more than once is deduplicated to its slowest copy, the same worst-case rule the hint table is refreshed on, so a repeat can never double the lane total or flip the reported remedy.
+Artifacts from two different partitions are refused outright, because shard 3 of five and shard 3 of six cover different work and their totals cannot be added.
 
 ## Timing artifacts
 
