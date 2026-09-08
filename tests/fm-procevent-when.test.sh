@@ -108,6 +108,25 @@ out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire is idempotent"
 pass "arm binds, refuses duplicates, and retire cleans up"
 
+# --- arm refuses a group-writable state root instead of registering a watch
+# that could never be polled (fm-procevent.sh's own reconcile refuses the same
+# way; arm must fail BEFORE writing any spec, trust record, or registration) --
+H="$TMP_ROOT/h-unsafe-root"; new_home "$H"
+chmod 775 "$H/state"
+if when "$H" arm unsafe-root --condition true --action true 2>"$TMP_ROOT/unsafe.err"; then
+  chmod 700 "$H/state"
+  fail "arm must refuse a group-writable state root"
+fi
+assert_grep "not a private directory" "$TMP_ROOT/unsafe.err" \
+  "the refusal names the private-directory check"
+assert_absent "$H/state/when/when-unsafe-root.spec" "no spec is written on refusal"
+assert_absent "$H/state/procevent/when-unsafe-root.source" "no registration is published on refusal"
+chmod 700 "$H/state"
+out=$(when "$H" arm unsafe-root --condition true --action true)
+assert_contains "$out" "armed: when-unsafe-root" "arm succeeds once the state root is private again"
+when "$H" retire unsafe-root >/dev/null
+pass "arm refuses a group-writable state root before registering anything"
+
 # --- concurrent arms publish exactly one complete registration ---------------
 H="$TMP_ROOT/h-concurrent-arm"; new_home "$H"
 (
