@@ -684,14 +684,18 @@ test_astra_qualified_and_raw_models_cannot_bypass_evidence() {
   pass "qualified and raw Astra launch paths cannot bypass primary evidence"
 }
 
-test_raw_codex_provider_models_require_inspectable_non_astra_launches() {
-  local rec opencode_astra_id omp_astra_id option_terminator_id opencode_safe_id absolute_codex_safe_id out status
+test_raw_model_capable_harnesses_require_inspectable_non_astra_launches() {
+  local rec opencode_astra_id omp_astra_id pi_astra_id pi_signed_astra_id option_terminator_id opencode_safe_id pi_safe_id absolute_codex_safe_id unclassified_id out status
   opencode_astra_id=profile-raw-opencode-astra-z3fga
   omp_astra_id=profile-raw-omp-astra-z3fgb
+  pi_astra_id=profile-raw-pi-astra-z3fgc
+  pi_signed_astra_id=profile-raw-pi-signed-astra-z3fgd
   option_terminator_id=profile-raw-option-terminator-z3fgc
   opencode_safe_id=profile-raw-opencode-safe-z3fgd
+  pi_safe_id=profile-raw-pi-safe-z3fge
   absolute_codex_safe_id=profile-raw-absolute-codex-safe-z3fge
-  rec=$(make_spawn_case profile-raw-codex-provider codex "$opencode_astra_id" "$omp_astra_id" "$option_terminator_id" "$opencode_safe_id" "$absolute_codex_safe_id")
+  unclassified_id=profile-raw-unclassified-z3fgf
+  rec=$(make_spawn_case profile-raw-model-capable codex "$opencode_astra_id" "$omp_astra_id" "$pi_astra_id" "$pi_signed_astra_id" "$option_terminator_id" "$opencode_safe_id" "$pi_safe_id" "$absolute_codex_safe_id" "$unclassified_id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$opencode_astra_id" "$PROJ_DIR" \
@@ -710,6 +714,22 @@ test_raw_codex_provider_models_require_inspectable_non_astra_launches() {
   assert_absent "$HOME_DIR/state/$omp_astra_id.meta" "raw omp Astra refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "raw omp Astra refusal typed a launch command"
 
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$pi_astra_id" "$PROJ_DIR" \
+    "pi --model openai-codex/gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "a raw Pi Astra command should refuse before launch"
+  assert_contains "$out" "selecting Astra are not inspectable" "raw Pi Astra refusal did not identify selection evidence"
+  assert_absent "$HOME_DIR/state/$pi_astra_id.meta" "raw Pi Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw Pi Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$pi_signed_astra_id" "$PROJ_DIR" \
+    "pi-signed --model openai-codex/gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "a raw Pi-signed Astra command should refuse before launch"
+  assert_contains "$out" "selecting Astra are not inspectable" "raw Pi-signed Astra refusal did not identify selection evidence"
+  assert_absent "$HOME_DIR/state/$pi_signed_astra_id.meta" "raw Pi-signed Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw Pi-signed Astra refusal typed a launch command"
+
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$option_terminator_id" "$PROJ_DIR" \
     "codex -- --model gpt-5")
   status=$?
@@ -722,14 +742,28 @@ test_raw_codex_provider_models_require_inspectable_non_astra_launches() {
     "opencode --model gpt-5")
   status=$?
   expect_code 0 "$status" "a canonical raw OpenCode non-Astra command should remain launchable: $out"
-  assert_meta_profile "$HOME_DIR/state/$opencode_safe_id.meta" opencode default default
+  assert_meta_profile "$HOME_DIR/state/$opencode_safe_id.meta" opencode gpt-5 default
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$pi_safe_id" "$PROJ_DIR" \
+    "pi --model openai-codex/gpt-5.6-terra")
+  status=$?
+  expect_code 0 "$status" "a canonical raw Pi non-Astra command should remain launchable: $out"
+  assert_meta_profile "$HOME_DIR/state/$pi_safe_id.meta" pi openai-codex/gpt-5.6-terra default
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$absolute_codex_safe_id" "$PROJ_DIR" \
     "$FAKEBIN_DIR/codex --model gpt-5")
   status=$?
   expect_code 0 "$status" "a direct raw Codex executable path with an explicit non-Astra model should remain launchable: $out"
-  assert_meta_profile "$HOME_DIR/state/$absolute_codex_safe_id.meta" codex default default
-  pass "raw Codex-provider launches reject Astra while preserving explicit non-Astra OpenCode"
+  assert_meta_profile "$HOME_DIR/state/$absolute_codex_safe_id.meta" codex gpt-5 default
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$unclassified_id" "$PROJ_DIR" \
+    "unclassified-agent --model gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "an unclassified raw harness should refuse before launch"
+  assert_contains "$out" "must begin with a direct, supported harness executable" "unclassified raw harness refusal did not identify the structured-launch requirement"
+  assert_absent "$HOME_DIR/state/$unclassified_id.meta" "unclassified raw harness refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unclassified raw harness refusal typed a launch command"
+  pass "raw model-capable launches reject Astra while preserving explicit non-Astra models"
 }
 
 test_raw_launch_classifier_requires_direct_supported_harness() {
@@ -1843,7 +1877,7 @@ test_codex_home_refuses_control_bytes_before_launch
 test_codex_home_is_refused_for_other_harnesses
 test_astra_without_a_profile_requires_primary_evidence
 test_astra_qualified_and_raw_models_cannot_bypass_evidence
-test_raw_codex_provider_models_require_inspectable_non_astra_launches
+test_raw_model_capable_harnesses_require_inspectable_non_astra_launches
 test_raw_launch_classifier_requires_direct_supported_harness
 test_raw_codex_home_override_is_refused
 test_astra_receipt_binds_the_selected_codex_home

@@ -1811,26 +1811,19 @@ if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     echo "error: raw launch commands with shell substitutions or compound syntax cannot prove their effective model; use the verified harness and --model instead" >&2
     exit 1
   fi
-  case "$HARNESS" in
-    codex|opencode|omp)
-    if ! fm_raw_launch_shell_simple "$LAUNCH"; then
-      echo "error: raw $HARNESS launch commands selecting Codex provider models must use shell-simple syntax so their effective model is inspectable; use the verified harness and --model instead" >&2
-      exit 1
-    fi
-    RAW_CODEX_MODEL=$(fm_raw_launch_canonical_model "$LAUNCH" "$HARNESS") || {
-      echo "error: raw $HARNESS launch commands that can select Codex provider models must be one canonical invocation with exactly one explicit --model before dispatch" >&2
-      exit 1
-    }
-    RAW_CODEX_PROVIDER=$(fm_quota_provider_for_harness "$HARNESS" "$RAW_CODEX_MODEL" 2>/dev/null) || {
-      echo "error: raw $HARNESS launch commands must use a model with a known provider before dispatch; use the verified harness and --model instead" >&2
-      exit 1
-    }
-    if [ "$RAW_CODEX_PROVIDER" = codex ] && fm_dispatch_model_is_astra "$RAW_CODEX_MODEL"; then
-      echo "error: raw launch commands selecting Astra are not inspectable for selection receipts; use the verified harness and --model instead" >&2
-      exit 1
-    fi
-    ;;
-  esac
+  if ! fm_raw_launch_shell_simple "$LAUNCH"; then
+    echo "error: raw $HARNESS launch commands must use shell-simple syntax so their effective model is inspectable; use the verified harness and --model instead" >&2
+    exit 1
+  fi
+  RAW_MODEL=$(fm_raw_launch_canonical_model "$LAUNCH" "$HARNESS") || {
+    echo "error: raw $HARNESS launch commands must be one canonical invocation with exactly one explicit --model before dispatch" >&2
+    exit 1
+  }
+  if fm_dispatch_model_is_astra "$RAW_MODEL"; then
+    echo "error: raw launch commands selecting Astra are not inspectable for selection receipts; use the verified harness and --model instead" >&2
+    exit 1
+  fi
+  MODEL=$RAW_MODEL
   if fm_dispatch_harness_receipt_required "$CONFIG/crew-dispatch.json" "$HARNESS"; then
     echo "error: raw launch commands for configured receipt-gated harnesses are not inspectable for selection receipts; use the verified harness and --model instead" >&2
     exit 1
