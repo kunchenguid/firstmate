@@ -61,11 +61,11 @@ Malformed or unsupported shell syntax that contains a protected command is a sem
 ## Primary pipeline ownership
 
 An executed `no-mistakes` command whose first two arguments are `axi run` or `axi respond` is a pipeline drive.
-The classifier follows recognized wrappers, control-flow command positions, and literal nested-shell execution, so `env`, shell or system `time`, named or unnamed `coproc`, `if`/loop/`case` bodies, and `bash -lc` cannot evade the ownership boundary.
+The classifier follows recognized wrappers, control-flow command positions, and literal nested-shell execution, and it conservatively denies the same resolved argument-vector sequence behind any other command, so `env`, `nice`, shell or system `time`, named or unnamed `coproc`, `if`/loop/`case` bodies, and `bash -lc` cannot evade the ownership boundary.
 A pipeline drive denies with `primary-pipeline-drive` only when `bin/fm-primary-scope-lib.sh` proved the checker is running in a genuine primary home.
 The identical command is allowed from a linked task worktree because that worker owns the run.
 Commands such as `no-mistakes axi status` and `no-mistakes axi abort` remain available in the primary for supervision and explicit recovery.
-A data mention in an argument to `echo`, `rg`, or another non-execution command remains allowed.
+A quoted data mention passed as one argument to `echo`, `rg`, or another non-execution command remains allowed; separate resolved `no-mistakes axi run` or `no-mistakes axi respond` fields deny conservatively because an unknown command may execute them.
 
 This ownership check is independent of Calm mode, the supervision branch, and the runtime backend.
 Calm mode hid the initiating model's working narration during the reported call, and the supervision branch could trigger the main conversation to process an outcome, but neither component executes the primary's tool call or blocks Pi's input loop.

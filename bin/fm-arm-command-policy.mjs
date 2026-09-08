@@ -580,6 +580,7 @@ export function commandPosition(tokens) {
   let command = words[index];
   while (command) {
     const name = basename(command.value);
+    if (name === "time" && wrappers.includes("command")) break;
     if (name === "exec" || name === "command" || name === "sudo" || name === "nohup" || name === "time") {
       wrappers.push(name === "time" && command.value.includes("/") ? "system-time" : name);
       const options = consumeWrapperOptions(name, words, index + 1);
@@ -779,22 +780,28 @@ function resolvedInvocationFields(word, context) {
 function isPipelineDriveInvocation(position, context) {
   if (!position.command) return false;
   const invocation = [];
+  const unquoted = [];
   const words = position.words.slice(position.index);
   for (let index = 0; index < words.length; index += 1) {
     const fields = resolvedInvocationFields(words[index], context);
     if (fields === null) {
-      if (invocation.length === 0) {
-        const commandGroup = resolvedInvocationFields(words[index + 1], context);
-        const actionGroup = resolvedInvocationFields(words[index + 2], context);
-        return commandGroup?.length === 1 && commandGroup[0] === "axi" &&
-          actionGroup?.length === 1 && ["run", "respond"].includes(actionGroup[0]);
-      }
-      return basename(invocation[0] || "") === "no-mistakes" && invocation[1] === "axi" && invocation.length === 2;
+      const commandGroup = resolvedInvocationFields(words[index + 1], context);
+      const actionGroup = resolvedInvocationFields(words[index + 2], context);
+      if (commandGroup?.length === 1 && commandGroup[0] === "axi" &&
+          actionGroup?.length === 1 && ["run", "respond"].includes(actionGroup[0])) return true;
+      if (basename(invocation.at(-2) || "") === "no-mistakes" && invocation.at(-1) === "axi") return true;
+      invocation.push(null);
+      unquoted.push(false);
+      continue;
     }
     invocation.push(...fields);
-    if (invocation.length >= 3) break;
+    unquoted.push(...fields.map(() => !words[index].quoted));
   }
-  return basename(invocation[0] || "") === "no-mistakes" && invocation[1] === "axi" && ["run", "respond"].includes(invocation[2]);
+  const commandName = basename(resolveKnownWord(position.command, context.knownVariables) || position.command.value);
+  const genericForwarding = !["bash", "sh", "zsh"].includes(commandName);
+  return invocation.some((field, index) => basename(field || "") === "no-mistakes" &&
+    invocation[index + 1] === "axi" && ["run", "respond"].includes(invocation[index + 2]) &&
+    (index === 0 || (genericForwarding && unquoted.slice(index, index + 3).every(Boolean))));
 }
 
 function shellPositionalArguments(position, payload, context) {

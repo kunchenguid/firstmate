@@ -375,6 +375,7 @@ worktree=$worker
 EOF
   for payload in \
     'no-mistakes axi respond --action fix' \
+    'nice no-mistakes axi respond --action fix' \
     'time no-mistakes axi respond --action fix' \
     'time -p no-mistakes axi respond --action fix' \
     '/usr/bin/time -l no-mistakes axi respond --action fix' \
@@ -424,6 +425,7 @@ EOF
 
   for payload in \
     'no-mistakes axi run --intent test' \
+    'nice no-mistakes axi respond --action fix' \
     'env NO_COLOR=1 no-mistakes axi respond --action fix' \
     "bash -lc 'no-mistakes axi respond --action fix'" \
     'time no-mistakes axi respond --action fix' \
