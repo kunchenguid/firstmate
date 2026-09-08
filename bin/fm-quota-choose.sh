@@ -33,17 +33,17 @@
 # rather than half-supported so a caller never reads a per-home choice out of a
 # single-home measurement.
 #
-# Multi-provider limitation: this helper maps each harness to ONE primary
+# Multi-provider limitation: this helper maps each harness to ONE established
 # provider family (see fm_quota_provider_for_harness) and checks quota for that
-# family only. Some harnesses can run models from several providers - for
-# example, Pi and OpenCode may dispatch xAI, Anthropic, or other models - so a
-# candidate whose established provider differs from the harness's primary family
-# is checked against the wrong quota row. This is an accepted limitation of the
-# optional helper. Authoritative multi-provider routing - including provider
-# discovery from the harness catalog and quota matching by that explicit
-# provider - is owned by AGENTS.md section 4 and the quota-array-dispatch skill,
-# not by this helper. Use this helper only when the brief already fixed the
-# candidate order and every candidate's provider is the harness's primary family.
+# family only. Pi's openai-codex/<id> family is the documented exception: it
+# authenticates through Codex, so it checks the codex row against bare <id>.
+# Other Pi and OpenCode models may dispatch xAI, Anthropic, or other providers,
+# and a candidate outside an established mapping is checked against the wrong
+# quota row. This is an accepted limitation of the optional helper.
+# Authoritative multi-provider routing - including provider discovery from the
+# harness catalog and quota matching by that explicit provider - is owned by
+# AGENTS.md section 4 and the quota-array-dispatch skill. Use this helper only
+# when the brief already fixed the candidate order and provider mapping.
 #
 # omp (Oh My Pi) has no single primary family, so its candidate model prefix
 # selects the family: openai-codex/<id> checks the codex row and
@@ -375,8 +375,7 @@ for c in "${CANDIDATES[@]}"; do
   model=${c#*:}
   [ "$model" = "$c" ] && model="default"
   provider=$(fm_quota_provider_for_harness "$harness" "$model")
-  scope_model=$model
-  [ "$harness" != omp ] || scope_model=${model#*/}
+  scope_model=$(fm_quota_scope_model_for_harness "$harness" "$model")
   effective=$(effective_for_provider_model "$provider" "$scope_model")
   if [ -z "$effective" ] || [ "$effective" = "null" ]; then
     continue

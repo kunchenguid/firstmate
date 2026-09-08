@@ -179,7 +179,7 @@ if help=$("$BIN/fm-quota-choose.sh" --help 2>&1); then
   fail "help unexpectedly exited zero"
 fi
 printf '%s\n' "$help" | grep -Fq \
-  "candidate order and every candidate's provider is the harness's primary family." \
+  "candidate order and provider mapping." \
   || fail "help omitted the multi-provider usage restriction"
 if printf '%s\n' "$help" | grep -Fq 'set -u'; then
   fail "help leaked executable source"
@@ -222,6 +222,14 @@ fi
 out=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:openai-codex/codex_other)
 [ "$out" = "omp openai-codex/codex_other" ] || fail "omp prefix: expected the provider-wide codex quota to select the prefixed model, got '$out'"
 ok "omp openai-codex prefix matches the bare codex model scope"
+
+if out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:openai-codex/codex_bengalfox 2>/dev/null); then
+  fail "pi Codex family: the bare codex model scope did not veto, got exit 0 with '$out'"
+fi
+[ "$out" = "none" ] || fail "pi Codex family: expected 'none' from the exhausted codex model scope, got '$out'"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:openai-codex/codex_other)
+[ "$out" = "pi openai-codex/codex_other" ] || fail "pi Codex family: expected the provider-wide codex quota to select the prefixed model, got '$out'"
+ok "pi openai-codex prefix matches the bare codex model scope"
 
 if err=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:ollama/qwen3:8b --candidate claude:claude-3-5-sonnet 2>&1); then
   fail "unmapped omp prefix unexpectedly selected a later candidate"

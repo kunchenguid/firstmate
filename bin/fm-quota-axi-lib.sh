@@ -104,7 +104,12 @@ fm_quota_provider_for_harness() {
     claude) printf 'claude\n' ;;
     codex) printf 'codex\n' ;;
     opencode) printf 'codex\n' ;;
-    pi|pi-signed) printf 'pi\n' ;;
+    pi|pi-signed)
+      case "${2:-}" in
+        openai-codex/*) printf 'codex\n' ;;
+        *) printf 'pi\n' ;;
+      esac
+      ;;
     grok) printf 'grok\n' ;;
     kimi) printf 'kimi\n' ;;
     cursor) printf 'cursor\n' ;;
@@ -113,11 +118,23 @@ fm_quota_provider_for_harness() {
   esac
 }
 
+fm_quota_scope_model_for_harness() {
+  case "$1" in
+    omp) printf '%s\n' "${2#*/}" ;;
+    pi|pi-signed)
+      case "$2" in
+        openai-codex/*) printf '%s\n' "${2#*/}" ;;
+        *) printf '%s\n' "$2" ;;
+      esac
+      ;;
+    *) printf '%s\n' "$2" ;;
+  esac
+}
+
 fm_quota_snapshot_has_candidate_availability() {
   local snapshot=$1 harness=$2 model=$3 provider scope_model
   provider=$(fm_quota_provider_for_harness "$harness" "$model") || return 1
-  scope_model=$model
-  [ "$harness" != omp ] || scope_model=${model#*/}
+  scope_model=$(fm_quota_scope_model_for_harness "$harness" "$model") || return 1
   printf '%s\n' "$snapshot" | jq -e --arg provider "$provider" --arg model "$scope_model" '
     ($model | sub("^model:"; "")) as $model_token |
     [.providers[]? | select(.provider == $provider)] as $providers |

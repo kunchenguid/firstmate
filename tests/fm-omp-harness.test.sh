@@ -309,7 +309,7 @@ test_busy_extension_lifecycle() {
   local rec id=omp-busy-q5 out state ext
   rec=$(make_spawn_case busy omp "$id")
   read_case_record "$rec"
-  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp)
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model ollama/qwen3:8b)
   expect_code 0 $? "omp spawn should succeed: $out"
   state="$HOME_DIR/state"
   ext="$state/$id.omp-ext.ts"

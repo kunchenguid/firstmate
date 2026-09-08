@@ -164,7 +164,7 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
   read_case_record "$rec"
 
   out=$(CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet)
   status=$?
   expect_code 0 "$status" "claude spawn under Cursor markers should succeed"
   launch=$(cat "$LAUNCH_LOG")
@@ -190,7 +190,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --model openai-codex/gpt-5.6-sol 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with relative home overrides should succeed"
@@ -219,7 +219,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$relative_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+      "$SPAWN" "$relative_id" "$PROJ_DIR" --mode no-mistakes --yolo off --model openai-codex/gpt-5.6-sol 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with relative FM_HOME defaults should succeed"
@@ -239,7 +239,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+      "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode no-mistakes --yolo off --model openai-codex/gpt-5.6-sol 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with absolute symlink-spelled FM_HOME defaults should succeed"
@@ -267,7 +267,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --model openai-codex/gpt-5.6-sol 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with absolute symlink-spelled overrides should succeed"
@@ -924,6 +924,53 @@ test_astra_receipt_requires_selected_provider_availability() {
   pass "Astra receipts require quota evidence for the selected provider"
 }
 
+test_pi_openai_codex_receipt_uses_codex_quota() {
+  local rec id out status receipt snapshot digest generated_at
+  id=profile-pi-codex-provider-z3j
+  rec=$(make_spawn_case profile-pi-codex-provider pi "$id")
+  read_case_record "$rec"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" pi-only "$id" openai-codex/gpt-6-astra)
+  jq '.harness = "pi" | .candidates[0].harness = "pi"' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  snapshot=$(jq -r '.quotaSnapshot.path' "$receipt")
+  generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -n --arg generated_at "$generated_at" '
+    {schemaVersion: 5, generatedAt: $generated_at,
+     providers: [{provider: "pi", quotaSemantics: {status: "known", effectiveAvailability: [{
+       scope: "all_models", status: "known", effectivePercentRemaining: 50,
+       runway: {status: "through_reset"}}]}}]}' > "$snapshot"
+  digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
+  jq --arg digest "$digest" \
+    '.quotaEvidence.snapshotSha256 = $digest | .quotaSnapshot.sha256 = $digest' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness pi --model openai-codex/gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a Pi-only snapshot should not permit a Pi Codex Astra spawn"
+  assert_contains "$out" "does not contain current quota-axi availability" "Pi-only quota evidence did not reject the Codex model"
+  assert_absent "$HOME_DIR/state/$id.meta" "Pi-only receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "Pi-only receipt typed a launch command"
+
+  jq -n --arg generated_at "$generated_at" '
+    {schemaVersion: 5, generatedAt: $generated_at,
+     providers: [{provider: "codex", quotaSemantics: {status: "known", effectiveAvailability: [{
+       scope: "all_models", status: "known", effectivePercentRemaining: 50,
+       runway: {status: "through_reset"}}]}}]}' > "$snapshot"
+  digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
+  jq --arg digest "$digest" \
+    '.quotaEvidence.snapshotSha256 = $digest | .quotaSnapshot.sha256 = $digest' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness pi --model openai-codex/gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 0 "$status" "Codex quota evidence should permit a Pi Codex Astra spawn: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-6-astra high
+  pass "Pi openai-codex Astra receipts require Codex quota evidence"
+}
+
 test_astra_dispatch_requires_a_current_primary_selection_receipt() {
   local rec id out status receipt launch digest snapshot account_hash
   id=profile-astra-receipt-z3f
@@ -1489,7 +1536,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   # (bin/fm-claude-trust.sh), so an unwritable directory is a genuine blocker.
   # The forwarding assertion below is what this case proves and is unchanged.
   out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet)
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
@@ -1506,7 +1553,7 @@ test_claude_omits_config_dir_prefix_when_unset() {
 
   # run_spawn pins CLAUDE_CONFIG_DIR empty by default, exercising the single-store
   # default path where fm-spawn adds no prefix.
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet)
   status=$?
   expect_code 0 "$status" "claude spawn without CLAUDE_CONFIG_DIR should succeed"
   launch=$(cat "$LAUNCH_LOG")
@@ -1522,7 +1569,7 @@ test_non_claude_harness_ignores_config_dir() {
   read_case_record "$rec"
 
   out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5)
   status=$?
   expect_code 0 "$status" "codex spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
@@ -1649,7 +1696,7 @@ test_launch_environment_invalid_config_refuses() {
   read_case_record "$rec"
   for bad in 'FM_TEST_ALLOWED=value' 'NAME;false' '1INVALID' '*'; do
     printf '%s\n' "$bad" > "$HOME_DIR/config/launch-env-allowlist"
-    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5)
     status=$?
     expect_code 1 "$status" "invalid allowlist must refuse spawn"
     assert_contains "$out" 'launch-env-allowlist' "refusal must identify the config file"
@@ -1682,7 +1729,7 @@ test_launch_environment_inaccessible_config_refuses() {
       fi
       chmod 600 "$blocked" || fail "could not remove configuration search permission"
       out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-        "$id" "$PROJ_DIR" --harness codex --backend tmux)
+        "$id" "$PROJ_DIR" --harness codex --model gpt-5 --backend tmux)
       status=$?
       chmod 700 "$blocked" || fail "could not restore configuration search permission"
       expect_code 1 "$status" "inaccessible $setting with $presence allowlist must refuse spawn: $out"
@@ -1847,9 +1894,9 @@ printf '%s\n' "$@" > "$FM_ROLE_PROMPT"
 SH
     chmod +x "$FAKEBIN_DIR/codex"
     if [ "$kind" = scout ]; then
-      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --model gpt-5)
     else
-      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode "$kind" --yolo off)
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode "$kind" --yolo off --model gpt-5)
     fi
     expect_code 0 "$?" "$kind worker spawn failed: $out"
     launch=$(cat "$LAUNCH_LOG")
@@ -1904,6 +1951,7 @@ test_raw_launch_classifier_requires_direct_supported_harness
 test_raw_codex_home_override_is_refused
 test_astra_receipt_binds_the_selected_codex_home
 test_astra_receipt_requires_selected_provider_availability
+test_pi_openai_codex_receipt_uses_codex_quota
 test_astra_dispatch_requires_a_current_primary_selection_receipt
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

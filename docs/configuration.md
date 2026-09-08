@@ -408,23 +408,24 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "home": "<optional absolute Codex home, codex only>", "requiresSelectionReceipt": true }
+        { "harness": "<adapter>", "model": "<concrete model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "home": "<optional absolute Codex home, codex only>", "requiresSelectionReceipt": true }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
   ],
   "default": [
-    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>", "home": "<optional absolute Codex home, codex only>", "requiresSelectionReceipt": true }
+    { "harness": "<adapter>", "model": "<concrete model>", "effort": "<optional effort>", "home": "<optional absolute Codex home, codex only>", "requiresSelectionReceipt": true }
   ]
 }
 ```
 
 Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
-The single-object form stays fully backward-compatible, and every profile needs `harness`.
-Profile `model` and `effort` fields and rule `why` are optional.
+The single-object form stays fully backward-compatible, and every crew or scout profile needs `harness` and a concrete `model`.
+Profile `effort` and rule `why` fields are optional.
 `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
-An omitted model or effort means the selected harness uses its own default for that axis.
+An omitted effort means the selected harness uses its own default for that axis.
+Crew and scout launches with an omitted or unprovable model are refused before dispatch rather than using a harness default.
 The optional `home` field names the absolute Codex home (`CODEX_HOME`) a candidate runs against, which is how one firstmate home dispatches across two logged-in Codex accounts.
 It is valid only for `harness: "codex"`, and any other harness carrying it is a `CREW_DISPATCH` configuration error.
 [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md) owns how such a candidate's quota is measured, and `fm-spawn.sh` exports `CODEX_HOME=<home>` into that one worker's launch while recording the choice in the task's own record.

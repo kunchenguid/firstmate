@@ -1147,7 +1147,7 @@ test_prefixed_prior_harness_wiring_is_still_retired() {
   printf '%s\n' "$dir/home/state/rl30.turn-ended" > "$auth"
   printf 'token=fm.abcdefabcdef\n' > "$dir/wt/.fm-grok-turnend"
   printf 'zsh' > "$dir/fake/command"
-  run_spawn "$dir" rl30 --relaunch --harness claude >/dev/null
+  run_spawn "$dir" rl30 --relaunch --harness claude --model sonnet >/dev/null
   [ ! -e "$auth" ] \
     || fail "a prefixed prior harness must still have its turn-end registry entry revoked"
   [ ! -e "$dir/home/state/rl30.grok-turnend-token" ] \
@@ -1169,7 +1169,7 @@ test_muse_session_binding_is_retired_on_a_harness_switch() {
     > "$dir/home/state/rl31.muse-session"
   printf '/nonexistent/session.jsonl\n' > "$dir/home/state/rl31.muse-session-current"
   printf 'zsh' > "$dir/fake/command"
-  run_spawn "$dir" rl31 --relaunch --harness claude >/dev/null
+  run_spawn "$dir" rl31 --relaunch --harness claude --model sonnet >/dev/null
   [ ! -e "$dir/home/state/rl31.muse-session" ] \
     || fail "the retired muse incarnation's session binding must not outlive it"
   [ ! -e "$dir/home/state/rl31.muse-session-current" ] \
@@ -1184,7 +1184,7 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
   printf 'workspace=%s\nprior_conversation=old-conversation\n' "$dir/wt" \
     > "$dir/home/state/rl35.cursor-session"
   printf 'zsh' > "$dir/fake/command"
-  run_spawn "$dir" rl35 --relaunch --harness claude >/dev/null
+  run_spawn "$dir" rl35 --relaunch --harness claude --model sonnet >/dev/null
   [ ! -e "$dir/home/state/rl35.cursor-session" ] \
     || fail "the retired cursor incarnation's session binding must not outlive it"
   pass "fm-spawn --relaunch: switching away from cursor retires its session binding"
@@ -1668,7 +1668,7 @@ exec "$dir/fakebin/tmux-real" "\$@"
 SH
   chmod +x "$dir/fakebin/tmux"
 
-  out=$(run_spawn "$dir" rl38 --relaunch --harness claude); rc=$?
+  out=$(run_spawn "$dir" rl38 --relaunch --harness claude --model sonnet); rc=$?
   expect_code 0 "$rc" "relaunch with one continuous meta lock should succeed"$'\n'"$out"
   assert_present "$dir/lock-observation-started" \
     "test did not observe the relaunch-held meta lock"
