@@ -310,10 +310,7 @@ fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <record-path> [e
   content=${content//[$' \t\r\n\v\f']/}
   line=${line//[$' \t\r\n\v\f']/}
   [ -n "$line" ] || return 1
-  case "$content" in
-    *"$line"*) return 0 ;;
-  esac
-  return 1
+  [ "$content" = "$line" ]
 }
 
 # fm_task_inbox_commit_pending_doorbell: submit a doorbell already sitting in
@@ -386,7 +383,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   # steps, so an agent exiting after the liveness check could leave a bare
   # shell only a suffix; the `: ` prefix protects complete lines only. Do not
   # add process-bound atomic delivery here unless an incident reopens this.
-  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
+  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 3 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
   # The verdict is read only to report a failed keystroke; every other value

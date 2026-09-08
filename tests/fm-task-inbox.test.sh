@@ -339,7 +339,7 @@ test_ring_commits_its_own_swallowed_doorbell() {
 # text firstmate did not type is someone's real half-typed content. It is
 # deferred untouched - no Enter, nothing typed - however long it sits there.
 test_ring_never_submits_foreign_composer_text() {
-  local dir state rec other other_doorbell log keylog rc
+  local dir state rec doorbell other other_doorbell log keylog rc
   dir="$TMP_ROOT/ring-foreign"
   state="$dir/state"
   mkdir -p "$state"
@@ -356,6 +356,18 @@ test_ring_never_submits_foreign_composer_text() {
   [ ! -s "$keylog" ] || fail "foreign composer text must never receive a key:"$'\n'"$(cat "$keylog")"
   [ ! -s "$log" ] || fail "foreign composer text must not be typed over:"$'\n'"$(cat "$log")"
   [ -f "$rec" ] || fail "deferring the ring must leave the durable record"
+
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  make_composer_capture "$dir/capture.txt" "$doorbell finish the release notes"
+  : > "$keylog"
+  : > "$log"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "a doorbell mixed with human draft text should defer the ring, got $rc"
+  [ ! -s "$keylog" ] || fail "mixed doorbell and human draft text must never receive a key:"$'\n'"$(cat "$keylog")"
+  [ ! -s "$log" ] || fail "mixed doorbell and human draft text must not be typed over:"$'\n'"$(cat "$log")"
 
   # Another record's doorbell is not this record's doorbell either.
   other=$(inbox_lib "$state" fm_task_inbox_write "$state" t2 "another steer")
