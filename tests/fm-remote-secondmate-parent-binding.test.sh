@@ -48,6 +48,11 @@ HERDR_LOG="$TMP_ROOT/remote-herdr.log"
 CLAIMS="$TMP_ROOT/claims"
 PUBLISH_PID=
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
+# Parent binding arms a listener in the parent home. The EXIT trap below sweeps
+# it; declaring the home is what retires it when the run is interrupted
+# instead, because that path runs tests/lib.sh's own signal teardown before the
+# fixture root is removed.
+fm_test_track_procevent_home "$PARENT" "$CLAIMS"
 
 cleanup() {
   local worker_pid=''

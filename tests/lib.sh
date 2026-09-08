@@ -122,17 +122,21 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
 # ${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/procevent-claims, where they
 # would write into and contend with live runners that have nothing to do with
 # this suite. A suite that sets its own claim root - and a child that inherits
-# one from its parent test process - keeps that value, and only the directory
-# this library created is removed at teardown.
+# one from its parent test process - keeps that value. Teardown removes the
+# exact directory this library created, held in FM_TEST_OWNED_CLAIM_ROOT, and
+# never whatever FM_PROCEVENT_CLAIM_ROOT points at by then: a suite is free to
+# repoint that variable after sourcing, and the path it repoints to is its own
+# to remove.
 
 FM_TEST_PROCEVENT_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-procevent.$$.XXXXXX") || return 1
 
-FM_TEST_OWNS_CLAIM_ROOT=
-[ -n "${FM_PROCEVENT_CLAIM_ROOT:-}" ] || FM_TEST_OWNS_CLAIM_ROOT=1
-: "${FM_PROCEVENT_CLAIM_ROOT:=$(mktemp -d "${TMPDIR:-/tmp}/.fm-test-procevent-claims.$$.XXXXXX")}"
-if [ -z "$FM_PROCEVENT_CLAIM_ROOT" ]; then
-  rm -f "$FM_TEST_CLEANUP_REGISTRY" "$FM_TEST_PROCEVENT_REGISTRY"
-  return 1
+FM_TEST_OWNED_CLAIM_ROOT=
+if [ -z "${FM_PROCEVENT_CLAIM_ROOT:-}" ]; then
+  FM_TEST_OWNED_CLAIM_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/.fm-test-procevent-claims.$$.XXXXXX") || {
+    rm -f "$FM_TEST_CLEANUP_REGISTRY" "$FM_TEST_PROCEVENT_REGISTRY"
+    return 1
+  }
+  FM_PROCEVENT_CLAIM_ROOT=$FM_TEST_OWNED_CLAIM_ROOT
 fi
 export FM_PROCEVENT_CLAIM_ROOT
 
@@ -182,7 +186,7 @@ fm_test_cleanup() {
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
-  [ -z "${FM_TEST_OWNS_CLAIM_ROOT:-}" ] || rm -rf "$FM_PROCEVENT_CLAIM_ROOT"
+  [ -z "${FM_TEST_OWNED_CLAIM_ROOT:-}" ] || rm -rf "$FM_TEST_OWNED_CLAIM_ROOT"
 }
 
 fm_test_tmproot() {
