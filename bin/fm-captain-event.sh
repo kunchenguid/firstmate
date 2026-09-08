@@ -142,9 +142,9 @@ ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 ENV_ASSIGNMENT_START_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*(?:\+\s*)?=\s*")
 AUTHORIZATION_HEADER_START_RE = re.compile(r"\b(?:Proxy-)?Authorization\s*:\s*", re.I)
 CREDENTIAL_LABEL_START_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:[A-Za-z0-9]{1,32}[ _-]+)?"
+    r'(?<![A-Za-z0-9_-])"?(?:[A-Za-z0-9]{1,32}[ _-]+)?'
     r"(?:secret|password|passwd|passphrase|token|authorization|auth|(?:access|private|api)[ _-]+key)"
-    r"(?=[A-Za-z0-9 _-]{0,127}\s*:\s*)",
+    r'(?=[A-Za-z0-9 _-]{0,127}"?\s*:\s*)',
     re.I,
 )
 SECRET_PATTERNS = [
@@ -154,6 +154,7 @@ SECRET_PATTERNS = [
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}", re.I),
+    re.compile(r"(?<![A-Za-z0-9_.-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_.-])"),
     re.compile(r"\b(?:password|passwd|api[_ -]?key|access[_ -]?token|pairing[_ -]?token|token|secret)\s*[:=]\s*[^\s,;]{6,}", re.I),
 ]
 

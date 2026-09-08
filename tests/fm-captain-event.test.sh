@@ -213,6 +213,33 @@ for credential_label_case in "${credential_label_cases[@]}"; do
     || fail "credential label case $after retained its value or tail"
   after=$((after + 1))
 done
+quoted_credential_label_cases=(
+  '{"client_secret":"privatevalue"} visible suffix'
+  '{"MiXeD-aPi-Key":"privatevalue"} visible suffix'
+)
+for quoted_credential_label_case in "${quoted_credential_label_cases[@]}"; do
+  primary_args "pi:quoted-credential-label-$after" "Prefix $quoted_credential_label_case"
+  FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "quoted credential label case $after append failed"
+  quoted_credential_label_row=$(FM_HOME="$home" "$OUTBOX" read --after "$after" --limit 1)
+  printf '%s\n' "$quoted_credential_label_row" | jq -e '.summary == "Prefix {[REDACTED]"' >/dev/null \
+    || fail "quoted credential label case $after retained its value or tail"
+  after=$((after + 1))
+done
+compact_jwt='eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sgnVsbG9uZ3NpZ25hdHVyZQ'
+primary_args "pi:compact-jwt-$after" "Prefix $compact_jwt remains"
+FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "compact JWT append failed"
+compact_jwt_row=$(FM_HOME="$home" "$OUTBOX" read --after "$after" --limit 1)
+printf '%s\n' "$compact_jwt_row" | jq -e '.summary == "Prefix [REDACTED] remains"' >/dev/null \
+  || fail "compact JWT was not redacted as one token"
+after=$((after + 1))
+for non_jwt in 'abcdefgh.ijklmnop' 'abcdefgh.ijklmnop.qrstuvwx.yzABCDEF'; do
+  primary_args "pi:non-jwt-$after" "Prefix $non_jwt remains"
+  FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "non-JWT dotted text append failed"
+  non_jwt_row=$(FM_HOME="$home" "$OUTBOX" read --after "$after" --limit 1)
+  printf '%s\n' "$non_jwt_row" | jq -e --arg summary "Prefix $non_jwt remains" '.summary == $summary' >/dev/null \
+    || fail "non-JWT dotted text was treated as a compact JWT"
+  after=$((after + 1))
+done
 primary_args pi:bare-uri 'Prefix postgres://bareuser:barepass@db.example/prod remains'
 FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "bare URI append failed"
 bare_uri_row=$(FM_HOME="$home" "$OUTBOX" read --after "$after" --limit 1)
@@ -489,6 +516,11 @@ await emit("Prefix AWS Secret Access Key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEK
 await emit("Prefix client_secret: privatevalue visible suffix", "client-secret");
 await emit("Prefix deployment-private-key: privatevalue visible suffix", "private-key");
 await emit("Prefix MiXeD-aUtH_ToKeN: privatevalue visible suffix", "mixed-auth-token");
+await emit('Prefix {"client_secret":"privatevalue"} visible suffix', "quoted-client-secret");
+await emit('Prefix {"MiXeD-aPi-Key":"privatevalue"} visible suffix', "quoted-api-key");
+await emit("Prefix eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sgnVsbG9uZ3NpZ25hdHVyZQ remains", "compact-jwt");
+await emit("Prefix abcdefgh.ijklmnop remains", "two-segment-dotted-text");
+await emit("Prefix abcdefgh.ijklmnop.qrstuvwx.yzABCDEF remains", "four-segment-dotted-text");
 JS
   python3 - "$capture" <<'PY' || fail "Pi producer pre-sanitizer retained credential material"
 import sys
@@ -503,6 +535,11 @@ assert summaries == [
     "Prefix [REDACTED]",
     "Prefix [REDACTED]",
     "Prefix [REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix [REDACTED] remains",
+    "Prefix abcdefgh.ijklmnop remains",
+    "Prefix abcdefgh.ijklmnop.qrstuvwx.yzABCDEF remains",
 ], summaries
 PY
 

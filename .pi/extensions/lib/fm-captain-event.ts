@@ -15,7 +15,7 @@ const SUMMARY_MAX = 600;
 const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
 const ENV_ASSIGNMENT_START = /\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*(?:\+\s*)?=\s*/g;
 const AUTHORIZATION_HEADER_START = /\b(?:Proxy-)?Authorization\s*:\s*/gi;
-const CREDENTIAL_LABEL_START = /(?<![A-Za-z0-9_-])(?:[A-Za-z0-9]{1,32}[ _-]+)?(?:secret|password|passwd|passphrase|token|authorization|auth|(?:access|private|api)[ _-]+key)(?=[A-Za-z0-9 _-]{0,127}\s*:\s*)/gi;
+const CREDENTIAL_LABEL_START = /(?<![A-Za-z0-9_-])"?(?:[A-Za-z0-9]{1,32}[ _-]+)?(?:secret|password|passwd|passphrase|token|authorization|auth|(?:access|private|api)[ _-]+key)(?=[A-Za-z0-9 _-]{0,127}"?\s*:\s*)/gi;
 const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)/gi,
   /\b[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s\/@"']+@[^\s,;"']+/gi,
@@ -23,6 +23,7 @@ const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
+  /(?<![A-Za-z0-9_.-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_.-])/g,
   /\b(?:password|passwd|api[_ -]?key|access[_ -]?token|pairing[_ -]?token|token|secret)\s*[:=]\s*[^\s,;]{6,}/gi,
 ];
 
