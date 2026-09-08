@@ -365,27 +365,39 @@ Whatever persists that acceptance, it is not this key, so nothing in `bin/fm-cla
 Refreshing this observation is manual and has no live guard, because reaching the prompt needs a real project whose settings trigger it rather than a scratch repo.
 It needs both arms, because the three rows above show most projects never prompt at all: unless the control arm first shows the prompt on this worktree, an absent prompt on a later control-arm rerun would prove nothing.
 Before every control-arm launch, including the reruns below, kill any live `tp-h1` session AND remove the worktree's entry from `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`.
+Both steps belong at the TOP of the arm: on a candidate rerun the kill and the removal precede `bin/fm-claude-trust.sh` and the candidate write, never the launch that follows them, because a removal performed after the candidate write drops the key under test.
 The kill is not optional: the treatment arm leaves `tp-h1` alive and answered, and against a live session `tmux new-session -d -s tp-h1` fails as a duplicate while `tmux capture-pane` still succeeds on that stale pane - a rerun that never launched then reads as "the prompt is gone".
 The treatment arm is not a launch of its own - it continues on the control arm's pane, with the entry left exactly as the control arm registered it, so do NOT clear it again before answering.
 
-Control arm - confirm this worktree reaches the prompt at all:
+Control arm - confirm this worktree reaches the prompt at all.
+It must carry the hooks every observed spawn carried: `bin/fm-spawn.sh` writes a `.claude/settings.local.json` into each claude worktree before launch, which is exactly what makes row B above a hooks-and-allow worktree that did not prompt.
+A bare `tmux` launch without that file differs from every row in the table along the one dimension the table leaves open, so an absent prompt there would retire the only reproducing project on a condition it was never observed under.
+Spawn through `bin/fm-spawn.sh` where that is possible; otherwise write the file yourself as below.
 
 ```sh
-tmux kill-session -t tp-h1 2>/dev/null || true   # then remove the worktree's entry from the store
-bin/fm-claude-trust.sh <worktree> <project>      # registers hasTrustDialogAccepted only
+tmux kill-session -t tp-h1 2>/dev/null || true   # kill and entry removal come FIRST, ahead of the registration
+# now remove projects[<worktree>] from the store - never after a candidate key has been written
+bin/fm-claude-trust.sh <worktree> <project> || exit 1   # a refusal must stop the arm, not fall through to the launch
+mkdir -p <worktree>/.claude   # stand in for the hooks bin/fm-spawn.sh injects into every claude worktree
+printf '%s\n' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"true"}]}],"Stop":[{"hooks":[{"type":"command","command":"true"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"true"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"true"}]}]}}' \
+  > <worktree>/.claude/settings.local.json
 tmux new-session -d -s tp-h1 -c <worktree> \
   "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions 'reply with exactly: BRIEF-REACHED'"
 tmux capture-pane -p -t tp-h1
 ```
 
-The arm is only usable if that pane shows the Quick safety check; if it does not, the project does not reproduce and no candidate can be tested on it.
+"Shows the Quick safety check" is NOT a usable readout: both prompts open with that byte-identical first line and both offer `Yes, I trust this folder`.
+The arm reproduces only if the pane shows the SECOND prompt, so key the readout on the discriminator - its next line is `This folder pre-approves N tool permissions in .claude/settings.json` and its first option is `No, continue without these permissions`, where the first dialog instead says Claude will be able to read, edit, and execute files here and offers `No, exit`.
+If the pane shows the FIRST dialog the registration did not take effect, which is what the `|| exit 1` above catches; fix the registration and rerun rather than answering, because answering it writes `hasTrustDialogAccepted` and the treatment arm's walk would then report the key this script already writes as a candidate.
+If neither prompt appears, the project does not reproduce and no candidate can be tested on it.
 
-Treatment arm - snapshot the store FIRST, then answer the prompt by hand in the control arm's `tp-h1` pane, then diff the two snapshots to see what the acceptance actually wrote:
+Treatment arm - snapshot the store FIRST, then answer the second prompt by hand in the control arm's `tp-h1` pane, then diff the two snapshots to see what the acceptance actually wrote:
 
 ```sh
 STORE=${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json   # the same store the control arm registered into
 cp "$STORE" /tmp/claude-store-before.json        # must run BEFORE answering
-# answer "Yes, I trust this folder" by hand in the tp-h1 pane, then:
+# answer "Yes, I trust this folder" by hand in tp-h1, on the prompt whose other option
+# is "No, continue without these permissions" - never on the "No, exit" trust dialog. Then:
 node -e 'const fs=require("node:fs");
 const walk=(x,y,p)=>{const o=v=>v&&typeof v==="object"&&!Array.isArray(v);
 if(o(x)&&o(y)){for(const k of new Set([...Object.keys(x),...Object.keys(y)]))walk(x[k],y[k],p.concat(k));return;}
