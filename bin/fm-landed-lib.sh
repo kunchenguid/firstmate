@@ -28,10 +28,15 @@
 # The retained hold-kind alone keeps answered calls out of the section.
 # Merged PRs and reported scouts remain distinct.
 #
-# The sole compatibility fallback keeps a structured Done row whose three
-# parsed artifact fields are absent when it does not retain hold-kind captain.
+# The backlog-selection compatibility fallback keeps a structured Done row
+# whose three parsed artifact fields are absent when it does not retain
+# hold-kind captain.
 # That preserves kindless rows closed before artifact-aware selection without
 # admitting answered captain calls or explicit reportless scouts.
+# Already-selected v1 secondmate landed rows may omit kind. For those rows,
+# landed_artifact preserves a report_path with a reported completion; this
+# display compatibility does not admit kindless reports from raw backlog rows.
+# tests/fm-bearings-snapshot.test.sh covers both fresh and cached v1 summaries.
 
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_LANDED_JQ_DEFS='

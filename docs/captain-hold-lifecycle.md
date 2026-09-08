@@ -145,12 +145,9 @@ Three accepted limits remain deliberate:
 - Cross-home summaries remain bounded by `FM_SNAPSHOT_SECONDMATE_DECISIONS` and `FM_SNAPSHOT_SECONDMATE_QUEUED`; a remote deferred hold beyond those bounds is not exported, so it can be neither gated nor revealed.
 
 Re-holding through the wrapper with `--until` remains the durable fix rather than relying on the projection safety net.
-`bin/fm-landed-lib.sh` is the single owner of Recently Landed's current and compatibility selection rules, which both the main-home and secondmate-home projections call.
-The lifecycle supplies the independent state that selector consumes: merge approval releases a pull request or local-only landing before cleanup records the landed artifact, while retained scout cleanup records the report without releasing its follow-up call.
-This keeps rejected merges out even when their task text names an artifact, preserves a retained scout's report even when its title names a pull request, and leaves released pull requests, local-only landings, and reports eligible after cleanup closes them.
+[`bin/fm-landed-lib.sh`](../bin/fm-landed-lib.sh) owns Recently Landed's shared selection and artifact-display compatibility rules.
 A local-only landing's note is written by `tasks-axi done --note` as the last of the row's indented body lines rather than into the row title, so the snapshot reads that final line as the note as well as parsing the title, and the landing is published carrying its recorded note.
 A body that carries a captain resolution record is the captain's own prose and is never mined for that note, so a decision worded `local main` does not become a delivery artifact.
-A local-only landing is published on the same terms whether or not its row carries a kind, because the retained hold-kind alone is what keeps an answered call out of the section.
 The projection remains read-only and uses the canonical snapshot's structured fields, including the machine-written hold-set timestamp.
 
 The window between a merge landing and cleanup is an accepted structural residual rather than an oversight.

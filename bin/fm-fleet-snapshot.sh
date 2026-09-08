@@ -86,9 +86,9 @@
 #     Actionable captain holds appear in decisions_open; every captain hold remains
 #     in the bounded queued inventory with its structured classification metadata.
 #     Structured-home input must declare the current home-summary and hold-classifier
-#     schemas; an older live ledger or cached copy is stale even when it contains no
-#     captain holds, and leaves the home explicitly unavailable until its producer
-#     refreshes it.
+#     schemas; a live ledger or cached copy missing either declaration or declaring
+#     an unsupported version is unavailable even when it contains no captain holds.
+#     These schemas also accept v1 summaries from older producers.
 #   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
 #     compatibility landed-work roll-up derived from secondmate_current. Readable
 #     structured homes are partial, not unreadable, when an unavailable child state
@@ -387,12 +387,14 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def metadata($rest; $key):
       cap($rest; ".*(?:\\(|,[[:space:]]*)" + $key + ":[[:space:]]*(?<v>[^,)]*)");
     # LOAD-BEARING, do not remove as a duplicate definition of the kind field.
-    # tasks-axi omits the (kind: ...) metadata entirely when a title begins with
-    # a canonical keyword, so those rows carry no explicit kind to read. Without
-    # this fallback a scout whose title starts with SCOUT reports kind null, its
+    # tasks-axi 0.2.5 omits the (kind: ...) metadata when a title starts with
+    # uppercase SCOUT or SHIP at a JavaScript word boundary (ASCII letters,
+    # digits, and underscore are word characters), so those rows carry no
+    # explicit kind to read. Without this fallback a scout whose title starts
+    # with SCOUT reports kind null, its
     # recorded report stops counting as a delivery, and it drops out of Recently
     # Landed - the defect this selector exists to fix. Pinned by
-    # tests/fm-bearings-snapshot.test.sh "canonical or explicit task kind".
+    # the producer word-boundary regression in tests/fm-bearings-snapshot.test.sh.
     def kind_of($rest):
       metadata($rest; "kind") as $kind
       | if $kind != null then $kind
