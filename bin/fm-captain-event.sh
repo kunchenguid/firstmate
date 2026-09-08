@@ -139,6 +139,7 @@ SECRET_PATTERNS = [
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\b(?:Bearer|Authorization\s*:\s*Bearer)\s+[A-Za-z0-9._~+/=-]{12,}", re.I),
+    re.compile(r'''\b(?=[A-Z][A-Z0-9_]{1,127}\s*=)(?=[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL|API_KEY|ACCESS_KEY|PRIVATE_KEY))[A-Z][A-Z0-9_]{1,127}\s*=\s*(?:"[^"]{0,4096}"|'[^']{0,4096}'|[^\s,;]{1,4096})'''),
     re.compile(r"\b(?:password|passwd|api[_ -]?key|access[_ -]?token|pairing[_ -]?token|token|secret)\s*[:=]\s*[^\s,;]{6,}", re.I),
 ]
 
@@ -306,8 +307,11 @@ def parse_refs(values):
                 hostname = parsed.hostname
             except ValueError as error:
                 raise OutboxError("pr_url is malformed") from error
-            if parsed.scheme != "https" or not hostname or parsed.username or parsed.password:
-                raise OutboxError("pr_url must be an https URL without embedded credentials")
+            if (
+                parsed.scheme != "https" or not hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment
+            ):
+                raise OutboxError("pr_url must be a credential-free canonical https URL")
             refs[key] = value
         elif key == "report_id":
             if not SLUG_RE.fullmatch(value):

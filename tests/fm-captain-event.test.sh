@@ -142,11 +142,11 @@ long=$(python3 - <<'PY'
 print("🧭" * 700)
 PY
 )
-primary_args pi:bounded $'\033[31mLine one\033[0m\nLine two token=supersecretvalue '
+primary_args pi:bounded $'\033[31mLine one\033[0m\nLine two token=supersecretvalue AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY ordinary prose '
 PRIMARY_ARGS+=(--summary-truncated true --ref pr_url=https://example.test/pull/7 --ref report_id=soak-report --ref report_path=data/soak-report/report.md --ref branch_outcome_seq=9)
 # Replace the summary argument with a value that exercises both redaction and
 # the Unicode cap without risking shell byte slicing.
-PRIMARY_ARGS[15]=$'\033[31mLine one\033[0m\nLine two \u202etoken=supersecretvalue '"$long"
+PRIMARY_ARGS[15]=$'\033[31mLine one\033[0m\nLine two \u202etoken=supersecretvalue AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY ordinary prose '"$long"
 FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "bounded append failed"
 row=$(FM_HOME="$home" "$OUTBOX" read --after 0)
 printf '%s\n' "$row" | jq -e '
@@ -154,6 +154,8 @@ printf '%s\n' "$row" | jq -e '
   and .summary_truncated == true
   and (.summary | contains("[REDACTED]"))
   and (.summary | contains("supersecretvalue") | not)
+  and (.summary | contains("wJalrXUtnFEMI") | not)
+  and (.summary | contains("ordinary prose"))
   and (.refs | keys) == ["branch_outcome_seq","pr_url","report_id","report_path"]
   and .refs.branch_outcome_seq == 9
 ' >/dev/null || fail "summary sanitization or allowlisted references are wrong"
@@ -176,6 +178,15 @@ primary_args pi:bad-url bad
 PRIMARY_ARGS+=(--ref pr_url=http://example.test/7)
 FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null 2>&1 \
   && fail "non-https PR reference was accepted"
+for unsafe_url in \
+  'https://user:password@example.test/pull/7' \
+  'https://example.test/pull/7?access_token=supersecretvalue' \
+  'https://example.test/pull/7#access_token=supersecretvalue'; do
+  primary_args "pi:unsafe-url-$RANDOM" bad
+  PRIMARY_ARGS+=(--ref "pr_url=$unsafe_url")
+  FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null 2>&1 \
+    && fail "credential-bearing PR reference was accepted: $unsafe_url"
+done
 primary_args pi:wrong-kind bad
 PRIMARY_ARGS[13]=worker.final
 FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null 2>&1 \
@@ -344,6 +355,49 @@ pass "concurrent primary/worker producers retain one monotonic gap-free order"
 # It must select visible text blocks only, classify stop vs toolUse explicitly,
 # use persisted entry identity, and remain inert without the activation file.
 if command -v node >/dev/null 2>&1 && node --experimental-strip-types -e '' >/dev/null 2>&1; then
+  home=$(new_home pi-presanitizer)
+  enable_home "$home"
+  fake_root="$TMP_ROOT/pi-presanitizer-root"
+  capture="$TMP_ROOT/pi-presanitizer.args"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-captain-event.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "${1-}" = append ] || exit 0
+printf '%s\0' "$@" > "$FM_CAPTURE"
+SH
+  chmod +x "$fake_root/bin/fm-captain-event.sh"
+  REPO_ROOT="$ROOT" FIXTURE_HOME="$home" FIXTURE_ROOT="$fake_root" FM_CAPTURE="$capture" \
+    NODE_NO_WARNINGS=1 node --experimental-strip-types --input-type=module <<'JS' \
+    || fail "Pi producer pre-sanitizer fixture failed"
+import { pathToFileURL } from "node:url";
+const { installCaptainEventPublisher } = await import(pathToFileURL(`${process.env.REPO_ROOT}/.pi/extensions/lib/fm-captain-event.ts`).href);
+const handlers = new Map();
+const pi = { on(name, handler) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); } };
+installCaptainEventPublisher(pi, {
+  fmHome: process.env.FIXTURE_HOME,
+  fmRoot: process.env.FIXTURE_ROOT,
+  state: `${process.env.FIXTURE_HOME}/state`,
+  config: `${process.env.FIXTURE_HOME}/config`,
+  sourceRole: "primary",
+});
+const message = {
+  role: "assistant",
+  content: [{ type: "text", text: "Ordinary prose AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY remains" }],
+  stopReason: "stop",
+  timestamp: 1,
+};
+const context = { sessionManager: { getSessionId: () => "pre", getEntries: () => [{ id: "e", type: "message", message }] } };
+for (const handler of handlers.get("turn_end") ?? []) await handler({ message }, context);
+JS
+  python3 - "$capture" <<'PY' || fail "Pi producer passed a credential-bearing environment assignment to the CLI"
+import sys
+
+args = open(sys.argv[1], "rb").read().split(b"\0")[:-1]
+summary = args[args.index(b"--summary") + 1].decode()
+assert summary == "Ordinary prose [REDACTED] remains", summary
+PY
+
   home=$(new_home pi-producer-disabled)
   REPO_ROOT="$ROOT" FIXTURE_HOME="$home" NODE_NO_WARNINGS=1 node --experimental-strip-types --input-type=module <<'JS' \
     || fail "disabled Pi producer fixture failed"
@@ -465,12 +519,14 @@ if command -v node >/dev/null 2>&1 && node --experimental-strip-types -e '' >/de
   extension="$home/state/$task.pi-ext.ts"
   spawn_gen=$(awk -F= '$1 == "spawn_gen" { print $2 }' "$home/state/$task.meta")
   rm -f "$home/state/$task.turn-ended"
-  EXTENSION="$extension" NODE_NO_WARNINGS=1 node --experimental-strip-types --input-type=module <<'JS' \
+  EXTENSION="$extension" REPO_ROOT="$ROOT" NODE_NO_WARNINGS=1 node --experimental-strip-types --input-type=module <<'JS' \
     || fail "generated Pi worker extension did not execute"
 import { pathToFileURL } from "node:url";
 const handlers = new Map();
 const pi = { on(name, handler) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); } };
 const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?fixture=${Date.now()}`);
+const primaryExtension = await import(`${pathToFileURL(`${process.env.REPO_ROOT}/.pi/extensions/fm-captain-event.ts`).href}?fixture=${Date.now()}`);
+primaryExtension.default(pi);
 extension.default(pi);
 const message = { role: "assistant", content: [{ type: "text", text: "Generated worker final" }], stopReason: "stop", timestamp: 303 };
 const context = {
@@ -484,15 +540,16 @@ for (const handler of handlers.get("turn_end") ?? []) await handler({ message },
 await new Promise((resolve) => setTimeout(resolve, 200));
 JS
   assert_present "$home/state/$task.turn-ended" "semantic producer displaced the worker turn-end notification"
-  jq -e --arg task "$task" --arg spawn_gen "$spawn_gen" '
-    .source_home == "main"
-    and .source_role == "worker"
-    and .task_id == $task
-    and .incarnation == $spawn_gen
-    and .kind == "worker.final"
-    and .summary == "Generated worker final"
+  jq -e -s --arg task "$task" --arg spawn_gen "$spawn_gen" '
+    length == 1
+    and .[0].source_home == "main"
+    and .[0].source_role == "worker"
+    and .[0].task_id == $task
+    and .[0].incarnation == $spawn_gen
+    and .[0].kind == "worker.final"
+    and .[0].summary == "Generated worker final"
   ' "$home/state/captain-events/events.jsonl" >/dev/null \
-    || fail "spawn-generated Pi producer did not bind its event to task spawn_gen"
+    || fail "spawn-generated Pi producer duplicated primary typing or lost task spawn_gen"
   pass "the real spawn path generates a Pi producer bound to worker spawn_gen"
 else
   echo "skip: node with TypeScript stripping unavailable for generated Pi worker behavior"
