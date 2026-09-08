@@ -399,9 +399,9 @@ test_active_dispatch_profile_allows_direct_raw_launch_command() {
   status=$?
   expect_code 0 "$status" "a direct supported raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=opencode" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode default default
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode gpt-5 default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "opencode --model gpt-5" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  assert_contains "$launch" "opencode --model gpt-5" "raw launch command lost its explicit model"
   pass "active crew-dispatch profile allows a direct supported raw command"
 }
 
@@ -643,7 +643,7 @@ test_astra_without_a_profile_requires_primary_evidence() {
     '$(printf codex) --model gpt-6-astra')
   status=$?
   expect_code 1 "$status" "a command-substituted raw Astra spawn without a profile should refuse"
-  assert_contains "$out" "cannot prove their effective model" "command-substituted raw Astra refusal did not identify the uninspectable command"
+  assert_contains "$out" "must begin with a direct, supported harness executable" "command-substituted raw Astra refusal did not identify the direct-harness requirement"
   assert_absent "$HOME_DIR/state/$id.meta" "command-substituted Astra refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "command-substituted Astra refusal typed a launch command"
 
@@ -848,6 +848,38 @@ test_raw_codex_home_override_is_refused() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "CODEX_HOME='$codex_home'" "canonical raw Codex launch did not retain the selected home"
   pass "a named Codex home cannot be overridden by a raw command"
+}
+
+test_raw_secondmate_codex_home_requires_a_canonical_launch() {
+  local rec rejected_id permitted_id out status codex_home rejected_home permitted_home launch
+  rejected_id=profile-raw-secondmate-home-z3fi
+  permitted_id=profile-raw-secondmate-home-z3fj
+  rec=$(make_spawn_case profile-raw-secondmate-home codex "$rejected_id" "$permitted_id")
+  read_case_record "$rec"
+  codex_home=$(make_codex_home "$CASE_DIR/codex-personal")
+  rejected_home="$CASE_DIR/rejected-secondmate-home"
+  permitted_home="$CASE_DIR/permitted-secondmate-home"
+  make_seeded_secondmate_home "$rejected_home" "$rejected_id"
+  make_seeded_secondmate_home "$permitted_home" "$permitted_id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$rejected_id" "$rejected_home" \
+    --secondmate --harness "codex --model gpt-5; CODEX_HO''ME=$CASE_DIR/other codex --model gpt-5" --codex-home "$codex_home")
+  status=$?
+  expect_code 1 "$status" "a selected-home raw secondmate command must refuse a compound Codex launch"
+  assert_contains "$out" "cannot prove their effective model" "compound raw secondmate refusal did not identify the canonical-launch boundary"
+  assert_absent "$HOME_DIR/state/$rejected_id.meta" "compound raw secondmate command wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "compound raw secondmate command typed a launch command"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$permitted_id" "$permitted_home" \
+    --secondmate --harness "codex --model gpt-5" --codex-home "$codex_home")
+  status=$?
+  expect_code 0 "$status" "a canonical raw secondmate command should retain its selected Codex home: $out"
+  assert_meta_profile "$HOME_DIR/state/$permitted_id.meta" codex gpt-5 default
+  assert_grep "codex_home=$codex_home" "$HOME_DIR/state/$permitted_id.meta" "canonical raw secondmate metadata lost the selected Codex home"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_home'" "canonical raw secondmate launch did not retain the selected Codex home"
+  assert_contains "$launch" "codex --model gpt-5" "canonical raw secondmate launch lost its explicit model"
+  pass "selected-home raw secondmates require one canonical Codex launch"
 }
 
 test_astra_receipt_binds_the_selected_codex_home() {
@@ -1430,7 +1462,7 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
 
       out=$(FM_TEST_PI_VERSION="$version" \
         run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-        "$id" "$PROJ_DIR")
+        "$id" "$PROJ_DIR" --model openai-codex/gpt-5.6-sol)
       status=$?
       expect_code 0 "$status" "$harness $version spawn should succeed"
       launch=$(cat "$LAUNCH_LOG")
@@ -1463,7 +1495,8 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off \
+      --model openai-codex/gpt-5.6-sol 2>&1)
   status=$?
   expect_code 1 "$status" "a missing pi-signed executable should refuse the spawn"
   assert_contains "$out" "pi-signed executable not found on PATH" \
@@ -1949,6 +1982,7 @@ test_astra_qualified_and_raw_models_cannot_bypass_evidence
 test_raw_model_capable_harnesses_require_inspectable_non_astra_launches
 test_raw_launch_classifier_requires_direct_supported_harness
 test_raw_codex_home_override_is_refused
+test_raw_secondmate_codex_home_requires_a_canonical_launch
 test_astra_receipt_binds_the_selected_codex_home
 test_astra_receipt_requires_selected_provider_availability
 test_pi_openai_codex_receipt_uses_codex_quota

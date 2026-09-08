@@ -1806,7 +1806,7 @@ if [ -n "$CODEX_HOME_ARG" ]; then
   fi
 fi
 
-if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+if [ "$RAW_LAUNCH" -eq 1 ] && { [ "$KIND" != secondmate ] || [ -n "$CODEX_HOME_ARG" ]; }; then
   if fm_raw_launch_has_unprovable_shell_syntax "$LAUNCH"; then
     echo "error: raw launch commands with shell substitutions or compound syntax cannot prove their effective model; use the verified harness and --model instead" >&2
     exit 1
@@ -1819,6 +1819,10 @@ if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     echo "error: raw $HARNESS launch commands must be one canonical invocation with exactly one explicit --model before dispatch" >&2
     exit 1
   }
+  MODEL=$RAW_MODEL
+fi
+
+if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
   if ! fm_dispatch_launch_model_identity_proven "$HARNESS" "$RAW_MODEL"; then
     echo "error: raw $HARNESS launch commands must identify an exact model before dispatch; use a fully qualified model or the verified structured launcher instead" >&2
     exit 1
@@ -1827,7 +1831,6 @@ if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     echo "error: raw launch commands selecting Astra are not inspectable for selection receipts; use the verified harness and --model instead" >&2
     exit 1
   fi
-  MODEL=$RAW_MODEL
   if fm_dispatch_harness_receipt_required "$CONFIG/crew-dispatch.json" "$HARNESS"; then
     echo "error: raw launch commands for configured receipt-gated harnesses are not inspectable for selection receipts; use the verified harness and --model instead" >&2
     exit 1
