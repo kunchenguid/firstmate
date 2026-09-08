@@ -31,7 +31,7 @@ const CD_BUILTINS = new Set(["cd", "pushd", "popd"]);
 // them never persists to the parent shell (and generally just fails, since cd is
 // a builtin with no external program). `command` is deliberately NOT here: it
 // runs the builtin in the current shell, so `command cd x` still persists.
-const FORKING_WRAPPERS = new Set(["env", "sudo", "nice", "caffeinate", "nohup", "timeout", "gtimeout", "exec", "coproc", "system-time"]);
+const FORKING_WRAPPERS = new Set(["env", "sudo", "nohup", "timeout", "gtimeout", "exec"]);
 
 function isPipe(separator) {
   return separator === "|" || separator === "|&";
@@ -82,8 +82,7 @@ function decision(command) {
     // commandPosition ignores subshell/brace groups, quoted data, comments, and
     // substitutions (they contribute no top-level command word), and skips
     // leading assignments and wrappers to find the executed command word.
-    const firstWord = nodes[index].find((token) => token.type === "word")?.value || "";
-    const position = commandPosition(nodes[index], new Map(), ["if", "elif", "while", "until", "!"].includes(firstWord));
+    const position = commandPosition(nodes[index]);
     if (hasPathQualifiedCommandPrefix(position)) continue;
     if (hasCommandQueryPrefix(position)) continue;
     let command = position.command;

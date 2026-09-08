@@ -692,11 +692,12 @@ function shellInvocation(position, context) {
   return { kind: "stdin", payload: null };
 }
 
-function shellScriptPayload(position, context) {
+function localScriptPayload(position, context) {
   const shell = shellInvocation(position, context);
-  if (shell?.kind !== "script") return null;
-  const resolved = resolveKnownWord(shell.payload, context.knownVariables);
-  if (!resolved) return null;
+  const script = shell?.kind === "script" ? shell.payload : position.command;
+  if (!script || (shell?.kind !== "script" && !script.value.includes("/"))) return null;
+  const resolved = resolveKnownWord(script, context.knownVariables);
+  if (!resolved || protectedIdentity(resolved, context.root)) return null;
   const candidate = path.resolve(context.root, resolved);
   const relative = path.relative(context.root, candidate);
   if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
@@ -1171,7 +1172,7 @@ function analyzeProgram(command, context, depth = 0) {
     const shellScript = shell?.kind === "script" ? shell.payload : null;
     const sourceScript = sourcedScript(position);
     const sourceProcessSafe = sourcedProcessIsSafe(position);
-    const shellFilePayload = shellScriptPayload(position, nodeContext);
+    const shellFilePayload = localScriptPayload(position, nodeContext);
     const resolvedEvalPayload = evalPayload(position, nodeContext);
     const heredocPayloads = shellHeredocPayloads(tokens, position, nodeContext);
     const hereStringPayloads = shellHereStringPayloads(tokens, position, nodeContext);

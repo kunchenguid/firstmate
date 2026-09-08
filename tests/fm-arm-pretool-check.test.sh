@@ -428,6 +428,7 @@ EOF
     'for x in 1; do no-mistakes axi respond --action fix; done' \
     'set -- no-mistakes axi respond; "$@" --action fix' \
     'bash ./drive.sh' \
+    './drive.sh' \
     "$heredoc_payload" \
     "$alternate_heredoc_payload" \
     "$process_source_payload" \
@@ -489,6 +490,7 @@ EOF
     'for x in 1; do no-mistakes axi respond --action fix; done' \
     'set -- no-mistakes axi respond; "$@" --action fix' \
     'bash ./drive.sh' \
+    './drive.sh' \
     "$heredoc_payload" \
     "$alternate_heredoc_payload" \
     "$process_source_payload" \
