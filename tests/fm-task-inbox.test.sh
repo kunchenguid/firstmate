@@ -527,6 +527,18 @@ test_ring_never_submits_foreign_composer_text() {
   [ ! -s "$keylog" ] || fail "mixed doorbell and human draft text must never receive a key:"$'\n'"$(cat "$keylog")"
   [ ! -s "$log" ] || fail "mixed doorbell and human draft text must not be typed over:"$'\n'"$(cat "$log")"
 
+  # Whitespace is editable content too. A space inserted into the quoted inbox
+  # path makes this a different, malformed instruction and must not authorize
+  # Enter.
+  make_composer_capture "$dir/capture.txt" "${doorbell//"$state"/"$state x"}"
+  : > "$keylog"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "a whitespace-edited doorbell should defer the ring, got $rc"
+  [ ! -s "$keylog" ] || fail "a whitespace-edited doorbell must never receive a key:"$'\n'"$(cat "$keylog")"
+
   # Another record's doorbell is not this record's doorbell either.
   other=$(inbox_lib "$state" fm_task_inbox_write "$state" t2 "another steer")
   other_doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$other")

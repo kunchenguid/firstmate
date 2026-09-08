@@ -291,27 +291,54 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Identifying our own line is what makes the deferral recoverable without
 # weakening the guarantee for text we did not type.
 #
-# Only the composer REGION is consulted (fm_composer_extract_selected_content),
-# never the whole capture: an already-submitted doorbell stays visible in the
-# transcript above, and matching that history would let a human's half-typed
-# text be committed. Both sides are compared with every whitespace byte
-# removed, because a composer wraps a long line across rows mid-token.
+# Only the composer REGION is consulted, never the whole capture: an
+# already-submitted doorbell stays visible in the transcript above, and
+# matching that history would let a human's half-typed text be committed.
+# Wrapped rows are rejoined without adding whitespace. Removing all whitespace
+# would make a user-edited line look unchanged and could submit their draft.
 #
-# Every failure - unreadable capture, unidentifiable composer, no match -
+# Every failure - unreadable capture, unidentifiable composer, no exact match -
 # returns false, so the caller keeps today's conservative skip.
 fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cap caps content
+  local backend=$1 target=$2 rec=$3 label=${4:-} line cap caps row raw content glyph
+  local joined='' prompt_seen=0
   line=$(fm_task_inbox_doorbell_line "$rec") || return 1
   cap=$(fm_backend_capture "$backend" "$target" "$FM_COMPOSER_CAPTURE_LINES" "$label" 2>/dev/null) || return 1
   [ -n "$cap" ] || return 1
   # styled=0: a plain capture cannot strip ghost/placeholder text, which can
   # only ever cost a match (a placeholder never carries this record's path).
   caps=$(printf 'styled=0\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
-  content=$(fm_composer_extract_selected_content "$caps" "$cap" 2>/dev/null) || return 1
-  content=${content//[$' \t\r\n\v\f']/}
-  line=${line//[$' \t\r\n\v\f']/}
+  # Run the shared selector in this shell so its selected composer bounds remain
+  # available. Its ordinary output collapses whitespace, so reconstruct from
+  # the selected rows instead and preserve visible whitespace within each row.
+  fm_composer_extract_selected_content "$caps" "$cap" >/dev/null 2>&1 || return 1
+  row=$FM_COMPOSER_SELECTED_FIRST
+  while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$cap")
+    content=$(_fm_composer_row_content "$raw" 0)
+    case "$FM_COMPOSER_SELECTED_KIND" in
+      bare)
+        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
+          && fm_composer_leading_agent_glyph_var glyph "$content"; then
+          content=${content#*"$glyph"}
+        fi
+        ;;
+      leftbar) case "$content" in '┃'*) content=${content#┃} ;; esac ;;
+      box)
+        if [ "$prompt_seen" = 0 ] \
+          && fm_composer_leading_prompt_glyph_var glyph "$content"; then
+          content=${content#*"$glyph"}
+          prompt_seen=1
+        fi
+        ;;
+    esac
+    fm_composer_normalize_spaces_var content
+    fm_composer_normalize_trim_var content
+    joined+=$content
+    row=$((row + 1))
+  done
   [ -n "$line" ] || return 1
-  [ "$content" = "$line" ]
+  [ "$joined" = "$line" ]
 }
 
 # fm_task_inbox_commit_pending_doorbell: submit a doorbell already sitting in
