@@ -10,18 +10,18 @@
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
-# For every PR-ending mode (no-mistakes, direct-PR), the block sequences the
-# pipeline or PR step as a numbered action to perform, not a condition that
-# is already satisfied, and it states outright that `done:` requires that
-# mode's PR URL: a worker that finished implementing and committing is told
-# to report `working:` and go do the next numbered step, never `done:`. The
-# wording is restructured so the pipeline run, or opening the PR, reads as a
-# numbered action still owed inside the work sequence rather than a condition
-# tacked on at the end; nothing in the code rejects a premature `done:`, so
-# this is a clearer contract, not a guarantee. Emphasis alone did not stop
-# repeated premature `done:` lines describing a finished implementation with
-# no PR (see PR history for the evidence). local-only and scout keep their
-# own `done:` semantics with no PR, unaffected by that rule.
+# For every PR-ending mode (no-mistakes, direct-PR), the block words the
+# pipeline run, or opening the PR, as a numbered action still owed inside the
+# work sequence rather than a condition tacked on at the end, and it states
+# outright that `done:` requires that mode's PR URL. A worker that has
+# committed but has not yet started the pipeline (or, in direct-PR, has no PR
+# yet) is told to report `working:` and go do that numbered step, never
+# `done:`; a worker already inside a live run follows the escalation rules
+# below instead. Nothing in the code rejects a premature `done:`, so this is a
+# clearer contract, not a guarantee: emphasis alone did not stop repeated
+# premature `done:` lines describing a finished implementation with no PR.
+# local-only and scout keep their own `done:` semantics with no PR, unaffected
+# by that rule.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.

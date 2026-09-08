@@ -334,8 +334,8 @@ test_no_mistakes_dod_wording() {
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   # The pipeline invocation is a numbered step to perform, not a condition
-  # already satisfied by finishing the implementation - this is the closes-by-
-  # construction fix for workers reporting `done:` right after their commit.
+  # already satisfied by finishing the implementation - this is the wording fix
+  # for workers reporting `done:` right after their commit.
   assert_grep "2. Immediately start /no-mistakes yourself; do not wait for firstmate to tell you to." "$brief" \
     "no-mistakes DOD must sequence starting the pipeline as a numbered step, not a condition"
   assert_grep "never append \`done:\` on a status line that does not carry that PR URL" "$brief" \
