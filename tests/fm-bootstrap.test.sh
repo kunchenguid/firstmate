@@ -5,8 +5,9 @@
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
 # 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)',
-# 'MISSING: gh-axi (install: ...)', 'MISSING: lavish-axi (install: ...)', and
-# 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
+# 'MISSING: gh-axi (install: ...)', 'MISSING: lavish-axi (install: ...)',
+# 'MISSING: perl-JSON-PP (install: ...)', and 'BOOTSTRAP_INFO: ...' lines, so
+# those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
 # tasks-axi update advertises --archive-body, whether its mv help advertises
@@ -484,6 +485,315 @@ ROWS
   pass "bootstrap enforces quota-axi minimum version"
 }
 
+test_perl_json_pp_dependency_is_detected_installed_and_used() {
+  local case_dir home fakebin marker manager_log real_perl real_tasks_axi out rc show
+  local detected installed answered decoded held
+  case_dir="$TMP_ROOT/perl-json-pp"
+  home="$case_dir/home"
+  marker="$case_dir/json-pp-installed"
+  manager_log="$case_dir/package-manager.log"
+  real_perl=$(command -v perl) || fail "Perl is required to test the JSON::PP dependency"
+  real_tasks_axi=$(command -v tasks-axi) || fail "tasks-axi is required to test captain-answer decoding"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  cat > "$fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = -MJSON::PP ] && [ ! -f "@MARKER@" ]; then
+    printf '%s\n' "Can't locate JSON/PP.pm in \@INC (simulated split package)" >&2
+    exit 2
+  fi
+done
+exec "@REAL_PERL@" "$@"
+SH
+  sed -i.bak "s|@MARKER@|$marker|g; s|@REAL_PERL@|$real_perl|g" "$fakebin/perl"
+  rm -f "$fakebin/perl.bak"
+  chmod +x "$fakebin/perl"
+
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf 'PATH=%q exec %q "$@"\n' "$PATH" "$real_tasks_axi"
+  } > "$fakebin/tasks-axi"
+  chmod +x "$fakebin/tasks-axi"
+
+  cat > "$fakebin/id" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = -u ] || exit 1
+printf '%s\n' 1000
+SH
+  chmod +x "$fakebin/id"
+  cat > "$fakebin/dnf" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "@MANAGER_LOG@"
+[ "${1:-}" = install ] || exit 2
+shift
+if [ "${1:-}" != -y ]; then
+  printf '%s\n' 'Operation aborted: transaction confirmation required.' >&2
+  exit 1
+fi
+shift
+[ "$#" -eq 1 ] && [ "$1" = perl-JSON-PP ] || exit 2
+if [ "${FM_FAKE_DNF_EXIT:-0}" -ne 0 ]; then
+  printf '%s\n' 'DNF transaction failed.' >&2
+  exit "$FM_FAKE_DNF_EXIT"
+fi
+: > "@MARKER@"
+SH
+  sed -i.bak "s|@MANAGER_LOG@|$manager_log|g; s|@MARKER@|$marker|g" "$fakebin/dnf"
+  rm -f "$fakebin/dnf.bak"
+  chmod +x "$fakebin/dnf"
+  cat > "$fakebin/sudo" <<'SH'
+#!/usr/bin/env bash
+exec "$@"
+SH
+  chmod +x "$fakebin/sudo"
+
+  printf '%s\n' 'A multiline body:' '' 'Original text must survive. Unicode: café.' > "$case_dir/body.txt"
+  printf '%s\n' 'Approve the portable fix.' > "$case_dir/decision.txt"
+  (
+    cd "$home" || exit 1
+    "$real_tasks_axi" add sample-json-call "Choose the portable fix" --kind ship \
+      --repo sample --body-file "$case_dir/body.txt" >/dev/null
+    "$real_tasks_axi" hold sample-json-call --reason "captain decision pending" \
+      --kind captain >/dev/null
+  ) || fail "could not build the captain-answer dependency fixture"
+  cat > "$case_dir/lavish.result" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "1","Approve\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-json-call\",\n  \"selection\": \"yes\",\n  \"note\": \"\"\n}","section#call",choice,"Approve"
+next_step: This was the last feedback before the user ended the session.
+EOF
+
+  if PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" "$ROOT/bin/fm-captain-hold.sh" answer \
+    sample-json-call --decision-file "$case_dir/decision.txt" \
+    > "$case_dir/answer-missing.out" 2> "$case_dir/answer-missing.err"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "captain-answer decoding worked while JSON::PP was unavailable"
+  assert_grep "Can't locate JSON/PP.pm" "$case_dir/answer-missing.err" \
+    "captain-answer failure did not prove the module was unavailable"
+  show=$(cd "$home" && "$real_tasks_axi" show sample-json-call --full) \
+    || fail "could not inspect the captain-held task after the missing-module failure"
+  assert_contains "$show" "state: queued" "missing JSON::PP closed the captain-held task"
+  assert_contains "$show" "held: yes" "missing JSON::PP released the captain-held task"
+  held=$show
+
+  if PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-procevent-lavish.sh" \
+    answers "$case_dir/lavish.result" > "$case_dir/lavish-missing.out" \
+    2> "$case_dir/lavish-missing.err"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "Lavish answer decoding worked while JSON::PP was unavailable"
+  assert_grep "Can't locate JSON/PP.pm" "$case_dir/lavish-missing.err" \
+    "Lavish failure did not prove the module was unavailable"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "MISSING: perl-JSON-PP (install: sudo dnf install -y perl-JSON-PP)" ] \
+    || fail "bootstrap did not report the missing Fedora split package exactly: $out"
+  assert_absent "$marker" "dependency detection installed JSON::PP before explicit consent"
+  assert_absent "$manager_log" "dependency detection invoked the package manager before explicit consent"
+  detected=$out
+
+  if PATH="$fakebin:$BASE_PATH" FM_FAKE_DNF_EXIT=23 "$ROOT/bin/fm-bootstrap.sh" \
+    install perl-JSON-PP perl-JSON-PP < /dev/null \
+    > "$case_dir/install-failed.out" 2> "$case_dir/install-failed.err"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 23 ] || fail "bootstrap did not propagate the failed transaction's exit status: $rc"
+  assert_grep 'DNF transaction failed.' "$case_dir/install-failed.err" \
+    "bootstrap hid the package manager's failure diagnostic"
+  assert_absent "$marker" "the failed transaction made JSON::PP available"
+  [ "$(wc -l < "$manager_log")" -eq 1 ] \
+    || fail "bootstrap continued installing after a failed transaction"
+  rm -f "$manager_log"
+
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-bootstrap.sh" install perl-JSON-PP < /dev/null) \
+    || fail "the approved JSON::PP installation path failed"
+  [ "$out" = "installing perl-JSON-PP: sudo dnf install -y perl-JSON-PP" ] \
+    || fail "the JSON::PP installation path reported an unexpected command: $out"
+  installed=$out
+  assert_present "$marker" "the explicit install did not make JSON::PP available"
+  assert_grep 'install -y perl-JSON-PP' "$manager_log" \
+    "the Fedora install path did not request the split JSON::PP package"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "bootstrap still reported JSON::PP after installation: $out"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" "$ROOT/bin/fm-captain-hold.sh" answer \
+    sample-json-call --decision-file "$case_dir/decision.txt") \
+    || fail "captain-answer decoding failed after JSON::PP installation"
+  [ "$out" = "answered: sample-json-call" ] \
+    || fail "captain-answer decoding returned an unexpected result: $out"
+  answered=$out
+  show=$(cd "$home" && "$real_tasks_axi" show sample-json-call --full) \
+    || fail "could not inspect the answered captain-held task"
+  assert_contains "$show" "state: done" "the decoded captain answer did not close the task"
+  assert_contains "$show" "Original text must survive. Unicode: café." \
+    "captain-answer decoding corrupted the existing multiline body"
+  assert_contains "$show" "Approve the portable fix." \
+    "captain-answer decoding lost the recorded answer"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-procevent-lavish.sh" \
+    answers "$case_dir/lavish.result") || fail "Lavish answer decoding failed after JSON::PP installation"
+  [ "$out" = "$(printf 'sample-json-call\tyes\tApprove')" ] \
+    || fail "Lavish answer decoding returned an unexpected result: $out"
+  decoded=$out
+  # Optional product evidence: actual CLI output and persisted task state, not
+  # test pass/fail output. The caller owns the external publication directory.
+  if [ -n "${FM_JSON_PP_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FM_JSON_PP_EVIDENCE_DIR" || fail "cannot create JSON::PP evidence directory"
+    {
+      printf '%s\n' 'Split-package regression: real Perl, tasks-axi, captain-answer and Lavish decoder.' \
+        'Only JSON::PP absence, DNF, sudo and unrelated bootstrap tools are simulated.' \
+        'No system packages are installed. Lavish input below is a protocol fixture.' '' \
+        '$ fm-captain-hold.sh answer sample-json-call --decision-file decision.txt (module absent)'
+      cat "$case_dir/answer-missing.err"
+      printf '\n%s\n%s\n' '$ tasks-axi show sample-json-call --full (after failed answer)' "$held"
+      printf '\n%s\n' '$ fm-procevent-lavish.sh answers lavish.result (module absent)'
+      cat "$case_dir/lavish-missing.err"
+      printf '\n%s\n%s\n' '$ fm-bootstrap.sh (detect-only; package-manager log and installed marker absent)' "$detected"
+      printf '\n%s\n' '$ fm-bootstrap.sh install perl-JSON-PP perl-JSON-PP </dev/null (injected DNF failure)'
+      cat "$case_dir/install-failed.out" "$case_dir/install-failed.err"
+      printf '%s\n' 'exit: 23; second installation not attempted; module still absent'
+      printf '\n%s\n%s\n' '$ fm-bootstrap.sh install perl-JSON-PP </dev/null (explicit approval)' "$installed"
+      printf '\n%s\n' '$ fm-bootstrap.sh (after installation)' '[silent; exit 0]'
+      printf '\n%s\n%s\n' '$ fm-captain-hold.sh answer sample-json-call --decision-file decision.txt' "$answered"
+      printf '\n%s\n%s\n' '$ tasks-axi show sample-json-call --full' "$show"
+      printf '\n%s\n' 'Lavish captured-result protocol fixture:'
+      cat "$case_dir/lavish.result"
+      printf '\n%s\n%s\n' '$ fm-procevent-lavish.sh answers lavish.result' "$decoded"
+    } > "$FM_JSON_PP_EVIDENCE_DIR/json-pp-cli-transcript.txt" || fail "cannot write JSON::PP CLI evidence"
+    cp "$home/data/backlog.md" "$FM_JSON_PP_EVIDENCE_DIR/json-pp-backlog.md" \
+      || fail "cannot publish persisted captain-answer evidence"
+  fi
+  pass "bootstrap detects and installs Fedora JSON::PP before captain-answer and Lavish decoding"
+}
+
+test_perl_json_pp_platform_install_paths() {
+  local case_dir fakebin bash_env manager os uid sudo_available expected out rc tool label
+  case_dir="$TMP_ROOT/json-pp-platforms"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  bash_env="$case_dir/platform.bash"
+  if [ -n "${FM_JSON_PP_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FM_JSON_PP_EVIDENCE_DIR" || fail "cannot create platform evidence directory"
+    printf '%s\n' 'Real bootstrap CLI with simulated platform, package managers and sudo; no system changes.' \
+      > "$FM_JSON_PP_EVIDENCE_DIR/json-pp-platforms.txt"
+  fi
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ]; then
+    case "${2:-}" in
+      dnf|yum|apt-get|apk|zypper|pkg|brew)
+        [ "$2" = "$FM_TEST_JSON_MANAGER" ] || return 1 ;;
+      sudo) [ "$FM_TEST_JSON_SUDO" = yes ] || return 1 ;;
+    esac
+  fi
+  builtin command "$@"
+}
+id() {
+  if [ "${1:-}" = -u ]; then printf '%s\n' "$FM_TEST_JSON_UID"; else command id "$@"; fi
+}
+uname() {
+  if [ "${1:-}" = -s ]; then printf '%s\n' "$FM_TEST_JSON_OS"; else command uname "$@"; fi
+}
+perl() {
+  case " $* " in *' -MJSON::PP '*) return 2 ;; esac
+  command perl "$@"
+}
+SH
+  # Shadow every installer, including hidden ones, so even an incorrect
+  # dispatch cannot reach a host package manager or privilege escalation.
+  for tool in dnf yum apt-get apk zypper pkg brew; do
+    cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "${0##*/}" "$*" >> "$FM_TEST_JSON_LOG"
+SH
+    chmod +x "$fakebin/$tool"
+  done
+  cat > "$fakebin/sudo" <<'SH'
+#!/usr/bin/env bash
+printf 'sudo ' >> "$FM_TEST_JSON_LOG"
+exec "$@"
+SH
+  chmod +x "$fakebin/sudo"
+  while IFS='|' read -r manager os uid sudo_available expected; do
+    label="$manager/$os/uid=$uid/sudo=$sudo_available"
+    rm -f "$case_dir/manager.log"
+    export FM_TEST_JSON_MANAGER="$manager" FM_TEST_JSON_OS="$os" FM_TEST_JSON_UID="$uid" \
+      FM_TEST_JSON_SUDO="$sudo_available" FM_TEST_JSON_LOG="$case_dir/manager.log"
+    out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" \
+      FM_ROOT_OVERRIDE="$case_dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh") \
+      || fail "$label: detection failed"
+    assert_absent "$case_dir/manager.log" "$label: detection installed without consent"
+    if [ "$expected" = manual ]; then
+      [ "$out" = 'MISSING_MANUAL: perl-JSON-PP (instructions: https://metacpan.org/pod/JSON::PP)' ] \
+        || fail "$label: missing manual diagnostic: $out"
+    else
+      [ "$out" = "MISSING: perl-JSON-PP (install: $expected)" ] \
+        || fail "$label: unexpected install diagnostic: $out"
+    fi
+    if [ -n "${FM_JSON_PP_EVIDENCE_DIR:-}" ]; then
+      printf '\n%s\n$ fm-bootstrap.sh (detect-only)\n%s\n' "$label" "$out" \
+        >> "$FM_JSON_PP_EVIDENCE_DIR/json-pp-platforms.txt"
+    fi
+    out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" \
+      "$ROOT/bin/fm-bootstrap.sh" install perl-JSON-PP </dev/null 2>&1) && rc=0 || rc=$?
+    if [ "$expected" = manual ]; then
+      [ "$rc" -eq 1 ] || fail "$label: manual install did not refuse"
+      assert_absent "$case_dir/manager.log" "$label: manual fallback invoked an installer"
+    else
+      [ "$rc" -eq 0 ] || fail "$label: approved installation failed: $out"
+      [ "$(cat "$case_dir/manager.log")" = "$expected" ] \
+        || fail "$label: executed the wrong package transaction"
+    fi
+    if [ -n "${FM_JSON_PP_EVIDENCE_DIR:-}" ]; then
+      printf '$ fm-bootstrap.sh install perl-JSON-PP </dev/null\n%s\nexit: %s\n' "$out" "$rc" \
+        >> "$FM_JSON_PP_EVIDENCE_DIR/json-pp-platforms.txt"
+    fi
+  done <<'ROWS'
+dnf|Linux|1000|yes|sudo dnf install -y perl-JSON-PP
+dnf|Linux|0|no|dnf install -y perl-JSON-PP
+yum|Linux|1000|yes|sudo yum install -y perl-JSON-PP
+apt-get|Linux|1000|yes|sudo apt-get install -y libjson-pp-perl
+apk|Linux|1000|yes|sudo apk add perl-json-pp
+zypper|Linux|1000|yes|sudo zypper --non-interactive install perl-JSON-PP
+pkg|FreeBSD|1000|yes|sudo pkg install -y p5-JSON-PP
+brew|Darwin|1000|no|brew install perl
+dnf|Linux|1000|no|manual
+none|Linux|1000|yes|manual
+pkg|Linux|1000|yes|manual
+ROWS
+  unset FM_TEST_JSON_MANAGER FM_TEST_JSON_OS FM_TEST_JSON_UID FM_TEST_JSON_SUDO FM_TEST_JSON_LOG
+  pass "bootstrap selects platform JSON::PP transactions and refuses unavailable privilege or managers"
+}
+
 test_git_is_required_with_supported_install_instruction() {
   local case_dir fakebin bash_env out expected
   case_dir="$TMP_ROOT/git-required"
@@ -511,7 +821,7 @@ SH
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
+  local case_dir fakebin bash_env out missing_orca
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
 
   case_dir="$TMP_ROOT/orca-backend-selected"
@@ -519,8 +829,23 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  # Fedora desktops may provide an unrelated screen reader named `orca`.
+  # Keep this missing-backend-CLI fixture independent of ambient executables.
+  bash_env="$case_dir/no-orca.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = orca ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+orca() {
+  return 127
+}
+SH
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
 
   case_dir="$TMP_ROOT/orca-backend-not-selected"
@@ -887,32 +1212,48 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
 # split is a PARTITION: `skip` plus `only` together do exactly what `all` does,
 # with no step dropped and no step run twice.
 test_network_phase_partitions_the_run() {
-  local case_dir fakebin all_out skip_out only_out combined
+  local case_dir fakebin bash_env all_out skip_out only_out combined
   case_dir="$TMP_ROOT/network-phase"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   # Break the two diagnostics that stand for the two halves: a local tool floor
-  # and the network GitHub-auth probe.
+  # and the network GitHub-auth probe. Hide any ambient Node installation so
+  # this missing-tool fixture remains portable.
   rm -f "$fakebin/node"
+  bash_env="$case_dir/no-node.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = node ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+node() {
+  return 127
+}
+SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 1
 SH
   chmod +x "$fakebin/gh"
 
-  all_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  all_out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$all_out" "MISSING: node (install:" "the unsplit run lost its local diagnostic"
   assert_contains "$all_out" "NEEDS_GH_AUTH" "the unsplit run lost its network diagnostic"
 
-  skip_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
+  skip_out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$skip_out" "MISSING: node (install:" "the local half lost its own diagnostic"
   assert_not_contains "$skip_out" "NEEDS_GH_AUTH" "the local half still made a network call"
 
-  only_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
+  only_out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$only_out" "NEEDS_GH_AUTH" "the network half lost its own diagnostic"
   assert_not_contains "$only_out" "MISSING: node" "the network half repeated the local half's work"
 
@@ -922,8 +1263,9 @@ SH
 
   # A typo must never silently drop a safety sweep, so anything unrecognized
   # resolves to the complete run.
-  [ "$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=sikp "$ROOT/bin/fm-bootstrap.sh")" = "$all_out" ] \
+  [ "$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_BOOTSTRAP_NETWORK=sikp "$ROOT/bin/fm-bootstrap.sh")" = "$all_out" ] \
     || fail "an unrecognized FM_BOOTSTRAP_NETWORK value did not fall back to the complete run"
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
 }
@@ -1154,6 +1496,8 @@ test_gh_axi_min_version
 test_lavish_axi_min_version
 test_tasks_axi_min_version
 test_quota_axi_min_version
+test_perl_json_pp_dependency_is_detected_installed_and_used
+test_perl_json_pp_platform_install_paths
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
