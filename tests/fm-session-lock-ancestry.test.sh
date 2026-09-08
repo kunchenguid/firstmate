@@ -139,7 +139,7 @@ SH
 # to prove a specific runtime started - fm-control's replacement proof - can
 # never recognize less than the fleet does.
 test_named_harness_identity_reads_every_witness() {
-  local dir fakebin case_line expect harness comm args
+  local dir fakebin expect harness comm args
   dir="$TMP_ROOT/named-identity"
   fakebin=$(fm_fakebin "$dir")
   # An npm-installed Claude Code is a bare `node`: its comm and argv[0] are the
