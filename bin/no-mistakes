@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Firstmate's argv-level no-mistakes dispatch boundary.
 #
-# Primary and secondmate sessions have no FM_TASK_ID. Ship and scout workers
-# receive that marker from fm-spawn.sh before their harness starts. Keep the
-# blocking run-driving operations with those workers while preserving every
-# read-only and recovery command for the primary.
+# Put this directory before the upstream no-mistakes executable on PATH.
+# Primary and secondmate sessions have no FM_TASK_ID; ship and scout workers
+# receive that marker from fm-spawn.sh before their harness starts. Invocations
+# whose first two arguments are `axi run` or `axi respond` are refused without
+# the marker. Every other invocation is forwarded unchanged to the first other
+# executable on PATH; absence of an upstream executable is an error.
 set -u
 
 if [ "${1:-}" = axi ]; then

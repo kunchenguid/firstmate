@@ -91,7 +91,7 @@ Put Firstmate's command boundary first on `PATH`, then launch one of the co-prim
 export PATH="$PWD/bin:$PATH"
 ```
 
-This routes `no-mistakes` through Firstmate's argv-level ownership check: primary sessions retain status and recovery access, while blocking `axi run` and `axi respond` calls stay with the task worker identified by `FM_TASK_ID`.
+This routes `no-mistakes` through Firstmate's argv-level ownership check: primary sessions retain status and recovery access, while pipeline-driving `axi run` and `axi respond` calls stay with the task worker identified by `FM_TASK_ID`.
 
 **Claude Code**
 
