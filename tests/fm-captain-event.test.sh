@@ -142,7 +142,7 @@ long=$(python3 - <<'PY'
 print("🧭" * 700)
 PY
 )
-assignments='token=supersecretvalue AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod escaped_name=private\ escapedvalue quoted_name="private \"quotedvalue\" tail"'
+assignments='token=supersecretvalue AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod escaped_name=private\ escapedvalue quoted_name="private \"quotedvalue\" tail" command_name=$(printf substitutionsecret) nested_name=$(outer $(inner nestedsecret)) postgres://bareuser:barepass@db.example/prod'
 primary_args pi:bounded "$assignments ordinary prose"
 PRIMARY_ARGS+=(--summary-truncated true --ref pr_url=https://github.com/example/repo/pull/7 --ref report_id=soak-report --ref report_path=data/soak-report/report.md --ref branch_outcome_seq=9)
 # Replace the summary argument with a value that exercises both redaction and
@@ -161,6 +161,10 @@ printf '%s\n' "$row" | jq -e '
   and (.summary | contains("dbpass") | not)
   and (.summary | contains("escapedvalue") | not)
   and (.summary | contains("quotedvalue") | not)
+  and (.summary | contains("substitutionsecret") | not)
+  and (.summary | contains("nestedsecret") | not)
+  and (.summary | contains("bareuser") | not)
+  and (.summary | contains("barepass") | not)
   and (.summary | contains("ordinary prose"))
   and (.refs | keys) == ["branch_outcome_seq","pr_url","report_id","report_path"]
   and .refs.branch_outcome_seq == 9
@@ -174,6 +178,14 @@ assert not any(unicodedata.category(ch).startswith("C") for ch in summary)
 ' || fail "bounded summary retained a Unicode control or format character"
 bytes=$(wc -c < "$home/state/captain-events/events.jsonl" | tr -d ' ')
 [ "$bytes" -le 8192 ] || fail "serialized event exceeds 8192 bytes ($bytes)"
+primary_args pi:unbalanced 'Prefix SAFE=$(printf unresolvedsecret trailing suffix'
+FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "unbalanced assignment append failed"
+unbalanced_row=$(FM_HOME="$home" "$OUTBOX" read --after 1)
+printf '%s\n' "$unbalanced_row" | jq -e '
+  .summary == "Prefix [REDACTED]"
+  and (.summary | contains("unresolvedsecret") | not)
+  and (.summary | contains("trailing suffix") | not)
+' >/dev/null || fail "unprovable assignment did not redact the remaining value"
 primary_args pi:bad-ref bad
 PRIMARY_ARGS+=(--ref terminal=/tmp/raw)
 out=$(FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" 2>&1)
@@ -399,7 +411,7 @@ installCaptainEventPublisher(pi, {
 });
 const message = {
   role: "assistant",
-  content: [{ type: "text", text: "Ordinary prose AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod escaped_name=private\\ escapedvalue quoted_name=\"private \\\"quotedvalue\\\" tail\" remains" }],
+  content: [{ type: "text", text: "Ordinary prose AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod escaped_name=private\\ escapedvalue quoted_name=\"private \\\"quotedvalue\\\" tail\" remains command_name=$(printf substitutionsecret) nested_name=$(outer $(inner nestedsecret)) postgres://bareuser:barepass@db.example/prod unproven_name=$(printf unresolvedsecret trailing suffix" }],
   stopReason: "stop",
   timestamp: 1,
 };
@@ -411,7 +423,7 @@ import sys
 
 args = open(sys.argv[1], "rb").read().split(b"\0")[:-1]
 summary = args[args.index(b"--summary") + 1].decode()
-assert summary == "Ordinary prose [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] remains", summary
+assert summary == "Ordinary prose [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] remains [REDACTED] [REDACTED] [REDACTED] [REDACTED]", summary
 PY
 
   home=$(new_home pi-producer-disabled)

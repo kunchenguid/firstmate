@@ -17,6 +17,7 @@ const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
 const ENV_ASSIGNMENT_START = /\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*=\s*/g;
 const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)/gi,
+  /\b[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s\/@"']+@[^\s,;"']+/gi,
   /\bAKIA[0-9A-Z]{16}\b/g,
   /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
@@ -60,6 +61,7 @@ function redactEnvironmentAssignments(value: string): string {
     let cursor = ENV_ASSIGNMENT_START.lastIndex;
     let quote = "";
     let escaped = false;
+    const substitutionQuotes: string[] = [];
     let scanned = 0;
     while (cursor < value.length) {
       if (scanned >= ASSIGNMENT_SCAN_MAX) {
@@ -71,11 +73,21 @@ function redactEnvironmentAssignments(value: string): string {
         escaped = false;
       } else if (character === "\\") {
         escaped = true;
+      } else if (quote === "'") {
+        if (character === "'") quote = "";
+      } else if (character === "$" && value[cursor + 1] === "(") {
+        substitutionQuotes.push(quote);
+        quote = "";
+        cursor += 2;
+        scanned += 2;
+        continue;
       } else if (quote) {
         if (character === quote) quote = "";
       } else if (character === "\"" || character === "'") {
         quote = character;
-      } else if (/\s/u.test(character) || character === "," || character === ";") {
+      } else if (character === ")" && substitutionQuotes.length > 0) {
+        quote = substitutionQuotes.pop() ?? "";
+      } else if (substitutionQuotes.length === 0 && (/\s/u.test(character) || character === "," || character === ";")) {
         break;
       }
       cursor += 1;

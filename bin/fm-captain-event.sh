@@ -138,6 +138,7 @@ ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 ENV_ASSIGNMENT_START_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*=\s*")
 SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)", re.I),
+    re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s/@\"']+@[^\s,;\"']+", re.I),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
@@ -285,6 +286,7 @@ def redact_environment_assignments(value):
         cursor = match.end()
         quote = None
         escaped = False
+        substitution_quotes = []
         scanned = 0
         while cursor < len(value):
             if scanned >= ASSIGNMENT_SCAN_MAX:
@@ -295,12 +297,23 @@ def redact_environment_assignments(value):
                 escaped = False
             elif character == "\\":
                 escaped = True
+            elif quote == "'":
+                if character == "'":
+                    quote = None
+            elif character == "$" and cursor + 1 < len(value) and value[cursor + 1] == "(":
+                substitution_quotes.append(quote)
+                quote = None
+                cursor += 2
+                scanned += 2
+                continue
             elif quote is not None:
                 if character == quote:
                     quote = None
             elif character in {'"', "'"}:
                 quote = character
-            elif character.isspace() or character in {",", ";"}:
+            elif character == ")" and substitution_quotes:
+                quote = substitution_quotes.pop()
+            elif not substitution_quotes and (character.isspace() or character in {",", ";"}):
                 break
             cursor += 1
             scanned += 1
