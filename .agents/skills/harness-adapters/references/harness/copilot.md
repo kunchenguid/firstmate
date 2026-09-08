@@ -14,7 +14,7 @@ The current hook and launch contract was refreshed against Copilot CLI 1.0.83-3 
 | Skill | Name the skill with a leading slash in the prompt, for example `Use the /no-mistakes skill`; `/skills` manages discovery and enablement. |
 | Resume | `copilot --resume=<session-id>` or `copilot --continue`; deterministic Firstmate recovery still uses relaunch from durable instructions. |
 | Autonomy | `--allow-all` grants tool, path, and URL permissions; `--no-ask-user` removes the interactive question tool from unattended workers. |
-| Marker | `COPILOT_CLI=1` reaches child and hook processes; Firstmate clears it when launching another adapter so a markerless child cannot inherit Copilot identity. |
+| Marker | `COPILOT_CLI=1` reaches child and hook processes; Firstmate clears inherited `CLAUDECODE`, `CLAUDE_PROJECT_DIR`, `PI_CODING_AGENT`, `FM_PI_HARNESS`, `GROK_AGENT`, `FM_OMP_HARNESS`, `GEMINI_CLI`, `ATLASSIAN_AGENT_TYPE`, `ROVODEV_CLI`, `CURSOR_AGENT`, and `CURSOR_INVOKED_AS` before launching Copilot, and clears `COPILOT_CLI` when launching another adapter so a child cannot inherit the wrong harness identity. |
 | Model | `--model <model>`; discover current availability through `/model`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`; Copilot also exposes lower `none` and `minimal` values outside Firstmate's shared vocabulary. |
 | Composer | Complete half-box using a `╻` plus `▄` top rule, `┃`-prefixed content, and a width-matched `╹` plus `▀` bottom rule. |
@@ -24,7 +24,8 @@ Accept the remembered trust choice only for a repository the captain intends to 
 
 ## Detection and liveness
 
-When `COPILOT_CLI=1` is present, `../../../bin/fm-harness.sh` resolves the nearest verified process ancestry first and falls back to Copilot only when ancestry cannot prove a nested harness.
+When `COPILOT_CLI=1` is present, `../../../bin/fm-harness.sh` resolves the nearest verified process ancestry first.
+If that ancestry is inconclusive, existing positive Gemini and Rovo markers keep their established precedence, and only the inherited Copilot-versus-Claude-or-Cursor ambiguity falls back to Copilot.
 It also recognizes the Linux process shapes observed across releases: command name `copilot`, argv zero ending in `/copilot`, or the bundled executable's `MainThread` command with Copilot argv zero.
 The anchored argv-zero rule deliberately does not match editor extensions, plugin paths, or an unrelated command whose later arguments merely mention Copilot.
 

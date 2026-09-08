@@ -60,9 +60,12 @@ ln -s "$SLEEP_BIN" "$LAB/bin/pi"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # omp (Oh My Pi) is a single binary whose live process name is the bare word
 # `omp`; the two decoys are the substrings an unanchored glob would misread.
-ln -s "$SLEEP_BIN" "$LAB/bin/omp"
-ln -s "$SLEEP_BIN" "$LAB/bin/ompd"
-ln -s "$SLEEP_BIN" "$LAB/bin/comp"
+# Keep only the path spellings here. GNU coreutils' multicall `sleep` refuses
+# a harness-name symlink such as `omp`, so the actual live process is launched
+# later with `exec -a` against these exact argv[0] paths instead.
+: > "$LAB/bin/omp"
+: > "$LAB/bin/ompd"
+: > "$LAB/bin/comp"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
@@ -216,13 +219,13 @@ pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
 # `omp`, with no path component to fall back on, so the anchored name is the
 # only signal and the two decoys prove it never widens into a substring match.
 
-new_window omp "$LAB/bin/omp" 900
+new_window omp bash -c "exec -a '$LAB/bin/omp' '$SLEEP_BIN' 900"
 wait_for_state "$SESSION:omp" alive \
   || fail "omp's bare binary name must classify alive"
 pass "tmux liveness: omp's bare binary name classifies alive"
 
 for decoy in ompd comp; do
-  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  new_window "decoy-$decoy" bash -c "exec -a '$LAB/bin/$decoy' '$SLEEP_BIN' 900"
   wait_for_state "$SESSION:decoy-$decoy" ambiguous \
     || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
 done
