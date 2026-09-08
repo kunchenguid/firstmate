@@ -330,18 +330,20 @@ With only `hasTrustDialogAccepted` registered:
 
 | project | tracked `.claude/settings.json` | second prompt |
 | --- | --- | --- |
-| A | `PreToolUse` hooks AND 2 `permissions.allow` entries | YES |
-| B | 8 `permissions.allow` entries, no hooks | no |
+| A | `PreToolUse` hooks AND 2 `permissions.allow` entries, both remote-root shell wildcards | YES |
+| B | 8 `permissions.allow` entries, all narrow local-CLI subcommand patterns, no hooks | no |
 | C | one `SessionStart` hook, no `permissions.allow` | no |
 
-That column is scoped to the repo's TRACKED `.claude/settings.json` only.
+Those three are the same day's non-Firstmate spawns, and that column is scoped to each repo's TRACKED `.claude/settings.json` only.
+Note the KIND of rule, not just the count: the arm that prompted is the one whose two entries grant remote shell access, while the larger eight-entry set that did not prompt is local-CLI only.
 Every arm also carried hooks Firstmate itself injects: `bin/fm-spawn.sh` writes a `.claude/settings.local.json` with `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` entries into every claude worktree before launch, so no arm was hooks-free as Claude reads the folder.
 At the file level B was therefore a hooks-and-allow worktree that did NOT prompt, which rules out "hooks plus allow rules anywhere in the folder" as the trigger on its own.
-No arm isolated a `PreToolUse` hook without allow rules: A is the only project carrying one, C's single tracked hook is `SessionStart`, and the injected hooks are `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd`.
-So "a `PreToolUse` hook alone reaches the prompt" was never tested and remains open.
+A hook without allow rules is not an open case, because Firstmate itself is the standing arm for it: this repository's own tracked `.claude/settings.json` carries `SessionStart`, `PreToolUse`, and `Stop` hooks and no `permissions` key at all, it is treehouse-pooled (`bin/fm-tangle-lib.sh`), and `bin/fm-spawn.sh` launches claude workers into fresh pre-registered worktrees of it routinely without any of them wedging on this prompt.
+The prompt's own text points the same way - it enumerates "This folder pre-approves N tool permissions in `.claude/settings.json`" - so a folder with no allow entries has nothing for it to be about.
+That leaves the tracked allow rules as the dimension still open.
 
 What is known: the prompt exists on 2.1.263, it appears despite a pre-registered `hasTrustDialogAccepted`, and it named the two `permissions.allow` entries from A's tracked `settings.json`.
-What is not known: which property of that project reaches it. Only A prompted, B and C did not, and one observation of each is too thin to separate tracked-versus-local settings, the hook class, the specific rules involved, or something else about the project entirely.
+What is not known: which property of A's tracked allow rules reaches it. Only A prompted, B and C did not, and one observation of each is too thin to separate the kind of rule granted, the count, tracked-versus-local settings, or something else about the project entirely.
 
 `hasTrustDialogHooksAccepted` was the obvious candidate for the key that pre-registers this acceptance, and it is NOT ESTABLISHED as that key.
 Read-only inspection of the operator's `~/.claude.json` on 2026-09-08 (71 project entries; `hasTrustDialogAccepted: true` in 37):
@@ -363,7 +365,7 @@ The shape of the two project-A worktree slots the captain answered by hand carri
 So pre-registering this key `true` would write a value the vendor has never been observed writing, and whether it records accepting the second prompt is NOT ESTABLISHED, because the only two known acceptances happened in slots this store does not update.
 Either way, nothing in `bin/fm-claude-trust.sh` pre-registers the second prompt and a worker that meets it still wedges.
 
-Refreshing this observation needs a live spawn against a project whose settings actually trigger the prompt, compared against the same worktree without the candidate key.
+Refreshing this observation needs a live spawn against a project whose tracked allow rules actually trigger the prompt, compared against the same worktree without the candidate key.
 No automated guard covers that, and Firstmate holds the controlled experiment as a separate deferred scout task.
 Recheck this after a Claude Code upgrade rather than trusting the version above.
 
