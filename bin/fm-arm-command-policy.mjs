@@ -686,25 +686,29 @@ function shellInvocation(position, context) {
   return { kind: "stdin", payload: null };
 }
 
-function readsStdinAsScript(position, context) {
-  if (shellInvocation(position, context)?.kind === "stdin") return true;
+function scriptInputFd(position, context) {
+  if (shellInvocation(position, context)?.kind === "stdin") return 0;
   const script = sourcedScript(position);
   const resolved = resolveKnownWord(script, context.knownVariables);
-  return resolved === "/dev/stdin" || resolved === "/dev/fd/0";
+  if (resolved === "/dev/stdin") return 0;
+  const match = resolved?.match(/^\/dev\/fd\/([0-9]+)$/);
+  return match ? Number(match[1]) : null;
 }
 
 function shellHeredocPayloads(tokens, position, context) {
-  if (!readsStdinAsScript(position, context)) return [];
-  const heredocs = tokens.filter((token) => token.type === "redir" && token.fd === 0 && typeof token.heredoc === "string");
+  const fd = scriptInputFd(position, context);
+  if (fd === null) return [];
+  const heredocs = tokens.filter((token) => token.type === "redir" && token.fd === fd && typeof token.heredoc === "string");
   return heredocs.length === 0 ? [] : [heredocs.at(-1).heredoc];
 }
 
 function shellHereStringPayloads(tokens, position, context) {
-  if (!readsStdinAsScript(position, context)) return [];
+  const fd = scriptInputFd(position, context);
+  if (fd === null) return [];
   const payloads = [];
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
-    if (token.type !== "redir" || token.value !== "<<<" || token.fd !== 0) continue;
+    if (token.type !== "redir" || token.value !== "<<<" || token.fd !== fd) continue;
     const payload = tokens[i + 1];
     if (payload?.type === "word" && payload.literal && payload.subs.length === 0) payloads.push(payload.value);
   }

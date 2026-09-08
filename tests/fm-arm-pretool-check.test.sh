@@ -300,7 +300,7 @@ test_stdin_unrelated_command_allowed() {
 }
 
 test_primary_pipeline_drive_is_denied_without_blocking_workers() {
-  local dir primary worker check payload heredoc_payload out err rc entry
+  local dir primary worker check payload heredoc_payload alternate_heredoc_payload out err rc entry
   dir=$(fm_test_tmproot fm-primary-pipeline-drive)
   primary="$dir/primary"
   worker="$dir/worker"
@@ -374,6 +374,7 @@ kind=ship
 worktree=$worker
 EOF
   heredoc_payload=$(printf "source /dev/stdin <<'EOF'\\nno-mistakes axi respond --action fix\\nEOF\\n")
+  alternate_heredoc_payload=$(printf "source /dev/fd/3 3<<'EOF'\\nno-mistakes axi respond --action fix\\nEOF\\n")
   for payload in \
     'no-mistakes axi respond --action fix' \
     'nice no-mistakes axi respond --action fix' \
@@ -421,7 +422,8 @@ EOF
     'if ./false; then no-mistakes axi respond --action fix; fi' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done' \
-    "$heredoc_payload"; do
+    "$heredoc_payload" \
+    "$alternate_heredoc_payload"; do
     FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
       --command "$payload" >"$dir/worker.out" 2>"$dir/worker.err"
     rc=$?
@@ -479,7 +481,8 @@ EOF
     'if ./false; then no-mistakes axi respond --action fix; fi' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done' \
-    "$heredoc_payload"; do
+    "$heredoc_payload" \
+    "$alternate_heredoc_payload"; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
     rc=$?
     [ "$rc" -eq 2 ] || fail "the primary pipeline drive must deny through recognized execution wrappers, got $rc for: $payload"
