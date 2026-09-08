@@ -365,6 +365,30 @@ EOF
   pass "fm-mail-check: a repeated status-2 stays-queued poll still wakes"
 }
 
+test_repeated_heal_failure_stays_silent() {
+  # Heal failure happens before wake_for: no queued mail and no .mail-woken
+  # growth. The first standing check reports it; a repeated identical
+  # pre-wake failure must stay silent.
+  local home out
+  home=$(make_home heal-fail)
+  write_env "$home"
+  enter_mailbox "$home" \
+    'printf "uidvalidity\\t90009\\n"'
+  printf 'uidvalidity=90009\n' > "$home/state/.mail-seen"
+  printf '%s\t%s\n' '90009' '55' > "$home/state/.mail-woken"
+  chmod 0400 "$home/state/.mail-seen"
+
+  out="$home/out1.txt"
+  run_check "$home" "$out" "$CHECK"
+  assert_contains "$(cat "$out")" "mail: heal could not record a uid" "the first heal failure reports"
+
+  out="$home/out2.txt"
+  run_check "$home" "$out" "$CHECK"
+  [ ! -s "$out" ] || fail "a repeated pre-wake heal failure must stay silent: $(cat "$out")"
+  chmod 0600 "$home/state/.mail-seen"
+  pass "fm-mail-check: a repeated pre-wake heal failure stays silent"
+}
+
 test_missing_mail_plane_is_reported() {
   local tmpbin home out check_bin
   tmpbin="$TMP_ROOT/plane2/bin"
@@ -395,4 +419,5 @@ test_repeated_status4_fail_closed_still_wakes
 test_repeated_status2_stays_queued_still_wakes
 test_repeated_failure_that_queued_new_mail_still_wakes
 test_repeated_timeout_still_wakes
+test_repeated_heal_failure_stays_silent
 test_missing_mail_plane_is_reported

@@ -177,7 +177,7 @@ poll_has_publication_evidence() {
   local rc=${1:-0} out=$2 woken_before=$3
   [ "$rc" -eq 124 ] && return 0
   if [ -n "$out" ] && printf '%s\n' "$out" | grep -qE \
-    '^fm-mail: woke for |the wake stays queued|could not clear retry for recovered|heal could not record a uid'
+    '^fm-mail: woke for |the wake stays queued|could not clear retry for recovered'
   then
     return 0
   fi
