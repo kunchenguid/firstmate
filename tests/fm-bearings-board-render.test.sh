@@ -184,7 +184,7 @@ test_underway_rows_name_their_home_when_the_repo_cannot() {
   ]}')
   printf '%s' "$out" | jq -e '
     (.underway | length) == 2
-      and (.underway[0].sub | test("firstmate") and endswith("main"))
+      and (.underway[0].sub | test("firstmate") and endswith("(main)"))
       and (.underway[1].sub | test("firstmate") and endswith("fm-self"))
   ' >/dev/null || fail "two same-repo rows did not name their different homes: $out"
   pass "an underway row names the home that owns it, not just its repo"
@@ -197,7 +197,7 @@ test_a_tile_owned_by_one_home_still_names_it() {
     {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"One"},
     {"id":"b","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"Two"}
   ]}')
-  [ "$(owners_of "$out" underway)" = "2 main" ] \
+  [ "$(owners_of "$out" underway)" = "2 (main)" ] \
     || fail "a tile owned entirely by one home refused to name it: $out"
   pass "a tile whose rows share one home still says which home"
 }
@@ -210,7 +210,7 @@ test_a_truncated_tile_says_its_breakdown_covers_only_the_shown_rows() {
     {"id":"a","repo":"firstmate","owner":"(main)","title":"One","reason":"gated","dispatchable":true},
     {"id":"b","repo":"firstmate","owner":"fm-self","title":"Two","reason":"gated","dispatchable":true}
   ],"charted_more":20}')
-  [ "$(owners_of "$out" "charted next")" = "1 main · 1 fm-self shown" ] \
+  [ "$(owners_of "$out" "charted next")" = "1 (main) · 1 fm-self shown" ] \
     || fail "a truncated tile implied its breakdown covered every row: $out"
   printf '%s' "$out" | jq -e '[.stats[] | select(.label == "charted next") | .n] == [22]' >/dev/null \
     || fail "the truncated tile lost its real total: $out"
@@ -226,11 +226,62 @@ test_owner_labels_do_not_collide_with_inherited_properties() {
     {"id":"c","repo":"firstmate","owner":"constructor","kind":"ship","state":"working","doing":"Three"},
     {"id":"d","repo":"firstmate","owner":"__proto__","kind":"ship","state":"working","doing":"Four"}
   ]}')
-  [ "$(owners_of "$out" underway)" = "2 constructor · 1 main · 1 __proto__" ] \
+  [ "$(owners_of "$out" underway)" = "2 constructor · 1 (main) · 1 __proto__" ] \
     || fail "valid owner labels disappeared from the breakdown: $out"
   printf '%s' "$out" | jq -e '.stats[] | select(.label == "underway") | .n == 4' >/dev/null \
     || fail "the ownership breakdown disagrees with the underway total: $out"
   pass "all valid owner labels count even when they name inherited properties"
+}
+
+test_main_home_and_a_mate_named_main_remain_distinct() {
+  local home out
+  home=$(make_home main-owner-collision)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"One"},
+    {"id":"b","repo":"firstmate","owner":"main","kind":"ship","state":"working","doing":"Two"}
+  ]}')
+  [ "$(owners_of "$out" underway)" = "1 (main) · 1 main" ] || fail "distinct homes were combined: $out"
+  printf '%s' "$out" | jq -e '.underway[0].sub | endswith("(main)")' >/dev/null || fail "main owner was aliased"
+  printf '%s' "$out" | jq -e '.underway[1].sub | endswith("· main")' >/dev/null || fail "mate owner was aliased"
+  pass "the main home and a mate named main retain distinct structural labels"
+}
+
+test_nudge_submissions_bypass_task_answer_intake() {
+  local home url overrides captured result answers nudges
+  home=$(make_home nudge-answer-routing)
+  url="https://gitlab.example/$(printf '%0170d' 1)/$(printf '%0170d' 2)/$(printf '%0170d' 3)/-/merge_requests/44"
+  printf '## In flight\n\n## Queued\n- [ ] nudge.foo - Unrelated captain call (repo: firstmate) (kind: captain) (hold: choose a route) (hold-kind: captain)\n\n## Done\n' > "$home/data/backlog.md"
+  overrides=$(jq -n --arg url "$url" '{captains_call:[{key:$url,type:"nudge",repo:"firstmate",title:"Nudge foo",
+    age_days:23,pr_url:$url,options:[{value:"leave",label:"Leave it"}]}]}')
+  render_payload "$home" "$overrides" >/dev/null
+  captured=$(node "$HARNESS" "$home/.lavish/bearings-board.html" \
+    "$(jq -nc --arg url "$url" '[{key:$url,selection:"leave",note:"still waiting"}]')") || fail "nudge submission failed"
+  printf '%s' "$captured" | jq -e --arg url "$url" '
+    [.prompts[] | {tag,data}] == [{tag:"nudge",data:{schema:"fm-bearings-nudge.v1",pr_url:$url,selection:"leave",note:"still waiting"}}]
+  ' >/dev/null || fail "nudge used the task-answer schema or lost request identity: $captured"
+  result="$home/nudge.result"
+  printf 'prompts[1]{tag,text,prompt}:\n' > "$result"
+  printf '%s' "$captured" | jq -r '.prompts[]
+    | [.tag,.text,(.prompt + "\n\nContext data:\n" + (.data | tojson))]
+    | map(tojson) | "  " + join(",")' >> "$result"
+  answers=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$result") || fail "answer extraction failed"
+  [ -z "$answers" ] || fail "a nudge reached the task-answer intake: $answers"
+  [ -z "$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$result")" ] || fail "a nudge reached reconcile intake"
+  nudges=$("$ROOT/bin/fm-procevent-lavish.sh" nudges "$result") || fail "nudge extraction failed"
+  printf '%s' "$nudges" | jq -e --arg url "$url" '.pr_url == $url and .selection == "leave" and .note == "still waiting"' \
+    >/dev/null || fail "the separate nudge reader lost the long request or answer: $nudges"
+  printf '%s' "$answers" | FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" answers '(any)' --source "nudge test" >/dev/null || fail "answer feed failed"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-captain-hold.sh" open nudge.foo --distinguish-absent >/dev/null || fail "the unrelated captain hold was closed"
+  printf 'prompts[1]{tag,text,prompt}:\n' > "$result"
+  jq -nr '["choice","Ordinary task answer",("Context data:\n" +
+    ({schema:"fm-bearings-answer.v1",question:"nudge.foo",selection:"leave",note:""} | tojson))]
+    | map(tojson) | "  " + join(",")' >> "$result"
+  answers=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$result") || fail "ordinary task answer extraction failed"
+  [ "${answers%%$'\t'*}" = nudge.foo ] || fail "separating nudges changed the task-answer key contract"
+  [ -z "$("$ROOT/bin/fm-procevent-lavish.sh" nudges "$result")" ] || fail "a task answer entered the nudge route"
+  pass "long request-keyed nudge submissions route separately and cannot close a task-shaped collision"
 }
 
 test_the_tiles_break_down_by_owner_without_a_tile_of_their_own() {
@@ -241,7 +292,7 @@ test_the_tiles_break_down_by_owner_without_a_tile_of_their_own() {
     {"id":"fm-self/b","repo":"firstmate","owner":"fm-self","kind":"ship","state":"working","doing":"Two"},
     {"id":"fm-self/c","repo":"firstmate","owner":"fm-self","kind":"ship","state":"working","doing":"Three"}
   ]}')
-  [ "$(owners_of "$out" underway)" = "2 fm-self · 1 main" ] \
+  [ "$(owners_of "$out" underway)" = "2 fm-self · 1 (main)" ] \
     || fail "the underway tile did not break its count down by owner: $out"
   printf '%s' "$out" | jq -e '[.stats[] | .label] | index("owner") == null' >/dev/null \
     || fail "ownership took a tile of its own instead of a sub-line: $out"
@@ -332,7 +383,7 @@ test_an_aged_delivery_reaches_the_captain_as_a_nudge_card() {
   local home out
   home=$(make_home delivered-nudge)
   out=$(render_payload "$home" '{"captains_call":[
-    {"key":"nudge.old-delivery","type":"nudge","repo":"firstmate","title":"Nudge the maintainer",
+    {"key":"https://github.com/o/r/pull/44","type":"nudge","repo":"firstmate","title":"Nudge the maintainer",
      "age_days":23,"pr_url":"https://github.com/o/r/pull/44",
      "detail":"Green and complete for 23 days; only the maintainer can merge it.",
      "options":[{"value":"nudge","label":"Nudge them"},{"value":"leave","label":"Leave it"}]}
@@ -359,6 +410,8 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering
 test_underway_rows_name_their_home_when_the_repo_cannot
 test_the_tiles_break_down_by_owner_without_a_tile_of_their_own
 test_owner_labels_do_not_collide_with_inherited_properties
+test_main_home_and_a_mate_named_main_remain_distinct
+test_nudge_submissions_bypass_task_answer_intake
 test_a_tile_owned_by_one_home_still_names_it
 test_a_truncated_tile_says_its_breakdown_covers_only_the_shown_rows
 test_the_needs_you_tile_is_never_split_or_filtered_by_owner

@@ -12,6 +12,9 @@ set -u
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 # shellcheck disable=SC1091
 . "$ROOT/bin/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$ROOT/bin/fm-pr-lib.sh"
 
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings)
@@ -2996,13 +2999,15 @@ touch_epoch() {  # <file> <epoch>
 
 # Arm a task's merge watch the way bin/fm-pr-check.sh does, at <epoch>.
 arm_merge_poll() {  # <home> <id> <url> <epoch>
-  local reg="$1/state/$2.pr-poll-registration"
-  {
-    printf 'fm-pr-poll-registration-v2\n%s\ngithub\n%s\ngithub.com\nacme/repo\n7\n' "$2" "$3"
-    printf 'a\nb\n1:1\n1:2\n'
-  } > "$reg"
-  chmod 0600 "$reg"
-  touch_epoch "$reg" "$4"
+  local meta="$1/state/$2.meta"
+  sed '/^pr=/d' "$meta" > "$meta.tmp"
+  printf 'pr=%s\n' "$3" >> "$meta.tmp"
+  mv "$meta.tmp" "$meta"
+  fm_pr_url_parse "$3" || fail "invalid fixture PR URL"
+  fm_pr_poll_prepare "$1/state" "$2" "$FM_PR_PROVIDER" "$FM_PR_URL" "$FM_PR_HOST" \
+    "$FM_PR_PATH" "$FM_PR_NUMBER" "$ROOT/bin/fm-pr-poll.sh" || fail "poll fixture preparation failed"
+  fm_pr_poll_publish_prepared || fail "poll fixture publication failed"
+  touch_epoch "$1/state/$2.pr-poll-registration" "$4"
 }
 
 # A home with one task still working and one shipped task whose merge watch is
@@ -3480,6 +3485,86 @@ SH
   pass "both homes require a declared wait, retain exited deliveries, and preserve superseding states and diagnostics"
 }
 
+test_delivery_requires_matching_poll_evidence_and_no_open_decision() {
+  local home parent fakebin id out ledger
+  home=$(make_home delivery-evidence)
+  make_valid_secondmate_home evidence-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in valid decision mismatch damaged missing; do
+    printf -- '- [ ] %s - Delivery evidence (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$home/state" "$id" idle
+    : > "$home/state/$id.status"
+    [ "$id" != decision ] || printf 'needs-decision [key=approval]: approve the delivery\n' > "$home/state/$id.status"
+    printf 'paused: waiting on upstream review\n' >> "$home/state/$id.status"
+    arm_merge_poll "$home" "$id" https://github.com/acme/repo/pull/2 "$BEARINGS_FIXTURE_EPOCH"
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  sed 's|pull/2|pull/3|' "$home/state/mismatch.meta" > "$home/state/mismatch.meta.tmp"
+  mv "$home/state/mismatch.meta.tmp" "$home/state/mismatch.meta"
+  printf '\nchanged\n' >> "$home/state/damaged.check.sh"
+  rm "$home/state/missing.check.sh"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "delivery evidence snapshot failed"
+  printf '%s' "$out" | jq -e '
+    [.tasks[] | select(.pr.merge_poll.armed) | .id] == ["decision", "valid"]
+      and (.tasks | any(.id == "decision" and .hints.pending_decision and .current_state.state == "paused"))
+      and (.tasks | any(.id == "mismatch" and .pr.url == "https://github.com/acme/repo/pull/3" and .pr.merge_poll.armed_epoch == null))
+  ' >/dev/null || fail "unverified poll evidence or a pending decision was lost: $out"
+  out=$(run "$home" "$fakebin" --json) || fail "main delivery evidence projection failed"
+  printf '%s' "$out" | jq -e '
+    [.awaiting[].id] == ["valid"]
+      and ([.in_flight[].id] | sort) == ["damaged", "decision", "mismatch", "missing"]
+  ' >/dev/null || fail "a captain-owed or unverified PR entered Delivered: $out"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "evidence ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    [.awaiting_merge[].id] == ["valid"]
+      and ([.active_children[].id] | sort) == ["damaged", "decision", "mismatch", "missing"]
+      and (.decisions_open | any(.id == "decision" and .key == "approval"))
+  ' >/dev/null || fail "the ledger hid a pending approval or invalid poll: $ledger"
+  parent=$(make_home delivery-evidence-parent)
+  append_secondmate_registry "$parent" evidence-mate "$home"
+  fm_write_secondmate_meta "$parent/state/evidence-mate.meta" "$home" "firstmate:fm-evidence-mate" firstmate
+  out=$(run "$parent" "$fakebin" --json) || fail "parent evidence projection failed"
+  printf '%s' "$out" | jq -e '
+    [.awaiting[].id] == ["evidence-mate/valid"]
+      and ([.in_flight[].id] | sort) == ["evidence-mate/damaged", "evidence-mate/decision", "evidence-mate/mismatch", "evidence-mate/missing"]
+  ' >/dev/null || fail "delivery evidence did not survive the parent projection: $out"
+  pass "both delivery projections retain unresolved approvals and reject mismatched, damaged, or missing poll artifacts"
+}
+
+test_long_request_links_survive_all_child_projections() {
+  local home parent fakebin url id ledger out
+  home=$(make_home long-request-links)
+  make_valid_secondmate_home link-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  url="https://gitlab.example/$(printf '%0170d' 1)/$(printf '%0170d' 2)/$(printf '%0170d' 3)/-/merge_requests/44"
+  printf '## In flight\n- [ ] delivered - Delivered (repo: firstmate) (kind: ship) (since 2026-07-01)\n- [ ] active - Working (repo: firstmate) (kind: ship) (since 2026-07-01)\n\n## Queued\n- [ ] queued - Next (repo: firstmate) (kind: ship)\n\n## Done\n' > "$home/data/backlog.md"
+  for id in delivered active queued; do
+    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$home/state" "$id" idle
+    printf 'paused: waiting on maintainer\n' > "$home/state/$id.status"
+    arm_merge_poll "$home" "$id" "$url" "$BEARINGS_FIXTURE_EPOCH"
+  done
+  record_claude_state "$home/state" active busy
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "long-link ledger failed"
+  printf '%s' "$ledger" | jq -e --arg url "$url" '
+    [.awaiting_merge[].pr_url] == [$url] and [.active_children[].pr_url] == [$url]
+      and [.queued[].pr_url] == [$url]
+  ' >/dev/null || fail "a child projection truncated a valid request URL: $ledger"
+  parent=$(make_home long-request-parent)
+  append_secondmate_registry "$parent" link-mate "$home"
+  fm_write_secondmate_meta "$parent/state/link-mate.meta" "$home" "firstmate:fm-link-mate" firstmate
+  out=$(run "$parent" "$fakebin" --json) || fail "long-link parent projection failed"
+  printf '%s' "$out" | jq -e --arg url "$url" '
+    [.awaiting[].pr_url] == [$url] and [.in_flight[].pr_url] == [$url]
+      and [.gates[] | select(.id == "queued") | .pr_url] == [$url]
+  ' >/dev/null || fail "the parent lost a complete recorded request: $out"
+  pass "full GitLab request URLs survive awaiting, active, and queued child projections"
+}
+
 test_failed_lookup_preserves_unresolved_decisions() {
   local home parent fakebin out ledger
   home=$(make_home lookup-decision)
@@ -3642,6 +3727,8 @@ test_delivery_requires_a_declaration_and_eligible_current_state_in_both_homes
 test_configured_wait_declarations_reach_both_delivery_projections
 test_a_parked_delivery_does_not_make_its_secondmate_home_working
 test_failed_lookup_preserves_unresolved_decisions
+test_delivery_requires_matching_poll_evidence_and_no_open_decision
+test_long_request_links_survive_all_child_projections
 test_overdue_deliveries_exceed_both_presentation_bounds
 test_a_secondmate_delivery_reaches_the_parent_as_a_delivered_row
 test_a_request_waiting_on_the_captain_never_lands_in_the_waiting_state

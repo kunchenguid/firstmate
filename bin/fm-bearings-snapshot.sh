@@ -52,15 +52,15 @@
 # declared an external wait, and no captain action is outstanding on that task.
 #
 # Complete on our side is affirmative, never "any state except working". The
-# delivery must be recorded (pr.merge_poll armed with a URL, which firstmate
-# writes only after a PR-ready signal), and the latest recorded event must be
+# delivery must have validated poll artifacts matching the captured task PR,
+# and the latest recorded event must be
 # the configured pause verb (default paused) from AGENTS.md section 8. Eligible
 # current states are paused, done, or unknown with source endpoint-gone from the
 # current-state reader's authoritative death classification. A done
 # event alone never declares an external wait. A later event supersedes the
 # declaration, and working, failed, blocked, or parked state is never eligible.
 #
-# A declared wait must also pass the structured captain-hold classification.
+# A declared wait must also pass the captain-hold and unresolved-decision checks.
 # An absent hold alone does not prove that no captain action remains.
 # This is the same guarantee as the never-split
 # needs-you tile, wearing its other face: nothing that needs the captain may be
@@ -476,10 +476,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
              and .current_state.source == "endpoint-gone"));
   # NOTHING THE CAPTAIN OWES IS EVER RE-LABELLED. A task he still owes an answer
   # on is his call, whatever else is true of it, so it never reaches this bucket.
-  # The test is the structured captain-hold classification and nothing else.
   def captain_owed:
     .backlog.hold_kind == "captain" or .backlog.hold_bucket != null
-    or .backlog.captain_actionable == true;
+    or .backlog.captain_actionable == true or .hints.pending_decision == true;
   def delivered_and_waiting:
     delivery_recorded and complete_on_our_side and (.backlog.state != "done")
     and (captain_owed | not);

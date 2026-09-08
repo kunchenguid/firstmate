@@ -215,6 +215,9 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 validate_positive_bound FM_BEARINGS_AWAITING_NUDGE_DAYS "$FM_BEARINGS_AWAITING_NUDGE_DAYS"
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
@@ -749,7 +752,7 @@ task_json_lines() {
     fi
     merge_poll_armed=false
     merge_poll_epoch=null
-    if [ -f "$STATE/$id.pr-poll-registration" ]; then
+    if fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$meta"; then
       merge_poll_armed=true
       merge_poll_epoch=$(file_mtime_epoch "$STATE/$id.pr-poll-registration")
       case "$merge_poll_epoch" in ''|*[!0-9]*) merge_poll_epoch=null ;; esac
@@ -957,6 +960,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     def delivered_and_waiting($work):
       $work.hold_kind != "captain" and $work.hold_bucket == null
       and $work.captain_actionable != true
+      and .hints.pending_decision != true
       and .pr.merge_poll.armed == true and .pr.url != null
       and .paths.status_log.last_event.state == $paused_verb
       and (.current_state.state == "paused" or .current_state.state == "done"
@@ -1024,12 +1028,12 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.id == $work.id)
          | select(.current_state.state == "working"
                   or ($work.current_role != "held"
-                      and .pr.merge_poll.armed == true and .pr.url != null
+                      and .pr.url != null
                       and (delivered_and_waiting($work) | not)))
          | {id,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             source:.current_state.source,
-            pr_url:(((.pr.url // $work.pr_url) // null) | if . == null then null else trunc(500) end),
+            pr_url:(.pr.url // $work.pr_url // null),
             doing:((.current_state.detail // "") | trunc(120))} ]
        | sort_by(if .state == "working" then 0 else 1 end)) as $active_all
     | ([ $owned_in_flight[] as $work
@@ -1040,7 +1044,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | {id:$task.id,kind:$task.kind,state:$task.current_state.state,
             repo:(($work.repo // $task.project // null) | if . == null then null else trunc(120) end),
             title:(($work.title // $task.id) | trunc(120)),
-            pr_url:($task.pr.url | trunc(500)),
+            pr_url:$task.pr.url,
             delivered_epoch:($task.pr.merge_poll.armed_epoch)} ]
        | sort_by([(.delivered_epoch == null), .delivered_epoch, .id])) as $awaiting_all
     | ([$awaiting_all[] | select(.delivered_epoch != null
@@ -1114,7 +1118,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           pr_url:(. as $row
             | ((.pr_url // ([$tasks[] | select(.id == $row.id and .pr.source == "meta")
                              | .pr.url] | first) // null)
-               | if . == null then null else trunc(500) end)),
+               )),
           kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,

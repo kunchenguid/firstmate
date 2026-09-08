@@ -8,6 +8,7 @@
 #   fm-procevent-lavish.sh silent <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
 #   fm-procevent-lavish.sh reconciles <result-file>
+#   fm-procevent-lavish.sh nudges <result-file>
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
@@ -432,6 +433,7 @@ cmd_choice_rows() {
   perl -MJSON::PP -e '
     use strict; use warnings;
     my ($selection, $path) = @ARGV;
+    my $nudge = $selection eq "nudges";
     open my $fh, "<", $path or exit 1;
     my (@fields, $want, @rows);
     while (my $line = <$fh>) {
@@ -464,7 +466,7 @@ cmd_choice_rows() {
       }
       my %f;
       $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
-      next unless defined $f{tag} && $f{tag} eq "choice";
+      next unless defined $f{tag} && $f{tag} eq ($nudge ? "nudge" : "choice");
       my $prompt = $f{prompt};
       next unless defined $prompt && $prompt =~ /Context data:\s*(\{.*\})/s;
       my $ctx = $1;
@@ -472,8 +474,8 @@ cmd_choice_rows() {
       next unless ref($data) eq "HASH";
       my ($key, $selected, $note, $answer, $legacy);
       if (defined($data->{schema}) && !ref($data->{schema})
-          && $data->{schema} eq "fm-bearings-answer.v1") {
-        $key = $data->{question};
+          && $data->{schema} eq ($nudge ? "fm-bearings-nudge.v1" : "fm-bearings-answer.v1")) {
+        $key = $nudge ? $data->{pr_url} : $data->{question};
         $selected = $data->{selection};
         $note = $data->{note};
         next if !defined($key) || ref($key) || !defined($selected) || ref($selected)
@@ -485,7 +487,7 @@ cmd_choice_rows() {
         $legacy = 0;
       # Time-limited compatibility for captures from pre-change boards; remove
       # once no board carrying the old question/answer context can remain armed.
-      } elsif (!exists($data->{schema}) && !exists($data->{selection})
+      } elsif (!$nudge && !exists($data->{schema}) && !exists($data->{selection})
           && !exists($data->{note})) {
         $key = $data->{question};
         $answer = $data->{answer};
@@ -498,7 +500,12 @@ cmd_choice_rows() {
       } else {
         next;
       }
-      next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
+      if ($nudge) {
+        next unless $key =~ m{\Ahttps://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^\s\x00-\x1f\x7f]*)?\z};
+        next if exists $data->{close};
+      } else {
+        next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
+      }
       my $mode = "";
       if (exists $data->{close}) {
         next if !defined($data->{close}) || ref($data->{close})
@@ -516,6 +523,11 @@ cmd_choice_rows() {
       };
     }
     for my $choice (grep { defined } @choices) {
+      if ($nudge) {
+        print encode_json({pr_url => $choice->{key}, selection => $choice->{selection},
+          note => $choice->{note}, label => $choice->{label}}), "\n";
+        next;
+      }
       if ($selection eq "reconciles") {
         next if $choice->{legacy};
         if ($choice->{selection} eq "reconcile") {
@@ -535,6 +547,7 @@ cmd_choice_rows() {
 
 cmd_answers() { cmd_choice_rows answers "$@"; }
 cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
+cmd_nudges() { cmd_choice_rows nudges "$@"; }
 
 # Present one already-captured result for a handler. Body lines are prefixed
 # so a captain-supplied string cannot forge a section label. The session-ending
@@ -685,6 +698,7 @@ case "${1-}" in
   silent)    shift; cmd_silent "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
   reconciles) shift; cmd_reconciles "$@" ;;
+  nudges) shift; cmd_nudges "$@" ;;
   read)      shift; cmd_read "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;

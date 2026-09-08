@@ -24,6 +24,7 @@ class Node {
     this.type = "";
     this.value = "";
     this.checked = false;
+    this.listeners = {};
     const has = (c) => this.className.split(/\s+/).includes(c);
     const add = (c) => { if (!has(c)) this.className = (this.className + " " + c).trim(); };
     const remove = (c) => {
@@ -45,7 +46,7 @@ class Node {
   set textContent(v) { this._text = String(v); this.children = []; }
   appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
   setAttribute(k, v) { this.attributes[k] = v; }
-  addEventListener() {}
+  addEventListener(name, handler) { this.listeners[name] = handler; }
   querySelectorAll(sel) {
     const want = sel.replace(/^\./, "").replace(/:checked$/, "");
     const checkedOnly = sel.endsWith(":checked");
@@ -86,11 +87,32 @@ globalThis.document = {
     return byId.get(id);
   },
 };
-globalThis.window = {};
+const prompts = [];
+globalThis.window = { lavish: { queuePrompt: (prompt, context) => {
+  prompts.push({prompt, tag: context.tag, text: context.text, data: context.data});
+} } };
 globalThis.TextEncoder = TextEncoder;
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
 new Function(script)();
+if (process.argv[3]) {
+  globalThis.FormData = class {
+    constructor(form) { this.values = form.values; }
+    get(name) { return this.values[name] || ""; }
+  };
+  const forms = [];
+  const walk = (node) => {
+    if (node.tagName === "form") forms.push(node);
+    node.children.forEach(walk);
+  };
+  [...byId.values()].forEach(walk);
+  for (const answer of JSON.parse(process.argv[3])) {
+    const form = forms.find((node) => node.attributes["data-lavish-question"] === answer.key);
+    if (!form) throw new Error("No question for " + answer.key);
+    form.values = {answer: answer.selection, note: answer.note};
+    form.listeners.submit({preventDefault() {}});
+  }
+}
 
 const badgesOf = (row) =>
   row.children
@@ -163,6 +185,7 @@ const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map(
 process.stdout.write(
   JSON.stringify({
     stats,
+    prompts,
     charted,
     underway: rowsOf("bb-underway"),
     awaiting: rowsOf("bb-awaiting"),

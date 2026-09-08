@@ -141,7 +141,7 @@ validate_payload() {  # <data.json>
     def nonneg_int: type == "number" and . >= 0 and (floor == .);
     def call_item:
       type == "object"
-      and (.key | slug(128))
+      and (if .type == "nudge" then .key == .pr_url else (.key | slug(128)) end)
       and (.type == "decision" or .type == "merge" or .type == "credential" or .type == "nudge")
       and repo_marker
       and (.title | nonempty_string)
@@ -169,6 +169,7 @@ validate_payload() {  # <data.json>
       and (if .type == "merge" then (.risk | nonempty_string) else true end)
       and (if .type == "nudge" then
              (has("pr_url") and (.pr_url | nonempty_string)) and (.age_days | nonneg_int)
+             and (has("close") | not)
            else true end);
     def underway_item:
       type == "object" and repo_marker and (.id | nonempty_string)
