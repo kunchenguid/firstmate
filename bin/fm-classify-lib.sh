@@ -1965,9 +1965,15 @@ crew_treehouse_status_json() {  # <project-dir>
   CDPATH='' cd -- "$project" && treehouse status --json 2>/dev/null
 }
 
-crew_treehouse_holder_for_worktree() {  # <project> <abs> <raw-wt>
-  local project=$1 abs=$2 raw=$3 json count holder
-  json=$(crew_treehouse_status_json "$project") || return 1
+crew_treehouse_holder_for_worktree() {  # <project> <abs> <raw-wt> [status-json] [status-rc]
+  local project=$1 abs=$2 raw=$3 json count holder status_rc
+  if [ "$#" -ge 4 ]; then
+    json=$4
+    status_rc=${5:-0}
+    [ "$status_rc" -eq 0 ] || return 1
+  else
+    json=$(crew_treehouse_status_json "$project") || return 1
+  fi
   [ -n "$json" ] || json='[]'
   printf '%s\n' "$json" | jq -e 'type=="array"' >/dev/null 2>&1 || return 1
   count=$(printf '%s\n' "$json" | jq -r --arg path "$abs" --arg raw "$raw" \
@@ -1978,14 +1984,26 @@ crew_treehouse_holder_for_worktree() {  # <project> <abs> <raw-wt>
   printf '%s\n' "$holder"
 }
 
-crew_worktree_custody_canonical_id() {  # <state> <abs>
+crew_worktree_custody_canonical_id() {  # <state> <abs> [status-project status-json status-rc]
   local state=$1 abs=$2 id holder best_id='' best_lease='' lease proj wt
+  local cached_project='' cached_json='' cached_status=0 have_cached=0
+  if [ "$#" -ge 3 ]; then
+    have_cached=1
+    cached_project=$3
+    cached_json=${4-}
+    cached_status=${5:-1}
+  fi
   holder=
   for id in $(crew_worktree_claimants "$state" "$abs"); do
     wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     proj=$(grep '^project=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     if [ -z "$holder" ] && [ -n "$proj" ] && [ -n "$wt" ]; then
-      holder=$(crew_treehouse_holder_for_worktree "$proj" "$abs" "$wt" 2>/dev/null || true)
+      if [ "$have_cached" -eq 1 ] && [ "$proj" = "$cached_project" ]; then
+        holder=$(crew_treehouse_holder_for_worktree "$proj" "$abs" "$wt" \
+          "$cached_json" "$cached_status" 2>/dev/null || true)
+      else
+        holder=$(crew_treehouse_holder_for_worktree "$proj" "$abs" "$wt" 2>/dev/null || true)
+      fi
     fi
     lease=$(grep '^treehouse_lease=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     if [ -n "$lease" ]; then
@@ -2009,6 +2027,8 @@ crew_worktree_custody_canonical_id() {  # <state> <abs>
 # run-step, pane, or status-log state from the worktree path.
 crew_worktree_custody_lost() {  # <id> <state>
   local id=$1 state=$2 meta wt abs kind access proj claimants holder canonical
+  local treehouse_json='' treehouse_status=0 revalidated_json='' revalidated_status=0
+  local revalidated_holder='' revalidated_canonical=''
   meta="$state/$id.meta"
   [ -f "$meta" ] || return 1
   kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -2022,7 +2042,14 @@ crew_worktree_custody_lost() {  # <id> <state>
   [ -n "$claimants" ] || return 1
   proj=$(grep '^project=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   if [ -n "$proj" ]; then
-    holder=$(crew_treehouse_holder_for_worktree "$proj" "$abs" "$wt" 2>/dev/null || true)
+    if treehouse_json=$(crew_treehouse_status_json "$proj"); then
+      treehouse_status=0
+    else
+      treehouse_status=$?
+      treehouse_json=
+    fi
+    holder=$(crew_treehouse_holder_for_worktree "$proj" "$abs" "$wt" \
+      "$treehouse_json" "$treehouse_status" 2>/dev/null || true)
     if [ -n "$holder" ]; then
       [ "$holder" = "$id" ] || return 0
       return 1
@@ -2031,14 +2058,33 @@ crew_worktree_custody_lost() {  # <id> <state>
   case "$(printf '%s\n' "$claimants" | wc -l | tr -d ' ')" in
     1) return 1 ;;
   esac
-  canonical=$(crew_worktree_custody_canonical_id "$state" "$abs" 2>/dev/null || true)
+  if [ -n "$proj" ]; then
+    canonical=$(crew_worktree_custody_canonical_id "$state" "$abs" \
+      "$proj" "$treehouse_json" "$treehouse_status" 2>/dev/null || true)
+  else
+    canonical=$(crew_worktree_custody_canonical_id "$state" "$abs" 2>/dev/null || true)
+  fi
   # No treehouse holder and no recorded lease anywhere means there is no
   # evidence another task holds this worktree: unpinned legacy metadata may
   # share a path, and fail-closed displacement needs a named holder, not the
   # mere absence of one. Trust the recorded worktree in that case.
   [ -n "$canonical" ] || return 1
-  [ "$canonical" = "$id" ] || return 0
-  return 1
+  [ "$canonical" = "$id" ] && return 1
+  # A no-holder snapshot plus metadata displacement is ambiguous: re-read before
+  # acting so a lease that appeared during this check cannot be misclassified.
+  if [ -n "$proj" ] && revalidated_json=$(crew_treehouse_status_json "$proj"); then
+    revalidated_status=0
+    revalidated_holder=$(crew_treehouse_holder_for_worktree "$proj" "$abs" "$wt" \
+      "$revalidated_json" "$revalidated_status" 2>/dev/null || true)
+    if [ -n "$revalidated_holder" ]; then
+      [ "$revalidated_holder" = "$id" ] || return 0
+      return 1
+    fi
+    revalidated_canonical=$(crew_worktree_custody_canonical_id "$state" "$abs" \
+      "$proj" "$revalidated_json" "$revalidated_status" 2>/dev/null || true)
+    [ "$revalidated_canonical" = "$id" ] && return 1
+  fi
+  return 0
 }
 
 crew_worktree_written_since() {  # <id> <state> <anchor-file>

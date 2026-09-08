@@ -1666,6 +1666,91 @@ test_recycled_slot_custody_lost_for_stale_task() {
   pass "recycled pooled slot custody blocks stale metadata from reading another task's worktree"
 }
 
+test_crew_state_reads_treehouse_status_once_per_project() {
+  reset_fakes
+  local d fb wt project calls out expected
+  d=$(new_case treehouse-status-once)
+  fb=$(make_fakebin "$d")
+  wt="$d/wt"
+  project="$d/project"
+  mkdir -p "$wt" "$project"
+  cat > "$fb/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = status ] && [ "${2:-}" = --json ] || exit 1
+printf '%s\n' read >> "$FM_TREEHOUSE_COUNT_FILE"
+printf '%s\n' "$FM_TREEHOUSE_STATUS_JSON"
+SH
+  chmod +x "$fb/treehouse"
+  fm_write_meta "$d/state/old-task.meta" \
+    "worktree=$wt" \
+    "project=$project" \
+    "kind=ship" \
+    "treehouse_lease=lease-a"
+  fm_write_meta "$d/state/new-task.meta" \
+    "worktree=$wt" \
+    "project=$project" \
+    "kind=ship" \
+    "treehouse_lease=lease-b"
+  printf '%s\n' 'working: observing the pooled worktree' > "$d/state/old-task.status"
+  FM_TREEHOUSE_STATUS_JSON=$(jq -cn --arg path "$wt" \
+    '[{name:"slot",path:$path,status:"leased",lease_id:"lease-b",lease_holder:"new-task"}]')
+  FM_TREEHOUSE_COUNT_FILE="$d/treehouse.calls"
+  export FM_TREEHOUSE_COUNT_FILE FM_TREEHOUSE_STATUS_JSON
+  out=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" old-task)
+  calls=$(wc -l < "$d/treehouse.calls" | tr -d ' ')
+  [ "$calls" -eq 1 ] || fail "expected one treehouse status read, got $calls"
+  expected='state: unknown · source: metadata · worktree custody lost (recorded path is held by another task)'
+  [ "$out" = "$expected" ] || fail "custody verdict changed: $out"
+  pass "crew-state reads treehouse status once per project and preserves the custody verdict"
+}
+
+test_crew_state_revalidates_treehouse_after_ambiguous_snapshot() {
+  reset_fakes
+  local d fb wt project out expected_json calls
+  d=$(new_case treehouse-status-revalidate)
+  fb=$(make_fakebin "$d")
+  wt="$d/wt"
+  project="$d/project"
+  mkdir -p "$wt" "$project"
+  cat > "$fb/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = status ] && [ "${2:-}" = --json ] || exit 1
+calls=0
+[ -f "$FM_TREEHOUSE_COUNT_FILE" ] && calls=$(wc -l < "$FM_TREEHOUSE_COUNT_FILE" | tr -d ' ')
+printf '%s\n' read >> "$FM_TREEHOUSE_COUNT_FILE"
+if [ "$calls" -eq 0 ]; then
+  printf '%s\n' '[]'
+else
+  printf '%s\n' "$FM_TREEHOUSE_SECOND_JSON"
+fi
+SH
+  chmod +x "$fb/treehouse"
+  fm_write_meta "$d/state/old-task.meta" \
+    "worktree=$wt" \
+    "project=$project" \
+    "kind=ship" \
+    "treehouse_lease=lease-a"
+  fm_write_meta "$d/state/new-task.meta" \
+    "worktree=$wt" \
+    "project=$project" \
+    "kind=ship" \
+    "treehouse_lease=lease-b"
+  printf '%s\n' 'working: observing the pooled worktree' > "$d/state/old-task.status"
+  expected_json=$(jq -cn --arg path "$wt" \
+    '[{name:"slot",path:$path,status:"leased",lease_id:"lease-a",lease_holder:"old-task"}]')
+  FM_TREEHOUSE_COUNT_FILE="$d/treehouse.calls"
+  FM_TREEHOUSE_SECOND_JSON="$expected_json"
+  export FM_TREEHOUSE_COUNT_FILE FM_TREEHOUSE_SECOND_JSON
+  out=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" old-task)
+  calls=$(wc -l < "$d/treehouse.calls" | tr -d ' ')
+  [ "$calls" -eq 2 ] || fail "expected a revalidation read, got $calls"
+  assert_not_contains "$out" "worktree custody lost" \
+    "a current lease holder must not be displaced by a stale first snapshot"
+  pass "crew-state revalidates an ambiguous treehouse snapshot before reporting custody loss"
+}
+
 test_duplicate_metadata_without_treehouse_holder_selects_latest_lease() {
   reset_fakes
   local d wt canonical
@@ -1878,6 +1963,8 @@ test_coarse_unresolvable_active_row_never_falls_to_older_row
 test_non_pipeline_owned_unresolvable_head_not_attributed
 test_pipeline_owned_terminal_run_not_exempt
 test_recycled_slot_custody_lost_for_stale_task
+test_crew_state_reads_treehouse_status_once_per_project
+test_crew_state_revalidates_treehouse_after_ambiguous_snapshot
 test_duplicate_metadata_without_treehouse_holder_selects_latest_lease
 test_unpinned_duplicate_metadata_keeps_custody
 test_recycled_slot_worker_liveness_reports_absent_endpoint
