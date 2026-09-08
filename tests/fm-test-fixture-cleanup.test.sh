@@ -10,12 +10,15 @@
 # terminating signal - plus that a stale marked fixture from a killed prior
 # run gets reaped on the next source.
 #
-# The last two cases cover the other half of that teardown: a fixture home that
+# Three more cases cover the other half of that teardown: a fixture home that
 # armed a real process-event listener. A runner is detached and reparents, so
 # removing the fixture root does not stop it, and a run that ends by failing or
 # by being signalled is exactly the one that used to leave a listener polling a
-# target that no longer existed. Those cases arm a real runner and assert the
-# process is gone, identified by the unique blocker path the case registered.
+# target that no longer existed. Those two arm a real runner in a declared home
+# and assert the process is gone, identified by the unique blocker path the case
+# registered. The third pins the containment default that bounds a home nobody
+# declared: with no claim root of its own, a source's claim has to land in the
+# suite-owned root rather than under the running user's own state directory.
 #
 # Nothing here inspects tests/lib.sh's source text; it only observes filesystem
 # and process state around the real helper.
@@ -58,11 +61,10 @@ wait_for_listener_exit() {  # <pid> <blocker-path> [tries]
 }
 
 # Build a child test process that arms a real detached process-event runner in
-# its own fixture root - the shape every suite that opens a listener uses - and
-# then ends the way its argument names. Two details make the assertion real:
-# the blocker records its pid OUTSIDE the fixture root, so the check survives
-# the root's removal, and the child does not declare its home for reaping, so a
-# suite that forgets that call is exactly what is under test.
+# its own fixture root, declared for reaping the way every suite that opens a
+# listener declares one, and then ends the way its argument names. The blocker
+# records its pid OUTSIDE the fixture root, so the check survives the root's
+# removal and can still name the process after its target is gone.
 write_listener_child() {  # <harness>
   local harness=$1
   cat > "$harness/blocker.sh" <<'SH'
@@ -82,6 +84,7 @@ set -u
 . "$FM_TEST_CHILD_LIB"
 root=$(fm_test_tmproot fm-test-cleanup-listener)
 home="$root/home"
+fm_test_track_procevent_home "$home" "$home/procevent-claims"
 mkdir -p "$home/state"
 FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
   "$ROOT/bin/fm-procevent.sh" register lavish leaked-src \
@@ -148,6 +151,43 @@ test_armed_listener_retired_after_sigterm() {
   wait_for_listener_exit "$pid" "$harness/blocker.sh" \
     || fail "an interrupted run left its listener polling a target it had already removed"
   pass "an interrupted run retires the listener it armed"
+}
+
+# A home that names no claim root of its own must still not reach the running
+# user's real claim store. HOME and XDG_STATE_HOME are pointed at a scratch
+# directory, so the pre-fix fallback would resolve there and is observable:
+# either the claim lands under the suite-owned root, or it lands under the
+# scratch state directory this case owns.
+test_undeclared_home_claims_stay_in_the_suite_owned_root() {
+  local root home scratch tries=200
+  root=$(fm_test_tmproot fm-test-cleanup-claim-root)
+  home="$root/home"
+  scratch="$root/scratch"
+  fm_test_track_procevent_home "$home"
+  mkdir -p "$home/state" "$scratch"
+  cat > "$root/blocker.sh" <<'SH'
+#!/usr/bin/env bash
+while [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.2; done
+exit 75
+SH
+  chmod +x "$root/blocker.sh"
+  HOME="$scratch" XDG_STATE_HOME="$scratch/state" FM_HOME="$home" \
+    "$ROOT/bin/fm-procevent.sh" register lavish contained-src -- "$root/blocker.sh" >/dev/null \
+    || fail "the undeclared home could not register its source"
+  HOME="$scratch" XDG_STATE_HOME="$scratch/state" FM_HOME="$home" \
+    "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null \
+    || fail "the undeclared home could not start its source"
+  while [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/contained-src.claim" ] && [ "$tries" -gt 0 ]; do
+    sleep 0.05
+    tries=$((tries - 1))
+  done
+  assert_present "$FM_PROCEVENT_CLAIM_ROOT/contained-src.claim" \
+    "an undeclared home's claim did not land in the suite-owned claim root"
+  assert_absent "$scratch/state/firstmate/procevent-claims" \
+    "an undeclared home reached the running user's own procevent claim store"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+  pass "an undeclared home's claims stay inside the suite-owned claim root"
 }
 
 test_fixture_root_gone_after_normal_exit() {
@@ -301,6 +341,7 @@ test_fixture_root_gone_after_normal_exit
 test_fixture_root_gone_after_sigterm
 test_armed_listener_retired_after_failing_exit
 test_armed_listener_retired_after_sigterm
+test_undeclared_home_claims_stay_in_the_suite_owned_root
 test_cleanup_registry_resists_precreation
 test_fixture_registration_failure_rolls_back_root
 test_orphan_sweep_respects_fixture_ownership

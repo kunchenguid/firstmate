@@ -128,6 +128,7 @@ mkdir -p "$PACKAGES" "$HOMES"
 
 new_home() {
   mkdir -p "$1"
+  fm_test_track_procevent_home "$1" "$FM_PROCEVENT_CLAIM_ROOT"
 }
 
 make_package() {  # <dir> <id> <adapter> [fixed-scenario] [required-consent]

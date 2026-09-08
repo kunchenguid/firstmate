@@ -55,6 +55,10 @@ VERSION=$(lavish-axi --version 2>/dev/null | tr -d '[:space:]')
 note "lavish-axi ${VERSION:-version-unknown}"
 
 LAB=$(fm_test_tmproot fm-bearings-lavish-live) || fail "cannot create the guard lab"
+# Declared with the exact claim root run_board uses, so teardown retires the
+# listener the board arms even on the paths where the board never reached the
+# point of taking a claim.
+fm_test_track_procevent_home "$LAB" "$LAB/procevent-claims"
 mkdir -p "$LAB/state" "$LAB/data"
 
 cat > "$LAB/payload.json" <<'JSON'
