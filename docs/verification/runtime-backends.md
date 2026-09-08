@@ -364,6 +364,26 @@ Two findings from the run shaped the shipped behavior: an OpenCode vendor update
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 
+### Swallowed-Enter recovery
+
+The same guard also proves the recovery half: a doorbell whose Enter is lost leaves firstmate's own line sitting in the composer, which reads `pending` - the exact verdict the ring defers on to protect a human's half-typed text.
+Identifying that line as firstmate's own is what keeps the deferral recoverable, because a ring that cannot tell its own undelivered doorbell from foreign text defers again on the text the previous ring left behind and the steer waits for a human keypress.
+Verified on 2026-09-08 against Herdr 0.9.0 (protocol 22) and Herdr 0.8.2 (protocol 20), each in its own isolated named-session lab with its own `XDG_CONFIG_HOME`, driving `fm_task_inbox_ring` against real Claude Code 2.1.236.
+Both versions behaved identically: before the change every re-ring returned the deferral status and left the composer `pending`; after it the first re-ring committed the line and the composer returned to `empty` with the turn started.
+A composer holding text firstmate did not type is still deferred untouched on both versions, with no key sent.
+
+The guard itself was run on 2026-09-08 on tmux 3.6a, macOS arm64, and both halves passed for the installed harness:
+
+```text
+ok - claude (2.1.236 (Claude Code)): the doorbell reached a real worker, which acted and acked with the mv
+ok - claude (2.1.236 (Claude Code)): a swallowed doorbell was committed by one re-ring, and the worker acted and acked
+ok - live steering-inbox doorbell guard: 2 check(s) honored the doorbell contract
+```
+
+The same run recorded why the transport itself is not the variable: with a raw-mode reader in the pane, `pane send-text` followed by `pane send-keys enter` delivers byte-identical input on both releases (the literal text, then the Enter encoding the application asked for - `\r`, or `\e[13u` under the Kitty keyboard protocol), in the same order, at the caller's settle interval.
+`pane run` is not an equivalent substitute for a composer: it emits the text bracketed-paste wrapped with the Enter appended in one zero-delay write (`\e[200~` ... `\e[201~\e[13u`), which a real Claude composer intermittently fails to commit - 2 of 3 and 4 of 5 submitted across two runs on 0.9.0, failing on the first message each time - against 5 of 5 for the settled two-step on both releases.
+
+
 ## Gemini
 
 The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.

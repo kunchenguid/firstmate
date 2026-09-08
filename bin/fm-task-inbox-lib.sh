@@ -77,11 +77,21 @@ _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_TASK_INBOX_LIB_DIR/fm-wake-lib.sh"
 # shellcheck source=/dev/null
 . "$_FM_TASK_INBOX_LIB_DIR/fm-backend.sh"
+# The composer extractor below identifies a swallowed doorbell still sitting in
+# the composer. Sourced explicitly rather than relying on a backend adapter
+# having pulled it in first.
+# shellcheck source=/dev/null
+. "$_FM_TASK_INBOX_LIB_DIR/fm-composer-lib.sh"
 
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
 FM_TASK_INBOX_RING_MAX_DEFAULT=3
 FM_TASK_INBOX_LOCK_WAIT_DEFAULT=5
+# Enter-only retries (and spacing) used to commit a doorbell that is already
+# sitting unsubmitted in the composer. Never retypes; see
+# fm_task_inbox_commit_pending_doorbell.
+FM_TASK_INBOX_COMMIT_RETRIES=${FM_TASK_INBOX_COMMIT_RETRIES:-3}
+FM_TASK_INBOX_COMMIT_SLEEP=${FM_TASK_INBOX_COMMIT_SLEEP:-0.4}
 
 fm_task_inbox_grace_secs() {
   local g=${FM_TASK_INBOX_GRACE_SECS:-$FM_TASK_INBOX_GRACE_DEFAULT}
@@ -268,6 +278,69 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$quoted" "$quoted"
 }
 
+# fm_task_inbox_composer_holds_doorbell: true only when the composer's OWN
+# content carries THIS record's complete doorbell line - the signature of an
+# Enter that was swallowed after the line was typed.
+#
+# Why identity matters: fm_task_inbox_ring defers on a `pending` composer so
+# our Enter can never submit someone's real half-typed content. That guard has
+# no way to tell foreign text from firstmate's own undelivered doorbell, so a
+# single swallowed Enter makes the doorbell itself the thing that blocks every
+# later re-ring, and the steer sits unsubmitted until a human presses Enter.
+# Identifying our own line is what makes the deferral recoverable without
+# weakening the guarantee for text we did not type.
+#
+# Only the composer REGION is consulted (fm_composer_extract_selected_content),
+# never the whole capture: an already-submitted doorbell stays visible in the
+# transcript above, and matching that history would let a human's half-typed
+# text be committed. Both sides are compared with every whitespace byte
+# removed, because a composer wraps a long line across rows mid-token.
+#
+# Every failure - unreadable capture, unidentifiable composer, no match -
+# returns false, so the caller keeps today's conservative skip.
+fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <record-path> [expected-label]
+  local backend=$1 target=$2 rec=$3 label=${4:-} line cap caps content
+  line=$(fm_task_inbox_doorbell_line "$rec") || return 1
+  cap=$(fm_backend_capture "$backend" "$target" "$FM_COMPOSER_CAPTURE_LINES" "$label" 2>/dev/null) || return 1
+  [ -n "$cap" ] || return 1
+  # styled=0: a plain capture cannot strip ghost/placeholder text, which can
+  # only ever cost a match (a placeholder never carries this record's path).
+  caps=$(printf 'styled=0\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+  content=$(fm_composer_extract_selected_content "$caps" "$cap" 2>/dev/null) || return 1
+  content=${content//[$' \t\r\n\v\f']/}
+  line=${line//[$' \t\r\n\v\f']/}
+  [ -n "$line" ] || return 1
+  case "$content" in
+    *"$line"*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_task_inbox_commit_pending_doorbell: submit a doorbell already sitting in
+# the composer, with a bounded Enter-only retry. Retyping is never correct
+# here - the text is already there, and a second copy would be delivered as
+# well as the first - so this reuses the shared Enter-only ladder rather than
+# going back through the type-and-submit path.
+# True when the composer no longer holds pending text.
+_FM_TASK_INBOX_COMMIT_BACKEND=''
+_fm_task_inbox_commit_send_key() {  # <target> <key> [expected-label]
+  fm_backend_send_key "$_FM_TASK_INBOX_COMMIT_BACKEND" "$1" "$2" "${3:-}"
+}
+_fm_task_inbox_commit_state() {  # <target> [expected-label]
+  fm_backend_composer_state "$_FM_TASK_INBOX_COMMIT_BACKEND" "$1" "${2:-}" 2>/dev/null || printf 'unknown'
+}
+fm_task_inbox_commit_pending_doorbell() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 label=${3:-} state
+  _FM_TASK_INBOX_COMMIT_BACKEND=$backend
+  state=$(fm_composer_submit_retry_core _fm_task_inbox_commit_send_key _fm_task_inbox_commit_state \
+    "$target" "$FM_TASK_INBOX_COMMIT_RETRIES" "$FM_TASK_INBOX_COMMIT_SLEEP" "$label")
+  _FM_TASK_INBOX_COMMIT_BACKEND=''
+  case "$state" in
+    pending|pending-unproven) return 1 ;;
+  esac
+  return 0
+}
+
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
 # composer pre-check, then the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
@@ -277,7 +350,12 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # record). No return value is delivery proof; the acknowledgement move is the
 # only delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
-# because there our Enter could submit someone's real half-typed content.
+# because there our Enter could submit someone's real half-typed content. A
+# pending composer that positively holds THIS record's own doorbell is the one
+# exception - that text is ours and already typed, so it is committed with an
+# Enter-only retry rather than deferred forever (see
+# fm_task_inbox_composer_holds_doorbell for why the deferral is otherwise
+# self-sustaining, and why every unidentified case still defers).
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
@@ -292,7 +370,17 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
-    pending) return 1 ;;
+    pending)
+      # Our own doorbell sitting here is a swallowed Enter, not someone's
+      # half-typed content: commit what is already typed instead of deferring
+      # to a re-ring that would defer again on the same text. Anything we
+      # cannot positively identify as this record's doorbell still defers.
+      if fm_task_inbox_composer_holds_doorbell "$backend" "$target" "$rec" "$label"; then
+        fm_task_inbox_commit_pending_doorbell "$backend" "$target" "$label" || return 1
+        return 0
+      fi
+      return 1
+      ;;
   esac
   # Accepted residual race: terminal input and Enter are separate delivery
   # steps, so an agent exiting after the liveness check could leave a bare

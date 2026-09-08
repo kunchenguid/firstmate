@@ -79,6 +79,13 @@ case "${1:-}" in
       if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
         mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
       fi
+    else
+      printf '%s\n' "${1:-}" >> "${FM_KEY_LOG:-/dev/null}"
+      # A committed Enter clears the composer, exactly as a real one does.
+      if [ "${1:-}" = Enter ] && [ -n "${FM_FAKE_TMUX_CAPTURE_AFTER_ENTER:-}" ] \
+        && [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
+        cp "$FM_FAKE_TMUX_CAPTURE_AFTER_ENTER" "$FM_FAKE_TMUX_CAPTURE"
+      fi
     fi
     exit 0 ;;
   display-message)
@@ -104,6 +111,25 @@ SH
   chmod +x "$fb/tmux"
   make_fake_crew_state "$fb" >/dev/null
   printf '%s\n' "$fb"
+}
+
+# make_composer_capture: a bordered composer pane holding <text>, wrapped across
+# rows the way a terminal wraps a long line. Border and content rows are the
+# same width on purpose: mismatched box geometry is what the shared classifier
+# calls ambiguous, and an ambiguous box downgrades pending to pending-unproven,
+# which is a different branch from the proven pending these cases exercise.
+# The fake tmux reports cursor row 1, so row 1 is the first content row.
+make_composer_capture() {  # <path> <text>
+  local path=$1 text=$2 width=60 rest=$2 i
+  {
+    printf '╭'; for ((i=0;i<width+2;i++)); do printf '─'; done; printf '╮\n'
+    [ -n "$rest" ] || printf '│ %-*s │\n' "$width" ''
+    while [ -n "$rest" ]; do
+      printf '│ %-*s │\n' "$width" "${rest:0:$width}"
+      rest=${rest:$width}
+    done
+    printf '╰'; for ((i=0;i<width+2;i++)); do printf '─'; done; printf '╯\n'
+  } > "$path"
 }
 
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
@@ -277,6 +303,72 @@ test_ring_skips_dead_agent() {
   [ "$rc" = 0 ] || fail "an endpoint the classifier cannot see should still be rung, got $rc"
   grep -qF 'Firstmate instruction waiting' "$log" || fail "an unclassifiable endpoint did not receive the doorbell"
   pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
+}
+
+# A doorbell whose Enter was swallowed leaves firstmate's OWN line sitting in
+# the composer. The `pending` deferral that protects a human's half-typed text
+# cannot tell the two apart on its own, so without identification the steer sits
+# unsubmitted until a human presses Enter, and every re-ring defers again on the
+# text the previous ring left behind. The ring must commit its own doorbell with
+# Enter alone - never retyping, which would deliver the line twice.
+test_ring_commits_its_own_swallowed_doorbell() {
+  local dir state rec doorbell log keylog rc
+  dir="$TMP_ROOT/ring-swallowed"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  make_composer_capture "$dir/capture.txt" "$doorbell"
+  make_composer_capture "$dir/capture-empty.txt" ""
+  log="$dir/send.log"; : > "$log"
+  keylog="$dir/key.log"; : > "$keylog"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-empty.txt" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "a swallowed doorbell should be committed and report rang, got $rc"
+  grep -qx 'Enter' "$keylog" || fail "committing a swallowed doorbell must send Enter:"$'\n'"$(cat "$keylog")"
+  [ ! -s "$log" ] || fail "committing a swallowed doorbell must not retype it:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "committing a swallowed doorbell must leave the durable record"
+  pass "inbox: the ring commits its own swallowed doorbell without retyping it"
+}
+
+# The other direction, and the one that must never regress: a composer holding
+# text firstmate did not type is someone's real half-typed content. It is
+# deferred untouched - no Enter, nothing typed - however long it sits there.
+test_ring_never_submits_foreign_composer_text() {
+  local dir state rec other other_doorbell log keylog rc
+  dir="$TMP_ROOT/ring-foreign"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  make_composer_capture "$dir/capture.txt" "rm -rf the production database"
+  log="$dir/send.log"; : > "$log"
+  keylog="$dir/key.log"; : > "$keylog"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "foreign composer text should defer the ring, got $rc"
+  [ ! -s "$keylog" ] || fail "foreign composer text must never receive a key:"$'\n'"$(cat "$keylog")"
+  [ ! -s "$log" ] || fail "foreign composer text must not be typed over:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "deferring the ring must leave the durable record"
+
+  # Another record's doorbell is not this record's doorbell either.
+  other=$(inbox_lib "$state" fm_task_inbox_write "$state" t2 "another steer")
+  other_doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$other")
+  make_composer_capture "$dir/capture.txt" "$other_doorbell"
+  : > "$keylog"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "another record's doorbell should defer this ring, got $rc"
+  [ ! -s "$keylog" ] || fail "another record's doorbell must not be committed by this ring:"$'\n'"$(cat "$keylog")"
+  pass "inbox: the ring never submits composer text it did not type"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -696,6 +788,8 @@ test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
+test_ring_commits_its_own_swallowed_doorbell
+test_ring_never_submits_foreign_composer_text
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence

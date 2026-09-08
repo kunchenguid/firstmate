@@ -13,6 +13,14 @@
 # file) and ACKNOWLEDGE it (the mv into handled/), failing loudly with the
 # harness name and version.
 #
+# Each harness is checked twice, because the two halves fail for different
+# reasons. The delivery check above proves a doorbell that lands is honored.
+# The swallowed-Enter check proves the recovery: a doorbell typed without its
+# Enter leaves firstmate's own line in the composer, which reads `pending` -
+# the same verdict the ring defers on to protect a human's half-typed text -
+# and one ordinary re-ring must commit it rather than defer on it forever.
+# Only a real harness renders the composer that read depends on.
+#
 # Run explicitly with FM_SEND_INBOX_LIVE_E2E=1. This test spends a small
 # number of real model tokens per installed harness (one short turn each) -
 # authorized by the harness-dependent-checks rule. An absent harness is
@@ -21,7 +29,8 @@
 # FM_SEND_INBOX_LIVE_HARNESSES="claude codex ..." when needed, and tune the
 # per-harness wait with FM_SEND_INBOX_LIVE_TIMEOUT (seconds, default 240).
 # Record the dated per-harness result in
-# docs/verification/runtime-backends.md ("Steering-inbox doorbell").
+# docs/verification/runtime-backends.md ("Steering-inbox doorbell", whose
+# "Swallowed-Enter recovery" subsection owns the recovery evidence).
 #
 # Folder trust: harnesses launch with the repo root as cwd, which the
 # operator's machine has normally already trusted; a trust dialog is a real
@@ -185,10 +194,83 @@ check_harness_doorbell() {  # <name>
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
 }
 
+# The swallowed-Enter recovery, proven against a real composer.
+#
+# A doorbell whose Enter is lost leaves firstmate's OWN line sitting in the
+# composer. That makes the composer read `pending`, which is exactly the state
+# the ring defers on to protect a human's half-typed text - so without
+# identifying its own line the ring defers forever and the steer waits for a
+# human keypress. Only a real harness renders the composer this reads, so a
+# stub cannot prove the recovery: it would only replay the shape written into
+# the stub. Types the doorbell with NO Enter, then requires one ordinary
+# re-ring to commit it and the worker to act and acknowledge.
+check_harness_swallowed_recovery() {  # <name>
+  local name=$1 version cmd win="hs-$1" home task acted rec handled line i ready_rc
+  version=$(harness_version "$name")
+  cmd=$(launch_cmd "$name") || return 0
+  home="$LAB/$name-swallow-home"
+  mkdir -p "$home/state"
+  task="swallow-$name"
+  acted="$LAB/acted-swallow-$name"
+  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" \
+    -- bash -lc "$cmd" \
+    || { FAILED=1; printf 'not ok - %s (%s): could not launch for the swallowed-doorbell check\n' "$name" "$version" >&2; return 0; }
+  wait_ready "$win"; ready_rc=$?
+  if [ "$ready_rc" -eq 1 ]; then
+    note "$name ($version): composer already pending before the swallow check; not verified here"
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    return 0
+  fi
+  printf 'window=%s:%s\nkind=ship\nharness=%s\n' "$SESSION" "$win" "$name" > "$home/state/$task.meta"
+  rec=$(FM_STATE_OVERRIDE="$home/state" fm_task_inbox_write "$home/state" "$task" \
+    "Firstmate live check: run exactly this shell command now: touch $acted - then follow the mv instruction you were given for this message. Reply with one short line.") \
+    || { FAILED=1; printf 'not ok - %s (%s): could not write the durable record\n' "$name" "$version" >&2; return 0; }
+  handled="$home/state/$task.inbox/handled/${rec##*/}"
+  line=$(fm_task_inbox_doorbell_line "$rec")
+
+  # The swallow: the line is typed, the Enter never lands. Typed the same way
+  # the tmux adapter types it (send-keys -l), so the composer sees exactly what
+  # a real doorbell leaves behind when its Enter is lost.
+  tmux -L "$SOCKET" send-keys -t "$SESSION:$win" -l "$line" 2>/dev/null || true
+  sleep 2
+  if [ "$(fm_tmux_composer_state "$SESSION:$win")" != pending ]; then
+    note "$name ($version): the typed doorbell did not read as pending text; swallow not reproduced, not verified here"
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    return 0
+  fi
+
+  # One ordinary re-ring must recover it rather than deferring on our own text.
+  if ! fm_task_inbox_ring tmux "$SESSION:$win" "$rec" "$name"; then
+    FAILED=1
+    printf 'not ok - %s (%s): the re-ring deferred on firstmate own swallowed doorbell instead of committing it\n' "$name" "$version" >&2
+    tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    return 0
+  fi
+  i=0
+  while [ "$i" -lt "$TIMEOUT" ]; do
+    [ -f "$handled" ] && [ -e "$acted" ] && break
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ -f "$handled" ] && [ -e "$acted" ]; then
+    CHECKED=$((CHECKED + 1))
+    pass "$name ($version): a swallowed doorbell was committed by one re-ring, and the worker acted and acked"
+  else
+    FAILED=1
+    printf 'not ok - %s (%s): swallowed doorbell not honored within %ss (acted=%s acked=%s)\n' \
+      "$name" "$version" "$TIMEOUT" "$([ -e "$acted" ] && echo yes || echo no)" \
+      "$([ -f "$handled" ] && echo yes || echo no)" >&2
+    tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null | grep '[^[:space:]]' | tail -10 | sed 's/^/#   /' >&2
+  fi
+  tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+}
+
 HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'claude codex opencode pi grok kimi muse'}
 for h in $HARNESSES; do
   if command -v "$h" >/dev/null 2>&1; then
     check_harness_doorbell "$h"
+    check_harness_swallowed_recovery "$h"
   else
     note "harness absent, not verified here: $h"
   fi
@@ -202,4 +284,4 @@ if [ "$CHECKED" -eq 0 ]; then
   printf 'not ok - live steering-inbox doorbell guard verified nothing (no harness installed?)\n' >&2
   exit 1
 fi
-pass "live steering-inbox doorbell guard: $CHECKED harness(es) honored the doorbell contract"
+pass "live steering-inbox doorbell guard: $CHECKED check(s) honored the doorbell contract"
