@@ -494,6 +494,58 @@ FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=2 duration_ms=121733 faile
 That also gives every other case in `tests/fm-turnend-guard.test.sh`, not only this correction's, a stated result on this host.
 The review commit carrying this paragraph changes documentation only - this entry and two added lines in `docs/turnend-guard.md` naming the block-budget-lock refusal that returns before priming - so it touches no code or test path the run above exercises, and no re-run was taken for it.
 
+The last review commit on this branch, the one carrying this paragraph, changes the refusal banner once more.
+It does not invalidate the isolated blocks above - every case named there keeps its name and still passes, as the full run at the end of this paragraph shows - but it does replace the banner wording those runs were taken against.
+The banner's Claude sentence had ended `so nothing owns recovery and restoring supervision is on you`, which is false on the refusal that just detached a primed cycle - the only refusal that reaches the banner after priming - and which tells the reader to arm a watcher over a recovery already under way.
+It now stops at what the guard actually knows and can state on every refusal: `The Stop-owned auto-arm did not claim this home, so no generation claim owns recovery for this Stop.`
+That is true whether or not this Stop detached anything, because `--ensure-watcher` deliberately takes no generation claim, and it leaves the banner's only instruction to the repair line below it, which tells a Claude session to inspect the Stop-owned recovery path rather than replace it.
+`test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal` gains one assertion on the first refusal's banner - the refusal in that case is the one that detaches the cycle the rest of the case then proves claims the home lock - and it fails against the old wording and passes against the new.
+
+That reproduction used the same truncated-copy method as the blocks above - the seven guard-side `--claude` cases, banner case first - run once with the guard's sentence reverted to its pre-correction wording and nothing else changed.
+`fail()` exits the script, so the run stops at the `not ok` line and the four cases after it did not run.
+
+```text
+ok - fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)
+ok - fm-turnend-guard --claude: an ordinary stop does not prime and leaves downtime a primed cycle would consume
+not ok - a refusal that detaches a recovery cycle must report the missing claim, not deny that anything is recovering (missing: 'no generation claim owns recovery for this Stop')
+FM_TEST_END 2026-09-08T23:40:06Z tests/zz-isolated-banner.test.sh exit=1 duration_ms=8826 gate_skip=false
+```
+
+The same copy on the corrected tree runs all seven to the end:
+
+```text
+ok - fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)
+ok - fm-turnend-guard --claude: an ordinary stop does not prime and leaves downtime a primed cycle would consume
+ok - fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (frozen-epoch variant)
+ok - fm-turnend-guard --claude: a refused stop still recovers when the epoch does not advance
+ok - fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (advancing-epoch variant)
+ok - fm-turnend-guard --claude: the attended fail-open allows without priming a handling successor
+ok - fm-turnend-guard --claude: a frozen auto-arm epoch still reaches the bounded attended fail-open
+FM_TEST_END 2026-09-08T23:40:32Z tests/zz-isolated-banner.test.sh exit=0 duration_ms=21046 gate_skip=false
+```
+
+The four suites were then re-run in full on the corrected tree.
+
+```sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-guard-stale-banner.test.sh tests/fm-turnend-guard.test.sh tests/fm-supervision-instructions.test.sh
+```
+
+Observed output, tail of the run:
+
+```text
+ok - fm-turnend-guard: a dead away-mode daemon still blocks under the poll-derived grace
+ok - fm-turnend-guard: the poll-derived grace is bounded, not unlimited
+ok - fm-turnend-guard: with away mode off, the poll-derived grace never applies
+FM_TEST_END 2026-09-08T23:42:47Z tests/fm-turnend-guard.test.sh exit=0 duration_ms=128629 gate_skip=false
+FM_TEST_END 2026-09-08T23:43:51Z tests/fm-claude-stop-autoarm.test.sh exit=0 duration_ms=64323 gate_skip=false
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=195027
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=1134 failed=0
+FM_TEST_SUMMARY_FAMILY family=standalone count=1 duration_ms=64323 failed=0
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=2 duration_ms=154139 failed=0
+```
+
+`bin/fm-test-run.sh` over the four suites exited 0, `bin/fm-lint.sh` exited 0, and `bin/fm-doc-audience-check.sh` exited 0 on that tree.
+
 The Pi extension-model pull-guard correction (`bin/fm-guard.sh` no longer reports a false watcher-down on a Pi primary during the extension's own watcher hand-off) was verified on 2026-08-13 with the installed ShellCheck 0.11.0 and isolated behavior suites.
 The guard verdict itself reads only state files and process liveness, so the portable suites are the enforcing evidence; `bin/fm-harness.sh`'s Pi marker detection, which selects the model, is exercised in the same suite through `PI_CODING_AGENT`.
 

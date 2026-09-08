@@ -244,7 +244,7 @@ block_stop() {
       printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
-      printf '●  The Stop-owned auto-arm did not claim this home, so nothing owns recovery and restoring supervision is on you.\n'
+      printf '●  The Stop-owned auto-arm did not claim this home, so no generation claim owns recovery for this Stop.\n'
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
@@ -503,9 +503,10 @@ fi
 # resurface, and takes no generation claim, so the registered asyncRewake hook
 # still owns rewake once a later Stop is allowed. The primed process is already
 # setsid-detached and survives this refusal. Nothing here reads its result: the
-# refusal banner states the missing claim, which is true whether or not a cycle
-# was detached. Do not prime before the wait: that made every ordinary Claude
-# Stop start a handling successor and suppressed once-per-generation downtime
+# refusal banner stops at the missing generation claim, which is true whether or
+# not a cycle was detached, so it never denies a recovery this Stop just
+# started. Do not prime before the wait: that made every ordinary Claude Stop
+# start a handling successor and suppressed once-per-generation downtime
 # re-presentation. Do not prime before terminal_fail_open either: that let a
 # cycle this Stop forked answer the health check the fail-open decides on, so
 # the mechanism for restoring supervision could silence the alarm that says

@@ -2034,6 +2034,8 @@ test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal() {
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
   expect_code 2 "$status" "first unprimed-window stop must still refuse while the watcher is not yet healthy"
   assert_contains "$out" "TURN WOULD END BLIND" "first refused stop lost the blind-turn banner"
+  assert_contains "$out" "no generation claim owns recovery for this Stop" \
+    "a refusal that detaches a recovery cycle must report the missing claim, not deny that anything is recovering"
   release_and_await_primed_watcher "$dir" \
     || fail "the watcher primed by the refused stop never claimed the home lock"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
