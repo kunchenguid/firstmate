@@ -156,7 +156,7 @@ SUMMARY=$(jq -r '
   def money(obj):
     if obj == null then null
     else (obj.amount_minor / pow(10; obj.exponent)) end;
-  if (.spend // null) != null and (.spend.enabled // true) then
+  if (.spend // null) != null and (.spend.enabled != false) then
     {
       used: money(.spend.used),
       limit: money(.spend.limit),
