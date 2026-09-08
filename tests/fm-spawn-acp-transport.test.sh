@@ -101,11 +101,12 @@ test_spawn_transport_acp_rejects_secondmate() {
   state="$TMP_ROOT/acp-second-state"; config="$TMP_ROOT/acp-second-config"
   mkdir -p "$state" "$config" "$proj"
 
-  out=$(FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" \
+  if out=$(FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" \
     FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --secondmate --transport acp 2>&1)
-  [ "$?" -ne 0 ] || fail "--transport acp with --secondmate should be refused"$'\n'"$out"
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --secondmate --transport acp 2>&1); then
+    fail "--transport acp with --secondmate should be refused"$'\n'"$out"
+  fi
   assert_contains "$out" "supports crewmates only, not --secondmate" \
     "the refusal must name the secondmate restriction"
   pass "fm-spawn.sh: --transport acp refuses --secondmate spawns"
@@ -118,11 +119,12 @@ test_spawn_transport_acp_rejects_unsupported_harness() {
   state="$TMP_ROOT/acp-harness-state"; config="$TMP_ROOT/acp-harness-config"
   mkdir -p "$state" "$config" "$proj"
 
-  out=$(FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" \
+  if out=$(FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" \
     FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" gemini --mode no-mistakes --yolo off --transport acp 2>&1)
-  [ "$?" -ne 0 ] || fail "--transport acp with an unsupported harness should be refused"$'\n'"$out"
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" gemini --mode no-mistakes --yolo off --transport acp 2>&1); then
+    fail "--transport acp with an unsupported harness should be refused"$'\n'"$out"
+  fi
   assert_contains "$out" "supports only --harness claude or --harness codex" \
     "the refusal must name the harness restriction"
   pass "fm-spawn.sh: --transport acp refuses harnesses other than claude/codex"
