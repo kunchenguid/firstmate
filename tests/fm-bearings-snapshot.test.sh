@@ -58,6 +58,24 @@ if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
 JSON
   exit 0
 fi
+if [ "${FAKE_GH_LARGE:-0}" = 1 ]; then
+  suffix=''
+  i=1
+  while [ "$i" -le 160 ]; do
+    suffix="${suffix}x"
+    i=$((i + 1))
+  done
+  printf '['
+  i=1
+  while [ "$i" -le 1200 ]; do
+    [ "$i" -eq 1 ] || printf ','
+    printf '{"number":%s,"title":"Large PR %s %s","url":"https://github.com/acme/repo/pull/%s","headRefName":"feature/large-%s","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]}' \
+      "$i" "$i" "$suffix" "$i" "$i"
+    i=$((i + 1))
+  done
+  printf ']\n'
+  exit 0
+fi
 cat <<'JSON'
 [{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fm/ship-task","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]
 JSON
@@ -1527,6 +1545,49 @@ test_per_repository_pr_cap_is_disclosed() {
   pass "per-repository open-PR caps are disclosed with an expansion knob"
 }
 
+test_large_candidate_pr_inventory_avoids_argument_transport() {
+  local home fakebin json
+  home=$(make_home large-pr-inventory); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(FM_BEARINGS_PR_LIMIT=1200 FAKE_GH_LARGE=1 \
+    run "$home" "$fakebin" --include-prs --json)
+  [ "$(printf '%s' "$json" | wc -c | tr -d ' ')" -gt 131072 ] \
+    || fail "large candidate PR fixture did not exceed the per-argument limit"
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-bearings.v1"
+      and (.candidate_prs | length) == 1200
+      and .candidate_prs[1199].num == "1200"
+  ' >/dev/null || fail "large candidate PR inventory did not render completely"
+  pass "large candidate PR inventories avoid argument transport"
+}
+
+test_large_task_decision_inventory_avoids_argument_transport() {
+  local home fakebin canonical suffix='' i
+  home=$(make_home large-task-decisions); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  i=1
+  while [ "$i" -le 1400 ]; do
+    suffix="${suffix}x"
+    i=$((i + 1))
+  done
+  i=1
+  while [ "$i" -le 100 ]; do
+    printf 'needs-decision [key=large-%s]: choose %s %s\n' "$i" "$i" "$suffix" \
+      >> "$home/state/mate.status"
+    i=$((i + 1))
+  done
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH=1783792800 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  [ "$(printf '%s' "$canonical" | wc -c | tr -d ' ')" -gt 131072 ] \
+    || fail "large task-decision fixture did not exceed the per-argument limit"
+  printf '%s' "$canonical" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and ([.tasks[] | select(.id == "mate")][0].hints.open_decisions | length) == 101
+  ' >/dev/null || fail "large task-decision inventory did not render completely"
+  pass "large task-decision inventories avoid argument transport"
+}
+
 install_failing_jq() {  # <fakebin> <model|toon>
   local fakebin=$1 phase=$2 real
   real=$(command -v jq)
@@ -2973,4 +3034,6 @@ test_blocked_deferred_hold_has_concrete_disclosure
 test_revealed_deferred_holds_show_their_deferral_reason
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
+test_large_candidate_pr_inventory_avoids_argument_transport
+test_large_task_decision_inventory_avoids_argument_transport
 test_projection_and_toon_fail_closed
