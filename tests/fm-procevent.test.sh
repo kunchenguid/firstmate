@@ -1533,55 +1533,50 @@ pass "live output stays bounded and retirement reaps the whole source group"
 HPOST_TERM="$TMP_ROOT/post-term-reuse"; new_home "$HPOST_TERM"
 POST_TERM_SOURCE="$TMP_ROOT/post-term-reuse-source.sh"
 POST_TERM_PID="$TMP_ROOT/post-term-reuse.pid"
-POST_TERM_MARKER="$TMP_ROOT/post-term-reuse.marker"
-POST_TERM_COUNT="$TMP_ROOT/post-term-reuse.count"
+POST_TERM_SIGNALS="$TMP_ROOT/post-term-reuse.signals"
 cat > "$POST_TERM_SOURCE" <<'SH'
 #!/usr/bin/env bash
-trap '' TERM
+trap 'printf "signalled\n" >> "$2"' TERM
 printf '%s\n' "$$" > "$1"
-while :; do sleep 1; done
+while [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 1; done
 SH
 chmod +x "$POST_TERM_SOURCE"
 POST_TERM_BIN=$(fm_fakebin "$TMP_ROOT/post-term-reuse-bin")
 REAL_PS=$(command -v ps) || fail "the post-TERM reuse fixture requires ps"
-cat > "$POST_TERM_BIN/ps" <<SH
-#!/usr/bin/env bash
-if [ -e "$POST_TERM_MARKER" ] && [ "\${1-}" = -p ] \
-  && [ "\${3-}" = -o ] && [ "\${4-}" = lstart= ]; then
-  count=0
-  [ ! -f "$POST_TERM_COUNT" ] || count=\$(cat "$POST_TERM_COUNT")
-  count=\$((count + 1))
-  printf '%s\n' "\$count" > "$POST_TERM_COUNT"
-  if [ "\$count" -gt 1 ]; then
-    printf 'post-TERM reused identity\n'
-    exit 0
-  fi
-fi
-exec "$REAL_PS" "\$@"
-SH
-chmod +x "$POST_TERM_BIN/ps"
 pe_register "$HPOST_TERM" lavish post-term-src -- \
-  "$POST_TERM_SOURCE" "$POST_TERM_PID" >/dev/null
-FM_PROCEVENT_OWNER_CHECK_SECONDS=5 pe "$HPOST_TERM" reconcile >/dev/null
+  "$POST_TERM_SOURCE" "$POST_TERM_PID" "$POST_TERM_SIGNALS" >/dev/null
+FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
+  FM_PROCEVENT_OWNER_CHECK_SECONDS=5 pe "$HPOST_TERM" reconcile >/dev/null
 wait_for "$POST_TERM_PID" || fail "the post-TERM reuse fixture did not start"
 wait_for "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
   || fail "the post-TERM reuse fixture did not claim its source"
 POST_TERM_RUNNER=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim")
-touch "$POST_TERM_MARKER"
+kill -STOP "$POST_TERM_RUNNER" || fail "the post-TERM fixture could not keep its leader alive"
+cat > "$POST_TERM_BIN/ps" <<SH
+#!/usr/bin/env bash
+if [ -s "$POST_TERM_SIGNALS" ] && [ "\${1-}" = -p ] && [ "\${2-}" = "$POST_TERM_RUNNER" ] \
+  && [ "\${3-}" = -o ] && [ "\${4-}" = lstart= ]; then
+  printf 'post-TERM reused identity\n'
+  exit 0
+fi
+exec "$REAL_PS" "\$@"
+SH
+chmod +x "$POST_TERM_BIN/ps"
 post_term_status=0
-PATH="$POST_TERM_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
-  pe "$HPOST_TERM" retire post-term-src >/dev/null 2>&1 || post_term_status=$?
+post_term_out=$(PATH="$POST_TERM_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
+  pe "$HPOST_TERM" retire post-term-src 2>&1) || post_term_status=$?
 [ "$post_term_status" -ne 0 ] || fail "retirement escalated after runner identity became ambiguous"
-# Which ambiguity the escalation meets here is platform-dependent, so this
-# asserts the invariant both forms share rather than one form's internals.
-# Where the runner leader keeps waiting on its TERM-ignoring source child the
-# post-TERM check sees a live leader whose identity no longer matches, and
-# where the leader dies promptly it sees a leaderless group carrying the same
-# numeric id; fm_procevent_pid_state reaches the second verdict without
-# consulting process identity at all, so counting identity lookups pins a
-# timing- and platform-dependent internal rather than the behavior.
+assert_contains "$post_term_out" "cannot confirm runner identity" \
+  "post-TERM identity mismatch refuses retirement"
+[ -s "$POST_TERM_SIGNALS" ] || fail "the post-TERM fixture never received TERM"
+kill -0 "$POST_TERM_RUNNER" 2>/dev/null \
+  || fail "the post-TERM fixture lost its leader instead of exercising a live identity mismatch"
 kill -0 -"$POST_TERM_RUNNER" 2>/dev/null \
   || fail "an ambiguous reused-PID group was killed during escalation"
+assert_present "$HPOST_TERM/state/procevent/post-term-src.source" \
+  "a live identity mismatch preserves registration"
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
+  "a live identity mismatch preserves its claim"
 kill -KILL -"$POST_TERM_RUNNER" 2>/dev/null || true
 for _ in $(seq 1 50); do kill -0 -"$POST_TERM_RUNNER" 2>/dev/null || break; sleep 0.1; done
 kill -0 -"$POST_TERM_RUNNER" 2>/dev/null && fail "could not clean up the post-TERM fixture group"
@@ -2552,8 +2547,33 @@ wait_for "$HPROOF/state/procevent/proof-src.runner" \
 PROOF_PID=$(cat "$HPROOF/state/procevent/proof-src.runner")
 wait_for "$TMP_ROOT/proof-retire.child" || fail "the signal-proof child never started"
 PROOF_CHILD=$(cat "$TMP_ROOT/proof-retire.child")
+PROOF_BIN=$(fm_fakebin "$TMP_ROOT/proof-retire-bin")
+REAL_PS=$(command -v ps) || fail "the escalation race fixture requires ps"
+kill -STOP "$PROOF_PID" || fail "the escalation race fixture could not pause its leader"
+cat > "$PROOF_BIN/ps" <<SH
+#!/usr/bin/env bash
+if [ "\${1-}" = -o ] && [ "\${2-}" = pgid= ] \
+  && [ "\${3-}" = -p ] && [ "\${4-}" = "$PROOF_PID" ] \
+  && [ -s "$TMP_ROOT/proof-retire.signals" ]; then
+  kill -0 "$PROOF_PID" 2>/dev/null || exit 75
+  kill -CONT "$PROOF_PID" || exit 75
+  for _ in \$(seq 1 100); do
+    if ! kill -0 "$PROOF_PID" 2>/dev/null; then
+      printf 'leader exited\n' > "$TMP_ROOT/proof-retire.raced"
+      exec "$REAL_PS" "\$@"
+    fi
+    sleep 0.1
+  done
+  exit 75
+fi
+exec "$REAL_PS" "\$@"
+SH
+chmod +x "$PROOF_BIN/ps"
 
-pe "$HPROOF" retire proof-src >/dev/null || fail "retiring a signal-proof listener reported failure"
+PATH="$PROOF_BIN:$PATH" pe "$HPROOF" retire proof-src >/dev/null \
+  || fail "retiring a signal-proof listener reported failure"
+[ -s "$TMP_ROOT/proof-retire.raced" ] \
+  || fail "the leader did not exit between escalation identity and process-group reads"
 wait_gone "-$PROOF_PID" \
   || fail "retirement left the signal-proof listener's process group running"
 wait_gone "$PROOF_CHILD" \
@@ -2606,23 +2626,16 @@ pass "an expired runner's guard escalates past a signal-proof child"
 # The forced kill is the backstop, not the normal path. When it carries every
 # stop, it stops being able to report that anything went wrong - which is exactly
 # how a listener that could not be stopped looked identical to one that could.
-# The stop's ordinary window is two seconds, so a stop that has to exhaust it
-# cannot finish inside that bound and one that does not is well under it.
 
 HPROMPT="$TMP_ROOT/prompt-stop"; new_home "$HPROMPT"
 pe_register "$HPROMPT" lavish prompt-src -- "$QUIET_STUB" "$TMP_ROOT/prompt-stop" >/dev/null
-pe "$HPROMPT" reconcile >/dev/null
+pe "$HPROMPT" start prompt-src >"$TMP_ROOT/prompt-start.log" 2>&1 &
+PROMPT_START_PID=$!
 wait_for "$HPROMPT/state/procevent/prompt-src.runner" \
   || fail "the promptly-stopping listener never recorded its runner"
 PROMPT_PID=$(cat "$HPROMPT/state/procevent/prompt-src.runner")
 wait_for "$TMP_ROOT/prompt-stop.descendant" \
   || fail "the promptly-stopping listener's child never spawned its own descendant"
-# Calibrated against this host rather than a wall-clock constant: the bound
-# under test IS the stop's own window - twenty tenth-of-a-second polls - and a
-# loaded host stretches that window and this retirement by the same factor, so
-# an absolute bound would measure the host instead of the behavior. The window
-# is sampled on both sides so a load spike during the retirement is caught by
-# the sample that follows it.
 stop_window_ms() {
   local from to
   from=$(now_ms)
@@ -2635,11 +2648,13 @@ start=$(now_ms)
 pe "$HPROMPT" retire prompt-src >/dev/null || fail "retiring a healthy listener reported failure"
 elapsed=$(( $(now_ms) - start ))
 window_after=$(stop_window_ms)
-window=$window_before
-[ "$window_after" -le "$window" ] || window=$window_after
+prompt_status=0
+wait "$PROMPT_START_PID" || prompt_status=$?
 wait_gone "-$PROMPT_PID" || fail "retiring a healthy listener left its process group running"
-[ "$elapsed" -lt "$window" ] \
-  || fail "the stop had to exhaust its ordinary signal window before the runner exited (${elapsed}ms against a ${window}ms window)"
+[ "$prompt_status" -eq 143 ] \
+  || fail "the runner did not exit on TERM (start status=$prompt_status, retirement=${elapsed}ms, sampled windows=${window_before}/${window_after}ms)"
+printf 'ordinary stop: start status=%s retirement=%sms sampled windows=%s/%sms\n' \
+  "$prompt_status" "$elapsed" "$window_before" "$window_after"
 pass "a runner exits on the ordinary stop signal instead of outliving it"
 
 # --- a crashed leader's group is still refused -------------------------------

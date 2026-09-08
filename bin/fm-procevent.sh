@@ -1301,8 +1301,11 @@ runner_group_signal() {  # <signal> <pid> <identity> [proved]
   # A proved escalation has no leader left to re-read a pgid from; state 3 already
   # established that this exact numeric group still has members.
   if [ "$state" -eq 0 ]; then
-    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
-    [ "$pgid" = "$pid" ] || return 2
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || pgid=
+    if [ "$pgid" != "$pid" ]; then
+      [ -n "$proved" ] && [ -z "$pgid" ] && ! fm_pid_alive "$pid" || return 2
+      fm_procevent_group_alive "$pid" || return 1
+    fi
   fi
   # KNOWN LIMIT: portable shell cannot make this verification and signal atomic,
   # so the PID and group could be reused in the interval between them.
