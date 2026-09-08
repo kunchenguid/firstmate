@@ -222,13 +222,6 @@ if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
   allow_supervised_stop
 fi
 
-# Set only when the refusal-path priming below actually detached a cycle, so the
-# banner reports what this hook did rather than inferring from the absent
-# generation claim that nothing is recovering. Priming has gates of its own -
-# away mode and an absent python3 among them - and every one of them returns
-# without forking, so invoking it proves nothing on its own.
-PRIMED_RECOVERY=0
-
 block_stop() {
   local afk x_mode reason rule
   afk=0
@@ -251,11 +244,7 @@ block_stop() {
       printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
-      if [ "$PRIMED_RECOVERY" -eq 1 ]; then
-        printf '●  The Stop-owned auto-arm did not claim this home, so no generation claim owns recovery yet.\n'
-      else
-        printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
-      fi
+      printf '●  The Stop-owned auto-arm did not claim this home, so nothing owns recovery and restoring supervision is on you.\n'
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
@@ -493,18 +482,18 @@ fi
 # cycle is confirmed, ledgered, and not re-announced into a one-poll
 # resurface, and takes no generation claim, so the registered asyncRewake hook
 # still owns rewake once a later Stop is allowed. The primed process is already
-# setsid-detached and survives this refusal. Its exit status reports whether it
-# forked, which is what the banner claim below is keyed on. Do not prime before
-# the wait: that made every ordinary Claude Stop start a handling successor and
-# suppressed once-per-generation downtime re-presentation. Do not call
-# autoarm_owns_recovery here: that accounts the failed-epoch budget.
+# setsid-detached and survives this refusal. Nothing here reads its result: the
+# refusal banner states the missing claim, which is true whether or not a cycle
+# was detached. Do not prime before the wait: that made every ordinary Claude
+# Stop start a handling successor and suppressed once-per-generation downtime
+# re-presentation. Do not call autoarm_owns_recovery here: that accounts the
+# failed-epoch budget.
 if ! fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" \
   && ! fm_autoarm_claim_open "$STATE" "$GRACE" \
   && [ -x "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" ]; then
-  if printf '%s' "$PAYLOAD" \
-    | "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" --ensure-watcher; then
-    PRIMED_RECOVERY=1
-  fi
+  printf '%s' "$PAYLOAD" \
+    | "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" --ensure-watcher \
+    || true
 fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block

@@ -1251,7 +1251,7 @@ test_ensure_watcher_starts_detached_watcher_without_claim() {
   : > "$dir/state/task.meta"
   write_ensure_watch_fixture "$dir"
   out=$(run_autoarm_ensure_watcher "$dir" 2>/dev/null); status=$?
-  expect_code 0 "$status" "--ensure-watcher must report the cycle it detached, and never rewake"
+  expect_code 0 "$status" "--ensure-watcher must exit 0 and never rewake"
   [ -z "$out" ] || fail "--ensure-watcher produced output: $out"
   [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "--ensure-watcher took a generation claim"
   i=0
@@ -1275,7 +1275,7 @@ test_ensure_watcher_inert_without_session_lock() {
   write_ensure_watch_fixture "$dir"
   out=$(printf '%s\n' '{"session_id":"s"}' \
     | FM_HOME="$dir" bash "$dir/bin/fm-claude-stop-autoarm.sh" --ensure-watcher 2>&1); status=$?
-  expect_code 1 "$status" "--ensure-watcher must report that it detached nothing without a session lock"
+  expect_code 0 "$status" "--ensure-watcher must stay inert without a session lock"
   [ ! -e "$dir/state/.watch.lock/pid" ] || fail "--ensure-watcher started a watcher without a session lock"
   pass "auto-arm --ensure-watcher: inert with no session lock"
 }
@@ -1323,7 +1323,7 @@ test_ensure_watcher_records_a_refused_primed_cycle() {
   done
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
-  expect_code 0 "$status" "a cycle that forked and then failed to take the lock was still detached"
+  expect_code 0 "$status" "--ensure-watcher must exit 0 even when the primed cycle cannot start"
   [ -n "$row" ] || fail "a primed cycle that could not start left no lifecycle record"
   case "$row" in
     *"exit_code=1"*) ;;
@@ -1344,7 +1344,7 @@ test_ensure_watcher_primes_arm_with_derived_grace() {
   write_ensure_watch_fixture "$dir"
   write_arm_fixture "$dir" records-grace
   out=$(unset FM_GUARD_GRACE; FM_POLL=900 run_autoarm_ensure_watcher "$dir" 2>/dev/null); status=$?
-  expect_code 0 "$status" "--ensure-watcher must report the fork that detached the primed cycle"
+  expect_code 0 "$status" "--ensure-watcher must exit 0 after detaching the primed cycle"
   i=0
   while [ "$i" -lt 50 ]; do
     [ -e "$dir/state/arm-received-grace" ] && break
@@ -1364,7 +1364,7 @@ test_ensure_watcher_inert_when_afk() {
   : > "$dir/state/.afk"
   write_ensure_watch_fixture "$dir"
   out=$(run_autoarm_ensure_watcher "$dir" 2>/dev/null); status=$?
-  expect_code 1 "$status" "--ensure-watcher must report that it detached nothing while away mode is on"
+  expect_code 0 "$status" "--ensure-watcher must stay inert while away mode is on"
   [ ! -e "$dir/state/.watch.lock/pid" ] || fail "--ensure-watcher started a watcher while AFK"
   pass "auto-arm --ensure-watcher: inert while away mode owns supervision"
 }

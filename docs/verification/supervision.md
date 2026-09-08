@@ -441,6 +441,24 @@ Two commits land after the trees named above, and neither has a fresh full-scrip
 It leaves `test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace` byte-identical to its state at `073a41f`, but no run at `1474acb` invoked that case, so the full-script failure above remains the only observation of it.
 The review commit that follows `1474acb` changes documentation only - the tree named for the isolated run just above, and one removed sentence in `docs/turnend-guard.md` - so it touches no code or test path any command in this entry exercises, and no re-run was taken for it.
 
+The review commit carrying this paragraph does change code, and it invalidates part of the isolated block above.
+It collapses the refusal banner to one unconditional sentence, removes the `--ensure-watcher` exit-status contract that existed only to choose between two wordings, and deletes `test_hook_claude_mode_away_refusal_claims_no_primed_start` - the fourth `ok` line above.
+That block therefore remains a record of `1474acb` and is not reproducible at HEAD, so the six surviving cases were re-run on this commit's tree by the same truncated-copy method.
+
+Observed output of that re-run:
+
+```text
+ok - fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)
+ok - fm-turnend-guard --claude: an ordinary stop does not prime and leaves downtime a primed cycle would consume
+ok - fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (frozen-epoch variant)
+ok - fm-turnend-guard --claude: a refused stop still recovers when the epoch does not advance
+ok - fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (advancing-epoch variant)
+ok - fm-turnend-guard --claude: a frozen auto-arm epoch still reaches the bounded attended fail-open
+```
+
+That copy exited 0, and the whole of `tests/fm-claude-stop-autoarm.test.sh` was run unmodified on the same tree: 46 cases, exit 0, including the two inert `--ensure-watcher` cases whose expected status returned to 0 with the contract gone.
+No full-script run of `tests/fm-turnend-guard.test.sh` was taken on this tree, so the `touch -d` failure above is still the only observation of that case.
+
 The Pi extension-model pull-guard correction (`bin/fm-guard.sh` no longer reports a false watcher-down on a Pi primary during the extension's own watcher hand-off) was verified on 2026-08-13 with the installed ShellCheck 0.11.0 and isolated behavior suites.
 The guard verdict itself reads only state files and process liveness, so the portable suites are the enforcing evidence; `bin/fm-harness.sh`'s Pi marker detection, which selects the model, is exercised in the same suite through `PI_CODING_AGENT`.
 
