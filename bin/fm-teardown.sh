@@ -860,11 +860,11 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
+  # Best-effort fleet usage harvest runs while the task's state files still
+  # exist; a harvest failure must never block teardown.
+  "$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
+    || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
   status_retire_presentation_task "$STATE" "$ID" || return 1
-# Best-effort fleet usage harvest runs while the task's state files still
-# exist; a harvest failure must never block teardown.
-"$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
-  || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   rm -f -- "$STATE/$ID.turn-ended"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
@@ -3316,6 +3316,10 @@ if [ "$KIND" != secondmate ]; then
     exit 1
   fi
 fi
+# Best-effort fleet usage harvest runs while the task's state files still
+# exist; a harvest failure must never block teardown.
+"$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
+  || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \
@@ -3341,10 +3345,6 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
-# Best-effort fleet usage harvest runs while the task's state files still
-# exist; a harvest failure must never block teardown.
-"$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
-  || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
 rm -f "$STATE/$ID.turn-ended" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \

@@ -518,10 +518,10 @@ test_lock_legacy_residue_swept_and_live_residue_defers() {
   lockdir="$state/.contend.lock"
   err="$dir/err"
 
-  # Residue with an absent mutex (a crash between the mutex removal and the
-  # deeper link) is recoverable, not a permanent wedge.
+  # Residue with absent intermediate mutexes is recoverable even when
+  # atomic creation of the fixed mutex succeeds on its first attempt.
   seed_stale_lock "$lockdir"
-  seed_stale_lock "$lockdir.steal.steal"
+  seed_stale_lock "$lockdir.steal.steal.steal"
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_try_acquire "$2" || exit 7
@@ -538,7 +538,7 @@ test_lock_legacy_residue_swept_and_live_residue_defers() {
   seed_stale_lock "$lockdir"
   sleep 300 &
   livepid=$!
-  seed_stale_lock "$lockdir.steal.steal" "$livepid"
+  seed_stale_lock "$lockdir.steal.steal.steal" "$livepid"
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_try_acquire "$2" || exit 7
@@ -546,7 +546,7 @@ test_lock_legacy_residue_swept_and_live_residue_defers() {
   wait_for_exit $! 300
   rc=$?
   [ "$rc" -eq 7 ] || fail "live residue holder was swept or recovery did not defer (rc=$rc)"
-  [ -L "$lockdir.steal.steal" ] || fail "live residue holder's mutex was removed"
+  [ -L "$lockdir.steal.steal.steal" ] || fail "live residue holder's mutex was removed"
   lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ -n "$lockpid" ] || fail "deferred recovery disturbed the stale primary lock"
   kill "$livepid" 2>/dev/null || true

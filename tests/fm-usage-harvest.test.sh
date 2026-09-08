@@ -23,6 +23,10 @@ file_mtime_epoch() {  # <file>
   case "$t" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s' "$t"
 }
+epoch_to_touch() {  # <epoch>
+  date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null \
+    || date -d "@$1" +%Y%m%d%H%M.%S
+}
 file_birth_epoch() {  # <file>
   local t
   t=$(stat -f %B -- "$1" 2>/dev/null) || t=$(stat -c %W -- "$1" 2>/dev/null) || return 1
@@ -88,7 +92,7 @@ JSON
   cat > "$logdir/session-future.jsonl" <<'JSON'
 {"type":"assistant","message":{"id":"msgX","model":"claude-test","usage":{"input_tokens":999,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":999}}}
 JSON
-  touch -t "$(date -r $(( $(file_mtime_epoch "$state/$id.status") + 7200 )) +%Y%m%d%H%M.%S)" \
+  touch -t "$(epoch_to_touch $(( $(file_mtime_epoch "$state/$id.status") + 7200 )))" \
     "$logdir/session-future.jsonl"
   mkdir -p "$FM_USAGE_CLAUDE_DIR/wrong-encoded-dir"
   printf '%s\n' '{"type":"assistant","message":{"id":"msgY","model":"claude-test","usage":{"input_tokens":777,"output_tokens":777}}}' \
@@ -159,7 +163,7 @@ JSON
 {"type":"session_meta","payload":{"cwd":"$wt"}}
 {"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":999,"output_tokens":999}}}}
 JSON
-  touch -t "$(date -r $(( $(file_mtime_epoch "$home/state/$id.status") + 7200 )) +%Y%m%d%H%M.%S)" \
+  touch -t "$(epoch_to_touch $(( $(file_mtime_epoch "$home/state/$id.status") + 7200 )))" \
     "$d1/rollout-future.jsonl"
   touch -m -r "$d1/rollout-match.jsonl" "$home/state/$id.status"
 
@@ -246,9 +250,9 @@ JSON
   # and the session log lands mid-window. Without the meta-mtime start fallback
   # the birthless window collapses to [T, T] and drops the earlier log.
   base=$(file_mtime_epoch "$state/$id.status")
-  touch -t "$(date -r "$base" +%Y%m%d%H%M.%S)" "$state/$id.status"
-  touch -t "$(date -r $((base - 100)) +%Y%m%d%H%M.%S)" "$state/$id.meta"
-  touch -t "$(date -r $((base - 50)) +%Y%m%d%H%M.%S)" "$logdir/session.jsonl"
+  touch -t "$(epoch_to_touch "$base")" "$state/$id.status"
+  touch -t "$(epoch_to_touch $((base - 100)))" "$state/$id.meta"
+  touch -t "$(epoch_to_touch $((base - 50)))" "$logdir/session.jsonl"
 
   fb="$TMP_ROOT/nobirth-fakebin"
   nobirth_stat_bin "$fb"
@@ -373,9 +377,10 @@ report_case() {
 # --- teardown integration: harvest failure never blocks teardown ------------
 
 teardown_case() {
+  local harvest_fails=${1:-yes}
   local proj wt id fb state data config out
-  id=usageharvtd1
-  proj="$TMP_ROOT/td-proj"; wt="$TMP_ROOT/td-wt"
+  id="usageharvtd-$harvest_fails"
+  proj="$TMP_ROOT/td-proj-$harvest_fails"; wt="$TMP_ROOT/td-wt-$harvest_fails"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb="$TMP_ROOT/td-fakebin"
   mkdir -p "$fb"
@@ -388,7 +393,7 @@ SH
 exit 0
 SH
   chmod +x "$fb/tmux" "$fb/treehouse"
-  state="$TMP_ROOT/td-state"; config="$TMP_ROOT/td-config"; data="$TMP_ROOT/td-data"
+  state="$TMP_ROOT/td-state"; config="$TMP_ROOT/td-config"; data="$TMP_ROOT/td-data-$harvest_fails"
   mkdir -p "$state" "$config" "$data/$id"
   printf 'scout findings\n' > "$data/$id/report.md"
   fm_write_meta "$state/$id.meta" \
@@ -397,17 +402,24 @@ SH
     "decisions_reviewed=1" "decision_keys="
   printf 'working: scouting\n' > "$state/$id.status"
   # The ledger path being a directory forces every append to fail.
-  mkdir -p "$data/usage-ledger.jsonl"
+  if [ "$harvest_fails" = yes ]; then
+    mkdir -p "$data/usage-ledger.jsonl"
+  fi
   out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_USAGE_CLAUDE_DIR="$TMP_ROOT/td-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/td-fake-codex" \
     "$TEARDOWN" "$id" 2>&1)
-  expect_code 0 "$?" "teardown must succeed even when the harvest fails"$'\n'"$out"
-  assert_contains "$out" "warning: usage harvest for $id failed" \
-    "teardown warns one line when the harvest fails"
+  expect_code 0 "$?" "teardown must succeed (harvest failure: $harvest_fails)"$'\n'"$out"
+  if [ "$harvest_fails" = yes ]; then
+    assert_contains "$out" "warning: usage harvest for $id failed" \
+      "teardown warns one line when the harvest fails"
+  else
+    jq -e '.turns == 1 and .completed_at != null' "$data/usage-ledger.jsonl" >/dev/null \
+      || fail "teardown lost the task status before harvesting usage"
+  fi
   assert_contains "$out" "teardown $id complete" \
-    "teardown completes after a harvest failure"
-  pass "teardown integration: harvest failure is non-fatal"
+    "teardown reports completion"
+  pass "teardown integration: status preserved and harvest failure non-fatal (failure: $harvest_fails)"
 }
 
 claude_case
@@ -418,4 +430,5 @@ remote_case
 race_case
 lock_bound_case
 report_case
-teardown_case
+teardown_case yes
+teardown_case no

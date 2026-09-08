@@ -940,7 +940,14 @@ fm_lock_steal_acquire() {  # <lockdir>
   local lockdir=$1 steal pid
   steal="$lockdir.steal"
   if fm_lock_try_create "$steal"; then
-    return 0
+    # Missing intermediate links do not imply deeper legacy state is gone.
+    # Keep the fixed mutex held while checking those descendants.
+    if fm_lock_steal_residue_sweep "$steal"; then
+      return 0
+    fi
+    fm_lock_release "$steal"
+    FM_LOCK_OWNER_DIR=
+    return 1
   fi
   pid=$(cat "$steal/pid" 2>/dev/null || true)
   if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
