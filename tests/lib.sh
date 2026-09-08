@@ -67,9 +67,10 @@ pass() {
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT/INT/TERM. A test file that needs extra teardown (e.g. killing a
-# daemon) should define its own EXIT trap and call fm_test_cleanup from inside
-# it so registered dirs are still removed.
+# on EXIT/INT/TERM/HUP/QUIT. A test file that needs extra teardown (e.g. stopping
+# an owned child before its fixture disappears) should route EXIT and those
+# signal traps through that teardown, then call fm_test_cleanup before deleting
+# fixture directories. See tests/fm-test-fixture-cleanup.test.sh.
 #
 # The call site is almost always `TMP_ROOT=$(fm_test_tmproot prefix)`, which
 # forks a subshell to capture stdout. Anything that function does to the
@@ -106,8 +107,9 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
 # survives to poll a target that no longer exists.
 #
 # Reaping is declaration-driven and opt-in: a home is swept only when the suite
-# named it through fm_test_track_procevent_home, and only against the claim root
-# that declaration named. Nothing is discovered, and nothing matches on a script
+# named it through fm_test_track_procevent_home. Pass the claim root used to arm
+# that home's sources; omitting it uses the FM_PROCEVENT_CLAIM_ROOT environment
+# value at cleanup time. Nothing is discovered, and nothing matches on a script
 # or process name, which would reach into another home's live runners.
 # Registration goes through a `$$`-keyed registry file for the same reason the
 # temp roots do - a fixture home is almost always built inside a command
@@ -191,8 +193,8 @@ fm_test_tmproot() {
 # it from fm_test_tmproot keeps one owner for it: it is registered for teardown
 # like every other fixture root, carries the marker identifying this shell, and
 # is reaped as a stale orphan by a later run if this one is killed outright.
-# A value the suite sets, and one a child inherits from its parent test process,
-# is neither created nor removed here.
+# A value already set when this library is sourced, including one inherited
+# from a parent test process, is used without registering its path for removal.
 if [ -z "${FM_PROCEVENT_CLAIM_ROOT:-}" ]; then
   FM_PROCEVENT_CLAIM_ROOT=$(fm_test_tmproot fm-test-procevent-claims) || {
     rm -f "$FM_TEST_CLEANUP_REGISTRY" "$FM_TEST_PROCEVENT_REGISTRY"

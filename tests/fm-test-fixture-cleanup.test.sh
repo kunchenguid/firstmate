@@ -16,9 +16,8 @@
 # by being signalled is exactly the one that used to leave a listener polling a
 # target that no longer existed. Those two arm a real runner in a declared home
 # and assert the process is gone, identified by the unique blocker path the case
-# registered. The third pins the containment default that bounds a home nobody
-# declared: with no claim root of its own, a source's claim has to land in the
-# suite-owned root rather than under the running user's own state directory.
+# registered. The third exercises tests/lib.sh's containment default without a
+# per-home claim-root override; its home is declared for teardown.
 #
 # Nothing here inspects tests/lib.sh's source text; it only observes filesystem
 # and process state around the real helper.
