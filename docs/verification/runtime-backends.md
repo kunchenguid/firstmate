@@ -364,13 +364,15 @@ Whatever persists that acceptance, it is not this key, so nothing in `bin/fm-cla
 
 Refreshing this observation is manual and has no live guard, because reaching the prompt needs a real project whose settings trigger it rather than a scratch repo.
 It needs both arms, because the three rows above show most projects never prompt at all: unless the control arm first shows the prompt on this worktree, an absent prompt on a later control-arm rerun would prove nothing.
-Remove the worktree's entry from `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json` before every control-arm launch, including the reruns below.
+Before every control-arm launch, including the reruns below, kill any live `tp-h1` session AND remove the worktree's entry from `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`.
+The kill is not optional: the treatment arm leaves `tp-h1` alive and answered, and against a live session `tmux new-session -d -s tp-h1` fails as a duplicate while `tmux capture-pane` still succeeds on that stale pane - a rerun that never launched then reads as "the prompt is gone".
 The treatment arm is not a launch of its own - it continues on the control arm's pane, with the entry left exactly as the control arm registered it, so do NOT clear it again before answering.
 
 Control arm - confirm this worktree reaches the prompt at all:
 
 ```sh
-bin/fm-claude-trust.sh <worktree> <project>   # registers hasTrustDialogAccepted only
+tmux kill-session -t tp-h1 2>/dev/null || true   # then remove the worktree's entry from the store
+bin/fm-claude-trust.sh <worktree> <project>      # registers hasTrustDialogAccepted only
 tmux new-session -d -s tp-h1 -c <worktree> \
   "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions 'reply with exactly: BRIEF-REACHED'"
 tmux capture-pane -p -t tp-h1
@@ -395,7 +397,9 @@ walk(JSON.parse(fs.readFileSync("/tmp/claude-store-before.json","utf8")),
 Diff the WHOLE parsed store, not `projects[<worktree>]` alone.
 The two slots the captain answered by hand were already observed holding exactly `{"hasTrustDialogAccepted": true}` afterwards, so that per-project object is known NOT to change: a per-project diff returns nothing because of where it looked, not because the acceptance persists nothing, and reading its empty output as "no candidate keys" is the wrong conclusion.
 The whole-store walk also surfaces ordinary session bookkeeping written by any concurrent Claude session, so quiet the machine first and read the output for a newly appearing trust or permission key rather than for a single line.
-The keys that change there are the candidates; pre-register one, clear the entry, and rerun the control arm to see whether the prompt is gone.
+The keys that change there are the candidates. Test one in this order: clear the entry, run `bin/fm-claude-trust.sh`, THEN write the candidate key into that same entry, and only then rerun the control arm to see whether the prompt is gone.
+Clearing after the candidate is written deletes the key under test - the entry removal drops the whole per-project object, and `bin/fm-claude-trust.sh` rebuilds it with `hasTrustDialogAccepted` alone - so the arm would launch with exactly the shape that already prompts and every candidate would read as ruled out without ever having been carried into a launch.
+The script merges into an existing entry rather than replacing it, so writing the candidate before or after the registration both work; only clearing after it does not.
 If nothing outside that bookkeeping changes, the acceptance is persisted somewhere other than that store, or not persisted at all, and the search moves off this file.
 Rerun this after a Claude Code upgrade rather than trusting the version above.
 
