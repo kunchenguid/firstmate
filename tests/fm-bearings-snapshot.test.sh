@@ -3716,6 +3716,53 @@ test_status_urls_never_become_child_request_links() {
   pass "status URLs neither select nonworking children nor become working-child request links"
 }
 
+test_backlog_reason_urls_never_become_child_request_links() {
+  local home parent fakebin id ledger out
+  home=$(make_home backlog-reason-link-children)
+  make_valid_secondmate_home backlog-reason-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in recorded-child unrecorded-child; do
+    printf -- '- [ ] %s - Held delivery (repo: firstmate) (kind: ship) (hold: dependency https://github.com/acme/repo/pull/99 is still under review) (hold-kind: external) (since 2026-07-01)\n' \
+      "$id" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$home/state" "$id" idle
+    printf 'paused: waiting on the upstream release\n' > "$home/state/$id.status"
+  done
+  printf 'pr=https://github.com/acme/repo/pull/2\n' >> "$home/state/recorded-child.meta"
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "backlog reason link snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.backlog.records | length) == 2
+      and all(.backlog.records[]; .hold_kind == "external" and .pr_url == "https://github.com/acme/repo/pull/99")
+      and ([.tasks[] | select(.id == "recorded-child") | .pr | {url,source}]
+        == [{url:"https://github.com/acme/repo/pull/2",source:"meta"}])
+  ' >/dev/null || fail "the fixture did not expose the conflicting backlog reason URL: $out"
+  out=$(run "$home" "$fakebin" --json) || fail "backlog reason main projection failed"
+  printf '%s' "$out" | jq -e '
+    [.gates[] | {id,owner,pr_url}] == [
+      {id:"recorded-child",owner:"(main)",pr_url:"https://github.com/acme/repo/pull/2"},
+      {id:"unrecorded-child",owner:"(main)",pr_url:null}]
+  ' >/dev/null || fail "a backlog reason URL became a main request link: $out"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "backlog reason link ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    .valid and [.queued[] | {id,pr_url}] == [
+      {id:"recorded-child",pr_url:"https://github.com/acme/repo/pull/2"},
+      {id:"unrecorded-child",pr_url:null}]
+  ' >/dev/null || fail "a backlog reason URL became a child request link: $ledger"
+  parent=$(make_home backlog-reason-link-parent)
+  append_secondmate_registry "$parent" backlog-reason-mate "$home"
+  fm_write_secondmate_meta "$parent/state/backlog-reason-mate.meta" "$home" "firstmate:fm-backlog-reason-mate" firstmate
+  out=$(run "$parent" "$fakebin" --json) || fail "backlog reason parent projection failed"
+  printf '%s' "$out" | jq -e '
+    [.gates[] | {id,owner,pr_url}] == [
+      {id:"recorded-child",owner:"backlog-reason-mate",pr_url:"https://github.com/acme/repo/pull/2"},
+      {id:"unrecorded-child",owner:"backlog-reason-mate",pr_url:null}]
+  ' >/dev/null || fail "a backlog reason URL reached the parent as a request link: $out"
+  pass "backlog reason URLs never replace recorded request links or supply missing links in either home"
+}
+
 test_cached_deliveries_age_before_the_consuming_bound() {
   local home parent fakebin sshbin id out ledger phase now epoch
   home=$(make_home cached-delivery-home)
@@ -3838,6 +3885,7 @@ test_failed_lookup_preserves_unresolved_decisions
 test_delivery_requires_matching_poll_evidence_and_no_open_decision
 test_long_request_links_survive_all_child_projections
 test_status_urls_never_become_child_request_links
+test_backlog_reason_urls_never_become_child_request_links
 test_cached_deliveries_age_before_the_consuming_bound
 test_overdue_deliveries_survive_ledger_and_presentation_bounds
 test_a_secondmate_delivery_reaches_the_parent_as_a_delivered_row

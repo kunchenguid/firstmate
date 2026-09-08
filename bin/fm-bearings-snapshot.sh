@@ -641,7 +641,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.captain_actionable != true)
          | select((.hold_bucket == null) or ($all_decisions == 0))
          | select(($awaiting_ids | index($record.id)) == null)
-         | as_gate("(main)"; (.pr_url // $recorded_pr_by_id[.id] // null)) ]
+         | as_gate("(main)"; ($recorded_pr_by_id[.id] // null)) ]
      + [ (.secondmate_current.records // [])[] as $m
          | select($m.provenance.selected == "structured-home")
          | $m.queued[]?

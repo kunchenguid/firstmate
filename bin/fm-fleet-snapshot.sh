@@ -1098,9 +1098,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           pr_url:(. as $row
-            | ((.pr_url // ([$tasks[] | select(.id == $row.id and .pr.source == "meta")
-                             | .pr.url] | first) // null)
-               )),
+            | ([$tasks[] | select(.id == $row.id and .pr.source == "meta")
+                | .pr.url] | first) // null),
           kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
