@@ -32,15 +32,30 @@ LIB="$ROOT/tests/lib.sh"
 # The interrupted-run case below holds a live child test process while it waits.
 # That child owns an armed listener, so teardown has to stop it BEFORE the
 # fixture roots go: signalled while its own home still exists, it retires the
-# listener through its own traps. Only this exact pid is ever signalled, and it
-# is cleared the moment the case has waited for it, so a pid the OS has since
-# recycled onto an unrelated process can never be reached from here.
+# listener through its own traps.
+#
+# The recorded pid alone does not authorize a signal. A child that dies during
+# its own startup can be reaped before this suite ever waits for it, which frees
+# its pid for the operating system to hand to an unrelated process, and killing
+# a stranger from teardown would be a worse defect than the leak. So the pid is
+# signalled only while the kernel still reports it as a child of THIS shell -
+# ownership of that exact recorded identifier, never a process or script name -
+# and it is dropped as soon as the case has waited for it.
 HELD_LISTENER_CHILD=
+
+held_listener_child_is_ours() {
+  local parent
+  [ -n "$HELD_LISTENER_CHILD" ] || return 1
+  parent=$(ps -o ppid= -p "$HELD_LISTENER_CHILD" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$parent" ] && [ "$parent" = "$$" ]
+}
 
 cleanup() {
   if [ -n "$HELD_LISTENER_CHILD" ]; then
-    kill -TERM "$HELD_LISTENER_CHILD" 2>/dev/null || true
-    wait "$HELD_LISTENER_CHILD" 2>/dev/null || true
+    if held_listener_child_is_ours; then
+      kill -TERM "$HELD_LISTENER_CHILD" 2>/dev/null || true
+      wait "$HELD_LISTENER_CHILD" 2>/dev/null || true
+    fi
     HELD_LISTENER_CHILD=
   fi
   fm_test_cleanup
