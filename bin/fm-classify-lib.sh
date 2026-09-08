@@ -153,8 +153,8 @@ status_is_terminal_verb() {
 # (working, resolved, captain-held) and paused never match from free-text prose;
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
-# Regex matching ignores numeric emission-time tags before the first colon so
-# existing FM_CAPTAIN_RE overrides keep matching; other metadata and note text
+# Regex matching ignores emission-time tags before the first colon, even malformed,
+# so existing FM_CAPTAIN_RE overrides keep matching; other metadata and note text
 # remain intact, as do the stored and surfaced event bytes.
 status_is_captain_relevant() {
   local line=$1 verb
@@ -174,7 +174,7 @@ status_is_captain_relevant() {
   printf '%s' "$line" | awk '{
     colon = index($0, ":")
     head = substr($0, 1, colon)
-    gsub(/ \[at=[0-9]+\]/, "", head)
+    gsub(/ \[at=[^]]*\]/, "", head)
     print head substr($0, colon + 1)
   }' | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
