@@ -413,6 +413,10 @@ cp "$other_home/state/captain-events/pending/"*.json "$pending_dir/"
 pending_before="$home/pending-before"
 mkdir "$pending_before"
 cp "$pending_dir/"*.json "$pending_before/"
+ack_temp="$home/state/captain-events/acks/.magistrate.json.123.11111111111111111111111111111111.tmp"
+printf 'partial acknowledgement\n' > "$ack_temp"
+chmod 0600 "$ack_temp"
+cp "$ack_temp" "$home/ack-temp-before"
 primary_args pi:duplicate-pending-three three
 out=$(FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" 2>&1)
 status=$?
@@ -421,7 +425,66 @@ assert_contains "$out" 'multiple pending events reserve seq 1' "duplicate pendin
 assert_absent "$home/state/captain-events/events.jsonl" "duplicate pending recovery partially advanced the journal"
 diff -r "$pending_before" "$pending_dir" >/dev/null \
   || fail "duplicate pending recovery changed pending record bytes"
-pass "pending recovery is atomic across crashes and invalid pending sets"
+cmp -s "$home/ack-temp-before" "$ack_temp" \
+  || fail "failed pending preflight changed acknowledgement temporary bytes"
+[ -f "$ack_temp" ] && [ ! -L "$ack_temp" ] \
+  || fail "failed pending preflight changed acknowledgement temporary type"
+ack_temp_mode=$(stat -c %a "$ack_temp" 2>/dev/null || stat -f %Lp "$ack_temp")
+ack_temp_links=$(stat -c %h "$ack_temp" 2>/dev/null || stat -f %l "$ack_temp")
+[ "$ack_temp_mode:$ack_temp_links" = "600:1" ] \
+  || fail "failed pending preflight changed acknowledgement temporary security properties"
+
+for unsafe_shape in root-directory pending-symlink root-hardlink pending-mode; do
+  home=$(new_home "unsafe-temp-$unsafe_shape")
+  enable_home "$home"
+  primary_args "pi:unsafe-temp-$unsafe_shape" pending
+  FM_CAPTAIN_EVENT_TEST_CRASH=after-pending FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null 2>&1
+  status=$?
+  expect_code 97 "$status" "$unsafe_shape pending crash injection"
+  root="$home/state/captain-events"
+  pending_dir="$root/pending"
+  pending_record=$(find "$pending_dir" -mindepth 1 -maxdepth 1 -type f ! -name '.*' -print -quit)
+  cp "$pending_record" "$home/pending-record-before"
+  case "$unsafe_shape" in
+    root-*) unsafe_temp="$root/.events.jsonl.123.22222222222222222222222222222222.tmp" ;;
+    pending-*) unsafe_temp="$pending_dir/.3333333333333333333333333333333333333333333333333333333333333333.json.123.22222222222222222222222222222222.tmp" ;;
+  esac
+  case "$unsafe_shape" in
+    root-directory) mkdir "$unsafe_temp" ;;
+    pending-symlink)
+      printf 'target\n' > "$home/temp-target"
+      ln -s "$home/temp-target" "$unsafe_temp"
+      ;;
+    root-hardlink)
+      printf 'linked\n' > "$home/temp-hardlink-source"
+      chmod 0600 "$home/temp-hardlink-source"
+      ln "$home/temp-hardlink-source" "$unsafe_temp"
+      ;;
+    pending-mode)
+      printf 'unsafe mode\n' > "$unsafe_temp"
+      chmod 0644 "$unsafe_temp"
+      ;;
+  esac
+  primary_args "pi:unsafe-temp-$unsafe_shape-retry" retry
+  FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null 2>&1 \
+    && fail "$unsafe_shape cleanup candidate was accepted"
+  assert_absent "$root/events.jsonl" "$unsafe_shape preflight partially advanced the journal"
+  cmp -s "$home/pending-record-before" "$pending_record" \
+    || fail "$unsafe_shape preflight changed pending record bytes"
+  case "$unsafe_shape" in
+    root-directory) [ -d "$unsafe_temp" ] || fail "$unsafe_shape candidate type changed" ;;
+    pending-symlink) [ -L "$unsafe_temp" ] || fail "$unsafe_shape candidate type changed" ;;
+    root-hardlink)
+      [ "$(stat -c %h "$unsafe_temp" 2>/dev/null || stat -f %l "$unsafe_temp")" = 2 ] \
+        || fail "$unsafe_shape candidate link count changed"
+      ;;
+    pending-mode)
+      [ "$(stat -c %a "$unsafe_temp" 2>/dev/null || stat -f %Lp "$unsafe_temp")" = 644 ] \
+        || fail "$unsafe_shape candidate mode changed"
+      ;;
+  esac
+done
+pass "pending recovery preflights every durable cleanup before mutation"
 
 # Each corruption shape blocks validation, reads, and appends without salvage.
 make_corrupt_case() {

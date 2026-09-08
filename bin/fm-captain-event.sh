@@ -551,12 +551,14 @@ def pending_files(root, pending):
     for path in root.iterdir():
         if path.name in {"events.jsonl", ".lock", "pending", "acks"}:
             continue
-        if path.name.startswith(".events.jsonl.") and path.name.endswith(".tmp"):
+        if re.fullmatch(r"\.events\.jsonl\.[1-9][0-9]*\.[0-9a-f]{32}\.tmp", path.name):
+            lstat_regular(path, f"journal temporary {path.name}", 0o600)
             unexpected.append(path)
         else:
             raise OutboxError(f"unexpected private outbox entry '{path.name}'")
     for path in pending.iterdir():
-        if path.name.startswith(".") and path.name.endswith(".tmp"):
+        if re.fullmatch(r"\.[0-9a-f]{64}\.json\.[1-9][0-9]*\.[0-9a-f]{32}\.tmp", path.name):
+            lstat_regular(path, f"pending temporary {path.name}", 0o600)
             unexpected.append(path)
             continue
         if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
@@ -586,7 +588,7 @@ def remove_durable(path):
     fsync_directory(path.parent)
 
 
-def recover_pending(root, pending, journal, rows):
+def recover_pending(root, pending, journal, rows, extra_temporary=()):
     files, temporary = pending_files(root, pending)
     events = [load_pending(path) for path in files]
     events.sort(key=lambda row: (row["seq"], row["event_id"]))
@@ -616,6 +618,8 @@ def recover_pending(root, pending, journal, rows):
     for path in removals:
         remove_durable(path)
     for path in temporary:
+        remove_durable(path)
+    for path in extra_temporary:
         remove_durable(path)
     return simulated_rows
 
@@ -650,19 +654,19 @@ def load_ack(path):
     return record
 
 
-def load_acks(acks, cleanup_temporary=False):
+def load_acks(acks):
     records = {}
+    temporary = []
     for path in acks.iterdir():
-        if path.name.startswith(".") and path.name.endswith(".tmp"):
-            if cleanup_temporary:
-                path.unlink()
-                continue
-            raise OutboxError("captain-event acknowledgement recovery is required before a non-destructive read")
+        if re.fullmatch(r"\.[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.json\.[1-9][0-9]*\.[0-9a-f]{32}\.tmp", path.name):
+            lstat_regular(path, f"acknowledgement temporary {path.name}", 0o600)
+            temporary.append(path)
+            continue
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.json", path.name):
             raise OutboxError(f"unexpected acknowledgement entry '{path.name}'")
         record = load_ack(path)
         records[record["consumer"]] = record
-    return records
+    return records, temporary
 
 
 def open_lock(lock_path, exclusive):
@@ -790,16 +794,18 @@ def main(argv):
         lock_fd = open_lock(lock_path, exclusive)
         try:
             rows = load_journal(journal)
-            acknowledgements = load_acks(acks, args.command in {"append", "recover", "ack"})
+            acknowledgements, acknowledgement_temporary = load_acks(acks)
             for acknowledgement in acknowledgements.values():
                 through = acknowledgement["through"]
                 if through > len(rows) or rows[through - 1]["event_id"] != acknowledgement["event_id"]:
                     raise OutboxError(f"consumer acknowledgement '{acknowledgement['consumer']}' is ahead of or conflicts with the journal")
             files, temporary = pending_files(root, pending)
+            if args.command in {"read", "validate"} and acknowledgement_temporary:
+                raise OutboxError("captain-event acknowledgement recovery is required before a non-destructive read")
             if args.command in {"read", "validate", "ack"} and (files or temporary):
                 raise OutboxError("captain-event publication recovery is required before this operation")
             if args.command in {"append", "recover"}:
-                rows = recover_pending(root, pending, journal, rows)
+                rows = recover_pending(root, pending, journal, rows, acknowledgement_temporary)
             if args.command == "recover":
                 print(len(rows))
                 return 0
@@ -830,6 +836,8 @@ def main(argv):
                 if previous and through == previous["through"]:
                     if args.event_id != previous["event_id"]:
                         raise OutboxError("consumer acknowledgement conflicts at its current sequence")
+                    for path in acknowledgement_temporary:
+                        remove_durable(path)
                     print(through)
                     return 0
                 record = {
@@ -840,6 +848,8 @@ def main(argv):
                     "acknowledged_at_ms": int(time.time() * 1000),
                 }
                 atomic_write(acks / f"{args.consumer}.json", (canonical_json(record) + "\n").encode("utf-8"))
+                for path in acknowledgement_temporary:
+                    remove_durable(path)
                 print(through)
                 return 0
 
