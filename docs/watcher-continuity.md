@@ -32,7 +32,8 @@ If the unready arm does not retire within that bound, the adapter keeps ownershi
 When that retained arm later closes, its actual close is classified as a new supervised event without replaying the earlier fallback.
 After the configured retry bound is exhausted, it delivers the original wake with a typed continuity-restoration failure even if every successor arm hung without reporting readiness.
 This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
-Main holds at most one unconsumed host follow-up at a time.
+
+Pi main holds at most one unconsumed host follow-up at a time.
 A later actionable close, a typed restoration failure included, rides that host instead of queueing another follow-up: it counts as delivered with the host, and when Pi finalizes the host's user message (`message_end`) the extension rewrites that one message in place to list the original reason plus every rider, which is where a rider is consumed.
 A rider whose host was consumed but never rewritten therefore still rides the replacement handoff, exactly as an unconsumed host does.
 A host Pi settles without consuming and with nothing left queued (`agent_settled`, the queue cleared by an abort) is dropped by Pi; the extension carries its reasons into the next host rather than re-sending on its own, so an abort never starts a turn by itself and no reason vanishes.

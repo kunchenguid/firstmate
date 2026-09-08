@@ -17,21 +17,15 @@
 // queued while main is streaming joins the running run without ever raising
 // before_agent_start, so waiting on that event stalls every later close.
 // Consumption is tracked only so a replacement can replay a follow-up Pi had
-// not consumed. An idle main consumes at before_agent_start; a streaming main
-// consumes at the user message_start carrying the exact wake text; either
-// event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// not consumed. An idle main consumes the host at before_agent_start; a
+// streaming main consumes it at the user message_start carrying the exact wake
+// text. Either event finishes the host pending record; message_end also covers
+// a host whose start was not observed. Riders wait for the rewrite below.
 //
-// Coalescing (stated once here):
-// Main holds at most one unconsumed host follow-up at a time. A later close
-// that would queue another follow-up instead rides that host as a rider: it is
-// delivered with it, and when Pi emits the host's user message_end the
-// extension rewrites that one message in place to list every rider. A rider is
-// consumed at that rewrite, so an unrewritten rider still rides the
-// replacement handoff. A host Pi settles without consuming and with nothing
-// queued was dropped (queue cleared); its reasons carry into the next host
-// instead of vanishing, and nothing is re-sent on its own. Carried reasons and
-// hostless wakes survive in-process replacement in memory only.
+// Coalescing contract: docs/watcher-continuity.md#actionable-wake-ordering.
+// Riders must remain pending until the message_end rewrite exposes them.
+// Carried reasons and hostless wakes survive in-process replacement in memory
+// only; keep them on the shared coordinator, not the session generation.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
