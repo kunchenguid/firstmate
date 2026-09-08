@@ -1180,24 +1180,9 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
-# The same bound, for delivered work whose merge poll is armed. A ship task that
-# has pushed its pull request is finished and correctly waiting on a merge nobody
-# here controls, and AGENTS.md section 7 requires it to keep waiting rather than be
-# cleaned up. Its agent is done but its pane keeps repainting - a clock, a token
-# counter, a configured status line - and every new hash re-reported the same
-# delivery, so the one state the lifecycle prescribes had no quiet form and trained
-# the supervisor to acknowledge deliveries by reflex.
-#
-# What makes the repetition pointless is that the delivery already has a durable
-# owner for its next event: the armed merge poll wakes firstmate when the pull
-# request lands. So bind this to the same long re-surface cadence an open captain
-# call uses instead of silencing it. Scope: only a `done:` verb, and only while the
-# poll artifacts the watcher actually runs are both present, so a blocker, a
-# failure, and an open decision alarm on every new hash exactly as before, and so
-# does a delivery with no poll to report its merge. The declaration carries the
-# pull request AND the status-log signature, so a re-arm against a different pull
-# request or any new status line re-alarms at once, and the cadence itself still
-# re-alarms a delivery whose merge never arrives.
+# docs/architecture.md owns the delivered-work stale-reminder bound.
+# Authenticate around the bounded health lookup: file presence and a silent
+# static poll are not evidence that the forge can actually report the next event.
 merge_poll_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2 url
   # An open captain call already owns this sighting's cadence.
