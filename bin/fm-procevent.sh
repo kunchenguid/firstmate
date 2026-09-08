@@ -792,7 +792,7 @@ cmd_start() {
   # it is outside this confused-agent-grade boundary.
   export FM_PROCEVENT_IN_RUNNER=1
   start_owner_guard "$id" || die "cannot bind the runner to its owning session: $id"
-  local launch_floor runner inbox reservation_dir staging
+  local launch_floor runner inbox reservation_dir staging launch_ready launch_reply launch_pid
   launch_floor=$(fm_procevent_launch_floor_seconds) \
     || die "FM_PROCEVENT_LAUNCH_FLOOR_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_FLOOR_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_FLOOR_MAX_SECONDS"
   if [ "$extension_owner" -eq 1 ]; then
@@ -843,12 +843,33 @@ cmd_start() {
   esac
   exec 7<&-
   if [ "$extension_owner" -eq 1 ]; then
-    capture_state=$(perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \
+    launch_ready=".$id.$CLAIM_TOKEN.launch-ready"
+    launch_reply="$REG/.$id.$CLAIM_TOKEN.launch-reply"
+    (umask 077; : > "$REG/$launch_ready" && : > "$launch_reply") || {
+      rm -f -- "$REG/$launch_ready" "$launch_reply"
+      fm_procevent_source_lock_release "$id"
+      die "cannot prepare the source launch boundary: $id"
+    }
+    perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \
       9 8 6 "$id" "$adapter" "$FM_PROCEVENT_EXTENSION_ID" \
       "$FM_PROCEVENT_EXTENSION_VERSION" "$FM_PROCEVENT_EXTENSION_CAPABILITY_VERSION" \
       "$FM_PROCEVENT_EXTENSION_PACKAGE_DIGEST" "$FM_PROCEVENT_EXTENSION_BINDING_DIGEST" \
-      "$CLAIM_TOKEN" "$runner" "$out" "$$" "$(fm_pid_identity "$$")" "$MAX_OUTPUT_BYTES" -- "${ARGV[@]}") \
-      || die "cannot safely stage the extension result"
+      "$CLAIM_TOKEN" "$runner" "$out" "$$" "$(fm_pid_identity "$$")" "$MAX_OUTPUT_BYTES" \
+      "$launch_ready" -- "${ARGV[@]}" > "$launch_reply" &
+    launch_pid=$!
+    while [ ! -s "$REG/$launch_ready" ] && kill -0 "$launch_pid" 2>/dev/null; do sleep 0.01; done
+    fm_procevent_source_lock_release "$id" \
+      || die "cannot release the source launch boundary: $id"
+    wait "$launch_pid" || {
+      rm -f -- "$REG/$launch_ready" "$launch_reply"
+      die "cannot safely stage the extension result"
+    }
+    [ -s "$REG/$launch_ready" ] || {
+      rm -f -- "$REG/$launch_ready" "$launch_reply"
+      die "cannot establish the source launch boundary: $id"
+    }
+    IFS= read -r capture_state < "$launch_reply" || capture_state=
+    rm -f -- "$REG/$launch_ready" "$launch_reply"
     IFS=$'\t' read -r capture_state durable rc truncated reservation_terminal reservation_silent <<EOF
 $capture_state
 EOF
@@ -863,10 +884,38 @@ EOF
       FM_PROCEVENT_CAPTURE_RESERVATION_SILENT=$reservation_silent
     fi
   else
-    [ ! -e "$out" ] && [ ! -L "$out" ] || die "cannot safely stage output"
-    (umask 077; : > "$out") || die "cannot stage output"
+    [ ! -e "$out" ] && [ ! -L "$out" ] || {
+      fm_procevent_source_lock_release "$id"
+      die "cannot safely stage output"
+    }
+    (umask 077; : > "$out") || {
+      fm_procevent_source_lock_release "$id"
+      die "cannot stage output"
+    }
     STAGED_OUTPUT=$out
-    "${ARGV[@]}" 2>/dev/null | perl -e '
+    launch_ready="$REG/.$id.$CLAIM_TOKEN.launch-pipe"
+    mkfifo -m 600 "$launch_ready" || {
+      fm_procevent_source_lock_release "$id"
+      die "cannot prepare the source launch boundary: $id"
+    }
+    exec 5<> "$launch_ready" || {
+      rm -f -- "$launch_ready"
+      fm_procevent_source_lock_release "$id"
+      die "cannot retain the source launch boundary: $id"
+    }
+    exec 4< "$launch_ready" || {
+      exec 5>&-
+      rm -f -- "$launch_ready"
+      fm_procevent_source_lock_release "$id"
+      die "cannot retain the source output boundary: $id"
+    }
+    "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
+    launch_pid=$!
+    exec 5>&-
+    rm -f -- "$launch_ready"
+    fm_procevent_source_lock_release "$id" \
+      || die "cannot release the source launch boundary: $id"
+    perl -e '
       use strict;
       use warnings;
       my $limit = shift;
@@ -889,10 +938,11 @@ EOF
         $truncated = 1 if $take < $count;
       }
       exit($truncated ? 3 : 0);
-    ' "$MAX_OUTPUT_BYTES" > "$out"
-    local pipe_status=("${PIPESTATUS[@]}")
-    rc=${pipe_status[0]}
-    bound_rc=${pipe_status[1]}
+    ' "$MAX_OUTPUT_BYTES" <&4 > "$out"
+    bound_rc=$?
+    exec 4<&-
+    wait "$launch_pid"
+    rc=$?
     case "$bound_rc" in
       0) ;;
       3) truncated=1 ;;

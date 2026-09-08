@@ -285,8 +285,11 @@ fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-ide
       rename $tmp, $path or exit 1;
     ' "$stamp" || status=1
   fi
-  fm_procevent_source_lock_release "$id" || status=1
-  return "$status"
+  if [ "$status" -ne 0 ]; then
+    fm_procevent_source_lock_release "$id" || :
+    return "$status"
+  fi
+  return 0
 }
 
 # True while the owning session is provably still there.
