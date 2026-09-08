@@ -300,8 +300,95 @@ That warning rendered in the same shape as the trust dialog, with the selection 
 That gate is not a production blocker, because a normal environment has already accepted it and the treatment arm above ran against the real config and saw neither dialog.
 This change does not address that warning and does not claim to.
 
-`bin/fm-spawn.sh` therefore pre-registers the task worktree through `bin/fm-claude-trust.sh` before launch, and `tests/fm-claude-trust.test.sh` pins both halves of the scope contract: a fresh worktree is trusted, and an out-of-scope path is refused.
+`bin/fm-spawn.sh` therefore pre-registers the task worktree through `bin/fm-claude-trust.sh` before launch, and `tests/fm-claude-trust.test.sh` pins what that registration writes and what it refuses: a fresh worktree is recorded with `hasTrustDialogAccepted`, and an out-of-scope path is refused.
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
+
+### A second prompt in projects with hooks or allow rules
+
+Observed 2026-09-07 on Claude Code 2.1.263, in production rather than in a built arm.
+`bin/fm-spawn.sh` launched workers into fresh treehouse worktrees with `hasTrustDialogAccepted` already pre-registered for each path, and the workspace-trust dialog above did not appear.
+Two workers in project A then wedged on a SECOND prompt the registration did not cover.
+The three projects below are the operator's own and are labelled by their settings shape rather than named; the operator's records hold the mapping.
+The prompt, with its pre-approved commands redacted:
+
+```text
+Quick safety check: Is this a project you created or one you trust? ...
+This folder pre-approves 2 tool permissions in .claude/settings.json:
+Bash(ssh root@<internal-host>:*) and Bash(ssh -o BatchMode=yes ...)
+These will apply without asking. Only proceed if you trust this configuration.
+> No, continue without these permissions
+  Yes, I trust this folder
+Enter to confirm . Esc to cancel
+```
+
+Its cursor sits on `No, continue without these permissions`, and firstmate's key plane cannot move the selection - the same reason the first dialog cannot be answered.
+Unlike the first dialog, whose Enter selects `No, exit` and kills the worker, a sent Enter here would by its own label leave a live worker running without the folder's pre-approved commands; that outcome is untested, no arm sent that key, and whether such a degraded worker is an acceptable unwedge is an open decision the captain owns.
+Both workers stayed there until the captain answered them by hand in the panes.
+
+What configuration reaches that prompt is UNESTABLISHED, and the same day's other spawns are why.
+With only `hasTrustDialogAccepted` registered:
+
+| project | tracked `.claude/settings.json` | second prompt |
+| --- | --- | --- |
+| A | `PreToolUse` hooks AND 2 `permissions.allow` entries | YES |
+| B | 8 `permissions.allow` entries, no hooks | no |
+| C | one `SessionStart` hook, no `permissions.allow` | no |
+
+That column is scoped to the repo's TRACKED `.claude/settings.json` only.
+Every arm also carried hooks Firstmate itself injects: `bin/fm-spawn.sh` writes a `.claude/settings.local.json` with `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` entries into every claude worktree before launch, so no arm was hooks-free as Claude reads the folder.
+At the file level B was therefore a hooks-and-allow worktree that did NOT prompt, which rules out "hooks plus allow rules anywhere in the folder" as the trigger on its own.
+No arm isolated a `PreToolUse` hook without allow rules: A is the only project carrying one, C's single tracked hook is `SessionStart`, and the injected hooks are `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd`.
+So "a `PreToolUse` hook alone reaches the prompt" was never tested and remains open.
+
+What is known: the prompt exists on 2.1.263, it appears despite a pre-registered `hasTrustDialogAccepted`, and it named the two `permissions.allow` entries from A's tracked `settings.json`.
+What is not known: which property of that project reaches it. Only A prompted, B and C did not, and one observation of each is too thin to separate tracked-versus-local settings, the hook class, the specific rules involved, or something else about the project entirely.
+
+`hasTrustDialogHooksAccepted` was the obvious candidate for the key that pre-registers this acceptance, and it is RULED OUT.
+Read-only inspection of the operator's `~/.claude.json` on 2026-09-08 (71 project entries; `hasTrustDialogAccepted: true` in 37):
+
+```sh
+node -e 'const p=JSON.parse(require("node:fs").readFileSync(process.env.HOME+"/.claude.json","utf8")).projects;
+const c={};for(const v of Object.values(p))if("hasTrustDialogHooksAccepted" in v)c[v.hasTrustDialogHooksAccepted]=(c[v.hasTrustDialogHooksAccepted]||0)+1;
+console.log(c);'
+grep -c 'hasTrustDialogHooksAccepted"[[:space:]]*:[[:space:]]*true' ~/.claude.json
+```
+
+```text
+{ false: 7 }
+0
+```
+
+The key occurs in 7 entries, is `false` in every one, and never appears as `true` anywhere in the file at any depth.
+The two project-A worktree slots where the captain answered "Yes, I trust this folder" by hand hold exactly `{"hasTrustDialogAccepted": true}` - accepting the second prompt wrote no hooks key at all.
+Whatever persists that acceptance, it is not this key, so nothing in `bin/fm-claude-trust.sh` pre-registers the second prompt and a worker that meets it still wedges.
+
+Refreshing this observation is manual and has no live guard, because reaching the prompt needs a real project whose settings trigger it rather than a scratch repo.
+It needs both arms, because the three rows above show most projects never prompt at all: an absent prompt in the treatment arm alone would prove nothing.
+Remove the worktree's entry from `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json` before each arm.
+
+Control arm - confirm this worktree reaches the prompt at all:
+
+```sh
+bin/fm-claude-trust.sh <worktree> <project>   # registers hasTrustDialogAccepted only
+tmux new-session -d -s tp-h1 -c <worktree> \
+  "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions 'reply with exactly: BRIEF-REACHED'"
+tmux capture-pane -p -t tp-h1
+```
+
+The arm is only usable if that pane shows the Quick safety check; if it does not, the project does not reproduce and no candidate can be tested on it.
+
+Treatment arm - answer the prompt by hand in that pane, then diff the store to see what the acceptance actually wrote:
+
+```sh
+cp ~/.claude.json /tmp/claude-store-before.json   # before answering
+node -e 'const a=JSON.parse(require("node:fs").readFileSync("/tmp/claude-store-before.json","utf8")).projects[process.argv[1]]||{},
+b=JSON.parse(require("node:fs").readFileSync(process.env.HOME+"/.claude.json","utf8")).projects[process.argv[1]]||{};
+for(const k of new Set([...Object.keys(a),...Object.keys(b)]))if(JSON.stringify(a[k])!==JSON.stringify(b[k]))console.log(k,JSON.stringify(a[k]),"->",JSON.stringify(b[k]));' <worktree>
+```
+
+The keys that change there are the candidates; pre-register one, clear the entry, and rerun the control arm to see whether the prompt is gone.
+Rerun this after a Claude Code upgrade rather than trusting the version above.
+
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
 ## Composer classification matrix

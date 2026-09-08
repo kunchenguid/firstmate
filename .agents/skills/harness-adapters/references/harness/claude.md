@@ -20,9 +20,18 @@ Claude gates a folder it has never seen behind an interactive workspace-trust di
 A ship or scout spawn therefore pre-registers the worktree before launch, and the dialog does not appear.
 `../../../bin/fm-claude-trust.sh` records `hasTrustDialogAccepted` for that worktree path in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`, and `../../../bin/fm-spawn.sh` refuses the spawn when the write fails rather than launching a worker that would wedge.
 
+That covers the first dialog only.
+A project whose `.claude/settings.json` carries `permissions.allow` rules can have a second prompt behind it: a "Quick safety check" listing the pre-approved permissions, with the cursor on `No, continue without these permissions`.
+It was observed on 2026-09-07 on Claude Code 2.1.263, after the trust dialog had been pre-registered, and it wedged two workers until a human answered it in the pane.
+Nothing pre-registers that prompt today, and `hasTrustDialogHooksAccepted` is not the key that would: it appears in the measured store only as `false`, and the slots a human accepted carry only `hasTrustDialogAccepted`.
+`../../../docs/verification/runtime-backends.md` under "Claude workspace trust" owns that observation, what it rules out, and the reproduction.
+
 Never try to answer the trust dialog with a key.
 Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so it cannot move a dialog's selection at all, and the observed rendering starts on `No, exit`, which means a sent Enter ends the session instead of accepting.
-A visible trust dialog means pre-registration did not take effect, so inspect the store and the spawn's error output rather than sending keys.
+Both prompts open with the same "Quick safety check" line, so read the next line and the options to tell them apart: the trust dialog says Claude will be able to read, edit, and execute files here and offers `No, exit`, while the second prompt says the folder pre-approves N tool permissions in `.claude/settings.json` and offers `No, continue without these permissions`.
+A visible TRUST DIALOG means pre-registration did not take effect, so inspect the store and the spawn's error output rather than sending keys; the second prompt is not pre-registered at all, so it appears even when the store is correct and the spawn reported success.
+The consequence of a sent Enter differs between the two prompts: on the trust dialog it selects `No, exit` and kills the worker, while on the second prompt it would select `No, continue without these permissions`, which by its own label leaves a live worker running without the folder's pre-approved commands.
+That second outcome is untested, and whether a worker degraded that way is an acceptable unwedge is an open decision the captain owns, so firstmate sends no key to either prompt until he rules.
 
 The once-per-machine bypass-permissions confirmation is a separate dialog, scoped to the machine rather than the path, and pre-registration does not address it.
 Never send Enter to that one either: it was observed rendering in the same shape as the trust dialog, with the selection on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so Enter ends the session rather than accepting.
