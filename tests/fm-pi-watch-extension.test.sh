@@ -1845,7 +1845,23 @@ async function closeCycle(n) {
   await waitFor(() => handledCount() >= expectedHandled, `cycle ${n} handling was not confirmed`);
 }
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const coordinatorPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+const legacyCoordinator = {
+  receiver: () => {},
+  pending: [],
+  nextTokenId: 37,
+  deliveries: new Map(),
+};
+const legacyReceiver = legacyCoordinator.receiver;
+const legacyPending = legacyCoordinator.pending;
+const legacyDeliveries = legacyCoordinator.deliveries;
+globalThis.__firstmatePiWatchReplacements = new Map([[coordinatorPath, legacyCoordinator]]);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+if (globalThis.__firstmatePiWatchReplacements.get(coordinatorPath) !== legacyCoordinator ||
+    legacyCoordinator.receiver !== legacyReceiver || legacyCoordinator.pending !== legacyPending ||
+    legacyCoordinator.deliveries !== legacyDeliveries || legacyCoordinator.nextTokenId !== 37) {
+  throw new Error("reload replaced existing coordinator state");
+}
 mod.default(pi);
 await tool.execute("tool-call-coalesce", {}, undefined, undefined, {});
 await waitFor(() => rows().length >= 1, "first arm did not start");
@@ -1887,6 +1903,9 @@ once(prompts[2], "signal: synthetic close 1");
 once(prompts[2], "signal: synthetic close 2");
 const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
 const handoff = readFileSync(handoffPath, "utf8");
+if (!JSON.parse(handoff).pending[0].token.endsWith("-40")) {
+  throw new Error(`reload lost the existing token sequence: ${handoff}`);
+}
 writeFileSync(handoffPath, "malformed");
 await fire("agent_settled", {}, { hasPendingMessages: () => false });
 await new Promise((resolve) => setTimeout(resolve, 100));
