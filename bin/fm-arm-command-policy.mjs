@@ -926,20 +926,10 @@ function staticControlCondition(position, keyword) {
   const prefixes = position.words.slice(0, position.index).map((word) => word.value);
   if (prefixes[0] !== keyword || prefixes.slice(1).some((value) => value !== "!")) return null;
   if (position.words.length !== position.index + 1) return null;
-  const name = basename(position.command?.value || "");
+  const name = position.command?.value || "";
   if (![":", "true", "false"].includes(name)) return null;
   const succeeded = name !== "false";
   return prefixes.length % 2 === 0 ? !succeeded : succeeded;
-}
-
-function controlFlowReachable(conditionals, loops, cases) {
-  const conditionalsReachable = conditionals.every((binding) => {
-    if (binding.condition === null) return true;
-    return binding.hasElse ? binding.condition === false : binding.condition === true;
-  });
-  const loopsReachable = loops.every((binding) => binding.zeroIterations !== true);
-  const casesReachable = cases.every((binding) => binding.branchReachable !== false);
-  return conditionalsReachable && loopsReachable && casesReachable;
 }
 
 function staticCasePatternMatches(selector, pattern) {
@@ -1000,8 +990,6 @@ function analyzeProgram(command, context, depth = 0) {
       branch.branchCount += 1;
       branch.reachableContext = mergeReachableContexts(activeContext, branch.reachableContext, depth);
       activeContext = branch.entryContext;
-      const patternValue = resolveKnownWord(position.words[0], activeContext.knownVariables);
-      branch.branchReachable = staticCasePatternMatches(branch.selectorValue, patternValue);
     }
     if (firstName === "else" && conditionalBindings.length > 0) {
       const branch = conditionalBindings.at(-1);
@@ -1017,11 +1005,8 @@ function analyzeProgram(command, context, depth = 0) {
     if (openLoop?.kind === "conditional" && !openLoop.bodyStarted && firstName !== "do") {
       openLoop.zeroIterations = null;
     }
-    if (precedingSeparator === "|" && caseBindings.length > 0) caseBindings.at(-1).branchReachable = null;
     if (firstName === "then" && conditionalBindings.length > 0) conditionalBindings.at(-1).bodyStarted = true;
     if (firstName === "do" && loopBindings.length > 0) loopBindings.at(-1).bodyStarted = true;
-    const nodeReachable = controlFlowReachable(conditionalBindings, loopBindings, caseBindings);
-    const pipelineDriveBeforeNode = pipelineDrive;
     if (firstName === "if") {
       conditionalBindings.push({
         entryContext: activeContext,
@@ -1040,8 +1025,6 @@ function analyzeProgram(command, context, depth = 0) {
         reachableContext: activeContext,
         firstBranchContext: null,
         branchCount: 0,
-        selectorValue,
-        branchReachable: firstPatternMatches,
         firstPatternMatches,
       });
     }
@@ -1152,7 +1135,6 @@ function analyzeProgram(command, context, depth = 0) {
     }
     pgrepWatcher ||= nodePgrepWatcher;
     nestedProtected ||= nodeNestedProtected;
-    if (!nodeReachable) pipelineDrive = pipelineDriveBeforeNode;
     const loopBinding = forLoopBinding(position, nodeContext, depth);
     if (loopBinding) {
       loopBindings.push({ ...loopBinding, kind: "for", entryContext: activeContext });

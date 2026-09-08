@@ -408,6 +408,10 @@ EOF
     'if false; true; then no-mistakes axi respond --action fix; fi' \
     'if false; then :; elif true; then no-mistakes axi respond --action fix; fi' \
     'case x in y|x) no-mistakes axi respond --action fix;; esac' \
+    'if false; then no-mistakes axi respond --action fix; fi' \
+    'while false; do no-mistakes axi respond --action fix; done' \
+    'case no in yes) no-mistakes axi respond --action fix;; esac' \
+    'if ./false; then no-mistakes axi respond --action fix; fi' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
@@ -455,6 +459,10 @@ EOF
     'if false; true; then no-mistakes axi respond --action fix; fi' \
     'if false; then :; elif true; then no-mistakes axi respond --action fix; fi' \
     'case x in y|x) no-mistakes axi respond --action fix;; esac' \
+    'if false; then no-mistakes axi respond --action fix; fi' \
+    'while false; do no-mistakes axi respond --action fix; done' \
+    'case no in yes) no-mistakes axi respond --action fix;; esac' \
+    'if ./false; then no-mistakes axi respond --action fix; fi' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
@@ -493,12 +501,6 @@ EOF
     || fail "the primary must retain nested read-only pipeline status"
   FM_HOME="$primary" "$check" --command 'ACTION=$(printf status); no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
     || fail "the primary must retain dynamically selected read-only pipeline status"
-  FM_HOME="$primary" "$check" --command 'if false; then no-mistakes axi respond --action fix; fi' >/dev/null 2>&1 \
-    || fail "an unreachable conditional pipeline drive must remain allowed"
-  FM_HOME="$primary" "$check" --command 'while false; do no-mistakes axi respond --action fix; done' >/dev/null 2>&1 \
-    || fail "an unreachable while-loop pipeline drive must remain allowed"
-  FM_HOME="$primary" "$check" --command 'case no in yes) no-mistakes axi respond --action fix;; esac' >/dev/null 2>&1 \
-    || fail "an unreachable case pipeline drive must remain allowed"
   FM_HOME="$primary" "$check" --command 'ACTION=respond; case yes in yes) ACTION=status;; esac; no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
     || fail "a matching case branch must preserve its read-only action"
   FM_HOME="$primary" "$check" --command 'ACTION=status; false && ACTION=respond; no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
