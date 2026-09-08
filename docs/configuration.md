@@ -227,11 +227,14 @@ There is no shared learnings file by captain decision.
 
 ## Scout report index (data/report-index.md)
 
-`data/report-index.md` is a privacy-safe catalog of the home's scout reports so a new session can discover which reports exist and what each concludes without injecting any report body into context; `bin/fm-report-index.sh` is its single schema owner.
-Each entry is one line recording only the report id, date, project, title, a short summary, and the `data/<id>/report.md` path - never report bodies, and never a second LLM: extraction is deterministic `grep`/`awk` over each report's bounded head plus the `data/<id>/brief.md` worktree line for the project. The published index is ordered by date then id so the bounded digest tail surfaces the most recent reports.
-`bin/fm-teardown.sh` rebuilds the index after a scout's report is finalized, so a fresh home with pre-existing reports resyncs with one `bin/fm-report-index.sh rebuild`; the session-start digest never rebuilds, it only prints a bounded tail of the prebuilt file in the fleet-state section, and rejects a symlinked or non-schema-header index as ABSENT so a body path can never be streamed.
-A report that is titleless, unreadable, or oversized is skipped to `data/report-index.skipped` as `id | reason` rather than failing the rebuild, so one bad report never blocks the rest. A completed scout recorded in `data/done-archive.md` or `data/backlog.md` (marked `(kind: scout)`) whose `data/<id>/report.md` is absent is flagged `id | missing`, so a deleted report is not silently invisible; that backlog parse is best-effort and never fails the rebuild.
-Override the oversized cap with `FM_REPORT_INDEX_MAX_BYTES` (default 1048576) and the manual `show --tail N` bound with `FM_REPORT_INDEX_TAIL` (default 8).
+`data/report-index.md` is a privacy-safe catalog that lets a new session discover scout reports without injecting any report body into context.
+[`bin/fm-report-index.sh`](../bin/fm-report-index.sh) owns the index and skip-diagnostic schemas, field extraction, locking, and exact command behavior.
+Its deterministic bounded-head extraction uses no second LLM, and it orders entries by date then id so the bounded digest tail surfaces the most recent reports.
+Every successful scout teardown requests a best-effort, non-waiting refresh, including a forced teardown with no report; a non-scout teardown also refreshes when that task produced a report.
+A contended or failed teardown refresh never blocks task cleanup, so run `bin/fm-report-index.sh rebuild` to resync a home with pre-existing reports or after a skipped refresh.
+The session-start digest never rebuilds the index; it prints only a bounded tail of a regular prebuilt file with the producer's schema header and otherwise reports the index as absent or unsafe.
+Skipped reports leave privacy-safe diagnostics, and completed scout records whose report is absent are diagnosed as missing without blocking other entries.
+The environment variable reference below lists the report-size, manual-tail, and startup-tail bounds and defaults.
 
 ## Startup memory budget (config/startup-memory-budget)
 
@@ -870,7 +873,10 @@ FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmat
 FM_ZELLIJ_SESSION=firstmate  # zellij-only: named session for normal backend ops and test isolation (docs/zellij-backend.md)
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest; each line is capped by bin/fm-line-cap-lib.sh
+FM_SESSION_START_REPORT_INDEX_TAIL=8   # scout report catalog lines printed in the session-start digest; report bodies are never read
 FM_SESSION_START_QUEUED_LIMIT=20   # plain queued backlog rows in the session-start digest; in-flight, held, and blocked rows are never bounded and done rows are never listed
+FM_REPORT_INDEX_TAIL=8   # scout report catalog lines printed by fm-report-index.sh show when --tail is omitted
+FM_REPORT_INDEX_MAX_BYTES=1048576   # report size above which fm-report-index.sh records an oversized diagnostic instead of reading the report
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_BOOTSTRAP_NETWORK=all   # internal session-start phase split: all, skip (local steps only), or only (network steps only); see bin/fm-bootstrap.sh
 FM_STARTUP_NETWORK_TIMEOUT=120   # seconds bounding the deferred inactive-outcome scan plus network checks; hitting it prints an actionable NETWORK_CHECKS line

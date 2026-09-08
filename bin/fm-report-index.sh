@@ -36,9 +36,9 @@
 #            report is not safely catalogable)
 #   summary  the first content line after the report's summary/TL;DR heading
 #            (matched on tokens: 摘要, TL;DR, 结论, Summary, Abstract, 概述,
-#            Overview), with list markers and markdown bold stripped, capped at
-#            SUMMARY_CAP chars; "-" when no summary section or no content line
-#            is found (a report without a TL;DR is still cataloged by title)
+#            Overview), else the first content line after the H1, with list
+#            markers and markdown bold stripped and capped at SUMMARY_CAP chars;
+#            "-" when neither source has a content line
 #   path     data/<id>/report.md (recorded explicitly per the task; also
 #            derivable from id, so a truncated digest line still reaches it)
 #
@@ -56,8 +56,8 @@
 #     skipped with a diagnostic and the rest are indexed.
 #
 # Who calls this:
-#   - bin/fm-teardown.sh rebuilds after every scout teardown, including an
-#     explicitly forced discard where the report is missing.
+#   - bin/fm-teardown.sh rebuilds after every successful scout teardown,
+#     including an explicitly forced discard where the report is missing.
 #   - An operator or firstmate runs `rebuild` once to resync a home with reports
 #     that predate this script.
 #   - bin/fm-session-start.sh does NOT rebuild; it reads the prebuilt index file

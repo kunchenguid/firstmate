@@ -8,9 +8,10 @@ Task chronology, incident transcripts, and the contents of any private report st
 
 ## Subject
 
-`bin/fm-report-index.sh` builds `data/report-index.md` (one line per report: `id | date | project | title | summary | path`) and `data/report-index.skipped` (one line per skipped report: `id | reason`) from `data/<id>/report.md`, with the project slug parsed from the surviving `data/<id>/brief.md` worktree line.
-`bin/fm-teardown.sh` rebuilds the index after a scout's report is finalized, and `bin/fm-session-start.sh` prints a bounded tail of the prebuilt file in the fleet-state digest without ever rebuilding on the startup blocking path.
-The requirement forbids a second LLM at runtime: extraction is deterministic `grep` and `awk` over each report's bounded head.
+`bin/fm-report-index.sh` owns the schemas and builds the catalog and skip diagnostics from scout reports plus completed-scout records.
+`bin/fm-teardown.sh` requests a best-effort, non-waiting rebuild after every successful scout teardown and after any other successful task teardown that leaves a report.
+`bin/fm-session-start.sh` prints a bounded tail of the prebuilt catalog in the fleet-state digest without rebuilding on the startup blocking path.
+Extraction uses deterministic local tools over bounded input and never invokes a second LLM.
 
 ## Extraction and privacy, verified against a real fleet home
 
@@ -19,7 +20,7 @@ The reports were copied into a throwaway `FM_HOME` (shown as `<home>` below) so 
 
 ```text
 $ FM_HOME=<home> bin/fm-report-index.sh rebuild
-indexed 25 report(s), skipped 0; index: <home>/data/report-index.md
+indexed 25 report(s), skipped 0 (0 missing); index: <home>/data/report-index.md
 
 $ FM_HOME=<home> bin/fm-report-index.sh show --tail 3
 <report-id> | 2026-09-07 | <project> | <title, capped at 120 chars> | <summary: the report's own first TL;DR line, capped at 140 chars> [truncated] | data/<report-id>/report.md
@@ -41,29 +42,32 @@ Synthetic fixtures under a throwaway `FM_HOME` confirmed each skip path records 
 
 ```text
 $ FM_REPORT_INDEX_MAX_BYTES=1024 FM_HOME=<home> bin/fm-report-index.sh rebuild
-indexed 1 report(s), skipped 3; index: <home>/data/report-index.md
+indexed 1 report(s), skipped 3 (0 missing); index: <home>/data/report-index.md
 $ cat <home>/data/report-index.skipped
 <report-id> | oversized
 <report-id> | no-title
 <report-id> | unreadable       # chmod 000; the size check uses stat (no file open) so no permission text leaks
 ```
 
-A directory with a `brief.md` but no `report.md` is not scanned, so it appears in neither file.
+An unrecorded directory with a `brief.md` but no `report.md` is not scanned, so it appears in neither file.
 The `stat`-based size read avoids opening the file, so an unreadable report's permission error never leaks to the rebuild's output.
-Portable interface fixtures also confirmed that invalid size caps, failed candidate enumeration or sorting, and directory-shaped publication destinations stop the rebuild with a diagnostic instead of publishing success.
+Portable interface fixtures also confirmed that unsafe report paths are skipped and that invalid size caps, failed candidate or entry sorting, candidate enumeration failures, and directory-shaped publication destinations stop the rebuild with a diagnostic instead of publishing success.
 
 ## Teardown hook and digest
 
 A scout teardown (`kind=scout`) with a finalized report, run through the `tests/fm-teardown.test.sh` machinery, rebuilt the index and cataloged the report while preserving `data/<id>/report.md` (the report survives teardown).
+The same teardown suite confirmed that a forced scout teardown records a missing report, a symlinked scout report is refused before durable task records or the worktree are removed, and a contended index lock skips the non-fatal refresh without delaying successful teardown.
 The session-start digest's new "Scout report index (data/report-index.md)" subsection printed the bounded tail from the prebuilt file, and printed `report index: ABSENT` without creating the index file when no index existed (no rebuild on the blocking path).
 
 ## Missing enumeration, recency ordering, and digest hardening
 
-Three contract decisions (raised as ask-user review findings and approved A/A/A) were implemented on top of the publication/concurrency hardening:
+Current regression coverage pins three additional guarantees:
 
-- **Missing reports (r1).** `rebuild` enumerates authoritative completed-scout records from `data/done-archive.md` and `data/backlog.md` Done rows (lines marked `(kind: scout)` with a `data/<id>/report.md` pointer) and flags any completed scout whose `data/<id>/report.md` is absent as `<id> | missing` in the skipped file. The main scan only indexes existing `report.md` files, so a deleted completed-scout report is surfaced rather than silently invisible. The backlog parse is best-effort: a format change yields no missing entries rather than failing the rebuild, so the coupling stays loose.
-- **Recency ordering (r2).** The published index is ordered by date then id (a stable sort key staged per entry, with `unknown` dates mapped oldest), so the bounded digest tail surfaces the most recent reports. This replaces the earlier lexical-by-id order, which could let an old `z-*` report displace a newly finalized `a-*` report. Determinism is preserved: same dates reproduce the same bytes, ties broken by id.
-- **Digest hardening (r12).** `print_report_index_tail` rejects a symlinked or non-regular `data/report-index.md` and one missing the schema-owner header as ABSENT, never streaming its target. A path pointing at a report body therefore cannot inject report content into the digest.
+- **Missing reports.** `rebuild` enumerates completed-scout records from `data/done-archive.md` and `data/backlog.md` Done rows, then diagnoses an absent report without hiding the remaining catalog entries.
+  The backlog parse is best-effort so format drift does not fail the rebuild.
+- **Recency ordering.** The published index is ordered by date then id, with unknown dates oldest and ties broken by id, so the bounded tail surfaces the most recent reports deterministically.
+- **Digest hardening.** The digest rejects a symlinked or non-regular index and one missing the schema-owner header as absent rather than streaming its target.
+  A path pointing at a report body therefore cannot inject that body into the digest.
 
 Fixtures in `tests/fm-report-index.test.sh` pin each: a completed scout in `done-archive.md` whose report is absent is flagged `missing`; a newer-by-date `a-*` report is the tail entry over an older `z-*` report; and a symlinked or non-schema-header index is rejected without streaming a body marker.
 
@@ -79,7 +83,7 @@ The portable regression in `tests/fm-report-index.test.sh` pins the behavior wit
 ## Reproduction
 
 ```text
-bin/fm-test-run.sh tests/fm-report-index.test.sh        # 21 portable assertions (extraction, privacy, skips, publication, missing, ordering, digest hardening)
-bin/fm-test-run.sh tests/fm-teardown.test.sh            # scout teardown rebuilds the index (case: test_scout_teardown_rebuilds_report_index)
+bin/fm-test-run.sh tests/fm-report-index.test.sh        # 25 portable assertions (extraction, privacy, skips, publication, missing, ordering, digest hardening)
+bin/fm-test-run.sh tests/fm-teardown.test.sh            # finalized, forced-missing, unsafe-report, and contended-lock teardown cases
 bin/fm-test-run.sh --check-coverage                     # coverage guard: the new test is accounted for
 ```

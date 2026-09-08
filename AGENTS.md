@@ -93,8 +93,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
-  report-index.md   privacy-safe scout report catalog (id, date, project, title, summary, path), ordered by date so the digest tail surfaces recent reports; built by bin/fm-report-index.sh at scout teardown and surfaced as a bounded tail in the fleet-state digest
-  report-index.skipped  per-report skip diagnostics (id | reason: missing, no-title, unreadable, or oversized); "missing" is a completed-scout record (from data/done-archive.md or backlog Done) whose report.md is absent; written by bin/fm-report-index.sh, never report content
+  report-index.md / report-index.skipped  privacy-safe scout report catalog and diagnostics; bin/fm-report-index.sh owns both schemas and rebuild behavior
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               runtime records and signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth

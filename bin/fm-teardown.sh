@@ -3391,12 +3391,14 @@ if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
 # Best-effort: refresh the scout report index so the next session's digest can
-# surface this report. A scout report survives teardown (it is the deliverable),
-# so it is present and stable here. Non-fatal: an index rebuild never blocks
-# task cleanup, and bin/fm-report-index.sh skips unreadable/malformed/oversized
-# reports itself rather than failing. Every scout teardown refreshes, including
-# an explicitly forced discard without a report; other task kinds refresh only
-# when they produced a report.
+# surface a finalized report or diagnose a forced scout teardown with no report.
+# An ordinary scout report survives teardown and is stable here.
+# Non-fatal: an index rebuild never blocks task cleanup, and
+# bin/fm-report-index.sh skips unreadable/malformed/oversized reports itself
+# rather than failing.
+# Every successful scout teardown refreshes, including an explicitly forced
+# discard without a report; other task kinds refresh only when they produced a
+# report.
 if [ "$KIND" = scout ] || [ -f "$DATA/$ID/report.md" ]; then
   "$SCRIPT_DIR/fm-report-index.sh" rebuild --no-wait >/dev/null 2>&1 || true
 fi
