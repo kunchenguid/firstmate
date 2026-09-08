@@ -1,21 +1,10 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
 # landing branch to the crewmate's recorded branch.
-# The crew branch is `Crew branch: branch=<name>` in data/<id>/brief.md
-# (written by bin/fm-brief.sh --branch-name). The landing branch is
-# `Base branch contract: base_branch=<branch>` in that same brief (written by
-# --base-branch). For both lines the last match wins, because the generated
-# contract is appended after free-form {TASK} text that may mention the same
-# phrase. Both lookups read only the last generated `# Definition of done`
-# before an fm-control relaunch marker. A marker copied into replaceable
-# {TASK} text does not count: it still sits before the first
-# `Scaffold bound: generated` line, or before the generated Setup pair on
-# older briefs that lack that line. A relaunch progress note is never
-# scanned. When the
-# crew-branch line is absent from that region, this
-# script still uses fm/<id>. When the base-branch line is absent, it still
-# lands on the project's default branch. Omitted flags therefore stay
-# identical to today. An invalid recorded name refuses rather than falling back.
+# The crew branch is the last `Crew branch: branch=<name>` in
+# data/<id>/brief.md (written by bin/fm-brief.sh --branch-name). The landing
+# branch is state/<id>.meta's base_branch=. Missing values retain the historical
+# fm/<id> crew branch and default landing branch.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -38,6 +27,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # no-op in homes without a branch actor).
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-brief-contract-lib.sh
+. "$SCRIPT_DIR/fm-brief-contract-lib.sh"
 fm_lease_forbid_branch "local-only landing (fm-merge-local)"
 ID=${1:?usage: fm-merge-local.sh <task-id>}
 META="$STATE/$ID.meta"
@@ -63,61 +54,10 @@ default_branch() {
   return 1
 }
 
-# Generated contracts live in the last `# Definition of done` before an
-# fm-control relaunch marker. Truncation anchors on the exact generated marker
-# (`## Progress note (ISO-timestamp)` followed by `This task was relaunched.`)
-# only when that marker sits after the first `Scaffold bound: generated` line
-# written by bin/fm-brief.sh. A progress note that copies `# Setup` and the
-# disposable-worktree line therefore cannot move the bound. Briefs without
-# that line keep the older rule: the marker is structural only when it is
-# not followed by a generated Setup pair (`# Setup` then `You are in a
-# disposable git worktree of `). Heading text alone is not a boundary.
-brief_dod_section() {
-  awk '
-    FNR==NR {
-      if (!scaffold_end && $0 == "Scaffold bound: generated") scaffold_end=FNR
-      if (pending_setup && /^[[:space:]]*$/) next
-      if (pending_setup) {
-        if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
-        pending_setup=0
-        next
-      }
-      if ($0 ~ /^# Setup[[:space:]]*$/) pending_setup=1
-      next
-    }
-    pending_relaunch && /^[[:space:]]*$/ { next }
-    pending_relaunch {
-      if ($0 ~ /^This task was relaunched\./) {
-        if (scaffold_end) {
-          if (FNR > scaffold_end) exit
-        } else if (!last_setup || FNR > last_setup) {
-          exit
-        }
-      }
-      pending_relaunch=0
-    }
-    /^## Progress note \([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$/ {
-      pending_relaunch=1
-      next
-    }
-    /^# Definition of done[[:space:]]*$/ { grab=1; buf=""; next }
-    /^#{1,6}[[:space:]]/ { grab=0; next }
-    grab { buf = buf $0 ORS }
-    END { printf "%s", buf }
-  ' "$1" "$1"
-}
-
-brief_last_contract() {
-  local file=$1 prefix=$2 section value
-  section=$(brief_dod_section "$file")
-  value=$(printf '%s\n' "$section" | sed -n "s/^${prefix}//p" | tail -n 1)
-  printf '%s' "$value"
-}
-
 BRIEF="$DATA/$ID/brief.md"
 BRANCH="fm/$ID"
 if [ -f "$BRIEF" ]; then
-  recorded_branch=$(brief_last_contract "$BRIEF" 'Crew branch: branch=')
+  recorded_branch=$(fm_brief_crew_branch "$BRIEF")
   if [ -n "$recorded_branch" ]; then
     git check-ref-format --branch "$recorded_branch" >/dev/null 2>&1 || {
       echo "error: $BRIEF records an invalid crew branch: $recorded_branch" >&2
@@ -130,15 +70,13 @@ git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { e
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 TARGET=$DEFAULT
-if [ -f "$BRIEF" ]; then
-  recorded_base=$(brief_last_contract "$BRIEF" 'Base branch contract: base_branch=')
-  if [ -n "$recorded_base" ]; then
-    git check-ref-format --branch "$recorded_base" >/dev/null 2>&1 || {
-      echo "error: $BRIEF records an invalid base branch: $recorded_base" >&2
-      exit 1
-    }
-    TARGET=$recorded_base
-  fi
+recorded_base=$(grep '^base_branch=' "$META" | tail -n 1 | cut -d= -f2- || true)
+if [ -n "$recorded_base" ]; then
+  git check-ref-format --branch "$recorded_base" >/dev/null 2>&1 || {
+    echo "error: $META records an invalid base branch: $recorded_base" >&2
+    exit 1
+  }
+  TARGET=$recorded_base
 fi
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$TARGET" >/dev/null || { echo "error: landing branch $TARGET does not exist in $PROJ" >&2; exit 1; }
 

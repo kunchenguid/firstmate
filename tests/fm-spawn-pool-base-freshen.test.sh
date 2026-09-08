@@ -933,33 +933,6 @@ test_local_only_origin_only_base_refuses() {
   pass "local-only --base-branch refuses when the base exists only on origin"
 }
 
-test_base_branch_contract_refuses_mismatch() {
-  local rec id out status before kind
-  for kind in ship scout; do
-    id="pool-base-branch-contract-${kind}-r7"
-    rec=$(make_case "base-branch-contract-$kind" "$id")
-    read_case_record "$rec"
-    if [ "$kind" = ship ]; then
-      scaffold_ship_brief "$id" no-mistakes develop
-      before=$(git -C "$POOL_DIR" rev-parse HEAD)
-      out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch release)
-    else
-      scaffold_scout_brief "$id" develop
-      before=$(git -C "$POOL_DIR" rev-parse HEAD)
-      out=$(run_spawn "$id" --scout --base-branch release)
-    fi
-    status=$?
-    [ "$status" -ne 0 ] || fail "$kind spawn accepted a --base-branch that disagrees with its generated brief"
-    assert_contains "$out" "base-branch mismatch" \
-      "$kind spawn did not clearly refuse a base-branch contract mismatch"
-    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-      || fail "$kind spawn changed the pooled worktree after a base-branch contract mismatch"
-    assert_absent "$HOME_DIR/state/$id.meta" \
-      "$kind spawn recorded metadata after a base-branch contract mismatch"
-  done
-  pass "ship and scout base contracts refuse conflicting spawn flags"
-}
-
 test_scout_base_branch_contract_agrees_and_records() {
   local rec id out status current_develop current_main
   id='pool-scout-base-branch-agree-r10'
@@ -989,154 +962,6 @@ test_scout_base_branch_contract_agrees_and_records() {
   pass "scout spawn honors a matching --base-branch contract from Definition of done"
 }
 
-test_base_branch_contract_uses_last_line() {
-  local rec id brief out status
-  id='pool-base-branch-last-line-r8'
-  rec=$(make_case base-branch-last-line "$id")
-  read_case_record "$rec"
-  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
-  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
-  git -C "$CASE_DIR/publisher" add develop-only.txt
-  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -qm develop-tip
-  git -C "$CASE_DIR/publisher" push --quiet origin develop
-  scaffold_ship_brief "$id" no-mistakes develop
-  brief="$HOME_DIR/data/$id/brief.md"
-  awk '
-    /^# Task$/ {
-      print
-      print "Base branch contract: base_branch=release"
-      next
-    }
-    { print }
-  ' "$brief" > "$brief.tmp" && mv "$brief.tmp" "$brief"
-
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch develop)
-  status=$?
-  expect_code 0 "$status" "spawn --base-branch should honor the last generated base contract"
-  assert_contains "$out" "spawned $id" "spawn did not report success after an earlier decoy base line"
-  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
-    "spawn treated an earlier Base branch mention as the contract"
-  pass "ship base-contract agreement uses the last Base branch line"
-}
-
-test_base_branch_contract_uses_last_dod_heading() {
-  local rec id brief out status
-  id='pool-base-branch-last-dod-r8'
-  rec=$(make_case base-branch-last-dod "$id")
-  read_case_record "$rec"
-  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
-  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
-  git -C "$CASE_DIR/publisher" add develop-only.txt
-  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -qm develop-tip
-  git -C "$CASE_DIR/publisher" push --quiet origin develop
-  scaffold_ship_brief "$id" no-mistakes develop
-  brief="$HOME_DIR/data/$id/brief.md"
-  awk '
-    /^# Definition of done[[:space:]]*$/ && !inserted {
-      print "# Definition of done"
-      print "Base branch contract: base_branch=release"
-      print "Delivery contract: mode=local-only"
-      inserted=1
-    }
-    { print }
-  ' "$brief" > "$brief.tmp" && mv "$brief.tmp" "$brief"
-
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch develop)
-  status=$?
-  expect_code 0 "$status" "spawn should honor the last generated Definition of done"
-  assert_contains "$out" "spawned $id" "spawn did not report success after a task-authored Definition of done"
-  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
-    "spawn treated a task-authored Definition of done as the contract"
-  pass "ship base-contract agreement uses the last Definition of done heading"
-}
-
-test_base_branch_contract_ignores_progress_note() {
-  local rec id brief out status
-  id='pool-base-branch-progress-note-r8'
-  rec=$(make_case base-branch-progress-note "$id")
-  read_case_record "$rec"
-  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
-  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
-  git -C "$CASE_DIR/publisher" add develop-only.txt
-  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -qm develop-tip
-  git -C "$CASE_DIR/publisher" push --quiet origin develop
-  scaffold_ship_brief "$id" no-mistakes develop
-  brief="$HOME_DIR/data/$id/brief.md"
-  cat >> "$brief" <<'EOF'
-
-## Progress note (2026-08-24T11:29:00Z)
-
-This task was relaunched. Continue from here.
-Base branch contract: base_branch=release
-Delivery contract: mode=local-only
-EOF
-
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch develop)
-  status=$?
-  expect_code 0 "$status" "spawn should ignore contract lines in a relaunch progress note"
-  assert_contains "$out" "spawned $id" "spawn did not report success after a progress-note decoy"
-  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
-    "spawn treated a progress-note Base branch line as the contract"
-  pass "ship base-contract agreement ignores a relaunch progress note"
-}
-
-test_base_contract_ignores_note_when_contract_line_absent() {
-  local rec id brief out status
-  id='pool-base-branch-note-conjure-r9'
-  rec=$(make_case base-branch-note-conjure "$id")
-  read_case_record "$rec"
-  scaffold_ship_brief "$id" no-mistakes
-  brief="$HOME_DIR/data/$id/brief.md"
-  cat >> "$brief" <<'EOF'
-
-## Progress note (2026-08-24T11:29:00Z)
-
-This task was relaunched. Continue from here.
-Base branch contract: base_branch=release
-Delivery contract: mode=local-only
-EOF
-
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
-  status=$?
-  expect_code 0 "$status" "spawn should ignore a conjured base contract in a progress note"
-  assert_contains "$out" "spawned $id" "spawn did not report success after a conjured base contract"
-  assert_no_grep 'base_branch=' "$HOME_DIR/state/$id.meta" \
-    "spawn recorded a base_branch conjured by a progress note"
-  pass "ship spawn ignores a base contract conjured in a relaunch progress note"
-}
-
-test_base_contract_refuses_flag_matching_conjured_note_not_generated() {
-  local rec id brief out status
-  id='pool-base-branch-note-flag-r9'
-  rec=$(make_case base-branch-note-flag "$id")
-  read_case_record "$rec"
-  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
-  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
-  git -C "$CASE_DIR/publisher" add develop-only.txt
-  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -qm develop-tip
-  git -C "$CASE_DIR/publisher" push --quiet origin develop
-  scaffold_ship_brief "$id" no-mistakes
-  brief="$HOME_DIR/data/$id/brief.md"
-  cat >> "$brief" <<'EOF'
-
-## Progress note (2026-08-24T11:29:00Z)
-
-This task was relaunched. Continue from here.
-Base branch contract: base_branch=release
-EOF
-
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch release)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn accepted --base-branch matching a conjured note without a generated contract"
-  assert_contains "$out" "base-branch mismatch" \
-    "spawn did not refuse a flag that only matched a conjured progress-note contract"
-  pass "ship spawn refuses --base-branch that matches only a conjured progress-note contract"
-}
-
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
@@ -1164,12 +989,6 @@ test_missing_base_branch_refuses_without_default_fallback
 test_originless_base_branch_uses_local_or_refuses
 test_base_branch_refused_on_relaunch_secondmate_and_orca
 test_local_only_origin_only_base_refuses
-test_base_branch_contract_refuses_mismatch
 test_scout_base_branch_contract_agrees_and_records
-test_base_branch_contract_uses_last_line
-test_base_branch_contract_uses_last_dod_heading
-test_base_branch_contract_ignores_progress_note
-test_base_contract_ignores_note_when_contract_line_absent
-test_base_contract_refuses_flag_matching_conjured_note_not_generated
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

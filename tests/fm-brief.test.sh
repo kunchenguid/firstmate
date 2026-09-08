@@ -976,13 +976,13 @@ test_base_branch_worker_steps() {
   assert_no_grep "axi run --base-branch" "$brief" \
     "scout --base-branch must not add a no-mistakes pipeline step"
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-scout-fm-id some-proj --scout --base-branch fm/brief-base-scout-fm-id >/dev/null 2>&1 \
-    || fail "scout --base-branch matching fm/<id> must scaffold; a scout never creates that crew branch"
-  brief="$home/data/brief-base-scout-fm-id/brief.md"
-  assert_grep "Base branch contract: base_branch=fm/brief-base-scout-fm-id" "$brief" \
-    "scout --base-branch fm/<id> must record its freshen base"
-  assert_no_grep "git checkout -b" "$brief" \
-    "scout --base-branch fm/<id> must not invent a crew-branch checkout"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-scout-fm-id some-proj --scout --base-branch fm/brief-base-scout-fm-id 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "scout accepted a base that promotion must reuse as its crew branch"
+  assert_contains "$out" "cannot be the crew branch" \
+    "scout crew/base collision did not name the conflict"
+  assert_contains "$out" "--branch-name" \
+    "scout crew/base collision did not identify the supported distinct-branch option"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-shell some-proj --mode no-mistakes --base-branch 'topic;id' >/dev/null 2>&1 \
     || fail "shell-metacharacter --base-branch brief should scaffold"

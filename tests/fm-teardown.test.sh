@@ -783,6 +783,27 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+test_local_only_merged_to_recorded_base_allows() {
+  local case_dir rc wt_head
+  case_dir=$(make_case merged-recorded-base)
+  write_meta "$case_dir" local-only ship
+  git -C "$case_dir/project" branch develop main
+  wt_commit "$case_dir" "merged on recorded base"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/develop "$wt_head"
+  printf '%s\n' 'base_branch=develop' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "recorded-base: teardown should accept work landed on develop"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "recorded-base: teardown rejected work landed on the recorded base"
+  pass "local-only teardown accepts work landed on the recorded base"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -3660,6 +3681,7 @@ test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_merged_to_recorded_base_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

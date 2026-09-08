@@ -20,7 +20,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 "$FM_ROOT/bin/fm-guard.sh" || true
+# shellcheck source=bin/fm-brief-contract-lib.sh
+. "$SCRIPT_DIR/fm-brief-contract-lib.sh"
 
 usage() {
   echo "usage: fm-review-diff.sh <task-id> [--stat]" >&2
@@ -75,11 +78,15 @@ if [ -n "$RECORDED_BASE" ]; then
 fi
 
 BRANCH="fm/$ID"
-if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
-  BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  [ -n "$BRANCH" ] || { echo "error: branch fm/$ID does not exist and worktree $WT is detached" >&2; exit 1; }
-  git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $WT" >&2; exit 1; }
+BRIEF="$DATA/$ID/brief.md"
+if [ -f "$BRIEF" ]; then
+  RECORDED_BRANCH=$(fm_brief_crew_branch "$BRIEF")
+  [ -z "$RECORDED_BRANCH" ] || BRANCH=$RECORDED_BRANCH
 fi
+git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 \
+  || { echo "error: $BRIEF records an invalid crew branch: $BRANCH" >&2; exit 1; }
+git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null \
+  || { echo "error: recorded crew branch $BRANCH does not exist in $WT" >&2; exit 1; }
 
 pr_number_from_target() {
   local target=$1 n

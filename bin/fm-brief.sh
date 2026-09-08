@@ -62,17 +62,11 @@
 # --branch-name <name> replaces every generated `fm/<task-id>` crew branch
 # (checkout command, push-rule text, local-only done line) with that name.
 # The name must pass `git check-ref-format --branch`. When omitted, scaffolds
-# still use `fm/<task-id>` exactly as today. Scout and secondmate refuse the flag:
-# a scout never creates a crew branch, so `--base-branch fm/<id>` is legal there.
-# On a ship brief the resolved crew branch (an explicit --branch-name, or
+# still use `fm/<task-id>` exactly as today. Scout and secondmate refuse the flag.
+# On a ship or scout brief the resolved crew branch (an explicit --branch-name, or
 # fm/<task-id> when that flag is omitted) and --base-branch cannot name the
-# same branch: the scaffold checks out the base, so an identical crew branch
-# would make `git checkout -b` fail on the worker's first action.
+# same branch: promotion creates that crew branch from the scout worktree.
 # A custom name is recorded as `Crew branch: branch=<name>` on ship briefs.
-# After the generated Definition of done, every ship and scout scaffold writes
-# the exact line `Scaffold bound: generated`. bin/fm-spawn.sh and
-# bin/fm-merge-local.sh treat the first such line as the end of generated
-# scaffold.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
@@ -233,8 +227,8 @@ CREW_BRANCH="fm/$ID"
 if [ "$BRANCH_NAME_SET" -eq 1 ]; then
   CREW_BRANCH=$BRANCH_NAME
 fi
-if [ "$KIND" = ship ] && [ "$BASE_BRANCH_SET" -eq 1 ] && [ "$BASE_BRANCH" = "$CREW_BRANCH" ]; then
-  echo "error: --base-branch cannot be the crew branch ($CREW_BRANCH): the scaffold checks out the base, so the worker cannot create a crew branch with the same name" >&2
+if { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } && [ "$BASE_BRANCH_SET" -eq 1 ] && [ "$BASE_BRANCH" = "$CREW_BRANCH" ]; then
+  echo "error: --base-branch cannot be the crew branch ($CREW_BRANCH): use --branch-name on a ship brief to choose a different crew branch" >&2
   exit 1
 fi
 
@@ -492,7 +486,6 @@ If your deliverable is a visual artifact the captain will review and iterate on,
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.$BASE_BRANCH_CONTRACT
-Scaffold bound: generated
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
 exit 0
@@ -529,7 +522,6 @@ fi
 if [ "$BRANCH_NAME_SET" -eq 1 ]; then
   DOD="${DOD}"$'\n'"Crew branch: branch=$CREW_BRANCH"
 fi
-DOD="${DOD}"$'\n'"Scaffold bound: generated"
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

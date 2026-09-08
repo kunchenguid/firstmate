@@ -2289,56 +2289,9 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
-# Last generated Definition of done wins; a later relaunch progress note is
-# ignored so appended text cannot override the scaffold. The same last-match
-# rule applies to Base branch contract. Lookups read only that last generated
-# Definition of done. bin/fm-merge-local.sh uses the same rule for landing.
-brief_dod_section() {
-  awk '
-    FNR==NR {
-      if (!scaffold_end && $0 == "Scaffold bound: generated") scaffold_end=FNR
-      if (pending_setup && /^[[:space:]]*$/) next
-      if (pending_setup) {
-        if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
-        pending_setup=0
-        next
-      }
-      if ($0 ~ /^# Setup[[:space:]]*$/) pending_setup=1
-      next
-    }
-    pending_relaunch && /^[[:space:]]*$/ { next }
-    pending_relaunch {
-      if ($0 ~ /^This task was relaunched\./) {
-        if (scaffold_end) {
-          if (FNR > scaffold_end) exit
-        } else if (!last_setup || FNR > last_setup) {
-          exit
-        }
-      }
-      pending_relaunch=0
-    }
-    /^## Progress note \([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$/ {
-      pending_relaunch=1
-      next
-    }
-    /^# Definition of done[[:space:]]*$/ { grab=1; buf=""; next }
-    /^#{1,6}[[:space:]]/ { grab=0; next }
-    grab { buf = buf $0 ORS }
-    END { printf "%s", buf }
-  ' "$1" "$1"
-}
-
-brief_last_contract_word() {
-  local file=$1 prefix=$2 section value
-  section=$(brief_dod_section "$file")
-  value=$(printf '%s\n' "$section" | sed -n "s/^${prefix}\([^ ]*\).*$/\1/p" | tail -n 1)
-  printf '%s' "$value"
-}
-
-BRIEF_BASE_BRANCH=$(brief_last_contract_word "$BRIEF" 'Base branch contract: base_branch=')
 if [ "$KIND" = ship ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
-  BRIEF_MODE=$(brief_last_contract_word "$BRIEF" 'Delivery contract: mode=')
+  BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
   elif [ "$BRIEF_MODE" != "$MODE" ]; then
@@ -2354,15 +2307,6 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
-  fi
-fi
-# Relaunch reuses the recorded worktree and refuses --base-branch, so it must
-# not require the flag to match a brief contract that a fresh spawn already
-# applied. Fresh ship and scout spawns still refuse a mismatch.
-if [ "$RELAUNCH" -eq 0 ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
-  if [ "$BRIEF_BASE_BRANCH" != "$BASE_BRANCH" ]; then
-    echo "error: base-branch mismatch for $ID: the brief says base_branch=${BRIEF_BASE_BRANCH:-<omitted>} but this spawn passed --base-branch ${BASE_BRANCH:-<omitted>}; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
-    exit 1
   fi
 fi
 

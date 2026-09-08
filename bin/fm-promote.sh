@@ -194,10 +194,6 @@ $PROMOTION_ASK_USER_BLOCK
 EOF
   printf '\n'
   fm_dod_block "$MODE" "$ID" "fm/$ID" "${RECORDED_BASE:-}"
-  if [ -n "${RECORDED_BASE:-}" ]; then
-    printf '%s\n' "Base branch contract: base_branch=$RECORDED_BASE"
-  fi
-  printf '%s\n' "Scaffold bound: generated"
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
 mv "$TMP" "$INSTRUCTIONS"
 TMP=
