@@ -572,7 +572,7 @@ No reasoning-effort axis was found; `gemini --help` on 0.58.0 exposes no effort,
 ## Herdr
 
 The compatibility floor is protocol 14.
-The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64, while focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
+The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64, with the focused Herdr 0.8.2 protocol 20 authority evidence below, while focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 Default-on presentation projection has its own floor at Herdr 0.8.0, protocol 19, verified below.
 
@@ -961,6 +961,65 @@ ok - real herdr: an agent that does not stop fails closed instead of being repor
 
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+
+### Stale Pi authority and its release
+
+Measured 2026-09-08 on Herdr 0.8.2, protocol 20, macOS aarch64, in an `fm-lab-` session provisioned and torn down by `bin/fm-herdr-lab.sh` with the default-session tripwire intact.
+These are the version-scoped facts the narrow stale `herdr:pi` recovery in [`herdr-backend.md`](../herdr-backend.md#restart-and-liveness-behavior) depends on.
+
+```sh
+herdr --version
+herdr status --json | jq -c '{client:.client.protocol,server:.server.protocol}'
+```
+
+```text
+herdr 0.8.2
+{"client":20,"server":20}
+```
+
+The clear method is protocol-only. `herdr api schema --json` carries `pane.clear_agent_authority` and its `PaneClearAgentAuthorityParams` in the request schema, while the only agent-authority verbs `herdr pane --help` exposes are `report-agent`, `report-agent-session`, `release-agent`, and `report-metadata`, with no clear-authority subcommand.
+That is why `bin/backends/herdr-clear-agent-authority.py` speaks the fixed method over the named session's owner-only socket instead of shelling out.
+
+`herdr:` is a reserved source namespace. Reporting or releasing agent state from an outside client under `herdr:pi`, `herdr:claude`, or bare `herdr` exits 0 and changes nothing, while an ordinary source registers normally:
+
+```text
+herdr:pi       rc=0 before={"agent_status":"unknown","agent":null} after={"agent_status":"unknown","agent":null}
+herdr:claude   rc=0 before={"agent_status":"unknown","agent":null} after={"agent_status":"unknown","agent":null}
+herdr          rc=0 before={"agent_status":"unknown","agent":null} after={"agent_status":"unknown","agent":null}
+firstmate:pi   rc=0 before={"agent_status":"unknown","agent":null} after={"agent_status":"idle","agent":"pi"}
+```
+
+`pane release-agent` reports the same silent success for any authority it does not own, so its exit status proves nothing about the pane:
+
+```text
+--- release-agent with a source that does not own the authority ---
+rc=0  {"agent_status":"idle","agent":"pi"}
+--- release-agent with the owning source ---
+rc=0  {"agent_status":"unknown","agent":null}
+```
+
+The fixed-method transport reaches protocol 20 and answers `ok` on the same non-owning input, while the pane is untouched; the identical request under the owning source clears it:
+
+```text
+{"id":"fm-clear-stale-herdr-pi-authority","result":{"type":"ok"}}  rc=0
+{"agent_status":"idle","agent":"pi"}
+{"id":"<request>","result":{"type":"ok"}}
+{"agent_status":"unknown","agent":null}
+```
+
+Protocol `ok` is therefore not mutation proof, which is the postcondition the helper's docstring and `fm-control`'s two post-clear samples exist to enforce.
+
+Nothing in Pi revokes the authority on exit. The installed Herdr integration `~/.pi/agent/extensions/herdr-agent-state.ts` (`HERDR_INTEGRATION_ID=pi`, `HERDR_INTEGRATION_VERSION=8`) publishes `pane.report_agent_session` and `pane.report_agent` under source `herdr:pi` from `session_start`, `agent_start`, and `agent_settled`, and contains no release, exit, or session-end path.
+Only Herdr's own process detection can retire the label, so behind the nested shell `treehouse get` leaves in the pane it can keep reporting the exited Pi.
+The same integration's request helper resolves on the first response byte, so a replacement's session report is acknowledged independently of that detection - the ordering the replacement's deferred lifecycle events guard against.
+
+Two claims are outside this record because they need a running Pi rather than a Herdr probe: that Herdr keeps reporting the exited Pi over the nested shell, and that it acknowledges a replacement's session report before publishing the replacement process generation.
+The opt-in end-to-end test owns both, and gate-skips wherever Pi is absent; it is the guard that refreshes them:
+
+```sh
+FM_CONTROL_HERDR_PI_RELAUNCH_LIVE_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-control-herdr-pi-relaunch-live-e2e.test.sh
+```
 
 ### Away-mode transport
 

@@ -19,6 +19,10 @@ Exit status:
 
 Protocol success is not mutation proof. The caller must verify that the session
 reference and full-lifecycle authority disappeared before any replacement.
+
+The measured 0.8.2 evidence behind every claim above lives in
+docs/verification/runtime-backends.md, under "Stale Pi authority and its
+release".
 """
 
 import json

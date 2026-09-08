@@ -1,7 +1,7 @@
 # Herdr runtime backend
 
 Herdr is an agent-native terminal backend with native per-pane agent state and push events.
-Firstmate requires Herdr protocol 14 or newer; broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0, while protocol-16 features remain gated by availability.
+Firstmate requires Herdr protocol 14 or newer; broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0, plus focused 0.8.2 agent-authority evidence, while protocol-16 features remain gated by availability.
 Default-on presentation spaces have a higher floor of Herdr 0.8.0 for the reason given under [Presentation spaces](#presentation-spaces).
 Herdr provides the terminal session while Treehouse continues to provide task worktrees.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
@@ -275,7 +275,7 @@ Unlike tmux process-name inspection, native registration can classify Pi without
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
-Herdr 0.8.2 can retain official `herdr:pi` full-lifecycle authority when Pi exits back into the nested shell created by `treehouse get`, because that shell is not Herdr's original pane-shell process.
+Herdr 0.8.2 can retain official `herdr:pi` full-lifecycle authority when Pi exits back into the nested shell created by `treehouse get`, because that shell is not Herdr's original pane-shell process, and its generic CLI release verb reports success without clearing that authority ([verification/runtime-backends.md](verification/runtime-backends.md#stale-pi-authority-and-its-release)).
 `fm-control exit|relaunch` has one narrow recovery for an ordinary Pi ship or scout: it requires the exact recorded session/workspace/tab/pane/task/cwd, a structurally managed Treehouse copy, a valid Pi session generation, and two stable full-process-tree samples showing only pane shell -> `treehouse get` -> nested shell with no Pi descendant; it then verifies `pane.clear_agent_authority` support, clears only `herdr:pi` through the named session's owner-only socket, and proves twice that authority and session identity disappeared without a process-generation change.
 After that clear Herdr may report either dead or a conservative process-detected Pi label, so only the still-running control transaction may carry its private proof into `fm-spawn --relaunch`, which marks either result as the same stale-authority recovery and rechecks the exact authority-free shell immediately before launch; a direct relaunch still refuses, and the replacement Pi registers its lifecycle handlers immediately but holds the events themselves for a moment, so Herdr can publish its replacement process generation before receiving the new full-lifecycle session and no startup event is dropped instead of deferred.
 The replacement is accepted only after a distinct valid session generation and exactly one Pi engine are stable below the same pane shell.
