@@ -14,9 +14,17 @@
 # PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --test-scout --source <ado|jira|none> [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   --test-scout writes a scout-kind E2E test-scout brief: same KIND=scout lifecycle
+#   as --scout (spawn and teardown unchanged), with fixed pipeline steps, artifact
+#   copy-out paths, and trust-posture framing. --source is required and selects the
+#   requirements front door (ado = story-export, jira = jra-axi, none = already-
+#   approved requirements file whose path firstmate puts in {TASK}). Mutually
+#   exclusive with --scout, --secondmate, and --mode. Load e2e-test-scout before
+#   scaffolding or dispatching; that skill owns board-source and no-story routing.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -121,8 +129,36 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+TEST_SCOUT=0
+SCOUT_FLAG=0
+SECONDMATE_FLAG=0
+SOURCE=
+SOURCE_SET=0
+SOURCE_COUNT=0
 POS=()
 want_value=
+for a in "$@"; do
+  case "$a" in
+    --test-scout) TEST_SCOUT=1 ;;
+    --scout) SCOUT_FLAG=1 ;;
+    --secondmate) SECONDMATE_FLAG=1 ;;
+    --mode|--mode=*) MODE_SET=1 ;;
+  esac
+done
+if [ "$TEST_SCOUT" -eq 1 ]; then
+  if [ "$SCOUT_FLAG" -eq 1 ]; then
+    echo "error: --test-scout cannot be combined with --scout" >&2
+    exit 1
+  fi
+  if [ "$SECONDMATE_FLAG" -eq 1 ]; then
+    echo "error: --test-scout cannot be combined with --secondmate" >&2
+    exit 1
+  fi
+  if [ "$MODE_SET" -eq 1 ]; then
+    echo "error: --test-scout cannot be combined with --mode" >&2
+    exit 1
+  fi
+fi
 for a in "$@"; do
   if [ -n "$want_value" ]; then
     case "$a" in
@@ -130,6 +166,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      source) SOURCE=$a; SOURCE_SET=1; SOURCE_COUNT=$((SOURCE_COUNT + 1)) ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -138,10 +175,13 @@ for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
+    --test-scout) KIND=scout ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
-    --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --mode=*) MODE=${a#--mode=} ;;
+    --source) want_value=source ;;
+    --source=*) SOURCE=${a#--source=}; SOURCE_SET=1; SOURCE_COUNT=$((SOURCE_COUNT + 1)) ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -150,6 +190,30 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+
+# --test-scout is a scout variant, not a new runtime kind. Validate its flag
+# contract before mkdir so a refused call leaves no task directory.
+if [ "$TEST_SCOUT" -eq 1 ]; then
+  if [ "$SOURCE_SET" -eq 0 ]; then
+    echo "error: --test-scout requires --source <ado|jira|none>" >&2
+    exit 1
+  fi
+  if [ "$SOURCE_COUNT" -gt 1 ]; then
+    echo "error: --test-scout accepts only one --source" >&2
+    exit 1
+  fi
+  if [ "${#POS[@]}" -lt 2 ]; then
+    echo "error: --test-scout requires a task ID and repository" >&2
+    exit 1
+  fi
+  case "$SOURCE" in
+    ado|jira|none) ;;
+    *) echo "error: --source must be one of ado, jira, none (got '$SOURCE')" >&2; exit 1 ;;
+  esac
+elif [ "$SOURCE_SET" -eq 1 ]; then
+  echo "error: --source requires --test-scout" >&2
+  exit 1
+fi
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
@@ -354,6 +418,150 @@ EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
 if [ "$KIND" = scout ]; then
+if [ "$TEST_SCOUT" -eq 1 ]; then
+case "$SOURCE" in
+  ado)
+    IFS= read -r -d '' SOURCE_ROUTING <<'EOF' || true
+**Requirements source:** ado
+  ado  -> run story-export first (needs the project's Azure DevOps org/project on file)
+  jira -> use jra-axi to pull the same title/description/acceptance-criteria shape
+  none -> an ALREADY-APPROVED requirements file exists at the path given in Task above -
+          the captain has already seen and signed off on it. Skip story-export entirely
+          and use the file directly with --from-file.
+          A bare requirement with NO approved file and NO board is a different case: the
+          e2e-test-scout skill routes that through the discuss/plan/approve front door
+          FIRST, before this brief is ever written - --source none is never the answer
+          to "there is no story yet", only to "the story is already approved and on disk"
+For this task: run story-export first (needs the project's Azure DevOps org/project on file).
+EOF
+    ;;
+  jira)
+    IFS= read -r -d '' SOURCE_ROUTING <<'EOF' || true
+**Requirements source:** jira
+  ado  -> run story-export first (needs the project's Azure DevOps org/project on file)
+  jira -> use jra-axi to pull the same title/description/acceptance-criteria shape
+  none -> an ALREADY-APPROVED requirements file exists at the path given in Task above -
+          the captain has already seen and signed off on it. Skip story-export entirely
+          and use the file directly with --from-file.
+          A bare requirement with NO approved file and NO board is a different case: the
+          e2e-test-scout skill routes that through the discuss/plan/approve front door
+          FIRST, before this brief is ever written - --source none is never the answer
+          to "there is no story yet", only to "the story is already approved and on disk"
+For this task: use jra-axi (github.com/lytv/jira-axi) to pull the same title/description/acceptance-criteria shape story-export would produce.
+EOF
+    ;;
+  none)
+    IFS= read -r -d '' SOURCE_ROUTING <<'EOF' || true
+**Requirements source:** none
+  ado  -> run story-export first (needs the project's Azure DevOps org/project on file)
+  jira -> use jra-axi to pull the same title/description/acceptance-criteria shape
+  none -> an ALREADY-APPROVED requirements file exists at the path given in Task above -
+          the captain has already seen and signed off on it. Skip story-export entirely
+          and use the file directly with --from-file.
+          A bare requirement with NO approved file and NO board is a different case: the
+          e2e-test-scout skill routes that through the discuss/plan/approve front door
+          FIRST, before this brief is ever written - --source none is never the answer
+          to "there is no story yet", only to "the story is already approved and on disk"
+For this task: an ALREADY-APPROVED requirements file exists at the path given in Task above.
+Skip story-export entirely and use the file directly with --from-file.
+EOF
+    ;;
+esac
+SOURCE_ROUTING=${SOURCE_ROUTING%$'\n'}
+cat > "$BRIEF" <<EOF
+You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+$TASK_SECTION
+
+# E2E Test-Scout Pipeline (fixed steps - do not skip or reorder)
+
+$SOURCE_ROUTING
+
+1. Generate test cases. Happy/Edge/Negative per acceptance criterion.
+   Ask one bounded question only for genuine ambiguity - never invent silently.
+2. Execute against the live app. Ground every selector in what actually exists first.
+   No accessible roles/labels/test-ids on part of the UI (a raw canvas or hand-rolled
+   graphic)? Fall back to dispatching the interaction event directly on the element and
+   flag those cases low-confidence, rather than forcing a real click that keeps missing.
+   App state lives only in the browser (no backend)? Seeding that state directly to reach
+   a specific screen deterministically is approved - note it in the case.
+3. Copy the durable artifacts out before finishing:
+   - every generated workbook       -> \`$DATA/$ID/workbooks/\`
+   - every generated test script + config (including any shared helper files, not just
+     the per-case specs) -> \`$DATA/$ID/specs/<id>/\`
+   - every screenshot/video evidence tree -> \`$DATA/$ID/evidence/<id>/\`
+   - treat every copied workbook as sensitive by default - it may carry raw test data or
+     credentials in its own data cells even with no separate auth file. Never copy an
+     auth/credential file, browser storage state, or the raw test-data store itself.
+     If the run used real credentials anywhere, say so plainly in the report so the
+     destination folder is handled as sensitive.
+4. Write the report: coverage matrix; Pass/Fail/Blocked/Manual counts WITH a clean pass
+   kept separate from a pass that needed a retry, and a named reason for every Blocked
+   or Manual case; which cases came straight from the acceptance criteria versus needed
+   an assumed default; low-confidence flags; the artifact paths above.
+
+**Trust posture:** do not self-declare results trusted. State findings plainly for the
+captain to review - screenshots and video exist so a human can check before anything
+downstream treats a result as confirmed.
+
+$HERDR_SECTION
+
+# Setup
+You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+This is a SCOUT task: the deliverable is a written report, not a PR.
+The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
+The report and the durable artifact trees under \`$DATA/$ID/\` are what survive, so anything worth keeping must be copied there.
+
+# Rules
+1. Never push to any remote and never open a PR.
+2. Stay inside this worktree; the only files you may write outside it are the report, the status file below, and \`$DATA/$ID/workbooks/\`, \`$DATA/$ID/specs/\`, and \`$DATA/$ID/evidence/\`.
+3. Use gh-axi for GitHub operations. This task uses Playwright as its browser driver (per the wep-core skills), not chrome-devtools-axi.
+4. Report status by appending one line:
+   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
+   FYI progress lines; firstmate reads your pane for that.
+   Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
+   https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
+   copies that URL from your line rather than assembling one.
+   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
+   known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
+   firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
+   treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
+6. If a decision belongs to a human (product choices, destructive actions),
+   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+   A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
+   every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
+   manages the daemon.
+   Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
+   \`no-mistakes axi status\`. If the daemon socket refuses connections or is missing, append
+   \`blocked: {the daemon error}\` and stop even when the local run record still says running or
+   fixing, because that record can be stale after the daemon exits. A run record failed with a
+   daemon error is also a real block.
+   Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
+   going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
+   the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
+   timed-out call was only waiting for a read while the run kept working.
+
+$INBOX_SECTION
+
+# Definition of done
+Write your findings to \`$DATA/$ID/report.md\`.
+The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+Include a coverage matrix; Pass/Fail/Blocked/Manual counts with a clean pass kept separate from a pass that needed a retry; a named reason for every Blocked or Manual case; which cases came straight from the acceptance criteria versus needed an assumed default; low-confidence flags; and the copied artifact paths under workbooks/, specs/, and evidence/.
+State findings as unconfirmed pending captain review - never self-declare results trusted.
+If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.
+Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
+When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
+If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
+EOF
+echo "scaffolded: $BRIEF (test-scout, source=$SOURCE; replace {TASK} and {FIRSTMATE_SPEC})"
+exit 0
+fi
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 

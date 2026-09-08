@@ -846,6 +846,120 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# --test-scout is a scout-kind E2E variant: fixed pipeline text per --source, and
+# fail-closed against missing/orphan --source and conflicting shape flags.
+# Plain --scout output must stay unchanged so the new path does not disturb it.
+test_test_scout_scaffold_and_refusals() {
+  local home brief out status source id label args expect baseline
+  home="$TMP_ROOT/test-scout-home"
+  mkdir -p "$home/data"
+
+  # Regression guard: capture plain --scout fixed content before exercising the
+  # new flag, then re-scaffold after and compare (executable output, not source).
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" plain-scout-baseline alpha --scout >/dev/null 2>&1 \
+    || fail "plain scout baseline scaffold failed"
+  baseline="$home/data/plain-scout-baseline/brief.md"
+  assert_present "$baseline" "plain scout baseline brief missing"
+  assert_no_grep "E2E Test-Scout Pipeline" "$baseline" \
+    "plain scout must not include the test-scout pipeline section"
+  assert_grep "chrome-devtools-axi for browser operations" "$baseline" \
+    "plain scout must keep chrome-devtools-axi"
+  assert_grep "the only files you may write outside it are the report and the status file below" "$baseline" \
+    "plain scout Rule 2 must stay report+status only"
+
+  for source in ado jira none; do
+    id="test-scout-$source"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --test-scout --source "$source" >/dev/null 2>&1 \
+      || fail "--test-scout --source $source scaffold exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "--test-scout --source $source brief was not scaffolded"
+    assert_grep "SCOUT task" "$brief" "$id: must remain a scout task"
+    assert_grep "E2E Test-Scout Pipeline" "$brief" "$id: missing fixed pipeline section"
+    assert_grep "**Requirements source:** $source" "$brief" "$id: missing selected source label"
+    assert_grep "Generate test cases" "$brief" "$id: missing step 1"
+    assert_grep "Execute against the live app" "$brief" "$id: missing step 2"
+    assert_grep "Copy the durable artifacts out before finishing" "$brief" "$id: missing step 3"
+    assert_grep "Write the report" "$brief" "$id: missing step 4"
+    assert_grep "workbooks/" "$brief" "$id: missing workbooks copy path"
+    assert_grep "specs/" "$brief" "$id: missing specs copy path"
+    assert_grep "evidence/" "$brief" "$id: missing evidence copy path"
+    assert_grep "Never copy an" "$brief" "$id: missing secret-handling rule"
+    assert_grep "do not self-declare results trusted" "$brief" "$id: missing trust posture"
+    assert_grep "clean pass" "$brief" "$id: missing clean-pass vs retry requirement"
+    assert_grep "Playwright as its browser driver" "$brief" "$id: Rule 3 must name Playwright"
+    assert_no_grep "chrome-devtools-axi for browser operations" "$brief" \
+      "$id: test-scout must not keep the plain-scout chrome-devtools-axi Rule 3"
+    assert_grep "workbooks/" "$brief" "$id: Rule 2 must allow workbooks"
+    assert_grep "## Captain's intent" "$brief" "$id: missing Captain's intent"
+    assert_grep "{TASK}" "$brief" "$id: missing {TASK} placeholder"
+    assert_grep "{FIRSTMATE_SPEC}" "$brief" "$id: missing {FIRSTMATE_SPEC} placeholder"
+    case "$source" in
+      ado) assert_grep "run story-export first" "$brief" "$id: ado routing missing" ;;
+      jira) assert_grep "jra-axi" "$brief" "$id: jira routing missing" ;;
+      none)
+        assert_grep "ALREADY-APPROVED requirements file" "$brief" "$id: none routing missing"
+        assert_grep "never the answer" "$brief" "$id: none must reject no-story misuse"
+        ;;
+    esac
+  done
+
+  # --source=ado equalspace form
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" test-scout-eq alpha --test-scout --source=ado >/dev/null 2>&1 \
+    || fail "--test-scout --source=ado equalspace form failed"
+  assert_grep "**Requirements source:** ado" "$home/data/test-scout-eq/brief.md" \
+    "--source=ado did not select ado"
+
+  # --herdr-lab still composes
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" test-scout-herdr alpha --test-scout --source none --herdr-lab >/dev/null 2>&1 \
+    || fail "--test-scout --herdr-lab composition failed"
+  assert_grep "HARD SAFETY CONTRACT" "$home/data/test-scout-herdr/brief.md" \
+    "--herdr-lab did not attach the Herdr contract to a test-scout brief"
+
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain why"
+    # Refused calls must leave no task directory (validate before mkdir).
+    case "$args" in
+      *brief-ts-*)
+        id=${args%% *}
+        [ ! -e "$home/data/$id" ] || fail "$label: refused call still created $home/data/$id"
+        ;;
+    esac
+  done <<'ROWS'
+test-scout without source|brief-ts-nosrc alpha --test-scout|--test-scout requires --source
+test-scout without repository|brief-ts-norepo --test-scout --source ado|--test-scout requires a task ID and repository
+test-scout without task ID|--test-scout --source ado|--test-scout requires a task ID and repository
+source without test-scout|brief-ts-orphansrc alpha --scout --source ado|--source requires --test-scout
+source alone on ship|brief-ts-shipsrc alpha --mode no-mistakes --source none|--source requires --test-scout
+test-scout with scout|brief-ts-withscout alpha --test-scout --source ado --scout|--test-scout cannot be combined with --scout
+test-scout with secondmate|brief-ts-withsm --test-scout --source ado --secondmate --no-projects|--test-scout cannot be combined with --secondmate
+test-scout with mode|brief-ts-withmode alpha --test-scout --source ado --mode no-mistakes|--test-scout cannot be combined with --mode
+test-scout with bare mode|brief-ts-baremode alpha --test-scout --source ado --mode|--test-scout cannot be combined with --mode
+bad source value|brief-ts-badsrc alpha --test-scout --source github|--source must be one of ado, jira, none
+duplicate spaced source|brief-ts-dupsrc alpha --test-scout --source ado --source jira|--test-scout accepts only one --source
+duplicate equals source|brief-ts-dupsrceq alpha --test-scout --source=ado --source=jira|--test-scout accepts only one --source
+ROWS
+
+  # Plain scout after the new path still matches the earlier baseline content for
+  # the fixed scout contract markers the regression cares about.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" plain-scout-after alpha --scout >/dev/null 2>&1 \
+    || fail "plain scout after test-scout path failed"
+  brief="$home/data/plain-scout-after/brief.md"
+  assert_no_grep "E2E Test-Scout Pipeline" "$brief" \
+    "plain scout after test-scout must not grow the pipeline section"
+  assert_grep "chrome-devtools-axi for browser operations" "$brief" \
+    "plain scout after test-scout lost chrome-devtools-axi"
+  assert_grep "the only files you may write outside it are the report and the status file below" "$brief" \
+    "plain scout after test-scout lost original Rule 2"
+  assert_no_grep "Playwright as its browser driver" "$brief" \
+    "plain scout must not pick up the test-scout Playwright Rule 3"
+  pass "fm-brief: --test-scout scaffolds per source and refuses invalid combinations"
+}
+
 test_worker_role_scope() {
   local kind home brief
   home="$TMP_ROOT/worker-role"
@@ -891,3 +1005,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_test_scout_scaffold_and_refusals
