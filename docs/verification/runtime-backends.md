@@ -1392,7 +1392,7 @@ The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 ## paseo
 
 paseo is a registered backend NAME only.
-Its runtime detection ordering and its endpoint-record validation shipped; no lifecycle adapter exists, so there is no live spawn, capture, send, or teardown evidence to record here yet.
+Its runtime detection ordering shipped, and its cleanup records are refused by the endpoint-validation boundary's fail-closed default for an adapterless backend rather than by any paseo-specific arm; no lifecycle adapter exists, so there is no live spawn, capture, send, or teardown evidence to record here yet.
 [`configuration.md`](../configuration.md) owns the current selection contract, including the fact that every paseo spawn refuses at `fm_backend_validate_spawn`.
 
 The dated investigation behind the ordering ran on 2026-09-06 against Paseo 0.7.2 on macOS (Darwin 25.6.0), with the local daemon on `127.0.0.1:6767`.
@@ -1486,7 +1486,7 @@ cmux signal=CMUX_WORKSPACE_ID
 tests/fm-backend-paseo.test.sh
 ```
 
-That portable regression pins the full ordering, including both both-markers cases, and the paseo cleanup-record refusal; it needs no Paseo install.
+That portable regression pins the full ordering, including both both-markers cases, the paseo cleanup-record refusal, and the fail-closed default behind it - driving both real functions to assert that every backend whose cleanup record validates has a reachable `fm_backend_kill`; it needs no Paseo install.
 
 ### Not verified here
 
