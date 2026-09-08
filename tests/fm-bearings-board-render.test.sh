@@ -57,11 +57,12 @@ SH
 }
 
 # Build the board from <charted-json> and return what the renderer produced.
-render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
-  local home=$1 charted=$2 more=${3:-0} warning_more=${4:-0} data="$1/payload.json"
-  jq -n --argjson charted "$charted" --argjson more "$more" --argjson warning_more "$warning_more" '{
+render() {  # <home> <charted-json> [charted_more] [charted_warning_more] [underway-json]
+  local home=$1 charted=$2 more=${3:-0} warning_more=${4:-0} underway=${5:-[]} data="$1/payload.json"
+  jq -n --argjson charted "$charted" --argjson more "$more" --argjson warning_more "$warning_more" \
+    --argjson underway "$underway" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:[], landed:[],
+    prs_live:false, captains_call:[], underway:$underway, landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -158,8 +159,24 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   pass "an omitted kind renders exactly as queued work always did"
 }
 
+test_an_underway_row_with_a_pr_renders_a_pr_link() {
+  local home out
+  home=$(make_home underway-pr)
+  out=$(render "$home" '[]' 0 0 '[
+    {"id":"task-a","repo":"sample","state":"done","doing":"Waiting on review","kind":"ship","pr_url":"https://github.com/example/sample/pull/42"},
+    {"id":"task-b","repo":"sample","state":"working","doing":"Implementing","kind":"ship"}
+  ]')
+  printf '%s' "$out" | jq -e '
+    (.underway | length) == 2
+      and (.underway[0].pr_href == "https://github.com/example/sample/pull/42")
+      and (.underway[1].pr_href == null)
+  ' >/dev/null || fail "a done underway row with a pr_url did not render a PR link: $out"
+  pass "an underway row with a pr_url renders a PR link, and one without stays unchanged"
+}
+
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
+test_an_underway_row_with_a_pr_renders_a_pr_link

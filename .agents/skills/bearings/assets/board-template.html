@@ -622,6 +622,11 @@ __FM_BEARINGS_BOARD_DATA__
        no repo is known */
     main.appendChild(el("div", "bb-row__sub", t.kind + " · " + (t.repo || t.id)));
     row.appendChild(main);
+    if (t.pr_url) {
+      var uwa = el("a", "bb-row__pr", "#" + t.pr_url.split("/").pop());
+      uwa.href = t.pr_url; uwa.title = t.pr_url; uwa.target = "_blank"; uwa.rel = "noopener";
+      row.appendChild(uwa);
+    }
     uw.appendChild(row);
   });
 

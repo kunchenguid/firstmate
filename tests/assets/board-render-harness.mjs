@@ -3,7 +3,7 @@
 // asserted through the real template rather than by reading its source.
 //
 // Usage: node board-render-harness.mjs <built-board.html>
-// Prints one JSON document: { stats:[{n,label}], charted:[{title,sub,badges,pickable}] }
+// Prints one JSON document: { stats:[{n,label}], charted:[{title,sub,badges,pickable}], underway:[{pr_href}] }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -114,4 +114,12 @@ const errorText = [...byId.entries()]
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
-process.stdout.write(JSON.stringify({ stats, charted, empty, more, error: errorText }) + "\n");
+const uw = byId.get("bb-underway") || new Node("div");
+const underway = uw.children
+  .filter((r) => r.className.split(/\s+/).includes("bb-row"))
+  .map((row) => {
+    const pr = row.children.find((c) => c.className.includes("bb-row__pr"));
+    return { pr_href: pr?.href ?? null };
+  });
+
+process.stdout.write(JSON.stringify({ stats, charted, underway, empty, more, error: errorText }) + "\n");
