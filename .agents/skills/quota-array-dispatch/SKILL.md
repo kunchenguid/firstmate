@@ -29,7 +29,7 @@ The helper maps each harness to its primary provider family and applies the prov
 An `exhausted_now` runway vetoes the candidate.
 The helper selects a candidate only when its applicable quota has a known `effectivePercentRemaining` greater than zero.
 An exact tie among the top known scalars exits 3 naming every tied candidate instead of breaking it, which you escalate the same way you would a tie you found by hand.
-A candidate with no known scalar stays eligible and ranks below every known value; the helper's header owns the remaining mechanics.
+A candidate with no known scalar stays eligible and ranks below every known value, and when two or more candidates are eligible but none has a known scalar the helper exits 3 naming every eligible candidate instead of choosing by argument order, while a single eligible candidate is still printed alone with exit 0.
 This is an optional narrow helper with a known limitation: it maps each harness to one primary provider family only, so a candidate whose established provider differs from that primary family is checked against the wrong quota row.
 omp has no primary family, so the helper keys an `omp:` candidate on its model prefix, mapping only `openai-codex/` and `claude-bridge/` and refusing every other prefix; the helper's header owns that mapping.
 Authoritative multi-provider routing - including provider discovery from the harness catalog and quota matching by that explicit provider - stays owned by this skill's intake procedure above and AGENTS.md section 4, not by the helper.

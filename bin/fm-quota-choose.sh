@@ -7,9 +7,13 @@
 # Reads one already-captured quota-axi default TOON or JSON snapshot from the
 # provided file, or from stdin when --snapshot is omitted. For each --candidate
 # it maps <harness> to its primary provider family, then applies the
-# provider-wide scopes and exact model or product scopes for <model>. A candidate
-# is eligible only when no applicable runway is `exhausted_now` and its known
-# effective percent remaining is greater than zero.
+# provider-wide scopes and exact model or product scopes for <model>. The <model>
+# token is matched exactly against the `model:` and `product:` scope suffixes,
+# so pass the token the snapshot actually uses when quota-axi names a model
+# window differently from the dispatch id - for example claude:fable rather
+# than claude:claude-fable-5-1. A candidate is eligible only when no applicable
+# runway is `exhausted_now` and its known effective percent remaining is
+# greater than zero.
 #
 # Among the eligible candidates the helper ranks by known `spendPriority`, read
 # from the tightest applicable scope: the exact model or product row when one
@@ -25,10 +29,13 @@
 # script exits 0. When two or more candidates share the highest known scalar the
 # helper refuses to break the tie: it prints "tie <harness> <model>" for each
 # tied candidate, one per line, and exits 3, and the caller escalates that choice
-# rather than resolving it by order. When no eligible candidate has a known
-# scalar there is nothing comparable to rank on, so the first eligible candidate
-# in argument order is printed. If no candidate is quota-eligible, it prints
-# "none" and exits 1.
+# rather than resolving it by order. When two or more candidates are eligible
+# and none has a known scalar there is nothing comparable to rank on, so the
+# helper escalates exactly like an exact tie: "tie <harness> <model>" for every
+# eligible candidate and exit 3, never a pick by argument order. A single
+# eligible candidate is printed as "<harness> <model>" with exit 0 whether or
+# not its scalar is known. If no candidate is quota-eligible, it prints "none"
+# and exits 1.
 #
 # --ordered restores first-eligible selection in argument order, for a caller
 # whose candidate order is a deliberate preference rather than an array to rank.
@@ -498,12 +505,9 @@ best=$(
   '
 )
 
-# No comparable scalar anywhere: there is nothing to rank on, so fall back to
-# argument order rather than escalating a tie that has no known values in it.
-if [ -z "$best" ]; then
-  printf '%s\n' "${ELIGIBLE_LABEL[0]}"
-  exit 0
-fi
+# No comparable scalar anywhere: there is nothing to rank on, so every eligible
+# candidate is escalated as a tie rather than picked by argument order.
+[ -n "$best" ] || best="${!ELIGIBLE_LABEL[*]}"
 
 read -r -a BEST_INDEXES <<< "$best"
 if [ "${#BEST_INDEXES[@]}" -gt 1 ]; then

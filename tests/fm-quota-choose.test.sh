@@ -741,13 +741,21 @@ out=$(call_choose --snapshot "$UNMEASURABLE_SCOPE_TOON" codex:default claude:def
 [ "$out" = "codex default" ] || fail "provider-wide codex ranking: expected 'codex default', got '$out'"
 ok "an unmeasurable model scope is not backfilled from the provider-wide row"
 
-# With no known scalar anywhere there is nothing comparable to rank on, so
-# argument order still decides rather than escalating an empty tie.
-out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:default --candidate claude:claude-3-5-sonnet)
-[ "$out" = "pi default" ] || fail "all-unknown ranking: expected 'pi default', got '$out'"
-out=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:claude-3-5-sonnet --candidate pi:default)
-[ "$out" = "claude claude-3-5-sonnet" ] || fail "all-unknown ranking: expected 'claude claude-3-5-sonnet', got '$out'"
-ok "candidates with no known scalar fall back to argument order"
+# With no known scalar anywhere there is nothing comparable to rank on, so two
+# or more eligible candidates are escalated as a tie rather than picked by order.
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:default --candidate claude:claude-3-5-sonnet 2>/dev/null) && rc=0 || rc=$?
+[ "$rc" = 3 ] || fail "all-unknown ranking exited $rc with '$out'"
+[ "$out" = "tie pi default
+tie claude claude-3-5-sonnet" ] || fail "all-unknown ranking named: '$out'"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:claude-3-5-sonnet --candidate pi:default 2>/dev/null) && rc=0 || rc=$?
+[ "$rc" = 3 ] || fail "reversed all-unknown ranking exited $rc with '$out'"
+[ "$out" = "tie claude claude-3-5-sonnet
+tie pi default" ] || fail "reversed all-unknown ranking named: '$out'"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:default)
+[ "$out" = "pi default" ] || fail "single all-unknown candidate: expected 'pi default', got '$out'"
+out=$(call_choose --ordered --snapshot "$LAB/captured.json" --candidate pi:default --candidate claude:claude-3-5-sonnet)
+[ "$out" = "pi default" ] || fail "--ordered all-unknown: expected 'pi default', got '$out'"
+ok "candidates with no known scalar escalate as a tie instead of falling back to argument order"
 
 # The JSON snapshot path carries the same selection evidence.
 jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[0].selection) =
