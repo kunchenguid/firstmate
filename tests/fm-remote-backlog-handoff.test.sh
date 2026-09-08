@@ -542,6 +542,34 @@ assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \
   "later successful handoff left stale wake state"
 pass "unrecordable best-effort wake state drops without blocking later handoffs"
 
+stale_wake_marker="$PARENT/state/.backlog-handoff-ios.wake-pending"
+printf 'invalid wake state\n' > "$stale_wake_marker"
+PATH="$RM_FAKEBIN:$PATH" FM_REAL_RM="$REAL_RM" FM_FAIL_RM_PATH="$stale_wake_marker" \
+  handoff_env "$ROOT/bin/fm-backlog-handoff.sh" --resume-pending \
+  > "$TMP_ROOT/stale-wake-resume.out" 2>&1 \
+  || fail "resume was blocked by an undeletable invalid wake marker"
+assert_present "$stale_wake_marker" "invalid wake marker did not survive the forced removal failure"
+assert_contains "$(cat "$TMP_ROOT/stale-wake-resume.out")" 'receiver wake state: DROPPED' \
+  "resume did not report the invalid wake marker as dropped"
+assert_contains "$(cat "$TMP_ROOT/stale-wake-resume.out")" "stale wake marker remains at $stale_wake_marker" \
+  "resume did not name the surviving stale wake marker"
+write_backlog '- [ ] after-stale-wake - later handoff ignores stale wake state (repo: alpha)'
+PATH="$RM_FAKEBIN:$PATH" FM_REAL_RM="$REAL_RM" FM_FAIL_RM_PATH="$stale_wake_marker" \
+  handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios after-stale-wake \
+  > "$TMP_ROOT/after-stale-wake.out" 2>&1 \
+  || fail "later handoff was blocked by an undeletable invalid wake marker"
+assert_absent "$PARENT/data/handoff/ios.outbox.md" \
+  "stale wake marker retained the later handoff outbox"
+[ "$(grep -cF -- '- [ ] after-stale-wake -' "$REMOTE/data/backlog.md")" -eq 1 ] \
+  || fail "handoff past a stale wake marker was lost or duplicated"
+assert_contains "$(cat "$TMP_ROOT/after-stale-wake.out")" 'receiver wake state: DROPPED' \
+  "later handoff did not report the stale wake as dropped"
+assert_contains "$(cat "$TMP_ROOT/after-stale-wake.out")" "stale wake marker remains at $stale_wake_marker" \
+  "later handoff did not name the surviving stale wake marker"
+assert_present "$stale_wake_marker" "later handoff concealed the forced stale-marker removal failure"
+rm -f -- "$stale_wake_marker"
+pass "undeletable invalid wake state cannot block remote handoffs"
+
 write_backlog '- [ ] route-race - remains dispatchable through retirement (repo: alpha)'
 registry_lock="$PARENT/state/.secondmate-registry.lock"
 handoff_lock="$PARENT/state/.backlog-handoff-ios.lock"
