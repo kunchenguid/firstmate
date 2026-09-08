@@ -22,6 +22,10 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 START="$ROOT/bin/fm-afk-start.sh"
+CONTRACT="$ROOT/bin/fm-afk-contract.sh"
+# The daemon paths refuse on a Pi primary, so pin a daemon-running harness for
+# every unit below; the Pi refusal has its own units (unit_pi_never_launches_the_daemon).
+export FM_AFK_PRIMARY_HARNESS=claude
 
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
@@ -39,6 +43,135 @@ GLOBAL_CLEANUP() {
   done
 }
 trap GLOBAL_CLEANUP EXIT
+
+# ---------------------------------------------------------------------------
+# UNIT 0: the away-posture record is the entry. `propose` reads the mandate
+# back, `confirm` records it and announces hold-for-return; on Pi the entry
+# ends there, and every daemon path confirms the record before launching.
+# ---------------------------------------------------------------------------
+unit_propose_confirm_records_the_posture_without_a_daemon() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-propose.XXXXXX")
+  mkdir -p "$st/state"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_PRIMARY_HARNESS=pi "$LAUNCH" propose \
+    --words 'merge the windows fix when green' --clause 'merge task fix-windows PR when checks green' \
+    --clause 'merge regardless' 2>&1)
+  rc=$?
+  if [ "$rc" -eq 3 ] && [ -f "$st/state/.afk-contract.proposed" ] \
+    && printf '%s' "$out" | grep -F '1. merge task fix-windows PR when checks green' >/dev/null \
+    && printf '%s' "$out" | grep -F '2. "merge regardless" - refused: missing when' >/dev/null \
+    && [ ! -e "$st/state/.afk-contract" ]; then
+    pass "propose: the read-back lists accepted and refused clauses and writes only a proposal"
+  else
+    fail "propose: read-back or proposal wrong (rc=$rc): $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_PRIMARY_HARNESS=pi "$LAUNCH" confirm 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -f "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk-contract.proposed" ] \
+    && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && printf '%s' "$out" | grep -F 'hold-for-return only. No phone channel is configured; anything that needs you waits for your return.' >/dev/null; then
+    pass "confirm: records the posture, announces hold-for-return only, and launches no daemon"
+  else
+    fail "confirm: record, announcement, or daemon state wrong (rc=$rc): $out"
+  fi
+  printf 'schema\tfm-afk-return.v1\nphase\tblocked\n' > "$st/state/.afk-return-catchup"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" propose --clause 'merge task a PR when checks green' >/dev/null 2>&1; then
+    fail "propose: accepted a new mandate while the prior return catch-up was pending"
+  else
+    pass "propose: refuses while the prior return catch-up is pending"
+  fi
+  rm -rf "$st"
+}
+
+unit_pi_never_launches_the_daemon() {
+  local st harness out rc
+  for harness in pi pi-signed; do
+    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-pi.XXXXXX")
+    mkdir -p "$st/state"
+      out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_PRIMARY_HARNESS="$harness" \
+      FM_SUPERVISOR_TARGET=unused FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start 2>&1)
+    rc=$?
+      if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F "the away daemon is no longer launched on $harness" >/dev/null \
+      && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] && [ ! -e "$st/state/.afk-contract" ]; then
+      pass "$harness: start refuses to launch the daemon and writes no state"
+    else
+      fail "$harness: start did not refuse cleanly (rc=$rc): $out"
+    fi
+      out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_PRIMARY_HARNESS="$harness" "$LAUNCH" start-native 2>&1)
+    rc=$?
+      if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+      pass "$harness: start-native refuses to prepare a daemon"
+    else
+      fail "$harness: start-native did not refuse (rc=$rc): $out"
+    fi
+    rm -rf "$st"
+  done
+}
+
+unit_daemon_entry_confirms_the_record_first() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-entry-record.XXXXXX")
+  mkdir -p "$st/state"
+  # A pending proposal is promoted by the daemon entry; with none, the default
+  # record is written; with a standing record, nothing is rewritten.
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" propose --clause 'merge task a PR when checks green' >/dev/null 2>&1
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+    && [ -f "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk-contract.proposed" ] && [ -e "$st/state/.afk" ] \
+    && [ "$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" clauses | cut -f2)" = merge ]; then
+    pass "daemon entry: a pending proposal is confirmed into the record before the daemon is prepared"
+  else
+    fail "daemon entry: the pending proposal was not confirmed into the record"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  rm -rf "$st/state/afk-contracts"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+    && [ -f "$st/state/.afk-contract" ] && [ -z "$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" clauses)" ]; then
+    pass "daemon entry: with no proposal the default record is written"
+  else
+    fail "daemon entry: the default record was not written"
+  fi
+  rm -rf "$st"
+}
+
+unit_failed_daemon_launch_archives_the_record_it_created() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-failed-record.XXXXXX")
+  mkdir -p "$st/state"
+  if ! FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1 \
+    && [ ! -e "$st/state/.afk-contract" ] && [ -n "$(ls "$st/state/afk-contracts" 2>/dev/null)" ]; then
+    pass "failed start: the record this entry created is archived, not left standing"
+  else
+    fail "failed start: left a posture record standing with no daemon behind it"
+  fi
+  # A record that stood BEFORE the failed launch is not the launch's to archive.
+  rm -rf "$st/state/afk-contracts"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" confirm >/dev/null 2>&1
+  if ! FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1 \
+    && [ -f "$st/state/.afk-contract" ] && [ ! -e "$st/state/afk-contracts" ]; then
+    pass "failed start: a record that already stood is preserved"
+  else
+    fail "failed start: a pre-existing posture record was archived by a failed launch"
+  fi
+  rm -rf "$st"
+}
+
+unit_stop_archives_the_record_last() {
+  local st epoch
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-archive.XXXXXX")
+  mkdir -p "$st/state"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 || fail "stop archive: native entry failed"
+  epoch=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" field entered_epoch)
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 \
+    && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-contract" ] \
+    && [ -f "$st/state/afk-contracts/$epoch.afk-contract" ]; then
+    pass "stop: clears the away flag and archives the posture record under its entry time"
+  else
+    fail "stop: the posture record was not archived (state: $(ls -a "$st/state"))"
+  fi
+  rm -rf "$st"
+}
 
 # ---------------------------------------------------------------------------
 # UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
@@ -943,6 +1076,11 @@ e2e_tmux() {
 }
 
 unit_clear_stale
+unit_propose_confirm_records_the_posture_without_a_daemon
+unit_pi_never_launches_the_daemon
+unit_daemon_entry_confirms_the_record_first
+unit_failed_daemon_launch_archives_the_record_it_created
+unit_stop_archives_the_record_last
 unit_relative_paths_are_absolute_before_daemon_launch
 unit_fresh_vs_refresh
 unit_stop_ordering
