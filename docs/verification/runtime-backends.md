@@ -375,24 +375,35 @@ A bare `tmux` launch without that file differs from every row in the table along
 Spawn through `bin/fm-spawn.sh` where that is possible; otherwise write the file yourself as below.
 
 ```sh
+cfg=${CLAUDE_CONFIG_DIR:-$HOME}                  # the worker must read the store we register into
+wt=$(cd -P -- <worktree> && pwd -P) || exit 1    # fm-claude-trust.sh keys the entry on the RESOLVED path
 tmux kill-session -t tp-h1 2>/dev/null || true   # kill and entry removal come FIRST, ahead of the registration
-node -e 'const fs=require("node:fs"),f=process.argv[1];const j=JSON.parse(fs.readFileSync(f,"utf8"));
-delete (j.projects||{})[process.argv[2]];fs.writeFileSync(f,`${JSON.stringify(j,null,2)}\n`,{mode:0o600});' \
-  "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json" <worktree> || exit 1   # never after a candidate key has been written
-bin/fm-claude-trust.sh <worktree> <project> || exit 1   # a refusal must stop the arm, not fall through to the launch
-mkdir -p <worktree>/.claude   # stand in for the hooks bin/fm-spawn.sh injects into every claude worktree
+node -e 'const fs=require("node:fs"),p=require("node:path"),c=require("node:crypto");
+const f=fs.realpathSync(process.argv[1]),was=fs.readFileSync(f,"utf8"),j=JSON.parse(was);
+if(!j.projects||!(process.argv[2] in j.projects))throw new Error(`no entry for ${process.argv[2]}`);
+delete j.projects[process.argv[2]];
+const t=p.join(p.dirname(f),`.claude.json.arm.${process.pid}.${c.randomBytes(8).toString("hex")}`);
+fs.writeFileSync(t,`${JSON.stringify(j,null,2)}\n`,{mode:0o600,flag:"wx"});
+if(fs.readFileSync(f,"utf8")!==was){fs.unlinkSync(t);throw new Error("store moved under us - rerun");}
+fs.renameSync(t,f);' "$cfg/.claude.json" "$wt" || exit 1   # never run after a candidate key has been written
+bin/fm-claude-trust.sh "$wt" <project> || exit 1   # a refusal must stop the arm, not fall through to the launch
+mkdir -p "$wt/.claude"   # stand in for the hooks bin/fm-spawn.sh injects into every claude worktree
 printf '%s\n' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"true"}]}],"Stop":[{"hooks":[{"type":"command","command":"true"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"true"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"true"}]}]}}' \
-  > <worktree>/.claude/settings.local.json
-tmux new-session -d -s tp-h1 -c <worktree> \
-  "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions 'reply with exactly: BRIEF-REACHED'" || exit 1
+  > "$wt/.claude/settings.local.json"
+tmux new-session -d -s tp-h1 -c "$wt" \
+  "CLAUDE_CONFIG_DIR=$cfg CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions 'reply with exactly: BRIEF-REACHED'" || exit 1
 pane=
 for _ in $(seq 60); do   # new-session -d returns before claude has rendered anything
   pane=$(tmux capture-pane -p -t tp-h1)
-  case $pane in *"Quick safety check"*|*". BRIEF-REACHED"*) break ;; esac
+  case $pane in *"Quick safety check"*) break ;; esac
+  if printf '%s\n' "$pane" | grep -v 'exactly:' | grep -q 'BRIEF-REACHED'; then break; fi
   sleep 1
 done
 printf '%s\n' "$pane"
 ```
+
+The removal treats an ABSENT entry as an error rather than a silent success, because that is the only signal that `$wt` disagrees with the key `bin/fm-claude-trust.sh` wrote; on a worktree that was genuinely never registered there is nothing to clear, so start at the registration instead.
+It also follows that script's own writer on that store - resolve the symlink, stage beside the target with mode 0600 and an exclusive create, re-read and compare before the rename, and refuse if the store moved - because a live Claude session writes this same file and a plain truncating write would silently drop whatever the vendor flushed in between.
 
 "Shows the Quick safety check" is NOT a usable readout: both prompts open with that byte-identical first line and both offer `Yes, I trust this folder`.
 The arm reproduces only if the pane shows the SECOND prompt, so key the readout on the discriminator - its next line is `This folder pre-approves N tool permissions in .claude/settings.json` and its first option is `No, continue without these permissions`, where the first dialog instead says Claude will be able to read, edit, and execute files here and offers `No, exit`.
@@ -400,7 +411,8 @@ If the pane shows the FIRST dialog the registration did not take effect; fix the
 Apply that readout only to a pane the poll settled on one of those two prompts.
 Loop exhaustion is NOT non-reproduction: it is equally what an empty pane looks like when the session died after creation - which the `|| exit 1` on the launch cannot catch, because it only guards session creation - and what the machine-scoped Bypass Permissions warning above or any other dialog looks like, none of which reached the trust stage at all.
 Treat every one of those as an INCONCLUSIVE arm to rerun, never as a result.
-The only pane that retires this project is one that positively shows the worker past the gate with no prompt having appeared: the answered brief, which is `. BRIEF-REACHED` on its own line and not the `> reply with exactly: BRIEF-REACHED` the UI echoes back, as the capture above shows.
+The only pane that retires this project is one that positively shows the worker past the gate with no prompt having appeared: a `BRIEF-REACHED` line that is NOT the composer's echo of the brief, which is what the poll's `grep -v 'exactly:'` tests.
+Match it that way rather than on a leading glyph: the captures in this file transcribe Claude's row markers into ASCII, so the bytes on a live pane are not the bytes quoted here.
 
 Treatment arm - snapshot the store FIRST, then answer the second prompt by hand in the control arm's `tp-h1` pane, then diff the two snapshots to see what the acceptance actually wrote:
 
@@ -417,12 +429,13 @@ if(o(x)&&o(y)){for(const k of new Set([...Object.keys(x),...Object.keys(y)]))wal
 if(JSON.stringify(x)!==JSON.stringify(y))console.log(p.join("."),JSON.stringify(x),"->",JSON.stringify(y));};
 walk(JSON.parse(fs.readFileSync(process.argv[1],"utf8")),
      JSON.parse(fs.readFileSync(process.argv[2],"utf8")),[]);' "$snap" "$STORE"
+rm -f "$snap"   # the snapshot is a full copy of a credential-bearing store; do not leave it behind
 ```
 
 Diff the WHOLE parsed store, not `projects[<worktree>]` alone.
 The two slots the captain answered by hand were already observed holding exactly `{"hasTrustDialogAccepted": true}` afterwards, so that per-project object is known NOT to change: a per-project diff returns nothing because of where it looked, not because the acceptance persists nothing, and reading its empty output as "no candidate keys" is the wrong conclusion.
 The whole-store walk also surfaces ordinary session bookkeeping written by any concurrent Claude session, so quiet the machine first and read the output for a newly appearing trust or permission key rather than for a single line.
-The keys that change there are the candidates. Test one in this order: clear the entry, run `bin/fm-claude-trust.sh`, THEN write the candidate key into that same entry, and only then rerun the control arm to see whether the prompt is gone.
+The keys that change there are the candidates. Test one in this order: clear the entry, run `bin/fm-claude-trust.sh`, THEN write the candidate key into that same entry - keyed on `$wt`, the resolved path the script itself uses - and only then rerun the control arm to see whether the prompt is gone.
 Clearing after the candidate is written deletes the key under test - the entry removal drops the whole per-project object, and `bin/fm-claude-trust.sh` rebuilds it with `hasTrustDialogAccepted` alone - so the arm would launch with exactly the shape that already prompts and every candidate would read as ruled out without ever having been carried into a launch.
 The script merges into an existing entry rather than replacing it, so writing the candidate before or after the registration both work; only clearing after it does not.
 If nothing outside that bookkeeping changes, the acceptance is persisted somewhere other than that store, or not persisted at all, and the search moves off this file.
