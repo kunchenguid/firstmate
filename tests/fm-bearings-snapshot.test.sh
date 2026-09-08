@@ -3029,15 +3029,17 @@ EOF
     "harness=claude" "kind=ship" "mode=no-mistakes" \
     "pr=https://github.com/acme/repo/pull/2"
   record_claude_state "$home/state" shipped-task idle
-  printf 'done: PR https://github.com/acme/repo/pull/2 checks green\n' > "$home/state/shipped-task.status"
+  printf 'paused: PR https://github.com/acme/repo/pull/2 waiting on the outside maintainer\n' > "$home/state/shipped-task.status"
   arm_merge_poll "$home" shipped-task https://github.com/acme/repo/pull/2 "$2"
   printf '%s:%s\n' "$home" "$fakebin"
 }
 
 run_at() {  # <home> <fakebin> <epoch> <args...>
-  local home=$1 fakebin=$2 epoch=$3; shift 3
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
-    FM_BEARINGS_NOW_EPOCH="$epoch" NET_LOG="$home/net.log" "$BEARINGS" "$@"
+  local home=$1 fakebin=$2 epoch=$3 now; shift 3
+  now=$(date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ) || fail "invalid fixture time"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW="$now" \
+    NET_LOG="$home/net.log" "$BEARINGS" "$@"
 }
 
 test_delivered_work_leaves_underway_for_its_own_bucket() {
@@ -3115,7 +3117,7 @@ test_the_nudge_threshold_is_one_named_constant() {
   pair=$(delivered_home delivered-threshold $((BEARINGS_FIXTURE_EPOCH - 3 * 86400)))
   home=${pair%%:*}; fakebin=${pair#*:}
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
-    FM_BEARINGS_NOW_EPOCH="$BEARINGS_FIXTURE_EPOCH" FM_BEARINGS_AWAITING_NUDGE_DAYS=2 \
+    FM_BEARINGS_AWAITING_NUDGE_DAYS=2 \
     NET_LOG="$home/net.log" "$BEARINGS" --json) || fail "the snapshot failed"
   printf '%s' "$out" | jq -e '
     .awaiting_nudge_days == 2 and (.awaiting[0] | .age_days == 3 and .nudge == true)
@@ -3241,7 +3243,7 @@ test_an_overdue_delivery_survives_the_awaiting_bound() {
       "harness=claude" "kind=ship" "mode=no-mistakes" \
       "pr=https://github.com/acme/repo/pull/1$i"
     record_claude_state "$home/state" "recent-$i" idle
-    printf 'done: PR https://github.com/acme/repo/pull/1%s checks green\n' "$i" \
+    printf 'paused: PR https://github.com/acme/repo/pull/1%s waiting on the outside maintainer\n' "$i" \
       > "$home/state/recent-$i.status"
     arm_merge_poll "$home" "recent-$i" "https://github.com/acme/repo/pull/1$i" \
       $((BEARINGS_FIXTURE_EPOCH - 86400))
@@ -3253,7 +3255,7 @@ test_an_overdue_delivery_survives_the_awaiting_bound() {
   arm_merge_poll "$home" shipped-task https://github.com/acme/repo/pull/2 \
     $((BEARINGS_FIXTURE_EPOCH - 40 * 86400))
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
-    FM_BEARINGS_NOW_EPOCH="$BEARINGS_FIXTURE_EPOCH" FM_BEARINGS_AWAITING=2 \
+    FM_BEARINGS_AWAITING=2 \
     NET_LOG="$home/net.log" "$BEARINGS" --json) || fail "the snapshot failed"
   printf '%s' "$out" | jq -e '
     (.awaiting | length) == 2
@@ -3294,7 +3296,7 @@ EOF
     "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes" \
     "pr=https://github.com/acme/repo/pull/77"
   record_claude_state "$mate/state" mate-shipped idle
-  printf 'done: PR https://github.com/acme/repo/pull/77 checks green\n' > "$mate/state/mate-shipped.status"
+  printf 'paused: PR https://github.com/acme/repo/pull/77 waiting on the outside maintainer\n' > "$mate/state/mate-shipped.status"
   arm_merge_poll "$mate" mate-shipped https://github.com/acme/repo/pull/77 \
     $((BEARINGS_FIXTURE_EPOCH - 4 * 86400))
   out=$(run "$home" "$fakebin" --json) || fail "the snapshot failed"
@@ -3307,6 +3309,108 @@ EOF
   pass "a second mate's delivery reaches the parent as a delivered row with its owner and link"
 }
 
+test_delivery_requires_a_declaration_and_eligible_current_state_in_both_homes() {
+  local home parent fakebin id window out ledger projected canonical meta
+  home=$(make_home delivery-state-matrix)
+  make_valid_secondmate_home delivery-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = 'axi status' ] || exit 0
+case "${PWD##*/}" in
+  run-failed) status=failed ;;
+  run-parked) status=fix_review ;;
+  run-done) status=completed ;;
+  run-unknown) status=completed; printf 'outcome: unverified\n' ;;
+  *) exit 0 ;;
+esac
+printf 'branch: %s\nhead: %s\nstatus: %s\n' \
+  "$(git symbolic-ref --quiet --short HEAD)" "$(git rev-parse HEAD)" "$status"
+SH
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in declared-live declared-exited undeclared-done event-failed event-blocked live-working run-failed run-parked run-done run-unknown; do
+    printf -- '- [ ] %s - Delivery state case (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" \
+      >> "$home/data/backlog.md"
+    mkdir -p "$home/projects/$id"
+    window="firstmate:fm-$id"
+    [ "$id" != declared-exited ] || window=firstmate:dead-declared-exited
+    fm_write_meta "$home/state/$id.meta" \
+      "window=$window" "worktree=$home/projects/$id" "project=firstmate" \
+      "harness=claude" "kind=ship" "mode=no-mistakes" \
+      "pr=https://github.com/acme/repo/pull/2"
+    record_claude_state "$home/state" "$id" idle
+    printf 'paused: waiting on the outside maintainer\n' > "$home/state/$id.status"
+    arm_merge_poll "$home" "$id" https://github.com/acme/repo/pull/2 \
+      $((BEARINGS_FIXTURE_EPOCH - 3 * 86400))
+    case "$id" in
+      run-*) fm_git_init_commit "$home/projects/$id" ;;
+      undeclared-done) printf 'done: PR ready for approval\n' > "$home/state/$id.status" ;;
+      event-failed) printf 'working: correcting delivery\nfailed: corrections failed\n' >> "$home/state/$id.status" ;;
+      event-blocked) printf 'working: correcting delivery\nblocked: corrections need firstmate\n' >> "$home/state/$id.status" ;;
+      live-working) record_claude_state "$home/state" "$id" busy ;;
+    esac
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "main delivery snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.awaiting[].id] | sort) == ["declared-exited", "declared-live", "run-done"]
+      and (.in_flight | any(.id == "undeclared-done" and .state == "done"
+        and .doing == "PR ready for approval"))
+      and (.in_flight | any(.id == "event-failed" and .state == "failed"
+        and .doing == "corrections failed"))
+      and (.in_flight | any(.id == "event-blocked" and .state == "blocked"
+        and .doing == "corrections need firstmate"))
+      and (.in_flight | any(.id == "live-working" and .state == "working"))
+      and (.in_flight | any(.id == "run-failed" and .state == "failed" and .doing == "run failed"))
+      and (.in_flight | any(.id == "run-parked" and .state == "parked" and .doing == "parked at fix_review"))
+      and (.in_flight | any(.id == "run-unknown" and .state == "unknown" and .doing == "outcome: unverified"))
+      and (.unhealthy_endpoints | any(.id == "declared-exited" and .exists == false))
+  ' >/dev/null || fail "main delivery classification hid an undeclared or superseded wait: $out"
+
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "delivery ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    ([.awaiting_merge[].id] | sort) == ["declared-exited", "declared-live", "run-done"]
+      and (.awaiting_merge | any(.id == "declared-exited" and .state == "unknown"))
+      and .invalidity.kind == "terminal_in_flight"
+      and (.invalidity.ids | sort) == ["event-failed", "run-failed", "undeclared-done"]
+      and (.holds | any(.id == "event-blocked" and .reason == "corrections need firstmate"))
+      and (.holds | any(.id == "run-parked" and .reason == "parked at fix_review"))
+  ' >/dev/null || fail "the delivery exception suppressed a failed-child diagnostic or lost an exited wait: $ledger"
+
+  parent=$(make_home delivery-state-parent)
+  append_secondmate_registry "$parent" delivery-mate "$home"
+  fm_write_secondmate_meta "$parent/state/delivery-mate.meta" "$home" "firstmate:fm-delivery-mate" firstmate
+  printf 'working [key=run-failed]: old correction activity\n' > "$parent/state/delivery-mate.status"
+  projected=$(run "$parent" "$fakebin" --json) || fail "parent delivery snapshot failed"
+  printf '%s' "$projected" | jq -e --argjson main "$out" '
+    ([.awaiting[].id | sub("^delivery-mate/"; "")] | sort) == ($main.awaiting | map(.id) | sort)
+      and ([.in_flight[] | {id:(.id | sub("^delivery-mate/"; "")), state, doing}] | sort_by(.id))
+        == ([$main.in_flight[] | {id, state, doing}] | sort_by(.id))
+  ' >/dev/null || fail "secondmate delivery state or detail diverged on the way to the parent: $projected"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$parent" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "parent activity snapshot failed"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "delivery-mate")
+    | .parent_event.reconciliation.activities
+    | any(.verb == "working" and .key == "run-failed" and .verdict == "contradicts")
+  ' >/dev/null || fail "a failed delivery corroborated old working evidence: $canonical"
+  for meta in "$home/state/"*.meta; do
+    [ "$meta" = "$home/state/run-failed.meta" ] || rm "$meta"
+  done
+  printf '## In flight\n- [ ] run-failed - Failed correction (repo: firstmate) (kind: ship) (since 2026-07-01)\n\n## Queued\n\n## Done\n' \
+    > "$home/data/backlog.md"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "failed delivery ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    .state == "no_active_work"
+      and .invalidity == {kind:"terminal_in_flight",ids:["run-failed"]}
+      and [.active_children[] | {id,state,doing}] == [{id:"run-failed",state:"failed",doing:"run failed"}]
+  ' >/dev/null || fail "a failed delivery made its home appear to have active work: $ledger"
+  pass "both homes require a declared wait, retain exited deliveries, and preserve superseding states and diagnostics"
+}
+
+test_delivery_requires_a_declaration_and_eligible_current_state_in_both_homes
 test_a_secondmate_delivery_reaches_the_parent_as_a_delivered_row
 test_a_request_waiting_on_the_captain_never_lands_in_the_waiting_state
 test_a_delivery_that_resumed_and_failed_keeps_its_own_state

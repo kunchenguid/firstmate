@@ -87,10 +87,8 @@
 #     untrusted supplements only and never override readable structured-home facts.
 #     Each structured-home record carries active_children, awaiting_merge,
 #     decisions_open, holds, queued, landed, endpoints, counts, and omitted.
-#     awaiting_merge is that home's DELIVERED work: an owned in-flight child
-#     whose delivery is recorded, whose last event declares done or the bounded
-#     external wait paused, whose live state is not working/blocked/parked, and
-#     on which the captain owes nothing. Only such a child is a recognized
+#     awaiting_merge is that home's DELIVERED work under the declared-wait
+#     eligibility contract in bin/fm-bearings-snapshot.sh. Only such a child is a recognized
 #     terminal-facing state rather than an inventory fault; one that resumed and
 #     failed keeps its diagnostic. Oldest first, so the child bound never drops
 #     the longest wait. The field is additive: a ledger written before it simply
@@ -953,6 +951,14 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     | def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
+    def delivered_and_waiting($work):
+      $work.hold_kind != "captain" and $work.hold_bucket == null
+      and $work.captain_actionable != true
+      and .pr.merge_poll.armed == true and .pr.url != null
+      and .paths.status_log.last_event.state == "paused"
+      and (.current_state.state == "paused" or .current_state.state == "done"
+           or (.current_state.state == "unknown"
+               and (.endpoint.exists == false or .endpoint.agent_alive == "dead")));
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
@@ -987,10 +993,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | $tasks[]
          | select(.kind != "secondmate")
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
-         | select(($work.hold_kind != "captain" and $work.hold_bucket == null
-                   and .pr.merge_poll.armed == true and .pr.url != null
-                   and (((.paths.status_log.last_event.state // "")) as $event
-                        | $event == "done" or $event == "paused")) | not)
+         | select(delivered_and_waiting($work) | not)
          | {id,state:.current_state.state} ]) as $terminal_in_flight
     | ([if $backlog.present != true then
           {kind:"missing_backlog",ids:[],reason:"missing structured backlog"}
@@ -1015,7 +1018,11 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     | ([ $owned_in_flight[] as $work
          | select($work.current_role != "program")
          | $tasks[]
-         | select(.id == $work.id and .current_state.state == "working")
+         | select(.id == $work.id)
+         | select(.current_state.state == "working"
+                  or ($work.current_role != "held"
+                      and .pr.merge_poll.armed == true and .pr.url != null
+                      and (delivered_and_waiting($work) | not)))
          | {id,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             source:.current_state.source,
@@ -1023,15 +1030,9 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ([ $owned_in_flight[] as $work
          | select($work.current_role != "program")
-         | select($work.hold_kind != "captain" and $work.hold_bucket == null
-                  and $work.captain_actionable != true)
          | $tasks[] as $task
          | select($task.id == $work.id and $task.kind != "secondmate")
-         | select($task.pr.merge_poll.armed == true and $task.pr.url != null)
-         | select((($task.paths.status_log.last_event.state // "")) as $event
-                  | $event == "done" or $event == "paused")
-         | select((["working", "blocked", "parked"]
-                   | index($task.current_state.state)) == null)
+         | select($task | delivered_and_waiting($work))
          | {id:$task.id,kind:$task.kind,state:$task.current_state.state,
             repo:(($work.repo // $task.project // null) | if . == null then null else trunc(120) end),
             title:(($work.title // $task.id) | trunc(120)),
@@ -1075,7 +1076,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
                    | index($invalidity.kind) | not))
        then "unknown"
        elif any($decisions_all[]; .verb == "needs-decision" or .verb == "captain-hold") then "captain_decision"
-       elif ($active_all | length) > 0 then "active_child_work"
+       elif any($active_all[]; .state == "working") then "active_child_work"
        elif ($holds_all | length) > 0 then "externally_held"
        else "no_active_work" end) as $state
     | {
@@ -1651,6 +1652,7 @@ parent_evidence_reconciliation_json() {  # <summary-json-file> <activities-json>
     ([ $activities[] as $e
        | if $e.verb == "working" then
            ([ $summary.active_children[]
+              | select(.state == "working")
               | select(if ($e.key | keyed) then .id == $e.key else true end)
               | {surface:"active_children",id,key:null,verb:"working"}]) as $matches
            | result($e; $matches;

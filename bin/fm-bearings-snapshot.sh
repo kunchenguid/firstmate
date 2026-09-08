@@ -48,19 +48,20 @@
 # chat cannot claim an empty fleet while main current state is broken.
 #
 # DELIVERED, WAITING ON A MERGE WE DO NOT CONTROL, is its own bucket rather than
-# a flavour of in_flight, and it is named for what the data proves rather than
-# for a stronger claim. A row qualifies only when BOTH halves hold: the work is
-# complete on our side, and no captain action is outstanding on that task.
+# a flavour of in_flight. A row qualifies only when BOTH halves hold: the worker
+# declared an external wait, and no captain action is outstanding on that task.
 #
 # Complete on our side is affirmative, never "any state except working". The
 # delivery must be recorded (pr.merge_poll armed with a URL, which firstmate
-# writes only after a PR-ready signal), the last recorded event must declare
-# done or the bounded external wait paused, and the live state must not be
-# working, blocked, or parked. Work that resumed and then failed keeps its own
-# state and detail rather than being filed as delivered.
+# writes only after a PR-ready signal), and the latest recorded event must be
+# paused, the bounded external wait from AGENTS.md section 8. Eligible current
+# states are paused, done, or unknown with an endpoint confirmed gone. A done
+# event alone never declares an external wait. A later event supersedes the
+# declaration, and working, failed, blocked, or parked state is never eligible.
 #
-# No captain action outstanding is read from the structured captain-hold
-# classification and nothing else. This is the same guarantee as the never-split
+# A declared wait must also pass the structured captain-hold classification.
+# An absent hold alone does not prove that no captain action remains.
+# This is the same guarantee as the never-split
 # needs-you tile, wearing its other face: nothing that needs the captain may be
 # hidden, whether by splitting a tile or by re-labelling a row.
 #
@@ -73,13 +74,13 @@
 # is one-way and no row can oscillate between the two. Overdue and oldest rows
 # sort first, so the bound can never be what drops one.
 #
-# WHAT THIS DELIBERATELY DOES NOT CLAIM. The state was first specified as
-# "delivered, awaiting an OUTSIDE MAINTAINER", requiring that the only remaining
-# actor be outside this fleet. Nothing in fleet state records that a repository
-# is one we never merge into - only prose in a project description - so that
-# condition was not testable and the state was narrowed to what structure
-# proves. Do not infer the missing fact from a description, from yolo, or from
-# any other proxy; adding it is a registered project posture, tracked separately.
+# The state was first specified too loosely, with prose standing in for
+# structure. It was narrowed once to what structure proves, then corrected
+# AGAIN during review: a PR-ready done event plus an armed watch and no hold
+# still left open the window before asking the captain for approval in chat.
+# Requiring a declared paused wait closes that window; an undeclared outside
+# wait stays in flight. Repository merge ownership is a registered project
+# posture tracked separately, never inferred from descriptions, yolo, or proxies.
 #
 # OWNERSHIP IS STRUCTURAL. Every in_flight, awaiting, landed, and gates row
 # carries owner - "(main)" for this home, the registered secondmate id for a
@@ -143,7 +144,7 @@ FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
 # its maintainer before the row stops being "still normal" and becomes the
 # captain's to nudge. 7 is measured, not guessed: across the last 200 merged
 # pull requests in this fleet's own upstream repository the merge latency was
-# 0.1 days at the median, 0.8 at the 90th percentile, and 10.2 at its single
+# 0.1 days at the median, 0.3 at the 75th percentile, 0.8 at the 90th, and 10.2 at its single
 # extreme, so a full week is roughly nine times the 90th percentile, absorbs a
 # weekend and a busy week, and still fires well before the longest merge this
 # repository has ever completed. Provisional: only four of those merges were
@@ -259,13 +260,9 @@ command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2
 "$SCRIPT_DIR/fm-afk-return.sh" guard || exit $?
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
-if [ -n "${FM_BEARINGS_NOW_EPOCH:-}" ]; then
-  NOW_EPOCH=$FM_BEARINGS_NOW_EPOCH
-else
-  NOW_EPOCH=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$NOW" +%s 2>/dev/null \
-    || date -u -d "$NOW" +%s 2>/dev/null \
-    || date +%s)
-fi
+NOW_EPOCH=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$NOW" +%s 2>/dev/null \
+  || date -u -d "$NOW" +%s 2>/dev/null \
+  || date +%s)
 case "$NOW_EPOCH" in ''|*[!0-9]*) NOW_EPOCH=$(date +%s) ;; esac
 if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
   if [ "$ALL_LANDED" = 1 ]; then
@@ -467,16 +464,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   # it" looks like in structure instead of in a title.
   def delivery_recorded:
     .pr.merge_poll.armed == true and .pr.url != null;
-  # COMPLETE ON OUR SIDE, stated affirmatively rather than as "any state except
-  # working". The last recorded event must declare a terminal-for-us state -
-  # done, or the paused that AGENTS.md section 8 defines as a bounded external
-  # wait - and the live state must not show work that resumed, needs firstmate,
-  # or sits at a gate. Work that resumed and then failed or blocked keeps that
-  # state and its detail instead of being reported as delivered.
   def complete_on_our_side:
-    . as $t
-    | ((($t.paths.status_log.last_event.state // "")) | . == "done" or . == "paused")
-      and ((["working", "blocked", "parked"] | index($t.current_state.state)) == null);
+    .paths.status_log.last_event.state == "paused"
+    and (.current_state.state == "paused" or .current_state.state == "done"
+         or (.current_state.state == "unknown"
+             and (.endpoint.exists == false or .endpoint.agent_alive == "dead")));
   # NOTHING THE CAPTAIN OWES IS EVER RE-LABELLED. A task he still owes an answer
   # on is his call, whatever else is true of it, so it never reaches this bucket.
   # The test is the structured captain-hold classification and nothing else.

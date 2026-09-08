@@ -46,9 +46,13 @@ Board answers are acted on later under the normal authority rules; this skill's 
    The canonical snapshot assigns every captain hold exactly one bucket from structured fields only: `blocked` when any blocker is unresolved, else `dated` while `hold_until` is in the future, else `aged` when an undated hold has reached the configured age threshold, else `live`.
    Never use hold-reason or body prose to classify or place a decision.
    The same structural-only rule governs the delivered bucket and ownership.
-   The snapshot's `awaiting` rows are the whole of the Delivered section, and a row qualifies only when BOTH halves hold: the work is complete on our side, and no captain action is outstanding on that task.
-   Complete on our side is stated affirmatively - the delivery is recorded by an armed merge watch with a URL, the last recorded event declares `done` or the bounded external wait `paused`, and the live state is not working, blocked, or parked - so work that resumed and then failed keeps its own state instead of reading as delivered.
-   Outstanding captain action is read from the structured captain-hold classification alone.
+   The snapshot's `awaiting` rows are the whole of the Delivered section, and a row qualifies only when BOTH halves hold: the worker declared a bounded external wait, and no captain action is outstanding on that task.
+   The delivery needs an armed merge watch with a URL, the latest recorded event must be `paused` as defined by AGENTS.md section 8, and the current state must be `paused`, `done`, or `unknown` with an endpoint confirmed gone.
+   A later event supersedes the declaration, and a current working, failed, blocked, or parked state is never eligible.
+   The declared wait must also pass the structured captain-hold classification; absence of a hold alone never establishes outside ownership.
+   The state was first specified too loosely, with prose standing in for structure, then narrowed once to what structure proves, and corrected AGAIN during review when that narrowing still left the captain window open: the normal PR-ready flow arms a merge watch after `done` before asking for the captain's approval in chat, without creating a hold.
+   A `done` event without a declared wait therefore stays in flight, as does a genuine outside wait nobody declared; under-populating Delivered preserves visibility, while mis-populating it hides the captain's work.
+   Repository merge ownership is a registered project posture tracked separately, never inferred from project descriptions, yolo, or any other proxy.
    The snapshot removes a qualifying row from `in_flight` and from `gates`, so the same work is counted once.
    `age_days` is how long this delivery has been waiting, measured from its own durable record and preserved when the same PR is re-recorded; `nudge` is the snapshot's own exit rule at `awaiting_nudge_days`: a row at or past it stops being a delivered row and becomes a Captain's Call nudge instead.
    Age only grows, so a row that crosses never crosses back; only the merge retires it.
