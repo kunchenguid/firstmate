@@ -529,6 +529,233 @@ SH
   pass "captain-hold mutations address the beads backend without a markdown override"
 }
 
+# run_captain_bounded <home> <seconds> <args...>: run_captain under a watchdog;
+# a wedged run is killed and reported to the caller as rc 137.
+run_captain_bounded() {
+  local home=$1 budget=$2 pid wd rc
+  shift 2
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@" &
+  pid=$!
+  ( sleep "$budget"; kill -9 "$pid" 2>/dev/null ) &
+  wd=$!
+  wait "$pid" 2>/dev/null
+  rc=$?
+  kill "$wd" 2>/dev/null || true
+  wait "$wd" 2>/dev/null || true
+  return "$rc"
+}
+
+# Leave exactly what a crashed lock holder leaves: an owner dir with a dead
+# holder pid and the lock symlink pointing at it.
+seed_stale_lock() {  # <lock-path>
+  local path=$1 owner
+  owner=$(mktemp -d "$path.owner.XXXXXX") || return 1
+  printf '999999999\n' > "$owner/pid" || { rm -rf "$owner"; return 1; }
+  ln -s "$owner" "$path" || { rm -rf "$owner"; return 1; }
+  return 0
+}
+
+# No lock, steal-mutex, owner-dir, or retired-residue name remains in a state
+# dir that should be fully clean.
+assert_no_lock_names() {  # <state-dir> <why>
+  local state=$1 why=$2 name base leftovers=''
+  for name in "$state"/* "$state"/.*; do
+    [ -e "$name" ] || [ -L "$name" ] || continue
+    base=${name##*/}
+    case "$base" in
+      .|..) continue ;;
+      *.lock|*.lock.*) leftovers="$leftovers $base" ;;
+    esac
+  done
+  [ -z "$leftovers" ] || fail "$why:$leftovers"
+}
+
+# A crashed completion (killed while holding the origin metadata lock) leaves a
+# stale lock. The next completion through the public surface must recover it,
+# record the attestation, leave no lock residue, and stay idempotent.
+test_completion_recovers_stale_meta_lock_and_cleans_up() {
+  local home id
+  home=$(make_home stale-meta-lock)
+  id=sample-crashed-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review a sample crashed run" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the crashed-review origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample crashed review\n\nNo captain choice remains.\n' > "$home/data/$id/report.md"
+  seed_stale_lock "$home/state/.meta-$id.lock" \
+    || fail "could not seed the stale completion lock"
+
+  run_captain_bounded "$home" 30 complete "$id" --none >/dev/null 2> "$home/complete.err" \
+    || fail "completion did not recover the stale lock: $(cat "$home/complete.err")"
+  assert_no_lock_names "$home/state" "recovered completion left lock residue behind"
+  assert_grep "decisions_reviewed=1" "$home/state/$id.meta" \
+    "recovered completion did not record the attestation"
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "idempotent completion retry failed after recovery"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "the completion gate failed after stale-lock recovery"
+  pass "completion recovers a crashed holder's stale lock and stays idempotent"
+}
+
+# The original failure: the retired recursive recovery minted one fresh .steal
+# suffix per recovery level, so killed recoveries ratcheted residue toward the
+# filesystem name limit, after which every later completion spun forever trying
+# to create deeper names. Completion must recover the deepest creatable chain
+# in one bounded run, attempt no deeper name, and leave nothing behind.
+test_completion_survives_deep_legacy_lock_residue() {
+  local home id p depth rc
+  home=$(make_home deep-lock-residue)
+  id=sample-wedged-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review a sample wedged run" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the wedged-review origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample wedged review\n\nNo captain choice remains.\n' > "$home/data/$id/report.md"
+  seed_stale_lock "$home/state/.meta-$id.lock" \
+    || fail "could not seed the stale completion lock"
+  p="$home/state/.meta-$id.lock.steal"
+  while seed_stale_lock "$p"; do
+    p="$p.steal"
+  done
+  depth=0
+  p="$home/state/.meta-$id.lock.steal"
+  while [ -L "$p" ]; do
+    depth=$((depth + 1))
+    p="$p.steal"
+  done
+  [ "$depth" -ge 3 ] || fail "deep residue fixture was too shallow to pin the defect ($depth links)"
+
+  set +e
+  run_captain_bounded "$home" 60 complete "$id" --none > "$home/complete.out" 2> "$home/complete.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 137 ] || fail "completion wedged in an unbounded wait on deep legacy residue (the original failure)"
+  [ "$rc" -eq 0 ] || fail "completion failed on deep legacy residue (rc=$rc): $(cat "$home/complete.err")"
+  assert_no_grep "File name too long" "$home/complete.err" \
+    "completion attempted a name past the filesystem limit"
+  assert_no_lock_names "$home/state" "completion left deep residue behind"
+  assert_grep "decisions_reviewed=1" "$home/state/$id.meta" \
+    "completion did not record the attestation"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "the completion gate failed after deep-residue recovery"
+  pass "completion recovers the deepest creatable retired-residue chain in one bounded run"
+}
+
+# Two completions racing on one origin serialize on the origin metadata lock:
+# both succeed, the attestation and inventory are recorded exactly once, and no
+# lock state leaks.
+test_concurrent_completion_serializes_on_the_meta_lock() {
+  local home id
+  home=$(make_home concurrent-complete)
+  id=sample-racing-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review a sample racing run" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the racing-review origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample racing review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-racing-call \
+    --title "Choose the sample race winner" --reason "captain racing choice pending" \
+    --repo sample >/dev/null \
+    || fail "could not register the racing call"
+
+  run_captain_bounded "$home" 60 complete "$id" sample-racing-call > "$home/c1.out" 2>&1 &
+  p1=$!
+  run_captain_bounded "$home" 60 complete "$id" sample-racing-call > "$home/c2.out" 2>&1 &
+  p2=$!
+  wait "$p1" || fail "first racing completion failed: $(cat "$home/c1.out")"
+  wait "$p2" || fail "second racing completion failed: $(cat "$home/c2.out")"
+  assert_grep "decisions_reviewed=1" "$home/state/$id.meta" \
+    "racing completions did not record the attestation"
+  assert_grep "decision_keys=sample-racing-call" "$home/state/$id.meta" \
+    "racing completions did not record the inventory"
+  [ "$(grep -c 'decisions_reviewed=1' "$home/state/$id.meta")" = 1 ] \
+    || fail "racing completions duplicated the attestation line"
+  assert_no_lock_names "$home/state" "racing completions left lock residue behind"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "the completion gate failed after racing completions"
+  pass "racing completions serialize on the metadata lock without residue"
+}
+
+# A live completion still holding the origin metadata lock is never stolen: a
+# second completion waits without disturbing the holder or leaving residue, and
+# completes once the holder exits.
+test_completion_refuses_live_lock_and_leaves_no_residue() {
+  local home id holder rc i name owner_pid base leftovers
+  home=$(make_home live-meta-lock)
+  id=sample-contested-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review a sample contested run" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the contested-review origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample contested review\n\nNo captain choice remains.\n' > "$home/data/$id/report.md"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$2"
+    fm_lock_acquire_wait "$1" || exit 9
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    sleep 30
+  ' _ "$home/state/.meta-$id.lock" "$ROOT/bin/fm-wake-lib.sh" "$home/holder" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$home/holder" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$home/holder" ] || fail "the live metadata lock holder never started"
+
+  set +e
+  run_captain_bounded "$home" 5 complete "$id" --none > "$home/complete.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 137 ] || fail "a second completion did not wait for the live metadata lock holder (rc=$rc)"
+  [ "$(cat "$home/state/.meta-$id.lock/pid" 2>/dev/null || true)" = "$(cat "$home/holder")" ] \
+    || fail "the waiting completion disturbed the live holder's lock"
+  leftovers=''
+  for name in "$home/state/.meta-$id.lock".steal*; do
+    [ -e "$name" ] || [ -L "$name" ] || continue
+    leftovers="$leftovers ${name##*/}"
+  done
+  [ -z "$leftovers" ] || fail "the waiting completion left steal residue behind:$leftovers"
+
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "completion failed after the live holder exited"
+  # The watchdog's SIGKILL can land between the waiter's owner-dir creation and
+  # its discard, orphaning one owner directory: a pre-existing, never-blocking
+  # primitive race (a kill-stress harness orphans 2/40 rounds, identically on
+  # the unfixed base), not steal-mutex state, and no lock path reads a dead-pid
+  # owner dir. Lock links, steal names, malformed owner dirs, and owner dirs
+  # with a live recorded pid must still all be gone; the three tests that kill
+  # no waiter keep the strict zero-debris assertion.
+  leftovers=''
+  for name in "$home/state"/* "$home/state"/.*; do
+    [ -e "$name" ] || [ -L "$name" ] || continue
+    base=${name##*/}
+    case "$base" in
+      .|..) continue ;;
+      *.lock|*.lock.steal*) leftovers="$leftovers $base" ;;
+      *.lock.owner.*)
+        owner_pid=$(cat "$name/pid" 2>/dev/null || true)
+        case "$owner_pid" in
+          ''|*[!0-9]*) leftovers="$leftovers $base" ;;
+          *) kill -0 "$owner_pid" 2>/dev/null && leftovers="$leftovers $base" ;;
+        esac
+        ;;
+    esac
+  done
+  [ -z "$leftovers" ] \
+    || fail "completion left blocking lock residue behind:$leftovers"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "the completion gate failed after the contested lock cleared"
+  pass "a contested completion waits, leaves no residue, and completes after the holder exits"
+}
+
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
 # and visual review have ended, the only genuine unresolved captain call is report
 # prose, no held backlog item or open status exists, and the authoritative
@@ -2603,6 +2830,10 @@ SH
 }
 
 test_uninventoried_report_decision_refuses_completion
+test_completion_recovers_stale_meta_lock_and_cleans_up
+test_completion_survives_deep_legacy_lock_residue
+test_concurrent_completion_serializes_on_the_meta_lock
+test_completion_refuses_live_lock_and_leaves_no_residue
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work

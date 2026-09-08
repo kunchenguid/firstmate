@@ -860,6 +860,10 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
+  # Best-effort fleet usage harvest runs while the task's state files still
+  # exist; a harvest failure must never block teardown.
+  "$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
+    || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
   status_retire_presentation_task "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   rm -f -- "$STATE/$ID.turn-ended"
@@ -2922,6 +2926,11 @@ cleanup_firstmate_home_children() {
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
+    # The child home is about to be deleted. Preserve its task usage in the
+    # surviving parent's ledger while the child status and metadata exist.
+    FM_HOME="$home" FM_STATE_OVERRIDE="$sub_state" FM_DATA_OVERRIDE="$DATA" \
+      "$FM_ROOT/bin/fm-usage-harvest.sh" "$child_id" >/dev/null \
+      || echo "warning: usage harvest for $child_id failed; continuing teardown" >&2
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
     remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
@@ -3312,6 +3321,10 @@ if [ "$KIND" != secondmate ]; then
     exit 1
   fi
 fi
+# Best-effort fleet usage harvest runs while the task's state files still
+# exist; a harvest failure must never block teardown.
+"$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
+  || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \

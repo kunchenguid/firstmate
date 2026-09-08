@@ -418,6 +418,151 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
+# Leave exactly what a crashed lock holder leaves: an owner dir with the
+# holder's dead pid and the lock symlink pointing at it. A live pid argument
+# seeds a live holder instead.
+seed_stale_lock() {  # <lock-path> [pid]
+  local path=$1 owner
+  owner=$(mktemp -d "$path.owner.XXXXXX") || return 1
+  printf '%s\n' "${2:-$(dead_pid)}" > "$owner/pid" || { rm -rf "$owner"; return 1; }
+  ln -s "$owner" "$path" || { rm -rf "$owner"; return 1; }
+  return 0
+}
+
+# No lock, steal-mutex, owner-dir, or retired-residue name of any lock family
+# remains in the state dir.
+assert_no_lock_family() {  # <state-dir> <why>
+  local state=$1 why=$2 name base leftovers=''
+  for name in "$state"/* "$state"/.*; do
+    [ -e "$name" ] || [ -L "$name" ] || continue
+    base=${name##*/}
+    case "$base" in
+      .|..) continue ;;
+      *.lock|*.lock.*) leftovers="$leftovers $base" ;;
+    esac
+  done
+  [ -z "$leftovers" ] || fail "$why:$leftovers"
+}
+
+# The retired recursive recovery minted one fresh .steal suffix per recovery
+# level, so crash residue could reach the filesystem name limit and wedge every
+# later recovery in an unbounded wait. One acquisition must recover the deepest
+# creatable stale chain, attempt no deeper name, and leave no residue.
+test_lock_deep_stale_chain_recovers_bounded() {
+  local dir state lockdir p err rc
+  dir=$(make_case lock-deep-chain)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  err="$dir/err"
+  seed_stale_lock "$lockdir"
+  p="$lockdir.steal"
+  while seed_stale_lock "$p"; do
+    p="$p.steal"
+  done
+  [ -L "$lockdir.steal" ] || fail "deep stale chain fixture was not seeded"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" 2> "$err" &
+  wait_for_exit $! 300
+  rc=$?
+  [ "$rc" -ne 124 ] || fail "deep stale chain recovery wedged in an unbounded wait"
+  [ "$rc" -eq 0 ] || fail "deep stale chain recovery failed (rc=$rc)"
+  assert_no_grep "File name too long" "$err" "recovery attempted a name past the filesystem limit"
+  assert_no_lock_family "$state" "deep chain recovery left lock residue behind"
+  pass "the deepest creatable stale chain recovers in one bounded acquisition"
+}
+
+# Repeated stale recovery must be a fixed point: however many holders crash and
+# whatever the retired protocol left behind, every round recovers and no round
+# ever leaves a deeper name than the one recovery mutex.
+test_lock_repeated_stale_recovery_never_deepens_names() {
+  local dir state lockdir round err rc
+  dir=$(make_case lock-repeat-recovery)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  err="$dir/err"
+  round=1
+  while [ "$round" -le 6 ]; do
+    seed_stale_lock "$lockdir"
+    case "$round" in
+      2|5) seed_stale_lock "$lockdir.steal" ;;
+      3|6)
+        seed_stale_lock "$lockdir.steal"
+        seed_stale_lock "$lockdir.steal.steal"
+        ;;
+    esac
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2" || exit 7
+      fm_lock_release "$2"
+    ' _ "$LIB" "$lockdir" 2> "$err" &
+    wait_for_exit $! 300
+    rc=$?
+    [ "$rc" -ne 124 ] || fail "stale recovery round $round wedged in an unbounded wait"
+    [ "$rc" -eq 0 ] || fail "stale recovery round $round failed (rc=$rc)"
+    assert_no_grep "File name too long" "$err" "round $round attempted a name past the filesystem limit"
+    assert_no_lock_family "$state" "round $round left lock residue behind"
+    round=$((round + 1))
+  done
+  pass "repeated stale recovery stays bounded and leaves no residue"
+}
+
+# Legacy residue beyond the recovery mutex must not wedge recovery, and a LIVE
+# residue holder defers recovery instead of being swept away.
+test_lock_legacy_residue_swept_and_live_residue_defers() {
+  local dir state lockdir err rc livepid lockpid
+  dir=$(make_case lock-residue)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  err="$dir/err"
+
+  # Residue with absent intermediate mutexes is recoverable even when
+  # atomic creation of the fixed mutex succeeds on its first attempt.
+  seed_stale_lock "$lockdir"
+  seed_stale_lock "$lockdir.steal.steal.steal"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" 2> "$err" &
+  wait_for_exit $! 300
+  rc=$?
+  [ "$rc" -ne 124 ] || fail "recovery wedged on residue with an absent mutex"
+  [ "$rc" -eq 0 ] || fail "recovery failed on residue with an absent mutex (rc=$rc)"
+  assert_no_lock_family "$state" "residue sweep left lock state behind"
+
+  # A live residue holder is proven through its recorded pid: the sweep defers,
+  # the stale primary stays untouched, and a later round recovers.
+  seed_stale_lock "$lockdir"
+  sleep 300 &
+  livepid=$!
+  seed_stale_lock "$lockdir.steal.steal.steal" "$livepid"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+  ' _ "$LIB" "$lockdir" 2> "$err" &
+  wait_for_exit $! 300
+  rc=$?
+  [ "$rc" -eq 7 ] || fail "live residue holder was swept or recovery did not defer (rc=$rc)"
+  [ -L "$lockdir.steal.steal.steal" ] || fail "live residue holder's mutex was removed"
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ -n "$lockpid" ] || fail "deferred recovery disturbed the stale primary lock"
+  kill "$livepid" 2>/dev/null || true
+  wait "$livepid" 2>/dev/null || true
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" 2> "$err" &
+  wait_for_exit $! 300
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "recovery still failed after the residue holder exited (rc=$rc)"
+  assert_no_lock_family "$state" "recovery after residue holder exit left lock state behind"
+  pass "legacy residue is swept when stale and defers while its holder is live"
+}
+
 test_watch_restart_rejects_reused_pid() {
   local dir state fakebin out live pid i
   dir=$(make_case restart-reused-pid)
@@ -1118,6 +1263,9 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_lock_deep_stale_chain_recovers_bounded
+test_lock_repeated_stale_recovery_never_deepens_names
+test_lock_legacy_residue_swept_and_live_residue_defers
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover

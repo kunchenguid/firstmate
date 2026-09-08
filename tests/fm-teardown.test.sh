@@ -2322,6 +2322,10 @@ test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
   write_meta "$case_dir" local-only secondmate
   configure_secondmate_with_tmux_children "$case_dir"
   home="$case_dir/secondmate-home"
+  for child in child-a child-b; do
+    printf 'harness=cursor\n' >> "$home/state/$child.meta"
+    printf 'working: child started\nworking: child finished\n' > "$home/state/$child.status"
+  done
   : > "$case_dir/kill.log"
   : > "$case_dir/treehouse.log"
   cat > "$case_dir/fakebin/tmux" <<SH
@@ -2387,6 +2391,10 @@ SH
     || fail "descendant-locks: uncontended retry retained retired task state"
   [ -s "$case_dir/kill.log" ] && [ -s "$case_dir/treehouse.log" ] \
     || fail "descendant-locks: uncontended retry did not perform endpoint and worktree cleanup"
+  jq -se '[.[] | select(.task == "child-a" or .task == "child-b")] |
+    length == 2 and all(.turns == 2 and .harness == "cursor" and .completed_at != null)' \
+    "$case_dir/data/usage-ledger.jsonl" >/dev/null \
+    || fail "descendant-locks: child usage did not survive removal of the secondmate home"
   pass "forced secondmate teardown holds every descendant lifecycle and metadata lock"
 }
 
