@@ -213,16 +213,28 @@ status_is_paused_or_captain_held() {  # <status-line>
 # than bin/fm-pr-lib.sh's canonical parse, which validates a whole string a
 # caller already isolated: these scrape free text a worker wrote. Both supported
 # forges are covered, so a GitLab merge request counts as a PR and a GitLab task
-# is never read as unlanded. This is the one scraper in the repo; callers that
-# want the newest mention read the last line rather than keeping their own
-# pattern.
+# is never read as unlanded. This pattern is the one definition in the repo;
+# callers that want the newest mention read the last line rather than keeping
+# their own pattern.
+FM_CLASSIFY_PR_URL_RE='https?://[^[:space:])"]+(/pull/|/-/merge_requests/)[0-9]+'
+
 status_pr_urls() {  # <text> -> every PR/MR URL, one per line
-  printf '%s\n' "$1" \
-    | LC_ALL=C grep -Eo 'https?://[^[:space:])"]+(/pull/|/-/merge_requests/)[0-9]+'
+  printf '%s\n' "$1" | LC_ALL=C grep -Eo "$FM_CLASSIFY_PR_URL_RE"
 }
 
 status_line_pr_url() {  # <text> -> first PR/MR URL, or empty
   status_pr_urls "$1" | head -1
+}
+
+# The same scrape over a whole file. A status log is the task's append-only
+# lifetime record and can grow to megabytes, so it is streamed through grep
+# rather than read into a shell variable first.
+status_pr_urls_file() {  # <file> -> every PR/MR URL, one per line
+  LC_ALL=C grep -Eo "$FM_CLASSIFY_PR_URL_RE" "$1" 2>/dev/null
+}
+
+status_file_pr_url() {  # <file> -> first PR/MR URL, or empty
+  status_pr_urls_file "$1" | head -1
 }
 
 # There is exactly ONE acceptance path, and it is the line itself: a `done:` line

@@ -347,9 +347,9 @@ status_event_json() {  # <observed-status-log> [<contract-path>]
 
 first_pr_url_in_file() {  # <file>
   [ -f "$1" ] || return 1
-  # fm-classify-lib.sh's status_pr_urls is the one PR/MR scraper; it also covers
-  # a GitLab merge request, which this column previously missed.
-  status_line_pr_url "$(LC_ALL=C cat "$1" 2>/dev/null)"
+  # fm-classify-lib.sh's status_pr_urls_file is the one PR/MR scraper; it also
+  # covers a GitLab merge request, which this column previously missed.
+  status_file_pr_url "$1"
 }
 
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG

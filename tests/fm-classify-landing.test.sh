@@ -181,6 +181,27 @@ test_gitlab_merge_request_counts_as_a_pr() {
   pass "a GitLab merge request counts as a PR"
 }
 
+# The file-taking scraper the fleet snapshot's PR column and the inactive
+# reconciler read a whole status log with. It answers exactly what the
+# text-taking form answers for the same content, on both forges and in log order.
+test_file_scraper_matches_the_text_scraper() {
+  local state text file_urls
+  text='working: opened https://gitlab.example.com/g/p/-/merge_requests/7
+working: superseded by https://github.com/o/r/pull/12
+'
+  state=$(make_task pr-scrape-file "$text")
+  file_urls=$(status_pr_urls_file "$state/task.status")
+  [ "$file_urls" = "$(status_pr_urls "$text")" ] \
+    || fail "the file scraper disagreed with the text scraper: $file_urls"
+  [ "$(status_file_pr_url "$state/task.status")" \
+    = 'https://gitlab.example.com/g/p/-/merge_requests/7' ] \
+    || fail "the file scraper did not return the first URL"
+  : > "$state/task.status"
+  [ -z "$(status_file_pr_url "$state/task.status")" ] \
+    || fail "an empty log yielded a PR URL"
+  pass "the file scraper answers what the text scraper answers"
+}
+
 # --- the acceptance paths that were deliberately removed ----------------------
 #
 # Both of these passed before the guard collapsed to one acceptance path, and
@@ -251,6 +272,7 @@ test_absent_and_unusable_records_are_accepted
 test_non_done_verbs_are_untouched
 test_pr_url_on_the_line_is_a_landing
 test_gitlab_merge_request_counts_as_a_pr
+test_file_scraper_matches_the_text_scraper
 test_pr_on_an_earlier_line_is_not_a_landing
 test_recorded_pr_metadata_is_not_a_landing
 test_drain_annotation_cannot_be_read_as_a_landing

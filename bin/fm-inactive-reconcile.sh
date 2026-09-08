@@ -318,7 +318,7 @@ pr_for_task() { # <meta> <status> [preferred-line]
     value=$(status_line_pr_url "$preferred" || true)
   fi
   if [ -z "$value" ] && [ -f "$status" ]; then
-    value=$(status_pr_urls "$(LC_ALL=C cat "$status" 2>/dev/null)" | tail -1 || true)
+    value=$(status_pr_urls_file "$status" | tail -1 || true)
   fi
   clean_field "$value"
 }
@@ -359,8 +359,8 @@ child_terminal_ledger_line() { # <status>
   # A done line with no PR behind it, on a task whose recorded delivery mode ends
   # in a PR, is the handoff signal the generated contract asks for on the
   # implementation commit, not a terminal outcome. Reporting it upward would post
-  # a landing that never happened to the parent channel, so it stays non-terminal
-  # here and the ordinary inactive path keeps supervising the child
+  # a landing that never happened to the parent channel, so the line stays
+  # non-terminal here and nothing is reported upward for it
   # (fm-classify-lib.sh's status_done_without_pr owns the test and its
   # accept-by-default edges, so a scout or local-only completion is untouched).
   status_done_without_pr "$last" "$status" >/dev/null && return 1

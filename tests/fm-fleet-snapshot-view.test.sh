@@ -1053,8 +1053,12 @@ EOF
   printf 'done: complete\n' > "$home/state/terminal-ship.status"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
   printf '%s' "$out" | jq -e '
-    .invalidity.kind != "terminal_in_flight"
-  ' >/dev/null || fail "a done with no PR on a no-mistakes ship must not read as terminal: $out"
+    .valid == true
+      and .invalidity == {kind:null,ids:[]}
+      and ([.holds[] | select(.id == "terminal-ship")] | length) == 1
+      and ([.holds[] | select(.id == "terminal-ship")][0]
+           | .source == "child-state" and (.reason | contains("not landed")))
+  ' >/dev/null || fail "a done with no PR on a no-mistakes ship must be a not-landed child-state hold, not terminal: $out"
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 

@@ -1759,6 +1759,31 @@ test_classify_signal_dedup_against_scan() {
   pass "classify_signal dedupes against the catch-all scan seen marker"
 }
 
+test_classify_signal_digest_refuses_a_pr_less_done() {
+  # The away-mode escalation digest is a supervisor-facing surface, so the
+  # PR-less done of a no-mistakes ship must not reach it as a landing claim.
+  local dir state out
+  dir=$(make_supercase signal-digest-not-landed)
+  state="$dir/state"
+  printf 'mode=no-mistakes\n' > "$state/land-s3.meta"
+  printf 'done: aprovacoes endpoint implemented, commit b291c234\n' > "$state/land-s3.status"
+  seen_through "$state" "land-s3"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/land-s3.status" "$state")
+  case "$out" in
+    *not-landed*) ;;
+    *) fail "digest must reclassify a PR-less done on a no-mistakes ship: $out" ;;
+  esac
+  printf 'done: PR https://github.com/o/r/pull/12 checks green\n' > "$state/land-s3.status"
+  seen_through "$state" "land-s3"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/land-s3.status" "$state")
+  case "$out" in
+    *not-landed*) fail "a real landing must reach the digest unchanged: $out" ;;
+    *pull/12*) ;;
+    *) fail "digest lost the landing line: $out" ;;
+  esac
+  pass "classify_signal digest renders a PR-less done as not landed"
+}
+
 test_classify_stale_dedup_against_signal() {
   # If the signal path already escalated a status (seen marker matches),
   # classify_stale must self-handle to avoid a duplicate in the digest.
@@ -2673,6 +2698,7 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_preserves_bright_placeholder_like_draft
 test_classify_signal_dedup_against_scan
+test_classify_signal_digest_refuses_a_pr_less_done
 test_classify_signal_skips_turn_end_markers
 test_classify_signal_survives_a_later_routine_append
 test_classification_commits_its_captured_endpoint
