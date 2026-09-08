@@ -325,7 +325,7 @@ Its cursor sits on `No, continue without these permissions`, and firstmate's key
 Unlike the first dialog, whose Enter selects `No, exit` and kills the worker, a sent Enter here would by its own label leave a live worker running without the folder's pre-approved commands; that outcome is untested, no arm sent that key, and whether such a degraded worker is an acceptable unwedge is an open decision the captain owns.
 Both workers stayed there until the captain answered them by hand in the panes.
 
-What configuration reaches that prompt is UNESTABLISHED, and the same day's other spawns are why.
+Which tracked allow rules reach that prompt is UNESTABLISHED, and the same day's other spawns are why.
 With only `hasTrustDialogAccepted` registered:
 
 | project | tracked `.claude/settings.json` | second prompt |
@@ -343,7 +343,7 @@ The prompt's own text points the same way - it enumerates "This folder pre-appro
 That leaves the tracked allow rules as the dimension still open.
 
 What is known: the prompt exists on 2.1.263, it appears despite a pre-registered `hasTrustDialogAccepted`, and it named the two `permissions.allow` entries from A's tracked `settings.json`.
-What is not known: which property of A's tracked allow rules reaches it. Only A prompted, B and C did not, and one observation of each is too thin to separate the kind of rule granted, the count, tracked-versus-local settings, or something else about the project entirely.
+What is not known: which property of A's tracked allow rules reaches it. Only A prompted, B and C did not, and one observation of each is too thin to separate the kind of rule granted from the count.
 
 `hasTrustDialogHooksAccepted` was the obvious candidate for the key that pre-registers this acceptance, and it is NOT ESTABLISHED as that key.
 Read-only inspection of the operator's `~/.claude.json` on 2026-09-08 (71 project entries; `hasTrustDialogAccepted: true` in 37):
@@ -361,8 +361,8 @@ grep -c 'hasTrustDialogHooksAccepted"[[:space:]]*:[[:space:]]*true' ~/.claude.js
 ```
 
 The key occurs in 7 entries - all of them non-treehouse slots - is `false` in every one, and never appears as `true` anywhere in the file at any depth.
-The shape of the two project-A worktree slots the captain answered by hand carries no information either way: all 8 treehouse entries in this store hold exactly one key while its 63 non-treehouse entries hold 9 to 38, so a worker session never updates its own slot's entry.
-So pre-registering this key `true` would write a value the vendor has never been observed writing, and whether it records accepting the second prompt is NOT ESTABLISHED, because the only two known acceptances happened in slots this store does not update.
+Claude sessions ran in all 8 treehouse slots in this store - each has session transcripts under `~/.claude/projects` - and none of them acquired the key; those 8 hold exactly one key each, while its 63 non-treehouse entries hold 9 to 38.
+So pre-registering this key `true` would write a value the vendor has never been observed writing, and whether it records accepting the second prompt is NOT ESTABLISHED.
 Either way, nothing in `bin/fm-claude-trust.sh` pre-registers the second prompt and a worker that meets it still wedges.
 
 Refreshing this observation needs a live spawn against a project whose tracked allow rules actually trigger the prompt, compared against the same worktree without the candidate key.
