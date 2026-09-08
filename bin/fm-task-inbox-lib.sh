@@ -301,7 +301,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # returns false, so the caller keeps today's conservative skip.
 fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cap caps row raw content glyph
-  local joined='' prompt_seen=0
+  local remaining framed left right prompt_seen=0 width
   line=$(fm_task_inbox_doorbell_line "$rec") || return 1
   cap=$(fm_backend_capture "$backend" "$target" "$FM_COMPOSER_CAPTURE_LINES" "$label" 2>/dev/null) || return 1
   [ -n "$cap" ] || return 1
@@ -309,36 +309,74 @@ fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <record-path> [e
   # only ever cost a match (a placeholder never carries this record's path).
   caps=$(printf 'styled=0\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   # Run the shared selector in this shell so its selected composer bounds remain
-  # available. Its ordinary output collapses whitespace, so reconstruct from
-  # the selected rows instead and preserve visible whitespace within each row.
+  # available. Its ordinary output trims every row, so compare the visible row
+  # cells ourselves. Only proven UI furniture is removed; editable whitespace
+  # at the start or at a wrap boundary remains part of the identity check.
   fm_composer_extract_selected_content "$caps" "$cap" >/dev/null 2>&1 || return 1
+  remaining=$line
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$cap")
-    content=$(_fm_composer_row_content "$raw" 0)
+    content=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
+    fm_composer_normalize_spaces_var content
     case "$FM_COMPOSER_SELECTED_KIND" in
-      bare)
-        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
-          && fm_composer_leading_agent_glyph_var glyph "$content"; then
-          content=${content#*"$glyph"}
-        fi
-        ;;
-      leftbar) case "$content" in '┃'*) content=${content#┃} ;; esac ;;
       box)
+        # Whitespace outside the paired border and one cell just inside each
+        # edge are box geometry. Every other cell is composer content.
+        framed=$content
+        fm_composer_normalize_trim_var framed
+        left=${framed:0:1}; right=${framed: -1}
+        case "$left$right" in '││'|'┃┃'|'║║'|'||') ;; *) return 1 ;; esac
+        content=${framed:1:${#framed}-2}
+        case "$content" in ' '*) content=${content:1} ;; *) return 1 ;; esac
+        case "$content" in *' ') content=${content:0:${#content}-1} ;; *) return 1 ;; esac
         if [ "$prompt_seen" = 0 ] \
           && fm_composer_leading_prompt_glyph_var glyph "$content"; then
           content=${content#*"$glyph"}
+          case "$content" in ' '*) content=${content:1} ;; esac
           prompt_seen=1
         fi
         ;;
+      leftbar)
+        framed=$content
+        fm_composer_normalize_trim_var framed
+        case "$framed" in '┃'*) content=${framed#┃} ;; *) return 1 ;; esac
+        case "$content" in ' '*) content=${content:1} ;; esac
+        ;;
+      bare)
+        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ]; then
+          framed=$content
+          framed=${framed#"${framed%%[![:space:]]*}"}
+          fm_composer_leading_agent_glyph_var glyph "$framed" || return 1
+          content=${framed#*"$glyph"}
+          case "$content" in ' '*) content=${content:1} ;; esac
+        fi
+        ;;
+      pi) ;;
+      *) return 1 ;;
     esac
-    fm_composer_normalize_spaces_var content
-    fm_composer_normalize_trim_var content
-    joined+=$content
+
+    width=${#content}
+    if [ "${#remaining}" -ge "$width" ]; then
+      [ "$content" = "${remaining:0:$width}" ] || return 1
+      remaining=${remaining:$width}
+    else
+      [ "${content:0:${#remaining}}" = "$remaining" ] || return 1
+      content=${content:${#remaining}}
+      # A bordered box paints blank cells through its right edge. Unbordered
+      # shapes do not provide that geometry, so any trailing cell is editable
+      # composer content and must prevent an identity match.
+      if [ "$FM_COMPOSER_SELECTED_KIND" = box ]; then
+        [ -z "${content// /}" ] || return 1
+      else
+        [ -z "$content" ] || return 1
+      fi
+      remaining=
+    fi
     row=$((row + 1))
   done
   [ -n "$line" ] || return 1
-  [ "$joined" = "$line" ]
+  [ -z "$remaining" ]
 }
 
 # fm_task_inbox_commit_pending_doorbell: submit a doorbell already sitting in

@@ -161,6 +161,20 @@ make_composer_capture() {  # <path> <text>
   } > "$path"
 }
 
+make_bare_composer_capture() {  # <path> <text>
+  local path=$1 rest=$2 width=60 first=1
+  : > "$path"
+  while [ -n "$rest" ]; do
+    if [ "$first" = 1 ]; then
+      printf '❯ %s\n' "${rest:0:$width}" >> "$path"
+      first=0
+    else
+      printf '%s\n' "${rest:0:$width}" >> "$path"
+    fi
+    rest=${rest:$width}
+  done
+}
+
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
@@ -538,6 +552,39 @@ test_ring_never_submits_foreign_composer_text() {
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 1 ] || fail "a whitespace-edited doorbell should defer the ring, got $rc"
   [ ! -s "$keylog" ] || fail "a whitespace-edited doorbell must never receive a key:"$'\n'"$(cat "$keylog")"
+
+  # Leading whitespace is composer content, not box padding. It must remain
+  # visible to the identity check rather than being trimmed with the UI cell.
+  make_composer_capture "$dir/capture.txt" " $doorbell"
+  : > "$keylog"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "a leading-whitespace-edited doorbell should defer the ring, got $rc"
+  [ ! -s "$keylog" ] || fail "a leading-whitespace-edited doorbell must never receive a key:"$'\n'"$(cat "$keylog")"
+
+  # An inserted space that becomes the first cell of a continuation row used
+  # to disappear when every wrapped row was trimmed independently.
+  make_composer_capture "$dir/capture.txt" "${doorbell:0:60} ${doorbell:60}"
+  : > "$keylog"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "a wrap-boundary whitespace edit should defer the ring, got $rc"
+  [ ! -s "$keylog" ] || fail "a wrap-boundary whitespace edit must never receive a key:"$'\n'"$(cat "$keylog")"
+
+  # A bare composer has no right-edge padding. Its trailing whitespace is
+  # therefore editable content and must not be normalized away.
+  make_bare_composer_capture "$dir/capture.txt" "$doorbell "
+  : > "$keylog"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "a trailing-whitespace-edited doorbell should defer the ring, got $rc"
+  [ ! -s "$keylog" ] || fail "a trailing-whitespace-edited doorbell must never receive a key:"$'\n'"$(cat "$keylog")"
 
   # Another record's doorbell is not this record's doorbell either.
   other=$(inbox_lib "$state" fm_task_inbox_write "$state" t2 "another steer")
