@@ -24,8 +24,17 @@ copilot_hook_state() {
   printf '%s\n' "${FM_STATE_OVERRIDE:-$home/state}"
 }
 
+copilot_notification_has_named_watcher_completion() {
+  local payload=${1:-} title message
+  [ -n "$payload" ] || return 1
+  title=$(printf '%s' "$payload" | jq -r '.title // empty' 2>/dev/null) || return 1
+  [ "$title" = 'Arm Firstmate watcher' ] || return 1
+  message=$(printf '%s' "$payload" | jq -r '.message // empty' 2>/dev/null) || return 1
+  printf '%s\n' "$message" | grep -Eq '^Shell command "Arm Firstmate watcher" \(shellId: [0-9]+\) has completed successfully\. Use read_bash with shellId "[0-9]+" to retrieve the output\.$'
+}
+
 copilot_notification_has_watcher_completion() {
-  local payload=${1:-} root home policy command verdict
+  local payload=${1:-} root home policy command verdict saw_command=0
   [ -n "$payload" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   printf '%s' "$payload" | jq -e '.notification_type == "shell_completed"' >/dev/null 2>&1 || return 1
@@ -36,6 +45,7 @@ copilot_notification_has_watcher_completion() {
   [ -f "$policy" ] || return 1
   while IFS= read -r -d '' command; do
     [ -n "$command" ] || continue
+    saw_command=1
     verdict=$(node "$policy" watcher-arm --root "$root" --home "$home" --command "$command" 2>/dev/null || true)
     [ "$verdict" = watch-arm ] && return 0
   done < <(printf '%s' "$payload" | jq -j '
@@ -57,6 +67,7 @@ copilot_notification_has_watcher_completion() {
   | unique[]
   | ., "\u0000"
 ' 2>/dev/null)
+  [ "$saw_command" -eq 0 ] && copilot_notification_has_named_watcher_completion "$payload" && return 0
   return 1
 }
 
