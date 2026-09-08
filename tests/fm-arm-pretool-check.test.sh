@@ -378,6 +378,7 @@ EOF
     'nice no-mistakes axi respond --action fix' \
     "nice 'no-mistakes' axi respond --action fix" \
     'nice -n 5 no-mistakes axi respond --action fix' \
+    "caffeinate 'no-mistakes' axi respond --action fix" \
     'time no-mistakes axi respond --action fix' \
     'time -p no-mistakes axi respond --action fix' \
     '/usr/bin/time -l no-mistakes axi respond --action fix' \
@@ -430,16 +431,12 @@ EOF
     'nice no-mistakes axi respond --action fix' \
     "nice 'no-mistakes' axi respond --action fix" \
     'nice -n 5 no-mistakes axi respond --action fix' \
+    "caffeinate 'no-mistakes' axi respond --action fix" \
     'env NO_COLOR=1 no-mistakes axi respond --action fix' \
     "bash -lc 'no-mistakes axi respond --action fix'" \
     'time no-mistakes axi respond --action fix' \
     'time -p no-mistakes axi respond --action fix' \
     '/usr/bin/time -l no-mistakes axi respond --action fix' \
-    'coproc no-mistakes axi respond --action fix' \
-    'coproc JOB no-mistakes axi respond --action fix' \
-    'coproc JOB MODE=fix no-mistakes axi respond --action fix' \
-    'coproc JOB env no-mistakes axi respond --action fix' \
-    'coproc JOB { no-mistakes axi respond --action fix; }' \
     "bash -o posix -c 'no-mistakes axi respond --action fix'" \
     "CMD='no-mistakes axi respond --action fix'; bash -c \"\$CMD\"" \
     "CMD='no-mistakes axi respond --action fix'; eval \"\$CMD\"" \
@@ -501,6 +498,10 @@ EOF
     FM_HOME="$primary" "$check" --command "$payload" >/dev/null 2>&1 \
       || fail "a pipeline command mentioned only as data must remain allowed: $payload"
   done
+  FM_HOME="$primary" "$check" --command 'no-mistakes axi respond --action fix &' >/dev/null 2>&1 \
+    || fail "an explicitly backgrounded pipeline drive must remain allowed"
+  FM_HOME="$primary" "$check" --command 'coproc no-mistakes axi respond --action fix' >/dev/null 2>&1 \
+    || fail "an asynchronous coprocess pipeline drive must remain allowed"
   FM_HOME="$primary" "$check" --command 'no-mistakes axi status' >/dev/null 2>&1 \
     || fail "the primary must retain read-only pipeline status"
   FM_HOME="$primary" "$check" --command "bash -c -- 'no-mistakes axi status'" >/dev/null 2>&1 \
