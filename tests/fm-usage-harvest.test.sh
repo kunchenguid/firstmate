@@ -223,7 +223,15 @@ while [ "$#" -gt 0 ]; do
 done
 case "$fmt" in
   %W) printf '0\n' ;;
-  %Y) /usr/bin/stat -f %m -- "$file" 2>/dev/null || /usr/bin/stat -c %Y -- "$file" ;;
+  %Y)
+    # GNU stat may print filesystem information before rejecting BSD flags.
+    # Capture the probe so only the successful command's epoch is emitted.
+    if t=$(/usr/bin/stat -f %m -- "$file" 2>/dev/null); then
+      printf '%s\n' "$t"
+    else
+      /usr/bin/stat -c %Y -- "$file"
+    fi
+    ;;
   *) exit 1 ;;
 esac
 SH

@@ -1359,7 +1359,9 @@ let finishReplacementPrompt;
 globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishReplacementPrompt = resolve; });
 const replacementOffer = dispatch("signal: after replacement");
 if (!replacementOffer.accepted) throw new Error("branch refused a wake after the replacement");
-await settle(() => (globalThis.__fmSessions ?? []).length === 2, "replacement branch session");
+// Session construction precedes wake claiming and prompt execution. Report
+// only once the prompt is open, so its durable-outcome baseline is established.
+await settle(() => typeof finishReplacementPrompt === "function", "replacement branch prompt");
 const report2 = globalThis.__fmSessions[1].options.customTools.find((tool) => tool.name === "fm_branch_report");
 const beforePair = requests().length;
 const second = await report2.execute("captain-2", { task: "branch-driver", verdict: "captain", summary: "PR https://example.com/pr/e is ready for review" }, undefined, undefined, {});
