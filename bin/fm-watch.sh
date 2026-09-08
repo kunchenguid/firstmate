@@ -1058,11 +1058,28 @@ pause_state_class() {  # <window> <task>
     return
   fi
   class=$(crew_absorb_class "$task")
-  if [ "$class" = working ]; then
-    rm -f "$recheck_file"
-    printf 'working'
-    return
-  fi
+  # An authoritative active run does NOT retire a current declaration. The two
+  # records agree far more often than they disagree: the commonest healthy shape
+  # on a supervised fleet is a crew that declares `paused: waiting on the
+  # no-mistakes review fix round` and then sits on an idle composer while that
+  # very run is still attributed to its code, so crew_absorb_class reports
+  # `working` for the same idleness the crew just declared. Returning `working`
+  # here handed that pane to the wedge timer, which alarmed
+  # "possible wedge, escalation N" once per STALE_ESCALATE_SECS for the whole
+  # wait - the non-busy twin of the busy-path exception busy_turn_bound_check
+  # already makes, and the same call the away-mode daemon's enriched-wedge
+  # override already refuses to make (issue #3149).
+  # A declaration is categorically stronger evidence than the run-step or pane
+  # state a wedge is inferred from: it is the crew's own statement that this pane
+  # waits by design, which is the one question the wedge timer cannot answer for
+  # itself. So an active run under a declared wait is reconciled exactly as a
+  # `paused` verdict is - the live-agent gate below still surfaces a live crew's
+  # first sight so no decision gate is silenced, and handle_paused_stale still
+  # re-surfaces the wait once per PAUSE_RESURFACE_SECS, so a declared wait that
+  # genuinely wedges cannot rot invisibly. Undeclared panes never reach here
+  # (the declared-wait gate above returns crew_absorb_class untouched), so wedge
+  # detection for a silent idle crew is unchanged.
+  [ "$class" = working ] && class=paused
   if [ "$kind" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
@@ -2162,7 +2179,9 @@ EOF
           # on first sight, never every poll) via pause_state_class, which returns:
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
-          #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
+          #     genuinely frozen run still escalates past STALE_ESCALATE_SECS. Only
+          #     an UNDECLARED pane arrives this way; pause_state_class's header owns
+          #     why a run under a declared wait takes the pause cadence instead;
           #   - paused: a declared wait pause_state_class admits (its header owns which
           #     liveness evidence each kind of crew must supply), so absorb on the long
           #     PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
@@ -2192,6 +2211,9 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
+                # Reached only if pause_state_class ever reports an active run
+                # under a declaration again; today it reconciles that pane as
+                # paused, so this arm only keeps the switch total.
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
