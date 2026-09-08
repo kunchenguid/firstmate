@@ -1449,13 +1449,15 @@ test_secondmate_reconcile_publishes_before_request_retirement() {
   assert_contains "$show" "Resolution mode: reconciled" \
     "request retirement failure lost the reconciled resolution mode"
   [ -f "$request" ] || fail "the request retired despite its forced retirement failure"
-  [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]: captain hold reconcile-channel-call: reconciled' "$channel")" -eq 1 ] \
+  [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]: captain hold reconcile-channel-call: reconciled' \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel"))" -eq 1 ] \
     || fail "the parent resolution was not published before retirement failed: $(cat "$channel")"
 
   run_captain "$mate" reconcile close reconcile-channel-call --evidence-file "$evidence" >/dev/null \
     || fail "the closed reconciliation could not finish publication and retirement"
   [ ! -e "$request" ] || fail "the retry did not retire the published reconcile request"
-  [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]: captain hold reconcile-channel-call: reconciled' "$channel")" -eq 1 ] \
+  [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]: captain hold reconcile-channel-call: reconciled' \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel"))" -eq 1 ] \
     || fail "the reconciliation retry duplicated or changed its parent resolution: $(cat "$channel")"
   tasks_in "$mate" add answer-channel-call "Answer the mate call" --kind ship --repo sample >/dev/null \
     || fail "could not create the normal-answer channel call"
@@ -1475,12 +1477,14 @@ test_secondmate_reconcile_publishes_before_request_retirement() {
   show=$(tasks_in "$mate" show answer-channel-call --full)
   assert_contains "$show" "state: done" "request retirement failure reversed the captain answer"
   [ -f "$request" ] || fail "the normal-answer retry trigger retired after its forced failure"
-  [ "$(grep -c 'resolved \[key=captain-hold-answer-channel-call-1\]: captain hold answer-channel-call: answered' "$channel")" -eq 1 ] \
+  [ "$(grep -c 'resolved \[key=captain-hold-answer-channel-call-1\]: captain hold answer-channel-call: answered' \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel"))" -eq 1 ] \
     || fail "the normal answer did not publish before retirement failed: $(cat "$channel")"
   run_captain "$mate" answer answer-channel-call --decision-file "$mate/answer.txt" >/dev/null \
     || fail "the normal-answer retry could not finish request retirement"
   [ ! -e "$request" ] || fail "the normal-answer retry left its request pending"
-  [ "$(grep -c 'resolved \[key=captain-hold-answer-channel-call-1\]: captain hold answer-channel-call: answered' "$channel")" -eq 1 ] \
+  [ "$(grep -c 'resolved \[key=captain-hold-answer-channel-call-1\]: captain hold answer-channel-call: answered' \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel"))" -eq 1 ] \
     || fail "the normal-answer retry duplicated its parent resolution: $(cat "$channel")"
   pass "secondmate resolutions publish before retiring durable retry triggers"
 }
