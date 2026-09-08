@@ -442,10 +442,12 @@ test_ship_project_memory_wording() {
 }
 
 test_nested_delegation_model_routing_contract() {
-  local home id brief kind routing_config quota_skill override_config override_routing_config
+  local home id brief kind routing_config quota_skill crew_harness_config override_config override_routing_config override_crew_harness_config
   home="$TMP_ROOT/nested routing home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
   routing_config="\`$home/config/crew-dispatch.json\`"
+  crew_harness_config="\`$home/config/crew-harness\`"
   quota_skill="\`$ROOT/.agents/skills/quota-array-dispatch/SKILL.md\`"
 
   for kind in ship scout; do
@@ -468,6 +470,8 @@ test_nested_delegation_model_routing_contract() {
       "$kind brief omitted the explicit child profile rule"
     assert_grep "load $quota_skill and follow its selection procedure" "$brief" \
       "$kind brief omitted the usable profile-array selection procedure"
+    assert_grep "fall back through $crew_harness_config; its resolved selection is \`codex\` with that harness's default model and effort" "$brief" \
+      "$kind brief omitted the resolved static-harness fallback"
     assert_grep 'Create the native child only when its facility can represent that complete selection.' "$brief" \
       "$kind brief did not fail closed on unrepresentable profiles"
     assert_grep 'do not create the child; report the mismatch to Firstmate' "$brief" \
@@ -482,7 +486,9 @@ test_nested_delegation_model_routing_contract() {
 
   override_config="$TMP_ROOT/override routing config"
   mkdir -p "$override_config"
+  printf 'grok\n' > "$override_config/crew-harness"
   override_routing_config="\`$override_config/crew-dispatch.json\`"
+  override_crew_harness_config="\`$override_config/crew-harness\`"
   id=brief-nested-routing-override
   FM_HOME="$home" FM_CONFIG_OVERRIDE="$override_config" \
     "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
@@ -491,6 +497,10 @@ test_nested_delegation_model_routing_contract() {
     "ship brief did not identify the effective overridden routing file"
   assert_no_grep "$routing_config is the active firstmate home's current worker-routing authority" "$brief" \
     "ship brief ignored FM_CONFIG_OVERRIDE for nested routing"
+  assert_grep "fall back through $override_crew_harness_config; its resolved selection is \`grok\` with that harness's default model and effort" "$brief" \
+    "ship brief did not resolve the overridden static-harness fallback"
+  assert_no_grep "resolved selection is \`codex\`" "$brief" \
+    "ship brief resolved the static fallback from the wrong config directory"
 
   pass "fm-brief.sh: ship and scout briefs require configured nested model routing without overclaiming enforcement"
 }
