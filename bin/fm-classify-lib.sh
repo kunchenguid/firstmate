@@ -64,6 +64,14 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
+# fm_dod_mode_ends_in_pr, the delivery contract's own answer to which recorded
+# modes end in a PR. bin/fm-dod-lib.sh owns that list beside the block it
+# renders, so the landing test below asks it rather than keeping a second copy.
+# The file defines functions only and imposes no shell options on consumers.
+# shellcheck source=bin/fm-dod-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_CLASSIFY_LIB_DIR/fm-dod-lib.sh"
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
@@ -183,6 +191,79 @@ status_is_captain_held() {  # <status-line>
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1
   status_is_paused "$line" || status_is_captain_held "$line"
+}
+
+# --- landing evidence -------------------------------------------------------
+#
+# A `done:` line is not by itself proof that a ship landed. On a task whose
+# RECORDED delivery mode ends in a PR, the generated contract has the worker
+# append `done: <summary>` on its implementation commit and stop BEFORE the
+# pipeline has produced anything (bin/fm-dod-lib.sh's no-mistakes block), so that
+# line is a handoff signal that reads exactly like a completion. Six workers
+# stopped there on 2026-09-07 and two more on 2026-09-08, and each was read as
+# landed until a supervisor steered it back by hand.
+#
+# These functions are the ONE owner of that reading. bin/fm-dod-lib.sh says which
+# modes end in a PR, status_line_pr_url says whether a PR is known, and
+# status_present_line renders the line so no supervisor surface can print it as a
+# landing. Every consumer calls them instead of restating the rule; nothing here
+# touches the append-only log, so a worker never loses its ability to report.
+
+# The PR and merge-request URLs in arbitrary status text. Deliberately looser
+# than bin/fm-pr-lib.sh's canonical parse, which validates a whole string a
+# caller already isolated: these scrape free text a worker wrote. Both supported
+# forges are covered, so a GitLab merge request counts as a PR and a GitLab task
+# is never read as unlanded. This is the one scraper in the repo; callers that
+# want the newest mention read the last line rather than keeping their own
+# pattern.
+status_pr_urls() {  # <text> -> every PR/MR URL, one per line
+  printf '%s\n' "$1" \
+    | LC_ALL=C grep -Eo 'https?://[^[:space:])"]+(/pull/|/-/merge_requests/)[0-9]+'
+}
+
+status_line_pr_url() {  # <text> -> first PR/MR URL, or empty
+  status_pr_urls "$1" | head -1
+}
+
+# 0 when a `done:` line claims completion on a task whose recorded delivery mode
+# ends in a PR while no PR is known for it; prints that recorded mode so a caller
+# can name it. Any other line, mode, or missing record returns 1 (accept).
+#
+# Evidence is read widest-first so a real landing can never be refused: the line
+# itself, then the task's recorded `pr=` (bin/fm-pr-check.sh writes it), then any
+# PR URL anywhere in the task's own status log, which covers a worker that
+# reported its PR on an earlier line. Accepting is the fallback everywhere - an
+# absent, unreadable, or symlinked record, an absent mode (a scout), or a mode
+# that does not end in a PR (local-only, secondmate) - because turning a correct
+# scout or local-only completion into a false alarm is worse than the bug.
+status_done_without_pr() {  # <status-line> <status-file> [<meta-file>] -> mode
+  local line=$1 status=$2 meta=${3:-} mode
+  [ "$(status_line_verb "$line")" = 'done' ] || return 1
+  [ -n "$status" ] || return 1
+  [ -n "$meta" ] || meta="${status%.status}.meta"
+  [ -f "$meta" ] && [ -r "$meta" ] && [ ! -L "$meta" ] || return 1
+  mode=$(grep '^mode=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  fm_dod_mode_ends_in_pr "$mode" || return 1
+  [ -z "$(status_line_pr_url "$line")" ] || return 1
+  [ -z "$(grep '^pr=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)" ] || return 1
+  if [ -f "$status" ] && [ -r "$status" ] && [ ! -L "$status" ]; then
+    [ -z "$(status_line_pr_url "$(LC_ALL=C command cat "$status" 2>/dev/null)")" ] || return 1
+  fi
+  printf '%s' "$mode"
+}
+
+# The presentation form of one status line: the line unchanged, unless it is a
+# done line with no landing behind it, in which case an explicit prefix states
+# what it actually is. Firstmate-facing surfaces render every status line through
+# here, so the reclassification reaches the supervisor wherever the line is
+# printed rather than depending on which surface it arrived through.
+status_present_line() {  # <status-line> <status-file> [<meta-file>]
+  local mode
+  if mode=$(status_done_without_pr "$1" "$2" "${3:-}"); then
+    printf '%s\n' "not-landed (a $mode ship with no PR yet; the pipeline still owes one): $1"
+  else
+    printf '%s\n' "$1"
+  fi
 }
 
 # --- durable keyed decisions ------------------------------------------------
@@ -1629,7 +1710,7 @@ _fm_status_open_decision_origins() {  # <status-file>
 
 status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
   local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file full_file prefix_file result
-  local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
+  local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0 shown
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
@@ -1711,8 +1792,11 @@ EOF
         rc=0
         ;;
       *)
+        # A done line with no landing behind it is rendered as what it is before
+        # it becomes a wake reason (status_present_line above owns that form).
+        shown=$(status_present_line "$line" "$f")
         [ -n "$events" ] && events="${events} ; "
-        events="${events}${line}"
+        events="${events}${shown}"
         rc=0
         ;;
     esac

@@ -341,6 +341,11 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# status_present_line, for the status tails below. fm-wake-lib.sh loads the
+# classifier lazily and this digest always prints tails, so it is required here
+# rather than left to a lazy path that never runs.
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -529,8 +534,13 @@ print_status_tail() {
   # observed line ran 865 characters. Cap each one the way the wake digest's
   # OPEN DECISIONS section does; the lede carries the state word and the key,
   # and the full log path above reaches the rest.
+  # A done line with no PR behind it, on a task whose recorded delivery mode ends
+  # in a PR, is rendered as the handoff signal it is rather than as a landing
+  # (fm-classify-lib.sh's status_present_line owns that form). Rendering before
+  # the cap keeps the reclassification in the lede, where a capped line still
+  # shows it.
   while IFS= read -r line || [ -n "$line" ]; do
-    fm_cap_line "$line"
+    fm_cap_line "$(status_present_line "$line" "$status")"
   done < <(tail -n "$STATUS_TAIL" "$status")
 }
 

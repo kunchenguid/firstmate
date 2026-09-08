@@ -190,6 +190,23 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+# 0 when a recorded delivery mode's definition of done ENDS IN A PR, so a task
+# in that mode has not landed until a PR exists for it.
+# One arm per fm_dod_block case below, which is why the two live together: the
+# no-mistakes and direct-PR blocks both end at a PR, while local-only ends at a
+# clean ready branch. Every other value is refused: a scout records no mode at
+# all, a secondmate records mode=secondmate, and an unrecognized string is not
+# evidence of anything. The default therefore ACCEPTS a completion, so only a
+# recorded PR-ending mode can ever make one read as unlanded.
+# bin/fm-classify-lib.sh's status_done_without_pr is the one consumer, and owns
+# what a supervisor does with the answer.
+fm_dod_mode_ends_in_pr() {  # <recorded delivery mode>
+  case "${1-}" in
+    no-mistakes|direct-PR) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
   case "$mode" in

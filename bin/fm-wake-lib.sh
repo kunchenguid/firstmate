@@ -2181,7 +2181,11 @@ EOF
       if [ "$mode" = historical ]; then
         prefix="$prefix; historical / not necessarily the triggering event"
       fi
-      line="$prefix: $status_key: $event_line"
+      # A done line with no PR behind it is a handoff signal, not a landing, and
+      # this annotation is where the supervisor actually reads the line. Rendered
+      # after the latest/unread comparison so that reading stays on the raw event
+      # (fm-classify-lib.sh's status_present_line owns the rendered form).
+      line="$prefix: $status_key: $(status_present_line "$event_line" "$path")"
       printf '%s\n' "$line" || return 1
     done <<EOF
 $FM_WAKE_UNREAD_LINES

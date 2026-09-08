@@ -23,6 +23,9 @@
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
+#   (g'') a `done:` log line with no PR, on a task whose RECORDED delivery mode
+#       ends in a PR, reads parked and says so                     -> status-log;
+#       local-only, scout, and a done line carrying a PR URL are untouched
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
 #   (i) kind=scout skips the run lookup                           -> pane/status-log
 #   (j) torn-down worktree / missing meta                         -> unknown/none
@@ -1433,6 +1436,106 @@ test_no_run_idle_pane_uses_keyed_log() {
   pass "no run + idle pane parses keyed status syntax"
 }
 
+# (g'') no run + idle pane on a `done:` line with NO PR, on a task whose RECORDED
+# delivery mode ends in a PR -> parked, never done. This is the exact shape six
+# workers left on 2026-09-07 and two more on 2026-09-08: an implementation commit
+# reported as a completion before the pipeline had produced anything. This reader
+# is what a supervisor is told to trust for current state, so it must not confirm
+# the landing. The modes that legitimately end without a PR are pinned right
+# below, because refusing one of those would be worse than the bug.
+test_no_run_idle_pane_done_without_pr_is_not_landed() {
+  reset_fakes
+  local d; d=$(new_case done-no-pr)
+  make_repo_on_branch "$d/wt" fm/feat-nopr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-nopr.meta" "window=fm:fm-feat-nopr" "worktree=$d/wt" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'working: setup done\ndone: aprovacoes endpoint implemented, commit b291c234\n' \
+    > "$d/state/feat-nopr.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-nopr
+  local out; out=$(run_crew_state "$d" feat-nopr)
+  assert_contains "$out" "state: parked" "done with no PR on a no-mistakes ship -> parked"
+  assert_not_contains "$out" "state: done" "a PR-less done must never read as done"
+  assert_contains "$out" "not landed" "the detail must say the ship has not landed"
+  assert_contains "$out" "commit b291c234" "the worker's own note is preserved"
+  pass "done with no PR on a no-mistakes ship reads parked, not done"
+}
+
+# The same shape on direct-PR, whose definition of done also ends at a PR.
+test_no_run_idle_pane_done_without_pr_direct_pr() {
+  reset_fakes
+  local d; d=$(new_case done-no-pr-direct)
+  make_repo_on_branch "$d/wt" fm/feat-direct
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-direct.meta" "window=fm:fm-feat-direct" "worktree=$d/wt" \
+    "kind=ship" "mode=direct-PR" "harness=claude"
+  printf 'done: implemented and committed\n' > "$d/state/feat-direct.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-direct
+  local out; out=$(run_crew_state "$d" feat-direct)
+  assert_contains "$out" "state: parked" "done with no PR on a direct-PR ship -> parked"
+  pass "done with no PR on a direct-PR ship reads parked, not done"
+}
+
+# A real landing still reads done: the PR URL on the line is the evidence.
+test_no_run_idle_pane_done_with_pr_is_done() {
+  reset_fakes
+  local d; d=$(new_case done-with-pr)
+  make_repo_on_branch "$d/wt" fm/feat-pr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pr.meta" "window=fm:fm-feat-pr" "worktree=$d/wt" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'done: PR https://github.com/o/r/pull/12 checks green\n' > "$d/state/feat-pr.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-pr
+  local out; out=$(run_crew_state "$d" feat-pr)
+  assert_contains "$out" "state: done" "done carrying a PR URL stays done"
+  assert_not_contains "$out" "not landed" "a real landing is never annotated"
+  pass "done carrying a PR URL still reads done"
+}
+
+# A local-only ship ends at a clean ready branch and never has a PR, so its
+# completion must be accepted exactly as before.
+test_no_run_idle_pane_done_local_only_is_done() {
+  reset_fakes
+  local d; d=$(new_case done-local-only)
+  make_repo_on_branch "$d/wt" fm/feat-local
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-local.meta" "window=fm:fm-feat-local" "worktree=$d/wt" \
+    "kind=ship" "mode=local-only" "harness=claude"
+  printf 'done: ready in branch fm/feat-local\n' > "$d/state/feat-local.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-local
+  local out; out=$(run_crew_state "$d" feat-local)
+  assert_contains "$out" "state: done" "a local-only completion stays done"
+  assert_not_contains "$out" "not landed" "a local-only completion is never annotated"
+  pass "local-only completion still reads done"
+}
+
+# A scout ends at a report and records no delivery mode at all, so nothing about
+# a PR may be inferred for it.
+test_no_run_idle_pane_done_scout_is_done() {
+  reset_fakes
+  local d; d=$(new_case done-scout)
+  make_repo_on_branch "$d/wt" fm/feat-scout
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-scout.meta" "window=fm:fm-feat-scout" "worktree=$d/wt" \
+    "kind=scout" "harness=claude"
+  printf 'done: report written to data/feat-scout/report.md\n' > "$d/state/feat-scout.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-scout
+  local out; out=$(run_crew_state "$d" feat-scout)
+  assert_contains "$out" "state: done" "a scout completion stays done"
+  assert_not_contains "$out" "not landed" "a scout completion is never annotated"
+  pass "scout completion still reads done"
+}
+
 # (g') no run + idle pane on a DECLARED external-wait pause -> state: paused, so a
 # supervisor reading the crew sees a distinct pause (and its reason) rather than a
 # wedge-suspect idle. This is the reader half the watcher/daemon build on.
@@ -2277,6 +2380,11 @@ test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
+test_no_run_idle_pane_done_without_pr_is_not_landed
+test_no_run_idle_pane_done_without_pr_direct_pr
+test_no_run_idle_pane_done_with_pr_is_done
+test_no_run_idle_pane_done_local_only_is_done
+test_no_run_idle_pane_done_scout_is_done
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
