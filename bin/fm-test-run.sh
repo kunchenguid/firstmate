@@ -24,8 +24,7 @@
 #   fm-test-run.sh --list-lanes
 #   fm-test-run.sh --check-coverage
 #
-#   fm-test-run.sh --check-shard-balance [--job-timeout-minutes <n>] \
-#                    <serial-lane.json> [more serial-lane.json...]
+#   fm-test-run.sh --check-shard-balance <serial-lane.json> [more serial-lane.json...]
 #
 # Aggregation (no suite execution):
 #   fm-test-run.sh --aggregate-json <out.json> <lane.json> [more lane.json...]
@@ -153,7 +152,6 @@ LIST_CONCURRENT_SAFE_FAMILIES=0
 LIST_LANES=0
 CHECK_COVERAGE=0
 AGGREGATE_OUT=
-JOB_TIMEOUT_MINUTES=
 FAMILY=
 LANE=
 BASE_REF=origin/main
@@ -194,35 +192,24 @@ PORTABLE_SERIAL_DEFAULT_WEIGHT_MS=27000
 # instead of silently. docs/fm-test-portable-shards.md owns the refresh.
 PORTABLE_SERIAL_MAX_UNHINTED_PERCENT=15
 
-# The two ways a balanced-looking partition still reaches its CI job cap, each
-# with its own remedy, checked by --check-shard-balance against the measured
-# durations the lanes already upload.
+# How close a shard may run to its CI job cap before --check-shard-balance
+# fails, as a share of that cap taken against the shard's own recorded wall
+# time. This is the property actually being protected: it degrades gracefully as
+# the suite grows, and it fires while the shard still finishes rather than after
+# it is cancelled. The failure names the scripts furthest over their hints, so
+# it still says what to re-measure.
 #
-# Drift: a shard runs further over its hint weight than this. The hints are what
-# the packer balances on, so once they read low the packer keeps reporting a
-# perfect split while one runner carries the excess. The remedy is a hint
-# refresh, and the guard names the scripts that drifted most. Only scripts that
-# actually carry a hint are compared: a missing hint is not a stale one, and the
-# unhinted share above already owns those.
-PORTABLE_SERIAL_MAX_HINT_DRIFT_PERCENT=15
-
-# Headroom: the worst shard's own recorded wall time against a share of the job
-# cap, since the wall clock is what that cap bounds. This is the property
-# actually being protected, and it degrades gracefully as the suite grows. Two shares, because the guard has to speak long before the
-# badge goes red and still not redden a suite that is merely unlucky.
-#
-# Warn: loud, non-fatal, and low enough that a lane growing at a few minutes a
-# day is told about it with days of margin left to add a shard in.
-PORTABLE_SERIAL_WARN_SHARD_BUDGET_PERCENT=75
-# Fail: far enough above the warning that ordinary hosted-runner spread cannot
-# turn an otherwise green suite red. Per-script noise on this lane reaches 3x,
-# and a guard that cries wolf gets switched off.
+# A richer diagnosis was built here and deliberately reduced away: a second
+# pass/fail bound on hint drift, a non-failing warning share below this one, and
+# a branch that told "the estimates are wrong" apart from "the lane has outgrown
+# its shard count". Both properties that are actually required survive in this
+# single check, so do not re-derive that split and add it back.
 PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT=90
 
-# The tests-portable-serial job cap the headroom share is taken against, in
-# minutes. .github/workflows/ci.yml owns that job's timeout-minutes and passes
-# it back through --job-timeout-minutes, which is refused when the two disagree
-# rather than left to drift silently.
+# The tests-portable-serial job cap that share is taken against, in minutes.
+# .github/workflows/ci.yml owns that job's timeout-minutes; tests/fm-test-run.test.sh
+# parses the workflow and refuses when the two disagree rather than leaving them
+# to drift silently.
 PORTABLE_SERIAL_JOB_TIMEOUT_MINUTES=20
 
 usage() {
@@ -1070,35 +1057,21 @@ check_portable_serial_balance() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-shard-balance.XXXXXX") || die "mktemp failed"
   portable_serial_weight_hints >"$tmp/hints"
   python3 - "$tmp/hints" "$bound_minutes" "$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS" \
-    "$PORTABLE_SERIAL_MAX_HINT_DRIFT_PERCENT" \
-    "$PORTABLE_SERIAL_WARN_SHARD_BUDGET_PERCENT" \
-    "$PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT" \
-    "$PORTABLE_SERIAL_SHARDS" "$@" <<'PY' || rc=$?
-import json, os, re, sys
+    "$PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT" "$@" <<'PY' || rc=$?
+import json, re, sys
 from pathlib import Path
 
-hints_path, bound_s, default_s, drift_s, warn_budget_s, budget_s, shards_s = sys.argv[1:8]
-inputs = [Path(p) for p in sys.argv[8:]]
+hints_path, bound_s, default_s, budget_s = sys.argv[1:5]
+inputs = [Path(p) for p in sys.argv[5:]]
 bound_ms = int(bound_s) * 60000
 default_ms = int(default_s)
-max_drift = int(drift_s)
-warn_budget = int(warn_budget_s)
 max_budget = int(budget_s)
-expected_shards = int(shards_s)
-
-# Below this a percentage says more about rounding than about balance.
-MIN_HINTED_MS = 60000
 
 # A numbered serial shard lane. The count may differ from this runner's own, so
 # an artifact from an earlier partition stays readable; what cannot be mixed is
 # two partitions in one invocation, because a shard number means different work
 # in each.
 LANE_RE = re.compile(r"^portable-serial-([0-9]+)of([0-9]+)$")
-
-# The warning is the signal that has to arrive before the badge goes red, so
-# under Actions it is raised as an annotation instead of a line only someone who
-# opens the step log would ever read.
-ANNOTATE = os.environ.get("GITHUB_ACTIONS") == "true"
 
 hints = {}
 for line in Path(hints_path).read_text().splitlines():
@@ -1120,9 +1093,9 @@ def minutes(ms):
     return "%.2f min" % (ms / 60000.0)
 
 
-# What the job cap actually bounds is the shard's wall clock, and the runner
-# records exactly that. The per-script sum only stands in for an artifact that
-# carries no usable one.
+# What the job cap bounds is the shard's wall clock, and the runner records
+# exactly that. The per-script sum only stands in for an artifact that carries
+# no usable one.
 def wall_ms_of(data, fallback):
     summary = data.get("summary")
     value = summary.get("duration_ms") if isinstance(summary, dict) else None
@@ -1135,18 +1108,13 @@ def wall_ms_of(data, fallback):
 
 by_index = {}
 partitions = {}
-ignored = 0
 deduped = 0
 for path in inputs:
     if not path.exists():
         continue
     data = json.loads(path.read_text())
-    lane = lane_of(data)
-    if not lane.startswith("portable-serial-"):
-        continue
-    match = LANE_RE.match(lane)
+    match = LANE_RE.match(lane_of(data))
     if match is None:
-        ignored += 1
         continue
     scripts = [s for s in data.get("scripts", []) if s.get("path")]
     if not scripts:
@@ -1156,18 +1124,11 @@ for path in inputs:
         real = int(s["duration_ms"])
         hint = hints.get(s["path"], default_ms)
         rows.append((real - hint, s["path"], real, hint, s["path"] not in hints))
-    # A script with no hint is not a stale hint, so it is excluded from the
-    # drift comparison on both sides; the coverage guard's unhinted share owns
-    # those. It still counts in full toward the wall time below.
-    hinted = [r for r in rows if not r[4]]
+    lane = match.group(0)
     partitions.setdefault(int(match.group(2)), lane)
     shard = {
         "lane": lane,
         "wall": wall_ms_of(data, sum(r[2] for r in rows)),
-        "hinted_measured": sum(r[2] for r in hinted),
-        "hinted": sum(r[3] for r in hinted),
-        "hinted_count": len(hinted),
-        "unhinted_count": len(rows) - len(hinted),
         "rows": rows,
     }
     index = int(match.group(1))
@@ -1175,7 +1136,7 @@ for path in inputs:
     if previous is not None:
         # Several runs globbed together supply the same shard more than once.
         # Keep the slowest copy, the same worst-case rule the hint table itself
-        # is refreshed on, so a repeat can never inflate the lane total.
+        # is refreshed on, so a repeat can never be counted as extra coverage.
         deduped += 1
         if previous["wall"] >= shard["wall"]:
             continue
@@ -1191,11 +1152,6 @@ if len(partitions) > 1:
     )
     sys.exit(2)
 
-if ignored:
-    print(
-        "FM_TEST_SHARD_BALANCE ignored %d artifact(s) that name no numbered "
-        "portable serial shard" % ignored
-    )
 if deduped:
     print(
         "FM_TEST_SHARD_BALANCE deduped %d repeated shard artifact(s); the "
@@ -1210,36 +1166,32 @@ if not shards:
     )
     sys.exit(0)
 
-complete = len(shards) >= expected_shards
-if not complete:
+# The artifacts declare the partition they ran as, so coverage is counted
+# against that rather than against whatever this runner is configured for now.
+declared_shards = next(iter(partitions))
+if len(shards) < declared_shards:
     print(
         "FM_TEST_SHARD_BALANCE partial %d of %d portable serial shards reported "
         "a timing artifact; a cancelled shard uploads none, so the rest are "
-        "unchecked" % (len(shards), expected_shards)
+        "unchecked" % (len(shards), declared_shards)
     )
 
+failures = []
 for s in shards:
-    s["share"] = s["wall"] * 100.0 / bound_ms
-    s["drift"] = (
-        (s["hinted_measured"] - s["hinted"]) * 100.0 / s["hinted"]
-        if s["hinted"]
-        else 0.0
-    )
-    s["drifted"] = s["hinted"] >= MIN_HINTED_MS and s["drift"] > max_drift
-
-# What an even repack of the reported work would put on each shard. Only that
-# answers whether the lane has outgrown its shard count, so the headroom report
-# never asserts that remedy without it.
-even_ms = sum(s["wall"] for s in shards) / expected_shards if complete else None
-
-
-def drifted_rows(s, hinted_only=False):
-    rows = [r for r in s["rows"] if not r[4]] if hinted_only else s["rows"]
-    lines = []
-    for delta, path, real, hint, unhinted in sorted(rows, reverse=True)[:5]:
+    share = s["wall"] * 100.0 / bound_ms
+    s["share"] = share
+    if share <= max_budget:
+        continue
+    lines = [
+        "shard balance guard failed: %s ran %s, %.0f%% of the %s min job cap "
+        "(max %d%%); repack the lane (docs/fm-test-portable-shards.md)"
+        % (s["lane"], minutes(s["wall"]), share, bound_s, max_budget)
+    ]
+    over = []
+    for delta, path, real, hint, unhinted in sorted(s["rows"], reverse=True)[:5]:
         if delta <= 0:
             continue
-        lines.append(
+        over.append(
             "    %s measured %.1fs hint %.1fs (%+.1fs)%s"
             % (
                 path,
@@ -1249,114 +1201,20 @@ def drifted_rows(s, hinted_only=False):
                 " [no hint, default weight]" if unhinted else "",
             )
         )
-    return lines
+    if over:
+        lines.append("  re-measure the scripts furthest over their hints:")
+        lines += over
+    failures.append("\n".join(lines))
 
-
-# A shard can be heavy with every hint accurate, so the header is only printed
-# when there is something under it to read.
-def labelled_rows(s, header, hinted_only=False):
-    rows = drifted_rows(s, hinted_only)
-    return [header] + rows if rows else []
-
-
-# States what was measured against the cap, then the cause the guard could
-# actually establish: a shard over its budget is not by itself evidence that the
-# lane needs another runner.
-def headroom_report(s, limit, label):
-    lines = [
-        "shard balance guard %s: %s ran %s, %.0f%% of the %s min job cap "
-        "(over %d%%)"
-        % (label, s["lane"], minutes(s["wall"]), s["share"], bound_s, limit)
-    ]
-    if s["drifted"]:
-        lines.append(
-            "  its hinted scripts also ran %.0f%% over their hint weight, so "
-            "refresh the hints and repack before adding a shard; the drift "
-            "report below names the scripts to re-measure" % s["drift"]
-        )
-    elif even_ms is None:
-        lines.append(
-            "  only %d of %d shards reported, so whether an even repack would fit "
-            "could not be determined (docs/fm-test-portable-shards.md)"
-            % (len(shards), expected_shards)
-        )
-        lines += labelled_rows(s, "  the scripts furthest over their hints:")
-    elif even_ms * 100.0 / bound_ms > limit:
-        lines.append(
-            "  an even repack across %d shards still gives %s each, so the lane has "
-            "outgrown its shard count: raise PORTABLE_SERIAL_SHARDS and the ci.yml "
-            "matrix (docs/fm-test-portable-shards.md)"
-            % (expected_shards, minutes(even_ms))
-        )
-    else:
-        lines.append(
-            "  an even repack across %d shards gives %s each, which fits, so this "
-            "shard is packed heavy rather than the lane having outgrown its shard "
-            "count (docs/fm-test-portable-shards.md)"
-            % (expected_shards, minutes(even_ms))
-        )
-        lines += labelled_rows(s, "  re-measure these scripts:")
-    return "\n".join(lines)
-
-
-warnings = []
-failures = []
-for s in shards:
-    # Warn well below the cap so the guard speaks before the badge goes red, and
-    # fail only where hosted-runner spread can no longer explain the shard.
-    if s["share"] > max_budget:
-        failures.append(headroom_report(s, max_budget, "failed"))
-    elif s["share"] > warn_budget:
-        warnings.append(headroom_report(s, warn_budget, "warning"))
-    if s["drifted"]:
-        excluded = (
-            "; %d unhinted script(s) excluded, the coverage guard owns those"
-            % s["unhinted_count"]
-            if s["unhinted_count"]
-            else ""
-        )
-        lines = [
-            "shard balance guard failed: %s ran %s against %s of hint weight "
-            "over its %d hinted scripts (+%.0f%%, max +%s%%%s)\n"
-            "  the hint table is stale; re-measure these scripts "
-            "(docs/fm-test-portable-shards.md):"
-            % (
-                s["lane"],
-                minutes(s["hinted_measured"]),
-                minutes(s["hinted"]),
-                s["hinted_count"],
-                s["drift"],
-                max_drift,
-                excluded,
-            )
-        ]
-        lines += drifted_rows(s, hinted_only=True)
-        failures.append("\n".join(lines))
-
-for w in warnings:
-    if ANNOTATE:
-        print("::warning::" + w.replace("\n", "%0A"))
-    else:
-        print(w, file=sys.stderr)
 if failures:
     for f in failures:
         print(f, file=sys.stderr)
     sys.exit(1)
 
-worst_share = max(shards, key=lambda s: s["share"])
-worst_drift = max(shards, key=lambda s: s["drift"])
+worst = max(shards, key=lambda s: s["share"])
 print(
-    "FM_TEST_SHARD_BALANCE %s shards=%d worst_share=%s@%.0f%% "
-    "worst_drift=%s@%+.0f%% bound=%smin"
-    % (
-        "warn" if warnings else "ok",
-        len(shards),
-        worst_share["lane"],
-        worst_share["share"],
-        worst_drift["lane"],
-        worst_drift["drift"],
-        bound_s,
-    )
+    "FM_TEST_SHARD_BALANCE ok shards=%d worst_share=%s@%.0f%% bound=%smin"
+    % (len(shards), worst["lane"], worst["share"], bound_s)
 )
 PY
   rm -rf "$tmp"
@@ -2130,15 +1988,6 @@ while [ "$#" -gt 0 ]; do
       MODE='shard-balance'
       shift
       ;;
-    --job-timeout-minutes)
-      [ "$#" -gt 1 ] || die "--job-timeout-minutes requires a value"
-      JOB_TIMEOUT_MINUTES=$2
-      shift 2
-      ;;
-    --job-timeout-minutes=*)
-      JOB_TIMEOUT_MINUTES=${1#--job-timeout-minutes=}
-      shift
-      ;;
     --aggregate-json)
       [ "$#" -gt 1 ] || die "--aggregate-json requires an output path"
       AGGREGATE_OUT=$2
@@ -2214,17 +2063,6 @@ if [ "$CHECK_COVERAGE" -eq 1 ]; then
 fi
 
 if [ "${MODE:-}" = "shard-balance" ]; then
-  if [ -n "$JOB_TIMEOUT_MINUTES" ]; then
-    case "$JOB_TIMEOUT_MINUTES" in
-      ''|*[!0-9]*) die "--job-timeout-minutes must be a positive integer" ;;
-    esac
-    # One owner, cross-checked: ci.yml passes back the cap it actually sets on
-    # the tests-portable-serial job, so changing it in either place without the
-    # other fails loudly instead of leaving this guard measuring headroom
-    # against a cap that no longer exists.
-    [ "$JOB_TIMEOUT_MINUTES" -eq "$PORTABLE_SERIAL_JOB_TIMEOUT_MINUTES" ] ||
-      die "--job-timeout-minutes $JOB_TIMEOUT_MINUTES disagrees with this runner's recorded portable serial job cap of $PORTABLE_SERIAL_JOB_TIMEOUT_MINUTES minutes (see PORTABLE_SERIAL_JOB_TIMEOUT_MINUTES)"
-  fi
   [ "${#SCRIPTS[@]}" -gt 0 ] || die "--check-shard-balance requires at least one timing JSON"
   for s in "${SCRIPTS[@]}"; do
     [ -f "$s" ] || die "shard balance input not found: $s"
