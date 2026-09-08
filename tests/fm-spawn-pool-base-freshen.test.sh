@@ -183,6 +183,12 @@ test_stale_pool_base_refreshes_before_branching() {
       "$branch_head" "$current" "$(cat "$POOL_DIR/advanced-main.txt")"
   fi
 
+  # Simulate the first task's slot having been genuinely returned to the pool
+  # (as teardown would do) before this second task reuses the same physical
+  # worktree - otherwise the reused path would still be a live collision by
+  # fm-spawn's own record-based guard, not the idempotent-refresh case this
+  # test means to exercise.
+  rm -f "$HOME_DIR/state/pool-current-base-r1.meta"
   id='pool-current-base-repeat-r1'
   fm_test_spawn_brief "$HOME_DIR" "$id"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
@@ -528,6 +534,11 @@ strand_submodule_pin_via_spawn() {  # <seed-id>
     || fail "the first spawn did not move the pooled base across the moved submodule pin"
   [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
     || fail "the first spawn did not strand the submodule on the pin the old base recorded"
+  # Simulate this seed task's slot having been genuinely returned to the pool
+  # (as teardown would do) before the case's own spawn reuses the same
+  # physical worktree - otherwise the reused path would still be a live
+  # collision by fm-spawn's own record-based guard.
+  rm -f "$HOME_DIR/state/$id.meta"
 }
 
 test_stale_submodule_pin_explains_itself() {
