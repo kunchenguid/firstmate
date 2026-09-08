@@ -77,6 +77,18 @@ test_context7_extra_widens_the_written_mcp_config() {
   pass "tools: context7 widens the written MCP config"
 }
 
+test_unrecognized_tools_extra_warns_on_spawns_own_stderr() {
+  local id=toolsurface-typo-z1
+  run_tool_surface_spawn "$id" "tools: browsr"
+  expect_code 0 "$SPAWN_STATUS" "claude spawn with a typo'd tools: entry should still succeed"$'\n'"$SPAWN_OUT"
+
+  assert_contains "$SPAWN_OUT" "warning: unrecognized tools: entry 'browsr' ignored" \
+    "spawn discarded fm_brief_tools' warning instead of surfacing it on its own stderr"
+  assert_contains "$SPAWN_OUT" "tool surface: minimal (no MCP servers, no plugin skills)" \
+    "a dropped extra should still narrow to the minimal surface"
+  pass "an unrecognized tools: entry warns on spawn's own stderr and still launches minimal"
+}
+
 write_brief_direct() {  # <file> <tools-line>
   cat > "$1" <<EOF
 # Task
@@ -117,5 +129,6 @@ esac
 
 test_no_tools_line_pins_strict_minimal_mcp_surface
 test_context7_extra_widens_the_written_mcp_config
+test_unrecognized_tools_extra_warns_on_spawns_own_stderr
 
 echo "# all fm-spawn-tool-surface tests passed"
