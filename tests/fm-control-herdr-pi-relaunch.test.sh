@@ -10,11 +10,14 @@
 # verifies a distinct authority. Liveness cases prove a Pi that is positively
 # running keeps the ORDINARY exit path - even when a tool child owns the pane's
 # foreground process group, the engine presents as `pi-launcher`, the reported
-# cwd is below the worktree, or the Treehouse copy cannot be proved - and that
+# cwd is below the worktree, the Treehouse copy cannot be proved, or the pane's
+# process state is transiently or persistently unreadable while this task's own
+# engine still names its generated extension in the process table - and that
 # an ordinary relaunch on a fleet that only reports a process-detected Pi label
 # still completes on its own dead-then-alive proof. Negative
 # cases prove changing process evidence, an unknown descendant, a working
-# authority, a different cwd, and endpoint/session identity mismatches all
+# authority, a different cwd, a pane whose process state stays unreadable with
+# no engine running anywhere, and endpoint/session identity mismatches all
 # refuse before release or terminal input. Cross-runtime cases prove the
 # cached Pi label Herdr keeps after the release can never stand in for the
 # target runtime: a replacement on another harness is reported only once
@@ -185,6 +188,15 @@ case "${1:-} ${2:-}" in
   "pane process-info")
     count=$(($(cat "$FM_FAKE_PROCESS_COUNT" 2>/dev/null || echo 0) + 1))
     printf '%s\n' "$count" > "$FM_FAKE_PROCESS_COUNT"
+    # A busy, restarting, or timed-out Herdr socket answers this read with
+    # nothing at all. `transient-unreadable-process` fails every read the two
+    # stale-exit samples would take on their own and answers only inside the
+    # liveness probe's retry budget; the two `unreadable-*` scenarios never
+    # answer at all.
+    case "$scenario" in
+      transient-unreadable-process) [ "$count" -gt 2 ] || exit 1 ;;
+      unreadable-task-engine|unreadable-no-engine) exit 1 ;;
+    esac
     shell=101
     foreground=303
     name=zsh
@@ -206,6 +218,7 @@ case "${1:-} ${2:-}" in
         live-child) foreground=505; name=bash; argv0=/bin/bash ;;
         live-launcher) foreground=404; name=pi-launcher; argv0=pi-launcher ;;
         live-subdir-cwd) foreground=505; name=git; argv0=/usr/bin/git ;;
+        transient-unreadable-process) foreground=404; name=pi; argv0=pi ;;
         process-detected) foreground=404; name=pi; argv0=pi ;;
       esac
     fi
@@ -406,6 +419,24 @@ EOF
 202 101 202 S treehouse treehouse get
 303 202 303 S zsh /bin/zsh
 404 303 404 S pi-launcher /opt/pi/bin/pi-launcher
+EOF
+  elif [ "$phase" = stale ] && [ "$scenario" = transient-unreadable-process ]; then
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S pi pi
+EOF
+  elif [ "$scenario" = unreadable-task-engine ]; then
+    # The pane's process state never answers, so the only evidence that this
+    # task's worker is running is the engine's own launch arguments: fm-spawn
+    # starts Pi with this task's generated extension and nothing else carries
+    # that path.
+    cat <<EOF
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S pi pi -e ${FM_FAKE_META%.meta}.pi-ext.ts
 EOF
   elif [ "$phase" = stale ] && [ "$scenario" = live-subdir-cwd ]; then
     cat <<'EOF'
@@ -1016,6 +1047,45 @@ assert_contains "$out" 'stopped rp1' "the live worker did not report an ordinary
 assert_not_contains "$(cat "$dir/herdr.log")" 'authority-clear' \
   "an unprovable copy gained stale-authority release rights"
 pass "fm-control Herdr/Pi: ownership is proved before release, not before ordinary lifecycle control"
+
+# Every process witness in the proof is derived from one `pane process-info`
+# response, so a single timed-out, restarted, or busy socket must not be read
+# as "no Pi is running" and turn a healthy worker's ordinary exit into a hard
+# refusal. The read is retried; the second answer decides.
+dir=$(new_case live-transient-unreadable transient-unreadable-process)
+out=$(run_control "$dir" rp1 exit)
+rc=$?
+expect_code 0 "$rc" "one unreadable pane process-state read should not refuse a running Pi's exit"$'\n'"$out"
+assert_contains "$out" 'stopped rp1' "the retried read did not report an ordinary stop"
+assert_contains "$(cat "$dir/herdr.log")" '/quit' "the retried read never submitted the harness exit command"
+assert_not_contains "$(cat "$dir/herdr.log")" 'authority-clear' \
+  "a transiently unreadable pane released authority for a Pi that is still running"
+pass "fm-control Herdr/Pi: a transient pane process-state failure is retried instead of read as an absent engine"
+
+# When the pane's process state stays unreadable, liveness still has a witness
+# that needs no Herdr response: fm-spawn launches this task's Pi with its own
+# generated extension, so an engine carrying that exact argument is this task's
+# worker. Ordinary exit stays available for it.
+dir=$(new_case live-unreadable-task-engine unreadable-task-engine)
+out=$(run_control "$dir" rp1 exit)
+rc=$?
+expect_code 0 "$rc" "an unreadable pane must not refuse exit while this task's Pi is visibly running"$'\n'"$out"
+assert_contains "$out" 'stopped rp1' "the independent process witness did not report an ordinary stop"
+assert_contains "$(cat "$dir/herdr.log")" '/quit' "the independent process witness never submitted the exit command"
+assert_not_contains "$(cat "$dir/herdr.log")" 'authority-clear' \
+  "an unreadable pane released authority for a Pi that is still running"
+pass "fm-control Herdr/Pi: an unreadable pane is answered by this task's own running engine, not by a refusal"
+
+# Ambiguity that persists is still a refusal: an unreadable pane with no Pi
+# engine running anywhere proves nothing, so no lifecycle text and no authority
+# release may follow.
+dir=$(new_case negative-unreadable-no-engine unreadable-no-engine)
+out=$(run_control "$dir" rp1 exit)
+rc=$?
+[ "$rc" -ne 0 ] || fail "an unreadable pane with no running engine should refuse: $out"
+assert_contains "$out" 'could not be proved stable' "the persistent-ambiguity refusal did not name the conservative proof"
+assert_no_terminal_or_release "$dir" "unreadable-no-engine"
+pass "fm-control Herdr/Pi: a pane whose process state stays unreadable with no engine running still refuses"
 
 # The launch half re-runs the complete process proof after the release proof is
 # published. A descendant that appears in that final gap prevents terminal

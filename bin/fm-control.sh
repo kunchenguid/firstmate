@@ -84,7 +84,9 @@
 #     postcondition cannot be proven. zellij, orca, and cmux are refused rather
 #     than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
-#     classified state acts.
+#     classified state acts. An unreadable pane process state is not an absent
+#     engine: the read is retried, and a task-scoped process witness that needs
+#     no Herdr response answers it, so only persistent ambiguity refuses.
 #   - One task-scoped exception repairs Herdr's stale Pi authority after a real
 #     Treehouse nested-shell exit. It applies only to an ordinary pi/pi-signed
 #     worker whose exact recorded pane, tab, workspace, task label, managed
@@ -116,6 +118,7 @@
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
 #   FM_CONTROL_HERDR_SAMPLE_WAIT delay between the two stale-process samples (0.2)
+#   FM_CONTROL_HERDR_READ_RETRIES attempts for one pane process-state read (3)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -172,6 +175,8 @@ EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
 HERDR_SAMPLE_WAIT=${FM_CONTROL_HERDR_SAMPLE_WAIT:-0.2}
+HERDR_READ_RETRIES=${FM_CONTROL_HERDR_READ_RETRIES:-3}
+case "$HERDR_READ_RETRIES" in ''|*[!0-9]*|0) HERDR_READ_RETRIES=3 ;; esac
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -454,18 +459,69 @@ control_herdr_pi_engine_process_name() {  # <name-or-path>
   return 1
 }
 
-# Positive-only liveness probe for the pane's Pi engine, read BEFORE any
-# identity, cwd or Treehouse-ownership gate. A Pi that is visibly running keeps
-# the ordinary lifecycle path (exit interrupts busy workers on purpose), so a
-# tool child holding the pane's foreground process group, a `pi-launcher` or
-# `Pi` process name, or a foreground cwd below the worktree must never become a
-# refusal. Returns 0 only on positive evidence; every other outcome falls
-# through to the conservative stale-exit proof below.
-control_herdr_pi_live_engine_present() {
-  local session pane process_json shell_pid names name
-  session=$(fm_backend_meta_exact_value "$META" herdr_session) || return 1
-  pane=$(fm_backend_meta_exact_value "$META" herdr_pane_id) || return 1
-  process_json=$(control_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+# Read the pane's process state, retrying only a transport failure. Every
+# process witness in this recovery is derived from this one response, so a
+# single timed-out, restarted, or busy Herdr socket must not be allowed to
+# decide either half of the proof. A response that arrives is returned as it
+# is, so a readable answer still stands or refuses on its own contents.
+control_herdr_pane_process_json() {  # <session> <pane>
+  local attempt=0 max=$HERDR_READ_RETRIES out
+  while :; do
+    if out=$(control_herdr_cli "$1" pane process-info --pane "$2" 2>/dev/null); then
+      printf '%s' "$out"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max" ] || return 1
+    sleep "$POLL"
+  done
+}
+
+# Second, independent liveness witness for a pane whose process state stays
+# unreadable. fm-spawn launches this task's Pi with its own generated extension
+# (state/<id>.pi-ext.ts), so an engine carrying that exact argument is this
+# task's worker and nobody else's - evidence read straight from the operating
+# system, with no Herdr response in the path. Returns 0 only on that positive
+# match; a zombie names no running engine.
+control_herdr_pi_task_engine_present() {
+  local extension="$STATE/$ID.pi-ext.ts" ps_bin rows
+  case "$HARNESS" in pi|pi-signed) ;; *) return 1 ;; esac
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  rows=$("$ps_bin" -axo pid=,ppid=,pgid=,stat=,comm=,args= 2>/dev/null) || return 1
+  printf '%s\n' "$rows" | awk -v extension="$extension" '
+    function base(value, count, parts) {
+      sub(/^-/, "", value)
+      count = split(value, parts, "/")
+      return parts[count]
+    }
+    function is_engine(value) {
+      value = base(value)
+      return value == "pi" || value == "pi-signed" || value == "pi-launcher" || value == "Pi"
+    }
+    {
+      if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || NF < 6 || $4 ~ /^Z/) next
+      comm = $5
+      $1 = $2 = $3 = $4 = $5 = ""
+      sub(/^[[:space:]]+/, "")
+      count = split($0, words, /[[:space:]]+/)
+      # `comm` is truncated here because it is not the last column, so argv0 is
+      # the authority and comm is a second witness, exactly as every other
+      # reader over this format.
+      if (!is_engine(comm) && !is_engine(words[1])) next
+      for (i = 2; i <= count; i++) if (words[i] == extension) { found = 1; exit }
+    }
+    END { exit !found }
+  '
+}
+
+# One instantaneous liveness observation for the probe below.
+#   0  a Pi engine is positively visible in the pane.
+#   1  the pane's process state was read and positively holds no Pi engine.
+#   2  the pane's process state could not be read at all.
+control_herdr_pi_live_engine_sample() {  # <session> <pane>
+  local session=$1 pane=$2 process_json shell_pid names name
+  process_json=$(control_herdr_pane_process_json "$session" "$pane") || return 2
   names=$(printf '%s' "$process_json" | jq -r --arg pane "$pane" '
     .result
     | select(.type == "pane_process_info" and .process_info.pane_id == $pane)
@@ -486,8 +542,8 @@ EOF
     | .process_info.shell_pid
     | select(type == "number" and . > 1)
     | floor
-  ' 2>/dev/null) || return 1
-  names=$(fm_herdr_pi_descendant_commands "$shell_pid") || return 1
+  ' 2>/dev/null) || return 2
+  names=$(fm_herdr_pi_descendant_commands "$shell_pid") || return 2
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     if control_herdr_pi_engine_process_name "$name"; then
@@ -496,6 +552,28 @@ EOF
   done <<EOF
 $names
 EOF
+  return 1
+}
+
+# Positive-only liveness probe for the pane's Pi engine, read BEFORE any
+# identity, cwd or Treehouse-ownership gate. A Pi that is visibly running keeps
+# the ordinary lifecycle path (exit interrupts busy workers on purpose), so a
+# tool child holding the pane's foreground process group, a `pi-launcher` or
+# `Pi` process name, or a foreground cwd below the worktree must never become a
+# refusal. An unreadable pane is not an absent engine either: it is retried,
+# and then answered by the task-scoped process witness above, so a transport
+# failure alone can never take ordinary lifecycle control away from a worker
+# that is running. Returns 0 only on positive evidence; every other outcome
+# falls through to the conservative stale-exit proof below.
+control_herdr_pi_live_engine_present() {
+  local session pane status=0
+  session=$(fm_backend_meta_exact_value "$META" herdr_session) || return 1
+  pane=$(fm_backend_meta_exact_value "$META" herdr_pane_id) || return 1
+  control_herdr_pi_live_engine_sample "$session" "$pane" || status=$?
+  case "$status" in
+    0) return 0 ;;
+    2) control_herdr_pi_task_engine_present && return 0 ;;
+  esac
   return 1
 }
 
@@ -561,7 +639,7 @@ EOF
   foreground_cwd=$(control_real_dir "$foreground_cwd") || return 20
   [ "$foreground_cwd" = "$wt_real" ] || return 20
 
-  process_json=$(control_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 20
+  process_json=$(control_herdr_pane_process_json "$session" "$pane") || return 20
   printf '%s' "$process_json" | jq -e --arg pane "$pane" '
     .result.type == "pane_process_info"
     and .result.process_info.pane_id == $pane
