@@ -396,8 +396,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def kind_of($rest):
       metadata($rest; "kind") as $kind
       | if $kind != null then $kind
-        elif ($rest | test("^SCOUT(?:[[:space:]]|$)")) then "scout"
-        elif ($rest | test("^SHIP(?:[[:space:]]|$)")) then "ship"
+        elif ($rest | test("^SCOUT(?![A-Za-z0-9_])")) then "scout"
+        elif ($rest | test("^SHIP(?![A-Za-z0-9_])")) then "ship"
         else null end;
     def hold_metadata($rest):
       cap($rest; ".*\\(hold:[[:space:]]*(?<v>[^)]*)");

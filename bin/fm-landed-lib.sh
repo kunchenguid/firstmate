@@ -39,7 +39,7 @@ FM_LANDED_JQ_DEFS='
     .kind == "scout"
     and (.report_path // null) != null;
   def landed_artifact:
-    if scout_report then (.report_path // null)
+    if scout_report or (.kind == null and .completion.verb == "reported") then (.report_path // null)
     elif .completion.verb == "merged" then (.pr_url // null)
     elif .completion.verb == "done" then (.local_note // null)
     else null

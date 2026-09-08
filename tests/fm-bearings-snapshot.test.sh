@@ -1768,6 +1768,83 @@ EOF
   pass "landed accepts only kind-owned delivery artifacts while answered questions stay out"
 }
 
+test_kind_fallback_matches_tasks_axi_word_boundaries() {
+  local home fakebin id title kind producer_kind fleet_json json
+  [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the kind-boundary regression"
+  home=$(make_home kind-word-boundaries)
+  fakebin=$(make_fakebin "$home")
+  : > "$home/net.log"
+  : > "$home/expected.jsonl"
+  while IFS='|' read -r id title kind; do
+    "$TASKS_AXI_BIN" add "$id" "$title" --start --file "$home/data/backlog.md" >/dev/null \
+      || fail "could not create keyword fixture $id"
+    "$TASKS_AXI_BIN" 'done' "$id" --report "data/$id/report.md" \
+      --file "$home/data/backlog.md" >/dev/null || fail "could not complete keyword fixture $id"
+    producer_kind=$("$TASKS_AXI_BIN" show "$id" --full --file "$home/data/backlog.md" \
+      | sed -n 's/^  kind: *//p' | head -1)
+    [ "$producer_kind" = "${kind/-/task}" ] || fail "tasks-axi kind differs for $title: $producer_kind"
+    jq -cn --arg id "$id" --arg kind "$kind" \
+      '{id:$id,kind:(if $kind == "-" then null else $kind end)}' >> "$home/expected.jsonl"
+  done <<'EOF'
+scout-colon|SCOUT: investigate regression|scout
+scout-unicode|SCOUTé investigate|scout
+scout-longer|SCOUTING investigate|-
+scout-underscore|SCOUT_investigate|-
+scout-digit|SCOUT7 investigate|-
+scout-lowercase|scout: investigate|-
+scout-nonleading|Investigate SCOUT: regression|-
+ship-colon|SHIP: implement|ship
+ship-unicode|SHIPé implement|ship
+ship-longer|SHIPPING implement|-
+EOF
+  fleet_json=$(PATH="$fakebin:$PATH" FM_HOME="$home" NET_LOG="$home/net.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "keyword fleet snapshot failed"
+  printf '%s' "$fleet_json" | jq -e --slurpfile expected "$home/expected.jsonl" \
+    '(.backlog.records | length) == ($expected | length)' >/dev/null \
+    || fail "producer fixture rows were archived before comparison"
+  printf '%s' "$fleet_json" | jq -e --slurpfile expected "$home/expected.jsonl" '
+    (.backlog.records | map({id,kind}) | sort_by(.id)) == ($expected | sort_by(.id))
+  ' >/dev/null || fail "snapshot kinds differ from tasks-axi word boundaries: $fleet_json"
+  json=$(run "$home" "$fakebin" --json --all-landed) || fail "keyword bearings failed"
+  printf '%s' "$json" | jq -e --slurpfile expected "$home/expected.jsonl" '
+    (.landed | map({id,artifact}) | sort_by(.id)) ==
+      ($expected | map(select(.kind == "scout") | {id,artifact:("data/" + .id + "/report.md")}) | sort_by(.id))
+  ' >/dev/null || fail "keyword scout deliveries differ from producer kinds: $json"
+  [ ! -s "$home/net.log" ] || fail "keyword projection made a network call"
+  pass "kind fallback matches tasks-axi word boundaries and preserves scout deliveries"
+}
+
+test_landed_preserves_kindless_v1_summary_reports() {
+  local parent fakebin remote_home json freshness epoch=1100
+  parent=$(make_home kindless-v1-reports)
+  make_remote_ledger_fleet "$parent" 1
+  remote_home="$TMP_ROOT/remote-ledger-home-1"
+  fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  jq '
+    .landed = [
+      {id:"legacy-report",title:"Scout report",report_path:"data/scout/report.md",completion:{verb:"reported",date:"2026-09-01"}},
+      {id:"legacy-pr",title:"Merged change",report_path:"data/scout/report.md",pr_url:"https://github.com/o/r/pull/1",completion:{verb:"merged",date:"2026-09-01"}},
+      {id:"legacy-local",title:"Local delivery",report_path:"data/scout/report.md",local_note:"local main",completion:{verb:"done",date:"2026-09-01"}}
+    ] | .counts.landed = (.landed | length)
+  ' "$remote_home/state/home-summary.json" > "$remote_home/state/legacy-summary.json"
+  mv "$remote_home/state/legacy-summary.json" "$remote_home/state/home-summary.json"
+  for freshness in fresh cached; do
+    json=$(run_remote_ledger_bearings "$parent" "$fakebin" "$epoch") \
+      || fail "kindless v1 summary bearings failed"
+    printf '%s' "$json" | jq -e --arg freshness "$freshness" '
+      (.secondmates | any(.id == "ledger-1" and .freshness == $freshness))
+      and (.landed | map({id,artifact,owner}) | sort_by(.id)) == [
+        {id:"legacy-local",artifact:"local main",owner:"ledger-1"},
+        {id:"legacy-pr",artifact:"https://github.com/o/r/pull/1",owner:"ledger-1"},
+        {id:"legacy-report",artifact:"data/scout/report.md",owner:"ledger-1"}
+      ]
+    ' >/dev/null || fail "kindless v1 $freshness artifacts were lost: $json"
+    rm -f "$remote_home/state/home-summary.json"
+    epoch=1200
+  done
+  pass "kindless v1 summaries retain report artifacts from fresh and cached ledgers"
+}
+
 test_landed_default_balances_dominant_and_sparse_homes() {
   local home dominant sparse_a sparse_b sparse_c fakebin json i actual expected
   home=$(make_home landed-balanced-default)
@@ -3119,6 +3196,8 @@ test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_accepts_only_kind_owned_delivery_artifacts
+test_kind_fallback_matches_tasks_axi_word_boundaries
+test_landed_preserves_kindless_v1_summary_reports
 test_landed_default_balances_dominant_and_sparse_homes
 test_landed_default_refills_capacity_after_sparse_homes_exhaust
 test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap
