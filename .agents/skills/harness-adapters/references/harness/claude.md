@@ -25,7 +25,7 @@ A second prompt can sit behind it: a "Quick safety check" listing the tool permi
 It was observed on 2026-09-07 on Claude Code 2.1.263, after the trust dialog had been pre-registered, and it wedged two workers until a human answered it in the pane.
 That project's tracked `.claude/settings.json` carried both `PreToolUse` hooks and `permissions.allow` rules, but what configuration reaches the prompt is UNESTABLISHED, so treat no settings shape as exempt.
 Nothing pre-registers that prompt today, and `hasTrustDialogHooksAccepted` is not the key that would: it appears in the measured store only as `false`, and the slots a human accepted carry only `hasTrustDialogAccepted`.
-`../../../../../docs/verification/runtime-backends.md` under "Claude workspace trust" owns that observation, what it rules out, and the reproduction.
+`../../../../../docs/verification/runtime-backends.md` under "Claude workspace trust" owns that observation, what it rules out, and why refreshing it needs a live spawn.
 
 Never try to answer the trust dialog with a key.
 Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so it cannot move a dialog's selection at all, and the observed rendering starts on `No, exit`, which means a sent Enter ends the session instead of accepting.

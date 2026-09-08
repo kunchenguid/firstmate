@@ -27,7 +27,7 @@
 # pre-registers it, and hasTrustDialogHooksAccepted is ruled out as the key that
 # would. docs/verification/runtime-backends.md under "Claude workspace trust"
 # owns the figures, the settings-shape table, the sent-Enter analysis, the open
-# captain question, and the reproduction.
+# captain question, and why refreshing it needs a live spawn.
 #
 # THE SCOPE TEST IS THE SAFETY PROPERTY, and it is STRUCTURAL rather than a
 # path policy. <worktree> must be a LINKED git worktree - its own git dir,
