@@ -222,25 +222,6 @@ if [ -n "$REMOTE_HOST" ]; then
   esac
 fi
 
-# ACPX supplies the lifecycle fact directly, independent of the pane transport.
-# The no-mistakes run remains authoritative above; this is its no-run fallback.
-if [ "$TRANSPORT" = acp ]; then
-  [ -n "$SESSION_ID" ] || emit unknown acp "ACP transport has no session_id"
-  ACP_STATUS=$("$SCRIPT_DIR/fm-acp-client.sh" status "$HARNESS" "$WT" "$SESSION_ID" 2>/dev/null || true)
-  case "$(printf '%s\n' "$ACP_STATUS" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p' | tail -1)" in
-    running) emit working acp "ACP session $SESSION_ID running" ;;
-    alive|idle)
-      if [ -n "$LOG_VERB" ]; then
-        LOG_STATE=$(map_log_state "$LOG_LINE")
-        [ "$LOG_STATE" = unknown ] || emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}ACP session $SESSION_ID idle"
-      fi
-      emit unknown acp "ACP session $SESSION_ID idle"
-      ;;
-    dead) emit unknown acp "ACP session $SESSION_ID dead" ;;
-    *) emit unknown acp "ACP session state unavailable" ;;
-  esac
-fi
-
 # pane_readable is consulted ONLY in the no-run fallback below. The run-step path
 # stays authoritative regardless of pane liveness - judge by the run-step, not the
 # shell - so a finished crew whose endpoint has closed still reports its run-step
@@ -776,6 +757,26 @@ fi
 # verdict reports unknown rather than trusting a possibly-stale status log as
 # the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
+
+# ACPX supplies the lifecycle fact directly, independent of the pane transport.
+# The no-mistakes run remains authoritative above; this is its no-run fallback.
+if [ "$TRANSPORT" = acp ]; then
+  [ -n "$SESSION_ID" ] || emit unknown acp "ACP transport has no session_id"
+  ACP_STATUS=$("$SCRIPT_DIR/fm-acp-client.sh" status "$HARNESS" "$WT" "$SESSION_ID" 2>/dev/null || true)
+  case "$(printf '%s\n' "$ACP_STATUS" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p' | tail -1)" in
+    running) emit working acp "ACP session $SESSION_ID running" ;;
+    alive|idle)
+      if [ -n "$LOG_VERB" ]; then
+        LOG_STATE=$(map_log_state "$LOG_LINE")
+        [ "$LOG_STATE" = unknown ] || emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}ACP session $SESSION_ID idle"
+      fi
+      emit unknown acp "ACP session $SESSION_ID idle"
+      ;;
+    dead) emit unknown acp "ACP session $SESSION_ID dead" ;;
+    *) emit unknown acp "ACP session state unavailable" ;;
+  esac
+fi
+
 if ! pane_readable "$BACKEND_TARGET"; then
   # A failed probe is not itself evidence the pane is gone: the herdr CLI can
   # error or stall under load, and tmux can fail to be executed at all (a
