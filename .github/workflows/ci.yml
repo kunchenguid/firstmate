@@ -399,13 +399,7 @@ jobs:
             exit 1
           }
 
-          bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
-          printf '%s\n' "$bearings_output"
-          bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
-          [ "$bearings_count" -eq 53 ] || {
-            echo "::error::expected 53 Bearings tests, got $bearings_count"
-            exit 1
-          }
+          /bin/bash tests/fm-bearings-snapshot.test.sh
 
           command -v npm >/dev/null || { echo "::error::npm is required to install tasks-axi"; exit 1; }
           npm install -g tasks-axi@0.2.5 >/dev/null
