@@ -69,8 +69,10 @@
 # tracked in wake-pending state and is retried under the same correlation by
 # later resumes and handoffs. If wake-pending state cannot be recorded, the wake
 # is reported as DROPPED and marker removal is attempted while the mate still
-# owns reconciliation from its durable backlog. Any unsafe, invalid, or
-# undeletable stale marker is reported and ignored by later resumes and handoffs.
+# owns reconciliation from its durable backlog. Any unsafe, invalid, delivered,
+# or undeletable stale marker is reported and ignored by later resumes and
+# handoffs, so wake-state cleanup neither suppresses a new wake nor fails a
+# completed remote handoff.
 # Usage: fm-backlog-handoff.sh <secondmate-id> <item-key>...
 #        fm-backlog-handoff.sh --resume-pending
 set -eu
@@ -97,6 +99,7 @@ RECEIVER_WAKE_MESSAGE='New routed work is in your backlog. Run bin/fm-session-st
 
 ACTIVE_HANDOFF_LOCK=
 ACTIVE_REGISTRY_LOCK=
+RECEIVER_WAKE_IGNORE_ID=
 release_remote_locks() {
   if [ -n "$ACTIVE_HANDOFF_LOCK" ]; then
     fm_lock_release "$ACTIVE_HANDOFF_LOCK"
@@ -367,7 +370,7 @@ receiver_wake_mark() { # <secondmate-id> <prepared|pending> [batch-id]
     [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
     value=$(cat "$marker" 2>/dev/null || true)
     case "$value" in
-      prepared:*|pending:*)
+      prepared:*)
         corr=${value#*:}
         corr=${corr%%:*}
         rec=$(fm_pending_reply_path "$STATE" "$corr")
@@ -375,6 +378,7 @@ receiver_wake_mark() { # <secondmate-id> <prepared|pending> [batch-id]
           && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ]
         return $?
         ;;
+      pending:*) receiver_wake_pending_valid "$id"; return $? ;;
       pending) ;;
       *) return 1 ;;
     esac
@@ -454,7 +458,20 @@ receiver_wake_pending_valid() { # <secondmate-id>
   [ -f "$rec" ] && [ ! -L "$rec" ] \
     && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] || return 1
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
-  [ -n "$delivered" ] || fm_pending_reply_corr_reusable "$STATE" "$corr" "$id"
+  [ -z "$delivered" ] || return 1
+  fm_pending_reply_corr_reusable "$STATE" "$corr" "$id"
+}
+
+receiver_wake_pending_delivered_valid() { # <secondmate-id>
+  local id=$1 marker="$STATE/.backlog-handoff-$1.wake-pending" value corr rec
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  value=$(cat "$marker" 2>/dev/null || true)
+  case "$value" in pending:*) corr=${value#pending:} ;; *) return 1 ;; esac
+  printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' || return 1
+  rec=$(fm_pending_reply_path "$STATE" "$corr")
+  [ -f "$rec" ] && [ ! -L "$rec" ] \
+    && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] \
+    && [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ]
 }
 
 receiver_wake_confirmed_valid() { # <secondmate-id>
@@ -487,17 +504,22 @@ receiver_wake_drop_marker() { # <secondmate-id> <reason>
 
 receiver_wake_clear_confirmed() { # <secondmate-id>
   local id=$1 marker="$STATE/.backlog-handoff-$1.wake-pending"
+  RECEIVER_WAKE_IGNORE_ID=
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   if receiver_wake_pending_valid "$id"; then
     return 0
   fi
-  if receiver_wake_confirmed_valid "$id"; then
+  if receiver_wake_pending_delivered_valid "$id" || receiver_wake_confirmed_valid "$id"; then
     if ! rm -f -- "$marker"; then
+      RECEIVER_WAKE_IGNORE_ID=$id
       printf 'warning: confirmed receiver wake left a stale marker at %s; later handoffs will ignore it\n' "$marker" >&2
     fi
     return 0
   fi
   receiver_wake_drop_marker "$id" 'wake-pending state is unsafe or invalid'
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    RECEIVER_WAKE_IGNORE_ID=$id
+  fi
 }
 
 wake_secondmate_receiver() { # <secondmate-id> <correlation-id>
@@ -619,7 +641,10 @@ remote_deliver_outbox() { # <secondmate-id> <outbox-path>
     return 1
   fi
   marker="$STATE/.backlog-handoff-$id.wake-pending"
-  if ! receiver_wake_pending_valid "$id" && ! receiver_wake_confirmed_valid "$id"; then
+  if [ "$RECEIVER_WAKE_IGNORE_ID" = "$id" ]; then
+    wake_state=dropped
+    wake_rc=1
+  elif ! receiver_wake_pending_valid "$id" && ! receiver_wake_confirmed_valid "$id"; then
     receiver_wake_mark_pending "$id" || {
       wake_state=dropped
       wake_rc=1
@@ -633,10 +658,10 @@ remote_deliver_outbox() { # <secondmate-id> <outbox-path>
     return 1
   }
   if [ "$wake_rc" -eq 0 ]; then
-    rm -f -- "$marker" || {
-      echo "error: remote outbox cleanup succeeded but confirmed receiver wake state could not be cleared: $marker" >&2
-      return 1
-    }
+    if ! rm -f -- "$marker"; then
+      RECEIVER_WAKE_IGNORE_ID=$id
+      echo "warning: remote outbox and receiver wake completed, but a stale confirmed wake marker remains at $marker; later handoffs will ignore it" >&2
+    fi
   elif [ "$wake_state" = dropped ]; then
     receiver_wake_drop_marker "$id" 'wake-pending state could not be recorded'
     echo "warning: remote backlog is durable at $id and its outbox was released after the best-effort receiver wake was dropped" >&2

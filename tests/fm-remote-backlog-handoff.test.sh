@@ -494,6 +494,77 @@ assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \
   "fresh handoff left confirmed wake state behind"
 pass "fresh remote work gets a new wake after confirmed cleanup recovery"
 
+write_backlog '- [ ] confirmed-marker-stale - completed handoff ignores marker cleanup failure (repo: alpha)'
+wakes_before=$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")
+PATH="$RM_FAKEBIN:$PATH" FM_REAL_RM="$REAL_RM" \
+  FM_FAIL_RM_PATH="$PARENT/state/.backlog-handoff-ios.wake-pending" \
+  handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios confirmed-marker-stale \
+  > "$TMP_ROOT/confirmed-marker-stale.out" 2>&1 \
+  || fail "confirmed marker cleanup failure falsely failed a completed handoff"
+assert_absent "$PARENT/data/handoff/ios.outbox.md" \
+  "confirmed marker cleanup failure retained a completed outbox"
+case "$(cat "$PARENT/state/.backlog-handoff-ios.wake-pending")" in
+  confirmed:*) ;;
+  *) fail "forced confirmed marker cleanup failure did not preserve confirmed state" ;;
+esac
+assert_contains "$(cat "$TMP_ROOT/confirmed-marker-stale.out")" \
+  "stale confirmed wake marker remains at $PARENT/state/.backlog-handoff-ios.wake-pending" \
+  "confirmed marker cleanup failure did not name the stale marker"
+[ "$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")" -eq $((wakes_before + 1)) ] \
+  || fail "confirmed marker cleanup failure changed the completed wake count"
+[ "$(grep -cF -- '- [ ] confirmed-marker-stale -' "$REMOTE/data/backlog.md")" -eq 1 ] \
+  || fail "confirmed marker cleanup failure lost or duplicated durable work"
+rm -f -- "$PARENT/state/.backlog-handoff-ios.wake-pending"
+pass "confirmed marker cleanup cannot fail a completed remote handoff"
+
+CONFIRM_MV_FAKEBIN="$TMP_ROOT/confirm-mv-fakebin"
+mkdir -p "$CONFIRM_MV_FAKEBIN"
+REAL_MV=$(command -v mv)
+cat > "$CONFIRM_MV_FAKEBIN/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "$FM_CONFIRM_MV_PATH" ]; then
+  count=$(cat "$FM_CONFIRM_MV_COUNT" 2>/dev/null || echo 0)
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_CONFIRM_MV_COUNT"
+  [ "$count" -ne 2 ] || exit 1
+fi
+exec "$FM_REAL_MV" "$@"
+SH
+chmod +x "$CONFIRM_MV_FAKEBIN/mv"
+write_backlog '- [ ] delivered-pending-old - wake confirms before state promotion fails (repo: alpha)'
+wakes_before=$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")
+PATH="$CONFIRM_MV_FAKEBIN:$PATH" FM_REAL_MV="$REAL_MV" \
+  FM_CONFIRM_MV_PATH="$PARENT/state/.backlog-handoff-ios.wake-pending" \
+  FM_CONFIRM_MV_COUNT="$TMP_ROOT/confirm-mv.count" \
+  handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios delivered-pending-old \
+  > "$TMP_ROOT/delivered-pending-old.out" 2>&1 \
+  || fail "confirmed wake state promotion failure failed durable work"
+delivered_pending_marker=$(cat "$PARENT/state/.backlog-handoff-ios.wake-pending" 2>/dev/null || true)
+case "$delivered_pending_marker" in
+  pending:*) delivered_pending_corr=${delivered_pending_marker#pending:} ;;
+  *) fail "confirmed wake state promotion failure did not leave pending correlation state" ;;
+esac
+delivered_pending_rec="$PARENT/state/pending-replies/$delivered_pending_corr"
+[ -n "$(grep '^delivered_epoch=' "$delivered_pending_rec" | cut -d= -f2-)" ] \
+  || fail "pending marker fixture did not retain confirmed delivery evidence"
+write_backlog '- [ ] delivered-pending-new - new work after delivered pending marker (repo: alpha)'
+handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios delivered-pending-new >/dev/null \
+  || fail "delivered pending marker blocked the next handoff"
+[ "$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")" -eq $((wakes_before + 2)) ] \
+  || fail "delivered pending marker suppressed the new handoff wake"
+[ "$(grep -cF -- '- [ ] delivered-pending-old -' "$REMOTE/data/backlog.md")" -eq 1 ] \
+  || fail "state promotion failure lost or duplicated the older item"
+[ "$(grep -cF -- '- [ ] delivered-pending-new -' "$REMOTE/data/backlog.md")" -eq 1 ] \
+  || fail "handoff after delivered pending state was lost or duplicated"
+assert_present "$delivered_pending_rec" \
+  "clearing delivered pending state discarded its pending-reply record"
+[ -n "$(grep '^delivered_epoch=' "$delivered_pending_rec" | cut -d= -f2-)" ] \
+  || fail "clearing delivered pending state reset confirmed delivery"
+assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \
+  "new handoff left delivered pending state behind"
+pass "delivered pending state cannot suppress a new handoff wake"
+
 MV_FAKEBIN="$TMP_ROOT/mv-fakebin"
 mkdir -p "$MV_FAKEBIN"
 REAL_MV=$(command -v mv)
