@@ -382,14 +382,20 @@ mkdir -p <worktree>/.claude   # stand in for the hooks bin/fm-spawn.sh injects i
 printf '%s\n' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"true"}]}],"Stop":[{"hooks":[{"type":"command","command":"true"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"true"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"true"}]}]}}' \
   > <worktree>/.claude/settings.local.json
 tmux new-session -d -s tp-h1 -c <worktree> \
-  "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions 'reply with exactly: BRIEF-REACHED'"
-tmux capture-pane -p -t tp-h1
+  "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions 'reply with exactly: BRIEF-REACHED'" || exit 1
+pane=
+for _ in $(seq 60); do   # new-session -d returns before claude has rendered anything
+  pane=$(tmux capture-pane -p -t tp-h1)
+  case $pane in *"Quick safety check"*|*BRIEF-REACHED*) break ;; esac
+  sleep 1
+done
+printf '%s\n' "$pane"
 ```
 
 "Shows the Quick safety check" is NOT a usable readout: both prompts open with that byte-identical first line and both offer `Yes, I trust this folder`.
 The arm reproduces only if the pane shows the SECOND prompt, so key the readout on the discriminator - its next line is `This folder pre-approves N tool permissions in .claude/settings.json` and its first option is `No, continue without these permissions`, where the first dialog instead says Claude will be able to read, edit, and execute files here and offers `No, exit`.
-If the pane shows the FIRST dialog the registration did not take effect, which is what the `|| exit 1` above catches; fix the registration and rerun rather than answering, because answering it writes `hasTrustDialogAccepted` and the treatment arm's walk would then report the key this script already writes as a candidate.
-If neither prompt appears, the project does not reproduce and no candidate can be tested on it.
+If the pane shows the FIRST dialog the registration did not take effect; fix the registration and rerun rather than answering, because answering it writes `hasTrustDialogAccepted` and the treatment arm's walk would then report the key this script already writes as a candidate.
+Apply that readout only to a pane the poll above settled: if neither prompt nor the reply ever appears the loop runs out, and only then does the project count as not reproducing.
 
 Treatment arm - snapshot the store FIRST, then answer the second prompt by hand in the control arm's `tp-h1` pane, then diff the two snapshots to see what the acceptance actually wrote:
 
