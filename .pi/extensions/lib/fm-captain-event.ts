@@ -12,14 +12,15 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const SUMMARY_MAX = 600;
+const ASSIGNMENT_SCAN_MAX = 8192;
 const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
+const ENV_ASSIGNMENT_START = /\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*=\s*/g;
 const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)/gi,
   /\bAKIA[0-9A-Z]{16}\b/g,
   /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
   /\b(?:Bearer|Authorization\s*:\s*Bearer)\s+[A-Za-z0-9._~+/=-]{12,}/gi,
-  /\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*=\s*(?:"[^"]{0,4096}"|'[^']{0,4096}'|[^\s,;]{1,4096})/g,
   /\b(?:password|passwd|api[_ -]?key|access[_ -]?token|pairing[_ -]?token|token|secret)\s*[:=]\s*[^\s,;]{6,}/gi,
 ];
 
@@ -51,12 +52,49 @@ function visibleAssistantText(content: unknown): string {
     .join("\n");
 }
 
+function redactEnvironmentAssignments(value: string): string {
+  let result = "";
+  let copiedThrough = 0;
+  ENV_ASSIGNMENT_START.lastIndex = 0;
+  for (let match = ENV_ASSIGNMENT_START.exec(value); match; match = ENV_ASSIGNMENT_START.exec(value)) {
+    let cursor = ENV_ASSIGNMENT_START.lastIndex;
+    let quote = "";
+    let escaped = false;
+    let scanned = 0;
+    while (cursor < value.length) {
+      if (scanned >= ASSIGNMENT_SCAN_MAX) {
+        cursor = value.length;
+        break;
+      }
+      const character = value[cursor];
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (quote) {
+        if (character === quote) quote = "";
+      } else if (character === "\"" || character === "'") {
+        quote = character;
+      } else if (/\s/u.test(character) || character === "," || character === ";") {
+        break;
+      }
+      cursor += 1;
+      scanned += 1;
+    }
+    result += `${value.slice(copiedThrough, match.index)}[REDACTED]`;
+    copiedThrough = cursor;
+    ENV_ASSIGNMENT_START.lastIndex = cursor;
+  }
+  return result + value.slice(copiedThrough);
+}
+
 function prepareSummary(raw: string): PreparedSummary | null {
   let text = raw.normalize("NFC").replace(ANSI_PATTERN, "");
   text = [...text].map((character) => (
     /[\p{C}\p{Zl}\p{Zp}]/u.test(character) ? " " : character
   )).join("");
   text = text.replace(/\s+/gu, " ").trim();
+  text = redactEnvironmentAssignments(text);
   for (const pattern of SECRET_PATTERNS) text = text.replace(pattern, "[REDACTED]");
   text = text.replace(/\s+/gu, " ").trim();
   if (!text) return null;

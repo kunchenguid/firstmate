@@ -142,11 +142,12 @@ long=$(python3 - <<'PY'
 print("🧭" * 700)
 PY
 )
-primary_args pi:bounded $'\033[31mLine one\033[0m\nLine two token=supersecretvalue AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod ordinary prose '
+assignments='token=supersecretvalue AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod escaped_name=private\ escapedvalue quoted_name="private \"quotedvalue\" tail"'
+primary_args pi:bounded "$assignments ordinary prose"
 PRIMARY_ARGS+=(--summary-truncated true --ref pr_url=https://github.com/example/repo/pull/7 --ref report_id=soak-report --ref report_path=data/soak-report/report.md --ref branch_outcome_seq=9)
 # Replace the summary argument with a value that exercises both redaction and
 # the Unicode cap without risking shell byte slicing.
-PRIMARY_ARGS[15]=$'\033[31mLine one\033[0m\nLine two \u202etoken=supersecretvalue AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod ordinary prose '"$long"
+PRIMARY_ARGS[15]=$'\033[31mLine one\033[0m\nLine two \u202e'"$assignments ordinary prose $long"
 FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "bounded append failed"
 row=$(FM_HOME="$home" "$OUTBOX" read --after 0)
 printf '%s\n' "$row" | jq -e '
@@ -158,6 +159,8 @@ printf '%s\n' "$row" | jq -e '
   and (.summary | contains("hunter2") | not)
   and (.summary | contains("privatevalue") | not)
   and (.summary | contains("dbpass") | not)
+  and (.summary | contains("escapedvalue") | not)
+  and (.summary | contains("quotedvalue") | not)
   and (.summary | contains("ordinary prose"))
   and (.refs | keys) == ["branch_outcome_seq","pr_url","report_id","report_path"]
   and .refs.branch_outcome_seq == 9
@@ -396,7 +399,7 @@ installCaptainEventPublisher(pi, {
 });
 const message = {
   role: "assistant",
-  content: [{ type: "text", text: "Ordinary prose AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod remains" }],
+  content: [{ type: "text", text: "Ordinary prose AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod escaped_name=private\\ escapedvalue quoted_name=\"private \\\"quotedvalue\\\" tail\" remains" }],
   stopReason: "stop",
   timestamp: 1,
 };
@@ -408,7 +411,7 @@ import sys
 
 args = open(sys.argv[1], "rb").read().split(b"\0")[:-1]
 summary = args[args.index(b"--summary") + 1].decode()
-assert summary == "Ordinary prose [REDACTED] [REDACTED] [REDACTED] [REDACTED] remains", summary
+assert summary == "Ordinary prose [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] remains", summary
 PY
 
   home=$(new_home pi-producer-disabled)

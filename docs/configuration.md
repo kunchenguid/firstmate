@@ -58,6 +58,9 @@ Enabled publication requires `bash` and `python3` with the standard POSIX `fcntl
 
 Enable one home with:
 
+Before writing the flag, run Pi's `/reload` in every already-running primary that should publish and wait for it to complete while the flag remains absent.
+An already-running task worker does not gain the producer dynamically; only workers whose generated extension came from this release are active publishers.
+
 ```sh
 printf 'enabled\n' > config/captain-event-outbox
 bin/fm-captain-event.sh validate

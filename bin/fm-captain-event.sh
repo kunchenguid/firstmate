@@ -114,6 +114,7 @@ except ImportError:
 SCHEMA = "fm-captain-event.v1"
 SUMMARY_MAX = 600
 EVENT_MAX = 8192
+ASSIGNMENT_SCAN_MAX = 8192
 MAX_SAFE_UINT = 9007199254740991
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
@@ -134,13 +135,13 @@ EVENT_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 GITHUB_PR_RE = re.compile(r"^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$")
 GITLAB_MR_RE = re.compile(r"^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$")
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+ENV_ASSIGNMENT_START_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*=\s*")
 SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)", re.I),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\b(?:Bearer|Authorization\s*:\s*Bearer)\s+[A-Za-z0-9._~+/=-]{12,}", re.I),
-    re.compile(r'''\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*=\s*(?:"[^"]{0,4096}"|'[^']{0,4096}'|[^\s,;]{1,4096})'''),
     re.compile(r"\b(?:password|passwd|api[_ -]?key|access[_ -]?token|pairing[_ -]?token|token|secret)\s*[:=]\s*[^\s,;]{6,}", re.I),
 ]
 
@@ -274,6 +275,42 @@ def validate_token(value, label):
         raise OutboxError(f"{label} must be 1..256 characters from [A-Za-z0-9._:-]")
 
 
+def redact_environment_assignments(value):
+    result = []
+    copied_through = 0
+    while True:
+        match = ENV_ASSIGNMENT_START_RE.search(value, copied_through)
+        if match is None:
+            break
+        cursor = match.end()
+        quote = None
+        escaped = False
+        scanned = 0
+        while cursor < len(value):
+            if scanned >= ASSIGNMENT_SCAN_MAX:
+                cursor = len(value)
+                break
+            character = value[cursor]
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif quote is not None:
+                if character == quote:
+                    quote = None
+            elif character in {'"', "'"}:
+                quote = character
+            elif character.isspace() or character in {",", ";"}:
+                break
+            cursor += 1
+            scanned += 1
+        result.append(value[copied_through:match.start()])
+        result.append("[REDACTED]")
+        copied_through = cursor
+    result.append(value[copied_through:])
+    return "".join(result)
+
+
 def clean_summary(value):
     value = unicodedata.normalize("NFC", value)
     value = ANSI_RE.sub("", value)
@@ -282,6 +319,7 @@ def clean_summary(value):
         for ch in value
     )
     value = re.sub(r"\s+", " ", value, flags=re.UNICODE).strip()
+    value = redact_environment_assignments(value)
     for pattern in SECRET_PATTERNS:
         value = pattern.sub("[REDACTED]", value)
     value = re.sub(r"\s+", " ", value, flags=re.UNICODE).strip()
