@@ -165,6 +165,7 @@ assert not any(unicodedata.category(ch).startswith("C") for ch in summary)
 ' || fail "bounded summary retained a Unicode control or format character"
 bytes=$(wc -c < "$home/state/captain-events/events.jsonl" | tr -d ' ')
 [ "$bytes" -le 8192 ] || fail "serialized event exceeds 8192 bytes ($bytes)"
+# shellcheck disable=SC2016 # Dollar and command-substitution syntax is intentional inert test data and must not expand.
 assignment_cases=(
   'token=supersecretvalue visible suffix'
   'escaped_name=private\ escapedvalue visible suffix'
