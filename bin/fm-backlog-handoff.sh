@@ -53,7 +53,11 @@
 # A present outbox remains the remote retry trigger until backlog receipt and
 # receiver wake are both confirmed; a companion pending-reply correlation makes
 # crash recovery reconcile an attempted or confirmed wake instead of blindly
-# resending it. A prepared local wake is bound to the exact sorted
+# resending it. An undelivered wake stays retryable on every resume under that
+# same correlation even after the watcher has escalated its unknown delivery
+# (bin/fm-pending-reply-lib.sh, retryable undelivered escalation): the durable
+# receipt is the work, the wake is only a live nudge, and only a confirmed
+# delivery is never resent. A prepared local wake is bound to the exact sorted
 # requested-key batch; an unrelated handoff to that mate refuses until the
 # original batch is retried, so it cannot discard wake intent for work that
 # already moved. No two-phase journal exists.

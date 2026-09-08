@@ -351,6 +351,67 @@ assert_absent "$PARENT/data/handoff/ios.outbox.md" \
   "remote receiver wake recovery left its outbox pending"
 pass "remote handoff wakes its supported endpoint or remains loudly recoverable"
 
+# The receiver wake is a best-effort live nudge sent AFTER the backlog receipt
+# is durable. A wake whose remote transport is lost leaves its correlation
+# undelivered with delivery unknown, and the watcher's very next pending-reply
+# tick escalates that correlation. That escalated-but-undelivered wake must
+# stay retryable: the outbox otherwise jams every later handoff to this mate
+# behind a correlation the resume refuses to resend forever.
+write_backlog '- [ ] wake-escalated - escalated undelivered wake stays retryable (repo: alpha)'
+wakes_before=$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")
+set +e
+FM_FAKE_REMOTE_WAKE_RC=255 handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios wake-escalated \
+  > "$TMP_ROOT/wake-escalated.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "remote handoff claimed success after its receiver wake transport was lost"
+assert_grep 'wake-escalated' "$REMOTE/data/backlog.md" "lost wake transport did not leave the backlog durably received"
+assert_present "$PARENT/data/handoff/ios.outbox.md" "lost wake transport discarded the recoverable outbox"
+wake_marker=$(cat "$PARENT/state/.backlog-handoff-ios.wake-pending" 2>/dev/null || true)
+case "$wake_marker" in
+  pending:*) escalated_corr=${wake_marker#pending:} ;;
+  *) fail "lost wake transport did not leave a pending correlated wake, got '$wake_marker'" ;;
+esac
+escalated_rec="$PARENT/state/pending-replies/$escalated_corr"
+[ -f "$escalated_rec" ] || fail "lost wake transport left no pending-reply record for $escalated_corr"
+[ "$(grep '^phase=' "$escalated_rec" | cut -d= -f2-)" = delivery_unknown ] \
+  || fail "lost wake transport did not record delivery unknown"
+# The watcher's pending-reply tick (bin/fm-watch.sh -> fm_pending_reply_tick)
+# escalates an undelivered delivery-unknown correlation before any resume runs.
+bash -c '. "$1"; fm_pending_reply_tick "$2"' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$PARENT/state" \
+  || fail "pending-reply tick failed on the undelivered wake"
+[ "$(grep '^phase=' "$escalated_rec" | cut -d= -f2-)" = escalated ] \
+  || fail "watcher tick did not escalate the undelivered wake, got $(grep '^phase=' "$escalated_rec")"
+[ -z "$(grep '^delivered_epoch=' "$escalated_rec" | cut -d= -f2-)" ] \
+  || fail "escalation must not invent a delivery for the undelivered wake"
+[ "$(grep -cF "blocked [key=pending-reply-$escalated_corr]:" "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "undelivered wake escalation was not published exactly once"
+set +e
+handoff_env "$ROOT/bin/fm-backlog-handoff.sh" --resume-pending > "$TMP_ROOT/wake-escalated-resume.out" 2>&1
+rc=$?
+set -e
+if [ "$rc" -ne 0 ]; then
+  printf 'resume output:\n%s\n' "$(cat "$TMP_ROOT/wake-escalated-resume.out")" >&2
+  fail "resume refused to retry the escalated undelivered wake (outbox deadlock)"
+fi
+assert_absent "$PARENT/data/handoff/ios.outbox.md" "escalated wake retry left its outbox pending"
+assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" "escalated wake retry left wake state behind"
+[ "$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")" -eq $((wakes_before + 3)) ] \
+  || fail "escalated wake retry did not resend the wake exactly once after the two lost attempts"
+[ -n "$(grep '^delivered_epoch=' "$escalated_rec" | cut -d= -f2-)" ] \
+  || fail "successful wake retry did not confirm delivery on the same correlation"
+[ "$(grep '^phase=' "$escalated_rec" | cut -d= -f2-)" = awaiting_report ] \
+  || fail "delivered wake retry did not return the correlation to awaiting its report"
+[ "$(grep -cF "blocked [key=pending-reply-$escalated_corr]:" "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "wake retry duplicated the published escalation"
+write_backlog '- [ ] after-escalated - next handoff flows once the escalated wake is retried (repo: alpha)'
+handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios after-escalated >/dev/null \
+  || fail "handoff after the escalated wake retry did not flow"
+[ "$(grep -cF after-escalated "$REMOTE/data/backlog.md")" -eq 1 ] \
+  || fail "handoff after the escalated wake retry was lost or duplicated"
+assert_absent "$PARENT/data/handoff/ios.outbox.md" "handoff after the escalated wake retry left an outbox pending"
+pass "an escalated undelivered receiver wake stays retryable instead of jamming the outbox"
+
 RM_FAKEBIN="$TMP_ROOT/rm-fakebin"
 mkdir -p "$RM_FAKEBIN"
 REAL_RM=$(command -v rm)
