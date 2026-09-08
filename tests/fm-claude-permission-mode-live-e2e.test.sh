@@ -42,6 +42,17 @@ set -u
 
 fm_live_gate opt-in FM_CLAUDE_PERMISSION_MODE_LIVE_E2E claude tmux
 
+# This guard proves the root-without-sandbox posture documented above; the
+# "before" arm's blocking assertion is not valid evidence outside it (a
+# non-root or declared-sandbox launch can legitimately proceed without the
+# root-specific approval prompt, which would otherwise read as a false
+# failure rather than the vendor behavior changing).
+if [ "$(id -u)" != 0 ] || [ -n "${IS_SANDBOX:-}" ]; then
+  printf 'skip: live: requires uid=0 with IS_SANDBOX unset (this fleet'"'"'s actual claude launch posture); got uid=%s IS_SANDBOX=%s\n' \
+    "$(id -u)" "${IS_SANDBOX:-unset}"
+  exit 0
+fi
+
 CLAUDE_VERSION=$(claude --version 2>/dev/null || printf 'version-unknown')
 CLAUDE_STORE="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
 
@@ -58,10 +69,16 @@ CHECKED=0
 cleanup_trust_entries() {
   # Strip only the two throwaway paths this guard registered, preserving
   # every other project entry in the launching user's own store - the same
-  # scope fm-claude-trust.sh's own write is limited to.
+  # scope fm-claude-trust.sh's own write is limited to. Written atomically
+  # (temp file + os.replace) so a mid-write crash never leaves a truncated
+  # store; this narrows, but cannot fully close, the race against a
+  # concurrent Claude session also touching the file (the existing
+  # "Claude workspace trust" verification record already documents that
+  # residual risk for the same store). A real cleanup failure is reported
+  # rather than silenced, but never aborts this exit-trap cleanup.
   [ -f "$CLAUDE_STORE" ] || return 0
-  python3 - "$CLAUDE_STORE" "$DIR_BEFORE" "$DIR_AFTER" <<'PY' 2>/dev/null || true
-import json, sys
+  python3 - "$CLAUDE_STORE" "$DIR_BEFORE" "$DIR_AFTER" <<'PY'
+import json, os, sys, tempfile
 path, before, after = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
     data = json.load(f)
@@ -69,9 +86,18 @@ projects = data.get("projects")
 if isinstance(projects, dict):
     for p in (before, after):
         projects.pop(p, None)
-    with open(path, "w") as f:
-        json.dump(data, f)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
 PY
+  status=$?
+  [ "$status" -eq 0 ] || printf 'warning: fm-claude-permission-mode-live-e2e cleanup could not prune its trust-store entries (exit %s); check %s by hand\n' "$status" "$CLAUDE_STORE" >&2
+  return 0
 }
 
 cleanup() {
