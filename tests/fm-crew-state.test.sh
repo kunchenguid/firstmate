@@ -621,6 +621,59 @@ test_working_run_reports_pipeline_activity_recency() {
   pass "activity: recent appears only on the wedge-timer read of a live table; the default line and every other run omit it"
 }
 
+# The real boundary the wedge timer depends on: bin/fm-classify-lib.sh's
+# crew_run_activity_is_recent reading the real fm-crew-state.sh, not a canned
+# line. It fixes the separator glyph and the first-detail-field position, so a
+# drift in either would leave the deferral inert in production. The library is
+# sourced above with its default FM_CREW_STATE_BIN, the real script.
+test_classifier_reads_real_crew_state_recency() {
+  reset_fakes
+  local d
+  d=$(new_case classifier-real-state)
+  make_repo_on_branch "$d/wt" fm/feat-cls
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cls.meta" "window=fm:fm-feat-cls" "worktree=$d/wt" "kind=ship"
+  classifier_recent() {  # <case-dir> <id>
+    PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" crew_run_activity_is_recent "$2"
+  }
+
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-cls)"
+  classifier_recent "$d" feat-cls || fail "a live active_steps table through the real crew-state read was not recent"
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_quiet fm/feat-cls)"
+  ! classifier_recent "$d" feat-cls || fail "a quiet-prefixed step through the real crew-state read counted as recent"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-cls)"
+  ! classifier_recent "$d" feat-cls || fail "a running record without a table through the real crew-state read counted as recent"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cls)"
+  ! classifier_recent "$d" feat-cls || fail "a ci wait through the real crew-state read counted as recent"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-cls)"
+  ! classifier_recent "$d" feat-cls || fail "a terminal run through the real crew-state read counted as recent"
+  pass "crew_run_activity_is_recent through the real fm-crew-state.sh: only a live table is recent"
+}
+
+# The activity field must never be read off another branch's table. In the
+# coarse fallback the primary axi status answer belongs to a different crew, and
+# its live active_steps table must not make this crew read as recent.
+test_coarse_attribution_never_reports_foreign_activity() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-foreign-activity)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-act
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-coarse-act.meta" "window=fm:fm-feat-coarse-act" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  fixing     fm/other-crew aaaaaaa  2026-09-08 10:10
+  running    fm/feat-coarse-act ${short}  2026-09-08 10:05
+EOF
+)"
+  out=$(run_crew_state_for_wedge_timer "$d" feat-coarse-act)
+  assert_contains "$out" "state: working" "this branch's coarse running row -> working"
+  assert_contains "$out" "source: run-step" "coarse attribution -> run-step source"
+  assert_not_contains "$out" "activity:" "another branch's live table is not this crew's recency"
+  pass "coarse attribution never borrows another branch's active_steps table as recency"
+}
+
 # A genuine refused socket outranks the persisted fixing record, which can
 # survive after the daemon exits.
 test_socket_refusal_over_stale_fixing_run_reports_blocked() {
@@ -2290,6 +2343,8 @@ test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_daemon_claim_over_live_run_reads_run_alive
 test_working_run_reports_pipeline_activity_recency
+test_classifier_reads_real_crew_state_recency
+test_coarse_attribution_never_reports_foreign_activity
 test_socket_refusal_over_stale_fixing_run_reports_blocked
 test_socket_refusal_over_terminal_run_reports_blocked
 test_ordinary_blocked_over_live_run_keeps_plain_superseded
