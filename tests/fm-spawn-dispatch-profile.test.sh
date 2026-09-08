@@ -135,22 +135,26 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
-test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
-  id=profile-off-z1
-  rec=$(make_spawn_case profile-off claude "$id")
+test_omitted_structured_model_is_refused_before_launch() {
+  local rec id explicit_id out status
+  id=profile-default-astra-z1
+  explicit_id=profile-explicit-codex-z1a
+  rec=$(make_spawn_case profile-default-astra codex "$id" "$explicit_id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
   status=$?
-  expect_code 0 "$status" "claude spawn without profile flags should succeed"
-  assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  expect_code 1 "$status" "an omitted structured Codex model must refuse before it can use an Astra default"
+  assert_contains "$out" "must identify an exact model" "omitted structured Codex model did not require a concrete identity"
+  assert_absent "$HOME_DIR/state/$id.meta" "omitted structured Codex model wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "omitted structured Codex model typed a launch command"
 
-  launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
-  [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and types the claude launch instructions"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$explicit_id" "$PROJ_DIR" \
+    --harness codex --model gpt-5 --effort medium)
+  status=$?
+  expect_code 0 "$status" "an explicit concrete non-Astra Codex model should remain launchable: $out"
+  assert_meta_profile "$HOME_DIR/state/$explicit_id.meta" codex gpt-5 medium
+  pass "structured launches require a concrete effective model"
 }
 
 test_non_cursor_launch_clears_inherited_cursor_markers() {
@@ -679,7 +683,7 @@ test_astra_qualified_and_raw_models_cannot_bypass_evidence() {
     "codex --model gpt-6-astra")
   status=$?
   expect_code 1 "$status" "a raw Astra command should refuse before launch"
-  assert_contains "$out" "configured receipt-gated harnesses" "raw Astra refusal did not identify the uninspectable command"
+  assert_contains "$out" "selecting Astra are not inspectable" "raw Astra refusal did not identify the uninspectable command"
   assert_absent "$HOME_DIR/state/$id.meta" "raw Astra refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "raw Astra refusal typed a launch command"
 
@@ -1874,7 +1878,7 @@ SH
 }
 
 test_worker_launch_delivers_role_scope
-test_no_profile_keeps_claude_profile_defaults
+test_omitted_structured_model_is_refused_before_launch
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths

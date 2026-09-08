@@ -1692,6 +1692,7 @@ fm_raw_launch_canonical_model() {
 
 fm_launch_model_identity_proven() {
   local harness=$1 model=$2
+  [ -n "$model" ] && [ "$model" != default ] || return 1
   case "$harness" in
     omp)
       case "$model" in
