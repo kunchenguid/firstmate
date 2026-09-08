@@ -110,9 +110,19 @@
 # any phase is silent routine, retried on the next sweep and never a
 # captain-facing escalation.
 #
-# CLI (mainly for standalone testing/inspection; production callers source
-# this file and call fm_idle_compact_tick directly):
-#   fm-idle-compact.sh tick
+# CLI:
+#   fm-idle-compact.sh tick     - mainly for standalone testing/inspection;
+#                                 production callers (the watcher, the
+#                                 away-mode daemon) source this file and call
+#                                 fm_idle_compact_tick directly instead.
+#   fm-idle-compact.sh enabled  - a genuine production entry point: the
+#                                 no-mistakes ship brief (bin/fm-dod-lib.sh)
+#                                 tells a worker to run this directly, right
+#                                 before deciding whether to pause for a
+#                                 compaction ring, so the decision reads
+#                                 config/idle-compact live instead of trusting
+#                                 a generation-time snapshot baked into the
+#                                 brief. Exits 0 (armed) or 1 (not armed).
 set -u
 
 # Self-referencing fallbacks (the bin/fm-wake-lib.sh idiom): a caller that
