@@ -1205,10 +1205,10 @@ merge_poll_stale_bound() {  # <window-key> <task>
   [ "$(status_line_verb "$(last_status_line "$STATE/$task.status")")" = "done" ] || return 1
   fm_pr_poll_snapshot_capture "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
   url=$FM_PR_POLL_SNAPSHOT_URL
-  run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+  run_check_capture "$SCRIPT_DIR/fm-pr-poll-health.sh" \
     "$FM_PR_POLL_SNAPSHOT_PROVIDER" "$url" "$FM_PR_POLL_SNAPSHOT_HOST" \
     "$FM_PR_POLL_SNAPSHOT_PATH" "$FM_PR_POLL_SNAPSHOT_NUMBER" || return 1
-  [ "$FM_CHECK_STATUS" -eq 0 ] && [ -z "$FM_CHECK_RESULT" ] || return 1
+  [ "$FM_CHECK_RESULT" = healthy ] || return 1
   fm_pr_poll_snapshot_matches "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
   STALE_WAIT_DECLARATION="merge-poll:$url:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
@@ -1424,7 +1424,6 @@ run_check_capture() {
   local pgid
   fm_check_output_cleanup
   FM_CHECK_RESULT=
-  FM_CHECK_STATUS=1
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
   chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
   FM_CHECK_SIGNAL_PENDING=
@@ -1442,8 +1441,7 @@ run_check_capture() {
     return 1
   fi
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
-  FM_CHECK_STATUS=0
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || FM_CHECK_STATUS=$?
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
