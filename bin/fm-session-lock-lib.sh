@@ -3,9 +3,10 @@
 #
 # ONE owner of the "which verified-harness process holds this home's session
 # lock, and does the current process descend from that same harness?" decision.
-# bin/fm-lock.sh uses it to acquire and inspect state/.lock;
-# bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
-# lock-owning primary session before it may arm or rewake.
+# bin/fm-lock.sh uses it to acquire and inspect state/.lock plus its owner
+# record state/.lock-owner; bin/fm-claude-stop-autoarm.sh and
+# bin/fm-turnend-guard-cursor.sh use it to prove a turn-end hook fires inside the
+# lock-owning primary session before either may arm or rewake.
 # This file is sourced by scripts and has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
@@ -175,4 +176,168 @@ fm_session_lock_owned_by_self() {
 $pids
 EOF
   return 1
+}
+
+# --- owner record: which harness process holds THIS home's lock --------------
+#
+# A bare pid cannot answer that question. Every long-lived process carrying a
+# verified harness command name satisfies the name tables above - the ChatGPT
+# desktop app ships its Codex app-server as exactly such a process, unrelated to
+# any firstmate home - and a pid recycled after a reboot lands on whatever came
+# next. Either one used to be accepted as a live lock owner, taking a whole home
+# read-only with nothing on screen tying the refusal to a real cause.
+#
+# state/.lock-owner closes that gap. It is written only by an acquire in THIS
+# state directory, so a process that never acquired here cannot be an owner, and
+# it pins the record to one exact process through fm_pid_identity, so a recycled
+# pid fails verification instead of inheriting the lock. The lock file itself
+# stays a bare pid: every other reader of state/.lock is unchanged.
+
+# fm_pid_identity is the fleet's one portable process-identity owner and lives in
+# the wake library. Load it only when a lock is actually being recorded or
+# verified, so sourcing this file keeps having no side effects.
+_fm_session_lock_require_identity() {
+  command -v fm_pid_identity >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$(dirname -- "${BASH_SOURCE[0]}")/fm-wake-lib.sh"
+}
+
+# Print a single-line description of what pid $1 is actually running, for an
+# operator who has to go find it. A bare number told the last operator nothing.
+fm_session_lock_describe_pid() {  # <pid>
+  local pid=$1 text
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  text=$(COLUMNS=10000 LC_ALL=C ps -o args= -p "$pid" 2>/dev/null | sed -n '1p')
+  [ -n "$text" ] || text=$(LC_ALL=C ps -o comm= -p "$pid" 2>/dev/null | sed -n '1p')
+  printf '%s' "$text" | tr -d '[:cntrl:]' | cut -c1-160
+}
+
+# fm_session_lock_record_owner <state> <pid>
+# Record <pid> as the verified owner of this home's session lock. Written by
+# every acquire and replaced in place; never removed, because a record naming a
+# process that is gone already classifies as stale.
+#
+# An identity that cannot be read records as empty rather than failing the
+# acquire. Being unable to describe a process is a reason to be careful about
+# taking a home AWAY from a session, never a reason to refuse to give a session
+# its own home: a hard failure here would put the whole session read-only with
+# no competing lock involved at all. The caution belongs in the verification
+# below, which never reclaims from an owner it cannot disprove.
+fm_session_lock_record_owner() {  # <state> <pid>
+  local state=$1 pid=$2 identity tmp
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -d "$state" ] || return 1
+  _fm_session_lock_require_identity
+  identity=$(fm_pid_identity "$pid" 2>/dev/null | tr -d '\n' || true)
+  tmp=$(mktemp "$state/.lock-owner.XXXXXX" 2>/dev/null) || return 1
+  if ! {
+    printf 'pid=%s\n' "$pid"
+    printf 'identity=%s\n' "$identity"
+  } > "$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  fi
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$state/.lock-owner" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+}
+
+# fm_session_lock_live_owner <state>
+# True when state/.lock is held by a firstmate session that is verifiably still
+# running here: the pid is live, it is a verified harness, an owner record
+# written in THIS home names that same pid, and the process now at that pid is
+# still the one that record pinned.
+#
+# Sets FM_LOCK_OWNER_STATUS to what a caller must tell the operator:
+#   free        no lock file at all
+#   malformed   the lock is not a regular file, or carries no numeric pid
+#   dead        that pid is gone, or is no longer a verified harness
+#   unconfirmed nothing here can confirm or disprove that live pid: no record
+#               names it, or an identity that would compare cannot be read
+#   reused      an unrelated process now occupies that pid
+#   live        a verified live owner
+# and FM_LOCK_OWNER_PID/COMMAND to the detail a refusal or reclaim needs.
+#
+# Only a genuine identity MISMATCH demotes an owner, and only a comparison that
+# actually happened can confirm one. An identity that cannot be read is neither:
+# it leaves the live, harness-named owner holding the lock, reported as
+# unconfirmed rather than as a match nobody made.
+#
+# unconfirmed is missing evidence, NOT evidence of absence: no record at all is
+# what a still-running session that acquired its lock before owner records
+# existed looks like, a record about some other pid says nothing about the
+# process in the lock file today, and an unreadable identity says nothing
+# either. Only dead and reused prove the pid in the lock is not a live session
+# here, and fm_session_lock_reclaimable below is the one place that judgement is
+# made.
+FM_LOCK_OWNER_STATUS=free
+FM_LOCK_OWNER_PID=
+FM_LOCK_OWNER_COMMAND=
+fm_session_lock_live_owner() {  # <state>
+  local state=$1 lock owner lock_pid rec_pid='' rec_identity=''
+  local live_identity line key value
+  lock="$state/.lock"
+  owner="$state/.lock-owner"
+  FM_LOCK_OWNER_STATUS=free
+  FM_LOCK_OWNER_PID=
+  FM_LOCK_OWNER_COMMAND=
+  [ -e "$lock" ] || [ -L "$lock" ] || return 1
+  if [ ! -f "$lock" ] || [ -L "$lock" ]; then
+    FM_LOCK_OWNER_STATUS=malformed
+    return 1
+  fi
+  IFS= read -r lock_pid < "$lock" 2>/dev/null || lock_pid=''
+  case "$lock_pid" in
+    ''|*[!0-9]*) FM_LOCK_OWNER_STATUS=malformed; return 1 ;;
+  esac
+  FM_LOCK_OWNER_PID=$lock_pid
+  FM_LOCK_OWNER_COMMAND=$(fm_session_lock_describe_pid "$lock_pid")
+  fm_harness_pid_alive "$lock_pid" || { FM_LOCK_OWNER_STATUS=dead; return 1; }
+  if [ -f "$owner" ] && [ ! -L "$owner" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      key=${line%%=*}
+      value=${line#*=}
+      case "$key" in
+        pid) rec_pid=$value ;;
+        identity) rec_identity=$value ;;
+      esac
+    done < "$owner"
+  fi
+  if [ "$rec_pid" != "$lock_pid" ]; then
+    FM_LOCK_OWNER_STATUS=unconfirmed
+    return 1
+  fi
+  _fm_session_lock_require_identity
+  live_identity=$(fm_pid_identity "$lock_pid" 2>/dev/null | tr -d '\n' || true)
+  if [ -z "$rec_identity" ] || [ -z "$live_identity" ]; then
+    FM_LOCK_OWNER_STATUS=unconfirmed
+    return 1
+  fi
+  if [ "$rec_identity" != "$live_identity" ]; then
+    FM_LOCK_OWNER_STATUS=reused
+    return 1
+  fi
+  FM_LOCK_OWNER_STATUS=live
+  return 0
+}
+
+# fm_session_lock_reclaimable <state>
+# The fleet's ONE answer to "may this home's lock be taken from the pid it
+# names?". True only on POSITIVE evidence that pid is not a live session here:
+#
+#   free/malformed  the lock names no pid at all, so no session holds it
+#   dead            that pid is gone, or is not a verified harness process
+#   reused          a record for that EXACT pid, compared against the process
+#                   there now, proves a different process occupies it
+#
+# A pid that is alive and carries a verified harness name is never by itself
+# such evidence - that is precisely how an unrelated ChatGPT-app codex daemon
+# came to hold a home read-only - and neither is missing, absent, or mismatched
+# owner-record data. Every one of those resolves to false, so a second session
+# refuses and an existing session keeps its home.
+fm_session_lock_reclaimable() {  # <state>
+  fm_session_lock_live_owner "$1" && return 1
+  case "$FM_LOCK_OWNER_STATUS" in
+    unconfirmed) return 1 ;;
+  esac
+  return 0
 }
