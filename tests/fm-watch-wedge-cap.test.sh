@@ -340,6 +340,106 @@ test_wedge_cap_failed_window_marker_rolls_back_per_hash_v13() {
   pass "v13 rolls back the per-hash marker when the window-scoped marker write fails (no partial cap state)"
 }
 
+
+test_wedge_cap_rollback_resets_state_v14() {
+  # v14 (2026-09-08): closes Greptile P1 from v13 review - "Failed cap
+  # writes refire immediately". On either cap-marker write failure the
+  # watcher must:
+  #   - reset .wedge-escalations-<key> (so the next poll starts at 1, not
+  #     at the saturated value)
+  #   - reset .stale-since-<key> to "now" (so the next poll ages from 0,
+  #     not 500s ago)
+  #   - clear_write_tracking on the window key
+  # Otherwise the next poll (which runs in a fresh watcher invocation) reads
+  # the saturated n and the stale timer, fires PERMANENTLY-WEDGED again
+  # immediately, and repeats every poll while the write failure persists.
+  #
+  # Test: drive the cap with FM_WAKE_QUEUE writable (so fm_wake_append
+  # succeeds) and with the window-scoped marker path planted as a directory
+  # (so the per-hash marker write succeeds and the window-scoped marker
+  # write fails - the v13 failure path). After round max we inspect the
+  # post-rollback state: escalation counter is 0, stale timer is "recent"
+  # (within last 5 seconds), no per-hash marker.
+  local dir state fakebin out capture_file window key pane_hash sig pid n max marker_hash marker_window
+  dir=$(make_case wedge-cap-rollback); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-cap-rollback"
+  printf 'idle wedged content for v14 rollback' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-rollback.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-rollback.status"
+  sig=$(seen_sig "$state/wedge-cap-rollback.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-rollback_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content for v14 rollback")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  max=3
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  marker_hash="$state/.wedge-permanent-$key-${pane_hash:0:12}"
+  marker_window="$state/.wedge-permanent-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "priming watch failed: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "priming ack failed"
+  n=1
+  while [ "$n" -le "$max" ]; do
+    if [ "$n" -eq "$max" ]; then
+      # Plant the window-scoped marker path as a non-empty directory so
+      # the per-hash marker write succeeds (closing P1 #2/#3 in v13) and
+      # the window-scoped marker write fails - triggering the v14 rollback.
+      mkdir -p "$marker_window/blocker" 2>/dev/null
+    fi
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+    pid=$!
+    set +e
+    wait "$pid" 2>/dev/null
+    round_status=$?
+    set -e
+    if [ "$n" -eq "$max" ]; then
+      [ "$round_status" -eq 1 ] || fail "round max expected exit 1 (v14 cap-failure rollback), got $round_status: $(cat "$out")"
+    else
+      [ "$round_status" -eq 0 ] || fail "round $n watch failed with exit $round_status: $(cat "$out")"
+    fi
+    if [ "$n" -lt "$max" ]; then
+      ack_stopped_cycle "$state" || fail "round $n ack failed"
+    fi
+    n=$((n + 1))
+  done
+
+  # v14 assertions: after the cap-failure rollback:
+  #   1. .wedge-permanent-<key>-<hash12> must NOT exist (per-hash rolled back)
+  #   2. .wedge-escalations-<key> must be 0 (counter rolled back to 0)
+  #   3. .stale-since-<key> must be "recent" (within 5 seconds of now;
+  #      rolled back so next poll ages from "now")
+  rm -rf "$marker_window" 2>/dev/null || true
+  [ ! -e "$marker_hash" ] || fail "per-hash marker was NOT rolled back - v14 rollback is incomplete (P1 #2/#3 regressed)"
+  if [ -e "$state/.wedge-escalations-$key" ]; then
+    ewf_after=$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo "")
+    case "$ewf_after" in
+      ''|0|0\n) ;;
+      *) fail "wedge-escalation counter was NOT reset by v14 rollback (still holds '$ewf_after' = saturation value) - the next poll will re-fire PERMANENTLY-WEDGED immediately (this is the P1 Greptile flagged on v13)"
+         ;;
+    esac
+  fi
+  if [ -e "$state/.stale-since-$key" ]; then
+    ssf_age=$(($(date +%s) - $(cat "$state/.stale-since-$key")))
+    [ "$ssf_age" -le 5 ] || fail "stale-since timer was NOT refreshed by v14 rollback (now ${ssf_age}s old - .stale-since-<key> still ages from 500s ago at the next poll, which means the next poll re-fires PERMANENTLY-WEDGED immediately)"
+  else
+    fail "stale-since was removed entirely (v14 rollback should RESTORE it to 'now', not delete it - the wedge timer needs an anchor)"
+  fi
+  unset FM_FAKE_CREW_STATE
+  pass "v14 rollback resets both the escalation counter and the stale timer so the next poll re-escalates from 1, not the saturated value (closes Greptile P1 from v13 review)"
+}
+
 test_wedge_cap_fires_permanently_wedged_after_max_escalations() {
   local dir state fakebin out capture_file window key pane_hash sig pid n max
   dir=$(make_case wedge-cap-fires); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1007,6 +1107,7 @@ test_wedge_cap_hash_change_invalidates_marker
 test_wedge_cap_escalation_counter_resets_on_cap_fire
 test_wedge_cap_marker_write_after_durable_wake_v13
 test_wedge_cap_failed_window_marker_rolls_back_per_hash_v13
+test_wedge_cap_rollback_resets_state_v14
 test_wedge_cap_window_marker_silences_hash_churning_busy_pane
 test_wedge_cap_operator_can_rm_marker
 test_wedge_cap_validates_invalid_override

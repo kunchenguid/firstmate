@@ -970,6 +970,22 @@ case "$FM_CAP_HORIZON_SECS" in
               FM_CAP_HORIZON_SECS=86400 ;;
 esac
 
+# _wedge_cap_rollback: helper for wedge_timer_check's v14 cap-failure paths.
+# Resets all per-window wedge state so the next poll re-accumulates from 1
+# instead of inheriting the saturated escalation counter and the 500s-ago
+# stale timer that would otherwise amplify a single cap-marker write failure
+# into a wake-queue flood. See the v14 comment block in wedge_timer_check
+# for the failure-modes this closes.
+#
+# _wedge_cap_rollback <window> <key> <escalation-file> <since-file>
+_wedge_cap_rollback() {
+  local _win=$1 _key=$2 _esc=$3 _since=$4
+  : > "$_esc" 2>/dev/null || true
+  date +%s > "$_since" 2>/dev/null || true
+  clear_write_tracking "$_key" 2>/dev/null || true
+  return 0
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -1088,53 +1104,54 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # entry durable before `wake` runs.
         if [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this (window, hash) until FM_CAP_HORIZON_SECS (default 86400s) elapses, the pane hash changes, or operator manually removes STATE/.wedge-permanent-<key>-<hash12>; local patch 2026-08-19)"
-          # v13 (2026-09-08, Greptile review of v12): order writes so the
-          # durable wake is on disk BEFORE any marker exists. This closes
-          # three v12 bugs that shared the same root cause (markers written
-          # before the wake, with incomplete rollback):
+          # v14 (2026-09-08, Greptile review of v13): rollback resets the
+          # stale timer AND the escalation counter on marker-write failure.
+          # v13 closed three P1s (marker precedes wake / window marker
+          # survives append failure / failed window marker permits repeats)
+          # by reordering writes so the wake is durable BEFORE any marker.
+          # v13 left a fourth P1: on either marker-write failure v13 exits 1
+          # with NO suppression markers but ALSO retains the saturated
+          # escalation counter and the stale timer (now .stale-since-<key>
+          # ages-from-500s-ago at the next poll). The successor poll reads
+          # n=$max, age>=STALE_ESCALATE_SECS, fires PERMANENTLY-WEDGED again
+          # immediately, and repeats every poll while the write failure
+          # persists - a denial-of-service amplifier on the durable queue
+          # (each repeat publishes a new wake row).
           #
-          #   P1 #1 (line 2440): "Marker precedes durable wake" - if the
-          #   watcher dies between the per-hash marker write and fm_wake_append,
-          #   the marker silences retries but no wake was queued. Fixed by
-          #   doing fm_wake_append first.
+          # v14 closes this by calling _wedge_cap_rollback after every
+          # cap-marker-write failure:
+          #   - reset .wedge-escalations-<key> so the next poll starts at 1
+          #     (not at the saturated value)
+          #   - reset .stale-since-<key> to "now" so the next poll ages
+          #     from zero (not 500s ago)
+          #   - clear_write_tracking on the window key (defensive - keeps
+          #     the wedge-deferral lookup state consistent)
+          # The cap path then exits 1 so the operator sees the failure in
+          # the heartbeat/wedge-cap-fail log and the upstream rearm machinery
+          # can intervene; the next poll starts a fresh wedge cycle if the
+          # fs condition has been resolved, OR repeats at most one failure
+          # wake per poll if it has not.
           #
-          #   P1 #2 (line 1058): "Window marker survives append failure" -
-          #   the v12 rollback only removed the per-hash marker on
-          #   fm_wake_append failure; the window-scoped marker remained and
-          #   suppressed every hash in the window. Fixed by writing the
-          #   window-scoped marker AFTER fm_wake_append succeeds, so no
-          #   rollback is ever needed for fm_wake_append failure.
-          #
-          #   P1 #3 (line 1043): "Failed window marker permits repeats" -
-          #   on window-scoped marker write failure v12 logged and continued,
-          #   so a subsequent hash-churning loop rebuilt the escalation
-          #   counter and re-fired. Fixed by treating the window-scoped
-          #   marker write as fatal: rm the per-hash marker (which we just
-          #   wrote) and exit 1, so the operator-visible triage_log is the
-          #   only lingering artifact; the next poll re-escalates from 1
-          #   with no markers and a fresh durable wake.
-          #
-          # Failure semantics: a wedge-cap attempt that fails between step
-          # 2 and step 4 leaves NO markers behind and a durable wake row
-          # that may or may not still be visible. The next poll re-escalates
-          # from 1, the captain may see one extra wake during the failure,
-          # but the unattended loop is still bounded by the durable
-          # FM_WEDGE_MAX_ESCALATIONS threshold.
+          # NOTE: the durable wake from the failed attempt IS still in the
+          # queue (we queued it before the marker write). That's intentional -
+          # the captain still wants to know the wedge fired even if the cap
+          # cannot be durably installed. v14's job is to prevent the
+          # ATTENDANT from amplifying that into a queue flood.
           if ! fm_wake_append stale "$win" "$reason"; then
             triage_log "wedge fm_wake_append FAILED for cap on $win, no markers written (next poll will retry)"
             exit 1
           fi
-          # Wake is now durable. Write the per-hash marker (v2 contract);
-          # the wedge itself did not survive fm_wake_append, so this is
-          # the only marker that can fail without breaking the cap.
+          # Wake is now durable. Write the per-hash marker (v2 contract).
+          # v14: on failure, run the rollback helper before exit 1.
           if ! date +%s > "$permanent_marker" 2>/dev/null; then
-            triage_log "wedge per-hash marker write FAILED after wake queued: $permanent_marker - cap fires but a future hash-churn rebuild of the escalation counter is possible; operator must intervene (rm $permanent_marker or wait for FM_CAP_HORIZON_SECS)"
+            _wedge_cap_rollback "$win" "$key" "$escalation_file" "$since_file"
+            triage_log "wedge per-hash marker write FAILED after wake queued: $permanent_marker - cap state rolled back (escalation counter and stale timer reset); operator must intervene (rm $permanent_marker or wait for FM_CAP_HORIZON_SECS)"
             exit 1
           fi
           # Write the window-scoped marker (v12 contract). On failure
-          # roll back the per-hash marker (which we just wrote) so the cap
-          # state is consistent: no partial cap. The durable wake row from
-          # step 2 stays as a transient operator-visible artifact.
+          # roll back the per-hash marker (which we just wrote) AND run the
+          # v14 rollback helper so the next poll re-escalates from 1 instead
+          # of the saturated value.
           #
           # The redirect can fail when the path is a non-empty directory
           # (bash refuses `date > <dir>`); `command date ...` doesn't help
@@ -1143,7 +1160,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           # diagnostic so the operator only sees our triage_log line.
           if ! { date +%s > "$STATE/.wedge-permanent-$(window_key "$win")"; } 2>/dev/null; then
             rm -f "$permanent_marker"
-            triage_log "wedge window-scoped marker write FAILED: $STATE/.wedge-permanent-$(window_key "$win") - rolled back per-hash marker, no cap state visible to next poll; operator must intervene"
+            _wedge_cap_rollback "$win" "$key" "$escalation_file" "$since_file"
+            triage_log "wedge window-scoped marker write FAILED: $STATE/.wedge-permanent-$(window_key "$win") - rolled back per-hash marker AND cap state (escalation counter and stale timer reset); operator must intervene"
             exit 1
           fi
           rm -f "$since_file"
