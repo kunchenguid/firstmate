@@ -28,9 +28,10 @@
 # configured channel a wake instead of a silent gap.
 #
 # Reporting is by difference against the last reported state stored in
-# state/.mail-check: a poll that keeps failing reports its line once, and a
-# poll that changes the story reports the change. A poll that comes back
-# healthy clears the record, so the next failure is news again.
+# state/.mail-check: a poll that keeps reporting the same finding reports
+# its line once, and a poll that changes the story reports the change. A
+# successful poll with no new mail clears the record, so the next new-mail
+# or failure line is news again.
 #
 # The poll must finish inside the watcher's per-check bound
 # (FM_CHECK_TIMEOUT, default 30, read from this check's own environment
