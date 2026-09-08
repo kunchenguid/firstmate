@@ -414,6 +414,26 @@ FM_TEST_SUMMARY total=4 failed=1 skipped_gate=0 duration_ms=149279
 The failing case is `test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace`, which arrived from main in `891dc51` (#3946) and is byte-identical here to its state at this branch's base commit `b84e0e3`, so the deadlock correction neither introduced it nor touches it.
 It is a host portability failure rather than a supervision defect: the case ages the beacon with `touch -d "@<epoch>"`, BSD touch on this Darwin host rejects that GNU-only form with the `out of range or illegal time specification` line above, the beacon therefore stays fresh, and the guard correctly allows the stop the case expected it to block.
 It reproduced with the same single failure on two consecutive runs, so it is deterministic on this host rather than flaky, and it remains open against `tests/fm-turnend-guard.test.sh` rather than against this correction.
+`tests/lib.sh` defines `fail()` as a `printf` plus `exit 1`, so that failure aborted the whole script, and `test_hook_no_afk_ignores_poll_derived_grace` - the only case invoked after it - therefore never ran at all in the run above.
+
+That abort left this correction's own guard-side cases with no stated result, because they are invoked earlier in the same script, so they were re-run on their own.
+`bin/fm-test-run.sh` selects whole scripts and has no per-case filter, so the isolated run used a copy of `tests/fm-turnend-guard.test.sh` truncated above its runner list - every function definition and helper intact, only the list of cases to invoke replaced - and it was captured on this review round's tree, which is commit `073a41f088a539e43cc3fa9deb60b4351a886242` plus the same round's removal of the banner's second primed-recovery line.
+
+Observed output of that isolated run:
+
+```text
+ok - fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)
+ok - fm-turnend-guard --claude: an ordinary stop does not prime and leaves downtime a primed cycle would consume
+ok - fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (frozen-epoch variant)
+ok - fm-turnend-guard --claude: a refusal that detached nothing does not claim a primed start
+ok - fm-turnend-guard --claude: a refused stop still recovers when the epoch does not advance
+ok - fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (advancing-epoch variant)
+ok - fm-turnend-guard --claude: a frozen auto-arm epoch still reaches the bounded attended fail-open
+```
+
+That copy exited 0.
+It covers the six guard-side cases this correction adds - `test_hook_claude_mode_ordinary_stop_does_not_prime`, `test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal`, `test_hook_claude_mode_away_refusal_claims_no_primed_start`, `test_hook_claude_mode_refused_stop_recovers_without_epoch_progress`, `test_hook_claude_mode_advancing_epoch_refusal_cannot_guarantee_a_second_refusal`, and `test_hook_claude_mode_frozen_epoch_still_reaches_the_bounded_fail_open` - plus `test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy` for the unprimed banner wording.
+It says nothing about any other case in that script; the full-script result above remains the only record for those.
 
 The Pi extension-model pull-guard correction (`bin/fm-guard.sh` no longer reports a false watcher-down on a Pi primary during the extension's own watcher hand-off) was verified on 2026-08-13 with the installed ShellCheck 0.11.0 and isolated behavior suites.
 The guard verdict itself reads only state files and process liveness, so the portable suites are the enforcing evidence; `bin/fm-harness.sh`'s Pi marker detection, which selects the model, is exercised in the same suite through `PI_CODING_AGENT`.

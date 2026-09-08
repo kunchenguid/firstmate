@@ -253,7 +253,6 @@ block_stop() {
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       if [ "$PRIMED_RECOVERY" -eq 1 ]; then
         printf '●  The Stop-owned auto-arm did not claim this home, so no generation claim owns recovery yet.\n'
-        printf '●  This refusal primed a detached watcher start that survives it, so it cannot guarantee the next refusal - verify whether a watcher took the home lock before treating the Stop hook as broken.\n'
       else
         printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
       fi
