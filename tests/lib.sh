@@ -100,15 +100,29 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
 #
 # A process-event runner is detached into its own process group and reparents to
 # init, so removing a fixture directory does not stop one: only sweeping the home
-# that owns it does. Registration goes through a `$$`-keyed registry file for the
-# same reason the temp roots do - a fixture home is almost always built inside a
-# command substitution (`home=$(make_home x)`), and an array append there never
-# reaches the caller, so a suite that tracked its homes in a shell array was
-# silently tracking nothing and left every runner it started behind.
+# that owns it does. That is why the sweep runs from every teardown path here
+# rather than from a suite's happy path - a listener armed by a case that then
+# fails, or by a run that is signalled part way through, is exactly the one that
+# survives to poll a target that no longer exists.
 #
-# The sweep is scoped to the exact home (and its claim root when the suite uses a
-# private one). It never matches on a script or process name, which would reach
-# into another home's live runners.
+# Teardown finds a home two ways, and needs both:
+#
+#   - Discovery. Every fixture root fm_test_tmproot created for this run is
+#     searched for the state/procevent directory an armed source leaves behind.
+#     A suite therefore cannot leak a listener by forgetting to declare its home,
+#     which is how the leak this guards kept coming back.
+#   - Declaration, through fm_test_track_procevent_home, for a home that is NOT
+#     inside one of those roots, or that needs a claim root discovery cannot
+#     infer. It goes through a `$$`-keyed registry file for the same reason the
+#     temp roots do - a fixture home is almost always built inside a command
+#     substitution (`home=$(make_home x)`), and an array append there never
+#     reaches the caller, so a suite that tracked its homes in a shell array was
+#     silently tracking nothing.
+#
+# Both paths sweep the exact home (and its claim root when the suite uses a
+# private one), and discovery never leaves the fixture roots this run created.
+# Nothing here matches on a script or process name, which would reach into
+# another home's live runners.
 
 FM_TEST_PROCEVENT_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-procevent.$$.XXXXXX") || return 1
 
@@ -117,23 +131,72 @@ fm_test_track_procevent_home() {  # <home> [claim-root]
   printf '%s\t%s\n' "$1" "${2-}" >> "$FM_TEST_PROCEVENT_REGISTRY"
 }
 
-fm_test_reap_procevent_homes() {
-  local home claim_root seen=$'\n'
-  [ -f "$FM_TEST_PROCEVENT_REGISTRY" ] || return 0
-  while IFS=$'\t' read -r home claim_root; do
-    [ -n "$home" ] || continue
+# Retire one fixture home's registered sources and stop the runners it owns.
+# A private claim root is used when the caller names one, and otherwise when the
+# home carries the `procevent-claims` directory this suite's fixtures put beside
+# their state; anything else keeps whatever claim root the suite exported.
+fm_test_sweep_procevent_home() {  # <home> [claim-root]
+  local home=$1 claim_root=${2-}
+  [ -n "$home" ] && [ -d "$home/state/procevent" ] || return 0
+  if [ -z "$claim_root" ] && [ -d "$home/procevent-claims" ]; then
+    claim_root="$home/procevent-claims"
+  fi
+  if [ -n "$claim_root" ]; then
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_PROCEVENT_CLAIM_ROOT="$claim_root" \
+      "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+  else
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+  fi
+}
+
+# Print every process-event home inside one fixture root. Bounded to that root
+# and to a shallow depth, and it never follows a symlink out of it, so the scan
+# stays proportionate and can only reach homes this run created. Repository
+# checkouts and package trees a fixture copies in are pruned rather than walked.
+fm_test_procevent_homes_under() {  # <fixture-root>
+  local root=$1 dir
+  [ -n "$root" ] && [ -d "$root" ] || return 0
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    printf '%s\n' "${dir%/state/procevent}"
+  done < <(find "$root" -maxdepth 6 \
+    \( -name .git -o -name node_modules \) -prune -o \
+    -type d -path '*/state/procevent' -print 2>/dev/null)
+}
+
+# Sweep every process-event home discovered inside one fixture root. Reads and
+# extends its caller's `seen` list so a home reached twice - declared and then
+# discovered, or held in both root registries - is swept once.
+fm_test_sweep_discovered_procevent_homes() {  # <fixture-root>
+  local home
+  while IFS= read -r home; do
     case "$seen" in *$'\n'"$home"$'\n'*) continue ;; esac
     seen+="$home"$'\n'
-    [ -d "$home/state/procevent" ] || continue
-    if [ -n "$claim_root" ]; then
-      FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_PROCEVENT_CLAIM_ROOT="$claim_root" \
-        "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-    else
-      FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-        "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-    fi
-  done < "$FM_TEST_PROCEVENT_REGISTRY"
-  rm -f "$FM_TEST_PROCEVENT_REGISTRY"
+    fm_test_sweep_procevent_home "$home"
+  done < <(fm_test_procevent_homes_under "$1")
+}
+
+fm_test_reap_procevent_homes() {
+  local home claim_root root seen=$'\n'
+  if [ -f "$FM_TEST_PROCEVENT_REGISTRY" ]; then
+    while IFS=$'\t' read -r home claim_root; do
+      [ -n "$home" ] || continue
+      case "$seen" in *$'\n'"$home"$'\n'*) continue ;; esac
+      seen+="$home"$'\n'
+      fm_test_sweep_procevent_home "$home" "$claim_root"
+    done < "$FM_TEST_PROCEVENT_REGISTRY"
+    rm -f "$FM_TEST_PROCEVENT_REGISTRY"
+  fi
+  for root in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
+    [ -n "$root" ] || continue
+    fm_test_sweep_discovered_procevent_homes "$root"
+  done
+  [ -f "$FM_TEST_CLEANUP_REGISTRY" ] || return 0
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    fm_test_sweep_discovered_procevent_homes "$root"
+  done < "$FM_TEST_CLEANUP_REGISTRY"
 }
 
 # Ceiling on how long a fixture's blocking stub may keep polling. A stub that
