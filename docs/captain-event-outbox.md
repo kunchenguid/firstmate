@@ -29,32 +29,23 @@ No custom tool, injected prompt, or model-visible message carries those trusted 
 
 ## Record and ordering
 
-Every canonical journal row has schema `fm-captain-event.v1`, one gap-free home-local `seq`, one derived `event_id`, publication and optional occurrence timestamps, explicit source home and source role, task and incarnation identity, producer and harness-event identity, `audience=captain`, an allowlisted kind, one bounded inert summary, a truncation bit, and an allowlisted reference object.
-A source home is `main` or `secondmate:<stable-id>`.
-A primary row has no task id; a worker row requires its safe task id.
-
-`event_id` is SHA-256 over the schema, source home, source role, task id, incarnation, producer, and harness event id.
-Those fields answer which semantic source event this is; kind, summary, timestamp, and references are the immutable payload attached to it.
+The command header owns the canonical record fields, accepted values, identity tuple, summary and event bounds, reference allowlist, sequence limit, and path and mode requirements.
+The identity fields answer which semantic source event this is; kind, summary, timestamp, and references are the immutable payload attached to it.
 A retry with the same identity and payload returns the original sequence without touching journal bytes.
 The same identity with a different payload is a conflict and stops publication.
 
-The summary is normalized Unicode, stripped of ANSI and control characters, collapsed to one line, conservatively cut off at any direct or append-style environment assignment, scrubbed for bare URI userinfo and other high-confidence credential shapes, and capped at 600 codepoints.
-The command header linked above owns the exact sanitizer contract.
-The complete canonical event including its newline is capped at 8 KiB.
-Consumers must render `summary` as inert text and make links only from the structured `refs` allowlist.
-The current reference keys are `pr_url`, `report_id`, `report_path`, and `branch_outcome_seq`; unknown keys are corruption, not future-looking passthrough data.
-The `pr_url` reference accepts only the canonical GitHub pull-request and GitLab merge-request URL forms already owned by [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh); other hosts, userinfo, ports, query strings, fragments, encodings, and extra path segments fail closed.
+The summary sanitizer retains useful prose through deterministic high-confidence redaction rather than claiming arbitrary model prose is mathematically secret-free.
+Consumers must render the summary as inert text and make links only from the structured reference allowlist.
+Unknown fields or reference keys are corruption, not future-looking passthrough data.
 
-The P0 spool has a hard 10,000-event ceiling, so its maximum serialized journal is 81,920,000 bytes.
+The P0 spool is durably bounded.
 It does not prune or reuse sequence numbers automatically.
-Reaching that ceiling stops publication and requires an explicit future retention upgrade or captain-approved intervention rather than silently losing an unacknowledged result.
+Reaching its documented ceiling stops publication and requires an explicit future retention upgrade or captain-approved intervention rather than silently losing an unacknowledged result.
 
 ## Atomic publication and recovery
 
-The outbox lives under mode-`0700` `state/captain-events/` with a mode-`0600` journal, lock, pending records, and consumer acknowledgements.
-Every operation validates the complete journal as canonical UTF-8 JSONL with LF-only record separation and termination, exact keys, matching event hashes, unique identities, gap-free sequence order, and hard field bounds.
-CRLF, bare CR, Unicode line separators, and malformed endings are rejected before any accepted prefix can be normalized or rewritten.
-Symlinks, hard-linked files, permissive private paths, malformed pending state, and unknown private entries are refused.
+Every enabled data operation validates the complete journal and private state against the fail-closed contract in the command header before a cursor or event can advance.
+Malformed serialization, unsafe filesystem objects, incomplete recovery state, and unknown private entries are refused rather than salvaged.
 
 A publisher holds the home-local lock while assigning the next sequence.
 It first atomically writes the exact assigned event under `pending/`, then fsyncs and atomically replaces the journal with an old-byte-prefix successor, then removes the pending record durably.
@@ -71,15 +62,7 @@ The consumer stores its source binding, last sequence, event id, payload hash, a
 Same id and same payload is a no-op; same id and different payload stops the source.
 A cursor beyond the validated tail, an unexpected truncation, an unknown schema/audience/kind, or any malformed row preserves the consumer's last accepted position and surfaces the source fault.
 
-After that transaction commits, the consumer records ingestion with:
-
-```sh
-FM_HOME=/path/to/home bin/fm-captain-event.sh ack \
-  --consumer magistrate \
-  --through 42 \
-  --event-id sha256:<event-id-at-sequence-42>
-```
-
+After that transaction commits, the consumer records ingestion with the acknowledgement command shown in [`configuration.md`](configuration.md#semantic-captain-event-outbox-configcaptain-event-outbox).
 The acknowledgement means the whole range through that exact event and the consumer's own cursor are durably ingested.
 It must not be sent after transport receipt, JSON parsing, an attempted database insert, or a transaction that can still roll back.
 The private receipt advances monotonically, cannot point beyond or disagree with the journal, and does not delete source bytes or alter any reader's cursor.

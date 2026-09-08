@@ -24,8 +24,9 @@
 #     canonical payload returns its original seq without changing bytes.  The
 #     same identity with any different semantic payload is a conflict and
 #     refuses.  seq is a gap-free, monotonically increasing home-local integer.
-#   - Every operation validates the complete journal, including canonical JSON,
-#     exact keys, bounds, event identity, duplicate ids, and sequence ordering.
+#   - Every enabled data operation validates the complete journal, including
+#     canonical JSON, exact keys, bounds, event identity, duplicate ids, and
+#     sequence ordering.
 #     Records are separated and terminated only by LF; CRLF, bare CR, Unicode
 #     separators, and any other malformed ending are invalid.  A malformed,
 #     gapped, reordered, duplicate, unterminated, insecure, or oversized record

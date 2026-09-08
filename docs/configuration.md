@@ -56,10 +56,10 @@ An absent file is the default-off state: the Pi producers do not invoke the outb
 An unreadable, linked, or malformed file is an error rather than an implicit enable or disable decision.
 Enabled publication requires `bash` and `python3` with the standard POSIX `fcntl` module; a missing emitter dependency reports an error instead of dropping an event.
 
-Enable one home with:
-
 Before writing the flag, run Pi's `/reload` in every already-running primary that should publish and wait for it to complete while the flag remains absent.
 An already-running task worker does not gain the producer dynamically; only workers whose generated extension came from this release are active publishers.
+
+Enable one home with:
 
 ```sh
 printf 'enabled\n' > config/captain-event-outbox

@@ -101,10 +101,8 @@ A captain-facing outcome persists as one exact, sequence-keyed visible transcrip
 ### Semantic captain activity
 
 Current-state projections and purpose-specific outcome stores do not provide a complete semantic record of visible prose emitted only inside a primary or task-worker harness.
-The optional [`fm-captain-event.v1` outbox](captain-event-outbox.md) fills that narrow gap without treating terminal presentation as data and without taking ownership from branch outcomes or public followups.
-Its P0 Pi producers run at the post-persistence `turn_end` boundary, explicitly assign primary/worker and message/final types, retain only bounded visible assistant text, and derive opaque identity from the home, Pi session entry, and worker `spawn_gen` outside model context.
-A private atomic pending-to-journal transition preserves retryability, one lock gives all home-local producers a gap-free order, stateless `after` reads leave every consumer independent, and an exact monotonic receipt records ingestion only after the consumer's own durable transaction commits.
-The outbox is presence-gated and artifact-free when unconfigured, has no push transport, and has no Herdr lifecycle or terminal-read dependency.
+The optional [`fm-captain-event.v1` outbox](captain-event-outbox.md) owns the narrow semantic-journal architecture, producer and consumer boundaries, and upgrade and rollback contract without taking ownership from branch outcomes or public followups.
+Its exact storage and command contract remains with [`fm-captain-event.sh`](../bin/fm-captain-event.sh).
 
 ### Registered secondmate current state
 
