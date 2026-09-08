@@ -1401,6 +1401,101 @@ SH
   pass "fm-lint.sh bounds a slow file by time and keeps linting the rest"
 }
 
+# Regression: in local changed-file mode (FOLLOW_SOURCES=0, no
+# --external-sources), no fallback attempt is ever possible, so the per-file
+# timeout/memory-ceiling report must not claim one happened. An earlier version
+# always appended "even after the --external-sources fallback" regardless of
+# has_external, which falsely told the user a retry occurred when none did.
+test_local_mode_timeout_report_omits_fallback_wording() {
+  local tmp fakebin diff_file target out rc
+  tmp=$(fm_test_tmproot fm-lint-local-timeout-wording)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  diff_file="$tmp/diff.nul"
+  target="bin/fm-afk-launch.sh"
+  fm_lint_write_diff_file "$diff_file" "$target"
+
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+trap 'exit 143' TERM
+sleep 30
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 FM_LINT_FILE_TIMEOUT=2 \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$diff_file" \
+    "$LINT" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a timed-out local-mode file did not fail the run"$'\n'"$out"
+  assert_contains "$out" "per-file lint timeout" \
+    "local-mode timeout report is missing the timeout message"
+  assert_not_contains "$out" "external-sources fallback" \
+    "local mode never runs --external-sources, so no fallback ever ran, but the report falsely claimed one did"
+  pass "fm-lint.sh local changed-file mode reports a timeout without falsely claiming a fallback ran"
+}
+
+# Regression: when the first attempt (with --external-sources) hits the
+# ceiling and the --external-sources fallback retry ALSO hits the ceiling but
+# via a DIFFERENT mechanism (first: a memory-ceiling signal; fallback: a
+# wall-clock timeout), the final classification must reflect the fallback's
+# actual outcome, since it is the definitive last attempt. An earlier version
+# left rc/timed_out at the first attempt's stale values and never replaced the
+# first attempt's captured output with the fallback's, so it reported the
+# stale "memory ceiling" verdict even though the fallback genuinely timed out.
+test_fallback_ceiling_classification_uses_fallback_outcome() {
+  local tmp fakebin fixture flag_log out rc
+  tmp=$(fm_test_tmproot fm-lint-fallback-stale-rc)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  fixture="$tmp/fixture.sh"
+  flag_log="$tmp/flags.log"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf ok
+SH
+
+  # The first (--external-sources) attempt reports a memory-ceiling signature
+  # (rc>1 plus "out of memory" in its output) and returns immediately; the
+  # fallback retry (no --external-sources) instead runs long enough to hit the
+  # wall-clock timeout, so the two attempts fail via genuinely different
+  # mechanisms.
+  cat > "$fakebin/shellcheck" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+has_external=0
+for a in "\$@"; do
+  [ "\$a" != --external-sources ] || has_external=1
+done
+if [ "\$has_external" -eq 1 ]; then
+  printf 'fm-lint-test: out of memory\n'
+  exit 2
+fi
+trap 'exit 143' TERM
+sleep 30
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 FM_LINT_FILE_TIMEOUT=2 \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_FLAG_LOG="$flag_log" \
+    "$LINT" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a fallback that also hit the ceiling did not fail the run"$'\n'"$out"
+  assert_contains "$out" "per-file lint timeout" \
+    "the fallback genuinely timed out, but the final report did not say so"
+  assert_not_contains "$out" "memory ceiling" \
+    "the final report used the first attempt's stale memory-ceiling verdict instead of the fallback's actual timeout"
+  pass "fm-lint.sh classifies a ceiling-failing fallback by its own outcome, not the first attempt's stale one"
+}
+
 # Regression: `ulimit -v` caps virtual address space, not resident memory, and
 # ShellCheck's GHC runtime reserves a very large virtual region up front
 # regardless of a file's real memory use. An earlier version of the per-file
@@ -1571,6 +1666,8 @@ test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
 test_per_file_bound_reports_and_continues
+test_local_mode_timeout_report_omits_fallback_wording
+test_fallback_ceiling_classification_uses_fallback_outcome
 test_real_shellcheck_passes_a_healthy_file_under_the_default_ceiling
 test_mem_ceiling_probe_failure_falls_back_to_timeout_only
 test_seeded_module_boundary_parity
