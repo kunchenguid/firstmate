@@ -18,14 +18,14 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 Claude gates a folder it has never seen behind an interactive workspace-trust dialog, so every fresh task worktree would hit it.
 `--dangerously-skip-permissions` does not cover that gate: `claude --help` records that the dialog is skipped only in non-interactive mode, through `-p` or a non-TTY stdout, and a crewmate pane is interactive.
 A ship or scout spawn therefore pre-registers the worktree before launch, and the dialog does not appear.
-`../../../bin/fm-claude-trust.sh` records `hasTrustDialogAccepted` for that worktree path in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`, and `../../../bin/fm-spawn.sh` refuses the spawn when the write fails rather than launching a worker that would wedge.
+`../../../../../bin/fm-claude-trust.sh` records `hasTrustDialogAccepted` for that worktree path in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`, and `../../../../../bin/fm-spawn.sh` refuses the spawn when the write fails rather than launching a worker that would wedge.
 
 That covers the first dialog only.
 A second prompt can sit behind it: a "Quick safety check" listing the tool permissions the folder pre-approves in `.claude/settings.json`, with the cursor on `No, continue without these permissions`.
 It was observed on 2026-09-07 on Claude Code 2.1.263, after the trust dialog had been pre-registered, and it wedged two workers until a human answered it in the pane.
 That project's tracked `.claude/settings.json` carried both `PreToolUse` hooks and `permissions.allow` rules, but what configuration reaches the prompt is UNESTABLISHED, so treat no settings shape as exempt.
 Nothing pre-registers that prompt today, and `hasTrustDialogHooksAccepted` is not the key that would: it appears in the measured store only as `false`, and the slots a human accepted carry only `hasTrustDialogAccepted`.
-`../../../docs/verification/runtime-backends.md` under "Claude workspace trust" owns that observation, what it rules out, and the reproduction.
+`../../../../../docs/verification/runtime-backends.md` under "Claude workspace trust" owns that observation, what it rules out, and the reproduction.
 
 Never try to answer the trust dialog with a key.
 Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so it cannot move a dialog's selection at all, and the observed rendering starts on `No, exit`, which means a sent Enter ends the session instead of accepting.
@@ -46,7 +46,7 @@ The spawn scopes `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` to every Claude wo
 CLI `--prompt-suggestions` affects print or SDK mode only and did not suppress interactive ghost text on v2.1.186.
 
 As defense in depth, `fm_composer_strip_ghost` in `../../../bin/fm-composer-lib.sh` removes SGR-2 runs before pending classification on styled tmux, Herdr, and Zellij readers.
-`../../../docs/herdr-backend.md` under "Composer and injection safety" owns dark-TRUECOLOR tradeoffs and `../../../docs/verification/runtime-backends.md` owns captures.
+`../../../../../docs/herdr-backend.md` under "Composer and injection safety" owns dark-TRUECOLOR tradeoffs and `../../../../../docs/verification/runtime-backends.md` owns captures.
 Styled capture stays internal to the boolean detector; `fm-peek` and model-facing captures remain plain, without escapes.
 
 ## Feedback drafts

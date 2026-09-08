@@ -372,7 +372,7 @@ The treatment arm is not a launch of its own - it continues on the control arm's
 Control arm - confirm this worktree reaches the prompt at all.
 It must carry the hooks every observed spawn carried: `bin/fm-spawn.sh` writes a `.claude/settings.local.json` into each claude worktree before launch, which is exactly what makes row B above a hooks-and-allow worktree that did not prompt.
 A bare `tmux` launch without that file differs from every row in the table along the one dimension the table leaves open, so an absent prompt there would retire the only reproducing project on a condition it was never observed under.
-Spawn through `bin/fm-spawn.sh` where that is possible; otherwise write the file yourself as below.
+Spawn through `bin/fm-spawn.sh` where that is possible; otherwise write the file yourself as below - the write is skipped when one already exists, so an existing `settings.local.json` is left in place and the arm is INCONCLUSIVE unless that file carries the four injected hooks.
 
 ```sh
 cfg=${CLAUDE_CONFIG_DIR:-$HOME}                  # the worker must read the store we register into
