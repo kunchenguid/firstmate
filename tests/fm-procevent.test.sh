@@ -2537,10 +2537,11 @@ pass "a stop the guard cannot prove is retried until the expired runner is reape
 # child into a refusal that left it running. They are asserted together because
 # they only hold together.
 #
-# Every stub above dies on the ordinary signal, which is why neither half was
-# caught: escalation was never reached, or never needed.
+# Earlier fixtures include TERM-resistant children and deliberately kept-alive
+# leaders. The cases below also exercise escalation after TERM ends the leader.
 
-# Millisecond clock, for the one assertion below whose subject is a duration.
+# Millisecond clock for supplementary retirement and stop-window measurements;
+# the healthy-stop verdict below requires attached-start status 143 (TERM).
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 
 SIGNAL_PROOF_STUB="$TMP_ROOT/signal-proof-stub.sh"

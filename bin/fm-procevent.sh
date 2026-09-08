@@ -1274,14 +1274,19 @@ cmd_reconcile() {
 # its own process group leader, so the group signal is what actually reaches the
 # blocking child - signalling only the runner would leave that child alive and
 # reparented, which is exactly how a source that never completes leaks.
-# Only stop_runner_pid's escalation after its successful TERM may pass `proved`:
-# re-reading the leader would discard ownership as our own signal ends it.
 # docs/configuration.md owns the operating contract and unproved-group limits.
 runner_group_signal() {  # <signal> <pid> <identity> [proved]
   local signal=$1 pid=$2 identity=$3 proved=${4-} state pgid
   if [ -n "$proved" ]; then
+    # This stop proved ownership before TERM; only its own escalation may reuse
+    # that same proof within the same stop_runner_pid call. Re-reading the leader
+    # as our signal ends it would discard that proof, not disprove ownership.
+    # A group encountered without proof remains refused by the unproved path.
     fm_procevent_group_alive "$pid" || return 1
   else
+    # Before the first signal, require a live identity-matched group leader:
+    # absent, unreadable, reused, or nonleader PIDs cannot prove ownership.
+    # Launch pacing, leases, and reconcile cleanup remain the backstop.
     fm_procevent_pid_state "$pid" "$identity"
     state=$?
     case "$state" in
