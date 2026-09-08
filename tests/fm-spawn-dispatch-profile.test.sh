@@ -685,11 +685,12 @@ test_astra_qualified_and_raw_models_cannot_bypass_evidence() {
 }
 
 test_raw_codex_provider_models_require_inspectable_non_astra_launches() {
-  local rec opencode_astra_id omp_astra_id opencode_safe_id out status
+  local rec opencode_astra_id omp_astra_id option_terminator_id opencode_safe_id out status
   opencode_astra_id=profile-raw-opencode-astra-z3fga
   omp_astra_id=profile-raw-omp-astra-z3fgb
-  opencode_safe_id=profile-raw-opencode-safe-z3fgc
-  rec=$(make_spawn_case profile-raw-codex-provider codex "$opencode_astra_id" "$omp_astra_id" "$opencode_safe_id")
+  option_terminator_id=profile-raw-option-terminator-z3fgc
+  opencode_safe_id=profile-raw-opencode-safe-z3fgd
+  rec=$(make_spawn_case profile-raw-codex-provider codex "$opencode_astra_id" "$omp_astra_id" "$option_terminator_id" "$opencode_safe_id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$opencode_astra_id" "$PROJ_DIR" \
@@ -707,6 +708,14 @@ test_raw_codex_provider_models_require_inspectable_non_astra_launches() {
   assert_contains "$out" "selecting Astra are not inspectable" "raw omp Astra refusal did not identify selection evidence"
   assert_absent "$HOME_DIR/state/$omp_astra_id.meta" "raw omp Astra refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "raw omp Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$option_terminator_id" "$PROJ_DIR" \
+    "codex -- --model gpt-5")
+  status=$?
+  expect_code 1 "$status" "a raw option terminator must refuse before launch"
+  assert_contains "$out" "exactly one explicit --model" "raw option terminator refusal did not identify the canonical model requirement"
+  assert_absent "$HOME_DIR/state/$option_terminator_id.meta" "raw option terminator refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw option terminator refusal typed a launch command"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$opencode_safe_id" "$PROJ_DIR" \
     "opencode --model gpt-5")

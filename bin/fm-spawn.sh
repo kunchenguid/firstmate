@@ -1669,6 +1669,7 @@ fm_raw_launch_canonical_model() {
   while [ "$index" -lt "${#words[@]}" ]; do
     word=${words[$index]}
     case "$word" in
+      --) return 1 ;;
       --model)
         index=$((index + 1))
         [ "$index" -lt "${#words[@]}" ] || return 1

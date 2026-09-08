@@ -1143,7 +1143,7 @@ crew_dispatch_validate() {
     def unusable_homes:
       home_profiles
       | map(.home)
-      | map(select(test("^/[^[:cntrl:]]*$") | not))
+      | map(select(if type == "string" then (test("^/[^[:cntrl:]]*$") | not) else false end))
       | unique;
     def validation_errors: [
     if type != "object" then "top-level value must be an object"
@@ -1172,7 +1172,7 @@ crew_dispatch_validate() {
       | (home_profiles | map(select(.harness != "codex")) | map(.harness) | unique) as $non_codex_homes
       | if ($bad_harnesses | length) > 0 then "unverified harness: " + ($bad_harnesses | join(", "))
         elif (bad_efforts | length) > 0 then "invalid effort: " + (bad_efforts | join(", "))
-        elif (home_profiles | any(((.home | type) != "string") or ((.home | length) == 0))) then "profile home must be a non-empty string when present"
+        elif (home_profiles | any(.home | if type == "string" then length == 0 else true end)) then "profile home must be a non-empty string when present"
         elif ($non_codex_homes | length) > 0 then "home is only valid for the codex harness: " + ($non_codex_homes | join(", "))
         elif (unusable_homes | length) > 0 then "home must be an absolute path: " + (unusable_homes | join(", "))
         elif (receipt_profiles | any(.requiresSelectionReceipt != true)) then "requiresSelectionReceipt must be true when present"

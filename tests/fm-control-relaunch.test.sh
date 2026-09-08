@@ -1065,11 +1065,6 @@ test_spawn_relaunch_keeps_the_recorded_codex_home() {
   pass "fm-spawn --relaunch: a Codex task keeps its recorded account home"
 }
 
-# `--harness 'codex --search'` is the raw-launch escape hatch, and its resolved
-# harness is still codex, so the replacement runs the codex CLI. Deciding the
-# account carry-forward on the pre-resolution token dropped it here and launched
-# the replacement against whatever ambient ~/.codex the environment resolves -
-# a DIFFERENT account, with no refusal and no diagnostic.
 test_spawn_relaunch_keeps_the_codex_home_through_a_raw_command() {
   local dir home out
   dir=$(new_case spawnhomeraw rl21c)
@@ -1081,14 +1076,14 @@ test_spawn_relaunch_keeps_the_codex_home_through_a_raw_command() {
   printf 'zsh' > "$dir/fake/command"
   printf 'codex' > "$dir/fake/becomes"
 
-  out=$(run_spawn "$dir" rl21c --relaunch --harness 'codex --search')
+  out=$(run_spawn "$dir" rl21c --relaunch --harness 'codex --model gpt-5')
   assert_contains "$out" "spawned rl21c harness=codex" \
     "a raw codex launch command should still resolve to the codex harness"
   [ "$(meta_field "$dir" rl21c codex_home)" = "$home" ] \
     || fail "a raw-command relaunch dropped the recorded Codex home from metadata"
   assert_contains "$(cat "$dir/fake/literal")" "CODEX_HOME='$home' env -u CURSOR_AGENT" \
     "a raw-command relaunch must launch against the recorded account, not ambient ~/.codex"
-  assert_contains "$(cat "$dir/fake/literal")" "codex --search" \
+  assert_contains "$(cat "$dir/fake/literal")" "codex --model gpt-5" \
     "carrying the account forward must not alter the raw launch command"
   pass "fm-spawn --relaunch: a raw codex launch command keeps the recorded account home"
 }
@@ -1106,11 +1101,11 @@ test_spawn_relaunch_refuses_a_logged_out_carried_codex_home() {
   printf 'zsh' > "$dir/fake/command"
   printf 'codex' > "$dir/fake/becomes"
 
-  out=$(run_spawn "$dir" rl21d --relaunch --harness 'codex --search'); rc=$?
+  out=$(run_spawn "$dir" rl21d --relaunch --harness 'codex --model gpt-5'); rc=$?
   expect_code 1 "$rc" "a carried Codex home with no auth.json must refuse"$'\n'"$out"
   assert_contains "$out" "--codex-home has no auth.json: $home" \
     "the refusal should name the account that is no longer logged in"
-  assert_not_contains "$(cat "$dir/fake/literal")" "codex --search" \
+  assert_not_contains "$(cat "$dir/fake/literal")" "codex --model gpt-5" \
     "a refused relaunch must not launch a replacement at all"
   pass "fm-spawn --relaunch: a carried Codex home is revalidated on the raw-command path"
 }
