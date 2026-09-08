@@ -20,7 +20,7 @@ const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
   /\b(?:Bearer|Authorization\s*:\s*Bearer)\s+[A-Za-z0-9._~+/=-]{12,}/gi,
   /\b[A-Z][A-Z0-9_]{1,127}\s*=\s*(?:"[A-Za-z][A-Za-z0-9+.-]{1,31}:\/\/[^"\s\/@]+@[^"\s]+"|'[A-Za-z][A-Za-z0-9+.-]{1,31}:\/\/[^'\s\/@]+@[^'\s]+'|[A-Za-z][A-Za-z0-9+.-]{1,31}:\/\/[^\s\/@]+@[^\s,;]+)/gi,
-  /\b(?=[A-Z][A-Z0-9_]{1,127}\s*=)(?=[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL|API_KEY|ACCESS_KEY|PRIVATE_KEY))[A-Z][A-Z0-9_]{1,127}\s*=\s*(?:"[^"]{0,4096}"|'[^']{0,4096}'|[^\s,;]{1,4096})/g,
+  /\b(?=[A-Z][A-Z0-9_]{1,127}\s*=)(?=[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL|API_KEY|ACCESS_KEY|PRIVATE_KEY))[A-Z][A-Z0-9_]{1,127}\s*=\s*(?:"[^"]{0,4096}"|'[^']{0,4096}'|[^\s,;]{1,4096})/gi,
   /\b(?:password|passwd|api[_ -]?key|access[_ -]?token|pairing[_ -]?token|token|secret)\s*[:=]\s*[^\s,;]{6,}/gi,
 ];
 
@@ -36,14 +36,6 @@ type PublisherOptions = {
 };
 type PreparedSummary = { text: string; truncated: boolean };
 type CommandResult = { ok: boolean; detail: string };
-type PublisherRegistration = {
-  options: PublisherOptions;
-  publication: Promise<void>;
-};
-
-const PUBLISHER_REGISTRATION = Symbol.for("firstmate.fm-captain-event.publisher.v1");
-type PublisherAPI = ExtensionAPI & { [key: symbol]: unknown };
-
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -151,57 +143,45 @@ function currentEntryId(context: ExtensionContext, message: {
 // processes.  A failed emitter process is retried once with the same identity;
 // its pending record makes a simultaneous parent crash recoverable later.
 export function installCaptainEventPublisher(pi: ExtensionAPI, options: PublisherOptions): void {
-  const publisherApi = pi as PublisherAPI;
-  const existing = publisherApi[PUBLISHER_REGISTRATION] as PublisherRegistration | undefined;
-  if (existing) {
-    if (existing.options.sourceRole === "primary" && options.sourceRole === "worker") {
-      existing.options = options;
-    }
-    return;
-  }
-  const publisher: PublisherRegistration = { options, publication: Promise.resolve() };
-  Object.defineProperty(publisherApi, PUBLISHER_REGISTRATION, { value: publisher });
+  const script = join(options.fmRoot, "bin", "fm-captain-event.sh");
+  const sourceHome = sourceHomeIdentity(options.fmHome);
+  let publication = Promise.resolve();
 
   const enqueue = (operation: () => Promise<void>): Promise<void> => {
-    const next = publisher.publication.then(operation, operation);
-    publisher.publication = next.catch(() => undefined);
+    const next = publication.then(operation, operation);
+    publication = next.catch(() => undefined);
     return next;
   };
 
   pi.on("session_start", () => {
-    const active = publisher.options;
-    if (!activationCandidate(active.config)) return;
+    if (!activationCandidate(options.config)) return;
     return enqueue(async () => {
-      const script = join(active.fmRoot, "bin", "fm-captain-event.sh");
-      const recovered = await run(script, ["recover"], active);
+      const recovered = await run(script, ["recover"], options);
       if (!recovered.ok) throw new Error(`captain-event recovery failed: ${recovered.detail}`);
     });
   });
 
   pi.on("turn_end", (event, context) => {
-    const active = publisher.options;
     const message = event.message;
     if (!message || message.role !== "assistant") return;
     if (["error", "aborted", "deferred", "pending"].includes(message.stopReason)) return;
-    if (!activationCandidate(active.config)) return;
+    if (!activationCandidate(options.config)) return;
     const summary = prepareSummary(visibleAssistantText(message.content));
     if (!summary) return;
 
-    const script = join(active.fmRoot, "bin", "fm-captain-event.sh");
-    const sourceHome = sourceHomeIdentity(active.fmHome);
     const sessionId = context.sessionManager.getSessionId();
     const entryId = currentEntryId(context, message);
     if (!entryId) throw new Error("captain-event publisher could not bind the persisted Pi session entry");
     const harnessEventId = `pi:${digest(`${sessionId}\u001fentry:${entryId}`)}`;
-    const incarnation = active.sourceRole === "primary"
+    const incarnation = options.sourceRole === "primary"
       ? `pi-session:${digest(sessionId).slice(0, 32)}`
-      : active.incarnation;
+      : options.incarnation;
     if (!incarnation) throw new Error("captain-event worker publisher has no spawn incarnation");
-    const kind = `${active.sourceRole}.${message.stopReason === "stop" ? "final" : "message"}`;
+    const kind = `${options.sourceRole}.${message.stopReason === "stop" ? "final" : "message"}`;
     const args = [
       "append",
       "--source", sourceHome,
-      "--source-role", active.sourceRole,
+      "--source-role", options.sourceRole,
       "--incarnation", incarnation,
       "--producer", "pi",
       "--harness-event-id", harnessEventId,
@@ -211,11 +191,11 @@ export function installCaptainEventPublisher(pi: ExtensionAPI, options: Publishe
       "--summary-truncated", String(summary.truncated),
       "--occurred-at-ms", String(message.timestamp),
     ];
-    if (active.taskId) args.push("--task", active.taskId);
+    if (options.taskId) args.push("--task", options.taskId);
 
     return enqueue(async () => {
-      let emitted = await run(script, args, active);
-      if (!emitted.ok) emitted = await run(script, args, active);
+      let emitted = await run(script, args, options);
+      if (!emitted.ok) emitted = await run(script, args, options);
       if (!emitted.ok) throw new Error(`captain-event publication failed: ${emitted.detail}`);
     });
   });

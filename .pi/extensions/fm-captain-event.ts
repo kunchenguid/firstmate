@@ -14,6 +14,7 @@ const state = process.env.FM_STATE_OVERRIDE || join(fmHome, "state");
 const config = process.env.FM_CONFIG_OVERRIDE || join(fmHome, "config");
 
 export default function captainEventExtension(pi: ExtensionAPI): void {
+  if (process.env.FM_TASK_ID) return;
   installCaptainEventPublisher(pi, {
     fmHome,
     fmRoot,
