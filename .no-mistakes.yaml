@@ -35,6 +35,22 @@ commands:
 
 # Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
 # The evidence is not committed to the feature or default branch.
+#
+# Trusted scenario-marking policy for the Test step.
+# `pass` asserts the scenario was verified against the real live product, so a
+# scenario reached only through a stub or the executable suite is untested
+# rather than passing, and recording it as a pass is what the step's own
+# validator refuses.
 test:
+  instructions: |
+    Mark a scenario `pass` only when you drove it against the real live
+    product and can cite the live command-output transcript that shows it.
+    Record every scenario you covered only through a stubbed dependency or
+    the executable suite as untested, and give the reason: name what was
+    stubbed, why it cannot run live here, and where its executable coverage
+    lives, for example "adapter-stubbed; no live lavish-axi server is started
+    in this environment; covered by tests/fm-procevent.test.sh".
+    Never record a scenario as passing when it was not live-verified, and do
+    not drop a scenario to avoid marking it untested.
   evidence:
     store_in_repo: true
