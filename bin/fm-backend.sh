@@ -600,6 +600,10 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 fm_backend_source() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
+  # A missing or unreadable adapter must come back as an ordinary failed
+  # return: on Bash 3.2 a `.` of a missing file can be a fatal shell error that
+  # skips the caller's own refusal; teardown's EXIT guard handles that abort.
+  [ -r "$FM_BACKEND_LIB_DIR/backends/$name.sh" ] || return 1
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
