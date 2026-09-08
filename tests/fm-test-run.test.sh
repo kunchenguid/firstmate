@@ -1098,6 +1098,75 @@ SH
   pass "--per-script-timeout-secs turns a hung script into a bounded failure"
 }
 
+test_runner_reaps_registered_fixture_groups_after_failure_and_timeout() {
+  local tmp repo runner fixture mode rc pid pgid expected_exit
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-owned-child.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fixture=tests/fm-owned-child-fixture.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/"
+  cp "$ROOT/tests/lib.sh" "$repo/tests/lib.sh"
+  cat > "$repo/$fixture" <<'SH'
+#!/usr/bin/env bash
+set -u
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+root=$(fm_test_tmproot fm-owned-child-fixture)
+stop="$root/stop"
+cat > "$root/child.sh" <<'CHILD'
+#!/usr/bin/env bash
+set -u
+controls=()
+[ "$FM_FIXTURE_MODE" != fail ] || controls+=("$FM_STOP_FILE")
+bash "$FM_TEST_LIB" owned-child-register \
+  "$FM_TEST_OWNED_CHILD_REGISTRY" "$$" "$FM_TEST_FIXTURE_ROOT" "${controls[@]+"${controls[@]}"}" || exit 97
+pgid=$(ps -o pgid= -p "$$" | tr -d '[:space:]')
+printf '%s %s\n' "$$" "$pgid" > "$FM_PID_REPORT"
+terms=0
+trap 'terms=$((terms + 1)); [ "$terms" -eq 1 ] || exit 0' TERM
+trap 'exit 0' INT
+deadline=$((SECONDS + 15))
+while [ -d "$FM_TEST_FIXTURE_ROOT" ] && [ "$SECONDS" -lt "$deadline" ]; do
+  [ "$FM_FIXTURE_MODE" != fail ] || [ ! -e "$FM_STOP_FILE" ] || exit 0
+  sleep 0.1
+done
+CHILD
+chmod +x "$root/child.sh"
+FM_TEST_FIXTURE_ROOT="$root" FM_STOP_FILE="$stop" \
+  fm_test_in_owned_process_group "$root/child.sh" >/dev/null 2>&1 &
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ -s "$FM_PID_REPORT" ] && break
+  sleep 0.05
+done
+[ -s "$FM_PID_REPORT" ] || exit 2
+trap - EXIT INT TERM
+[ "$FM_FIXTURE_MODE" != fail ] || exit 1
+sleep 600
+SH
+  chmod +x "$runner" "$repo/$fixture"
+
+  for mode in fail timeout; do
+    set +e
+    FM_FIXTURE_MODE="$mode" FM_PID_REPORT="$tmp/$mode.pid" \
+      "$runner" --per-script-timeout-secs 2 "$fixture" >"$tmp/$mode.out" 2>"$tmp/$mode.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 1 ] || fail "$mode fixture run returned $rc instead of a bounded failure"
+    read -r pid pgid < "$tmp/$mode.pid"
+    ! kill -0 "$pid" 2>/dev/null || fail "$mode fixture left registered pid $pid alive"
+    ! kill -0 -- "-$pgid" 2>/dev/null || fail "$mode fixture left registered process group $pgid alive"
+    if [ "$mode" = fail ]; then expected_exit=1; else expected_exit=124; fi
+    grep -Eq "FM_TEST_END .* exit=$expected_exit " "$tmp/$mode.out" \
+      || fail "$mode fixture did not preserve its expected test result: $(cat "$tmp/$mode.out")"
+    ! grep -Fq 'left a registered fixture process' "$tmp/$mode.out" \
+      || fail "$mode fixture failed the outer zero-live assertion: $(cat "$tmp/$mode.out")"
+  done
+
+  rm -rf "$tmp"
+  pass "the outer runner reaps registered fixture groups after failed and timed-out files"
+}
+
 # The duration regression this guard exists for: a suite whose scripts are all
 # green but whose wall clock outgrew its caller's invocation budget. The caller
 # gets killed mid-run and retries invisibly, so an over-budget run has to be a
@@ -1395,6 +1464,7 @@ test_jobs_admits_a_concurrent_safe_family
 test_unmapped_new_test_never_inherits_family_concurrency
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
+test_runner_reaps_registered_fixture_groups_after_failure_and_timeout
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout

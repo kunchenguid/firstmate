@@ -2080,31 +2080,47 @@ record_script_result() {
 # because an unbounded suite is what silently outruns its caller's budget.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
-  local rc
-  : "$id"
+  local rc cleanup_rc registry="$RUN_TMP/owned.$id"
+  mkdir -p "$registry"
   set +e
   if [ "$stream" -eq 1 ]; then
     if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
       # Expansion is intentionally deferred to the child bash passed to -c.
       # shellcheck disable=SC2016
       fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
-        'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
+        'FM_TEST_OWNED_CHILD_REGISTRY=$1 bash "$2" 2>&1 | tee "$3"; exit "${PIPESTATUS[0]}"' \
+        _ "$registry" "$script" "$out"
       rc=$?
     else
-      bash "$script" 2>&1 | tee "$out"
+      FM_TEST_OWNED_CHILD_REGISTRY="$registry" bash "$script" 2>&1 | tee "$out"
       rc=${PIPESTATUS[0]}
     fi
   elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
+    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" env \
+      FM_TEST_OWNED_CHILD_REGISTRY="$registry" bash "$script" >"$out" 2>&1
     rc=$?
   else
-    bash "$script" >"$out" 2>&1
+    FM_TEST_OWNED_CHILD_REGISTRY="$registry" bash "$script" >"$out" 2>&1
     rc=$?
   fi
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
     printf 'not ok - %s exceeded the per-script bound of %ss and was terminated\n' \
       "$script" "$PER_SCRIPT_TIMEOUT_SECS" >>"$out"
     [ "$stream" -eq 1 ] && tail -1 "$out"
+  fi
+  if [ -r "$ROOT/tests/lib.sh" ]; then
+    bash "$ROOT/tests/lib.sh" owned-children-cleanup "$registry" >>"$out" 2>&1
+    cleanup_rc=$?
+  elif compgen -G "$registry/child.*" >/dev/null; then
+    printf 'fm-test: owned-child registry is populated but tests/lib.sh is unavailable\n' >>"$out"
+    cleanup_rc=1
+  else
+    cleanup_rc=0
+  fi
+  if [ "$cleanup_rc" -ne 0 ]; then
+    printf 'not ok - %s left a registered fixture process or process group alive\n' "$script" >>"$out"
+    [ "$stream" -eq 1 ] && tail -1 "$out"
+    [ "$rc" -ne 0 ] || rc=1
   fi
   return "$rc"
 }

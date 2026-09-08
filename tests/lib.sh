@@ -48,6 +48,183 @@ export FM_TELEMETRY_FSEVENTSD_DISABLE=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+fm_test_pid_identity() {
+  local pid=$1
+  FM_STATE_OVERRIDE="${TMPDIR:-/tmp}" bash -c \
+    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid"
+}
+
+# --- owned fixture processes -----------------------------------------------
+#
+# A long-lived fixture process registers one durable record through
+# `bash tests/lib.sh owned-child-register ...`. The test runner supplies the
+# registry directory when it owns the outer execution boundary; direct test
+# invocations get a private registry below. Records carry enough identity to
+# release and, if necessary, terminate only the exact process group a fixture
+# created. Never substitute pathname or command-line discovery here.
+
+fm_test_process_pgid() {
+  local pid=$1 pgid
+  pgid=$(LC_ALL=C ps -o pgid= -p "$pid" 2>/dev/null) || return 1
+  pgid=$(printf '%s' "$pgid" | tr -d '[:space:]')
+  case "$pgid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  printf '%s\n' "$pgid"
+}
+
+fm_test_owned_group_live() {
+  kill -0 -- "-$1" 2>/dev/null
+}
+
+fm_test_owned_child_register() { # <registry> <pid> <root> [release-or-stop-control...]
+  local registry=$1 pid=$2 root=$3 pgid identity record tmp control
+  shift 3
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -d "$registry" ] || return 1
+  [ -d "$root" ] || return 1
+  root=$(cd -P -- "$root" && pwd -P) || return 1
+  pgid=$(fm_test_process_pgid "$pid") || return 1
+  identity=$(fm_test_pid_identity "$pid") || return 1
+  record="$registry/child.$pid"
+  tmp="$registry/.child.$pid.$$"
+  umask 077
+  {
+    printf '%s\n' "$pid" "$pgid" "$root" "$identity"
+    for control in "$@"; do
+      [ -n "$control" ] && printf '%s\n' "$control"
+    done
+  } > "$tmp" || return 1
+  mv "$tmp" "$record"
+}
+
+fm_test_owned_group_wait_closed() { # <pgid> <iterations>
+  local pgid=$1 iterations=$2 i=0
+  while fm_test_owned_group_live "$pgid" && [ "$i" -lt "$iterations" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  ! fm_test_owned_group_live "$pgid"
+}
+
+fm_test_owned_child_cleanup_record() { # <record>
+  local record=$1 pid pgid root identity current current_pgid own_pgid control parent peer peer_pid peer_pgid peer_identity peer_current
+  pid=$(sed -n '1p' "$record" 2>/dev/null) || return 1
+  pgid=$(sed -n '2p' "$record" 2>/dev/null) || return 1
+  root=$(sed -n '3p' "$record" 2>/dev/null) || return 1
+  identity=$(sed -n '4p' "$record" 2>/dev/null) || return 1
+  case "$pid:$pgid" in *[!0-9:]*) return 1 ;; esac
+  [ -n "$identity" ] || return 1
+
+  if [ -d "$root" ]; then
+    while IFS= read -r control; do
+      [ -n "$control" ] || continue
+      parent=${control%/*}
+      [ "$parent" != "$control" ] || parent=.
+      [ -d "$parent" ] && : > "$control"
+    done < <(sed -n '5,$p' "$record" 2>/dev/null)
+  fi
+
+  if fm_test_owned_group_wait_closed "$pgid" 150; then
+    rm -f "$record"
+    return 0
+  fi
+
+  current=$(fm_test_pid_identity "$pid" 2>/dev/null) || current=
+  current_pgid=$(fm_test_process_pgid "$pid" 2>/dev/null) || current_pgid=
+  if [ -z "$current" ] && fm_test_owned_group_live "$pgid"; then
+    for peer in "${record%/*}"/child.*; do
+      [ "$peer" != "$record" ] || continue
+      [ -f "$peer" ] || continue
+      peer_pid=$(sed -n '1p' "$peer" 2>/dev/null) || continue
+      peer_pgid=$(sed -n '2p' "$peer" 2>/dev/null) || continue
+      [ "$peer_pgid" = "$pgid" ] || continue
+      peer_identity=$(sed -n '4p' "$peer" 2>/dev/null) || continue
+      peer_current=$(fm_test_pid_identity "$peer_pid" 2>/dev/null) || continue
+      if [ "$peer_current" = "$peer_identity" ]; then
+        rm -f "$record"
+        return 0
+      fi
+    done
+  fi
+  own_pgid=$(fm_test_process_pgid "$$" 2>/dev/null) || own_pgid=
+  if [ "$current" != "$identity" ] || [ "$current_pgid" != "$pgid" ] || [ "$pgid" = "$own_pgid" ]; then
+    printf 'fm-test: refusing ambiguous owned fixture group pid=%s pgid=%s root=%s\n' \
+      "$pid" "$pgid" "$root" >&2
+    return 1
+  fi
+
+  kill -TERM -- "-$pgid" 2>/dev/null || true
+  if fm_test_owned_group_wait_closed "$pgid" 50; then
+    rm -f "$record"
+    return 0
+  fi
+
+  # The identity and membership above authorize this one bounded teardown
+  # transaction. Escalation stays scoped to that already-proven group.
+  kill -KILL -- "-$pgid" 2>/dev/null || true
+  if fm_test_owned_group_wait_closed "$pgid" 50; then
+    rm -f "$record"
+    return 0
+  fi
+  printf 'fm-test: owned fixture group survived KILL pid=%s pgid=%s root=%s\n' \
+    "$pid" "$pgid" "$root" >&2
+  return 1
+}
+
+fm_test_owned_children_cleanup() { # <registry> [root]
+  local registry=$1 only_root=${2:-} record root failed=0
+  [ -d "$registry" ] || return 0
+  for record in "$registry"/child.*; do
+    [ -f "$record" ] || continue
+    root=$(sed -n '3p' "$record" 2>/dev/null) || root=
+    [ -z "$only_root" ] || [ "$root" = "$only_root" ] || continue
+    fm_test_owned_child_cleanup_record "$record" || failed=1
+  done
+  [ "$failed" -eq 0 ]
+}
+
+fm_test_owned_children_assert_zero() { # <registry>
+  local registry=$1 record pid pgid
+  [ -d "$registry" ] || return 0
+  for record in "$registry"/child.*; do
+    [ -f "$record" ] || continue
+    pid=$(sed -n '1p' "$record" 2>/dev/null) || pid=unknown
+    pgid=$(sed -n '2p' "$record" 2>/dev/null) || pgid=unknown
+    printf 'fm-test: registered fixture process remains pid=%s pgid=%s\n' "$pid" "$pgid" >&2
+    return 1
+  done
+  return 0
+}
+
+fm_test_in_owned_process_group() {
+  perl -MPOSIX -e '
+    POSIX::setsid() >= 0 or die "setsid failed: $!\n";
+    exec {$ARGV[0]} @ARGV or die "exec $ARGV[0] failed: $!\n";
+  ' "$@"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  command=${1:-}
+  shift || true
+  case "$command" in
+    owned-child-register)
+      fm_test_owned_child_register "$@"
+      exit $?
+      ;;
+    owned-children-cleanup)
+      fm_test_owned_children_cleanup "$@" && fm_test_owned_children_assert_zero "$@"
+      exit $?
+      ;;
+    owned-children-assert-zero)
+      fm_test_owned_children_assert_zero "$@"
+      exit $?
+      ;;
+    *)
+      printf 'usage: bash tests/lib.sh owned-child-register|owned-children-cleanup|owned-children-assert-zero ...\n' >&2
+      exit 2
+      ;;
+  esac
+fi
+
 # --- reporters --------------------------------------------------------------
 
 fail() {
@@ -79,12 +256,13 @@ pass() {
 
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
-
-fm_test_pid_identity() {
-  local pid=$1
-  FM_STATE_OVERRIDE="${TMPDIR:-/tmp}" bash -c \
-    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid"
-}
+FM_TEST_OWNED_CHILD_REGISTRY_OWNED=0
+if [ -z "${FM_TEST_OWNED_CHILD_REGISTRY:-}" ]; then
+  FM_TEST_OWNED_CHILD_REGISTRY=$(mktemp -d "${TMPDIR:-/tmp}/.fm-test-owned.$$.XXXXXX") || return 1
+  FM_TEST_OWNED_CHILD_REGISTRY_OWNED=1
+fi
+export FM_TEST_OWNED_CHILD_REGISTRY
+export FM_TEST_LIB="$ROOT/tests/lib.sh"
 
 FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   rm -f "$FM_TEST_CLEANUP_REGISTRY"
@@ -92,16 +270,32 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
 }
 
 fm_test_cleanup() {
-  local d
+  local d failed=0
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    [ -n "$d" ] || continue
+    if fm_test_owned_children_cleanup "$FM_TEST_OWNED_CHILD_REGISTRY" "$d"; then
+      rm -rf "$d"
+    else
+      failed=1
+    fi
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && rm -rf "$d"
+      [ -n "$d" ] || continue
+      if fm_test_owned_children_cleanup "$FM_TEST_OWNED_CHILD_REGISTRY" "$d"; then
+        rm -rf "$d"
+      else
+        failed=1
+      fi
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
+  fm_test_owned_children_assert_zero "$FM_TEST_OWNED_CHILD_REGISTRY" || failed=1
+  if [ "$FM_TEST_OWNED_CHILD_REGISTRY_OWNED" -eq 1 ] && [ "$failed" -eq 0 ] \
+    && [ -d "$FM_TEST_OWNED_CHILD_REGISTRY" ]; then
+    rmdir "$FM_TEST_OWNED_CHILD_REGISTRY" 2>/dev/null || failed=1
+  fi
+  [ "$failed" -eq 0 ]
 }
 
 fm_test_tmproot() {
@@ -118,7 +312,14 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
-trap fm_test_cleanup EXIT
+fm_test_cleanup_on_exit() {
+  local status=$?
+  trap - EXIT
+  fm_test_cleanup || status=1
+  exit "$status"
+}
+
+trap fm_test_cleanup_on_exit EXIT
 trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM
 
