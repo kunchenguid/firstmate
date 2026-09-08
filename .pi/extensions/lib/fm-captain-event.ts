@@ -15,6 +15,7 @@ const SUMMARY_MAX = 600;
 const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
 const ENV_ASSIGNMENT_START = /\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*(?:\+\s*)?=\s*/g;
 const AUTHORIZATION_HEADER_START = /\b(?:Proxy-)?Authorization\s*:\s*/gi;
+const CREDENTIAL_LABEL_START = /(?<![A-Za-z0-9_-])(?:[A-Za-z0-9]{1,32}[ _-]+)?(?:secret|password|passwd|passphrase|token|authorization|auth|(?:access|private|api)[ _-]+key)(?=[A-Za-z0-9 _-]{0,127}\s*:\s*)/gi;
 const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)/gi,
   /\b[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s\/@"']+@[^\s,;"']+/gi,
@@ -65,6 +66,12 @@ function redactAuthorizationHeaders(value: string): string {
   return match ? `${value.slice(0, match.index)}[REDACTED]` : value;
 }
 
+function redactCredentialLabels(value: string): string {
+  CREDENTIAL_LABEL_START.lastIndex = 0;
+  const match = CREDENTIAL_LABEL_START.exec(value);
+  return match ? `${value.slice(0, match.index)}[REDACTED]` : value;
+}
+
 function prepareSummary(raw: string): PreparedSummary | null {
   let text = raw.normalize("NFC").replace(ANSI_PATTERN, "");
   text = [...text].map((character) => (
@@ -73,6 +80,7 @@ function prepareSummary(raw: string): PreparedSummary | null {
   text = text.replace(/\s+/gu, " ").trim();
   text = redactEnvironmentAssignments(text);
   text = redactAuthorizationHeaders(text);
+  text = redactCredentialLabels(text);
   for (const pattern of SECRET_PATTERNS) text = text.replace(pattern, "[REDACTED]");
   text = text.replace(/\s+/gu, " ").trim();
   if (!text) return null;

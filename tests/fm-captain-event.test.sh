@@ -199,6 +199,20 @@ for authorization_case in "${authorization_cases[@]}"; do
     || fail "authorization case $after retained its credential value"
   after=$((after + 1))
 done
+credential_label_cases=(
+  'AWS Secret Access Key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY visible suffix'
+  'client_secret: privatevalue visible suffix'
+  'deployment-private-key: privatevalue visible suffix'
+  'MiXeD-aUtH_ToKeN: privatevalue visible suffix'
+)
+for credential_label_case in "${credential_label_cases[@]}"; do
+  primary_args "pi:credential-label-$after" "Prefix $credential_label_case"
+  FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "credential label case $after append failed"
+  credential_label_row=$(FM_HOME="$home" "$OUTBOX" read --after "$after" --limit 1)
+  printf '%s\n' "$credential_label_row" | jq -e '.summary == "Prefix [REDACTED]"' >/dev/null \
+    || fail "credential label case $after retained its value or tail"
+  after=$((after + 1))
+done
 primary_args pi:bare-uri 'Prefix postgres://bareuser:barepass@db.example/prod remains'
 FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "bare URI append failed"
 bare_uri_row=$(FM_HOME="$home" "$OUTBOX" read --after "$after" --limit 1)
@@ -471,13 +485,21 @@ await emit("Ordinary prose postgres://bareuser:barepass@db.example/prod remains 
 await emit("Prefix AuThOrIzAtIoN: Basic dXNlcjpwYXNz visible suffix", "basic");
 await emit("Prefix pRoXy-AuThOrIzAtIoN: Bearer ordinarybearertoken visible suffix", "bearer");
 await emit('Prefix AUTHORIZATION: Digest username="captain", response="private" visible suffix', "digest");
+await emit("Prefix AWS Secret Access Key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY visible suffix", "aws-secret-access-key");
+await emit("Prefix client_secret: privatevalue visible suffix", "client-secret");
+await emit("Prefix deployment-private-key: privatevalue visible suffix", "private-key");
+await emit("Prefix MiXeD-aUtH_ToKeN: privatevalue visible suffix", "mixed-auth-token");
 JS
-  python3 - "$capture" <<'PY' || fail "Pi producer passed a credential-bearing environment assignment to the CLI"
+  python3 - "$capture" <<'PY' || fail "Pi producer pre-sanitizer retained credential material"
 import sys
 
 summaries = open(sys.argv[1], encoding="utf-8").read().splitlines()
 assert summaries == [
     "Ordinary prose [REDACTED] remains [REDACTED]",
+    "Prefix [REDACTED]",
+    "Prefix [REDACTED]",
+    "Prefix [REDACTED]",
+    "Prefix [REDACTED]",
     "Prefix [REDACTED]",
     "Prefix [REDACTED]",
     "Prefix [REDACTED]",
