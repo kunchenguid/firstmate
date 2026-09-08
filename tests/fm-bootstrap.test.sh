@@ -1077,7 +1077,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   case_dir="$TMP_ROOT/dispatch-active"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
+  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high","codexHome":"/home/example/.codex-3"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"high","piAgentDir":"/home/example/.pi/agent-3"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
@@ -1088,7 +1088,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
 
-  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]'
+  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high [codexHome=/home/example/.codex-3]]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/openai-codex/gpt-5.6-sol/high [piAgentDir=/home/example/.pi/agent-3], grok/grok-4.5/high]'
   [ "$out" = "$expect" ] || fail "active dispatch verbose info block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
@@ -1123,6 +1123,14 @@ unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","us
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
 pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
 pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
+codex codexHome is accepted^{"rules":[{"when":"alternate Codex account","use":{"harness":"codex","model":"gpt-5.5","codexHome":"/home/example/.codex-3"}}]}^empty^
+pi piAgentDir is accepted^{"rules":[{"when":"alternate Pi account","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","piAgentDir":"/home/example/.pi/agent-3"}}]}^empty^
+empty codexHome is flagged^{"rules":[{"when":"alternate Codex account","use":{"harness":"codex","codexHome":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile codexHome must be a non-empty string when present
+non-string codexHome is flagged^{"default":{"harness":"codex","codexHome":3}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile codexHome must be a non-empty string when present
+codexHome on another harness is flagged^{"rules":[{"when":"wrong adapter","use":{"harness":"pi","codexHome":"/home/example/.codex-3"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - codexHome is supported only for codex profiles
+empty piAgentDir is flagged^{"rules":[{"when":"alternate Pi account","use":{"harness":"pi","piAgentDir":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile piAgentDir must be a non-empty string when present
+non-string piAgentDir is flagged^{"default":{"harness":"pi-signed","piAgentDir":3}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile piAgentDir must be a non-empty string when present
+piAgentDir on another harness is flagged^{"rules":[{"when":"wrong adapter","use":{"harness":"codex","piAgentDir":"/home/example/.pi/agent-3"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - piAgentDir is supported only for pi and pi-signed profiles
 muse shared efforts are accepted^{"rules":[{"when":"muse low","use":{"harness":"muse","effort":"low"}},{"when":"muse medium","use":{"harness":"muse","effort":"medium"}},{"when":"muse high","use":{"harness":"muse","effort":"high"}},{"when":"muse xhigh","use":{"harness":"muse","effort":"xhigh"}},{"when":"muse max","use":{"harness":"muse","effort":"max"}}]}^empty^
 unsupported muse ultra effort is flagged^{"rules":[{"when":"muse ultra","use":{"harness":"muse","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: muse:ultra
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
