@@ -17,6 +17,11 @@
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
+# Whether an exact-mode check means anything on the target filesystem is a
+# platform question, not a PR question, and bin/fm-platform-lib.sh owns it.
+# shellcheck source=bin/fm-platform-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-platform-lib.sh"
+
 FM_PR_PROVIDER=
 FM_PR_URL=
 FM_PR_HOST=
@@ -263,10 +268,18 @@ fm_pr_sha256() {
   fi
 }
 
+# The exact-mode contract applies only where a mode can actually be stored
+# (fm_platform_fs_honors_modes). On a noacl Git Bash mount chmod is a silent
+# no-op, so requiring an exact mode would refuse every private artifact and
+# permanently block checks, PR polls, and Relay on Windows; there the Windows
+# user-profile ACL is the privacy boundary and the structural guards below
+# (regular file, no symlink, device pin, link count 1) still hold in full.
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  if fm_platform_fs_honors_modes "$path"; then
+    [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  fi
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
 }
