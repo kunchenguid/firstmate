@@ -1047,7 +1047,7 @@ run_coverage_guard() {
 # cap is reached rather than after. Each artifact carries the lane it ran as and
 # every script it ran, so a shard is checked against its own recorded work
 # rather than against a re-derived assignment. A cancelled shard uploads no
-# artifact at all, so missing input is reported and skipped rather than guessed.
+# artifact at all.
 check_portable_serial_balance() {
   local bound_minutes=$1 tmp rc
   shift
