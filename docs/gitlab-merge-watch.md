@@ -1,7 +1,7 @@
 # GitLab merge request watch and merge verification
 
 Empirical record for the merge watch and the merge path on GitLab, alongside the existing GitHub ones.
-Every command through "Upgrade path from an existing armed watch" was run on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
+The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
 Every output is reproduced exactly.
 
 ## Versions
@@ -44,7 +44,7 @@ That is deliberate: the host-agnostic property is a property of the stored recor
 GitLab runs mostly on self-hosted instances, so a merge request can live under any host.
 A GitLab project also sits under at least one group at no fixed depth, so no owner-and-repository pair can address one the way it can on GitHub.
 The stored record therefore carries `provider`, `url`, `host`, `path`, and `number`, and every consumer rebuilds the URL from those parts and refuses any record that does not reconstruct the stored URL exactly.
-`tests/fm-pr-check-security.test.sh` asserts that neither `bin/fm-pr-lib.sh` nor `bin/fm-pr-poll.sh` contains the string `gitlab.com` at all.
+`tests/fm-pr-check-security.test.sh` proves the host-agnostic path through a non-default-host sidecar and verifies that `glab` receives the reconstructed project URL.
 
 ## How plain glab is invoked, and why
 
@@ -178,37 +178,15 @@ $ PATH="$noglab" fm-pr-check.sh e6 https://github.com/kunchenguid/firstmate/pull
 armed: state/e6.check.sh
 ```
 
-## Upgrade path from an existing armed watch
+## Registration version
 
-The stored record gained the provider tag, so its version moved to `fm-pr-poll-registration-v2` and a record written by the previous release no longer parses.
-The existing non-executing migration handles that: it never runs the old artifact, and rebuilds the poll from the task's recorded pull request URL.
-Starting from a poll armed exactly as the previous release wrote it:
-
-```
-$ head -1 state/t1.pr-poll-registration
-fm-pr-poll-registration-v1
-$ fm-pr-check-migrate.sh --checks-safe
-PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home
-$ head -2 state/t1.pr-poll-registration
-fm-pr-poll-registration-v2
-t1
-$ cat state/.pr-check-migration.log
-task t1: migration outcome tracking started before legacy poll handling
-task t1: canonical legacy poll rebuilt and armed
-```
-
-The rebuilt poll works, verified against a pull request that is genuinely merged:
-
-```
-$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/t1.pr-poll)
-merged
-```
-
-No armed watch is lost by upgrading.
+The live registration tag is `fm-pr-poll-registration-v2`, which includes the provider tag.
+A `fm-pr-poll-registration-v1` record no longer parses.
+Arm a current watch with `bin/fm-pr-check.sh`.
 
 ## Merging a merge request
 
-`bin/fm-pr-merge.sh` now merges a GitLab merge request through the same recording and the same guards a GitHub pull request gets.
+`bin/fm-pr-merge.sh` now merges a GitLab merge request through the shared recording helper and GitLab's own live pre-merge guards.
 Every run below used a throwaway `FM_HOME`, so no live task record was touched, and a `glab` wrapper that refused any `merge` subcommand outright, so no merge could reach the forge even if a check were wrong.
 That wrapper is why the open fixture merge request could be used as evidence at all: it is `mergeable` with discussions resolved, so the pipeline conditions are the only thing between it and a real merge.
 

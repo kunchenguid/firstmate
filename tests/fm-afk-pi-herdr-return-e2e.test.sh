@@ -2,8 +2,11 @@
 # Real Pi/Herdr end-to-end regression for the 2026-07-14 two-owner incident.
 #
 # Opt-in because it launches a real interactive Pi primary, a real away daemon,
-# and a real isolated Herdr lab session. Every explicit and production-adapter
-# Herdr call is routed through fm-herdr-lab.sh. The scenario proves:
+# and a real isolated Herdr lab session. Real model turns, real side effects,
+# and heavyweight lab setup put it outside the token-free default-on class, so
+# it does not run merely because its tools are installed. Every explicit and
+# production-adapter Herdr call is routed through fm-herdr-lab.sh. The scenario
+# proves:
 #   - a live blocked status is classified and durably queued while away;
 #   - a pending Pi composer refuses injection and receives no forced Enter;
 #   - the existing wedge alarm remains observable and deduped;
@@ -15,19 +18,13 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_AFK_PI_HERDR_E2E herdr jq pi python3
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-supervise-daemon.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
-
-if [ "${FM_AFK_PI_HERDR_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_AFK_PI_HERDR_E2E=1 to run the real Pi/Herdr away-return regression"
-  exit 0
-fi
-
-for tool in herdr jq pi python3; do
-  command -v "$tool" >/dev/null 2>&1 || { echo "skip: $tool not found"; exit 0; }
-done
 
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 SESSION=$("$LAB_HELPER" name fm-afk-pi-return-e2e)

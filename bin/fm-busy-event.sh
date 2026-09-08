@@ -103,7 +103,7 @@ LOCK="$REC.lock"
 # gets a non-numeric token. Detect the platform once and pick the right form,
 # exactly as bin/fm-watch.sh does.
 if [ "$(uname)" = Darwin ]; then
-  lock_mtime() { stat -f %m "$1" 2>/dev/null; }
+  lock_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }
 else
   lock_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi

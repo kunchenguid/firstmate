@@ -18,7 +18,7 @@ A mid-turn working note is assistant text in a message the model did not end its
 Hiding it removes the narration a model emits alongside its tool calls, while the genuine reply that ends a response stays visible.
 Text that is still streaming is never hidden, because suppressing it would also stop a genuine reply from streaming, so a working note is briefly visible before its row collapses.
 The narration is hidden only from the live transcript presentation, and remains in the message, model context, session storage, and `/export` artifacts.
-The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
+The operational inputs Calm classifies remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Outside Pi's same-name built-in override collision described below, Calm changes presentation only.

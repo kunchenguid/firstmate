@@ -12,10 +12,10 @@
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
 set -u
 
-if [ "${FM_CLAUDE_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_CLAUDE_LIVE_E2E=1 to run the Claude Stop auto-arm regression"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_CLAUDE_LIVE_E2E claude
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -23,8 +23,6 @@ fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
 }
-
-command -v claude >/dev/null 2>&1 || fail "claude not found"
 
 LAB="$ROOT/.claude-autoarm-live-e2e.$$"
 PROJECT="$LAB/project"
@@ -111,8 +109,9 @@ PROMPT='Run exactly `bin/fm-session-start.sh` with Bash as your first tool call.
 
 (
   cd "$PROJECT" || exit 1
-  FM_HOME="$HOME_DIR" CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
-    claude -p "$PROMPT" --dangerously-skip-permissions --effort low --output-format stream-json --verbose
+  FM_HOME="$HOME_DIR" CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 \
+    claude -p "$PROMPT" --dangerously-skip-permissions --settings '{"feedbackDrafts":"off"}' \
+    --effort low --output-format stream-json --verbose
 ) > "$TRANSCRIPT" 2>&1 || fail "Claude credentialed auto-arm session failed: $(tail -20 "$TRANSCRIPT")"
 
 ARM_RUNS=$(wc -l < "$HOME_DIR/state/arm-ran" 2>/dev/null | tr -d ' ')

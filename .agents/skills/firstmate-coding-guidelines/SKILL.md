@@ -98,9 +98,10 @@ Every such check needs two tests, because they fail for different reasons:
 - A portable regression in `tests/` that pins the logic with real processes and no harness, so CI enforces the classifier everywhere it runs tmux.
   Drive the signals apart deliberately and assert the verdict survives losing one; assert the divergence itself so the case cannot go quietly vacuous.
   Confirm which signal a given construction actually blinds on each supported platform rather than assuming, because the same trick can break different sources on macOS and Linux.
-- A live guard in the `live-harness-optin` family (`bin/fm-test-run.sh`), env-gated and self-skipping, that exercises every INSTALLED harness for real and fails naming the harness and version.
+- A live guard in the `live-harness-optin` family (`bin/fm-test-run.sh`) that exercises every INSTALLED harness for real and fails naming the harness and version.
   Report an absent harness explicitly rather than passing silently over it, and refuse a pass that checked nothing.
-  This guard is opt-in and on-demand because standard CI has neither harness binaries nor credentials; run it after every harness upgrade and before trusting refreshed per-harness evidence.
+  Open it with `fm_live_gate` from `tests/lib.sh`, which is the single owner of that decision: a guard that spends no model tokens runs by default wherever its tools are installed, a guard that submits prompts stays opt-in, and its own variable or `FM_LIVE` forces it on (an absent tool then fails rather than skips) or off.
+  The portable serial CI lane has no credentials and installs the public Pi package, so token-free guards exercise the available Pi surfaces while unavailable tools capability-skip; run a prompt-submitting guard after every harness upgrade and before trusting refreshed per-harness evidence.
 
 Record the dated per-harness result in `docs/verification/runtime-backends.md`, and point at the live guard as the command that refreshes it, rather than leaving a version-scoped observation to rot into a false claim.
 
@@ -110,6 +111,12 @@ For every changed maintained prose surface, identify its inventory audience, aut
 Move or delete evidence only after the current owner and regression pointer are verified.
 After all documentation, review-fix, and lint-fix commits, review the complete branch diff again against those criteria rather than reviewing only the latest commit.
 Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup routing, local link targets, and owner pointers without keyword-linting legitimate evidence prose.
+
+## No-mistakes test configuration
+
+Never configure a deterministic suite-walk `commands.test` in any repository's no-mistakes config, whether it selects the full suite, changed tests, a family, or a fixed script list.
+Targeted validation belongs to the no-mistakes evidence path, while CI owns broad deterministic regression coverage.
+Firstmate PR #3644 demonstrated the cost: pinning a 75-162-script walk took 32.7 minutes per validation, while removing it restored the 3.6-minute targeted-validation posture.
 
 ## Repo style rules
 

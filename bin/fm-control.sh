@@ -34,10 +34,12 @@
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. With no explicit axis, a secondmate re-resolves its
-#              durable config/secondmate-harness pin (harness plus its optional
-#              model and effort tokens) exactly as any other respawn does, while
-#              a ship or scout keeps the exact adapter already recorded for it.
+#              of this verb. An explicit `default` model or effort clears that
+#              axis for the replacement. With no explicit axis, a secondmate
+#              re-resolves its durable config/secondmate-harness pin (harness
+#              plus its optional model and effort tokens) exactly as any other
+#              respawn does, while a ship or scout keeps the exact adapter
+#              already recorded for it.
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
 #              --note is required for a ship or scout, whose replacement
@@ -195,45 +197,48 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
-want_value=
-for a in "$@"; do
-  if [ -n "$want_value" ]; then
-    case "$a" in
-      --*) die "--$want_value requires a value" ;;
+control_want_value=
+for control_arg in "$@"; do
+  if [ -n "$control_want_value" ]; then
+    case "$control_arg" in
+      --*) die "--$control_want_value requires a value" ;;
     esac
-    case "$want_value" in
-      harness) NEW_HARNESS=$a; HARNESS_SET=1 ;;
-      model) NEW_MODEL=$a; MODEL_SET=1 ;;
-      effort) NEW_EFFORT=$a; EFFORT_SET=1 ;;
-      note) NOTE=$a; NOTE_SET=1 ;;
-      note-file)
-        [ -f "$a" ] || die "--note-file '$a' is not a readable file"
-        NOTE=$(cat "$a")
+    case "$control_want_value" in
+      harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
+      model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
+      effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
+      note) NOTE=$control_arg; NOTE_SET=1 ;;
+      note_file)
+        [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
+        NOTE=$(cat "$control_arg")
         NOTE_SET=1
         ;;
     esac
-    want_value=
+    control_want_value=
     continue
   fi
-  case "$a" in
-    --harness) want_value=harness ;;
-    --harness=*) NEW_HARNESS=${a#--harness=}; HARNESS_SET=1 ;;
-    --model) want_value=model ;;
-    --model=*) NEW_MODEL=${a#--model=}; MODEL_SET=1 ;;
-    --effort) want_value=effort ;;
-    --effort=*) NEW_EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
-    --note) want_value=note ;;
-    --note=*) NOTE=${a#--note=}; NOTE_SET=1 ;;
-    --note-file) want_value=note-file ;;
+  case "$control_arg" in
+    --harness) control_want_value=harness ;;
+    --harness=*) NEW_HARNESS=${control_arg#--harness=}; HARNESS_SET=1 ;;
+    --model) control_want_value=model ;;
+    --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
+    --effort) control_want_value=effort ;;
+    --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --note) control_want_value=note ;;
+    --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
+    --note-file) control_want_value=note_file ;;
     --note-file=*)
-      [ -f "${a#--note-file=}" ] || die "--note-file '${a#--note-file=}' is not a readable file"
-      NOTE=$(cat "${a#--note-file=}")
+      [ -f "${control_arg#--note-file=}" ] || die "--note-file '${control_arg#--note-file=}' is not a readable file"
+      NOTE=$(cat "${control_arg#--note-file=}")
       NOTE_SET=1
       ;;
-    *) die "unexpected argument '$a'" ;;
+    *) die "unexpected argument '$control_arg'" ;;
   esac
 done
-[ -z "$want_value" ] || die "--$want_value requires a value"
+if [ -n "$control_want_value" ]; then
+  [ "$control_want_value" = note_file ] && die "--note-file requires a value"
+  die "--$control_want_value requires a value"
+fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
@@ -243,8 +248,8 @@ fi
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
 case "$NEW_EFFORT" in
-  ''|low|medium|high|xhigh|max) ;;
-  *) die "--effort must be one of low, medium, high, xhigh, max" ;;
+  ''|default|low|medium|high|xhigh|max) ;;
+  *) die "--effort must be one of default, low, medium, high, xhigh, max" ;;
 esac
 
 # --- exact task-id resolution ----------------------------------------------
