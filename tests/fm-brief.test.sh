@@ -221,6 +221,39 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# The honey token-efficiency skill applies to every ship worker (all three
+# delivery modes) but a scout's deliverable is a report, so it stays exempt to
+# keep findings complete; a secondmate charter is not a delivery contract at
+# all and carries neither ship nor scout Rules.
+test_honey_rule_ship_only() {
+  local home id mode brief
+  home="$TMP_ROOT/honey-home"
+  write_registry "$home"
+
+  for id_mode in "brief-honey-nomistakes:no-mistakes" "brief-honey-directpr:direct-PR" "brief-honey-localonly:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "fm-brief.sh $id --mode $mode exited non-zero"
+    brief="$home/data/$id/brief.md"
+    assert_grep 'Apply the `honey` skill' "$brief" "$id: ship brief missing the honey rule"
+    assert_grep 'Honey trims narration, never evidence' "$brief" "$id: ship brief honey rule dropped the evidence-stays-complete clause"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-honey-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  brief="$home/data/brief-honey-scout/brief.md"
+  assert_no_grep 'Apply the `honey` skill' "$brief" "scout brief must stay exempt from the honey rule"
+
+  FM_SECONDMATE_CHARTER='Supervise the some-proj domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-honey-sm some-proj --secondmate some-proj >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  brief="$home/data/brief-honey-sm/brief.md"
+  assert_no_grep 'Apply the `honey` skill' "$brief" "secondmate charter must stay exempt from the honey rule"
+
+  pass "fm-brief.sh: honey rule appears in every ship mode only, never in scout or secondmate"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -873,6 +906,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_honey_rule_ship_only
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

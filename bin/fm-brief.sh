@@ -67,6 +67,9 @@
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
+# Ship (not scout, not the secondmate charter) carries a fixed Rules entry
+# telling the worker to apply the `honey` token-efficiency skill; a scout's
+# deliverable is a report, so it stays exempt to keep findings complete.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -492,6 +495,9 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Apply the \`honey\` skill to all code and prose you produce: invoke it with \`/honey\` on claude, grok, kimi, and cursor, \`\$honey\` on codex, or by asking for it in plain words on opencode and pi.
+   If the skill is not available in this runtime, continue without it and say so in one status line.
+   Status appends, the PR description, and any report you write stay complete; Honey trims narration, never evidence.
 
 $INBOX_SECTION
 
