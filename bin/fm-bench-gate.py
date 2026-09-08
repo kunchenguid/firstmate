@@ -2177,6 +2177,11 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
                    or frozen_hashes.get(name) != sha256_file(root / name) for name in archive_programs)):
         report.fail("evaluator.execution", "archive entrypoints must be executable members of the frozen evaluator package")
         return
+    try:
+        frozen_archive_layouts(contract, frozen_hashes)
+    except GateError as exc:
+        report.fail("evaluator.execution", str(exc))
+        return
     wrapper = isolation.get("exec_wrapper")
     mechanism, detail = validate_confinement_wrapper(wrapper, require_enforcing=True, purpose="replay")
     if mechanism is None:
@@ -2888,6 +2893,38 @@ def evaluator_identity(hashes: dict[str, str]) -> str:
     return sha256_bytes(json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode())
 
 
+def frozen_archive_layouts(contract: dict[str, Any], frozen: dict[str, str]) -> dict[str, Any]:
+    programs = contract.get("archive_programs", [contract.get("program")])
+    if not isinstance(programs, list) or not programs or any(not isinstance(p, str) for p in programs):
+        raise GateError("frozen archive entrypoints are invalid")
+    inputs = {name: name for name in frozen
+              if name.startswith("scoring/") or name in {f"evaluator/{item}" for item in EVALUATOR_CONFIG_FILES}}
+    layouts = contract.get("archive_packages", {
+        program: {"argv": [program], "frozen_package": inputs} for program in programs
+    })
+    if not isinstance(layouts, dict) or set(layouts) != set(programs):
+        raise GateError("frozen archive layouts must cover every entrypoint")
+    for program, layout in layouts.items():
+        if not isinstance(layout, dict) or set(layout) != {"argv", "frozen_package"}:
+            raise GateError("frozen archive layout requires argv and frozen_package")
+        argv, mapping = layout["argv"], layout["frozen_package"]
+        if (not isinstance(mapping, dict) or not mapping
+                or any(not isinstance(name, str) or not isinstance(source, str)
+                       or source not in inputs for name, source in mapping.items())
+                or not isinstance(argv, list) or len(argv) != 1 or not isinstance(argv[0], str)
+                or mapping.get(argv[0]) != program or not program.startswith("scoring/")
+                or not {f"evaluator/{name}" for name in EVALUATOR_CONFIG_FILES} <= set(mapping.values())):
+            raise GateError("frozen archive layout has invalid sources or entrypoint")
+        try:
+            if any(normalized_relative_path(name) != name or "\\" in name for name in mapping):
+                raise ValueError("noncanonical package path")
+            if any(parent.as_posix() in mapping for name in mapping for parent in Path(name).parents):
+                raise ValueError("overlapping package paths")
+        except ValueError as exc:
+            raise GateError("frozen archive layout has invalid destinations") from exc
+    return layouts
+
+
 def validate_archived_scoring(sample: Path, manifest: dict[str, Any]) -> None:
     root = sample.parent.parent
     frozen = frozen_evaluator_hashes(root)
@@ -2913,6 +2950,10 @@ def validate_archived_scoring(sample: Path, manifest: dict[str, Any]) -> None:
     if (not isinstance(argv, list) or len(argv) != 1 or not isinstance(argv[0], str)
             or not isinstance(programs, list) or mapping.get(argv[0]) not in programs):
         raise GateError("archived scorer is not a preregistered evaluator entrypoint")
+    layouts = frozen_archive_layouts(contract, frozen)
+    layout = layouts[mapping[argv[0]]]
+    if argv != layout["argv"] or mapping != layout["frozen_package"] or len(package) != len(mapping):
+        raise GateError("archived scoring package layout differs from its frozen mapping")
     for name, source in mapping.items():
         if source == "evaluator/execution.json" or source not in frozen:
             raise GateError("archived scoring references an unfrozen package input")

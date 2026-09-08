@@ -153,4 +153,5 @@ Container wrappers require an explicit `repository@sha256:<64 hex digits>` or `s
 Preflight records `evaluator_sha256` over the frozen scoring code, execution contract, and evaluator configuration.
 Each archived `evaluator_rerun.frozen_package` maps its package filenames to frozen source paths, including both evaluator configuration files; all package bytes must match those hashes.
 The archived entrypoint must be the execution contract’s `program`, or one of its explicitly preregistered `archive_programs`.
+The execution contract’s `archive_packages` maps each source entrypoint to its exact `argv` and complete `frozen_package` destination-to-source mapping. Archive layouts must match that frozen declaration. If omitted, each entrypoint uses its source path as `argv` and preserves the source paths of every frozen scoring file and both evaluator configuration files.
 Scored archives must retain valid timing intervals before archive verification, restore, or cleanup can pass.

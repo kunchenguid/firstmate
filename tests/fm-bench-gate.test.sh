@@ -2244,6 +2244,7 @@ for name in ("lock.json", "score-map.json"):
     if not (config / name).exists():
         (config / name).write_text("{}\n")
 programs = []
+layouts = {}
 for path in sorted((root / "archive").glob("*/manifest.json")):
     record = json.loads(path.read_text())
     if record["attempt"]["status"] != "scored":
@@ -2273,6 +2274,7 @@ for path in sorted((root / "archive").glob("*/manifest.json")):
     rerun["package_files"] = list(mapping)
     rerun["frozen_package"] = mapping
     programs.append(mapping[rerun["argv"][0]])
+    layouts[programs[-1]] = {"argv": rerun["argv"], "frozen_package": mapping}
     group = record["groups"].setdefault("capture_and_scoring", ["capture.json"])
     for name, source in mapping.items():
         digest = hashlib.sha256((sample / name).read_bytes()).hexdigest()
@@ -2282,7 +2284,7 @@ for path in sorted((root / "archive").glob("*/manifest.json")):
             group.append(name)
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 contract = config / "execution.json"
-contract.write_text(json.dumps({"program": programs[0], "archive_programs": programs}))
+contract.write_text(json.dumps({"program": programs[0], "archive_programs": programs, "archive_packages": layouts}))
 frozen["hashes"]["evaluator/execution.json"] = hashlib.sha256(contract.read_bytes()).hexdigest()
 freeze_path.write_text(json.dumps(frozen, indent=2, sort_keys=True) + "\n")
 identity = {name: digest for name, digest in frozen["hashes"].items()

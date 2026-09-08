@@ -47,7 +47,7 @@ class BenchmarkReviewTests(unittest.TestCase):
             source = "evaluator/" + name
             target = root / source
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("{}\n")
+            target.write_text(json.dumps({"bonus": 3 if name == "lock.json" else 0}) + "\n")
             archived = "frozen-" + name
             (sample / archived).write_bytes(target.read_bytes())
             mapping[archived] = source
@@ -56,7 +56,9 @@ class BenchmarkReviewTests(unittest.TestCase):
             record["files"][archived] = hashlib.sha256(target.read_bytes()).hexdigest()
         record["evaluator_rerun"]["frozen_package"] = mapping
         contract = root / "evaluator/execution.json"
-        contract.write_text(json.dumps({"program": mapping[record["evaluator_rerun"]["argv"][0]]}))
+        program = mapping[record["evaluator_rerun"]["argv"][0]]
+        contract.write_text(json.dumps({"program": program, "archive_packages": {
+            program: {"argv": record["evaluator_rerun"]["argv"], "frozen_package": mapping}}}))
         hashes = {source: hashlib.sha256((root / source).read_bytes()).hexdigest() for source in mapping.values()}
         hashes["evaluator/execution.json"] = hashlib.sha256(contract.read_bytes()).hexdigest()
         (root / "freeze.json").write_text(json.dumps({"schema": gate.FREEZE_SCHEMA, "hashes": hashes}))
@@ -85,6 +87,7 @@ else:
     data = (Path(sys.argv[1]) / "work.json").read_bytes()
     value = json.loads(data)["value"]
     score = 4 if {mode!r} == "metadata" else value
+    score += json.loads((root / "frozen-score-map.json").read_text())["bonus"]
     print(json.dumps({{"deterministic": score, "tree": "a" * 40,
                       "capture_hash": hashlib.sha256(data).hexdigest()}}))
 ''')
@@ -97,9 +100,19 @@ else:
                                       "scored_inputs": ["work.json"],
                                       "input_perturbations": {"work.json": {"kind": "json-value", "pointer": "/value"}}}}
         self.freeze_scoring(sample, record)
+        if tamper == "layout":
+            mapping = record["evaluator_rerun"]["frozen_package"]
+            left, right = "frozen-lock.json", "frozen-score-map.json"
+            mapping[left], mapping[right] = mapping[right], mapping[left]
+            a, b = (sample / left).read_bytes(), (sample / right).read_bytes()
+            (sample / left).write_bytes(b)
+            (sample / right).write_bytes(a)
+            for name in (left, right):
+                record["files"][name] = hashlib.sha256((sample / name).read_bytes()).hexdigest()
         if tamper:
             target = program if tamper == "code" else sample / "frozen-score-map.json"
-            target.write_text(target.read_text().replace("else value", "else value + 3") if tamper == "code" else '{"bonus":3}\n')
+            if tamper != "layout":
+                target.write_text(target.read_text().replace("else value", "else value + 3") if tamper == "code" else '{"bonus":3}\n')
             record["files"][target.name] = hashlib.sha256(target.read_bytes()).hexdigest()
             capture["deterministic"] += 3
             (sample / "capture.json").write_text(json.dumps(capture) + "\n")
@@ -144,6 +157,11 @@ os.execv(sys.argv[2], sys.argv[2:])
         passed, detail, _ = self.replay(tamper="config")
         self.assertFalse(passed)
         self.assertIn("differs from its frozen identity", detail)
+
+    def test_frozen_configuration_cannot_be_remapped(self):
+        passed, detail, _ = self.replay(tamper="layout")
+        self.assertFalse(passed)
+        self.assertIn("layout differs from its frozen mapping", detail)
 
     def test_scored_archive_requires_timing_before_cleanup(self):
         sample = self.root / "archive/sample"

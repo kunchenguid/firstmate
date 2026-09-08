@@ -67,7 +67,7 @@ for entrant in e1 e2; do
   mkdir -p "$ISO/$entrant/.git/worktrees/w"
 done
 
-python3 - "$TMP_ROOT/benchmark" "$CONFINE" "$MECHANISM" "$ISO" <<'PY'
+python3 - "$TMP_ROOT/benchmark" "$CONFINE" "$MECHANISM" "$ISO" "$IMAGE" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -77,7 +77,7 @@ bench.mkdir(parents=True, exist_ok=True)
     "schema": "fm-bench-plan.v1", "benchmark_id": "isolation-e2e", "tracks": {"A": {"entrants": [{"name": "e1"}, {"name": "e2"}]}}}, indent=2) + "\n")
 (bench / "isolation.json").write_text(json.dumps({
     "schema": "fm-bench-isolation.v1",
-    "exec_wrapper": [confine, "--mechanism", mechanism, "--allow", "{root}", "--"],
+    "exec_wrapper": [confine, "--mechanism", mechanism, "--image", sys.argv[5], "--allow", "{root}", "--"],
     "launch_wrapper": [confine, "--purpose", "entrant", "--mechanism", "container",
                        "--image", "firstmate-benchmark-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                        "--provider-network", "{provider_network}",
@@ -129,7 +129,7 @@ pass "enforced isolation ($MECHANISM) denies file, worktree, object, unreachable
 
 # The confinement must not be a wall that also blocks the entrant's own work:
 # an entrant that cannot read its own clone is not isolated, it is broken.
-own=$("$CONFINE" --mechanism "$MECHANISM" --allow "$ISO/e1" -- \
+own=$("$CONFINE" --mechanism "$MECHANISM" --image "$IMAGE" --allow "$ISO/e1" -- \
   /bin/cat "$ISO/e1/answer.txt" 2>&1) || fail "the entrant must still read its own clone: $own"
 assert_contains "$own" "candidate answer from e1" "the entrant reaches its own private clone"
 pass "the same confinement still lets an entrant work in its own private clone"
