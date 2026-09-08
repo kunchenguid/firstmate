@@ -1659,7 +1659,7 @@ test_shard_balance_fails_on_lost_headroom() {
   pass "shard balance guard fails when a shard loses its job-cap headroom"
 }
 
-test_shard_balance_reports_missing_and_foreign_artifacts() {
+test_shard_balance_reports_missing_artifacts() {
   local tmp out
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-partial.XXXXXX")
   # A cancelled shard uploads no artifact at all, so the guard must say how much
@@ -1670,24 +1670,8 @@ test_shard_balance_reports_missing_and_foreign_artifacts() {
     || { rm -rf "$tmp"; fail "a single healthy shard must still pass: $out"; }
   assert_contains "$out" "FM_TEST_SHARD_BALANCE partial" \
     "an incomplete lane must be reported as partial"
-  # A parallel lane's artifact carries no serial shard, and must be skipped
-  # rather than counted or refused.
-  cat >"$tmp/parallel.json" <<'JSON'
-{
-  "run_id": "fixture",
-  "selection": "lane=portable-parallel-1",
-  "started_at": "2026-09-08T00:00:00Z",
-  "finished_at": "2026-09-08T00:01:00Z",
-  "summary": {"total": 1, "failed": 0, "skipped_gate": 0, "duration_ms": 1000},
-  "scripts": [{"path": "tests/a.test.sh", "family": "pure-contract-unit", "duration_ms": 1000, "exit": 0, "gate_skip": false}]
-}
-JSON
-  out=$("$RUNNER" --check-shard-balance "$tmp/parallel.json") \
-    || { rm -rf "$tmp"; fail "a non-serial artifact must not fail the guard: $out"; }
-  assert_contains "$out" "FM_TEST_SHARD_BALANCE skipped" \
-    "a lane with no serial shard must be reported as skipped"
   rm -rf "$tmp"
-  pass "shard balance guard reports missing and foreign timing artifacts"
+  pass "shard balance guard reports missing timing artifacts"
 }
 
 test_portable_serial_job_cap_has_one_owner() {
@@ -1794,5 +1778,5 @@ test_aggregate_json
 test_shard_balance_passes_and_reports_bound
 test_shard_balance_measures_the_recorded_wall_time
 test_shard_balance_fails_on_lost_headroom
-test_shard_balance_reports_missing_and_foreign_artifacts
+test_shard_balance_reports_missing_artifacts
 test_portable_serial_job_cap_has_one_owner

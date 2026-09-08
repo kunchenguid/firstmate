@@ -141,8 +141,6 @@ Do not re-derive that split and add it back.
 The `tests-timing-aggregate` job runs the check after building the aggregate summary.
 A cancelled shard uploads no artifact, so the check reports how many of the shards its artifacts declare could actually be read and leaves the rest unchecked rather than guessing.
 
-An artifact that names no numbered serial shard is skipped.
-
 ## Timing artifacts
 
 Portable shards, each portable serial shard, and the Herdr lane upload runner-generated timing JSON.

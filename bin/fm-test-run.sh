@@ -1099,8 +1099,6 @@ for path in inputs:
         continue
     data = json.loads(path.read_text())
     match = LANE_RE.match(lane_of(data))
-    if match is None:
-        continue
     scripts = [s for s in data.get("scripts", []) if s.get("path")]
     if not scripts:
         continue
