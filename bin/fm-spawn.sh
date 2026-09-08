@@ -1690,6 +1690,22 @@ fm_raw_launch_canonical_model() {
   printf '%s\n' "$model"
 }
 
+fm_raw_launch_model_identity_proven() {
+  local harness=$1 model=$2
+  case "$harness" in
+    omp)
+      case "$model" in
+        ?*/?*)
+          case "${model#*/}" in
+            */*) return 1 ;;
+          esac
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+}
+
 case "$ARG3" in
   *' '*)  # raw launch command
     RAW_LAUNCH=1
@@ -1819,6 +1835,10 @@ if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     echo "error: raw $HARNESS launch commands must be one canonical invocation with exactly one explicit --model before dispatch" >&2
     exit 1
   }
+  if ! fm_raw_launch_model_identity_proven "$HARNESS" "$RAW_MODEL"; then
+    echo "error: raw $HARNESS launch commands must identify an exact model before dispatch; use a fully qualified model or the verified structured launcher instead" >&2
+    exit 1
+  fi
   if fm_dispatch_model_is_astra "$RAW_MODEL"; then
     echo "error: raw launch commands selecting Astra are not inspectable for selection receipts; use the verified harness and --model instead" >&2
     exit 1

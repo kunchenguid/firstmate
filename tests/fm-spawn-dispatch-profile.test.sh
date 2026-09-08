@@ -685,9 +685,10 @@ test_astra_qualified_and_raw_models_cannot_bypass_evidence() {
 }
 
 test_raw_model_capable_harnesses_require_inspectable_non_astra_launches() {
-  local rec opencode_astra_id omp_astra_id pi_astra_id pi_signed_astra_id option_terminator_id opencode_safe_id pi_safe_id absolute_codex_safe_id unclassified_id out status
+  local rec opencode_astra_id omp_astra_id omp_fuzzy_id pi_astra_id pi_signed_astra_id option_terminator_id opencode_safe_id pi_safe_id absolute_codex_safe_id unclassified_id out status
   opencode_astra_id=profile-raw-opencode-astra-z3fga
   omp_astra_id=profile-raw-omp-astra-z3fgb
+  omp_fuzzy_id=profile-raw-omp-fuzzy-z3fgg
   pi_astra_id=profile-raw-pi-astra-z3fgc
   pi_signed_astra_id=profile-raw-pi-signed-astra-z3fgd
   option_terminator_id=profile-raw-option-terminator-z3fgc
@@ -695,7 +696,7 @@ test_raw_model_capable_harnesses_require_inspectable_non_astra_launches() {
   pi_safe_id=profile-raw-pi-safe-z3fge
   absolute_codex_safe_id=profile-raw-absolute-codex-safe-z3fge
   unclassified_id=profile-raw-unclassified-z3fgf
-  rec=$(make_spawn_case profile-raw-model-capable codex "$opencode_astra_id" "$omp_astra_id" "$pi_astra_id" "$pi_signed_astra_id" "$option_terminator_id" "$opencode_safe_id" "$pi_safe_id" "$absolute_codex_safe_id" "$unclassified_id")
+  rec=$(make_spawn_case profile-raw-model-capable codex "$opencode_astra_id" "$omp_astra_id" "$omp_fuzzy_id" "$pi_astra_id" "$pi_signed_astra_id" "$option_terminator_id" "$opencode_safe_id" "$pi_safe_id" "$absolute_codex_safe_id" "$unclassified_id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$opencode_astra_id" "$PROJ_DIR" \
@@ -713,6 +714,14 @@ test_raw_model_capable_harnesses_require_inspectable_non_astra_launches() {
   assert_contains "$out" "selecting Astra are not inspectable" "raw omp Astra refusal did not identify selection evidence"
   assert_absent "$HOME_DIR/state/$omp_astra_id.meta" "raw omp Astra refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "raw omp Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$omp_fuzzy_id" "$PROJ_DIR" \
+    "omp --model astra")
+  status=$?
+  expect_code 1 "$status" "a raw omp fuzzy model selector should refuse before launch"
+  assert_contains "$out" "must identify an exact model" "raw omp fuzzy selector refusal did not require a fully qualified model"
+  assert_absent "$HOME_DIR/state/$omp_fuzzy_id.meta" "raw omp fuzzy selector refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw omp fuzzy selector refusal typed a launch command"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$pi_astra_id" "$PROJ_DIR" \
     "pi --model openai-codex/gpt-6-astra")
@@ -763,7 +772,7 @@ test_raw_model_capable_harnesses_require_inspectable_non_astra_launches() {
   assert_contains "$out" "must begin with a direct, supported harness executable" "unclassified raw harness refusal did not identify the structured-launch requirement"
   assert_absent "$HOME_DIR/state/$unclassified_id.meta" "unclassified raw harness refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "unclassified raw harness refusal typed a launch command"
-  pass "raw model-capable launches reject Astra while preserving explicit non-Astra models"
+  pass "raw model-capable launches require exact non-Astra model identities"
 }
 
 test_raw_launch_classifier_requires_direct_supported_harness() {
