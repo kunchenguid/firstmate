@@ -722,14 +722,19 @@ assert_contains "$(pe "$H" handled when-repeat "$SEQ")" "already-handled" \
 # prior fire's runner already exited, so a fresh reconcile must start a new
 # one and that runner must actually observe the trigger absent at least once
 # before it reappears - otherwise this would only prove the still-true-level
-# refire bug, not a real edge.
+# refire bug, not a real edge. A relaunch is gated by fm-procevent-lib.sh's
+# launch floor (>=1s since the prior launch), so a single reconcile plus a
+# short fixed sleep is not long enough to prove the new runner has polled
+# yet; poll the poll-count file itself instead of guessing a delay.
 rm -f -- "$REPEAT_TRIG"
+COUNT_BEFORE_FALSE_POLL=$(count_lines "$TMP_ROOT/repeat-count")
 for _ in $(seq 1 150); do
-  [ "$(count_lines "$REPEATLOG")" -ge 1 ] && break
+  pe "$H" reconcile >/dev/null 2>&1
+  [ "$(count_lines "$TMP_ROOT/repeat-count")" -gt "$COUNT_BEFORE_FALSE_POLL" ] && break
   sleep 0.1
 done
-pe "$H" reconcile >/dev/null 2>&1
-sleep 0.3
+[ "$(count_lines "$TMP_ROOT/repeat-count")" -gt "$COUNT_BEFORE_FALSE_POLL" ] \
+  || fail "the relaunched repeat watch never actually polled the trigger absent"
 : > "$REPEAT_TRIG"
 # 300 tries (30s), double the file's other wait budgets: this loop spawns a
 # `pe reconcile` process every iteration on top of the polling runner it is
