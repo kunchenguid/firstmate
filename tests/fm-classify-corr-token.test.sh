@@ -563,7 +563,7 @@ test_optional_event_time() {
   ) || fail "clock failure lost the event"
   for line in 'done: legacy' 'done: [at=1700000000] prose' \
     'done [at=]: empty' "done [at=\$(date +%s)]: literal substitution" \
-    'done [at=bad]: malformed' 'done [at=-1]: negative' \
+    'done [at=bad]: malformed' 'done [at=17:00]: malformed colon' 'done [at=-1]: negative' \
     'done [at=01700000000]: noncanonical' 'done [at=99999999999999999999]: overflow' \
     'done [at=1] [at=2]: ambiguous'; do
     if status_line_at_epoch "$line" >/dev/null; then fail "invented time for $line"; fi
@@ -589,6 +589,11 @@ test_optional_event_time() {
   fm_parent_channel_append_once "$dir/state/retry.status" 'done: prose [at=1]'
   fm_parent_channel_append_once "$dir/state/retry.status" 'done: prose [at=2]'
   [ "$(wc -l < "$dir/state/retry.status")" -eq 4 ] || fail "dedup stripped a time mention from prose"
+  for stamped in 'done [at=17:00]: shipped' 'done [at=bad] [at=17:00]: shipped'; do
+    printf '%s\n' "$stamped" > "$dir/state/malformed.status"
+    fm_parent_channel_append_once "$dir/state/malformed.status" 'done: shipped' || fail "malformed time retry failed"
+    [ "$(cat "$dir/state/malformed.status")" = "$stamped" ] || fail "retry duplicated or rewrote malformed time"
+  done
   stamped=$(status_stamp_line "needs-decision corr=$CORR [key=timed]: choose: A or B")
   printf '%s\n' "$stamped" 'working [at=1700000000]: unrelated progress' > "$dir/state/task.status"
   [ -n "$(status_open_decisions "$dir/state/task.status")" ] || fail "time cleared an open decision"
@@ -604,6 +609,7 @@ test_captain_override_ignores_event_time() {
   for verb in 'done' needs-decision blocked failed; do
     for line in "$verb: audit complete" "$verb [at=1700000000]: audit complete" \
       "$verb [at=]: audit complete" "$verb [at=bad]: audit complete" \
+      "$verb [at=17:00]: audit complete" "$verb [at=bad] [at=17:00]: audit complete" \
       "$verb [at=\$(date +%s)]: audit complete" \
       "$verb [at=1] [at=2]: audit complete"; do
       status_is_captain_relevant "$line" || fail "override missed actionable event: $line"
@@ -633,7 +639,9 @@ test_captain_override_ignores_event_time() {
   FM_CAPTAIN_RE="^done \\[corr=$CORR\\]: literal \\[at=1700000000\\]$"
   for line in "done [corr=$CORR]: literal [at=1700000000]" \
     "done [at=1700000000] [corr=$CORR]: literal [at=1700000000]" \
-    "done [corr=$CORR] [at=1700000000]: literal [at=1700000000]"; do
+    "done [corr=$CORR] [at=1700000000]: literal [at=1700000000]" \
+    "done [at=17:00] [corr=$CORR]: literal [at=1700000000]" \
+    "done [corr=$CORR] [at=17:00]: literal [at=1700000000]"; do
     status_is_captain_relevant "$line" || fail "normalization changed correlation metadata or note: $line"
   done
   pass "captain regex overrides preserve timed and legacy relevance and event bytes"
