@@ -179,7 +179,7 @@ fm_lease_guard() {
   # A caller with more than one guarded phase already excludes claims until
   # its shared cleanup; do not recursively acquire the non-reentrant lock.
   if [ "$FM_LEASE_GUARD_LOCK" != "$lock" ]; then
-    fm_lock_acquire_wait "$lock"
+    fm_lock_acquire_wait "$lock" || return "$?"
     FM_LEASE_GUARD_LOCK=$lock
   fi
   if ! fm_lease_live "$task"; then

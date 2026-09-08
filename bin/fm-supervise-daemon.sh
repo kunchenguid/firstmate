@@ -1512,7 +1512,10 @@ fm_super_main() {
   [ -x "$WATCH" ] || { echo "error: watcher not found or not executable: $WATCH" >&2; exit 1; }
 
   # --- single instance (portable lock, no flock dependency) ------------------
-  if ! fm_lock_try_acquire "$LOCK"; then
+  if fm_lock_try_acquire "$LOCK"; then
+    :
+  else
+    [ "$?" -eq 1 ] || exit 2
     if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
       echo "error: another fm-supervise-daemon is already running (pid $FM_LOCK_HELD_PID, lock $LOCK held)" >&2
     else

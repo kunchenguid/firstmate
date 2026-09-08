@@ -515,6 +515,38 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+## Lock acquisition failure contract
+
+`fm_lock_try_acquire` returns 0 only for ownership, 1 for contention, and 2 when owner-directory creation or owner-record preparation fails. `fm_lock_try_create` supplies that distinction directly: an existing lock, a lost symlink publication race, or a refused claim remains contention even while the primary path is absent during reclaim. Creation failure emits `lock: cannot establish owner record for <path>` and leaves `FM_LOCK_HELD_PID` empty. `fm_lock_acquire_wait` retries contention and propagates creation failure immediately; `fm_lock_acquire_wait_bounded` additionally returns 124 when its contention deadline expires. A caller must check acquisition before setting a held flag or entering protected work, even under `set -e`. Existing guarded interfaces may map failure to their own nonzero status.
+
+Owner identity is the process start time alone, read from `/proc/<pid>/stat` field 22 where a Linux-compatible `/proc` is present and from `ps -o lstart=` otherwise. `argv` is excluded because `exec` replaces the command line while preserving both the pid and the start time, so an argv component would read a live holder that execs as abandoned and hand its lock to the next acquirer. Start time still makes a reused pid a mismatch.
+
+Owner publication clears `pid-identity` before changing `pid`, then publishes the new identity. During a bounded-wait handoff, interruption or an identity-write failure therefore leaves either the helper's pid or the caller's pid with an empty identity. A live pid without readable identity remains held; a dead pid remains reclaimable. The handoff never exposes a new pid with the preceding owner's identity.
+
+The caller audit covers direct calls and the source-lock, public-followup registry, extension lifecycle, captain-control, and lease-guard wrappers. Paths below are relative to `bin/`.
+
+| Callers | Acquisition-failure behavior |
+|---|---|
+| `fm-wake-lib.sh`, `fm-wake-drain.sh`, `fm-wake-grant.sh` | Return or exit before queue mutation, acknowledgement, grant publication, or held-flag assignment. Internal recovery-marker operations release any earlier lock before refusing. |
+| `fm-watch.sh`, `fm-supervise-daemon.sh`, `fm-lock.sh` | Creation failure exits nonzero without claiming an existing supervisor/session. Ordinary held-owner behavior is unchanged. Watcher queue-surfacing failure skips that pass without writing surfaced markers; later passes can retry the durable queue. |
+| `fm-startup-network.sh`, `fm-home-summary-refresh.sh` | Refuse protected publication. Startup propagates the failed command status. Idle home-summary refresh may skip contention; best-effort mode may report the error and retain the previous ledger without publishing a replacement. |
+| `fm-lease-lib.sh`, `fm-lease.sh`, `fm-send.sh`, `fm-control.sh`, `fm-captain-hold.sh`, `fm-x-lib.sh`, `fm-pr-check.sh`, `fm-promote.sh`, `fm-branch-outcome.sh`, `fm-afk-return.sh` | Refuse the guarded task/lease/metadata operation; callers of lease and captain-control guards also check failure before continuing. |
+| `fm-spawn.sh`, `fm-teardown.sh`, `fm-backlog-handoff.sh` | Refuse the protected lifecycle phase and release previously acquired locks through existing cleanup. A failed trace-metadata write aborts that write; pending-outbox resume may move to another independent outbox while retaining the failed one. |
+| `fm-home-seed.sh`, `fm-backlog-receive.sh`, `fm-config-push.sh`, `fm-remote-file.sh`, `fm-remote-inherit.sh`, `fm-remote-home-seed.sh`, `fm-remote-home-provision.sh`, `fm-procevent-remote-reply.sh` | Existing checked calls refuse protected remote/registry/file work; provisioning now checks its wait explicitly. |
+| `fm-pending-reply-lib.sh`, `fm-merge-outcome-lib.sh`, `fm-classify-lib.sh`, `fm-procevent-lib.sh`, `fm-public-followup-lib.sh`, `fm-procevent.sh` | Checked mutation interfaces return failure. Tail-returning acquisition wrappers preserve the failure result, and their callers guard the dependent operation. |
+| `fm-bootstrap.sh`, `fm-inactive-reconcile.sh`, `fm-secondmate-reconcile.sh`, `fm-herdr-session-cleanup.sh` | Skip an unavailable task/route or refuse the scan; no mutation of that locked item. Previously acquired sibling locks are released. Continuing a scan is safe because each item acquires its own locks. |
+| `fm-afk-start.sh`, `fm-watch-arm.sh`, `fm-push-transition-lib.sh`, `fm-task-inbox-lib.sh`, `fm-turnend-guard-cursor.sh`, `backends/herdr.sh` | Existing bounded retries enter protected work only after a successful attempt. Exhaustion skips optional logging/flag work or refuses inbox/control/terminal work; staged temporary files do not publish shared state. |
+| `fm-turnend-guard.sh`, `fm-guard.sh` | Failed acquisition skips budget reset or refuses budget/terminal mutation. The stale-warning path may still emit its warning, but writes its deduplication marker only while holding the lock. |
+
+Focused executable checks:
+
+```sh
+bash tests/fm-lock-failure.test.sh
+bash tests/fm-watcher-lock.test.sh
+```
+
+The failure suite forces owner-directory creation failure through real queue append/drain/grant, metadata, lease, startup-harvest, watcher, and daemon interfaces and checks preserved state plus diagnostics. Reclaim-gap checks hold the primary or nested steal mutex while its protected path is absent, require ordinary contention, and confirm a real wake append waits until release before writing; an exited stealer in the same gap is reclaimed. Lost publication after self-held or dead-owner reclaim also remains retryable. Drain acknowledgement covers both initial acquisition and reacquisition after receipt processing. Handoff checks interrupt execution immediately after caller-pid publication and separately fail the identity write, then require another live waiter to refuse reclamation. The watcher-lock suite retains dead-owner reclamation, reused-pid handling, live-owner refusal, ordinary bounded contention, and concurrent single-winner checks, and pins a live holder that `exec`s a different command keeping its lock.
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

@@ -222,7 +222,7 @@ cmd_start() {  # <locked> <harvest-pid>
     return 1
   fi
 
-  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  fm_lock_acquire_wait "$PUBLISH_LOCK" || return "$?"
   if [ "$(status_get state)" = running ] && worker_alive \
     && worker_covers_request "$locked" "$lock_pid"; then
     # A worker whose phases cover this request is still going. Starting another
@@ -334,7 +334,7 @@ await_delivery() {  # <generation> <state>
   limit=$(( $(delivery_budget) * 10 ))
   while [ "$waited" -lt "$limit" ]; do
     claim_live=0
-    fm_lock_acquire_wait "$PUBLISH_LOCK"
+    fm_lock_acquire_wait "$PUBLISH_LOCK" || return "$?"
     if [ "$(status_get generation)" != "$generation" ]; then
       fm_lock_release "$PUBLISH_LOCK"
       return 0
@@ -369,7 +369,7 @@ EOF
     sleep 0.1
     waited=$((waited + 1))
   done
-  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  fm_lock_acquire_wait "$PUBLISH_LOCK" || return "$?"
   if [ "$(status_get generation)" != "$generation" ] || [ -f "$DELIVERED_FILE" ]; then
     fm_lock_release "$PUBLISH_LOCK"
     return 0
@@ -384,7 +384,7 @@ EOF
 
 publish() {  # <generation> <state> <phases> <locked> <started> <rc> <output-file> <timing-file>
   local generation=$1 state=$2 phases=$3 locked=$4 started=$5 rc=$6 out=$7 timings=${8:-} report_published=1
-  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  fm_lock_acquire_wait "$PUBLISH_LOCK" || return "$?"
   if [ "$(status_get generation)" != "$generation" ]; then
     fm_lock_release "$PUBLISH_LOCK"
     return 0
@@ -420,13 +420,14 @@ EOF
 }
 
 cmd_run() {  # <locked> <lock-pid> <generation>
+  local publish_rc
   local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started
   mkdir -p "$STATE" 2>/dev/null || return 1
   started=$(now)
   budget=$(stage_budget)
   phases=probe
   if [ -n "$generation" ]; then
-    fm_lock_acquire_wait "$PUBLISH_LOCK"
+    fm_lock_acquire_wait "$PUBLISH_LOCK" || return "$?"
     if [ "$(status_get generation)" = "$generation" ] && [ "$(status_get pid)" = "$$" ]; then
       internal=1
       started=$(status_get started)
@@ -449,7 +450,7 @@ cmd_run() {  # <locked> <lock-pid> <generation>
 
   if [ "$internal" -eq 0 ]; then
     generation="$(now).$$.manual"
-    fm_lock_acquire_wait "$PUBLISH_LOCK"
+    fm_lock_acquire_wait "$PUBLISH_LOCK" || return "$?"
     if [ "$(status_get state)" = running ] && worker_alive; then
       fm_lock_release "$PUBLISH_LOCK"
       return 1
@@ -477,7 +478,7 @@ EOF
   stage_started=$(fm_timing_now_ms)
   rc=0
   if [ "$sweep_locked" -eq 1 ]; then
-    fm_lock_acquire_wait "$STATE/.lock.acquire"
+    fm_lock_acquire_wait "$STATE/.lock.acquire" || return "$?"
     lease_held=1
     if ! lock_unchanged "$lock_pid"; then
       sweep_locked=0
@@ -524,9 +525,10 @@ EOF
       publish "$generation" failed "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings"
       ;;
   esac
+  publish_rc=$?
   rm -f "$out" 2>/dev/null || true
   [ -z "$timings" ] || rm -f "$timings" 2>/dev/null || true
-  return 0
+  return "$publish_rc"
 }
 
 # --- harvest / report --------------------------------------------------------
@@ -593,7 +595,7 @@ print_state() {
 
 cmd_harvest() {  # <pid>
   local pid=$1 generation state claim_record claim_generation claim_pid
-  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  fm_lock_acquire_wait "$PUBLISH_LOCK" || return "$?"
   generation=$(status_get generation)
   # Another session's live claim is left alone; the worker reaps a dead one.
   if [ -f "$CLAIM_FILE" ]; then
@@ -652,9 +654,9 @@ done
 case "$LOCKED" in 0|1) ;; *) LOCKED=0 ;; esac
 
 case "$MODE" in
-  start) cmd_start "$LOCKED" "${HARVEST_PID:-0}" ;;
-  run) cmd_run "$LOCKED" "$LOCK_PID" "$GENERATION" ;;
-  harvest) cmd_harvest "${HARVEST_PID:-}" ;;
+  start) cmd_start "$LOCKED" "${HARVEST_PID:-0}" || exit "$?" ;;
+  run) cmd_run "$LOCKED" "$LOCK_PID" "$GENERATION" || exit "$?" ;;
+  harvest) cmd_harvest "${HARVEST_PID:-}" || exit "$?" ;;
   report) print_state; print_timings ;;
   wait) cmd_wait "${1:-120}" || exit $? ;;
   -h|--help) usage ;;

@@ -293,7 +293,7 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
   echo "error: forced teardown refused - the supervision branch cannot discard work" >&2
   exit "$FM_LEASE_REFUSE_EXIT"
 fi
-fm_lease_guard "$ID" "teardown (fm-teardown)"
+fm_lease_guard "$ID" "teardown (fm-teardown)" || exit "$?"
 
 # A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
 # Require both its pool state and the same Git common directory as the recorded
@@ -400,7 +400,7 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   exit 1
 }
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
-fm_lock_acquire_wait "$META_LOCK"
+fm_lock_acquire_wait "$META_LOCK" || exit "$?"
 META_LOCK_HELD=1
 fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2

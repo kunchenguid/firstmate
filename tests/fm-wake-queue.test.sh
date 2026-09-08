@@ -1618,7 +1618,7 @@ test_subshell_lock_ownership_without_bashpid() {
 # lock once contention clears so it can safely hold and release the critical
 # section itself.
 test_bounded_lock_handoff_after_contention() {
-  local dir state lock holder_pid waiter_pid i recorded_pid real_sleep sleep_log
+  local dir state lock holder_pid waiter_pid i recorded_pid recorded_identity current_identity real_sleep sleep_log
   dir=$(make_case bounded-lock-handoff)
   state="$dir/state"
   lock="$state/.fixture.lock"
@@ -1680,6 +1680,11 @@ SH
   recorded_pid=$(cat "$dir/waiter.ready")
   [ "$recorded_pid" = "$waiter_pid" ] && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$waiter_pid" ] \
     || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded acquire did not hand lock ownership to its caller"; }
+  recorded_identity=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  current_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$waiter_pid") \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "could not identify bounded lock caller"; }
+  [ "$recorded_identity" = "$current_identity" ] \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded acquire did not hand pid identity to its caller"; }
 
   : > "$dir/release-waiter"
   wait "$waiter_pid" || fail "caller could not release its handed-off lock"

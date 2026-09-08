@@ -266,7 +266,7 @@ ID=$RAW_ID
 # live lease (contract: bin/fm-lease-lib.sh; no-op in homes without leases).
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
-fm_lease_guard "$ID" "lifecycle control (fm-control)"
+fm_lease_guard "$ID" "lifecycle control (fm-control)" || exit "$?"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" \

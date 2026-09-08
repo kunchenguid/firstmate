@@ -67,13 +67,16 @@ if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   fi
 fi
 
-if ! fm_lock_try_acquire "$CLAIM_LOCK"; then
+if fm_lock_try_acquire "$CLAIM_LOCK"; then
+  :
+else
+  [ "$?" -eq 1 ] || exit 2
   sweep_pid=$(sed -n 's/^pid=//p' "$STATE/.startup-network.status" 2>/dev/null | tail -1)
   if [ -n "${FM_LOCK_HELD_PID:-}" ] && [ "$FM_LOCK_HELD_PID" = "$sweep_pid" ]; then
     echo "error: the prior session's bounded startup sweep is finishing; operate read-only until it releases the fleet lock" >&2
     exit 1
   fi
-  fm_lock_acquire_wait "$CLAIM_LOCK"
+  fm_lock_acquire_wait "$CLAIM_LOCK" || exit "$?"
 fi
 CLAIM_LOCK_HELD=1
 

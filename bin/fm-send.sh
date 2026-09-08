@@ -441,7 +441,7 @@ shift
 if [ -n "$TARGET_META" ]; then
   LEASE_GUARD_TASK=$(fm_send_id_from_meta "$TARGET_META")
   if [ -n "$LEASE_GUARD_TASK" ]; then
-    fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
+    fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)" || exit "$?"
     trap 'fm_lease_guard_release' EXIT
   fi
 fi

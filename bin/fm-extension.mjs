@@ -933,18 +933,20 @@ async function capturedProcessOutput(command, args, maxBytes = 8192) {
   return Buffer.concat(chunks).toString("utf8").trim();
 }
 
+// Byte-identical to fm_pid_identity in bin/fm-wake-lib.sh: procevent writes a
+// claim identity with the shell helper and this process re-reads it, so argv is
+// excluded on both sides or an exec would make a live claim owner look gone.
 async function pidIdentity(pid) {
   if (process.platform === "linux") {
     const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => fail("process-identity-uncertain", "cannot inspect extension process identity"));
-    const cmdline = await readFile(`/proc/${pid}/cmdline`).catch(() => fail("process-identity-uncertain", "cannot inspect extension process identity"));
     const close = stat.lastIndexOf(")");
     const fields = close >= 0 ? stat.slice(close + 1).trim().split(/\s+/u) : [];
-    if (fields.length < 20 || !/^[0-9]+$/u.test(fields[19]) || cmdline.length === 0) {
+    if (fields.length < 20 || !/^[0-9]+$/u.test(fields[19])) {
       fail("process-identity-uncertain", "cannot inspect extension process identity");
     }
-    return `linux-starttime=${fields[19]} cmdline-hex=${cmdline.toString("hex")}`;
+    return `linux-starttime=${fields[19]}`;
   }
-  return capturedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "lstart=", "-o", "command="]);
+  return capturedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "lstart="]);
 }
 
 async function selfIdentity() {

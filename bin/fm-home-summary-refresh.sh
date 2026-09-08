@@ -100,7 +100,7 @@ home_summary_fail() {
 }
 
 home_summary_refresh_once() {
-  local producer_rc producer_error
+  local producer_rc producer_error lock_rc
   if ! mkdir -p "$STATE" 2>/dev/null; then
     home_summary_fail "state directory is unavailable: $STATE"
     return 1
@@ -110,9 +110,20 @@ home_summary_refresh_once() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   if [ "$HOME_SUMMARY_IF_IDLE" -eq 1 ]; then
-    fm_lock_try_acquire "$REFRESH_LOCK" || return 0
+    if fm_lock_try_acquire "$REFRESH_LOCK"; then
+      :
+    else
+      lock_rc=$?
+      [ "$lock_rc" -ne 1 ] || return 0
+      home_summary_fail "refresh lock could not be acquired safely"
+      return "$lock_rc"
+    fi
   else
-    fm_lock_acquire_wait "$REFRESH_LOCK"
+    fm_lock_acquire_wait "$REFRESH_LOCK" || {
+      lock_rc=$?
+      home_summary_fail "refresh lock could not be acquired safely"
+      return "$lock_rc"
+    }
   fi
   HOME_SUMMARY_LOCK_HELD=1
   HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.XXXXXX") || {

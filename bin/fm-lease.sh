@@ -46,7 +46,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 mkdir -p "$STATE"
 LEASE_COMMAND_LOCK="$STATE/.fm-lease-command.lock"
-fm_lock_acquire_wait "$LEASE_COMMAND_LOCK"
+fm_lock_acquire_wait "$LEASE_COMMAND_LOCK" || exit "$?"
 trap 'fm_lock_release "$LEASE_COMMAND_LOCK"' EXIT
 
 usage() {

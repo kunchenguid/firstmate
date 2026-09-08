@@ -142,7 +142,7 @@ FM_STATE_OVERRIDE="$PROVISION_LOCK_STATE"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 PROVISION_LOCK="$STATE/.remote-home-provision-$HOME_LOCK_KEY.lock"
-fm_lock_acquire_wait "$PROVISION_LOCK"
+fm_lock_acquire_wait "$PROVISION_LOCK" || exit "$?"
 PROVISION_LOCK_HELD=1
 
 if [ -e "$FM_HOME" ] || [ -L "$FM_HOME" ]; then
