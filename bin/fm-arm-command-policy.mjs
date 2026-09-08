@@ -1009,12 +1009,15 @@ function analyzeProgram(command, context, depth = 0) {
       branch.hasElse = true;
       activeContext = branch.entryContext;
     }
-    if (["&&", "||"].includes(precedingSeparator)) {
-      const conditional = conditionalBindings.at(-1);
-      if (conditional && !conditional.bodyStarted) conditional.condition = null;
-      const loop = loopBindings.at(-1);
-      if (loop?.kind === "conditional" && !loop.bodyStarted) loop.zeroIterations = null;
+    const openConditional = conditionalBindings.at(-1);
+    if (openConditional && ((!openConditional.bodyStarted && firstName !== "then") || firstName === "elif")) {
+      openConditional.condition = null;
     }
+    const openLoop = loopBindings.at(-1);
+    if (openLoop?.kind === "conditional" && !openLoop.bodyStarted && firstName !== "do") {
+      openLoop.zeroIterations = null;
+    }
+    if (precedingSeparator === "|" && caseBindings.length > 0) caseBindings.at(-1).branchReachable = null;
     if (firstName === "then" && conditionalBindings.length > 0) conditionalBindings.at(-1).bodyStarted = true;
     if (firstName === "do" && loopBindings.length > 0) loopBindings.at(-1).bodyStarted = true;
     const nodeReachable = controlFlowReachable(conditionalBindings, loopBindings, caseBindings);

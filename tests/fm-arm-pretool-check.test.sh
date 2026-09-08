@@ -405,6 +405,9 @@ EOF
     'ACTION=respond; case no in yes) ACTION=status;; esac; no-mistakes axi "$ACTION"' \
     'if ! false; then no-mistakes axi respond --action fix; fi' \
     'if false || true; then no-mistakes axi respond --action fix; fi' \
+    'if false; true; then no-mistakes axi respond --action fix; fi' \
+    'if false; then :; elif true; then no-mistakes axi respond --action fix; fi' \
+    'case x in y|x) no-mistakes axi respond --action fix;; esac' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
@@ -449,6 +452,9 @@ EOF
     'ACTION=respond; case no in yes) ACTION=status;; esac; no-mistakes axi "$ACTION"' \
     'if ! false; then no-mistakes axi respond --action fix; fi' \
     'if false || true; then no-mistakes axi respond --action fix; fi' \
+    'if false; true; then no-mistakes axi respond --action fix; fi' \
+    'if false; then :; elif true; then no-mistakes axi respond --action fix; fi' \
+    'case x in y|x) no-mistakes axi respond --action fix;; esac' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
