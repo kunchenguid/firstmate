@@ -361,7 +361,11 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
       continue
     fi
 
-    line="$task $event"
+    # A done line with no PR behind it is a handoff signal, not a landing. This
+    # section prints the status line to the supervisor on every main drain, so it
+    # renders through the same owner as the annotations rather than reprinting the
+    # untouched landing claim (fm-classify-lib.sh's status_present_line).
+    line="$task $(status_present_line "$event" "$STATE/$task.status")"
     fm_cap_line_var "$line" $((item_bytes - 1))
     line=$FM_LINE_CAP_LINE
     bytes=$(( ${#line} + 1 ))

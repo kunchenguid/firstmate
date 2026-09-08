@@ -842,7 +842,7 @@ if [ -n "$LOG_VERB" ]; then
   # done verb can match, so every other verb keeps its mapping unchanged.
   if NOT_LANDED_MODE=$(status_done_without_pr "$LOG_LINE" "$LOG" "$META"); then
     LOG_STATE=parked
-    LOG_DETAIL="$LOG_DETAIL${SEP}not landed: $NOT_LANDED_MODE ship, no PR yet"
+    LOG_DETAIL="${LOG_DETAIL:+$LOG_DETAIL$SEP}not landed: $NOT_LANDED_MODE ship, no PR yet"
   fi
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$LOG_DETAIL"

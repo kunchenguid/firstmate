@@ -900,7 +900,11 @@ EOF
     "harness=claude" "kind=ship" "mode=no-mistakes"
   record_claude_state "$mate/state" "done" idle
   record_claude_state "$mate/state" failed idle
-  printf 'done: complete\n' > "$mate/state/done.status"
+  # A landing, not merely an implementation commit: on a mode that ends in a PR,
+  # a `done:` with no PR is the pipeline handoff signal and reads as parked
+  # (bin/fm-classify-lib.sh's status_done_without_pr), so only a genuine landing
+  # makes this child terminal.
+  printf 'done: PR https://github.com/o/r/pull/12 checks green\n' > "$mate/state/done.status"
   printf 'failed: stopped\n' > "$mate/state/failed.status"
   rm "$mate/state/parked.meta" "$mate/state/parked.status"
   refresh_local_secondmate_ledgers "$home"

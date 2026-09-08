@@ -204,7 +204,7 @@ status_is_paused_or_captain_held() {  # <status-line>
 # landed until a supervisor steered it back by hand.
 #
 # These functions are the ONE owner of that reading. bin/fm-dod-lib.sh says which
-# modes end in a PR, status_line_pr_url says whether a PR is known, and
+# modes end in a PR, status_line_pr_url says whether the line carries one, and
 # status_present_line renders the line so no supervisor surface can print it as a
 # landing. Every consumer calls them instead of restating the rule; nothing here
 # touches the append-only log, so a worker never loses its ability to report.
@@ -225,17 +225,38 @@ status_line_pr_url() {  # <text> -> first PR/MR URL, or empty
   status_pr_urls "$1" | head -1
 }
 
-# 0 when a `done:` line claims completion on a task whose recorded delivery mode
-# ends in a PR while no PR is known for it; prints that recorded mode so a caller
-# can name it. Any other line, mode, or missing record returns 1 (accept).
+# There is exactly ONE acceptance path, and it is the line itself: a `done:` line
+# on a task whose recorded delivery mode ends in a PR is accepted if and only if
+# that line carries the PR or merge-request URL. Nothing else counts.
 #
-# Evidence is read widest-first so a real landing can never be refused: the line
-# itself, then the task's recorded `pr=` (bin/fm-pr-check.sh writes it), then any
-# PR URL anywhere in the task's own status log, which covers a worker that
-# reported its PR on an earlier line. Accepting is the fallback everywhere - an
-# absent, unreadable, or symlinked record, an absent mode (a scout), or a mode
-# that does not end in a PR (local-only, secondmate) - because turning a correct
-# scout or local-only completion into a false alarm is worse than the bug.
+# This asks for nothing the delivery contract does not already mandate.
+# bin/fm-dod-lib.sh puts the URL on the landing line in both PR-ending variants,
+# `done: PR {url}` for direct-PR and `done: PR {url} checks green` for
+# no-mistakes, so a real landing already proves itself where it is claimed.
+#
+# Two wider acceptance paths were considered and deliberately removed, because a
+# guard with three doors is not three times safer, it is three times easier to
+# walk around:
+#   - Scraping the whole status log for any PR URL. An earlier
+#     `working: reviewing feedback on PR <url>` would then authorize every later
+#     PR-less `done:`, which is the original defect reopened through a back door.
+#   - Trusting the task's recorded `pr=`. That record is not scoped to the task's
+#     current incarnation - bin/fm-spawn.sh's relaunch does not reset it - so a
+#     relaunched ship whose new worker again stops at a PR-less `done:` would read
+#     as landed. Scoping `pr=` to an incarnation would mean new metadata semantics
+#     plus a relaunch-time reset, which is machinery to hold open a door that does
+#     not need to be open; deleting the door is cheaper than fitting it a lock.
+#
+# 0 when such a line claims a landing it does not have, printing the recorded mode
+# so a caller can name it. Any other line, mode, or missing record returns 1
+# (accept). Accepting stays the fallback everywhere - an absent, unreadable, or
+# symlinked record, an absent mode (a scout), or a mode that does not end in a PR
+# (local-only, secondmate) - because turning a correct scout or local-only
+# completion into a false alarm is worse than the bug.
+#
+# The status file locates the task's sibling metadata and nothing else; its
+# contents are never read. A caller that already holds the metadata path (a
+# reader honoring an explicit override) passes it directly.
 status_done_without_pr() {  # <status-line> <status-file> [<meta-file>] -> mode
   local line=$1 status=$2 meta=${3:-} mode
   [ "$(status_line_verb "$line")" = 'done' ] || return 1
@@ -245,10 +266,6 @@ status_done_without_pr() {  # <status-line> <status-file> [<meta-file>] -> mode
   mode=$(grep '^mode=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   fm_dod_mode_ends_in_pr "$mode" || return 1
   [ -z "$(status_line_pr_url "$line")" ] || return 1
-  [ -z "$(grep '^pr=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)" ] || return 1
-  if [ -f "$status" ] && [ -r "$status" ] && [ ! -L "$status" ]; then
-    [ -z "$(status_line_pr_url "$(LC_ALL=C command cat "$status" 2>/dev/null)")" ] || return 1
-  fi
   printf '%s' "$mode"
 }
 

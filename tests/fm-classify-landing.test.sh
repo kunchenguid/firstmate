@@ -15,6 +15,12 @@
 # legitimately finish without one: turning a correct scout or local-only
 # completion into a false alarm would be worse than the bug being fixed.
 #
+# There is exactly one acceptance path, the URL on the done line itself, so the
+# two wider paths that were removed get a refusal case each: a PR mentioned on an
+# earlier status line, and a `pr=` record a relaunch carried over from a previous
+# incarnation. Both were accepted before, and each is the original defect reached
+# through a back door.
+#
 # Coverage is split by interface: the rule through the library's own sourced
 # entry points, and the supervisor-facing rendering through the REAL
 # bin/fm-wake-drain.sh, so the reclassification is proven where a supervisor
@@ -175,26 +181,36 @@ test_gitlab_merge_request_counts_as_a_pr() {
   pass "a GitLab merge request counts as a PR"
 }
 
-test_recorded_pr_metadata_is_a_landing() {
+# --- the acceptance paths that were deliberately removed ----------------------
+#
+# Both of these passed before the guard collapsed to one acceptance path, and
+# each is the original defect reachable through a back door, so they are the
+# cases that prove the doors are shut.
+
+# An earlier line mentioning a PR must not authorize every later PR-less done.
+# A worker reviewing feedback on someone else's PR writes exactly this shape.
+test_pr_on_an_earlier_line_is_not_a_landing() {
   local state line
-  line='done: checks green'
+  line='done: endpoint implemented'
+  state=$(make_task pr-earlier "working: reviewing feedback on PR https://github.com/kunchenguid/firstmate/pull/4001
+$line
+" kind=ship mode=no-mistakes)
+  status_done_without_pr "$line" "$state/task.status" >/dev/null \
+    || fail "a PR on an earlier line must not authorize a later PR-less done"
+  pass "a PR reported on an earlier status line is not a landing"
+}
+
+# A relaunch carries the previous incarnation's pr= into the new metadata, so a
+# recorded PR proves nothing about the completion being claimed now.
+test_recorded_pr_metadata_is_not_a_landing() {
+  local state line
+  line='done: endpoint implemented, commit b291c234'
   state=$(make_task pr-in-meta "$line
 " kind=ship mode=no-mistakes \
     pr=https://github.com/kunchenguid/firstmate/pull/3951)
-  ! status_done_without_pr "$line" "$state/task.status" >/dev/null \
-    || fail "a recorded pr= is evidence the PR exists"
-  pass "a PR recorded in the task metadata is accepted"
-}
-
-test_pr_reported_on_an_earlier_line_is_a_landing() {
-  local state line
-  line='done: merge monitoring finished'
-  state=$(make_task pr-earlier "working: PR https://github.com/kunchenguid/firstmate/pull/3951 opened
-$line
-" kind=ship mode=no-mistakes)
-  ! status_done_without_pr "$line" "$state/task.status" >/dev/null \
-    || fail "a PR reported earlier in the same log is still evidence"
-  pass "a PR reported on an earlier status line is accepted"
+  status_done_without_pr "$line" "$state/task.status" >/dev/null \
+    || fail "a relaunched task's inherited pr= must not authorize a PR-less done"
+  pass "a PR recorded in the task metadata is not a landing"
 }
 
 # --- the supervisor-facing surface --------------------------------------------
@@ -235,8 +251,8 @@ test_absent_and_unusable_records_are_accepted
 test_non_done_verbs_are_untouched
 test_pr_url_on_the_line_is_a_landing
 test_gitlab_merge_request_counts_as_a_pr
-test_recorded_pr_metadata_is_a_landing
-test_pr_reported_on_an_earlier_line_is_a_landing
+test_pr_on_an_earlier_line_is_not_a_landing
+test_recorded_pr_metadata_is_not_a_landing
 test_drain_annotation_cannot_be_read_as_a_landing
 
 echo "all fm-classify-landing tests passed"
