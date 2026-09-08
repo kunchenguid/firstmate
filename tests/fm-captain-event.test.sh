@@ -219,6 +219,16 @@ done
 quoted_credential_label_cases=(
   '{"client_secret":"privatevalue"} visible suffix'
   '{"MiXeD-aPi-Key":"privatevalue"} visible suffix'
+  '{"clientSecret":"privatevalue"} visible suffix'
+  '{"clientToken":"privatevalue"} visible suffix'
+  '{"accessToken":"privatevalue"} visible suffix'
+  '{"accessKey":"privatevalue"} visible suffix'
+  '{"secretKey":"privatevalue"} visible suffix'
+  '{"apiKey":"privatevalue"} visible suffix'
+  '{"privateKey":"privatevalue"} visible suffix'
+  '{"authToken":"privatevalue"} visible suffix'
+  '{"refreshToken":"privatevalue"} visible suffix'
+  '{"AzUrEAdClIeNtSeCrEt":"privatevalue"} visible suffix'
 )
 for quoted_credential_label_case in "${quoted_credential_label_cases[@]}"; do
   primary_args "pi:quoted-credential-label-$after" "Prefix $quoted_credential_label_case"
@@ -524,6 +534,10 @@ await emit("Prefix; platform-prod_service_AcCeSs-kEy: privatevalue visible suffi
 await emit("Prefix; one_two-THREE_PaSsPhRaSe: privatevalue visible suffix", "mixed-passphrase");
 await emit('Prefix {"client_secret":"privatevalue"} visible suffix', "quoted-client-secret");
 await emit('Prefix {"MiXeD-aPi-Key":"privatevalue"} visible suffix', "quoted-api-key");
+for (const label of [
+  "clientSecret", "clientToken", "accessToken", "accessKey", "secretKey",
+  "apiKey", "privateKey", "authToken", "refreshToken", "AzUrEAdClIeNtSeCrEt",
+]) await emit(`Prefix {"${label}":"privatevalue"} visible suffix`, `quoted-${label}`);
 await emit("Prefix eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sgnVsbG9uZ3NpZ25hdHVyZQ remains", "compact-jwt");
 await emit("Prefix abcdefgh.ijklmnop remains", "two-segment-dotted-text");
 await emit("Prefix abcdefgh.ijklmnop.qrstuvwx.yzABCDEF remains", "four-segment-dotted-text");
@@ -544,6 +558,16 @@ assert summaries == [
     "Prefix; [REDACTED]",
     "Prefix; [REDACTED]",
     "Prefix; [REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
     "Prefix {[REDACTED]",
     "Prefix {[REDACTED]",
     "Prefix [REDACTED] remains",

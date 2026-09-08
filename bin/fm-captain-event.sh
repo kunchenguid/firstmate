@@ -147,6 +147,10 @@ CREDENTIAL_LABEL_CANDIDATE_RE = re.compile(
 )
 CREDENTIAL_LABEL_TERMS = {"secret", "password", "passwd", "passphrase", "token", "authorization", "auth"}
 CREDENTIAL_KEY_PREFIXES = {"access", "private", "api"}
+CREDENTIAL_LABEL_COMPOUNDS = {
+    "clientsecret", "clienttoken", "accesstoken", "accesskey", "secretkey",
+    "apikey", "privatekey", "authtoken", "refreshtoken",
+}
 SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)", re.I),
     re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s/@\"']+@[^\s,;\"']+", re.I),
@@ -306,12 +310,14 @@ def redact_credential_labels(value):
     for match in CREDENTIAL_LABEL_CANDIDATE_RE.finditer(value):
         label = match.group(1) or match.group(2)
         segments = [segment for segment in re.split(r"[ _-]+", label.lower()) if segment]
+        collapsed = "".join(segments)
         has_term = any(segment in CREDENTIAL_LABEL_TERMS for segment in segments)
         has_key_term = any(
             segment in CREDENTIAL_KEY_PREFIXES and index + 1 < len(segments) and segments[index + 1] == "key"
             for index, segment in enumerate(segments)
         )
-        if has_term or has_key_term:
+        has_compound = any(compound in collapsed for compound in CREDENTIAL_LABEL_COMPOUNDS)
+        if has_term or has_key_term or has_compound:
             return value[:match.start()] + "[REDACTED]"
     return value
 

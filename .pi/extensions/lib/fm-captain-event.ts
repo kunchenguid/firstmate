@@ -18,6 +18,10 @@ const AUTHORIZATION_HEADER_START = /\b(?:Proxy-)?Authorization\s*:\s*/gi;
 const CREDENTIAL_LABEL_CANDIDATE = /(?:(?:"([A-Za-z0-9](?:[A-Za-z0-9 _-]{0,126}[A-Za-z0-9])?)")|(?:(?<![A-Za-z0-9_-])([A-Za-z0-9](?:[A-Za-z0-9 _-]{0,126}[A-Za-z0-9])?)))\s*:\s*/g;
 const CREDENTIAL_LABEL_TERMS = new Set(["secret", "password", "passwd", "passphrase", "token", "authorization", "auth"]);
 const CREDENTIAL_KEY_PREFIXES = new Set(["access", "private", "api"]);
+const CREDENTIAL_LABEL_COMPOUNDS = [
+  "clientsecret", "clienttoken", "accesstoken", "accesskey", "secretkey",
+  "apikey", "privatekey", "authtoken", "refreshtoken",
+];
 const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)/gi,
   /\b[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s\/@"']+@[^\s,;"']+/gi,
@@ -73,11 +77,13 @@ function redactCredentialLabels(value: string): string {
   CREDENTIAL_LABEL_CANDIDATE.lastIndex = 0;
   for (const match of value.matchAll(CREDENTIAL_LABEL_CANDIDATE)) {
     const segments = (match[1] ?? match[2]).toLowerCase().split(/[ _-]+/).filter(Boolean);
+    const collapsed = segments.join("");
     const hasTerm = segments.some((segment) => CREDENTIAL_LABEL_TERMS.has(segment));
     const hasKeyTerm = segments.some((segment, index) => (
       CREDENTIAL_KEY_PREFIXES.has(segment) && segments[index + 1] === "key"
     ));
-    if (hasTerm || hasKeyTerm) return `${value.slice(0, match.index)}[REDACTED]`;
+    const hasCompound = CREDENTIAL_LABEL_COMPOUNDS.some((compound) => collapsed.includes(compound));
+    if (hasTerm || hasKeyTerm || hasCompound) return `${value.slice(0, match.index)}[REDACTED]`;
   }
   return value;
 }
