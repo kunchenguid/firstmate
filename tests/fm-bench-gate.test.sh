@@ -746,7 +746,7 @@ for entrant in entrants:
         tree = hashlib.sha1(seed).hexdigest()
         slug = entrant.lower().replace(" ", "-").replace(".", "-")
         record = {
-            "entrant": entrant, "packet": f"B{index}",
+            "calibration_id": f"{slug}-reference-{index}",
             "original_sha": hashlib.sha1(seed + b"o").hexdigest(), "original_tree": tree,
             "neutral_sha": hashlib.sha1(seed + b"n").hexdigest(), "neutral_tree": tree,
             "base_tree": hashlib.sha1(b"base").hexdigest(),
@@ -814,7 +814,7 @@ BENCH="$TMP_ROOT/evaluator"
 write_plan "$BENCH"
 write_evaluator "$BENCH"
 out=$(run_gate "$BENCH" evaluator-verify) || fail "the calibrated evaluator must pass: $out"
-assert_contains "$out" "30 capture records, one per candidate head" "one bound record per Track B head"
+assert_contains "$out" "30 calibration capture records" "preflight uses reference captures"
 assert_contains "$out" "separate from screenshot resolution" "200% zoom is not deviceScaleFactor"
 assert_contains "$out" "evidence-validity conditions carry zero score weight" "validity gates do not score"
 pass "the frozen, calibrated evaluator passes with 30 bound capture records"
@@ -823,9 +823,9 @@ BENCH="$TMP_ROOT/evaluator-nine"
 write_plan "$BENCH"
 write_evaluator "$BENCH" 9
 out=$(run_gate "$BENCH" evaluator-verify) && status=0 || status=$?
-expect_code 1 "$status" "nine capture jobs cannot cover 30 candidate heads"
-assert_contains "$out" "expected 30 capture records" "the capture count is derived, not asserted"
-pass "nine capture jobs are refused for thirty candidate heads"
+expect_code 0 "$status" "calibration captures do not require future candidate heads"
+assert_contains "$out" "9 calibration capture records" "calibration scope is independent of candidate count"
+pass "preflight calibrates before any candidate results exist"
 
 # check_evaluator derives the capture field from the plan before any cost-model
 # check runs, so it has to survive a malformed unit price on its own.
@@ -910,8 +910,7 @@ p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" evaluator-verify) && status=0 || status=$?
 expect_code 1 "$status" "capture records must exactly cover planned candidate heads"
-assert_contains "$out" "missing Composer 2.5 on B1" "the missing planned capture is named"
-assert_contains "$out" "unexpected Composer 2.5 on B7" "the unexpected capture is named"
+assert_contains "$out" "calibration fixtures, not candidate results" "candidate identities cannot be mistaken for calibration fixtures"
 pass "capture records outside the planned candidate heads are refused"
 
 BENCH="$TMP_ROOT/evaluator-scored-gate"
@@ -1158,6 +1157,89 @@ out=$(FM_BENCH_ROOT="$BENCH" bash -c '
 expect_code 1 "$status" "a benchmark launch with no verified wrapper is refused"
 assert_contains "$out" "cannot use its preflight-proven confinement" "the launch refuses rather than falling back unconfined"
 pass "benchmark launches bind the preflight-proven confinement while ordinary launches stay unchanged"
+
+python3 - "$ROOT" "$TMP_ROOT" <<'PYTRANSPORT' || fail "benchmark terminal and lifecycle transport must work"
+import json, os, pty, select, shutil, subprocess, sys, time
+from pathlib import Path
+root, work = Path(sys.argv[1]), Path(sys.argv[2]) / "transport"
+work.mkdir()
+runtime = work / "docker"
+runtime.write_text("""#!/usr/bin/env python3
+import os, subprocess, sys
+args = sys.argv[1:]
+if args[0] == 'info':
+    sys.exit(0)
+if args[:2] == ['network', 'inspect']:
+    print('true proxy ')
+    sys.exit(0)
+command = args[args.index('runtime:test') + 1:]
+interactive = '--interactive' in args
+terminal = '--tty' in args
+if os.isatty(0) and interactive and not terminal:
+    sys.exit(19)
+if terminal and not os.isatty(0):
+    sys.exit(20)
+if not interactive:
+    os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
+os.execv(command[0], command)
+""")
+runtime.chmod(0o755)
+env = {**os.environ, "PATH": str(work) + os.pathsep + os.environ["PATH"], "TERM": "xterm-256color"}
+base = [str(root / "bin/fm-bench-confine.sh"), "--mechanism", "container", "--image", "runtime:test", "--allow", str(work)]
+entrant = base + ["--purpose", "entrant", "--provider-network", "private", "--provider-proxy", "http://proxy:8080", "--provider-proxy-container", "proxy", "--"]
+reader = [sys.executable, "-c", "import sys; print('DELIVERED:' + sys.stdin.readline().strip())"]
+result = subprocess.run(entrant + reader, input="follow-up\n", text=True, capture_output=True, env=env, timeout=10)
+assert result.returncode == 0 and 'DELIVERED:follow-up' in result.stdout, result
+master, slave = pty.openpty()
+process = subprocess.Popen(entrant + reader, stdin=slave, stdout=slave, stderr=slave, env=env)
+os.close(slave)
+os.write(master, b"terminal-follow-up\n")
+output = b""
+deadline = time.monotonic() + 10
+while process.poll() is None and time.monotonic() < deadline:
+    if select.select([master], [], [], 0.1)[0]:
+        try:
+            chunk = os.read(master, 4096)
+            if not chunk:
+                break
+            output += chunk
+        except OSError:
+            break
+code = process.wait(timeout=5)
+while select.select([master], [], [], 0)[0]:
+    try:
+        chunk = os.read(master, 4096)
+        if not chunk:
+            break
+        output += chunk
+    except OSError:
+        break
+assert code == 0 and b'DELIVERED:terminal-follow-up' in output, output
+os.close(master)
+result = subprocess.run(base + ["--", *reader], input="must-not-arrive\n", text=True, capture_output=True, env=env, timeout=10)
+assert result.returncode == 0 and result.stdout.strip() == 'DELIVERED:', result
+host, private = work / "host", work / "private"
+host.mkdir(); private.mkdir()
+task = "bench-signal"
+writer = str(root / "bin/fm-busy-event.sh")
+generation = subprocess.check_output([writer, "arm", str(host), task, "--source", "pi-ext"], text=True).strip()
+for suffix in ("busy-gen", "busy-state"):
+    shutil.copyfile(host / f"{task}.{suffix}", private / f"{task}.{suffix}")
+(host / "sibling.busy-state").write_text("sibling stays busy")
+child = ["/bin/bash", "-c", '"$1" apply "$2" "$3" idle --gen "$4" --source pi-ext --event agent-settled && touch "$2/$3.turn-ended"', "_", writer, str(private), task, generation]
+relay = [sys.executable, str(root / "bin/fm-bench-lifecycle.py"), str(private), str(host), task, writer, "--"]
+subprocess.run(relay + child, check=True, timeout=10)
+observed = subprocess.check_output(["/bin/bash", "-c", '. "$1/bin/fm-busy-lib.sh"; fm_busy_record_read "$2" "$3"', "_", str(root), str(host), task], text=True)
+assert observed.startswith("idle pi-ext agent-settled"), observed
+assert (host / f"{task}.turn-ended").exists()
+assert (host / "sibling.busy-state").read_text() == "sibling stays busy"
+(host / f"{task}.turn-ended").unlink()
+child = ["/bin/bash", "-c", '"$1" arm "$2" "$3" >/dev/null; "$1" apply "$4" "$3" idle --gen "$5" --source pi-ext --event agent-settled; touch "$4/$3.turn-ended"', "_", writer, str(host), task, str(private), generation]
+subprocess.run(relay + child, check=True, timeout=10)
+assert "state=busy" in (host / f"{task}.busy-state").read_text()
+assert not (host / f"{task}.turn-ended").exists()
+PYTRANSPORT
+pass "entrant input reaches terminals and lifecycle signals reach only the current task"
 
 FAKE_RUNTIME_BIN="$TMP_ROOT/provider-runtime-bin"
 mkdir -p "$FAKE_RUNTIME_BIN"
@@ -2146,6 +2228,41 @@ isolation.write_text(json.dumps({
 PY
 }
 
+bind_scoring_fixture() {
+  python3 - "$1" "${2:-all}" <<'PYBIND'
+import hashlib, json, shlex, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+samples = sorted((bench / "archive").iterdir())
+if sys.argv[2] == "first":
+    samples = samples[:1]
+for sample in samples:
+    manifest_path = sample / "manifest.json"
+    record = json.loads(manifest_path.read_text())
+    rerun = record["evaluator_rerun"]
+    program = sample / rerun["argv"][0]
+    raw = sample / "raw-evaluator.sh"
+    raw.write_bytes(program.read_bytes())
+    raw.chmod(0o755)
+    capture = json.loads((sample / "capture.json").read_text())
+    capture["capture_hash"] = rerun["result_hash"]
+    output = json.dumps(capture, sort_keys=True, indent=2) + "\n"
+    (sample / "capture.json").write_text(output)
+    capture["capture_hash"] = "%s"
+    template = json.dumps(capture, sort_keys=True, indent=2) + "\n"
+    program.write_text('#!/bin/bash\nset -eo pipefail\n' +
+                      'digest=$("$(dirname "$0")/raw-evaluator.sh" "$@" | sha256sum)\n' +
+                      'printf ' + shlex.quote(template) + ' "${digest%% *}"\n')
+    program.chmod(0o755)
+    for name in ("capture.json", "raw-evaluator.sh", rerun["argv"][0]):
+        record["files"][name] = hashlib.sha256((sample / name).read_bytes()).hexdigest()
+    if "raw-evaluator.sh" not in record["groups"]["capture_and_scoring"]:
+        record["groups"]["capture_and_scoring"].append("raw-evaluator.sh")
+    rerun["result_hash"] = record["files"]["capture.json"]
+    manifest_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PYBIND
+}
+
 write_archive() {  # <bench-dir> <src-repo> [png-mode]
   local bench=$1 src=$2 png_mode=${3:-normal}
   python3 - "$bench" "$src" "$ROOT" "$png_mode" <<'PY'
@@ -2288,6 +2405,7 @@ printf '%s\n' "$value"
     }, indent=2, sort_keys=True) + "\n")
 PY
   [ -z "$RESTORE_MECHANISM" ] || write_restore_confinement "$bench"
+  bind_scoring_fixture "$bench"
 }
 
 BENCH="$TMP_ROOT/archive"
@@ -2321,6 +2439,7 @@ for name, document in documents.items():
     payload = json.dumps(document).encode()
     (sample / name).write_bytes(payload)
     manifest["files"][name] = hashlib.sha256(payload).hexdigest()
+manifest["evaluator_rerun"]["result_hash"] = manifest["files"]["capture.json"]
 (sample / "manifest.json").write_text(json.dumps(manifest))
 PY
   out=$(run_gate "$BENCH" archive-verify) && status=0 || status=$?
@@ -2837,6 +2956,7 @@ genuine = (
 record["evaluator_rerun"]["result_hash"] = hashlib.sha256(genuine).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) || fail "real benchmark content must support dependence proof: $out"
 assert_contains "$out" "work.ts proven by its declared form-preserving perturbation" \
   "a normalized TypeScript declaration proves dependence"
@@ -2890,6 +3010,7 @@ record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
 record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b"metadata\n").hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "candidate metadata cannot reveal which differential input was perturbed"
 assert_contains "$out" "ignored declared scored input work.json" \
@@ -2924,6 +3045,7 @@ record["evaluator_rerun"]["input_perturbations"] = {
 record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b"genuine\n").hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "input byte length cannot identify the differential role"
 assert_contains "$out" "ignored declared scored input work-number.json" \
@@ -2952,6 +3074,7 @@ record["evaluator_rerun"]["input_perturbations"] = {
 record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b'{"value":true}\n').hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "a length-changing declared perturbation is refused"
 assert_contains "$out" "cannot preserve its serialized byte length" \
@@ -2982,6 +3105,7 @@ record["evaluator_rerun"]["result_hash"] = hashlib.sha256(
 ).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) || fail "a scored input may share a name with an execution role: $out"
 assert_contains "$out" "genuine proven by its declared form-preserving perturbation" \
   "candidate paths cannot collide with differential execution roles"
@@ -3015,6 +3139,7 @@ record["evaluator_rerun"]["input_perturbations"] = {
 record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b"genuine\n").hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "PNG chunk layout cannot identify the differential role"
 assert_contains "$out" "does not match" \
@@ -3045,6 +3170,7 @@ record["evaluator_rerun"]["result_hash"] = hashlib.sha256(
 ).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "a perturbation that changes a path outside its declaration is refused"
 assert_contains "$out" "differ outside the declared perturbation" \
@@ -3069,6 +3195,7 @@ record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
 record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b"").hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "per-run evaluator state cannot impersonate scored-input dependence"
 assert_contains "$out" "ignored declared scored input work.json" \
@@ -3100,6 +3227,7 @@ record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
 record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b"blind\n").hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "run paths and environments cannot reveal differential roles"
 assert_contains "$out" "ignored declared scored input work.json" \
@@ -3130,6 +3258,7 @@ record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
 record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b"genuine\n").hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "recognising an old perturbation marker cannot impersonate evaluation"
 assert_contains "$out" "ignored declared scored input work.json" \
@@ -3160,6 +3289,7 @@ record["evaluator_rerun"]["result_hash"] = hashlib.sha256(
 ).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "an evaluator with no perturbable scored input is refused"
 assert_contains "$out" "must declare at least one supported form-preserving scored-input perturbation" \
@@ -3334,8 +3464,10 @@ printf '%s\n' \"$value\"
 """)
 scoring.chmod(0o755)
 record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256((record["sample"] + "\n").encode()).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "a rejected form-preserving perturbation is inconclusive"
 assert_contains "$out" "was inconclusive because the declared form-preserving input" \
@@ -3370,8 +3502,10 @@ printf '%s\\n' \"$value\"
 """)
 scoring.chmod(0o755)
 record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256((record["sample"] + "\n").encode()).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "a perturbed archived evaluator that fails is refused"
 assert_contains "$out" "was inconclusive because the declared form-preserving input" \
@@ -3404,6 +3538,7 @@ record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
 record["evaluator_rerun"]["result_hash"] = hashlib.sha256((record["sample"] + "\nscratch\n").encode()).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) || fail "an evaluator that writes scratch output must not dirty its archive: $out"
 assert_contains "$out" "evaluator_dependence ok proven" "the scratch-writing evaluator ran against both restored candidates"
 first_sample=$(find "$BENCH/archive" -mindepth 1 -maxdepth 1 -type d | sort | head -n 1)
@@ -3428,8 +3563,10 @@ scoring.chmod(0o755)
 manifest = sample / "manifest.json"
 record = json.loads(manifest.read_text())
 record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256((record["sample"] + "\n").encode()).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) || fail "the confined evaluator must not reach the certified archive: $out"
 dirty_sample=$(find "$BENCH/archive" -mindepth 1 -maxdepth 1 -type d | sort | head -n 1)
 assert_absent "$dirty_sample/archive-dirty.txt" \
@@ -3453,8 +3590,10 @@ record = json.loads(manifest.read_text())
 record["files"][scoring.name] = hashlib.sha256(scoring.read_bytes()).hexdigest()
 record["groups"]["capture_and_scoring"].append(scoring.name)
 record["evaluator_rerun"]["argv"] = [scoring.name]
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256((record["sample"] + "\n").encode()).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+bind_scoring_fixture "$BENCH" first
 stability_out="$TMP_ROOT/archive-stability.out"
 run_gate "$BENCH" restore-drill >"$stability_out" 2>&1 &
 stability_pid=$!
@@ -3533,7 +3672,7 @@ p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "a rerun whose archived evaluator result drifts is refused"
-assert_contains "$out" "archived evaluator result hash" "the drill executes the evaluator instead of trusting its declared hash"
+assert_contains "$out" "not bound to the archived evaluator result" "the drill rejects a declaration detached from consumed measurements"
 assert_absent "$BENCH/archive/restore-drill.json" "a failed evaluator rerun writes no cleanup receipt"
 pass "every archive must rerun its evaluator before cleanup"
 
@@ -3658,6 +3797,7 @@ def write(
                     "status": status, "supersedes": supersedes},
         "groups": {"failure_and_timing": ["timing.json"]} if status == "void" else {},
         "files": files,
+        "evaluator_rerun": {"result_hash": files.get("capture.json")},
         "tree_binding": {"original_tree": tree} if status == "scored" else {},
     }, indent=2, sort_keys=True) + "\n")
     (out / f"{slug}.json").write_text(json.dumps({
@@ -3766,6 +3906,26 @@ assert_contains "$out" "standing route eligible" "a sweep with margin is eligibl
 assert_contains "$out" "subject to the captain's explicit word" "promotion still needs the captain"
 assert_contains "$out" "no benchmark candidate ships directly" "the no-direct-ship rule is restated at the verdict"
 pass "a six-of-six sweep with margin and no regression is the only promotable result"
+
+BENCH="$TMP_ROOT/promote-detached-measurement"
+write_plan "$BENCH"
+write_results "$BENCH" sweep
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+path = sample / "capture.json"
+capture = json.loads(path.read_text())
+capture["deterministic"] = 9.5
+path.write_text(json.dumps(capture))
+manifest_path = sample / "manifest.json"
+manifest = json.loads(manifest_path.read_text())
+manifest["files"]["capture.json"] = hashlib.sha256(path.read_bytes()).hexdigest()
+manifest_path.write_text(json.dumps(manifest))
+PY
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "editing content-addressed scores cannot change promotion without evaluator output"
+assert_contains "$out" "not bound to the archived evaluator result" "promotion uses the replay-bound measurement result"
 
 BENCH="$TMP_ROOT/promote-edited-margin"
 write_plan "$BENCH"

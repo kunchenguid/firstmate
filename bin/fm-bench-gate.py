@@ -1927,7 +1927,7 @@ def check_evaluator(
     weights = check_evaluator_score_map(base, report)
     check_evaluator_determinism(base, report)
     check_evaluator_mutations(base, weights, report)
-    check_evaluator_captures(base, plan, expected_captures, report)
+    check_evaluator_captures(base, report)
     if execute:
         check_evaluator_execution(root, base, report, timeout)
 
@@ -1964,7 +1964,7 @@ def validate_measurement_fixture(fixture: Any, record_name: str) -> None:
             if not isinstance(checks, list) or not checks or any(type(value) is not bool for value in checks):
                 raise GateError("raw check outcomes must be nonempty boolean arrays")
     elif group == "captures":
-        fields = {"entrant", "packet", "original_sha", "original_tree", "neutral_sha", "neutral_tree", "base_tree", "patch_hash"}
+        fields = {"calibration_id", "original_sha", "original_tree", "neutral_sha", "neutral_tree", "base_tree", "patch_hash"}
         if set(fixture) != fields or any(not nonempty_str(value) for value in fixture.values()):
             raise GateError("capture fixture must contain source identities, never a derived result hash")
     else:
@@ -2582,16 +2582,16 @@ def check_evaluator_mutations(base: Path, weights: dict[str, Any] | None, report
     )
 
 
-def check_evaluator_captures(base: Path, plan: dict[str, Any], expected: int, report: Report) -> None:
+def check_evaluator_captures(base: Path, report: Report) -> None:
     directory = base / "captures"
     records = sorted(directory.glob("*.json")) if directory.is_dir() else []
     report.require(
-        len(records) == expected,
+        len(records) > 0,
         "evaluator.capture_count",
-        f"{len(records)} capture records, one per candidate head",
-        f"expected {expected} capture records bound to candidate heads, found {len(records)}",
+        f"{len(records)} calibration capture records",
+        "at least one pre-launch calibration capture is required",
     )
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     trees: set[str] = set()
     for path in records:
         check = f"evaluator.capture.{path.stem}"
@@ -2603,8 +2603,7 @@ def check_evaluator_captures(base: Path, plan: dict[str, Any], expected: int, re
         missing = [
             key
             for key in (
-                "entrant",
-                "packet",
+                "calibration_id",
                 "original_sha",
                 "original_tree",
                 "neutral_sha",
@@ -2621,46 +2620,22 @@ def check_evaluator_captures(base: Path, plan: dict[str, Any], expected: int, re
         if record.get("original_tree") != record.get("neutral_tree"):
             report.fail(check, "neutralisation changed the tree; capture and judging would bind different objects")
             continue
-        key = (str(record.get("entrant")), str(record.get("packet")))
+        if "entrant" in record or "packet" in record:
+            report.fail(check, "pre-launch captures must identify calibration fixtures, not candidate results")
+            continue
+        key = str(record["calibration_id"])
         if key in seen:
-            report.fail(check, f"a second capture record claims {key[0]} on {key[1]}")
+            report.fail(check, f"a second capture record claims calibration {key}")
             continue
         seen.add(key)
         trees.add(str(record.get("original_tree")))
-        report.ok(check, f"{key[0]} on {key[1]} bound to tree {str(record.get('original_tree'))[:12]}")
+        report.ok(check, f"calibration {key} bound to tree {str(record.get('original_tree'))[:12]}")
     report.require(
         len(trees) == len(seen) if seen else False,
         "evaluator.capture_binding",
-        f"{len(trees)} distinct candidate trees carry {len(seen)} independent results",
-        "capture records share a candidate tree; each head needs its own bound result",
+        f"{len(trees)} distinct calibration trees carry {len(seen)} independent results",
+        "calibration records share a reference tree; each fixture needs its own bound result",
     )
-    planned = {
-        (str(entrant.get("name", "")), str(packet.get("id", "")))
-        for track in (plan.get("tracks") or {}).values()
-        if isinstance(track, dict) and track.get("capture_required") is True
-        for entrant in as_sequence(track.get("entrants"))
-        if isinstance(entrant, dict)
-        for packet in (track.get("packets") or [])
-        if isinstance(packet, dict)
-    }
-    missing = sorted(planned - seen)
-    unexpected = sorted(seen - planned)
-    render = lambda pairs: ", ".join(f"{entrant} on {packet}" for entrant, packet in pairs)
-    report.require(
-        not missing and not unexpected,
-        "evaluator.capture_scope",
-        f"capture records exactly cover all {len(planned)} planned candidate heads",
-        "capture records do not match planned candidate heads: "
-        + "; ".join(
-            part
-            for part in (
-                f"missing {render(missing)}" if missing else "",
-                f"unexpected {render(unexpected)}" if unexpected else "",
-            )
-            if part
-        ),
-    )
-
 
 # --------------------------------------------------------------------------
 # Archive, restore drill, and cleanup: correction 8. Cleanup is authorised only
@@ -2838,6 +2813,27 @@ def check_result_plan_binding(root: Path, plan: dict[str, Any], report: Report) 
                        "plan differs from its frozen or passing preflight binding")
     except GateError as exc:
         report.fail("results.plan_binding", str(exc))
+
+
+def load_archived_measurements(sample: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    files = as_object(manifest.get("files"))
+    rerun = manifest.get("evaluator_rerun")
+    if not isinstance(rerun, dict):
+        raise GateError("archive manifest has no deterministic evaluator rerun")
+    if not isinstance(rerun.get("result_hash"), str) or re.fullmatch(r"[0-9a-f]{64}", rerun["result_hash"]) is None:
+        raise GateError("archived evaluator result_hash must be a sha256 digest")
+    path = sample / "capture.json"
+    if not is_within(path.resolve(), sample.resolve()) or not stat.S_ISREG(path.lstat().st_mode):
+        raise GateError("archived measurement result must be a contained regular file")
+    digest = sha256_file(path)
+    if files.get("capture.json") != digest or rerun.get("result_hash") != digest:
+        raise GateError("promotion measurements are not bound to the archived evaluator result")
+    capture = load_json(path)
+    if not isinstance(capture.get("capture_hash"), str) or re.fullmatch(r"[0-9a-f]{64}", capture["capture_hash"]) is None:
+        raise GateError("archived capture hash must be a SHA256 digest")
+    if capture.get("tree") != as_object(manifest.get("tree_binding")).get("original_tree"):
+        raise GateError("archived measurement result names a different candidate tree")
+    return capture
 
 
 def validate_attempt_failure(
@@ -3127,7 +3123,7 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             continue
         failure = timing.get("failure")
         try:
-            capture = load_json(sample / "capture.json")
+            capture = load_archived_measurements(sample, record)
             judging = load_json(sample / "judging.json")
             validate_attempt_failure(plan, failure, "scored", capture.get("deterministic"), judging.get("scores"))
         except GateError as exc:
@@ -3217,6 +3213,10 @@ def validate_archived_evaluator_declaration(
     record: dict[str, Any],
     restored_tree: Path,
 ) -> tuple[dict[str, Any] | None, str]:
+    try:
+        load_archived_measurements(sample, record)
+    except (GateError, OSError) as exc:
+        return None, str(exc)
     rerun = record.get("evaluator_rerun")
     if not isinstance(rerun, dict):
         return None, "archive manifest has no deterministic evaluator rerun"
@@ -4260,7 +4260,11 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
             )
             continue
         judging = evidence_parts["judging.json"]
-        evaluator = evidence_parts["capture.json"]
+        try:
+            evaluator = load_archived_measurements(sample, manifest)
+        except (GateError, OSError) as exc:
+            report.fail("promote.evidence", f"{path.name}: {exc}")
+            continue
         panel = judging.get("panel")
         scores = judging.get("scores")
         valid_scores = (
@@ -4895,8 +4899,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Evaluator input fixtures use exactly: determinism={head,reference_pixels,observed_pixels,violations}, "
             "with equal-length hexadecimal pixel buffers and violation severity strings; "
             "mutations={dimension,before_checks,after_checks}, with dimension-keyed boolean check arrays; "
-            "captures={entrant,packet,original_sha,original_tree,neutral_sha,neutral_tree,base_tree,patch_hash}. "
-            "Expected measurements, scores, deltas, and result hashes belong only in expected outputs."
+            "captures={calibration_id,original_sha,original_tree,neutral_sha,neutral_tree,base_tree,patch_hash}. "
+            "Expected measurements, scores, deltas, and result hashes belong only in expected outputs. "
+            "Preflight captures are calibration fixtures, not planned candidate results. "
+            "Archived capture.json is the complete evaluator stdout JSON with deterministic, tree, and "
+            "capture_hash fields; its content address must equal evaluator_rerun.result_hash."
         ),
     )
     parser.add_argument("--bench", help="benchmark directory (default: $FM_BENCH_ROOT)")

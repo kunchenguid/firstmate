@@ -128,7 +128,7 @@ scrubbed_env() {
     "BENCH_PRIVATE_SESSION=${BENCH_PRIVATE_SESSION:-${ALLOW[0]}}" \
     "PROCESS_INSPECTION_MARKER_FILE=${PROCESS_INSPECTION_MARKER_FILE:-}" \
     "LANG=${LANG:-C.UTF-8}" \
-    "TERM=dumb"
+    "TERM=$([ "$PURPOSE" = entrant ] && printf '%s' "${TERM:-xterm-256color}" || printf dumb)"
 }
 
 case "$MECHANISM" in
@@ -142,7 +142,10 @@ case "$MECHANISM" in
         || { echo "error: provider-only network is unavailable" >&2; exit 2; }
       [ "$topology" = "true $PROVIDER_PROXY_CONTAINER " ] \
         || { echo "error: provider-only network must be internal and contain only $PROVIDER_PROXY_CONTAINER" >&2; exit 2; }
-      args=(run --rm --network "$PROVIDER_NETWORK")
+      args=(run --rm --interactive --network "$PROVIDER_NETWORK")
+      if [ -t 0 ] && [ -t 1 ]; then
+        args+=(--tty)
+      fi
     else
       args=(run --rm --network none)
     fi

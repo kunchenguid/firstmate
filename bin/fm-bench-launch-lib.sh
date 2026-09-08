@@ -118,7 +118,7 @@ fm_bench_wrap_entrant_launch() {  # <task-id> <worktree> <shell-command>
     return 1
   fi
   wrapped=$(python3 - "$root/isolation.json" "$id" "$worktree" "$command" \
-    "$harness" "$model" "$effort" "$raw" "$kind" "${9-}" "${10-}" "${11-}" "${12-}" "${13-}" <<'PY'
+    "$harness" "$model" "$effort" "$raw" "$kind" "${9-}" "${10-}" "${11-}" "${12-}" "${13-}" "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" <<'PY'
 import json
 import os
 import shlex
@@ -126,7 +126,7 @@ import shutil
 import sys
 from pathlib import Path
 
-path, entrant_id, worktree, command, harness, model, effort, raw, kind, brief, code_root, state, turnend, binary = sys.argv[1:]
+path, entrant_id, worktree, command, harness, model, effort, raw, kind, brief, code_root, state, turnend, binary, library = sys.argv[1:]
 try:
     record = json.loads(Path(path).read_text(encoding="utf-8"))
 except (OSError, json.JSONDecodeError) as exc:
@@ -237,7 +237,11 @@ if brief:
         shutil.rmtree(stage)
         raise
 env = [f"BENCH_PRIVATE_ROOT={declared_root}", f"BENCH_PRIVATE_OBJECT_STORE={private['private_object_store']}", f"BENCH_PRIVATE_TMP={private['private_tmp']}", f"BENCH_PRIVATE_HOME={private['private_home']}", f"BENCH_PRIVATE_SESSION={private['private_session']}"]
-print(" ".join(shlex.quote(item) for item in ["env", *env, *argv, "/bin/sh", "-lc", command]))
+launch = ["env", *env, *argv, "/bin/sh", "-lc", command]
+if brief:
+    launch = ["python3", str(Path(library) / "fm-bench-lifecycle.py"), str(staged_state),
+              str(Path(state).resolve()), entrant_id, str(Path(library) / "fm-busy-event.sh"), "--", *launch]
+print(" ".join(shlex.quote(item) for item in launch))
 PY
 ) || {
     echo "error: benchmark entrant $id cannot use its preflight-proven confinement; launch refused" >&2
