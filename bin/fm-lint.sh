@@ -368,6 +368,10 @@ fm_lint_run_one_file() {  # <mem-kb> <timeout-s> <output-file> <path> -- <shellc
       rm -f "$current" "$fallback_current"
       return "$fallback_rc"
     fi
+    rc=$fallback_rc
+    timed_out=$fallback_timed_out
+    : > "$current"
+    cat "$fallback_current" >> "$current"
     rm -f "$fallback_current"
   fi
 
