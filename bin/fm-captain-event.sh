@@ -26,20 +26,25 @@
 #     refuses.  seq is a gap-free, monotonically increasing home-local integer.
 #   - Every operation validates the complete journal, including canonical JSON,
 #     exact keys, bounds, event identity, duplicate ids, and sequence ordering.
-#     A malformed, gapped, reordered, duplicate, unterminated, insecure, or
-#     oversized record stops the operation before a cursor or event can advance.
+#     Records are separated and terminated only by LF; CRLF, bare CR, Unicode
+#     separators, and any other malformed ending are invalid.  A malformed,
+#     gapped, reordered, duplicate, unterminated, insecure, or oversized record
+#     stops the operation before a cursor or event can advance.
 #   - Publication is serialized by a private advisory lock.  A complete next
 #     journal is fsync'd and atomically renamed, so a crash exposes either the
 #     old journal or its exact old-byte-prefix successor, never a torn append.
 #     Before that rename, the exact assigned event is atomically retained under
 #     pending/.  append and recover finish a valid pending publication; read and
 #     validate remain non-destructive and refuse while recovery is owed.
-#   - summary is inert single-line text: ANSI/control characters are removed,
-#     whitespace is collapsed, high-confidence credential shapes are redacted,
-#     and the result is capped at 600 Unicode codepoints.  One serialized event,
+#   - summary is inert single-line text: ANSI/control characters are removed and
+#     whitespace is collapsed.  At the first direct or append-style environment
+#     assignment marker, the safe prefix is retained, one [REDACTED] marker is
+#     emitted, and the remaining text is discarded without parsing shell syntax;
+#     bare URI userinfo and other high-confidence credential shapes are redacted.
+#     The result is capped at 600 Unicode codepoints.  One serialized event,
 #     including its terminating newline, is capped at 8192 bytes.  No prompt,
-#     reasoning, tool argument/result, terminal, environment, credential field,
-#     or arbitrary reference key exists in the schema.
+#     reasoning, tool argument/result, terminal, environment value, credential
+#     field, or arbitrary reference key exists in the schema.
 #   - read --after is stateless: it validates the complete journal, prints only
 #     rows with seq greater than the caller's cursor (up to --limit), and writes
 #     no consumer cursor.  Every consumer owns its cursor and payload-hash ledger

@@ -38,7 +38,8 @@ Those fields answer which semantic source event this is; kind, summary, timestam
 A retry with the same identity and payload returns the original sequence without touching journal bytes.
 The same identity with a different payload is a conflict and stops publication.
 
-The summary is normalized Unicode, stripped of ANSI and control characters, collapsed to one line, scrubbed for high-confidence credential shapes, and capped at 600 codepoints.
+The summary is normalized Unicode, stripped of ANSI and control characters, collapsed to one line, conservatively cut off at any direct or append-style environment assignment, scrubbed for bare URI userinfo and other high-confidence credential shapes, and capped at 600 codepoints.
+The command header linked above owns the exact sanitizer contract.
 The complete canonical event including its newline is capped at 8 KiB.
 Consumers must render `summary` as inert text and make links only from the structured `refs` allowlist.
 The current reference keys are `pr_url`, `report_id`, `report_path`, and `branch_outcome_seq`; unknown keys are corruption, not future-looking passthrough data.
@@ -51,7 +52,8 @@ Reaching that ceiling stops publication and requires an explicit future retentio
 ## Atomic publication and recovery
 
 The outbox lives under mode-`0700` `state/captain-events/` with a mode-`0600` journal, lock, pending records, and consumer acknowledgements.
-Every operation validates the complete journal as canonical UTF-8 JSONL with exact keys, matching event hashes, unique identities, gap-free sequence order, hard field bounds, and a terminating newline.
+Every operation validates the complete journal as canonical UTF-8 JSONL with LF-only record separation and termination, exact keys, matching event hashes, unique identities, gap-free sequence order, and hard field bounds.
+CRLF, bare CR, Unicode line separators, and malformed endings are rejected before any accepted prefix can be normalized or rewritten.
 Symlinks, hard-linked files, permissive private paths, malformed pending state, and unknown private entries are refused.
 
 A publisher holds the home-local lock while assigning the next sequence.
