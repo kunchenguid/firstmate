@@ -142,11 +142,11 @@ long=$(python3 - <<'PY'
 print("🧭" * 700)
 PY
 )
-primary_args pi:bounded $'\033[31mLine one\033[0m\nLine two token=supersecretvalue AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DATABASE_URL=postgres://alice:hunter2@db.example/prod ordinary prose '
+primary_args pi:bounded $'\033[31mLine one\033[0m\nLine two token=supersecretvalue AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY database_url=postgres://alice:hunter2@db.example/prod ordinary prose '
 PRIMARY_ARGS+=(--summary-truncated true --ref pr_url=https://example.test/pull/7 --ref report_id=soak-report --ref report_path=data/soak-report/report.md --ref branch_outcome_seq=9)
 # Replace the summary argument with a value that exercises both redaction and
 # the Unicode cap without risking shell byte slicing.
-PRIMARY_ARGS[15]=$'\033[31mLine one\033[0m\nLine two \u202etoken=supersecretvalue AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DATABASE_URL=postgres://alice:hunter2@db.example/prod ordinary prose '"$long"
+PRIMARY_ARGS[15]=$'\033[31mLine one\033[0m\nLine two \u202etoken=supersecretvalue AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY database_url=postgres://alice:hunter2@db.example/prod ordinary prose '"$long"
 FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "bounded append failed"
 row=$(FM_HOME="$home" "$OUTBOX" read --after 0)
 printf '%s\n' "$row" | jq -e '
@@ -183,6 +183,8 @@ for unsafe_url in \
   'https://user:password@example.test/pull/7' \
   'https://example.test/pull/7?access_token=supersecretvalue' \
   'https://example.test/pull/7#access_token=supersecretvalue' \
+  'https://example.test/pull/7/access_token=supersecretvalue' \
+  'https://example.test/pull/7/access_token%3Dsupersecretvalue' \
   'https://example.test/pull/7?' \
   'https://example.test/pull/7#'; do
   primary_args "pi:unsafe-url-$RANDOM" bad
@@ -386,7 +388,7 @@ installCaptainEventPublisher(pi, {
 });
 const message = {
   role: "assistant",
-  content: [{ type: "text", text: "Ordinary prose AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DATABASE_URL=postgres://alice:hunter2@db.example/prod remains" }],
+  content: [{ type: "text", text: "Ordinary prose AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY database_url=postgres://alice:hunter2@db.example/prod remains" }],
   stopReason: "stop",
   timestamp: 1,
 };
