@@ -124,7 +124,7 @@ fm_procevent_owner_lease_path() {  # <state-root>
   printf '%s/.owner-lease\n' "$(fm_procevent_registry_dir "$1")"
 }
 
-# Record that an owning session touched this home's process-event state. Best
+# Record owner-presence activity in this home's process-event state. Best
 # effort by design: a home with no registry directory yet owns no runner.
 fm_procevent_owner_lease_touch() {  # <state-root>
   local reg lease tmp now
@@ -158,7 +158,7 @@ fm_procevent_owner_lease_age() {  # <state-root>
   ' "$value"
 }
 
-# How long a runner keeps going with no sign of its owning session. The default
+# How long a runner keeps going with no activity in its owning home. The default
 # is forty watcher cycles at the default poll interval, so an ordinary busy or
 # briefly wedged home never trips it, while a home that is simply gone stops
 # owning processes within the hour rather than within a day.
@@ -292,7 +292,7 @@ fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-ide
   return 0
 }
 
-# True while the owning session is provably still there.
+# True while the owning home is provably still active.
 fm_procevent_owner_alive() {  # <state-root> <lease-seconds>
   local age
   age=$(fm_procevent_owner_lease_age "$1") || return 1

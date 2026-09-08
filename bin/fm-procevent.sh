@@ -656,9 +656,9 @@ require_isolated_group() {  # <role>
 
 require_runner_group() { require_isolated_group runner; }
 
-# Record that an owning session is still here. Skipped under the inherited
+# Record owner-presence activity for this home. Skipped under the inherited
 # FM_PROCEVENT_IN_RUNNER marker, so a runner and its ordinary children do not
-# keep refreshing their own owner's lease and outlive the session that armed it.
+# keep refreshing their own lease after the home goes away.
 # Confused-agent-grade: a source that deliberately unsets the marker can still
 # refresh, and that is out of scope (see docs/configuration.md).
 owner_lease_refresh() {
