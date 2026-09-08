@@ -310,8 +310,9 @@ test_primary_pipeline_drive_is_denied_without_blocking_workers() {
   chmod +x "$primary/bin/fm-arm-pretool-check.sh" "$primary/bin/fm-arm-command-policy.mjs"
   printf '# fixture\n' > "$primary/AGENTS.md"
   printf 'fixture-secondmate\n' > "$primary/.fm-secondmate-home"
+  printf '%s\n' 'no-mistakes axi respond --action fix' > "$primary/drive.sh"
   git -C "$primary" init -q
-  git -C "$primary" add AGENTS.md .fm-secondmate-home bin
+  git -C "$primary" add AGENTS.md .fm-secondmate-home drive.sh bin
   git -C "$primary" -c user.name=test -c user.email=test@example.com commit -qm fixture
   git -C "$primary" worktree add -q --detach "$worker"
   git -C "$worker" checkout -qb fm/fixture-worker
@@ -426,6 +427,7 @@ EOF
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done' \
     'set -- no-mistakes axi respond; "$@" --action fix' \
+    'bash ./drive.sh' \
     "$heredoc_payload" \
     "$alternate_heredoc_payload" \
     "$process_source_payload" \
@@ -486,6 +488,7 @@ EOF
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done' \
     'set -- no-mistakes axi respond; "$@" --action fix' \
+    'bash ./drive.sh' \
     "$heredoc_payload" \
     "$alternate_heredoc_payload" \
     "$process_source_payload" \
@@ -526,6 +529,8 @@ EOF
     || fail "the primary must retain read-only pipeline status"
   FM_HOME="$primary" "$check" --command "source <(echo 'no-mistakes axi status')" >/dev/null 2>&1 \
     || fail "sourced process output must retain read-only pipeline status"
+  FM_HOME="$primary" "$check" --command "source <(printf '%s\\n' 'no-mistakes axi status')" >/dev/null 2>&1 \
+    || fail "printf-sourced process output must retain read-only pipeline status"
   FM_HOME="$primary" "$check" --command "source <(echo 'no-mistakes axi respond' >&2)" >/dev/null 2>&1 \
     || fail "sourced empty stdout must remain allowed"
   FM_HOME="$primary" "$check" --command "bash -c -- 'no-mistakes axi status'" >/dev/null 2>&1 \

@@ -161,7 +161,7 @@ case "$CMD" in
   *"\$'"*|*'$"'*) ;;
   *)
     case "$PREFILTER" in
-      *fm-watch*|*no-mistakes*) ;;
+      *fm-watch*|*no-mistakes*|*sh\ *) ;;
       *) exit 0 ;;
     esac
     ;;

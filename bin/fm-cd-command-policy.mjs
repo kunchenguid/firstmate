@@ -82,7 +82,8 @@ function decision(command) {
     // commandPosition ignores subshell/brace groups, quoted data, comments, and
     // substitutions (they contribute no top-level command word), and skips
     // leading assignments and wrappers to find the executed command word.
-    const position = commandPosition(nodes[index]);
+    const firstWord = nodes[index].find((token) => token.type === "word")?.value || "";
+    const position = commandPosition(nodes[index], new Map(), ["if", "elif", "while", "until", "!"].includes(firstWord));
     if (hasPathQualifiedCommandPrefix(position)) continue;
     if (hasCommandQueryPrefix(position)) continue;
     let command = position.command;

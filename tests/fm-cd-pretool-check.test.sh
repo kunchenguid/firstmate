@@ -148,6 +148,7 @@ matrix_case A37 allow 'coproc cd projects/foo'
 matrix_case A38 allow '/usr/bin/time -l cd projects/foo'
 matrix_case A39 allow 'command time cd projects/foo'
 matrix_case A40 allow 'nice cd projects/foo'
+matrix_case A41 allow 'if false; then cd projects/foo; fi'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-cd-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")

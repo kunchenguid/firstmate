@@ -14,7 +14,7 @@
 // runs only when this module is invoked directly, never on import.
 
 import path from "node:path";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const REASONS = {
@@ -568,7 +568,7 @@ function consumeWrapperOptions(name, words, index) {
 const CONTROL_COMMAND_PREFIXES = new Set(["if", "then", "elif", "else", "while", "until", "do", "!"]);
 const COPROC_COMMAND_WORDS = new Set(["bash", "caffeinate", "command", "env", "exec", "gtimeout", "nice", "nohup", "no-mistakes", "sh", "sudo", "time", "timeout", "zsh"]);
 
-export function commandPosition(tokens, knownVariables = new Map()) {
+export function commandPosition(tokens, knownVariables = new Map(), stripControlPrefixes = false) {
   const words = wordsInNode(tokens);
   let index = 0;
   let prefixAssignments = 0;
@@ -578,7 +578,7 @@ export function commandPosition(tokens, knownVariables = new Map()) {
       index += 1;
       continue;
     }
-    if (CONTROL_COMMAND_PREFIXES.has(words[index].value) && !words[index].quoted) {
+    if (stripControlPrefixes && CONTROL_COMMAND_PREFIXES.has(words[index].value) && !words[index].quoted) {
       index += 1;
       continue;
     }
@@ -692,6 +692,22 @@ function shellInvocation(position, context) {
   return { kind: "stdin", payload: null };
 }
 
+function shellScriptPayload(position, context) {
+  const shell = shellInvocation(position, context);
+  if (shell?.kind !== "script") return null;
+  const resolved = resolveKnownWord(shell.payload, context.knownVariables);
+  if (!resolved) return null;
+  const candidate = path.resolve(context.root, resolved);
+  const relative = path.relative(context.root, candidate);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  try {
+    const payload = readFileSync(candidate, "utf8");
+    return payload.length <= 262144 ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
 function scriptInputFd(position, context) {
   if (shellInvocation(position, context)?.kind === "stdin") return 0;
   const script = sourcedScript(position);
@@ -735,10 +751,13 @@ function sourcedProcessIsSafe(position) {
   const program = splitProgram(lexed.tokens);
   if (program.nodes.length !== 1 || program.separators.length !== 0) return false;
   const words = wordsInNode(program.nodes[0]);
-  if (words.length !== 2 || words.some((word) => !word.literal || word.subs.length > 0) || words[0].value !== "echo") return false;
+  if (words.some((word) => !word.literal || word.subs.length > 0)) return false;
+  const echoPayload = words.length === 2 && words[0].value === "echo" ? words[1].value : null;
+  const printfPayload = words.length === 3 && words[0].value === "printf" && words[1].value === "%s\\n" ? words[2].value : null;
+  if (echoPayload === null && printfPayload === null) return false;
   if (/(?:^|\s)(?:1)?>&2\s*$/.test(content)) return true;
   return !program.nodes[0].some((token) => token.type === "redir") &&
-    /^no-mistakes\s+axi\s+(?:status|abort)\b/.test(words[1].value);
+    /^no-mistakes\s+axi\s+(?:status|abort)\b/.test(echoPayload || printfPayload);
 }
 
 function wordReferencesAny(word, names) {
@@ -1046,7 +1065,7 @@ function analyzeProgram(command, context, depth = 0) {
   for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
     const tokens = program.nodes[nodeIndex];
     const precedingSeparator = nodeIndex > 0 ? program.separators[nodeIndex - 1] : "";
-    const position = commandPosition(tokens, activeContext.knownVariables);
+    const position = commandPosition(tokens, activeContext.knownVariables, true);
     const firstName = basename(position.words[0]?.value || "");
     if (precedingSeparator === ";;" && caseBindings.length > 0) {
       const branch = caseBindings.at(-1);
@@ -1152,6 +1171,7 @@ function analyzeProgram(command, context, depth = 0) {
     const shellScript = shell?.kind === "script" ? shell.payload : null;
     const sourceScript = sourcedScript(position);
     const sourceProcessSafe = sourcedProcessIsSafe(position);
+    const shellFilePayload = shellScriptPayload(position, nodeContext);
     const resolvedEvalPayload = evalPayload(position, nodeContext);
     const heredocPayloads = shellHeredocPayloads(tokens, position, nodeContext);
     const hereStringPayloads = shellHereStringPayloads(tokens, position, nodeContext);
@@ -1185,7 +1205,7 @@ function analyzeProgram(command, context, depth = 0) {
         unresolvedExecutionPayloadMentionsPipelineDrive(position.words.slice(position.index + 1))) {
       pipelineDrive = true;
     }
-    for (const payload of [resolvedEvalPayload, ...heredocPayloads, ...hereStringPayloads]) {
+    for (const payload of [resolvedEvalPayload, shellFilePayload, ...heredocPayloads, ...hereStringPayloads]) {
       if (payload === null) continue;
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
