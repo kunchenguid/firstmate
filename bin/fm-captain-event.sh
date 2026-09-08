@@ -145,7 +145,8 @@ CREDENTIAL_LABEL_CANDIDATE_RE = re.compile(
     r'(?:(?:"([A-Za-z0-9](?:[A-Za-z0-9 _-]{0,126}[A-Za-z0-9])?)")|'
     r'(?:(?<![A-Za-z0-9_-])([A-Za-z0-9](?:[A-Za-z0-9 _-]{0,126}[A-Za-z0-9])?)))\s*:\s*'
 )
-CREDENTIAL_LABEL_TERMS = {"secret", "password", "passwd", "passphrase", "token", "authorization", "auth"}
+CREDENTIAL_LABEL_TERMS = {"secret", "password", "passwd", "passphrase", "pwd", "token", "authorization", "auth"}
+CREDENTIAL_LABEL_SUFFIXES = ("secret", "password", "passphrase", "passwd", "pwd", "token")
 CREDENTIAL_KEY_PREFIXES = {"access", "private", "api"}
 CREDENTIAL_LABEL_COMPOUNDS = {
     "clientsecret", "clienttoken", "accesstoken", "accesskey", "secretkey",
@@ -312,12 +313,13 @@ def redact_credential_labels(value):
         segments = [segment for segment in re.split(r"[ _-]+", label.lower()) if segment]
         collapsed = "".join(segments)
         has_term = any(segment in CREDENTIAL_LABEL_TERMS for segment in segments)
+        has_suffix = any(collapsed.endswith(suffix) for suffix in CREDENTIAL_LABEL_SUFFIXES)
         has_key_term = any(
             segment in CREDENTIAL_KEY_PREFIXES and index + 1 < len(segments) and segments[index + 1] == "key"
             for index, segment in enumerate(segments)
         )
         has_compound = any(compound in collapsed for compound in CREDENTIAL_LABEL_COMPOUNDS)
-        if has_term or has_key_term or has_compound:
+        if has_term or has_suffix or has_key_term or has_compound:
             return value[:match.start()] + "[REDACTED]"
     return value
 

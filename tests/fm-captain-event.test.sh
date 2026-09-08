@@ -207,6 +207,8 @@ credential_label_cases=(
   'azure_ad_client_secret: privatevalue visible suffix'
   'platform-prod_service_AcCeSs-kEy: privatevalue visible suffix'
   'one_two-THREE_PaSsPhRaSe: privatevalue visible suffix'
+  'namespace_client_password: privatevalue visible suffix'
+  'namespace-client_PwD: privatevalue visible suffix'
 )
 for credential_label_case in "${credential_label_cases[@]}"; do
   primary_args "pi:credential-label-$after" "Prefix; $credential_label_case"
@@ -229,6 +231,11 @@ quoted_credential_label_cases=(
   '{"authToken":"privatevalue"} visible suffix'
   '{"refreshToken":"privatevalue"} visible suffix'
   '{"AzUrEAdClIeNtSeCrEt":"privatevalue"} visible suffix'
+  '{"clientPassword":"privatevalue"} visible suffix'
+  '{"azureAdClientPassword":"privatevalue"} visible suffix'
+  '{"servicePassphrase":"privatevalue"} visible suffix'
+  '{"tenantPwd":"privatevalue"} visible suffix'
+  '{"applicationPasswd":"privatevalue"} visible suffix'
 )
 for quoted_credential_label_case in "${quoted_credential_label_cases[@]}"; do
   primary_args "pi:quoted-credential-label-$after" "Prefix $quoted_credential_label_case"
@@ -532,11 +539,14 @@ await emit("Prefix; MiXeD-aUtH_ToKeN: privatevalue visible suffix", "mixed-auth-
 await emit("Prefix; azure_ad_client_secret: privatevalue visible suffix", "azure-client-secret");
 await emit("Prefix; platform-prod_service_AcCeSs-kEy: privatevalue visible suffix", "mixed-access-key");
 await emit("Prefix; one_two-THREE_PaSsPhRaSe: privatevalue visible suffix", "mixed-passphrase");
+await emit("Prefix; namespace_client_password: privatevalue visible suffix", "namespaced-password");
+await emit("Prefix; namespace-client_PwD: privatevalue visible suffix", "namespaced-pwd");
 await emit('Prefix {"client_secret":"privatevalue"} visible suffix', "quoted-client-secret");
 await emit('Prefix {"MiXeD-aPi-Key":"privatevalue"} visible suffix', "quoted-api-key");
 for (const label of [
   "clientSecret", "clientToken", "accessToken", "accessKey", "secretKey",
   "apiKey", "privateKey", "authToken", "refreshToken", "AzUrEAdClIeNtSeCrEt",
+  "clientPassword", "azureAdClientPassword", "servicePassphrase", "tenantPwd", "applicationPasswd",
 ]) await emit(`Prefix {"${label}":"privatevalue"} visible suffix`, `quoted-${label}`);
 await emit("Prefix eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sgnVsbG9uZ3NpZ25hdHVyZQ remains", "compact-jwt");
 await emit("Prefix abcdefgh.ijklmnop remains", "two-segment-dotted-text");
@@ -558,6 +568,13 @@ assert summaries == [
     "Prefix; [REDACTED]",
     "Prefix; [REDACTED]",
     "Prefix; [REDACTED]",
+    "Prefix; [REDACTED]",
+    "Prefix; [REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
+    "Prefix {[REDACTED]",
     "Prefix {[REDACTED]",
     "Prefix {[REDACTED]",
     "Prefix {[REDACTED]",

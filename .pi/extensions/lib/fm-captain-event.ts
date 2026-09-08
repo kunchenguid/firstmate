@@ -16,7 +16,8 @@ const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
 const ENV_ASSIGNMENT_START = /\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*(?:\+\s*)?=\s*/g;
 const AUTHORIZATION_HEADER_START = /\b(?:Proxy-)?Authorization\s*:\s*/gi;
 const CREDENTIAL_LABEL_CANDIDATE = /(?:(?:"([A-Za-z0-9](?:[A-Za-z0-9 _-]{0,126}[A-Za-z0-9])?)")|(?:(?<![A-Za-z0-9_-])([A-Za-z0-9](?:[A-Za-z0-9 _-]{0,126}[A-Za-z0-9])?)))\s*:\s*/g;
-const CREDENTIAL_LABEL_TERMS = new Set(["secret", "password", "passwd", "passphrase", "token", "authorization", "auth"]);
+const CREDENTIAL_LABEL_TERMS = new Set(["secret", "password", "passwd", "passphrase", "pwd", "token", "authorization", "auth"]);
+const CREDENTIAL_LABEL_SUFFIXES = ["secret", "password", "passphrase", "passwd", "pwd", "token"];
 const CREDENTIAL_KEY_PREFIXES = new Set(["access", "private", "api"]);
 const CREDENTIAL_LABEL_COMPOUNDS = [
   "clientsecret", "clienttoken", "accesstoken", "accesskey", "secretkey",
@@ -79,11 +80,12 @@ function redactCredentialLabels(value: string): string {
     const segments = (match[1] ?? match[2]).toLowerCase().split(/[ _-]+/).filter(Boolean);
     const collapsed = segments.join("");
     const hasTerm = segments.some((segment) => CREDENTIAL_LABEL_TERMS.has(segment));
+    const hasSuffix = CREDENTIAL_LABEL_SUFFIXES.some((suffix) => collapsed.endsWith(suffix));
     const hasKeyTerm = segments.some((segment, index) => (
       CREDENTIAL_KEY_PREFIXES.has(segment) && segments[index + 1] === "key"
     ));
     const hasCompound = CREDENTIAL_LABEL_COMPOUNDS.some((compound) => collapsed.includes(compound));
-    if (hasTerm || hasKeyTerm || hasCompound) return `${value.slice(0, match.index)}[REDACTED]`;
+    if (hasTerm || hasSuffix || hasKeyTerm || hasCompound) return `${value.slice(0, match.index)}[REDACTED]`;
   }
   return value;
 }
