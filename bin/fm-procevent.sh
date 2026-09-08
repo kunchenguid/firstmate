@@ -607,11 +607,18 @@ isolate_runner() {  # <wait|detach> <source-id>
   perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id" >/dev/null 2>&1 &
 }
 
+# perl instead of `ps -o pgid=`: MSYS ps rejects -o entirely, and perl is
+# already a hard dependency of this file (isolate_runner). Empty output on
+# failure or a dead pid, so callers keep their existing emptiness checks.
+proc_pgid() {  # <pid>: print the pid's process group id
+  perl -e 'my $g = eval { getpgrp($ARGV[0]) }; print $g if defined $g && $g > 0' "$1" 2>/dev/null
+}
+
 require_runner_group() {
   local pgid
   [ "${FM_PROCEVENT_RUNNER_GROUP:-}" = "$$" ] \
     || die "runner process group was not isolated"
-  pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]') \
+  pgid=$(proc_pgid "$$") \
     || die "cannot inspect runner process group"
   [ -n "$pgid" ] || die "cannot inspect runner process group"
   [ "$pgid" = "$$" ] || die "runner does not lead its process group"
@@ -1057,7 +1064,7 @@ stop_runner_pid() {  # <pid> <identity>
     0)
       # A live identity-matched leader still owns its group, so prove the group
       # really is the one this pid leads before signalling it.
-      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
+      pgid=$(proc_pgid "$pid") || return 2
       [ "$pgid" = "$pid" ] || return 2
       ;;
     3)

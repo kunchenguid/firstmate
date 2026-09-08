@@ -42,7 +42,11 @@ export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }
       if (!sessionID || handledSessions.has(sessionID) || !root) return;
       handledSessions.add(sessionID);
 
-      const result = await runProcess(`${root}/bin/fm-sessionstart-nudge.sh`, []);
+      // Spawned through bash, not by its shebang: Windows has no shebang, so
+      // CreateProcess refuses a .sh outright and runProcess's error handler
+      // turns that into a silent {code: 0, stdout: ""} - indistinguishable
+      // here from the script legitimately having no nudge to print.
+      const result = await runProcess("bash", [`${root}/bin/fm-sessionstart-nudge.sh`]);
       const nudge = result.code === 0 ? result.stdout.trim() : "";
       if (!nudge) return;
 

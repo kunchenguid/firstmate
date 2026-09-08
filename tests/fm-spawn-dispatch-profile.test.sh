@@ -789,6 +789,50 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+# The pane PATH repair is Windows-only, so both cases drive fm-platform-lib's
+# FM_PLATFORM_UNAME seam rather than depending on the host the suite runs on.
+# The PATH export is a pre-launch pane line rather than part of the launch
+# command, so these read FM_FAKE_PANE_LOG instead of the launch log.
+test_msys_exports_firstmate_path_before_launch() {
+  local rec id out status panelog pl gl
+  id=profile-msys-path-z21
+  rec=$(make_spawn_case profile-msys-path claude "$id")
+  read_case_record "$rec"
+  panelog="$CASE_DIR/pane.log"
+
+  out=$(FM_PLATFORM_UNAME=MINGW64_NT-10.0 FM_FAKE_PANE_LOG="$panelog" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "MSYS spawn should succeed"
+  assert_grep "export PATH=" "$panelog" \
+    "an MSYS pane must be handed firstmate's PATH, or env and every /usr/bin/env shebang is unresolvable there"
+  assert_grep "$FAKEBIN_DIR" "$panelog" \
+    "the exported PATH must be firstmate's own resolved PATH, not a constant"
+  pl=$(grep -n '^export PATH=' "$panelog" | tail -1 | cut -d: -f1)
+  gl=$(grep -n '^export GOTMPDIR=' "$panelog" | tail -1 | cut -d: -f1)
+  [ -n "$pl" ] && [ -n "$gl" ] || fail "pane log missing the PATH export or the GOTMPDIR export"
+  [ "$pl" -lt "$gl" ] || fail "the PATH export must lead the pre-launch env lines (path=$pl gotmp=$gl)"
+  pass "an MSYS pane is handed firstmate's PATH ahead of every other pre-launch line"
+}
+
+test_non_msys_leaves_the_pane_path_alone() {
+  local rec id out status panelog
+  id=profile-nonmsys-path-z22
+  rec=$(make_spawn_case profile-nonmsys-path claude "$id")
+  read_case_record "$rec"
+  panelog="$CASE_DIR/pane.log"
+
+  out=$(FM_PLATFORM_UNAME=Linux FM_FAKE_PANE_LOG="$panelog" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "non-MSYS spawn should succeed"
+  assert_grep "export GOTMPDIR=" "$panelog" \
+    "the pane log fixture should have captured the pre-launch env lines"
+  assert_no_grep "export PATH=" "$panelog" \
+    "a POSIX pane inherits a working PATH from its daemon and must not have firstmate's overlaid on it"
+  pass "a non-MSYS pane keeps the PATH its daemon gave it"
+}
+
 # The captain's attribution policy lives in the `user` settings scope, which a
 # spawned worker's settings sources are not guaranteed to load. Every claude
 # launch must therefore carry the policy itself, or a spawned worker writes
@@ -1163,6 +1207,8 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
+test_msys_exports_firstmate_path_before_launch
+test_non_msys_leaves_the_pane_path_alone
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir

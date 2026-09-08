@@ -13,6 +13,16 @@
 # shellcheck disable=SC2016 # single quotes are deliberate: $FM_HOME and $$ expand inside the fixture child
 set -u
 
+# Every case here simulates a POSIX host: the unit layer drives the library
+# behind a deterministic fake ps to cover both Linux and macOS reporting
+# semantics, and the end-to-end layer builds real orphaned process trees. On a
+# Git Bash host the native Windows bridge in bin/fm-winproc-lib.sh would answer
+# the ancestry question first and report the REAL harness, so the fixtures would
+# be bypassed and every assertion here would describe the live session instead
+# of the tree under test. Disable it so this file means the same thing on every
+# host; tests/fm-winproc-lib.test.sh owns the bridge's own coverage.
+export FM_WINPROC_DISABLE=1
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -258,9 +268,18 @@ make_primary_home() {  # <dir>
   # owner, exactly as a real session does at session start.
   cat > "$dir/session.sh" <<'SH'
 #!/usr/bin/env bash
+# MSYS ps rejects -o entirely; the Cygwin procfs ppid file answers for MSYS pids.
+# Without the fallback this prints nothing, nothing never equals 1, and the wait
+# below can never observe the reparenting it exists to wait for.
+fixture_ppid() {  # <pid>
+  local out
+  out=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+  [ -n "$out" ] || out=$(tr -d ' \n' < "/proc/$1/ppid" 2>/dev/null)
+  printf '%s' "$out"
+}
 if [ "${FM_FIXTURE_ORPHAN_HERE:-0}" = 1 ]; then
   i=0
-  while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  while [ "$i" -lt 200 ] && [ "$(fixture_ppid $$)" != 1 ]; do
     sleep 0.05
     i=$((i + 1))
   done
@@ -272,8 +291,15 @@ printf '%s\n' "$?" > "$FM_HOME/state/hook.rc"
 SH
   cat > "$dir/daemon.sh" <<'SH'
 #!/usr/bin/env bash
+# MSYS ps rejects -o entirely; the Cygwin procfs ppid file answers for MSYS pids.
+fixture_ppid() {  # <pid>
+  local out
+  out=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+  [ -n "$out" ] || out=$(tr -d ' \n' < "/proc/$1/ppid" 2>/dev/null)
+  printf '%s' "$out"
+}
 i=0
-while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+while [ "$i" -lt 200 ] && [ "$(fixture_ppid $$)" != 1 ]; do
   sleep 0.05
   i=$((i + 1))
 done

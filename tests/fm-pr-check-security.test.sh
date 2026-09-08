@@ -494,10 +494,10 @@ test_valid_recording_and_merge_derivation() {
     || fail "canonical pr metadata was not exact"
   grep -qxF "pr_head=$expected" "$dir/home/state/task-a.meta" || fail "PR head metadata was not exact"
   cmp -s "$POLL" "$dir/home/state/task-a.check.sh" || fail "published check was not byte-for-byte static"
-  [ "$(file_mode "$dir/home/state/task-a.check.sh")" = 600 ] || fail "published check mode was not 0600"
-  [ "$(file_mode "$dir/home/state/task-a.pr-poll")" = 600 ] || fail "published sidecar mode was not 0600"
-  [ "$(file_mode "$dir/home/state/task-a.pr-poll-registration")" = 600 ] \
-    || fail "published registration mode was not 0600"
+  fm_test_assert_private_mode "$dir/home/state/task-a.check.sh" 600 "published check is mode 0600"
+  fm_test_assert_private_mode "$dir/home/state/task-a.pr-poll" 600 "published sidecar is mode 0600"
+  fm_test_assert_private_mode "$dir/home/state/task-a.pr-poll-registration" 600 \
+    "published registration is mode 0600"
   [ "$(fm_pr_file_link_count "$dir/home/state/task-a.check.sh")" = 1 ] \
     && [ "$(fm_pr_file_link_count "$dir/home/state/task-a.pr-poll")" = 1 ] \
     && [ "$(fm_pr_file_link_count "$dir/home/state/task-a.pr-poll-registration")" = 1 ] \
@@ -796,10 +796,10 @@ SH
     [ ! -s "$dir/watch.err" ] || fail "concurrent watcher observed a partial artifact error"
     if [ -e "$dir/home/state/task-a.check.sh" ]; then
       cmp -s "$POLL" "$dir/home/state/task-a.check.sh" || fail "concurrent publication check bytes changed"
-      [ "$(file_mode "$dir/home/state/task-a.check.sh")" = 600 ] || fail "concurrent check mode was not private"
-      [ "$(file_mode "$dir/home/state/task-a.pr-poll")" = 600 ] || fail "concurrent sidecar mode was not private"
-      [ "$(file_mode "$dir/home/state/task-a.pr-poll-registration")" = 600 ] \
-        || fail "concurrent registration mode was not private"
+      fm_test_assert_private_mode "$dir/home/state/task-a.check.sh" 600 "concurrent check is private"
+      fm_test_assert_private_mode "$dir/home/state/task-a.pr-poll" 600 "concurrent sidecar is private"
+      fm_test_assert_private_mode "$dir/home/state/task-a.pr-poll-registration" 600 \
+        "concurrent registration is private"
       fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
         || fail "concurrent publication did not leave canonical provenance"
     else
@@ -2127,6 +2127,52 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_mode_probe_and_relaxation() {
+  local dir state file device
+  dir=$(make_case mode-probe-relaxation)
+  state="$dir/home/state"
+  file="$state/task-a.pr-poll"
+  printf 'x\n' > "$file"
+  chmod 0644 "$file"
+  device=$(fm_pr_file_device "$file") || fail "could not stat the mode-probe fixture"
+  [ -n "$device" ] || fail "could not stat the mode-probe fixture"
+
+  # With modes declared honored, the exact-mode contract is unchanged.
+  ( FM_FS_MODES_HONORED=1 fm_pr_private_file_valid "$file" 600 "$device" ) \
+    && fail "mode-honoring validation accepted a 644 private file"
+
+  # With modes declared unrepresentable, the same file is accepted...
+  ( FM_FS_MODES_HONORED=0 fm_pr_private_file_valid "$file" 600 "$device" ) \
+    || fail "mode-free validation refused a structurally valid file"
+
+  # ...while every structural guard still refuses.
+  ln "$file" "$state/task-a.pr-poll.extra" || fail "could not create the hardlink fixture"
+  ( FM_FS_MODES_HONORED=0 fm_pr_private_file_valid "$file" 600 "$device" ) \
+    && fail "mode-free validation accepted a multi-link file"
+  rm -f "$state/task-a.pr-poll.extra"
+  ( FM_FS_MODES_HONORED=0 fm_pr_private_file_valid "$file" 600 "$((device + 1))" ) \
+    && fail "mode-free validation accepted a foreign device"
+  ln -s "$file" "$state/task-a.link" 2>/dev/null || true
+  if [ -L "$state/task-a.link" ]; then
+    ( FM_FS_MODES_HONORED=0 fm_pr_private_file_valid "$state/task-a.link" 600 "$device" ) \
+      && fail "mode-free validation accepted a symlink"
+  fi
+
+  # The unset-variable probe must report what this filesystem actually does:
+  # after a real chmod 0600, an honoring filesystem reads 600 and must probe
+  # as honoring, and a mount that cannot store modes must probe as mode-free.
+  chmod 0600 "$file"
+  if [ "$(fm_pr_file_mode "$file")" = 600 ]; then
+    fm_platform_fs_honors_modes "$file" \
+      || fail "probe called a mode-honoring filesystem mode-free"
+  else
+    if fm_platform_fs_honors_modes "$file"; then
+      fail "probe called a mode-free filesystem honoring"
+    fi
+  fi
+  pass "mode relaxation is probe-scoped and keeps every structural guard"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -2154,3 +2200,4 @@ test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_mode_probe_and_relaxation

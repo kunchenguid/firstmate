@@ -178,9 +178,7 @@ pass "one blocking completion yields exactly one bounded normalized event"
 
 RESULT=$(first_result "$H1" src-one || true)
 [ -n "$RESULT" ] || fail "no durable result was captured"
-mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
-  '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$RESULT")
-assert_contains "$mode" 600 "the captured result is private"
+fm_test_assert_private_mode "$RESULT" 600 "the captured result is private"
 assert_grep 'payload one' "$RESULT" "the captured result holds the source output verbatim"
 assert_grep 'lavish' "${RESULT%.result}.adapter" "the captured result retains its immutable adapter"
 assert_absent "${RESULT%.result}.handled" "publication alone never marks a result handled"
@@ -217,7 +215,7 @@ pe "$HPG" start direct-src > "$TMP_ROOT/direct-start.out" &
 direct_runner=$!
 wait_for "$FM_PROCEVENT_CLAIM_ROOT/direct-src.claim" || fail "direct start never claimed its source"
 direct_leader=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/direct-src.claim")
-direct_group=$(ps -o pgid= -p "$direct_leader" 2>/dev/null | tr -d '[:space:]')
+direct_group=$(fm_test_pgid "$direct_leader")
 [ "$direct_group" = "$direct_leader" ] \
   || fail "direct start claimed before leading its process group: pid=$direct_leader pgid=$direct_group"
 : > "$DIRECT_TRIGGER"
@@ -354,9 +352,8 @@ assert_contains "$private_out" "cannot durably record handling" "mode enforcemen
 assert_absent "$HPRIVATE/state/procevent-inbox/private-src.1.handled" "failed mode enforcement left an authoritative marker"
 private_out=$(umask 000; pe "$HPRIVATE" handled private-src 1)
 assert_contains "$private_out" "handled: private-src 1" "handling succeeds after private mode enforcement recovers"
-private_mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
-  '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$HPRIVATE/state/procevent-inbox/private-src.1.handled")
-assert_contains "$private_mode" 600 "the handled marker is private under a permissive caller umask"
+fm_test_assert_private_mode "$HPRIVATE/state/procevent-inbox/private-src.1.handled" 600 \
+  "the handled marker is private under a permissive caller umask"
 pass "handled acknowledgement creation is private and fails safely"
 
 # --- a terminal result retires its source, on the adapter's verdict alone ----

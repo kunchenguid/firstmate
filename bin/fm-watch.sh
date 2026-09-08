@@ -1392,6 +1392,8 @@ run_check_capture() {
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
+  # MSYS ps rejects -o entirely; the Cygwin procfs pgid file answers for MSYS pids.
+  [ -n "$pgid" ] || pgid=$(cat "/proc/$FM_ACTIVE_CHECK_PID/pgid" 2>/dev/null)
   trap 'exit 1' HUP INT TERM
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true

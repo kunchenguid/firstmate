@@ -86,6 +86,19 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
 
+# Whether an exact-mode check means anything on the filesystem holding the
+# presentation lock namespace (bin/fm-platform-lib.sh).
+# shellcheck source=bin/fm-platform-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-platform-lib.sh"
+
+# Windows process facts for the idle-shell proof, whose pids are native Windows
+# pids that MSYS ps cannot address. Sourced when present and gated on
+# fm_winproc_available at every use, so a Linux or macOS home never reaches it.
+# shellcheck source=bin/fm-winproc-lib.sh
+if [ -r "$FM_BACKEND_HERDR_ROOT/bin/fm-winproc-lib.sh" ]; then
+  . "$FM_BACKEND_HERDR_ROOT/bin/fm-winproc-lib.sh"
+fi
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
 # subscription_event schema first shipped at protocol 16 (verified: herdr
@@ -383,6 +396,36 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   HERDR_SESSION="$session" herdr "$@" --session "$session"
 }
 
+# fm_backend_herdr_cli_literal: fm_backend_herdr_cli for the calls whose payload
+# is literal pane input rather than anything herdr should resolve. On MSYS the
+# herdr client is a native Windows binary, so Git Bash rewrites arguments it
+# reads as POSIX paths before the exe ever sees them: a harness `/exit` slash
+# command arrives in the pane as `C:/Program Files/Git/exit`, the agent never
+# stops, and the send itself still reports success. Pane input is never a path
+# here, so suppress that conversion for exactly these calls and leave every
+# other herdr call converting normally, because those do pass real paths a
+# native client must receive in native form.
+fm_backend_herdr_cli_literal() {  # <session> <herdr-subcommand-and-args...>
+  if fm_platform_is_msys; then
+    MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 fm_backend_herdr_cli "$@"
+  else
+    fm_backend_herdr_cli "$@"
+  fi
+}
+
+# fm_backend_herdr_strip_cr: filter a jq capture down to CR-free lines.
+# The Windows jq build writes its output in text mode, so every line it emits
+# ends CRLF. A single-value capture survives that untouched, because command
+# substitution strips the whole trailing CRLF; a MULTI-LINE capture does not,
+# because only the final line's CR sits where the strip can reach it and every
+# earlier line keeps one. Those interior CRs then ride inside ids and labels and
+# into any text joined from them. Pipe a multi-line jq read through here. It is
+# a plain filter rather than an MSYS branch so the same bytes come back on every
+# platform, which is what makes one portable regression meaningful.
+fm_backend_herdr_strip_cr() {
+  tr -d '\r'
+}
+
 # fm_backend_herdr_tool_check: refuse loudly if herdr or jq is missing.
 fm_backend_herdr_tool_check() {
   command -v herdr >/dev/null 2>&1 || { echo "error: backend=herdr selected but the 'herdr' CLI is not installed (https://herdr.dev) (dual-licensed AGPL-3.0-or-later/commercial)" >&2; return 1; }
@@ -675,13 +718,20 @@ fm_backend_herdr_presentation_lock_namespace_uid() {
   fi
 }
 
+# The directory, symlink, and owning-uid checks are structural and always
+# apply. The mode equality applies only where the filesystem can store a mode:
+# on a noacl Git Bash mount the `mkdir -m 700` above is a silent no-op and the
+# namespace reports 755 forever, so requiring 700 there makes the lock
+# permanently unacquirable and every presentation close and recovery refuses.
 fm_backend_herdr_presentation_lock_namespace_valid() {
   local dir=$1 expected_uid owner mode
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   expected_uid=$(id -u 2>/dev/null) || return 1
   owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$dir") || return 1
+  [ "$owner" = "$expected_uid" ] || return 1
+  fm_platform_fs_honors_modes "$dir" || return 0
   mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
-  [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
+  [ "$mode" = 700 ]
 }
 
 # Resolve the one verified running named-session socket path as an absolute
@@ -696,8 +746,16 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 # literal path. Single owner for every socket-identity comparison in this
 # adapter (the presentation session lock and the launcher-identity same-session
 # proof both use it).
+# Herdr on Windows reports native socket paths (C:\Users\...\herdr.sock), which
+# the absolute-path test below reads as relative and refuses, so the session
+# lock can never be acquired there. Every spelling is folded to the POSIX form
+# first, exactly because this function is the single identity owner: C:\x, C:/x
+# and /c/x must all collapse to one lock identity. fm_path_posix is the
+# identity function off MSYS, so no other platform changes.
 fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   local socket=$1 sock_dir sock_base
+  [ -n "$socket" ] || return 1
+  socket=$(fm_path_posix "$socket")
   [ -n "$socket" ] || return 1
   case "$socket" in
     /*) ;;
@@ -1133,10 +1191,14 @@ fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid>
   case "$shell_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  # MSYS resolves the shell through the Windows process-facts owner instead of
+  # ps, so a missing ps must not stop the close there.
+  if ! fm_platform_is_msys; then
+    command -v "$ps_bin" >/dev/null 2>&1 || return 1
+  fi
   max_attempts=${FM_BACKEND_HERDR_DEATH_CLOSE_POLLS:-40}
   fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$shell_pid" || return 1
-  kill -HUP "$shell_pid" 2>/dev/null || true
+  fm_backend_herdr_signal_shell HUP "$shell_pid"
   attempt=0
   while [ "$attempt" -lt "$max_attempts" ]; do
     presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
@@ -1150,7 +1212,7 @@ fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid>
   resampled_pid=$(fm_backend_herdr_pane_idle_shell_sample "$session" "$pane_id") || return 1
   [ "$resampled_pid" = "$shell_pid" ] || return 1
   fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$shell_pid" || return 1
-  kill -KILL "$shell_pid" 2>/dev/null || true
+  fm_backend_herdr_signal_shell KILL "$shell_pid"
   attempt=0
   while [ "$attempt" -lt "$max_attempts" ]; do
     presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
@@ -1161,16 +1223,53 @@ fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid>
   return 1
 }
 
+# fm_backend_herdr_shell_basename: reduce a process image name or path to the
+# bare shell name the recognized-shell checks compare against.
+# BSD ps reports comm as argv0, so a login shell arrives as "-zsh"; the leading
+# dash is stripped here for every caller. Windows contributes two more spellings
+# of the same shell: a backslash image path, and the ".exe" suffix that makes
+# herdr report the Git Bash pane shell as "bash.exe" (verified live on 0.8.2).
+# Stripping the suffix only under MSYS keeps a POSIX host's name space exact.
+fm_backend_herdr_shell_basename() {  # <image-name-or-path>
+  local name=$1
+  name=${name#-}
+  name=${name##*/}
+  name=${name##*\\}
+  if fm_platform_is_msys; then
+    name=${name%.exe}
+  fi
+  printf '%s' "$name"
+}
+
+# fm_backend_herdr_signal_shell: send <signal> to the pane's shell <pid>.
+# Under MSYS that pid is a native Windows pid: the bash builtin kill cannot
+# address one at all (verified against a live native pid: "No such process"),
+# and only /usr/bin/kill's -W/--winpid mode can. Verified on the real pane-shell
+# shape - -W -HUP terminates an idle Git Bash pane shell, and -W -KILL escalates
+# past a shell that ignores HUP. A process outside the MSYS runtime is invisible
+# to -W, so this can never signal something the runtime does not own.
+fm_backend_herdr_signal_shell() {  # <signal> <pid>
+  if fm_platform_is_msys; then
+    /usr/bin/kill -W "-$1" "$2" 2>/dev/null || true
+  else
+    kill "-$1" "$2" 2>/dev/null || true
+  fi
+}
+
 # fm_backend_herdr_pid_is_bare_shell: <pid> currently resolves to a bare
 # recognized shell process per <ps-bin>.
-# BSD ps reports comm as argv0, so a login shell arrives as "-zsh"; strip the
-# login dash exactly like the idle-shell proof's argv0 normalization.
+# Under MSYS the pid is a native Windows pid and MSYS ps implements no -o field
+# selection at all, so the image name comes from the Windows process-facts owner
+# in Windows-pid space instead.
 fm_backend_herdr_pid_is_bare_shell() {  # <ps-bin> <pid>
   local comm
-  comm=$("$1" -p "$2" -o comm= 2>/dev/null) || return 1
+  if fm_platform_is_msys; then
+    comm=$(fm_winproc_command "$2" 2>/dev/null) || return 1
+  else
+    comm=$("$1" -p "$2" -o comm= 2>/dev/null) || return 1
+  fi
   comm=$(printf '%s' "$comm" | tr -d '[:space:]')
-  comm=${comm#-}
-  comm=${comm##*/}
+  comm=$(fm_backend_herdr_shell_basename "$comm")
   case "$comm" in sh|bash|zsh|dash|ksh|fish) return 0 ;; esac
   return 1
 }
@@ -1207,7 +1306,7 @@ fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
 # contract and the settle retry.
 fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   local session=$1 pane=$2 info shell_pid foreground_pgid count
-  local process_pid name argv0 shell_name rows stat ps_bin
+  local process_pid name argv0 shell_name rows stat ps_bin census
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
   printf '%s' "$info" | jq -e --arg pane "$pane" '
     .result.type == "pane_process_info"
@@ -1231,22 +1330,39 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
     | ($process.argv0 // $process.argv[0])
     | select(type == "string" and length > 0)
   ' 2>/dev/null) || return 1
-  shell_name=${name##*/}
-  argv0=${argv0#-}
-  argv0=${argv0##*/}
+  shell_name=$(fm_backend_herdr_shell_basename "$name")
+  argv0=$(fm_backend_herdr_shell_basename "$argv0")
   [ "$argv0" = "$shell_name" ] || return 1
   case "$shell_name" in sh|bash|zsh|dash|ksh|fish) ;; *) return 1 ;; esac
 
-  ps_bin=${FM_HERDR_PS_BIN:-ps}
-  command -v "$ps_bin" >/dev/null 2>&1 || return 1
-  rows=$("$ps_bin" -axo pid=,ppid= 2>/dev/null) || return 1
-  printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
-    $1 == shell { found++ }
-    $2 == shell { child++ }
-    END { exit(found == 1 && child == 0 ? 0 : 1) }
-  ' || return 1
-  stat=$("$ps_bin" -p "$shell_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
-  case "$stat" in S*|I*) ;; *) return 1 ;; esac
+  if fm_platform_is_msys; then
+    # herdr's shell_pid is a native Windows pid. MSYS ps cannot answer for it
+    # twice over: its PID column carries MSYS pids, not Windows ones, so the
+    # comparison would silently cross pid namespaces, and it implements no -o
+    # field selection at all. One census keeps both counts on a single
+    # snapshot, so they cannot straddle a process exit.
+    #
+    # No state check on this branch. Windows exposes no equivalent of ps's
+    # sleeping/idle state and Win32_Process.ExecutionState is unpopulated, so
+    # there is nothing to read. Little is lost: what stat= catches on a POSIX
+    # host is a shell running something in the foreground, and any such command
+    # is itself a child process, which the no-child count below already
+    # refuses. The lone-row, no-child, and recognized-shell proofs all still
+    # hold.
+    census=$(fm_winproc_pid_census "$shell_pid" 2>/dev/null) || return 1
+    [ "$census" = "1 0" ] || return 1
+  else
+    ps_bin=${FM_HERDR_PS_BIN:-ps}
+    command -v "$ps_bin" >/dev/null 2>&1 || return 1
+    rows=$("$ps_bin" -axo pid=,ppid= 2>/dev/null) || return 1
+    printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
+      $1 == shell { found++ }
+      $2 == shell { child++ }
+      END { exit(found == 1 && child == 0 ? 0 : 1) }
+    ' || return 1
+    stat=$("$ps_bin" -p "$shell_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || return 1
+    case "$stat" in S*|I*) ;; *) return 1 ;; esac
+  fi
   printf '%s\n' "$shell_pid"
 }
 
@@ -1491,7 +1607,8 @@ fm_backend_herdr_workspace_find_all() {  # <session>
   # ALWAYS return empty and every spawn mint a fresh "firstmate" workspace
   # (the workspace leak).
   printf '%s' "$list" | jq -r --arg want "$label" \
-    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null
+    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null \
+    | fm_backend_herdr_strip_cr
 }
 
 # fm_backend_herdr_workspace_find: this HOME's own workspace id inside
@@ -2006,6 +2123,9 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
     echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
   }
+  # Stripped after the status check, never inside that pipeline: the filter's
+  # own success would otherwise stand in for jq's and hide a parse failure.
+  dup_tabs=$(printf '%s' "$dup_tabs" | fm_backend_herdr_strip_cr)
   dup_tab_ids=""
   if [ -n "$dup_tabs" ]; then
     while IFS= read -r dup; do
@@ -2468,7 +2588,7 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
       echo "error: could not parse herdr presentation workspace $wsid for $id; refusing duplicate launch" >&2
       return 1
     fi
-    pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[]? | .pane_id' 2>/dev/null)
+    pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[]? | .pane_id' 2>/dev/null | fm_backend_herdr_strip_cr)
     while IFS= read -r pane; do
       [ -n "$pane" ] || continue
       state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
@@ -2530,9 +2650,35 @@ fm_backend_herdr_target_ready() {  # <target>
 # the project directory, since `cwd` stays frozen at the original path forever.
 # `.result.pane.foreground_cwd` tracks the ACTUALLY RUNNING foreground
 # process's cwd instead, which is what changes when `treehouse get` enters its
-# worktree subshell - confirmed live against a real treehouse acquisition.
+# worktree subshell - confirmed live on macOS and Linux.
+#
+# Windows measures the other way round, so MSYS falls back to `.cwd`: the Herdr
+# build there emits NO `foreground_cwd` key at all, while `.cwd` is live rather
+# than frozen and follows a `cd` within a single poll
+# (docs/verification/runtime-backends.md "Windows x86_64"). That value arrives
+# in native form with a trailing separator, so it is folded to the POSIX form
+# every caller compares against. The fallback stays MSYS-only because `.cwd`
+# really is frozen on a POSIX host, where reading it would report a stale
+# creation-time path as though it were live.
+#
+# The MSYS read tracks the pane's TOP-LEVEL shell, not a foreground subshell,
+# so it serves every caller that reads a pane's own shell - stale detection and
+# the relaunch check - but it cannot see inside `treehouse get`'s subshell.
+# Worktree acquisition on this backend therefore remains an open Windows gap
+# rather than something this fallback closes; the refusal at the wait's
+# deadline is the isolation guard behaving correctly.
 fm_backend_herdr_current_path() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
+  local path
+  if fm_platform_is_msys; then
+    path=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+      | jq -r '.result.pane.foreground_cwd // .result.pane.cwd // empty' 2>/dev/null)
+    [ -n "$path" ] || return 0
+    path=$(fm_path_posix "$path")
+    [ "$path" = / ] || path=${path%/}
+    printf '%s\n' "$path"
+    return 0
+  fi
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
@@ -2543,7 +2689,7 @@ fm_backend_herdr_current_path() {  # <target>
 # the command and submits it in one call (verified).
 fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+  fm_backend_herdr_cli_literal "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input - the
@@ -2552,7 +2698,7 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 # original guess); it behaves exactly like tmux's `-l` literal send.
 fm_backend_herdr_send_literal() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+  fm_backend_herdr_cli_literal "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
@@ -2578,7 +2724,7 @@ fm_backend_herdr_send_key() {  # <target> <key>
   fm_backend_herdr_target_ready "$1" || return 1
   local key
   key=$(fm_backend_herdr_normalize_key "$2")
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
+  fm_backend_herdr_cli_literal "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
@@ -3092,7 +3238,7 @@ fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
 # normally carry meta), best-effort.
 fm_backend_herdr_resolve_bare_selector() {  # <name>
   local name=$1 sessions session tabs tab_id wsid pane_id
-  sessions=$(herdr session list --json 2>/dev/null | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
+  sessions=$(herdr session list --json 2>/dev/null | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null | fm_backend_herdr_strip_cr)
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || continue
@@ -3133,7 +3279,7 @@ fm_backend_herdr_list_live() {  # <session>
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
     [ -n "$pane_id" ] || continue
     printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null | fm_backend_herdr_strip_cr)
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------
