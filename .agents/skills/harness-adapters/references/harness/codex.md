@@ -1,6 +1,52 @@
 # Codex
 
+**A worker without functioning supervision hooks can still work, produce, and finish while nothing ever wakes firstmate: it is silently invisible to supervision.**
+Treat missing hook permission as a threat to that supervision path, even when launch and instruction processing succeed.
+
 Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer version.
+
+## Trust gates and launch verification
+
+### Directory trust
+
+A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
+Accept it with Enter and verify the instructions begin processing.
+The decision persists for the repository, so later worktrees of the same project skip it.
+That Enter recipe applies only to this directory dialog.
+
+### New or changed hooks
+
+On the first launch after the runtime switch on 2026-09-08, a separate dialog appeared before instructions were processed: four hooks were new or changed, with an offer to let them run outside the sandbox.
+It presented three choices with the cursor on review, not either trust choice.
+Firstmate's key plane can confirm, escape, or interrupt but cannot move the selection.
+**Escape is the only safe key for this dialog through that plane**, because it offers going back without granting anything.
+Confirm opens a review flow the plane cannot navigate; declining disables precisely the hooks supervision depends on.
+Do not automate an answer or guess a selection.
+The dialog swallowed the ordinary stop command in the observed launch: delivery succeeded but stopping did not take effect, so Escape had to clear the dialog before recovery could proceed.
+
+Escape cleared the dialog and instructions proceeded in two observed launches on that machine.
+The dialog recurred on the second launch after the first had been escaped, so Escape did not persist a trust decision that satisfied subsequent launches.
+It is not a once-per-machine clearance through Escape.
+Both launches nevertheless produced turn-end notifications: the first after one minute forty seconds, with a confirmed supervision wake, and the second after sixty-three seconds.
+This establishes that dismissal was survivable for those two workers; it does not establish that all four hooks ran or that the hooks were trusted rather than merely dismissed.
+**Trusted versus merely dismissed remains unresolved**, including why the notifications worked; do not turn those successful observations into a trust guarantee for future launches or versions.
+
+### Required after every launch
+
+Before treating any Codex worker as supervised, verify that its actual turn-end signal was freshly written after this launch and that supervision received the corresponding wake.
+Inspect the active home's task-specific `state/<id>.turn-ended` evidence against the launch time, accounting for an older marker on a relaunch, and correlate it with the supervisor's received event.
+A successful launch, instruction processing, completed work, or installed hook configuration is insufficient; keep supervision unverified while that evidence is absent.
+The first observed worker's signal at launch plus one minute forty seconds and resulting wake exemplify the required check, not a timeout or a guarantee about the next worker.
+`../../../bin/fm-spawn.sh` owns signal wiring; its Codex launch uses `notify` for the turn-end marker, so a notification is not proof that the four dialog-listed lifecycle hooks are all authorized.
+
+### Operator acceptance persistence
+
+Whether proper operator acceptance persists across launches on this machine is **not established by observation**: neither observed dialog was accepted.
+The [official hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks), checked on 2026-09-08, describes recorded trust for the exact hook definition's hash and renewed review when hooks change, not blanket trust for a machine.
+It also says untrusted non-managed hooks are skipped; this does not settle the trust state of the observed workers or explain their notifications.
+To settle the local questions safely, an operator would need an isolated, non-fleet session with the same runtime version and hook definitions, inspect the recorded trust state before and after Escape, then explicitly accept and inspect that state across a fresh launch with unchanged hooks.
+Record the version, approval scope, dialog recurrence, and real hook execution separately; a changed-definition comparison would establish the invalidation boundary.
+Do not trigger this experiment on live workers or their validation pipelines.
 
 ## Operating facts
 
@@ -14,10 +60,6 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Model flag | `--model <model>`. |
 | Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertises only these four values while omitting `max`. |
 | Model discovery | Open the current interactive session's `/model` picker. |
-
-A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
-Accept it with Enter and verify the instructions begin processing.
-The decision persists for the repository, so later worktrees of the same project skip it.
 
 ## Skill popup
 
