@@ -741,7 +741,7 @@ DEFAULT_RATE_ART="$TMP_ROOT/default-rate-board.html"
 printf '<h1>default rate</h1>\n' > "$DEFAULT_RATE_ART"
 DEFAULT_RATE_COUNT="$TMP_ROOT/default-rate-count"
 PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$DEFAULT_RATE_COUNT" LAVISH_SCRIPT=interrupt \
-  FM_LAVISH_POLL_RETRY_DELAY= \
+  FM_LAVISH_POLL_RETRY_DELAY='' \
   "$ROOT/bin/fm-procevent-lavish.sh" poll "$DEFAULT_RATE_ART" >/dev/null 2>&1 &
 DEFAULT_RATE_PID=$!
 perl -MTime::HiRes=sleep -e 'sleep 6.2'
@@ -1390,6 +1390,19 @@ wait_for "$FM_PROCEVENT_CLAIM_ROOT/sweep-one.claim" || fail "home sweep fixture 
 wait_for "$FM_PROCEVENT_CLAIM_ROOT/sweep-two.claim" || fail "home sweep fixture two did not start"
 sweep_pid_one=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/sweep-one.claim")
 sweep_pid_two=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/sweep-two.claim")
+# The claim-only case is an owned claim with no live runner, so build exactly
+# that: kill the runner's group so it cannot run its own cleanup, confirm it is
+# gone, and only then drop the registration. Deleting the registration out from
+# under a LIVE runner no longer produces this case, because a superseded
+# generation now observes the identity mismatch, self-retires, and releases its
+# claim - so the sweep would race that exit and see one source or two depending
+# on which won.
+kill -KILL -"$sweep_pid_two" 2>/dev/null || true
+for _ in $(seq 1 50); do kill -0 "$sweep_pid_two" 2>/dev/null || break; sleep 0.1; done
+kill -0 "$sweep_pid_two" 2>/dev/null \
+  && fail "the claim-only sweep fixture runner did not stop"
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/sweep-two.claim" \
+  "a killed runner leaves its owned claim behind for the sweep"
 rm -f "$HM/state/procevent/sweep-two.source"
 out=$(pe "$HM" sweep-home --preflight)
 assert_contains "$out" "sweep preflight: ready" "home sweep preflight validates the full bounded snapshot"
@@ -2059,6 +2072,12 @@ pe_register "$HPACE_RACE" lavish pace-race-src -- "$FAST_SOURCE" "$PACE_RACE_LOG
 wait "$PACE_RACE_PID" || fail "the superseded paced runner failed"
 [ "$(wc -l < "$PACE_RACE_LOG" | tr -d ' ')" = 1 ] \
   || fail "the superseded paced runner invoked its stale command"
+# The runner marker is written before the launch floor is waited on, and a home
+# sweep counts a marker with no owned claim as a preflight failure. A superseded
+# generation that exits without clearing its marker therefore makes the whole
+# home refuse to sweep, so assert the marker is gone and the sweep still runs.
+assert_absent "$HPACE_RACE/state/procevent/pace-race-src.runner" \
+  "a superseded paced runner leaves no runner marker behind"
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3 pe "$HPACE_RACE" start pace-race-src >/dev/null
 PACE_RACE_STAMPS=$(find "$HPACE_RACE/state/procevent" -maxdepth 1 -type f \
   -name 'pace-race-src.*.last-launch' | wc -l | tr -d ' ')

@@ -834,7 +834,11 @@ cmd_start() {
   fm_procevent_launch_floor_wait "$STATE" "$id" "$CLAIM_REG_IDENTITY" "$launch_floor"
   case "$?" in
     0) ;;
-    2) exit 0 ;;
+    # A superseded generation leaves nothing behind. The runner marker is
+    # written before this wait, and a home sweep counts a marker with no owned
+    # claim as a preflight failure, so exiting without removing it would make
+    # that home refuse to sweep.
+    2) [ "$extension_owner" -eq 1 ] || rm -f -- "$runner"; exit 0 ;;
     *) die "cannot enforce the source launch floor: $id" ;;
   esac
   exec 7<&-
