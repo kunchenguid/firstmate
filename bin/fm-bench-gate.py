@@ -1478,6 +1478,10 @@ def validate_confinement_wrapper(
         return None, f"confinement wrapper names an unsupported mechanism: {mechanism}"
     if require_enforcing and mechanism == "none":
         return None, "restore drill requires an enforcing confinement mechanism, not none"
+    if mechanism in ("auto", "container") and re.fullmatch(
+        r"[^\s@]+@sha256:[0-9a-f]{64}|sha256:[0-9a-f]{64}", values.get("--image", "")
+    ) is None:
+        return None, "container confinement requires an explicit immutable SHA256 image identity"
     declared_purpose = values.get("--purpose", "replay")
     if declared_purpose != purpose:
         return None, f"confinement wrapper purpose must be {purpose}"
@@ -2164,6 +2168,14 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
         or frozen_hashes.get(str(program_name)) != expected_hash
     ):
         report.fail("evaluator.execution", "the executable evaluator is absent, mutable, or outside frozen scoring")
+        return
+    archive_programs = contract.get("archive_programs", [program_name])
+    if (not isinstance(archive_programs, list) or not archive_programs
+            or any(not isinstance(name, str) or not name.startswith("scoring/")
+                   or not is_within((root / name).resolve(), (root / "scoring").resolve())
+                   or not (root / name).is_file() or not os.access(root / name, os.X_OK)
+                   or frozen_hashes.get(name) != sha256_file(root / name) for name in archive_programs)):
+        report.fail("evaluator.execution", "archive entrypoints must be executable members of the frozen evaluator package")
         return
     wrapper = isolation.get("exec_wrapper")
     mechanism, detail = validate_confinement_wrapper(wrapper, require_enforcing=True, purpose="replay")
@@ -2863,6 +2875,53 @@ def validate_archived_projection(sample: Path, record: dict[str, Any]) -> None:
             raise GateError("neutral projection does not reconstruct the candidate tree")
 
 
+def frozen_evaluator_hashes(root: Path) -> dict[str, str]:
+    hashes = as_object(load_json(root / "freeze.json", FREEZE_SCHEMA).get("hashes"))
+    required = {"evaluator/execution.json", *(f"evaluator/{name}" for name in EVALUATOR_CONFIG_FILES)}
+    selected = {name: digest for name, digest in hashes.items() if name.startswith("scoring/") or name in required}
+    if not required <= set(selected) or not any(name.startswith("scoring/") for name in selected):
+        raise GateError("frozen evaluator package lacks its code, execution contract, or configuration")
+    return selected
+
+
+def evaluator_identity(hashes: dict[str, str]) -> str:
+    return sha256_bytes(json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode())
+
+
+def validate_archived_scoring(sample: Path, manifest: dict[str, Any]) -> None:
+    root = sample.parent.parent
+    frozen = frozen_evaluator_hashes(root)
+    receipt = load_json(root / "preflight.receipt", RECEIPT_SCHEMA)
+    if receipt.get("verdict") != "pass" or receipt.get("evaluator_sha256") != evaluator_identity(frozen):
+        raise GateError("archived scoring does not match the preflight-frozen evaluator identity")
+    contract_path = root / "evaluator/execution.json"
+    if sha256_file(contract_path) != frozen["evaluator/execution.json"]:
+        raise GateError("frozen evaluator execution contract changed")
+    contract = load_json(contract_path)
+    rerun = as_object(manifest.get("evaluator_rerun"))
+    mapping = rerun.get("frozen_package")
+    package = rerun.get("package_files", rerun.get("argv"))
+    files = as_object(manifest.get("files"))
+    if (not isinstance(mapping, dict) or not mapping or not isinstance(package, list)
+            or any(not isinstance(name, str) for name in package) or set(mapping) != set(package)
+            or any(not isinstance(name, str) or not isinstance(source, str) for name, source in mapping.items())):
+        raise GateError("archived scoring package lacks a complete frozen source mapping")
+    if not {f"evaluator/{name}" for name in EVALUATOR_CONFIG_FILES} <= set(mapping.values()):
+        raise GateError("archived scoring omits frozen evaluator configuration")
+    argv = rerun.get("argv")
+    programs = contract.get("archive_programs", [contract.get("program")])
+    if (not isinstance(argv, list) or len(argv) != 1 or not isinstance(argv[0], str)
+            or not isinstance(programs, list) or mapping.get(argv[0]) not in programs):
+        raise GateError("archived scorer is not a preregistered evaluator entrypoint")
+    for name, source in mapping.items():
+        if source == "evaluator/execution.json" or source not in frozen:
+            raise GateError("archived scoring references an unfrozen package input")
+        path = sample / name
+        if (not is_within(path.resolve(), sample.resolve()) or not stat.S_ISREG(path.lstat().st_mode)
+                or sha256_file(path) != frozen[source] or files.get(name) != frozen[source]):
+            raise GateError("archived scoring code or configuration differs from its frozen identity")
+
+
 def load_archived_measurements(sample: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     files = as_object(manifest.get("files"))
     rerun = manifest.get("evaluator_rerun")
@@ -2876,6 +2935,7 @@ def load_archived_measurements(sample: Path, manifest: dict[str, Any]) -> dict[s
     digest = sha256_file(path)
     if files.get("capture.json") != digest or rerun.get("result_hash") != digest:
         raise GateError("promotion measurements are not bound to the archived evaluator result")
+    validate_archived_scoring(sample, manifest)
     capture = load_json(path)
     if not isinstance(capture.get("capture_hash"), str) or re.fullmatch(r"[0-9a-f]{64}", capture["capture_hash"]) is None:
         raise GateError("archived capture hash must be a SHA256 digest")
@@ -3224,6 +3284,10 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             ok = False
             continue
         failure = timing.get("failure")
+        if not valid_attempt_intervals(timing):
+            report.fail(check, "scored attempt lacks valid timing intervals")
+            ok = False
+            continue
         try:
             validate_archived_projection(sample, record)
             capture = load_archived_measurements(sample, record)
@@ -4871,6 +4935,10 @@ def frozen_inputs(root: Path, plan: dict[str, Any]) -> dict[str, str]:
         missing = sorted(expected_packets - present)
         if missing:
             raise GateError(f"{kind} is missing planned packet inputs: {', '.join(missing)}")
+    for name in ("execution.json", *EVALUATOR_CONFIG_FILES):
+        path = root / "evaluator" / name
+        if path.is_file():
+            hashes[f"evaluator/{name}"] = sha256_file(path)
     tuples = [
         f"{name}:{candidate.get('harness')}/{candidate.get('model')}@{candidate.get('effort')}"
         for name in sorted(plan.get("tracks") or {})
@@ -4982,6 +5050,7 @@ def preflight(root: Path, plan: dict[str, Any], report: Report, timeout: int) ->
                 "verdict": "pass",
                 "plan_sha256": sha256_file(root / "benchmark.json"),
                 "isolation_sha256": sha256_file(root / "isolation.json"),
+                "evaluator_sha256": evaluator_identity(frozen_evaluator_hashes(root)),
                 "evidence_sha256": evidence_digest(root),
                 "stages": list(PREFLIGHT_STAGES),
             },

@@ -10,6 +10,9 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
+import contextlib
+import io
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("bench_gate", ROOT / "bin/fm-bench-gate.py")
@@ -29,9 +32,40 @@ class BenchmarkReviewTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def replay(self, mode="score", package=None):
-        sample = self.root / "sample"
-        sample.mkdir()
+    def freeze_scoring(self, sample, record):
+        root = sample.parent.parent
+        mapping = {}
+        for name in record["evaluator_rerun"]["package_files"]:
+            if name in ("capture.json", "candidate.bundle"):
+                continue
+            source = "scoring/" + name
+            target = root / source
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(sample / name, target)
+            mapping[name] = source
+        for name in gate.EVALUATOR_CONFIG_FILES:
+            source = "evaluator/" + name
+            target = root / source
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("{}\n")
+            archived = "frozen-" + name
+            (sample / archived).write_bytes(target.read_bytes())
+            mapping[archived] = source
+            record["evaluator_rerun"]["package_files"].append(archived)
+            record["groups"]["capture_and_scoring"].append(archived)
+            record["files"][archived] = hashlib.sha256(target.read_bytes()).hexdigest()
+        record["evaluator_rerun"]["frozen_package"] = mapping
+        contract = root / "evaluator/execution.json"
+        contract.write_text(json.dumps({"program": mapping[record["evaluator_rerun"]["argv"][0]]}))
+        hashes = {source: hashlib.sha256((root / source).read_bytes()).hexdigest() for source in mapping.values()}
+        hashes["evaluator/execution.json"] = hashlib.sha256(contract.read_bytes()).hexdigest()
+        (root / "freeze.json").write_text(json.dumps({"schema": gate.FREEZE_SCHEMA, "hashes": hashes}))
+        (root / "preflight.receipt").write_text(json.dumps({"schema": gate.RECEIPT_SCHEMA, "verdict": "pass",
+                                                         "evaluator_sha256": gate.evaluator_identity(hashes)}))
+
+    def replay(self, mode="score", package=None, tamper=None):
+        sample = self.root / "archive/sample"
+        sample.mkdir(parents=True)
         tree = self.root / "tree"
         tree.mkdir()
         (tree / "work.json").write_text('{"value":4}\n')
@@ -62,6 +96,15 @@ else:
                                       "package_files": package or [program.name],
                                       "scored_inputs": ["work.json"],
                                       "input_perturbations": {"work.json": {"kind": "json-value", "pointer": "/value"}}}}
+        self.freeze_scoring(sample, record)
+        if tamper:
+            target = program if tamper == "code" else sample / "frozen-score-map.json"
+            target.write_text(target.read_text().replace("else value", "else value + 3") if tamper == "code" else '{"bonus":3}\n')
+            record["files"][target.name] = hashlib.sha256(target.read_bytes()).hexdigest()
+            capture["deterministic"] += 3
+            (sample / "capture.json").write_text(json.dumps(capture) + "\n")
+            record["files"]["capture.json"] = hashlib.sha256((sample / "capture.json").read_bytes()).hexdigest()
+            record["evaluator_rerun"]["result_hash"] = record["files"]["capture.json"]
         declaration, detail = gate.validate_archived_evaluator_declaration(sample, record, tree)
         if declaration is None:
             return False, detail, {}
@@ -90,7 +133,69 @@ os.execv(sys.argv[2], sys.argv[2:])
     def test_package_cannot_declare_answer_or_original_bundle(self):
         passed, detail, _ = self.replay(package=["score.py", "capture.json", "candidate.bundle"])
         self.assertFalse(passed)
-        self.assertIn("only addressed scoring code and measurement inputs", detail)
+        self.assertIn("frozen source mapping", detail)
+
+    def test_changed_scorer_cannot_gain_a_candidate_bonus(self):
+        passed, detail, _ = self.replay(tamper="code")
+        self.assertFalse(passed)
+        self.assertIn("differs from its frozen identity", detail)
+
+    def test_changed_configuration_is_not_accepted_as_frozen(self):
+        passed, detail, _ = self.replay(tamper="config")
+        self.assertFalse(passed)
+        self.assertIn("differs from its frozen identity", detail)
+
+    def test_scored_archive_requires_timing_before_cleanup(self):
+        sample = self.root / "archive/sample"
+        sample.mkdir(parents=True)
+        groups = {name: sorted(gate.ARCHIVE_GROUP_REQUIREMENTS.get(name, set())) for name in gate.REQUIRED_ARCHIVE_GROUPS}
+        groups["candidate_bundle_and_projection"] = ["candidate.bundle", "projection.diff"]
+        groups["capture_and_scoring"].append("scoring.py")
+        for names in groups.values():
+            for name in names:
+                (sample / name).write_text("{}\n")
+        (sample / "judging.json").write_text('{"scores":[4]}')
+        failure = {"status": "scored", "class": "none", "blocker_class": False}
+        record = {"schema": gate.ARCHIVE_SCHEMA, "sample": "sample", "groups": groups,
+                  "identity": {"track": "A", "role": "entrant", "candidate": "candidate", "packet": "A1"},
+                  "attempt": {"id": "one", "status": "scored", "supersedes": None},
+                  "tree_binding": {key: "a" * 40 for key in
+                                   ("original_sha", "original_tree", "neutral_sha", "neutral_tree", "base_tree", "patch_hash")}}
+        identity = ("A", "entrant", "candidate", "A1")
+        with mock.patch.object(gate, "check_result_plan_binding"), \
+             mock.patch.object(gate, "planned_sample_identities", return_value={identity}), \
+             mock.patch.object(gate, "validate_archived_projection"), \
+             mock.patch.object(gate, "load_archived_measurements", return_value={"deterministic": 4}):
+            for intervals, expected in ((dict.fromkeys(gate.REQUIRED_TIMING_INTERVALS, 10), True), ({}, False)):
+                (sample / "timing.json").write_text(json.dumps({"failure": failure, "intervals": intervals}))
+                record["files"] = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                                   for path in sample.iterdir() if path.name != "manifest.json"}
+                (sample / "manifest.json").write_text(json.dumps(record))
+                report = gate.Report("archive-verify")
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    passed, _ = gate.check_archive(self.root, {}, report)
+                self.assertEqual(passed, expected, output.getvalue())
+                if not expected:
+                    self.assertIn("scored attempt lacks valid timing intervals", output.getvalue())
+
+    def test_container_images_require_explicit_digests(self):
+        confine = str(ROOT / "bin/fm-bench-confine.sh")
+        for value in (None, "runtime:latest", "runtime@sha256:test"):
+            options = [] if value is None else ["--image", value]
+            wrapper = [confine, "--mechanism", "container", *options, "--allow", "{root}", "--"]
+            mechanism, detail = gate.validate_confinement_wrapper(wrapper, require_enforcing=True)
+            self.assertIsNone(mechanism)
+            self.assertIn("immutable", detail)
+            result = subprocess.run([confine, "--mechanism", "container", *options, "--allow", str(self.root),
+                                     "--", "/bin/true"], env={**os.environ, "FM_BENCH_CONFINE_IMAGE": "sha256:" + "a" * 64},
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("immutable", result.stderr)
+        mechanism, detail = gate.validate_confinement_wrapper(
+            [confine, "--mechanism", "container", "--image", "runtime@sha256:" + "a" * 64,
+             "--allow", "{root}", "--"], require_enforcing=True)
+        self.assertEqual(mechanism, "container", detail)
 
     def test_timeout_disposition_and_deadline(self):
         plan = {"timing": {"no_commit_timeout_s": 600, "no_commit_disposition": "void_and_rerun"}}
@@ -179,7 +284,7 @@ elif args[0] == "run":
     Path(args[args.index("--cidfile") + 1]).write_text(cid)
     labels = dict(args[index + 1].split("=", 1) for index, arg in enumerate(args) if arg == "--label")
     info.write_text(json.dumps([{{"Id": cid, "State": {{"Running": True}}, "Config": {{"Labels": labels}}}}]))
-    raise SystemExit(subprocess.call(args[args.index("runtime:test") + 1:]))
+    raise SystemExit(subprocess.call(args[args.index("runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") + 1:]))
 ''')
         child = self.executable(private / "worker.py", f'''#!{sys.executable}
 from pathlib import Path
@@ -190,7 +295,7 @@ while not Path({str(stop)!r}).exists():
         env = {**os.environ, "PATH": str(runtime) + os.pathsep + os.environ["PATH"]}
         command = [sys.executable, str(ROOT / "bin/fm-bench-lifecycle.py"), str(private), str(host), task,
                    str(ROOT / "bin/fm-busy-event.sh"), "--container", "--", str(ROOT / "bin/fm-bench-confine.sh"),
-                   "--purpose", "entrant", "--mechanism", "container", "--image", "runtime:test",
+                   "--purpose", "entrant", "--mechanism", "container", "--image", "runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                    "--provider-network", "test", "--provider-proxy", "http://proxy:8080",
                    "--provider-proxy-container", "proxy", "--allow", str(private), "--", str(child)]
         process = subprocess.Popen(command, env=env)

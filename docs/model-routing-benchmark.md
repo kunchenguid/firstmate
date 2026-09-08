@@ -148,3 +148,9 @@ Archive and promotion checks reconstruct the neutral projection in a fresh Git r
 The serialized `tree-binding.json` must agree with the manifest binding.
 Tmux identifies a confined entrant through a host-owned relay record tied to its process start, task generation, and Docker launch labels; stopped containers or stale bindings cannot establish agent liveness.
 The benchmark family includes `tests/fm-bench-review.test.sh`, which runs the Python regression cases.
+
+Container wrappers require an explicit `repository@sha256:<64 hex digits>` or `sha256:<64 hex digits>` image identity; mutable tags and ambient image defaults cannot authorize launch or replay.
+Preflight records `evaluator_sha256` over the frozen scoring code, execution contract, and evaluator configuration.
+Each archived `evaluator_rerun.frozen_package` maps its package filenames to frozen source paths, including both evaluator configuration files; all package bytes must match those hashes.
+The archived entrypoint must be the execution contract’s `program`, or one of its explicitly preregistered `archive_programs`.
+Scored archives must retain valid timing intervals before archive verification, restore, or cleanup can pass.

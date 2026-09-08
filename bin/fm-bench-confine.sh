@@ -44,7 +44,7 @@ set -u
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MECHANISM=auto
 PURPOSE=replay
-IMAGE=${FM_BENCH_CONFINE_IMAGE:-debian:stable-slim}
+IMAGE=
 PROVIDER_NETWORK=
 PROVIDER_PROXY=
 PROVIDER_PROXY_CONTAINER=
@@ -133,6 +133,8 @@ scrubbed_env() {
 
 case "$MECHANISM" in
   container)
+    [[ "$IMAGE" =~ ^([^[:space:]@]+@)?sha256:[0-9a-f]{64}$ ]] \
+      || { echo "error: container execution requires an explicit immutable SHA256 image identity" >&2; exit 2; }
     runtime=$(resolve_container_runtime) || { echo "error: no usable container runtime" >&2; exit 2; }
     # A container gets its own PID namespace by default, which is what denies
     # the process-inspection probe.

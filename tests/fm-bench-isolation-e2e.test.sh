@@ -33,6 +33,7 @@ else
   for runtime in docker podman; do
     if command -v "$runtime" >/dev/null 2>&1 && "$runtime" info >/dev/null 2>&1 \
       && "$runtime" image inspect "$IMAGE" >/dev/null 2>&1; then
+      IMAGE=$("$runtime" image inspect "$IMAGE" --format '{{.Id}}')
       MECHANISM=container
       break
     fi
@@ -78,7 +79,7 @@ bench.mkdir(parents=True, exist_ok=True)
     "schema": "fm-bench-isolation.v1",
     "exec_wrapper": [confine, "--mechanism", mechanism, "--allow", "{root}", "--"],
     "launch_wrapper": [confine, "--purpose", "entrant", "--mechanism", "container",
-                       "--image", "firstmate-benchmark-runtime@sha256:test",
+                       "--image", "firstmate-benchmark-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                        "--provider-network", "{provider_network}",
                        "--provider-proxy", "{provider_proxy}",
                        "--provider-proxy-container", "{provider_proxy_container}",

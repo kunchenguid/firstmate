@@ -29,6 +29,7 @@ else
   for runtime in docker podman; do
     if command -v "$runtime" >/dev/null 2>&1 && "$runtime" info >/dev/null 2>&1 \
       && "$runtime" image inspect "$IMAGE" >/dev/null 2>&1; then
+      IMAGE=$("$runtime" image inspect "$IMAGE" --format '{{.Id}}')
       RESTORE_MECHANISM=container
       break
     fi
@@ -1172,7 +1173,7 @@ if args[0] == 'info':
 if args[:2] == ['network', 'inspect']:
     print('true proxy ')
     sys.exit(0)
-command = args[args.index('runtime:test') + 1:]
+command = args[args.index('runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') + 1:]
 interactive = '--interactive' in args
 terminal = '--tty' in args
 if os.isatty(0) and interactive and not terminal:
@@ -1185,7 +1186,7 @@ os.execv(command[0], command)
 """)
 runtime.chmod(0o755)
 env = {**os.environ, "PATH": str(work) + os.pathsep + os.environ["PATH"], "TERM": "xterm-256color"}
-base = [str(root / "bin/fm-bench-confine.sh"), "--mechanism", "container", "--image", "runtime:test", "--allow", str(work)]
+base = [str(root / "bin/fm-bench-confine.sh"), "--mechanism", "container", "--image", "runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--allow", str(work)]
 entrant = base + ["--purpose", "entrant", "--provider-network", "private", "--provider-proxy", "http://proxy:8080", "--provider-proxy-container", "proxy", "--"]
 reader = [sys.executable, "-c", "import sys; print('DELIVERED:' + sys.stdin.readline().strip())"]
 result = subprocess.run(entrant + reader, input="follow-up\n", text=True, capture_output=True, env=env, timeout=10)
@@ -1263,7 +1264,7 @@ EOF
 chmod +x "$FAKE_RUNTIME_BIN/docker"
 out=$(PATH="$FAKE_RUNTIME_BIN:$PATH" BENCH_TEST_NETWORK_TOPOLOGY="false provider-proxy " \
   "$ROOT/bin/fm-bench-confine.sh" --purpose entrant --mechanism container \
-  --image runtime@sha256:test --provider-network provider-only \
+  --image runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --provider-network provider-only \
   --provider-proxy http://provider-proxy:8080 --provider-proxy-container provider-proxy \
   --allow "$ENTRY_ROOT" -- /bin/true 2>&1) && status=0 || status=$?
 expect_code 2 "$status" "an internet-routed provider network is refused"
@@ -1272,12 +1273,12 @@ assert_contains "$out" "must be internal and contain only provider-proxy" \
 pass "entrant egress refuses a network that exposes more than the provider proxy"
 
 PATH="$FAKE_RUNTIME_BIN:$PATH" "$CONFINE" --purpose entrant --mechanism container \
-  --image runtime@sha256:test --provider-network provider-egress-k7 \
+  --image runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --provider-network provider-egress-k7 \
   --provider-proxy http://provider-proxy-k7:8080 --provider-proxy-container provider-proxy-k7 \
   --allow "$ENTRY_ROOT" -- /bin/true >"$TMP_ROOT/k7-launch" 2>&1 &
 k7_pid=$!
 PATH="$FAKE_RUNTIME_BIN:$PATH" "$CONFINE" --purpose entrant --mechanism container \
-  --image runtime@sha256:test --provider-network provider-egress-r2 \
+  --image runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --provider-network provider-egress-r2 \
   --provider-proxy http://provider-proxy-r2:8080 --provider-proxy-container provider-proxy-r2 \
   --allow "$ENTRY_ROOT" -- /bin/true >"$TMP_ROOT/r2-launch" 2>&1 &
 r2_pid=$!
@@ -1474,7 +1475,7 @@ json.dump({
     "schema": "fm-bench-isolation.v1",
     "exec_wrapper": [confine, "--mechanism", mechanism, "--image", image, "--allow", "{root}", "--"],
     "launch_wrapper": [confine, "--purpose", "entrant", "--mechanism", "container",
-                       "--image", "firstmate-benchmark-runtime@sha256:test",
+                       "--image", "firstmate-benchmark-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                        "--provider-network", "{provider_network}",
                        "--provider-proxy", "{provider_proxy}",
                        "--provider-proxy-container", "{provider_proxy_container}",
@@ -2125,7 +2126,7 @@ json.dump({
     "schema": "fm-bench-isolation.v1",
     "exec_wrapper": [wrapper],
     "launch_wrapper": [confine, "--purpose", "entrant", "--mechanism", "container",
-                       "--image", "firstmate-benchmark-runtime@sha256:test",
+                       "--image", "firstmate-benchmark-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                        "--provider-network", "{provider_network}",
                        "--provider-proxy", "{provider_proxy}",
                        "--provider-proxy-container", "{provider_proxy_container}",
@@ -2228,6 +2229,70 @@ isolation.write_text(json.dumps({
 PY
 }
 
+bind_archived_scoring() {
+  python3 - "$1" <<'PYFROZENSCORING'
+import hashlib, json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+freeze_path, receipt_path = root / "freeze.json", root / "preflight.receipt"
+if not freeze_path.exists() or not receipt_path.exists():
+    raise SystemExit("fixture must bind its plan before scoring")
+frozen = json.loads(freeze_path.read_text())
+config = root / "evaluator"
+config.mkdir(exist_ok=True)
+for name in ("lock.json", "score-map.json"):
+    if not (config / name).exists():
+        (config / name).write_text("{}\n")
+programs = []
+for path in sorted((root / "archive").glob("*/manifest.json")):
+    record = json.loads(path.read_text())
+    if record["attempt"]["status"] != "scored":
+        continue
+    sample = path.parent
+    rerun = record["evaluator_rerun"]
+    if not rerun.get("argv"):
+        (sample / "scoring.sh").write_text('#!/bin/sh\ncat "$1/score.json"\n')
+        (sample / "scoring.sh").chmod(0o755)
+        rerun["argv"] = ["scoring.sh"]
+        rerun["package_files"] = ["scoring.sh"]
+    names = [name for name in rerun.get("package_files", rerun["argv"]) if not name.startswith("frozen-config/")]
+    mapping = {}
+    for name in names:
+        if not (sample / name).is_file():
+            continue
+        source = f"scoring/{sample.name}/{name}"
+        target = root / source
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((sample / name).read_bytes())
+        mapping[name] = source
+    for name in ("lock.json", "score-map.json"):
+        archived = f"frozen-config/{name}"
+        (sample / archived).parent.mkdir(exist_ok=True)
+        (sample / archived).write_bytes((config / name).read_bytes())
+        mapping[archived] = f"evaluator/{name}"
+    rerun["package_files"] = list(mapping)
+    rerun["frozen_package"] = mapping
+    programs.append(mapping[rerun["argv"][0]])
+    group = record["groups"].setdefault("capture_and_scoring", ["capture.json"])
+    for name, source in mapping.items():
+        digest = hashlib.sha256((sample / name).read_bytes()).hexdigest()
+        record["files"][name] = digest
+        frozen["hashes"][source] = digest
+        if name not in group:
+            group.append(name)
+    path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+contract = config / "execution.json"
+contract.write_text(json.dumps({"program": programs[0], "archive_programs": programs}))
+frozen["hashes"]["evaluator/execution.json"] = hashlib.sha256(contract.read_bytes()).hexdigest()
+freeze_path.write_text(json.dumps(frozen, indent=2, sort_keys=True) + "\n")
+identity = {name: digest for name, digest in frozen["hashes"].items()
+            if name.startswith("scoring/") or name in ("evaluator/lock.json", "evaluator/score-map.json", "evaluator/execution.json")}
+receipt = json.loads(receipt_path.read_text())
+receipt["evaluator_sha256"] = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+PYFROZENSCORING
+}
+
 bind_scoring_fixture() {
   python3 - "$1" "${2:-all}" <<'PYBIND'
 import hashlib, json, shlex, sys
@@ -2266,6 +2331,7 @@ for sample in samples:
     rerun["result_hash"] = record["files"]["capture.json"]
     manifest_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PYBIND
+  bind_archived_scoring "$1"
 }
 
 write_archive() {  # <bench-dir> <src-repo> [png-mode]
@@ -2903,7 +2969,7 @@ manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "an archived-file echo cannot stand in for a restored-tree evaluator"
-assert_contains "$out" "evaluator confinement or execution exited" \
+assert_contains "$out" "frozen source mapping" \
   "the replay package withholds the archived answer from the evaluator"
 assert_absent "$BENCH/archive/restore-drill.json" "a no-op evaluator writes no cleanup receipt"
 pass "the restore drill refuses an executable evaluator that ignores restored content"
@@ -3922,6 +3988,7 @@ for name in sorted(plan["tracks"]):
             )
 PY
   bind_result_plan "$1"
+  bind_archived_scoring "$1"
 }
 
 BENCH="$TMP_ROOT/promote"
