@@ -510,6 +510,9 @@ test_wedge_cap_rollback_failure_sets_sentinel_v15() {
   # at the top without publishing a wake. The test uses wait_poll_cycle
   # (which waits for a heartbeat) to confirm the watcher is alive AND
   # processing the sentinel without publishing a wake.
+  #
+  # triage_log writes to STATE/.watch-triage.log, not stdout - the test
+  # checks that file (not $out) for the expected short-circuit log line.
   printf '%s %s\n' "$(date +%s)" "test-injected" > "$sentinel"
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
@@ -523,8 +526,8 @@ test_wedge_cap_rollback_failure_sets_sentinel_v15() {
   if grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null; then
     reap "$pid"; fail "v15 sentinel short-circuit published a PERMANENTLY-WEDGED wake - the queue-flood behavior v15 closed is broken"
   fi
-  if ! grep -F "rollback-failed sentinel active" "$out" >/dev/null; then
-    reap "$pid"; fail "expected triage_log for sentinel short-circuit was not emitted in: $(cat "$out")"
+  if ! grep -F "rollback-failed sentinel active" "$state/.watch-triage.log" >/dev/null; then
+    reap "$pid"; fail "expected triage_log 'rollback-failed sentinel active' was not emitted (triage file: $(cat "$state/.watch-triage.log" 2>/dev/null || echo missing))"
   fi
   [ -e "$sentinel" ] || { reap "$pid"; fail "v15 sentinel was removed by the short-circuit poll - it should remain until TTL expiry or operator rm"; }
   reap "$pid"

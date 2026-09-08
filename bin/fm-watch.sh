@@ -1047,13 +1047,13 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   rollback_sentinel="$STATE/.wedge-rollback-failed-$(window_key "$win")"
   if [ -e "$rollback_sentinel" ]; then
     sentinel_content=$(cat "$rollback_sentinel" 2>/dev/null || true)
-    # Parse leading integer timestamp from "<ts> [optional reason]". A
-    # malformed sentinel (no leading integer) is left in place and treated
-    # as expired: the next wedge attempt overwrites it.
+    # Parse the leading integer timestamp from "<ts> [optional reason]".
+    # A sentinel with no leading all-digit prefix is malformed: treat as
+    # expired (delete on this read, next wedge attempt will overwrite).
     sentinel_ts=0
     case "$sentinel_content" in
-      ''|*[!0-9]*[!0-9]*) ;;  # malformed leading content; sentinel_ts stays 0
-      *) sentinel_ts=$(printf '%s\n' "$sentinel_content" | awk '{print $1}') ;;
+      *\ *) sentinel_ts=${sentinel_content%% *} ;;
+      *)    sentinel_ts=$sentinel_content ;;
     esac
     case "$sentinel_ts" in
       ''|*[!0-9]*) sentinel_ts=0 ;;
