@@ -215,7 +215,7 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
 Placement is proven only at launch, so `bin/fm-spawn.sh` also exports the task id as `FM_TASK_ID` into every ship and scout pane.
-The marker authorizes worker-owned `no-mistakes axi run` and `no-mistakes axi respond` through `bin/no-mistakes`, while `bin/fm-test-run.sh` refuses to execute the behavior suite from the primary checkout when it is set; the scripts' headers own their predicates, and [`tests/fm-no-mistakes-dispatch.test.sh`](../tests/fm-no-mistakes-dispatch.test.sh) and [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh) pin them.
+The marker together with the worker's linked task worktree authorizes worker-owned `no-mistakes axi run` and `no-mistakes axi respond` through `bin/no-mistakes`; a marker alone authorizes neither a primary checkout nor a secondmate home. `bin/fm-test-run.sh` refuses to execute the behavior suite from the primary checkout when the marker is set; the scripts' headers own their predicates, and [`tests/fm-no-mistakes-dispatch.test.sh`](../tests/fm-no-mistakes-dispatch.test.sh) and [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh) pin them.
 
 ## No-mistakes gate authority boundary
 

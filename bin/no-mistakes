@@ -2,17 +2,28 @@
 # Firstmate's argv-level no-mistakes dispatch boundary.
 #
 # Put this directory before the upstream no-mistakes executable on PATH.
-# Primary and secondmate sessions have no FM_TASK_ID; ship and scout workers
-# receive that marker from fm-spawn.sh before their harness starts. Invocations
-# whose first two arguments are `axi run` or `axi respond` are refused without
-# the marker. Every other invocation is forwarded unchanged to the first other
-# executable on PATH; absence of an upstream executable is an error.
+# Ship and scout workers receive FM_TASK_ID from fm-spawn.sh and run in a linked
+# task worktree. Invocations whose first two arguments are `axi run` or
+# `axi respond` are refused unless both facts hold. A marker alone cannot turn a
+# primary checkout or secondmate home into a worker. Every other invocation is
+# forwarded unchanged to the first other executable on PATH; absence of an
+# upstream executable is an error.
 set -u
+
+is_task_worker_checkout() {
+  local top git_dir common_dir
+  [ -n "${FM_TASK_ID:-}" ] || return 1
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ ! -f "$top/.fm-secondmate-home" ] || return 1
+  git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ "$git_dir" != "$common_dir" ]
+}
 
 if [ "${1:-}" = axi ]; then
   case "${2:-}" in
     run|respond)
-      if [ -z "${FM_TASK_ID:-}" ]; then
+      if ! is_task_worker_checkout; then
         echo "REFUSED: no-mistakes axi $2 is worker-owned; send the request to the task worker" >&2
         exit 2
       fi
