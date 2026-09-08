@@ -1055,7 +1055,8 @@ control_herdr_process_names_harness() {  # <harness> <comm> <args>
 # engine left anywhere under it. Prints a stable fingerprint on success.
 control_herdr_target_engine_snapshot() {  # <target-harness>
   local harness=${1:-} session workspace tab pane wt_real pane_json pane_cwd process_json shell_pid
-  local ps_bin rows descendants pid ppid comm argv0 args target_pids=' ' target_rows='' root_pid='' roots=0
+  local ps_bin rows descendants pid ppid comm argv0 args target_pids=' ' target_rows='' roots=0
+  local parent_map=' ' chain='' walk='' rest='' hops=0 independent=1 root_chain=''
   [ -n "$harness" ] || return 1
   control_herdr_target_engine_nameable "$harness" || return 1
   session=$(fm_backend_meta_exact_value "$META" herdr_session) || return 1
@@ -1128,6 +1129,7 @@ control_herdr_target_engine_snapshot() {  # <target-harness>
        || { [ -n "$argv0" ] && control_herdr_pi_engine_process_name "$argv0"; }; then
       return 1
     fi
+    parent_map="$parent_map$pid=$ppid "
     if control_herdr_process_names_harness "$harness" "$comm" "$args"; then
       target_pids="$target_pids$pid "
       target_rows="$target_rows$pid $ppid"$'\n'
@@ -1137,21 +1139,40 @@ $descendants
 EOF
 
   # A harness may run its own nested worker chain (Claude Code's bg-pty-host
-  # tree is contiguous), so "exactly one replacement" counts INDEPENDENT target
-  # processes - those whose parent is not itself the same harness - never raw
-  # process instances.
+  # tree is contiguous, and a helper of its own can sit behind an intermediate
+  # shell), so "exactly one replacement" counts INDEPENDENT target processes -
+  # those with no target anywhere in their ancestry up to the pane shell - never
+  # raw process instances and never immediate parentage alone. The accepted
+  # root's whole ancestry is part of the fingerprint, so a replacement that
+  # changes what it hangs from cannot pass as the same stable sample; an
+  # ancestry that leaves the sampled tree or does not terminate is unreadable
+  # evidence and refuses rather than counting as a root.
   while read -r pid ppid; do
     [ -n "$pid" ] || continue
-    case "$target_pids" in
-      *" $ppid "*) continue ;;
-    esac
+    chain=$pid
+    walk=$ppid
+    hops=0
+    independent=1
+    while [ "$walk" != "$shell_pid" ]; do
+      [ "$hops" -lt 64 ] || return 1
+      case "$target_pids" in
+        *" $walk "*) independent=0; break ;;
+      esac
+      chain="$chain<$walk"
+      rest=${parent_map#*" $walk="}
+      [ "$rest" != "$parent_map" ] || return 1
+      walk=${rest%% *}
+      case "$walk" in ''|*[!0-9]*) return 1 ;; esac
+      hops=$((hops + 1))
+    done
+    [ "$independent" -eq 1 ] || continue
     roots=$((roots + 1))
-    root_pid=$pid
+    root_chain="$chain<$shell_pid"
   done <<EOF
 $target_rows
 EOF
   [ "$roots" -eq 1 ] || return 1
-  printf '%s:%s' "$shell_pid" "$root_pid"
+  printf '%s:%s' "$shell_pid" "$root_chain"
 }
 
 wait_new_herdr_target_engine() {  # <target-harness>

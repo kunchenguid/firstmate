@@ -19,7 +19,10 @@
 # cached Pi label Herdr keeps after the release can never stand in for the
 # target runtime: a replacement on another harness is reported only once
 # exactly one independent target process, with no Pi engine left, is stable
-# below the same pane shell. The real-Herdr counterpart is
+# below the same pane shell - independence measured over the whole ancestry, so
+# the runtime's own helpers collapse into one replacement while a config-tree
+# helper that merely shares the harness name is neither a replacement nor a
+# duplicate. The real-Herdr counterpart is
 # tests/fm-control-herdr-pi-relaunch-live-e2e.test.sh.
 set -u
 
@@ -278,6 +281,47 @@ EOF
 202 101 202 S treehouse treehouse get
 303 202 303 S zsh /bin/zsh
 404 303 404 S node /usr/local/bin/node /home/fixture/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
+EOF
+  elif [ "$phase" = new ] && [ "$scenario" = cross-target-npm-helper ]; then
+    # The same replacement running one of its own config-tree helpers behind an
+    # intermediate shell: a hook under ~/.claude shares the harness name without
+    # being a worker.
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S node /usr/local/bin/node /home/fixture/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
+500 404 500 S bash /bin/bash -c node /home/fixture/.claude/hooks/notify.js
+501 500 501 S node /usr/local/bin/node /home/fixture/.claude/hooks/notify.js
+EOF
+  elif [ "$phase" = new ] && [ "$scenario" = cross-target-npm-worker-chain ]; then
+    # The replacement's own nested worker, reached through an intermediate shell
+    # that is not itself the harness: one replacement, not two.
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S node /usr/local/bin/node /home/fixture/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
+500 404 500 S bash /bin/bash -c exec node cli.js --mcp
+501 500 501 S node /usr/local/bin/node /home/fixture/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js --mcp
+EOF
+  elif [ "$phase" = new ] && [ "$scenario" = cross-target-npm-phantom ]; then
+    # Nothing started: the only process naming the harness is a config-tree
+    # helper left below the released shell.
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+501 303 501 S node /usr/local/bin/node /home/fixture/.claude/hooks/notify.js
+EOF
+  elif [ "$phase" = new ] && [ "$scenario" = cross-target-npm-duplicate ]; then
+    # Two interpreter-hosted replacements, neither descending from the other.
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S node /usr/local/bin/node /home/fixture/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
+406 303 406 S node /usr/local/bin/node /home/fixture/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
 EOF
   elif [ "$phase" = new ] && [ "$scenario" = cross-target-nested ]; then
     cat <<'EOF'
@@ -703,13 +747,32 @@ expect_code 0 "$rc" "an interpreter-hosted target runtime should relaunch"$'\n'"
 assert_contains "$out" 'relaunched rp1 harness=claude from=pi' "the interpreter-hosted relaunch did not retarget the adapter"
 assert_contains "$(cat "$dir/home/state/rp1.control-relaunch")" 'herdr_pi_authority=released-target-engine' \
   "the completed transaction did not record which proof accepted the replacement"
-pass "fm-control Herdr/Pi: a replacement the fleet identifies only by its interpreter script path is proved, not refused after launch"
+
+# The same replacement while it runs one of its OWN config-tree helpers behind
+# an intermediate shell. `node ~/.claude/hooks/notify.js` shares the harness
+# name without being a worker, so counting it would refuse a healthy single
+# replacement after it was already typed into the pane.
+dir=$(new_case cross-runtime-npm-helper cross-target-npm-helper pi)
+out=$(run_control "$dir" rp1 relaunch --harness claude --note 'resume with the runtime running its own hook')
+rc=$?
+expect_code 0 "$rc" "a config-tree helper must not be counted as a second replacement"$'\n'"$out"
+assert_contains "$out" 'relaunched rp1 harness=claude from=pi' "the replacement running its own hook was not accepted"
+
+# The replacement's own nested worker, reached across an intermediate shell that
+# is not itself the harness: independence is decided over the whole ancestry, so
+# this is one replacement.
+dir=$(new_case cross-runtime-npm-worker-chain cross-target-npm-worker-chain pi)
+out=$(run_control "$dir" rp1 relaunch --harness claude --note 'resume with a nested worker chain')
+rc=$?
+expect_code 0 "$rc" "a target worker behind an intermediate shell is still one replacement"$'\n'"$out"
+assert_contains "$out" 'relaunched rp1 harness=claude from=pi' "the nested worker chain was not accepted as one replacement"
+pass "fm-control Herdr/Pi: a replacement the fleet identifies only by its interpreter script path is proved, and its own helpers collapse into one replacement"
 
 # The regression this proof exists for: nothing started, but Herdr still
 # reports the released Pi label as `alive`. Reporting that as a relaunch would
 # leave the record published on the new harness with no agent.
-# These three proofs can never succeed, so they only need long enough to prove
-# they time out rather than the full default launch budget.
+# These proofs can never succeed, so they only need long enough to prove they
+# time out rather than the full default launch budget.
 FM_TEST_LAUNCH_WAIT=0.05
 dir=$(new_case cross-runtime-vacuous cross-none pi)
 out=$(run_control "$dir" rp1 relaunch --harness codex --note 'resume on another runtime')
@@ -718,6 +781,25 @@ rc=$?
 assert_contains "$out" 'could not be verified as exactly one stable codex process' \
   "the refusal did not name the postcondition it could not prove"
 assert_not_contains "$out" 'relaunched rp1' "an unproven replacement was reported as relaunched"
+
+# The phantom direction the same looseness would open: nothing started, and the
+# only process naming the harness below the released shell is a config-tree
+# helper. Accepting it would report a relaunch with no worker running.
+dir=$(new_case cross-runtime-npm-phantom cross-target-npm-phantom pi)
+out=$(run_control "$dir" rp1 relaunch --harness claude --note 'resume on an npm-installed runtime')
+rc=$?
+[ "$rc" -ne 0 ] || fail "a config-tree helper must not stand in for a replacement that never started: $out"
+assert_contains "$out" 'could not be verified as exactly one stable claude process' \
+  "the refusal did not name the postcondition it could not prove"
+assert_not_contains "$out" 'relaunched rp1' "a phantom replacement was reported as relaunched"
+
+# Two interpreter-hosted replacements, neither descending from the other, is the
+# duplicate worker this whole proof exists to refuse.
+dir=$(new_case cross-runtime-npm-duplicate cross-target-npm-duplicate pi)
+out=$(run_control "$dir" rp1 relaunch --harness claude --note 'resume on an npm-installed runtime')
+rc=$?
+[ "$rc" -ne 0 ] || fail "two independent interpreter-hosted replacements must refuse: $out"
+assert_not_contains "$out" 'relaunched rp1' "a duplicated interpreter-hosted replacement was reported as relaunched"
 
 # A Pi engine still running below the pane shell is a duplicate-worker risk,
 # never evidence for the target runtime.

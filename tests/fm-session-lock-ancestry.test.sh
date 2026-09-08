@@ -144,7 +144,11 @@ test_named_harness_identity_reads_every_witness() {
   fakebin=$(fm_fakebin "$dir")
   # An npm-installed Claude Code is a bare `node`: its comm and argv[0] are the
   # interpreter and `claude-code` is not a `claude` path component, so only the
-  # interpreter witness can name it.
+  # interpreter witness can name it. That witness reads the SCRIPT PATH the
+  # interpreter runs, structurally: the harness's own program directory names a
+  # running harness, while its config tree under ~/.claude - hooks, MCP
+  # wrappers, preloaded tools - never does, because callers count what this
+  # names.
   while IFS='|' read -r expect harness comm args; do
     [ -n "$expect" ] || continue
     if lib_eval "$fakebin" "fm_harness_process_is '$harness' '$comm' '$args'"; then
@@ -155,6 +159,11 @@ test_named_harness_identity_reads_every_witness() {
   done <<'EOF'
 yes|claude|node|/usr/local/bin/node /home/u/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
 no|codex|node|/usr/local/bin/node /home/u/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
+no|claude|node|/usr/local/bin/node /home/u/.claude/hooks/notify.js
+no|claude|node|/usr/local/bin/node /home/u/.claude/mcp/wrapper.js --port 1234
+no|claude|node|/usr/local/bin/node --require /home/u/.claude/preload.js /srv/app/index.js
+no|claude|python3|/usr/bin/python3 /home/u/.claude/tools/run.py
+yes|claude|node|/usr/local/bin/node /opt/claude/cli.js
 yes|claude|/opt/homebrew/bi|/opt/homebrew/bin/claude --resume
 yes|claude|2.1.220|/home/u/.local/share/claude/versions/2.1.220 --resume
 yes|codex|codex|/usr/local/bin/codex

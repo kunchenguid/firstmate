@@ -68,19 +68,62 @@ fm_harness_name_pattern() {  # <harness>
   return 1
 }
 
+# Whole path components that positively name harness $1 inside an installed
+# PROGRAM path: the harness name itself, plus the canonical package directory
+# its own published CLI ships as. Claude Code's npm package installs its entry
+# point at .../node_modules/@anthropic-ai/claude-code/cli.js, where no `claude`
+# component exists, while ~/.claude/... is that harness's CONFIG tree - hooks,
+# settings, MCP wrappers - and names a running harness for nobody. Extend only
+# with a package directory an adapter's own CLI is verified to install as.
+fm_harness_program_components() {  # <harness>
+  printf '%s\n' "$1"
+  case "$1" in
+    claude) printf '%s\n' claude-code ;;
+  esac
+}
+
+# Print the script path a bare interpreter is running - the first argument that
+# is neither the interpreter itself nor an option - or return 1. Only that one
+# argument is program evidence: any later path is data the program was pointed
+# at, and reading it as identity is how a config or hook path is mistaken for a
+# running harness.
+fm_harness_interpreter_script() {  # <args>
+  local args=$1 token i=1
+  local -a tokens=()
+  IFS=' ' read -r -a tokens <<EOF
+$args
+EOF
+  while [ "$i" -lt "${#tokens[@]}" ]; do
+    token=${tokens[$i]}
+    i=$((i + 1))
+    case "$token" in
+      ''|-*) continue ;;
+    esac
+    printf '%s' "$token"
+    return 0
+  done
+  return 1
+}
+
 # True when the process described by command name <comm> and full argument
 # string <args> is the NAMED harness. Same evidence and same tables as
 # fm_harness_process_matches, which stays the "is this ANY harness" owner:
 #   1. the basename of the reported command name,
 #   2. an exact harness component in that command path or in argv[0],
-#   3. a bare interpreter (node, python) running that harness's script path -
-#      how an npm-installed Claude Code (`node .../@anthropic-ai/claude-code/
-#      cli.js`) is identified, since neither its comm nor its argv[0] carries a
-#      `claude` path component.
+#   3. a bare interpreter (node, python) whose SCRIPT PATH carries one of that
+#      harness's program components as a whole path component - how an
+#      npm-installed Claude Code (`node .../@anthropic-ai/claude-code/cli.js`)
+#      is identified, since neither its comm nor its argv[0] carries a `claude`
+#      path component.
+# Witness 3 is structurally anchored rather than a substring of the argument
+# string because callers COUNT the processes this names: `node
+# ~/.claude/hooks/notify.js` shares the harness's name without being it, and
+# counting it would both refuse a healthy single replacement and let an
+# unrelated helper stand in for a replacement that never started.
 # Every witness is asked about the harness in question, so a witness naming some
 # OTHER harness can never short-circuit the rest.
 fm_harness_process_is() {  # <harness> <comm> <args>
-  local harness=${1:-} comm=${2:-} args=${3:-} re argv0
+  local harness=${1:-} comm=${2:-} args=${3:-} re argv0 script component
   re=$(fm_harness_name_pattern "$harness") || return 1
   if printf '%s' "$(basename -- "$comm")" | grep -qE "$re"; then
     return 0
@@ -90,7 +133,15 @@ fm_harness_process_is() {  # <harness> <comm> <args>
   fm_harness_path_name "$argv0" "$harness" >/dev/null && return 0
   case "$comm" in
     *node*|*python*)
-      printf '%s' "$args" | grep -qE "$re" && return 0
+      script=$(fm_harness_interpreter_script "$args") || return 1
+      while IFS= read -r component; do
+        [ -n "$component" ] || continue
+        case "/$script/" in
+          */"$component"/*) return 0 ;;
+        esac
+      done <<EOF
+$(fm_harness_program_components "$harness")
+EOF
       ;;
   esac
   return 1
