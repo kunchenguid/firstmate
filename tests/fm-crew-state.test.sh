@@ -1689,6 +1689,7 @@ EOF
 #!/usr/bin/env bash
 cat > /dev/null
 [ -z "${FM_FAKE_REMOTE_STATE_OUT:-}" ] || printf '%s\n' "$FM_FAKE_REMOTE_STATE_OUT"
+[ -z "${FM_FAKE_REMOTE_STATE_ERR:-}" ] || printf '%s\n' "$FM_FAKE_REMOTE_STATE_ERR" >&2
 exit "${FM_FAKE_SSH_RC:-0}"
 SH
   chmod +x "$d/fakebin/fake-ssh"
@@ -1754,6 +1755,22 @@ test_remote_dead_reports_remote_verdict() {
   assert_contains "$out" "remote endpoint dead on remote-mac" \
     "a genuinely dead remote endpoint reports the remote host's own verdict"
   pass "fm-crew-state remote: the remote host's own dead verdict is reported truthfully"
+}
+
+test_remote_unreadable_carries_the_remote_reason() {
+  reset_fakes
+  local d out rc
+  d=$(setup_remote_case remote-unreadable-reason)
+  make_fakebin "$d" >/dev/null
+  out=$(FM_FAKE_REMOTE_STATE_OUT=unreadable \
+    FM_FAKE_REMOTE_STATE_ERR="herdr client selection: herdr client /remote/.local/bin/herdr (version 0.8.2, protocol 20) cannot talk to the running server for session 'fm-remote' (protocol 22); upgrade the herdr client on this PATH" \
+    FM_FAKE_SSH_RC=0 run_remote_crew_state "$d" rsm); rc=$?
+  expect_code 0 "$rc" "unreadable remote exits 0"
+  assert_contains "$out" "unknown-remote: endpoint state 'unreadable' on remote-mac" "an unreadable endpoint stays unknown-remote"
+  assert_contains "$out" "not proof of death" "an unreadable endpoint must not read as dead"
+  assert_contains "$out" "protocol 20" "the remote host's own reason for the unreadable read must be carried into the detail"
+  assert_contains "$out" "upgrade the herdr client" "the carried reason must keep its fix"
+  pass "fm-crew-state remote: an unreadable endpoint carries the remote host's stated reason instead of staying mute"
 }
 
 test_missing_meta() {
@@ -2291,6 +2308,7 @@ test_remote_alive_with_log_uses_status_log
 test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
+test_remote_unreadable_carries_the_remote_reason
 test_missing_meta
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped

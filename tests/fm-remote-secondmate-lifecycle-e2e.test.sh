@@ -6,6 +6,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/remote-herdr-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
+# shellcheck source=tests/herdr-client-pair-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -1101,6 +1103,31 @@ launches_after_repair=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "the endpoint was not probed successfully after readiness repair"
 pass "startup repairs remote readiness before probing without relaunching"
+
+# --- a stale herdr client shadowing the one the server accepts --------------
+# The remote host's job PATH can resolve an older self-updated herdr ahead of
+# the one its running server accepts; the server then refuses every command
+# from it with protocol_mismatch. The host-local state read must still reach
+# the live endpoint through the accepted client, and when no accepted client
+# exists it must say which client the server refuses instead of a mute
+# `unreadable` (bin/backends/herdr.sh "client selection").
+make_herdr_client_pair "$TMP_ROOT/client-pair" 0.7.1 14 0.7.5 16
+export FM_HERDR_PAIR_DIR="$TMP_ROOT/client-pair"
+SHADOWED_STATE=$(FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  PATH="$TMP_ROOT/client-pair/stale:$REMOTE_ROOT/bin:$TMP_ROOT/client-pair/tools:/usr/bin:/bin" \
+  "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" state ios 2>"$TMP_ROOT/shadowed-state.err")
+[ "$SHADOWED_STATE" = alive ] \
+  || fail "a live endpoint behind a stale shadowing client must still read alive, got: $SHADOWED_STATE ($(cat "$TMP_ROOT/shadowed-state.err"))"
+assert_contains "$(cat "$TMP_ROOT/client-pair/stale.log")" 'pane get' "the stale client was not the one the job PATH resolved first"
+LONE_STALE_STATE=$(FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  PATH="$TMP_ROOT/client-pair/stale:$TMP_ROOT/client-pair/tools:/usr/bin:/bin" \
+  "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" state ios 2>"$TMP_ROOT/lone-stale-state.err")
+[ "$LONE_STALE_STATE" = unreadable ] \
+  || fail "with only a refused client the endpoint must read unreadable, got: $LONE_STALE_STATE"
+assert_contains "$(cat "$TMP_ROOT/lone-stale-state.err")" "$TMP_ROOT/client-pair/stale/herdr (version 0.7.1, protocol 14) cannot talk to the running server for session 'fm-remote' (protocol 16)" \
+  "the unreadable read did not name the refused client and both protocols"
+unset FM_HERDR_PAIR_DIR
+pass "the host-local state read steps around a stale shadowing herdr client and names a refused lone client"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-liveness-legacy.meta"

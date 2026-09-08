@@ -193,11 +193,17 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 # down or dead mate; only the remote host's own dead/missing verdict may say
 # the endpoint is actually gone.
 if [ -n "$REMOTE_HOST" ]; then
+  REMOTE_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-crew-state-remote.XXXXXX") || REMOTE_ERR=/dev/null
   if ! REMOTE_STATE=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$ID" \
-    fm-remote-secondmate-control.sh state "$ID" < /dev/null 2>/dev/null); then
+    fm-remote-secondmate-control.sh state "$ID" < /dev/null 2>"$REMOTE_ERR"); then
     REMOTE_STATE=
   fi
   REMOTE_STATE=$(printf '%s\n' "$REMOTE_STATE" | tail -1)
+  # The remote state read names its reason on stderr when it cannot read the
+  # endpoint (for example a herdr client that cannot talk to the running
+  # server); keep the last line so unknown-remote is actionable, not mute.
+  REMOTE_REASON=$(grep -v '^[[:space:]]*$' "$REMOTE_ERR" 2>/dev/null | tail -1 || true)
+  [ "$REMOTE_ERR" = /dev/null ] || rm -f -- "$REMOTE_ERR"
   case "$REMOTE_STATE" in
     alive)
       if [ -n "$LOG_VERB" ]; then
@@ -212,10 +218,10 @@ if [ -n "$REMOTE_HOST" ]; then
       emit unknown remote-endpoint "remote endpoint $REMOTE_STATE on $REMOTE_HOST"
       ;;
     '')
-      emit unknown remote-endpoint "unknown-remote: $REMOTE_HOST unreachable or endpoint unreadable (not proof of death)"
+      emit unknown remote-endpoint "unknown-remote: $REMOTE_HOST unreachable or endpoint unreadable (not proof of death)${REMOTE_REASON:+${SEP}$REMOTE_REASON}"
       ;;
     *)
-      emit unknown remote-endpoint "unknown-remote: endpoint state '$REMOTE_STATE' on $REMOTE_HOST (not proof of death)"
+      emit unknown remote-endpoint "unknown-remote: endpoint state '$REMOTE_STATE' on $REMOTE_HOST (not proof of death)${REMOTE_REASON:+${SEP}$REMOTE_REASON}"
       ;;
   esac
 fi

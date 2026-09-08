@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/herdr-client-pair-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the herdr adapter parses its JSON)"; exit 0; }
 
@@ -623,3 +625,72 @@ assert_contains "$DOCTOR_OUT" 'check entrypoint-link=human:' "an operator-owned 
   || fail "--fix overwrote a file it did not create"
 unset FM_ROOT_OVERRIDE
 pass "the entrypoint symlink is recreated when absent and never overwritten when operator-owned"
+
+# --- a stale ~/.local/bin client shadowing the compatible one ----------------
+# The remote-job PATH resolves ~/.local/bin first, so a self-updated older
+# herdr there hides the package-managed one the running server actually
+# accepts. The doctor must report which client it selected and why, and the
+# launch agent must start the server from that same client, never from the
+# one the server refuses.
+
+new_case Darwin with-herdr gui
+make_herdr_client_pair "$CASE_DIR/pair"
+mkdir -p "$CASE_HOME/.local/bin"
+cp "$CASE_DIR/pair/stale/herdr" "$CASE_HOME/.local/bin/herdr"
+cp "$CASE_DIR/pair/current/herdr" "$CASE_BIN/herdr"
+export FM_HERDR_PAIR_DIR="$CASE_DIR/pair"
+mkdir -p "$(dirname "$CASE_PLIST")"
+cat > "$CASE_PLIST" <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$CASE_HOME/.local/bin/herdr</string>
+		<string>server</string>
+		<string>--session</string>
+		<string>fm-remote</string>
+	</array>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>$CASE_HOME/Library/Logs/$LABEL.log</string>
+	<key>StandardErrorPath</key>
+	<string>$CASE_HOME/Library/Logs/$LABEL.log</string>
+</dict>
+</plist>
+XML
+write_loaded_contract "$CASE_HOME/.local/bin/herdr"
+doctor
+expect_code 1 "$DOCTOR_RC" "a launch agent bound to the refused client was reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr=ok: $CASE_BIN/herdr (bypassing $CASE_HOME/.local/bin/herdr: herdr client $CASE_HOME/.local/bin/herdr (version 0.8.2, protocol 20) cannot talk to the running server for session 'fm-remote' (protocol 22)" \
+  "the doctor did not report the compatible client it selected and the stale one it bypassed"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the running server was not read through the selected client"
+assert_contains "$DOCTOR_OUT" 'check launchagent=fixable:' "a launch agent bound to the refused client was not tagged fixable"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=fixable:' "a loaded contract bound to the refused client was not tagged fixable"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not rebind the launch agent to the selected client"
+assert_grep "<string>$CASE_BIN/herdr</string>" "$CASE_PLIST" "the repaired launch agent does not start the server from the selected client"
+assert_no_grep "$CASE_HOME/.local/bin/herdr" "$CASE_PLIST" "the refused client survived launch-agent repair"
+unset FM_HERDR_PAIR_DIR
+pass "a stale client shadowing the compatible one is bypassed, named, and kept out of the launch agent"
+
+# --- only incompatible clients is a human gap, named precisely ---------------
+
+new_case Darwin with-herdr gui
+make_herdr_client_pair "$CASE_DIR/pair"
+cp "$CASE_DIR/pair/stale/herdr" "$CASE_BIN/herdr"
+export FM_HERDR_PAIR_DIR="$CASE_DIR/pair"
+doctor
+expect_code 1 "$DOCTOR_RC" "a host whose only client the server refuses was reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr=human: herdr client $CASE_BIN/herdr (version 0.8.2, protocol 20) cannot talk to the running server for session 'fm-remote' (protocol 22)" \
+  "the doctor did not name the lone refused client, its protocol, and the server protocol"
+assert_contains "$DOCTOR_OUT" 'action: herdr: upgrade the herdr client' "the refused-client gap came with no operator action"
+unset FM_HERDR_PAIR_DIR
+pass "a host with no compatible client is a human gap that names the client and protocols"

@@ -378,9 +378,160 @@ fm_backend_herdr_workspace_label() {
 # fm_backend_herdr_version_check, which is intentionally session-independent
 # (reads only .client.* fields).
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
-  local session=$1
+  local session=$1 rc=0 err
   shift
-  HERDR_SESSION="$session" herdr "$@" --session "$session"
+  # stderr is buffered (stdout streams untouched) so a protocol_mismatch
+  # refusal can be recognized and retried once on a compatible client; see
+  # "client selection" below. A failed command's stderr is replayed verbatim.
+  # The long-lived `server` launch is exec'd straight through: buffering its
+  # stderr would hold this call open for the server's whole lifetime.
+  if [ "${1:-}" = server ]; then
+    HERDR_SESSION="$session" "$(fm_backend_herdr_bin)" "$@" --session "$session"
+    return $?
+  fi
+  { err=$(HERDR_SESSION="$session" "$(fm_backend_herdr_bin)" "$@" --session "$session" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1
+  if [ "$rc" -ne 0 ] && [ -z "${FM_BACKEND_HERDR_BIN:-}" ]; then
+    case "$err" in
+      *protocol_mismatch*)
+        fm_backend_herdr_client_select "$session" force
+        if [ -n "${FM_BACKEND_HERDR_BIN:-}" ]; then
+          HERDR_SESSION="$session" "$FM_BACKEND_HERDR_BIN" "$@" --session "$session"
+          return $?
+        fi
+        ;;
+    esac
+  fi
+  [ -z "$err" ] || printf '%s\n' "$err" >&2
+  return "$rc"
+}
+
+# --- client selection --------------------------------------------------------
+#
+# Every session-scoped call runs the client fm_backend_herdr_bin names: by
+# default the first `herdr` on PATH, exactly as before. A host can carry more
+# than one herdr client (a self-updated copy in ~/.local/bin next to a
+# package-managed one), and the two PATH orders Firstmate runs under (an
+# interactive login shell, and the fixed remote-job PATH that puts ~/.local/bin
+# first - bin/fm-remote-job-lib.sh) can then resolve DIFFERENT binaries. A
+# client older than the running server is answered with error code
+# protocol_mismatch on every command (verified: herdr 0.8.2, protocol 20,
+# against a 0.9.0 server, protocol 22), which the read classifiers correctly
+# refuse to interpret - but that turned a live remote secondmate into
+# `unreadable`, severed every doorbell into it, and blocked the relaunch that
+# would have repaired it.
+#
+# Selection is reactive, never speculative: the happy path makes no extra
+# call on any host, and fakes that never emit protocol_mismatch never see it.
+# On that refusal fm_backend_herdr_cli asks fm_backend_herdr_client_select to
+# read `status --json --session <s>` from the PATH-first client and, when a
+# running server reports it incompatible (.server.compatible when the client
+# emits it, equal .client/.server protocol otherwise), from each other
+# distinct herdr on PATH in order, adopting the first one that positively
+# proves compatible and retrying the command on it once. The choice is
+# exported as FM_BACKEND_HERDR_BIN so children inherit it, and
+# FM_BACKEND_HERDR_CLIENT_NOTE carries the one-line reason whenever the
+# PATH-first client was bypassed or no compatible client exists. Nothing here
+# writes to stderr, because callers merge stderr into the JSON they parse;
+# diagnosing surfaces print the note themselves
+# (fm_backend_herdr_client_diagnose), and bin/fm-remote-doctor.sh consults
+# the same selection so the launch agent starts the server from the client
+# every session-scoped call uses. An unknown verdict (a client that reports
+# no protocol at all) always keeps the PATH-first client.
+fm_backend_herdr_bin() {
+  printf '%s' "${FM_BACKEND_HERDR_BIN:-herdr}"
+}
+
+# fm_backend_herdr_client_candidates: every distinct executable named herdr on
+# PATH, one per line, in PATH order (builtins only - no fork).
+fm_backend_herdr_client_candidates() {
+  local dir candidate seen='|' old_ifs=$IFS
+  IFS=:
+  for dir in $PATH; do
+    [ -n "$dir" ] || dir=.
+    candidate="$dir/herdr"
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    case "$seen" in *"|$candidate|"*) continue ;; esac
+    seen="$seen$candidate|"
+    printf '%s\n' "$candidate"
+  done
+  IFS=$old_ifs
+}
+
+# fm_backend_herdr_client_status: one session-scoped status read of <bin>,
+# printed as "<running>\t<compatible>\t<client-protocol>\t<server-protocol>\t<client-version>"
+# with empty fields for anything the client did not report. Never fails.
+fm_backend_herdr_client_status() {  # <bin> <session>
+  local bin=$1 session=$2 out
+  out=$(HERDR_SESSION="$session" "$bin" status --json --session "$session" 2>/dev/null) || out=
+  printf '%s' "$out" | jq -r '
+    [ (if (.server | type) == "object" and .server.running != null then (.server.running | tostring) else "" end),
+      (if (.server | type) == "object" and (.server | has("compatible"))
+       then (.server.compatible | tostring)
+       elif (.client.protocol != null and .server.protocol != null)
+       then ((.client.protocol == .server.protocol) | tostring)
+       else "" end),
+      (.client.protocol // "" | tostring),
+      (.server.protocol // "" | tostring),
+      (.client.version // "" | tostring) ] | @tsv' 2>/dev/null \
+    || printf '\t\t\t\t'
+}
+
+# fm_backend_herdr_client_select: resolve the client for <session> once per
+# process (pass `force` to redo it), per the contract above.
+fm_backend_herdr_client_select() {  # <session> [force]
+  local session=$1 candidates first candidate running compatible cproto sproto cversion
+  local first_proto first_version others=
+  if [ "${2:-}" != force ]; then
+    [ "${FM_BACKEND_HERDR_CLIENT_SESSION:-}" != "$session" ] || return 0
+  fi
+  FM_BACKEND_HERDR_BIN=
+  FM_BACKEND_HERDR_CLIENT_NOTE=
+  FM_BACKEND_HERDR_CLIENT_SESSION=$session
+  export FM_BACKEND_HERDR_BIN FM_BACKEND_HERDR_CLIENT_NOTE FM_BACKEND_HERDR_CLIENT_SESSION
+  candidates=$(fm_backend_herdr_client_candidates)
+  case "$candidates" in *$'\n'*) ;; *) return 0 ;; esac
+  first=${candidates%%$'\n'*}
+  IFS=$'\t' read -r running compatible first_proto sproto first_version \
+    <<< "$(fm_backend_herdr_client_status "$first" "$session")"
+  [ "$running" = true ] && [ "$compatible" = false ] || return 0
+  while IFS= read -r candidate; do
+    [ "$candidate" != "$first" ] || continue
+    IFS=$'\t' read -r running compatible cproto sproto cversion \
+      <<< "$(fm_backend_herdr_client_status "$candidate" "$session")"
+    if [ "$running" = true ] && [ "$compatible" = true ]; then
+      FM_BACKEND_HERDR_BIN=$candidate
+      FM_BACKEND_HERDR_CLIENT_NOTE="herdr client $first (version ${first_version:-unknown}, protocol ${first_proto:-unknown}) cannot talk to the running server for session '$session' (protocol ${sproto:-unknown}); using $candidate (version ${cversion:-unknown}, protocol ${cproto:-unknown}) instead - remove or upgrade the shadowing client on this PATH"
+      return 0
+    fi
+    others="$others, $candidate (version ${cversion:-unknown}, protocol ${cproto:-unknown})"
+  done <<< "$candidates"
+  FM_BACKEND_HERDR_CLIENT_NOTE="no herdr client on PATH can talk to the running server for session '$session' (protocol ${sproto:-unknown}): $first (version ${first_version:-unknown}, protocol ${first_proto:-unknown})$others; upgrade the herdr client on this PATH"
+  return 0
+}
+
+# fm_backend_herdr_client_diagnose: print the selection note for <session> on
+# stdout when there is one (callers redirect it to stderr where they report an
+# unreadable endpoint); with nothing selected, one status read of the client
+# in use names a stopped server or an incompatible lone client, and a healthy
+# client prints nothing.
+fm_backend_herdr_client_diagnose() {  # <session>
+  local session=$1 bin running compatible cproto sproto cversion
+  fm_backend_herdr_client_select "$session"
+  if [ -n "${FM_BACKEND_HERDR_CLIENT_NOTE:-}" ]; then
+    printf 'herdr client selection: %s\n' "$FM_BACKEND_HERDR_CLIENT_NOTE"
+    return 0
+  fi
+  bin=$(fm_backend_herdr_bin)
+  [ "$bin" != herdr ] || bin=$(command -v herdr 2>/dev/null) || return 0
+  IFS=$'\t' read -r running compatible cproto sproto cversion \
+    <<< "$(fm_backend_herdr_client_status "$bin" "$session")"
+  if [ "$running" != true ]; then
+    printf "herdr client selection: no herdr server is running for session '%s' (client %s, version %s, protocol %s)\n" \
+      "$session" "$bin" "${cversion:-unknown}" "${cproto:-unknown}"
+  elif [ "$compatible" = false ]; then
+    printf "herdr client selection: herdr client %s (version %s, protocol %s) cannot talk to the running server for session '%s' (protocol %s); upgrade the herdr client on this PATH\n" \
+      "$bin" "${cversion:-unknown}" "${cproto:-unknown}" "$session" "${sproto:-unknown}"
+  fi
 }
 
 # fm_backend_herdr_tool_check: refuse loudly if herdr or jq is missing.
@@ -396,7 +547,7 @@ fm_backend_herdr_tool_check() {
 fm_backend_herdr_version_check() {
   fm_backend_herdr_tool_check || return 1
   local status protocol version
-  status=$(herdr status --json 2>/dev/null) || { echo "error: 'herdr status --json' failed; is herdr installed correctly?" >&2; return 1; }
+  status=$("$(fm_backend_herdr_bin)" status --json 2>/dev/null) || { echo "error: 'herdr status --json' failed; is herdr installed correctly?" >&2; return 1; }
   protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null)
   version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
   case "$protocol" in
@@ -1940,7 +2091,10 @@ fm_backend_herdr_agent_state() {  # <target>
     dead) printf 'missing' ;;
     no-agent) printf 'dead' ;;
     live) printf 'alive' ;;
-    *) printf 'unreadable' ;;
+    *)
+      printf 'unreadable'
+      fm_backend_herdr_client_diagnose "$FM_BACKEND_HERDR_SESSION" >&2
+      ;;
   esac
 }
 
@@ -3092,7 +3246,7 @@ fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
 # normally carry meta), best-effort.
 fm_backend_herdr_resolve_bare_selector() {  # <name>
   local name=$1 sessions session tabs tab_id wsid pane_id
-  sessions=$(herdr session list --json 2>/dev/null | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
+  sessions=$("$(fm_backend_herdr_bin)" session list --json 2>/dev/null | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || continue
@@ -3156,7 +3310,7 @@ fm_backend_herdr_list_live() {  # <session>
 # ~/.config/herdr/sessions/<name>/herdr.sock). Empty on any failure.
 fm_backend_herdr_socket_path() {  # <session>
   local session=$1
-  herdr session list --json 2>/dev/null \
+  "$(fm_backend_herdr_bin)" session list --json 2>/dev/null \
     | jq -r --arg name "$session" '.sessions[]? | select(.name == $name) | .socket_path // empty' 2>/dev/null \
     | head -1
 }
@@ -3180,10 +3334,10 @@ fm_backend_herdr_events_capable() {  # <session>
   if [ -z "${FM_BACKEND_HERDR_EVENT_READER:-}" ]; then
     command -v python3 >/dev/null 2>&1 || return 1
   fi
-  protocol=$(herdr status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
+  protocol=$("$(fm_backend_herdr_bin)" status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
-  schema=$(herdr api schema --json 2>/dev/null) || return 1
+  schema=$("$(fm_backend_herdr_bin)" api schema --json 2>/dev/null) || return 1
   printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
   printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
   return 0
