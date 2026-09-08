@@ -378,7 +378,7 @@ fm_backend_herdr_workspace_label() {
 # fm_backend_herdr_version_check, which is intentionally session-independent
 # (reads only .client.* fields).
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
-  local session=$1 rc=0 err
+  local session=$1 rc=0 err failed_bin selected_bin
   shift
   # stderr is buffered (stdout streams untouched) so a protocol_mismatch
   # refusal can be recognized and retried once on a compatible client; see
@@ -389,13 +389,15 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
     HERDR_SESSION="$session" "$(fm_backend_herdr_bin)" "$@" --session "$session"
     return $?
   fi
-  { err=$(HERDR_SESSION="$session" "$(fm_backend_herdr_bin)" "$@" --session "$session" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1
-  if [ "$rc" -ne 0 ] && [ -z "${FM_BACKEND_HERDR_BIN:-}" ]; then
+  failed_bin=$(fm_backend_herdr_bin)
+  { err=$(HERDR_SESSION="$session" "$failed_bin" "$@" --session "$session" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1
+  if [ "$rc" -ne 0 ]; then
     case "$err" in
       *protocol_mismatch*)
         fm_backend_herdr_client_select "$session" force
-        if [ -n "${FM_BACKEND_HERDR_BIN:-}" ]; then
-          HERDR_SESSION="$session" "$FM_BACKEND_HERDR_BIN" "$@" --session "$session"
+        selected_bin=$(fm_backend_herdr_bin)
+        if [ "$selected_bin" != "$failed_bin" ]; then
+          HERDR_SESSION="$session" "$selected_bin" "$@" --session "$session"
           return $?
         fi
         ;;
