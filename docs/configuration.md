@@ -407,6 +407,23 @@ Regression coverage executes emitted launch commands with synthetic nonsecret va
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
+### Worker tool surface (`tools:` in the brief)
+
+A crewmate or scout launches with the minimal Claude Code tool surface: `--strict-mcp-config` with a per-task `--mcp-config` (empty by default) and `--setting-sources project,local`, which drops the user settings layer that carries the plugin skill catalog.
+The brief's `## Firstmate spec` section may widen it with one `tools:` line naming the extras this task needs, from `browser`, `context7`, `mockup`, `lavish`, or `none`.
+`bin/fm-dod-lib.sh`'s `fm_brief_tools` owns the parsing and drops an unrecognized entry with a warning, so a typo narrows the surface rather than widening it unpredictably.
+`bin/fm-spawn.sh` writes the resolved MCP config into the task tmp dir at 0600 and prints one `tool surface:` line at launch.
+
+The measured reason: a crewmate's cold prefix was 135k to 145k tokens across 166 seats in the week of 2026-08-29, of which the on-disk global rules layer was only 23k to 27k, and the seat re-read that prefix across an average of 280 turns.
+Pipeline seats get the same surface through `~/.claude/templates/no-mistakes-agent-args.yaml` (`NewAiCoder/claude-portable`).
+
+Dropping the `user` settings scope also drops any hook the captain registered there, including safety guards (a compound-`cd` refusal, a headless-launch model pin) that carry no project-scope copy.
+To keep those firing, `fm-spawn.sh` mirrors every hook from the captain's own user-scope `settings.json` (`$CLAUDE_CONFIG_DIR/settings.json` when set, else `~/.claude/settings.json`) into the per-task `.claude/settings.local.json` it writes for the worktree, merged with firstmate's own busy-state hooks rather than replacing them; an event registered on both sides keeps both hook groups.
+This requires `jq`; a claude crewmate/scout/ship spawn refuses rather than launch with the mirrored hooks silently dropped when `jq` is unavailable or the captain's settings.json fails to parse.
+
+A secondmate is exempt from the whole minimal-surface change: it launches on the full, pre-D6 settings surface (no `--setting-sources`, no `--strict-mcp-config`, no per-task MCP config), so it keeps every plugin skill and MCP server the captain's own settings enable, and its `.claude/settings.local.json` never needs the hook-mirroring step above because the native `user` scope is still loaded.
+This is deliberate: a secondmate charter has no `## Firstmate spec` `tools:` line to widen a minimal surface from, and a secondmate is a long-lived home rather than a single narrow task, so the cold-prefix saving does not apply the same way.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

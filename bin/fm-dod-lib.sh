@@ -41,13 +41,18 @@ EOF
 
 # Return 0 when a Task subsection still consists only of its scaffold
 # placeholder. A missing file and legacy briefs carry no such placeholders.
+# The current scaffold appends a fixed `tools: none` line after {FIRSTMATE_SPEC}
+# (D6): an unfilled spec body is that placeholder plus that line verbatim, so
+# both the bare legacy form and the current scaffold form count as unfilled.
 fm_brief_task_placeholders_present() {  # <file>
-  local file=$1 intent spec
+  local file=$1 intent spec spec_stripped
   [ -f "$file" ] || return 1
   intent=$(fm_brief_task_heading_body "$file" "## Captain's intent")
   spec=$(fm_brief_task_heading_body "$file" "## Firstmate spec")
+  spec_stripped=$(printf '%s' "$spec" | tr -d '[:space:]')
   [ "$(printf '%s' "$intent" | tr -d '[:space:]')" = '{TASK}' ] && return 0
-  [ "$(printf '%s' "$spec" | tr -d '[:space:]')" = '{FIRSTMATE_SPEC}' ] && return 0
+  [ "$spec_stripped" = '{FIRSTMATE_SPEC}' ] && return 0
+  [ "$spec_stripped" = '{FIRSTMATE_SPEC}tools:none' ] && return 0
   return 1
 }
 
@@ -179,6 +184,26 @@ fm_brief_task_content_valid() {  # <file>
   fi
   task=$(fm_brief_heading_body "$file" "# Task")
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
+}
+
+# The extras a task's tool surface is widened by, read from the brief's
+# `## Firstmate spec` `tools:` line. Everything not on this list is dropped
+# rather than passed through: a typo must narrow the surface, never widen it
+# in an unexpected direction.
+FM_TOOLS_KNOWN="browser context7 mockup lavish none"
+
+fm_brief_tools() {  # <brief-file>
+    local body line word out=''
+    body=$(fm_brief_task_heading_body "$1" "## Firstmate spec") || return 0
+    line=$(printf '%s\n' "$body" | sed -n 's/^[[:space:]]*tools:[[:space:]]*//p' | head -1)
+    [ -n "$line" ] || return 0
+    for word in $line; do
+        case " $FM_TOOLS_KNOWN " in
+            *" $word "*) [ "$word" = none ] || out="$out${out:+ }$word" ;;
+            *) echo "warning: unrecognized tools: entry '$word' ignored" >&2 ;;
+        esac
+    done
+    printf '%s' "$out"
 }
 
 fm_ask_user_escalation_block() {  # <data-dir> <task-id>
