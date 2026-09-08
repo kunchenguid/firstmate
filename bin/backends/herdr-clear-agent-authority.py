@@ -103,7 +103,9 @@ def main(argv):
         response = json.loads(line.decode("utf-8", "replace"))
     except ValueError:
         return 4
-    result = response.get("result") if isinstance(response, dict) else None
+    if not isinstance(response, dict):
+        return 4
+    result = response.get("result")
     if (
         response.get("id") != REQUEST_ID
         or response.get("error") is not None

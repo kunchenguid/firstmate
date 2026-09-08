@@ -102,3 +102,19 @@ rc=0
 wait "$SERVER_PID"; SERVER_PID=
 [ "$rc" = 4 ] || fail "a Herdr error response should fail response verification, got $rc"
 pass "Herdr authority clearer: protocol errors and response-identity mismatches are never mutation proof"
+
+# Well-formed JSON that is not an object at all. The declared exit contract is
+# 0/2/3/4, so these have to be reported as malformed responses rather than
+# escaping as an uncaught exception - a caller that distinguishes a transport
+# failure from a protocol failure would otherwise be told neither.
+n=0
+for shape in '[]' '[{"id":"fm-clear-stale-herdr-pi-authority","result":{"type":"ok"}}]' '"ok"' '42' 'null' 'true'; do
+  n=$((n + 1))
+  start_server "nonobject-$n" "$shape"
+  rc=0
+  out=$("$HELPER" "$SOCKET" w7:p2 "$n" 2>&1) || rc=$?
+  wait "$SERVER_PID"; SERVER_PID=
+  [ "$rc" = 4 ] || fail "the non-object response $shape should fail response verification as 4, got $rc: $out"
+  assert_not_contains "$out" 'Traceback' "the non-object response $shape escaped the exit contract as an exception"
+done
+pass "Herdr authority clearer: list, scalar, and null responses are malformed, never crashes or mutation proof"

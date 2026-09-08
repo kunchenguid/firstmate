@@ -115,7 +115,8 @@ EOF
 # fm_harness_process_matches, which stays the "is this ANY harness" owner:
 #   1. the basename of the reported command name,
 #   2. an exact harness component in that command path or in argv[0],
-#   3. a bare interpreter (node, python) whose SCRIPT PATH carries one of that
+#   3. a bare interpreter (node, python), recognized from the basename of the
+#      command name OR of argv[0], whose SCRIPT PATH carries one of that
 #      harness's program components as a whole path component - how an
 #      npm-installed Claude Code (`node .../@anthropic-ai/claude-code/cli.js`)
 #      is identified, since neither its comm nor its argv[0] carries a `claude`
@@ -125,10 +126,20 @@ EOF
 # ~/.claude/hooks/notify.js` shares the harness's name without being it, and
 # counting it would both refuse a healthy single replacement and let an
 # unrelated helper stand in for a replacement that never started.
+# Naming the interpreter takes argv[0] for the same reason witness 2 does: this
+# function's callers read `comm` from a ps format where it is NOT the last
+# column, so the platform truncates it (16 characters of the executable path on
+# macOS), and an interpreter started from any longer path - nvm, Homebrew, an
+# npm prefix - reports a command name that names no interpreter at all. Both
+# witnesses are the BASENAME of an executable rather than a substring of a path,
+# because argv[0] is untruncated: `/home/u/node_modules/.bin/watcher` is an
+# ordinary program that was handed a script, not a language runtime hosting one,
+# and admitting it would let any tool pointed at a harness's own CLI count as
+# that harness.
 # Every witness is asked about the harness in question, so a witness naming some
 # OTHER harness can never short-circuit the rest.
 fm_harness_process_is() {  # <harness> <comm> <args>
-  local harness=${1:-} comm=${2:-} args=${3:-} re argv0 script component
+  local harness=${1:-} comm=${2:-} args=${3:-} re argv0 candidate interpreter=0 script component
   re=$(fm_harness_name_pattern "$harness") || return 1
   if printf '%s' "$(basename -- "$comm")" | grep -qE "$re"; then
     return 0
@@ -136,19 +147,23 @@ fm_harness_process_is() {  # <harness> <comm> <args>
   argv0=${args%% *}
   fm_harness_path_name "$comm" "$harness" >/dev/null && return 0
   fm_harness_path_name "$argv0" "$harness" >/dev/null && return 0
-  case "$comm" in
-    *node*|*python*)
-      script=$(fm_harness_interpreter_script "$args") || return 1
-      while IFS= read -r component; do
-        [ -n "$component" ] || continue
-        case "/$script/" in
-          */"$component"/*) return 0 ;;
-        esac
-      done <<EOF
+  for candidate in "$comm" "$argv0"; do
+    [ -n "$candidate" ] || continue
+    case "$(basename -- "$candidate")" in
+      node|nodejs|node[0-9]*|python|python[0-9]*) interpreter=1; break ;;
+    esac
+  done
+  if [ "$interpreter" -eq 1 ]; then
+    script=$(fm_harness_interpreter_script "$args") || return 1
+    while IFS= read -r component; do
+      [ -n "$component" ] || continue
+      case "/$script/" in
+        */"$component"/*) return 0 ;;
+      esac
+    done <<EOF
 $(fm_harness_program_components "$harness")
 EOF
-      ;;
-  esac
+  fi
   return 1
 }
 

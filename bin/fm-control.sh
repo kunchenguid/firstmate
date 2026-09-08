@@ -916,6 +916,7 @@ EOF
     {
       if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || NF < 5 || seen[$1]++) { bad = 1; next }
       parent[$1] = $2
+      state[$1] = $4
       command[$1] = $5
       argv0[$1] = (NF >= 6 ? $6 : "")
       present[$1] = 1
@@ -934,7 +935,12 @@ EOF
       # control_herdr_target_engine_snapshot below does: the untruncated argv0
       # is authoritative, and a spurious second match can only make the
       # exactly-one postcondition refuse.
-      for (pid in owned) if (owned[pid]) {
+      # A zombie is a reaped engine that no longer runs anything, so it is
+      # neither the one live replacement nor a duplicate worker; both sibling
+      # readers over this same ps format skip it, and counting it here would
+      # report a relaunch with no worker running or refuse a healthy one.
+      for (pid in owned) {
+        if (!owned[pid] || state[pid] ~ /^Z/) continue
         name = base(command[pid])
         argname = base(argv0[pid])
         if (name == "pi" || argname == "pi") { pi++; pi_pid = pid }

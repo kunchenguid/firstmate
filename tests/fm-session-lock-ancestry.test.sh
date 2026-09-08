@@ -148,7 +148,10 @@ test_named_harness_identity_reads_every_witness() {
   # interpreter runs, structurally: the harness's own program directory names a
   # running harness, while its config tree under ~/.claude - hooks, MCP
   # wrappers, preloaded tools - never does, because callers count what this
-  # names.
+  # names. The caller reads `comm` from a ps format where it is not the last
+  # column, so macOS hands this function 16 characters of the executable path;
+  # the interpreter is named from the untruncated argv[0] too, but from its
+  # BASENAME, so a node_modules install directory is not a language runtime.
   while IFS='|' read -r expect harness comm args; do
     [ -n "$expect" ] || continue
     if lib_eval "$fakebin" "fm_harness_process_is '$harness' '$comm' '$args'"; then
@@ -172,6 +175,11 @@ no|pi|pi-signed|pi-signed
 no|claude|node|/usr/bin/node /srv/app/index.js
 no|claude|bash|/home/u/.claude/hooks/notify.sh --quiet
 no|muse|muse|/usr/local/bin/muse
+yes|claude|/opt/homebrew/bi|/opt/homebrew/bin/node /home/u/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
+yes|claude|/Users/u/.nvm/ve|/Users/u/.nvm/versions/node/v20.19.5/bin/node /home/u/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js --resume
+no|claude|/opt/homebrew/bi|/opt/homebrew/bin/node /home/u/.claude/hooks/notify.js
+no|codex|/opt/homebrew/bi|/opt/homebrew/bin/node /home/u/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
+no|claude|/home/u/node_mod|/home/u/node_modules/.bin/watcher /home/u/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
 EOF
   # A witness that resolves to some OTHER harness must not short-circuit the
   # rest: here the reported command path names one harness while argv[0] - the

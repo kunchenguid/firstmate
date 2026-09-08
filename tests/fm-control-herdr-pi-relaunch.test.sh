@@ -282,6 +282,17 @@ EOF
 303 202 303 S zsh /bin/zsh
 404 303 404 S node /usr/local/bin/node /home/fixture/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
 EOF
+  elif [ "$phase" = new ] && [ "$scenario" = cross-target-npm-impostor ]; then
+    # An unrelated program that was merely handed the harness's own CLI path,
+    # whose macOS-truncated `comm` happens to keep the word "node" from its
+    # node_modules install directory. Its argv[0] is the authority and names an
+    # ordinary executable, not a language runtime hosting a script.
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S /home/u/node_mod /home/u/node_modules/.bin/watcher /home/fixture/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
+EOF
   elif [ "$phase" = new ] && [ "$scenario" = cross-target-npm-helper ]; then
     # The same replacement running one of its own config-tree helpers behind an
     # intermediate shell: a hook under ~/.claude shares the harness name without
@@ -354,6 +365,25 @@ EOF
 303 202 303 S zsh /bin/zsh
 404 303 404 S codex /usr/local/bin/codex
 405 303 405 S pi pi
+EOF
+  elif [ "$phase" = new ] && [ "$scenario" = zombie-pi-only ]; then
+    # The replacement Pi exited and sits unreaped below the nested shell. A
+    # zombie holds a process table row and nothing else, so it is no engine.
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 Z pi (pi)
+EOF
+  elif [ "$phase" = new ] && [ "$scenario" = zombie-pi-beside-live ]; then
+    # One live replacement plus the unreaped remains of the engine it replaced:
+    # one worker, not two.
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S pi pi
+405 303 405 Z pi (pi)
 EOF
   elif [ "$phase" = new ]; then
     cat <<'EOF'
@@ -698,6 +728,29 @@ assert_contains "$out" 'relaunched rp1 harness=pi-signed from=pi-signed' "the si
   || fail "the signed relaunch should start exactly one replacement"
 pass "fm-control Herdr/Pi: pi-signed replacement requires one signed wrapper and one Pi engine"
 
+# "Exactly one Pi engine" counts RUNNING engines. A zombie is a reaped process
+# that runs nothing, so it can neither stand in for a replacement that died
+# right after publishing its authority nor make a healthy single replacement
+# look duplicated.
+dir=$(new_case positive-zombie-beside-live zombie-pi-beside-live)
+out=$(run_control "$dir" rp1 relaunch --note 'continue past the unreaped remains')
+rc=$?
+expect_code 0 "$rc" "an unreaped zombie beside the live replacement must not read as a duplicate engine"$'\n'"$out"
+assert_contains "$out" 'relaunched rp1 harness=pi from=pi' "the single live replacement was not accepted"
+[ "$(grep -c 'encode launch-brief' "$dir/herdr.log" || true)" -eq 1 ] \
+  || fail "the relaunch beside a zombie should start exactly one replacement"
+
+FM_TEST_LAUNCH_WAIT=0.05
+dir=$(new_case negative-zombie-only zombie-pi-only)
+out=$(run_control "$dir" rp1 relaunch --note 'continue after the real Pi exit')
+rc=$?
+FM_TEST_LAUNCH_WAIT=
+[ "$rc" -ne 0 ] || fail "a zombie Pi must not prove a running replacement: $out"
+assert_contains "$out" 'exactly one Pi engine could not be verified' \
+  "the refusal did not name the postcondition the zombie failed to satisfy"
+assert_not_contains "$out" 'relaunched rp1' "a zombie Pi was reported as a completed relaunch"
+pass "fm-control Herdr/Pi: an unreaped Pi zombie neither proves a replacement nor duplicates a healthy one"
+
 # A recovered stale Pi may be relaunched onto another supported runtime. The
 # release proof describes the harness that was RELEASED, so it must keep
 # validating against that after fm-spawn republishes the record on the target.
@@ -766,7 +819,36 @@ out=$(run_control "$dir" rp1 relaunch --harness claude --note 'resume with a nes
 rc=$?
 expect_code 0 "$rc" "a target worker behind an intermediate shell is still one replacement"$'\n'"$out"
 assert_contains "$out" 'relaunched rp1 harness=claude from=pi' "the nested worker chain was not accepted as one replacement"
-pass "fm-control Herdr/Pi: a replacement the fleet identifies only by its interpreter script path is proved, and its own helpers collapse into one replacement"
+
+# The same interpreter-hosted replacement read from a macOS process table. This
+# proof asks for `comm` before `args`, so the platform truncates it to 16
+# characters of the executable path and it no longer names `node` at all - the
+# only untruncated witness left is argv[0]. Reading the interpreter from `comm`
+# alone would refuse every normally installed (nvm, Homebrew, npm prefix) Claude
+# Code on the platform the fleet runs on, and only AFTER the replacement was
+# typed into the pane and the record republished on the target harness.
+dir=$(new_case cross-runtime-npm-truncated-comm cross-target-npm pi)
+out=$(FM_FAKE_PS_COMM_PREFIX=/opt/homebrew/bin run_control "$dir" rp1 relaunch --harness claude --note 'resume on an npm-installed runtime')
+rc=$?
+expect_code 0 "$rc" "a macOS-truncated comm column must not hide an interpreter-hosted replacement"$'\n'"$out"
+assert_contains "$out" 'relaunched rp1 harness=claude from=pi' "the truncated-comm interpreter-hosted replacement was not accepted"
+[ "$(grep -c 'encode launch-brief' "$dir/herdr.log" || true)" -eq 1 ] \
+  || fail "the truncated-comm interpreter-hosted relaunch should start exactly one replacement"
+
+# Reading argv[0] must not turn an unrelated program into the harness: a
+# node_modules install directory is not a language runtime, so a tool merely
+# pointed at the harness's own CLI is still not a replacement - even when the
+# truncated `comm` it reports keeps the word "node" from that directory.
+dir=$(new_case cross-runtime-npm-truncated-impostor cross-target-npm-impostor pi)
+FM_TEST_LAUNCH_WAIT=0.05
+out=$(run_control "$dir" rp1 relaunch --harness claude --note 'resume on an npm-installed runtime')
+rc=$?
+FM_TEST_LAUNCH_WAIT=
+[ "$rc" -ne 0 ] || fail "a program that merely runs the harness CLI path must not count as the harness: $out"
+assert_contains "$out" 'could not be verified as exactly one stable claude process' \
+  "the refusal did not name the postcondition it could not prove"
+assert_not_contains "$out" 'relaunched rp1' "an impostor was reported as a proved replacement"
+pass "fm-control Herdr/Pi: a replacement the fleet identifies only by its interpreter script path is proved through a truncated comm, and its own helpers collapse into one replacement"
 
 # The regression this proof exists for: nothing started, but Herdr still
 # reports the released Pi label as `alive`. Reporting that as a relaunch would
