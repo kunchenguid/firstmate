@@ -705,9 +705,6 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
         (if ($awaiting_all | length) > ($awaiting_visible | length) then {surface:("awaiting showing \($awaiting_visible | length) of \($awaiting_all | length)"), reveal:"--all-awaiting"} else empty end),
         (($snap.secondmate_current.records // [])[] as $m
-         | ([($m.omitted // [])[] | select(.surface == "awaiting_merge") | .count] | add // 0) as $n
-         | if $n > 0 then {surface:("secondmate " + $m.id + " delivered rows omitted by snapshot bound: \($n)"), reveal:"raise FM_SNAPSHOT_SECONDMATE_CHILDREN"} else empty end),
-        (($snap.secondmate_current.records // [])[] as $m
          | ([($m.omitted // [])[] | select(.surface == "active_children") | .count] | add // 0) as $n
          | if $n > 0 then {surface:("secondmate " + $m.id + " active children omitted by snapshot bound: \($n)"), reveal:"raise FM_SNAPSHOT_SECONDMATE_CHILDREN"} else empty end),
         (if $all_secondmates == 0 and ($secondmates_all | length) > $secondmates_n then {surface:("secondmates showing \($secondmates_n) of \($secondmates_all | length)"), reveal:"--all-secondmates"} else empty end),

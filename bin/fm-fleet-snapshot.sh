@@ -219,7 +219,6 @@ esac
 # shellcheck source=bin/fm-pr-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-validate_positive_bound FM_BEARINGS_AWAITING_NUDGE_DAYS "$FM_BEARINGS_AWAITING_NUDGE_DAYS"
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
