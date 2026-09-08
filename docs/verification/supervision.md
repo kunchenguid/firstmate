@@ -385,8 +385,8 @@ fm-doc-audience-check: ok surfaces=64 local_links=188
 FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=80078
 ```
 
-The Claude Stop guard/auto-arm deadlock correction (a refused Stop primes a detached watcher start that survives the refusal, so the first refusal cannot guarantee the next) was verified on 2026-09-08 with the installed ShellCheck 0.11.0 and the same isolated behavior suites.
-The workflow YAML companion of `bin/fm-lint.sh` could not run: actionlint 1.7.12 was not on PATH.
+The Claude Stop guard/auto-arm deadlock correction (a refused Stop primes a detached watcher start that survives the refusal, so the first refusal cannot guarantee the next) was verified on 2026-09-08 with the installed ShellCheck 0.11.0, actionlint 1.7.12, and the same isolated behavior suites.
+This run was captured at commit `073a41f088a539e43cc3fa9deb60b4351a886242`, the branch head that carries the derived guard grace into the priming fork, so the record covers that source and its `test_ensure_watcher_primes_arm_with_derived_grace` case rather than an earlier tree.
 
 ```sh
 bin/fm-lint.sh
@@ -399,14 +399,21 @@ Observed output:
 ```text
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 fm-lint.sh: local changed-file mode; ShellCheck source following disabled
-fm-lint-workflows.sh: actionlint not found; install actionlint 1.7.12 with bin/fm-install-actionlint.sh <destination-directory> and put that directory on PATH.
-fm-doc-audience-check: ok surfaces=97 local_links=350
-FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=152298
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+fm-doc-audience-check: ok surfaces=97 local_links=357
+touch: out of range or illegal time specification: YYYY-MM-DDThh:mm:SS[.frac][tz]
+not ok - a beacon older than the poll-derived grace must still block: expected exit 2, got 0
+FM_TEST_END 2026-09-08T21:02:35Z tests/fm-turnend-guard.test.sh exit=1 duration_ms=100845 gate_skip=false
+FM_TEST_SUMMARY total=4 failed=1 skipped_gate=0 duration_ms=149279
 ```
 
-`bin/fm-lint.sh` exited 1 because actionlint was missing; ShellCheck itself ran.
+`bin/fm-lint.sh` exited 0.
 `bin/fm-doc-audience-check.sh` exited 0.
-`bin/fm-test-run.sh` over the four suites exited 0.
+`bin/fm-test-run.sh` over the four suites exited 1 - `tests/fm-turnend-guard.test.sh` failed and the other three passed.
+The failing case is `test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace`, which arrived from main in `891dc51` (#3946) and is byte-identical here to its state at this branch's base commit `b84e0e3`, so the deadlock correction neither introduced it nor touches it.
+It is a host portability failure rather than a supervision defect: the case ages the beacon with `touch -d "@<epoch>"`, BSD touch on this Darwin host rejects that GNU-only form with the `out of range or illegal time specification` line above, the beacon therefore stays fresh, and the guard correctly allows the stop the case expected it to block.
+It reproduced with the same single failure on two consecutive runs, so it is deterministic on this host rather than flaky, and it remains open against `tests/fm-turnend-guard.test.sh` rather than against this correction.
 
 The Pi extension-model pull-guard correction (`bin/fm-guard.sh` no longer reports a false watcher-down on a Pi primary during the extension's own watcher hand-off) was verified on 2026-08-13 with the installed ShellCheck 0.11.0 and isolated behavior suites.
 The guard verdict itself reads only state files and process liveness, so the portable suites are the enforcing evidence; `bin/fm-harness.sh`'s Pi marker detection, which selects the model, is exercised in the same suite through `PI_CODING_AGENT`.
