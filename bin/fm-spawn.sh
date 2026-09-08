@@ -1662,7 +1662,7 @@ fm_raw_launch_has_unprovable_shell_syntax() {
 }
 
 fm_raw_launch_canonical_model() {
-  local launch=$1 harness=$2 model= word index=1 model_count=0
+  local launch=$1 harness=$2 model='' word index=1 model_count=0
   local -a words
   IFS=$' \t\n' read -r -a words <<< "$launch"
   [ "$(basename "${words[0]:-}")" = "$harness" ] || return 1

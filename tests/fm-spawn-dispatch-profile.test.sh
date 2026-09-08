@@ -639,6 +639,7 @@ test_astra_without_a_profile_requires_primary_evidence() {
   assert_absent "$HOME_DIR/state/$id.meta" "unconfigured obfuscated Astra refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "unconfigured obfuscated Astra refusal typed a launch command"
 
+  # shellcheck disable=SC2016 # Command substitution is deliberate raw-launch input.
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     '$(printf codex) --model gpt-6-astra')
   status=$?
