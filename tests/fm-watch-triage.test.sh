@@ -4375,6 +4375,67 @@ test_procevent_marker_failure_exits_and_replays() {
   pass "marker failure exits through the shared wake owner, releases its lock, and replays later"
 }
 
+# --- process-event reconcile failure: a private-directory regression must
+# surface once per failure episode, never flood, and clear once the state
+# root is private again (kunchenguid/firstmate#3929) -------------------------
+
+test_procevent_reconcile_failure_wakes_once_and_recovers() {
+  local dir state out pid marker
+  dir=$(make_case procevent-reconcile-failure); state="$dir/state"; out="$dir/watch.out"
+  pe_case "$dir" register lavish reconcile-fail-src -- \
+    /bin/sh -c 'printf "session:\n  file: /a.html\n  status: waiting\n"' >/dev/null \
+    || fail "the fixture could not register a process-event source"
+  chmod 775 "$state"
+
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  if ! wait_for_exit "$pid" 100; then
+    chmod 700 "$state"
+    fail "a group-writable state root did not end the watcher cycle: $(cat "$out")"
+  fi
+  chmod 700 "$state"
+  grep -F "check: process-event reconcile failed:" "$out" >/dev/null \
+    || fail "the reconcile failure was not surfaced as an actionable check: $(cat "$out")"
+  grep -F "not a private directory" "$out" >/dev/null \
+    || fail "the surfaced reason did not name fm-procevent.sh's own check: $(cat "$out")"
+  marker="$state/.procevent-reconcile-failed"
+  [ -e "$marker" ] || fail "no failure-episode marker was recorded"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "reconcile-failure fixture drain failed"
+
+  # Still broken: a second cycle must NOT wake again while the same episode's
+  # marker is present, or a persistent state-root regression would flood a
+  # wake every poll cycle instead of reporting it once.
+  chmod 775 "$state"
+  procevent_watch_bg "$dir" "$out.repeat"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    chmod 700 "$state"
+    reap "$pid"
+    fail "a still-failing reconcile woke again instead of staying suppressed for the episode: $(cat "$out.repeat")"
+  fi
+  reap "$pid"
+  if [ -s "$out.repeat" ]; then
+    chmod 700 "$state"
+    fail "a still-failing reconcile printed a second wake: $(cat "$out.repeat")"
+  fi
+
+  # Recovered: the next reconcile succeeds and clears the marker within its
+  # first cycle, whether or not that same cycle also exits for an unrelated
+  # reason (killing the still-broken watcher above republishes its own
+  # downtime episode, which this fresh watcher may resurface once - the
+  # reconcile call runs, and the marker is cleared, before that later step).
+  chmod 700 "$state"
+  procevent_watch_bg "$dir" "$out.recovered"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" >/dev/null 2>&1 || true
+  reap "$pid"
+  if grep -F "process-event reconcile failed" "$out.recovered" >/dev/null 2>&1; then
+    fail "a recovered state root still reported a reconcile failure: $(cat "$out.recovered")"
+  fi
+  [ ! -e "$marker" ] || fail "the failure-episode marker was not cleared once reconcile recovered"
+  pass "a group-writable state root wakes exactly once per failure episode and clears once recovered"
+}
+
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
 
 test_heartbeat_no_change_absorbed() {
@@ -4890,6 +4951,7 @@ test_procevent_launch_failed_episodes_are_each_delivered
 test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
+test_procevent_reconcile_failure_wakes_once_and_recovers
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status

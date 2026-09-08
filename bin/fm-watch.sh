@@ -92,6 +92,13 @@
 #                          source owned closes that episode); the queued
 #                          payload names what to check. These three kinds are
 #                          joined with `;` when more than one surfaces in a cycle
+#   check: process-event reconcile failed: <error>
+#                          fm-procevent.sh reconcile's own private-directory
+#                          safety check rejected the state root (e.g. a
+#                          group/world-writable state/), which otherwise leaves
+#                          every registered source silently unpolled; reported
+#                          once per failure episode via a persistent marker,
+#                          cleared the moment reconcile succeeds again
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -1977,8 +1984,24 @@ while :; do
   # each registered source has its own child blocking on that source, and this
   # only republishes results already captured durably and restarts a source
   # whose owner is gone. It is a no-op with nothing registered.
+  #
+  # A regressed state root (group/world-writable) makes fm-procevent.sh's own
+  # private-directory check fail identically on every cycle, so a bare
+  # `|| true` here used to leave every registered source silently unpolled -
+  # the only symptom was lanes sitting idle with no wake at all. Surface a
+  # failure once per episode via a persistent marker, cleared the moment
+  # reconcile succeeds again, instead of flooding a wake every poll cycle.
   if [ -d "$STATE/procevent" ]; then
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+    procevent_reconcile_marker="$STATE/.procevent-reconcile-failed"
+    if procevent_reconcile_err=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile 2>&1 >/dev/null); then
+      rm -f "$procevent_reconcile_marker" 2>/dev/null || true
+    elif [ ! -e "$procevent_reconcile_marker" ]; then
+      reason="check: process-event reconcile failed: $(printf '%s' "$procevent_reconcile_err" | tail -n 1)"
+      fm_wake_append check procevent-reconcile "$reason" || exit 1
+      : > "$procevent_reconcile_marker" 2>/dev/null || true
+      touch "$STATE/.last-check"
+      wake "$reason"
+    fi
   fi
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.

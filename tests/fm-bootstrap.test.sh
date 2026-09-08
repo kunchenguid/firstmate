@@ -672,6 +672,54 @@ SH
   pass "bootstrap: a present perl JSON::PP module stays silent"
 }
 
+# A group-writable state root makes fm-procevent.sh's own private-directory
+# check fail identically on every reconcile, which otherwise leaves every
+# registered process-event source silently unpolled with no wake at all (the
+# watcher's reconcile call swallows the failure). Bootstrap must surface it as
+# an actionable PROCEVENT line, but only for a home that has actually
+# registered a source (state/procevent exists) - a home that never touched
+# process-event stays silent regardless of state/ permissions.
+test_procevent_state_root_reports_actionable_diagnostic() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/procevent-unsafe-root"
+  mkdir -p "$case_dir/home/state/procevent"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  chmod 775 "$case_dir/home/state"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  chmod 700 "$case_dir/home/state"
+  assert_contains "$out" \
+    "PROCEVENT: process-event state root is not a private directory - chmod 750 $case_dir/home/state to resume polling its registered sources" \
+    "bootstrap should report the unsafe process-event state root with its exact chmod fix"
+  pass "bootstrap: a group-writable state root with registered sources reports an actionable PROCEVENT diagnostic"
+}
+
+test_procevent_state_root_silent_when_private() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/procevent-safe-root"
+  mkdir -p "$case_dir/home/state/procevent"
+  chmod 700 "$case_dir/home/state"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a private process-event state root should not be reported, got: $out"
+  pass "bootstrap: a private state root with registered sources stays silent"
+}
+
+test_procevent_state_root_silent_without_registrations() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/procevent-unused"
+  mkdir -p "$case_dir/home/state"
+  chmod 775 "$case_dir/home/state"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  chmod 700 "$case_dir/home/state"
+  assert_not_contains "$out" "PROCEVENT:" \
+    "a home that never registered a process-event source must not be checked"
+  pass "bootstrap: a home with no process-event registrations stays silent regardless of state permissions"
+}
+
 test_unknown_backend_reports_invalid_configuration() {
   local case_dir fakebin out
   case_dir="$TMP_ROOT/unknown-backend"
@@ -1217,6 +1265,9 @@ test_herdr_install_requires_manual_action
 test_cmux_bundled_cli_satisfies_dependency
 test_perl_jsonpp_missing_reports_manual_diagnostic
 test_perl_jsonpp_present_is_silent
+test_procevent_state_root_reports_actionable_diagnostic
+test_procevent_state_root_silent_when_private
+test_procevent_state_root_silent_without_registrations
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
