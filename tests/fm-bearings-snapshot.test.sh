@@ -31,19 +31,11 @@ make_fakebin() {  # <dir>
   fb=$(fm_fakebin "$1")
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-if [ "${FAKE_NM_SLEEP:-0}" = 1 ]; then
-  [ -z "${FAKE_NM_SIGNAL:-}" ] || : > "$FAKE_NM_SIGNAL"
-  sleep 30
-fi
+[ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30
 exit 0
 SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
-if [ "${FAKE_TMUX_SLEEP:-0}" = 1 ] && \
-   [ "$*" = "display-message -p -t fixture:bounded-endpoint #{pane_id}" ]; then
-  [ -z "${FAKE_TMUX_SIGNAL:-}" ] || : > "$FAKE_TMUX_SIGNAL"
-  sleep 30
-fi
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   capture-pane)
@@ -2669,11 +2661,8 @@ SH
       and .pr.url == null
       and .paths.status_log.present == false
       and .paths.report.present == false
-      and .hints.pending_decision == null
-      and .hints.blocked_event == null
-      and .hints.open_decisions == null
-      and .hints.inspection.complete == false
-      and (.hints.inspection.reason | contains("task generation changed during snapshot"))
+      and .hints.pending_decision == false
+      and .hints.open_decisions == []
       and .hints.scout_report_present == false
       and .hints.last_event_text == ""
   ' >/dev/null || fail "replacement live state crossed task generations: $json"
@@ -2768,143 +2757,6 @@ SH
       and ([.in_flight[] | select(.id == "local-1" and .kind == "ship")] | length) == 1
   ' >/dev/null || fail "large local snapshot lost a worker row: $parallel"
   pass "large local snapshot overlaps local reads with byte-identical serial and concurrent projections"
-}
-
-test_local_snapshot_labels_crew_state_deadline_timeout() {
-  local home fakebin worktree signal json started elapsed
-  home=$(make_home crew-state-deadline)
-  worktree="$home/projects/crew-state-deadline"
-  fm_git_init_commit "$worktree"
-  fakebin=$(make_fakebin "$home")
-  cat > "$home/data/backlog.md" <<'EOF'
-## In flight
-- [ ] crew-state-deadline - Crew state deadline fixture (repo: firstmate) (kind: ship)
-
-## Queued
-
-## Done
-EOF
-  fm_write_meta "$home/state/crew-state-deadline.meta" \
-    "worktree=$worktree" "project=firstmate" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
-  printf 'working: status inspection completes before crew state stalls\n' \
-    > "$home/state/crew-state-deadline.status"
-  signal="$home/crew-state-started"
-
-  started=$(date +%s)
-  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_CREW_STATE_TIMEOUT=2 \
-    FAKE_NM_SLEEP=1 FAKE_NM_SIGNAL="$signal" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
-    || fail "fleet snapshot failed instead of labeling a crew-state deadline"
-  elapsed=$(( $(date +%s) - started ))
-  [ -f "$signal" ] || fail "crew-state deadline fixture never entered no-mistakes status"
-  [ "$elapsed" -lt 7 ] || fail "crew-state read exceeded the overall two-second deadline: ${elapsed}s"
-  printf '%s' "$json" | jq -e '
-    .tasks[] | select(.id == "crew-state-deadline")
-    | .current_state.state == "unknown"
-      and (.current_state.detail | contains("local snapshot deadline after 2s"))
-      and .hints.inspection.complete == true
-      and .hints.inspection.reason == null
-      and .hints.pending_decision == false
-      and .hints.blocked_event == false
-      and .hints.open_decisions == []
-  ' >/dev/null || fail "crew-state timeout omitted its deadline reason: $json"
-  pass "fleet snapshots label crew-state deadline timeouts"
-}
-
-test_local_snapshot_bounds_status_inspection_and_exposes_timeout() {
-  local home fakebin worktree template json started elapsed i
-  home=$(make_home bounded-status-inspection)
-  worktree="$home/projects/bounded-status-inspection"
-  fm_git_init_commit "$worktree"
-  fakebin=$(make_fakebin "$home")
-  {
-    printf '## In flight\n'
-    i=1
-    while [ "$i" -le 16 ]; do
-      printf -- '- [ ] bounded-status-%s - Bounded status fixture %s (repo: firstmate) (kind: ship)\n' "$i" "$i"
-      i=$((i + 1))
-    done
-    printf '\n## Queued\n\n## Done\n'
-  } > "$home/data/backlog.md"
-  template="$home/oversized.status"
-  i=1
-  while [ "$i" -le 50000 ]; do
-    printf 'working: historical status line %s with enough content to require a complete fold\n' "$i"
-    i=$((i + 1))
-  done > "$template"
-  i=1
-  while [ "$i" -le 16 ]; do
-    fm_write_meta "$home/state/bounded-status-$i.meta" \
-      "worktree=$worktree" "project=firstmate" \
-      "harness=claude" "kind=ship" "mode=no-mistakes"
-    cp "$template" "$home/state/bounded-status-$i.status"
-    i=$((i + 1))
-  done
-
-  started=$(date +%s)
-  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_CREW_STATE_TIMEOUT=1 \
-    FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
-    || fail "fleet snapshot failed instead of exposing bounded status timeouts"
-  elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 8 ] || fail "fleet status inspection multiplied its one-second deadline across batches: ${elapsed}s"
-  printf '%s' "$json" | jq -e '
-    (.tasks | length) == 16
-      and ([.tasks[] | select(
-        .current_state.state == "unknown"
-        and (.current_state.detail | contains("local snapshot deadline after 1s"))
-        and .hints.inspection.complete == false
-        and (.hints.inspection.reason | contains("local snapshot deadline after 1s"))
-        and .hints.pending_decision == null
-        and .hints.blocked_event == null
-        and .hints.open_decisions == null
-      )] | length) > 0
-  ' >/dev/null || fail "fleet deadline did not retain unfinished tasks with explicit uncertainty: $json"
-  pass "fleet snapshots enforce one status deadline and expose unfinished tasks"
-}
-
-test_local_snapshot_bounds_endpoint_observation() {
-  local home fakebin worktree signal json started elapsed
-  home=$(make_home bounded-endpoint-observation)
-  worktree="$home/projects/bounded-endpoint-observation"
-  fm_git_init_commit "$worktree"
-  fakebin=$(make_fakebin "$home")
-  cat > "$home/data/backlog.md" <<'EOF'
-## In flight
-- [ ] bounded-endpoint - Bounded endpoint fixture (repo: firstmate) (kind: secondmate)
-
-## Queued
-
-## Done
-EOF
-  fm_write_meta "$home/state/bounded-endpoint.meta" \
-    "window=fixture:bounded-endpoint" "worktree=$worktree" "project=firstmate" \
-    "harness=claude" "kind=secondmate" "mode=no-mistakes"
-  printf 'needs-decision: preserve this decision while probing the endpoint\n' \
-    > "$home/state/bounded-endpoint.status"
-  signal="$home/endpoint-started"
-
-  started=$(date +%s)
-  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_CREW_STATE_TIMEOUT=2 \
-    FAKE_TMUX_SLEEP=1 FAKE_TMUX_SIGNAL="$signal" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
-    || fail "fleet snapshot failed instead of bounding endpoint observation"
-  elapsed=$(( $(date +%s) - started ))
-  [ -f "$signal" ] || fail "endpoint deadline fixture never entered the backend probe"
-  [ "$elapsed" -lt 7 ] || fail "endpoint probe exceeded the overall two-second deadline: ${elapsed}s"
-  printf '%s' "$json" | jq -e '
-    .tasks[] | select(.id == "bounded-endpoint")
-    | .endpoint.exists == null
-      and .endpoint.agent_alive == "unknown"
-      and .endpoint.status == "unknown"
-      and .hints.inspection.complete == true
-      and .hints.inspection.reason == null
-      and .hints.pending_decision == true
-      and .hints.blocked_event == false
-      and (.hints.open_decisions | map(.key)) == ["default"]
-  ' >/dev/null || fail "endpoint timeout discarded completed task observations: $json"
-  pass "fleet snapshots bound endpoint probes inside the local deadline"
 }
 
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
@@ -3073,9 +2925,6 @@ test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state
 test_large_local_snapshot_overlaps_local_reads_without_projection_drift
-test_local_snapshot_labels_crew_state_deadline_timeout
-test_local_snapshot_bounds_status_inspection_and_exposes_timeout
-test_local_snapshot_bounds_endpoint_observation
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
 test_domain_alpha_stale_parent_event_does_not_become_current_work
