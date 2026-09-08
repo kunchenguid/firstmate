@@ -12,7 +12,6 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const SUMMARY_MAX = 600;
-const ASSIGNMENT_SCAN_MAX = 8192;
 const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
 const ENV_ASSIGNMENT_START = /\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*=\s*/g;
 const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
@@ -54,50 +53,9 @@ function visibleAssistantText(content: unknown): string {
 }
 
 function redactEnvironmentAssignments(value: string): string {
-  let result = "";
-  let copiedThrough = 0;
   ENV_ASSIGNMENT_START.lastIndex = 0;
-  for (let match = ENV_ASSIGNMENT_START.exec(value); match; match = ENV_ASSIGNMENT_START.exec(value)) {
-    let cursor = ENV_ASSIGNMENT_START.lastIndex;
-    let quote = "";
-    let escaped = false;
-    const substitutionQuotes: string[] = [];
-    let scanned = 0;
-    while (cursor < value.length) {
-      if (scanned >= ASSIGNMENT_SCAN_MAX) {
-        cursor = value.length;
-        break;
-      }
-      const character = value[cursor];
-      if (escaped) {
-        escaped = false;
-      } else if (character === "\\") {
-        escaped = true;
-      } else if (quote === "'") {
-        if (character === "'") quote = "";
-      } else if (character === "$" && value[cursor + 1] === "(") {
-        substitutionQuotes.push(quote);
-        quote = "";
-        cursor += 2;
-        scanned += 2;
-        continue;
-      } else if (quote) {
-        if (character === quote) quote = "";
-      } else if (character === "\"" || character === "'") {
-        quote = character;
-      } else if (character === ")" && substitutionQuotes.length > 0) {
-        quote = substitutionQuotes.pop() ?? "";
-      } else if (substitutionQuotes.length === 0 && (/\s/u.test(character) || character === "," || character === ";")) {
-        break;
-      }
-      cursor += 1;
-      scanned += 1;
-    }
-    result += `${value.slice(copiedThrough, match.index)}[REDACTED]`;
-    copiedThrough = cursor;
-    ENV_ASSIGNMENT_START.lastIndex = cursor;
-  }
-  return result + value.slice(copiedThrough);
+  const match = ENV_ASSIGNMENT_START.exec(value);
+  return match ? `${value.slice(0, match.index)}[REDACTED]` : value;
 }
 
 function prepareSummary(raw: string): PreparedSummary | null {

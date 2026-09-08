@@ -114,7 +114,6 @@ except ImportError:
 SCHEMA = "fm-captain-event.v1"
 SUMMARY_MAX = 600
 EVENT_MAX = 8192
-ASSIGNMENT_SCAN_MAX = 8192
 MAX_SAFE_UINT = 9007199254740991
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
@@ -277,51 +276,10 @@ def validate_token(value, label):
 
 
 def redact_environment_assignments(value):
-    result = []
-    copied_through = 0
-    while True:
-        match = ENV_ASSIGNMENT_START_RE.search(value, copied_through)
-        if match is None:
-            break
-        cursor = match.end()
-        quote = None
-        escaped = False
-        substitution_quotes = []
-        scanned = 0
-        while cursor < len(value):
-            if scanned >= ASSIGNMENT_SCAN_MAX:
-                cursor = len(value)
-                break
-            character = value[cursor]
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif quote == "'":
-                if character == "'":
-                    quote = None
-            elif character == "$" and cursor + 1 < len(value) and value[cursor + 1] == "(":
-                substitution_quotes.append(quote)
-                quote = None
-                cursor += 2
-                scanned += 2
-                continue
-            elif quote is not None:
-                if character == quote:
-                    quote = None
-            elif character in {'"', "'"}:
-                quote = character
-            elif character == ")" and substitution_quotes:
-                quote = substitution_quotes.pop()
-            elif not substitution_quotes and (character.isspace() or character in {",", ";"}):
-                break
-            cursor += 1
-            scanned += 1
-        result.append(value[copied_through:match.start()])
-        result.append("[REDACTED]")
-        copied_through = cursor
-    result.append(value[copied_through:])
-    return "".join(result)
+    match = ENV_ASSIGNMENT_START_RE.search(value)
+    if match is None:
+        return value
+    return value[:match.start()] + "[REDACTED]"
 
 
 def clean_summary(value):
@@ -489,7 +447,7 @@ def load_journal(journal):
         raise OutboxError("captain-event journal exists but is unexpectedly empty")
     if not raw.endswith(b"\n"):
         raise OutboxError("captain-event journal has a torn unterminated tail")
-    raw_lines = raw.splitlines()
+    raw_lines = raw[:-1].split(b"\n")
     if len(raw_lines) > MAX_EVENTS:
         raise OutboxError("captain-event journal exceeds its hard P0 event bound")
     rows = []

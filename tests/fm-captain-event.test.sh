@@ -142,29 +142,16 @@ long=$(python3 - <<'PY'
 print("🧭" * 700)
 PY
 )
-assignments='token=supersecretvalue AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod escaped_name=private\ escapedvalue quoted_name="private \"quotedvalue\" tail" command_name=$(printf substitutionsecret) nested_name=$(outer $(inner nestedsecret)) postgres://bareuser:barepass@db.example/prod'
-primary_args pi:bounded "$assignments ordinary prose"
+primary_args pi:bounded "ordinary prose $long"
 PRIMARY_ARGS+=(--summary-truncated true --ref pr_url=https://github.com/example/repo/pull/7 --ref report_id=soak-report --ref report_path=data/soak-report/report.md --ref branch_outcome_seq=9)
-# Replace the summary argument with a value that exercises both redaction and
+# Replace the summary argument with a value that exercises normalization and
 # the Unicode cap without risking shell byte slicing.
-PRIMARY_ARGS[15]=$'\033[31mLine one\033[0m\nLine two \u202e'"$assignments ordinary prose $long"
+PRIMARY_ARGS[15]=$'\033[31mLine one\033[0m\nLine two \u202e'"ordinary prose $long"
 FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "bounded append failed"
 row=$(FM_HOME="$home" "$OUTBOX" read --after 0)
 printf '%s\n' "$row" | jq -e '
   .audience == "captain"
   and .summary_truncated == true
-  and (.summary | contains("[REDACTED]"))
-  and (.summary | contains("supersecretvalue") | not)
-  and (.summary | contains("wJalrXUtnFEMI") | not)
-  and (.summary | contains("hunter2") | not)
-  and (.summary | contains("privatevalue") | not)
-  and (.summary | contains("dbpass") | not)
-  and (.summary | contains("escapedvalue") | not)
-  and (.summary | contains("quotedvalue") | not)
-  and (.summary | contains("substitutionsecret") | not)
-  and (.summary | contains("nestedsecret") | not)
-  and (.summary | contains("bareuser") | not)
-  and (.summary | contains("barepass") | not)
   and (.summary | contains("ordinary prose"))
   and (.refs | keys) == ["branch_outcome_seq","pr_url","report_id","report_path"]
   and .refs.branch_outcome_seq == 9
@@ -178,14 +165,29 @@ assert not any(unicodedata.category(ch).startswith("C") for ch in summary)
 ' || fail "bounded summary retained a Unicode control or format character"
 bytes=$(wc -c < "$home/state/captain-events/events.jsonl" | tr -d ' ')
 [ "$bytes" -le 8192 ] || fail "serialized event exceeds 8192 bytes ($bytes)"
-primary_args pi:unbalanced 'Prefix SAFE=$(printf unresolvedsecret trailing suffix'
-FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "unbalanced assignment append failed"
-unbalanced_row=$(FM_HOME="$home" "$OUTBOX" read --after 1)
-printf '%s\n' "$unbalanced_row" | jq -e '
-  .summary == "Prefix [REDACTED]"
-  and (.summary | contains("unresolvedsecret") | not)
-  and (.summary | contains("trailing suffix") | not)
-' >/dev/null || fail "unprovable assignment did not redact the remaining value"
+assignment_cases=(
+  'token=supersecretvalue visible suffix'
+  'escaped_name=private\ escapedvalue visible suffix'
+  'quoted_name="private \"quotedvalue\" tail" visible suffix'
+  'command_name=$(printf substitutionsecret) visible suffix'
+  'nested_name=$(outer $(inner nestedsecret)) visible suffix'
+  'SAFE=$( (printf alpha); printf swordfish) visible suffix'
+  'unproven_name=$(printf unresolvedsecret trailing suffix'
+)
+after=1
+for assignment_case in "${assignment_cases[@]}"; do
+  primary_args "pi:assignment-$after" "Prefix $assignment_case"
+  FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "assignment case $after append failed"
+  assignment_row=$(FM_HOME="$home" "$OUTBOX" read --after "$after" --limit 1)
+  printf '%s\n' "$assignment_row" | jq -e '.summary == "Prefix [REDACTED]"' >/dev/null \
+    || fail "assignment case $after retained text after its marker"
+  after=$((after + 1))
+done
+primary_args pi:bare-uri 'Prefix postgres://bareuser:barepass@db.example/prod remains'
+FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "bare URI append failed"
+bare_uri_row=$(FM_HOME="$home" "$OUTBOX" read --after "$after" --limit 1)
+printf '%s\n' "$bare_uri_row" | jq -e '.summary == "Prefix [REDACTED] remains"' >/dev/null \
+  || fail "bare credential-bearing URI was not redacted"
 primary_args pi:bad-ref bad
 PRIMARY_ARGS+=(--ref terminal=/tmp/raw)
 out=$(FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" 2>&1)
@@ -330,7 +332,7 @@ make_corrupt_case() {
   printf '%s\n' "$home"
 }
 
-for shape in empty gap duplicate reorder torn; do
+for shape in empty gap duplicate reorder torn unterminated crlf bare-cr vertical-tab form-feed unicode-line unicode-paragraph; do
   home=$(make_corrupt_case "corrupt-$shape")
   journal="$home/state/captain-events/events.jsonl"
   case "$shape" in
@@ -339,6 +341,33 @@ for shape in empty gap duplicate reorder torn; do
     duplicate) sed -n '1p' "$journal" > "$home/duplicate-row" && cat "$home/duplicate-row" >> "$journal" ;;
     reorder) { sed -n '2p' "$journal"; sed -n '1p' "$journal"; } > "$home/bad" && mv "$home/bad" "$journal" ;;
     torn) printf '{"schema":"fm-captain-event.v1"' >> "$journal" ;;
+    unterminated) python3 - "$journal" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+path.write_bytes(path.read_bytes()[:-1])
+PY
+      ;;
+    crlf|bare-cr|vertical-tab|form-feed|unicode-line|unicode-paragraph)
+      python3 - "$journal" "$shape" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+first, second, empty = path.read_bytes().split(b"\n")
+assert empty == b""
+separators = {
+    "crlf": b"\r\n",
+    "bare-cr": b"\r",
+    "vertical-tab": b"\v",
+    "form-feed": b"\f",
+    "unicode-line": "\u2028".encode(),
+    "unicode-paragraph": "\u2029".encode(),
+}
+path.write_bytes(first + separators[sys.argv[2]] + second + b"\n")
+PY
+      ;;
   esac
   chmod 0600 "$journal"
   cp "$journal" "$home/corrupt-bytes"
@@ -411,7 +440,7 @@ installCaptainEventPublisher(pi, {
 });
 const message = {
   role: "assistant",
-  content: [{ type: "text", text: "Ordinary prose AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod escaped_name=private\\ escapedvalue quoted_name=\"private \\\"quotedvalue\\\" tail\" remains command_name=$(printf substitutionsecret) nested_name=$(outer $(inner nestedsecret)) postgres://bareuser:barepass@db.example/prod unproven_name=$(printf unresolvedsecret trailing suffix" }],
+  content: [{ type: "text", text: "Ordinary prose postgres://bareuser:barepass@db.example/prod remains SAFE=$( (printf alpha); printf swordfish) visible suffix" }],
   stopReason: "stop",
   timestamp: 1,
 };
@@ -423,7 +452,7 @@ import sys
 
 args = open(sys.argv[1], "rb").read().split(b"\0")[:-1]
 summary = args[args.index(b"--summary") + 1].decode()
-assert summary == "Ordinary prose [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] remains [REDACTED] [REDACTED] [REDACTED] [REDACTED]", summary
+assert summary == "Ordinary prose [REDACTED] remains [REDACTED]", summary
 PY
 
   home=$(new_home pi-producer-disabled)
