@@ -1180,6 +1180,36 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
+# The same bound, for delivered work whose merge poll is armed. A ship task that
+# has pushed its pull request is finished and correctly waiting on a merge nobody
+# here controls, and AGENTS.md section 7 requires it to keep waiting rather than be
+# cleaned up. Its agent is done but its pane keeps repainting - a clock, a token
+# counter, a configured status line - and every new hash re-reported the same
+# delivery, so the one state the lifecycle prescribes had no quiet form and trained
+# the supervisor to acknowledge deliveries by reflex.
+#
+# What makes the repetition pointless is that the delivery already has a durable
+# owner for its next event: the armed merge poll wakes firstmate when the pull
+# request lands. So bind this to the same long re-surface cadence an open captain
+# call uses instead of silencing it. Scope: only a `done:` verb, and only while the
+# poll artifacts the watcher actually runs are both present, so a blocker, a
+# failure, and an open decision alarm on every new hash exactly as before, and so
+# does a delivery with no poll to report its merge. The declaration carries the
+# pull request AND the status-log signature, so a re-arm against a different pull
+# request or any new status line re-alarms at once, and the cadence itself still
+# re-alarms a delivery whose merge never arrives.
+merge_poll_stale_bound() {  # <window-key> <task>
+  local key=$1 task=$2 url
+  # An open captain call already owns this sighting's cadence.
+  [ -z "$STALE_WAIT_DECLARATION" ] || return 1
+  [ "$(status_line_verb "$(last_status_line "$STATE/$task.status")")" = "done" ] || return 1
+  [ -f "$STATE/$task.pr-poll" ] && [ -f "$STATE/$task.check.sh" ] || return 1
+  url=$(fm_meta_get "$STATE/$task.meta" pr)
+  [ -n "$url" ] || return 1
+  STALE_WAIT_DECLARATION="merge-poll:$url:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
+  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+}
+
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -2131,6 +2161,14 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+            elif merge_poll_stale_bound "$key" "$task"; then
+              # Delivered, and the armed merge poll owns the next event. Further
+              # NEW pane hashes with the same delivery have nothing to add until
+              # the merge lands or the cadence elapses.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (delivered, armed merge poll owns the next event): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"

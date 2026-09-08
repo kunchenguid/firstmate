@@ -74,7 +74,12 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. One log state is checked
+#      against the endpoint before it is trusted: `working` claims the crew is
+#      producing work right now, so on tmux and herdr it is refused when the
+#      recovery-grade classifier proves the endpoint outlived its agent - the
+#      pane a departed agent leaves behind answers every cheap probe, and without
+#      that check an empty terminal reported whatever the worker last wrote.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -234,6 +239,25 @@ pane_readable() {  # <target>
     tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
+}
+# 0 only on POSITIVE evidence that this endpoint outlived its agent, from the
+# same recovery-grade classifier the death branch below reads. Exactly one
+# verdict qualifies here: `dead` - the endpoint answered and its foreground holds
+# nothing but shells. `missing` deliberately does not, because this predicate is
+# consulted only where the cheap probe just READ the endpoint, so an inventory
+# claiming the endpoint is absent contradicts that read rather than confirming
+# it, and a contradiction between two probes is not evidence. Ambiguous,
+# unreadable, and unverified are never death here, exactly as they are never
+# death there, and a backend with no classifier (orca, zellij, and cmux all
+# answer `unverified`) never reaches a verdict at all. Called lazily by the one
+# reading a departed agent can falsify, so nothing else pays for the probe.
+crew_agent_gone() {
+  [ -n "$BACKEND_TARGET" ] || return 1
+  case "$TASK_BACKEND" in
+    tmux|herdr) ;;
+    *) return 1 ;;
+  esac
+  [ "$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET")" = dead ]
 }
 # crew_busy_verdict: the crew's semantic busy state from the one contract
 # owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
@@ -826,8 +850,23 @@ fi
 # `unknown` with the resolution note as `doing`. map_log_state is the single owner of
 # the verb->state mapping (including the configurable paused verb), so reusing its
 # `unknown` verdict as the "not a state" test needs no second verb list here.
+#
+# `working` is the one status-log state that claims the crew is producing work
+# RIGHT NOW, and an agent that has exited contradicts it. The branch above only
+# consults the recovery-grade classifier when the cheap probe FAILS, so a pane
+# the agent left behind as a bare login shell - readable, and answering every
+# cheap probe - skipped it entirely and resurrected whatever the worker last
+# wrote, reporting an empty terminal as an actively working crew. Ask the same
+# classifier fm-bootstrap and fm-session-start already trust for recovery, and
+# only for this one claim: it is the sole status-log state a departed agent can
+# falsify, and it is asked for lazily so no other reading pays for the probe.
+# Every other status-log state - done, failed, blocked, needs-decision, paused -
+# describes work that is not in progress and stays true after the agent exits.
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
+  if [ "$LOG_STATE" = working ] && crew_agent_gone; then
+    emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
+  fi
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi

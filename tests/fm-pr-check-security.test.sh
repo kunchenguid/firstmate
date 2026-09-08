@@ -2127,6 +2127,78 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+# The task record is a key=value file many writers append to, and the poll binds
+# to the single `pr=` identity inside it. Ordinary fields those writers add after
+# that line - a relaunch transaction, a captain-hold attestation, a legacy spawn
+# stamp, a Relay request - carry no identity and must not de-authenticate the
+# poll, or a merged pull request stops being reported and the work reads as
+# waiting forever. What identity really rests on still refuses: a second pull
+# request, an invalid head after it, and any content that is not a field at all.
+# Driven through the watcher rather than the parser, so the assertion is the one
+# firstmate actually depends on - whether the merge is detected.
+test_ordinary_metadata_fields_after_the_identity_keep_the_poll_authenticated() {
+  local spec name extra dir state rc out
+  for spec in \
+    'relaunch|control_relaunch_tx=tx-7' \
+    'captain-hold|decisions_reviewed=1' \
+    'legacy-stamp|spawn_gen=s1700000000.9.4' \
+    'relay|x_request=request-7'
+  do
+    name=${spec%%|*}; extra=${spec#*|}
+    dir=$(make_case "poll-tail-$name")
+    state="$dir/home/state"
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+    printf '%s\n' "$extra" >> "$state/task-a.meta"
+    set +e
+    FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/watch.out" 2> "$dir/watch.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "[$name] watcher failed: $(cat "$dir/watch.err")"
+    out=$(cat "$dir/watch.out")
+    case "$out" in
+      check:*task-a.check.sh:*merged) ;;
+      *) fail "[$name] the merge was not reported after a later field landed: $out" ;;
+    esac
+  done
+  pass "ordinary metadata fields written after the identity keep the merge poll authenticated"
+}
+
+# The other half. Each of these breaks what the identity actually rests on, and
+# each must refuse the poll instead of running it.
+test_corrupted_metadata_after_the_identity_still_refuses_the_poll() {
+  local spec name extra dir state rc out
+  for spec in \
+    'second-pr|pr=https://github.com/o/r/pull/2' \
+    'bad-head|pr_head=not-a-commit' \
+    'not-a-field|this line is not a field' \
+    'bad-key|9lives=cat'
+  do
+    name=${spec%%|*}; extra=${spec#*|}
+    dir=$(make_case "poll-corrupt-$name")
+    state="$dir/home/state"
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+    printf '%s\n' "$extra" >> "$state/task-a.meta"
+    set +e
+    FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/watch.out" 2> "$dir/watch.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "[$name] watcher failed: $(cat "$dir/watch.err")"
+    out=$(cat "$dir/watch.out")
+    case "$out" in
+      *merged*) fail "[$name] a record this parser cannot account for still ran its poll: $out" ;;
+    esac
+    case "$out" in
+      *'unauthenticated state checks'*) ;;
+      *) fail "[$name] the refusal was not reported as an unauthenticated check: $out" ;;
+    esac
+  done
+  pass "corrupted content after the identity still refuses the poll"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -2154,3 +2226,5 @@ test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_ordinary_metadata_fields_after_the_identity_keep_the_poll_authenticated
+test_corrupted_metadata_after_the_identity_still_refuses_the_poll
