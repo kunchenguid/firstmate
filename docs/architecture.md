@@ -98,6 +98,14 @@ The branch handles those rows, stores the outcome durably, and merges it back in
 A captain-facing outcome persists as one exact, sequence-keyed visible transcript entry and then opens one sequence-keyed processing turn on main, which only main's sequence-bound acknowledgement closes.
 [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns row eligibility, dispatch architecture, deterministic outcome delivery, and processing re-presentation, while the generated [Pi supervision protocol](supervision-protocols/pi.md) owns MAIN's merged-event handling and acknowledgement duty; every other harness keeps the wake-to-main path unchanged.
 
+### Semantic captain activity
+
+Current-state projections and purpose-specific outcome stores do not provide a complete semantic record of visible prose emitted only inside a primary or task-worker harness.
+The optional [`fm-captain-event.v1` outbox](captain-event-outbox.md) fills that narrow gap without treating terminal presentation as data and without taking ownership from branch outcomes or public followups.
+Its P0 Pi producers run at the post-persistence `turn_end` boundary, explicitly assign primary/worker and message/final types, retain only bounded visible assistant text, and derive opaque identity from the home, Pi session entry, and worker `spawn_gen` outside model context.
+A private atomic pending-to-journal transition preserves retryability, one lock gives all home-local producers a gap-free order, stateless `after` reads leave every consumer independent, and an exact monotonic receipt records ingestion only after the consumer's own durable transaction commits.
+The outbox is presence-gated and artifact-free when unconfigured, has no push transport, and has no Herdr lifecycle or terminal-read dependency.
+
 ### Registered secondmate current state
 
 A registered secondmate's validated home is the authority for bearings current state because it owns the child metadata inventory, each child's current-state result, endpoint observations, backlog holds and dependencies, keyed unresolved decisions, and recent Done baseline.

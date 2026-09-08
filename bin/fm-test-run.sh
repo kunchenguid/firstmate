@@ -335,7 +335,7 @@ family_for_basename() {
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
-    fm-tmux-agent-liveness.test.sh|\
+    fm-captain-event.test.sh|fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
@@ -607,6 +607,7 @@ tests/fm-branch-supervision.test.sh 5729
 tests/fm-busy-adapter-wiring.test.sh 17873
 tests/fm-busy-state.test.sh 2926
 tests/fm-calm-pi-extension.test.sh 256
+tests/fm-captain-event.test.sh 9382
 tests/fm-check-unregister.test.sh 481
 tests/fm-classify-corr-token.test.sh 38742
 tests/fm-classify-decision-key.test.sh 1167
@@ -734,7 +735,8 @@ EOF
 # back to PORTABLE_SERIAL_DEFAULT_WEIGHT_MS, so they are balanced on a guess
 # rather than on evidence; the coverage guard bounds how many there may be.
 portable_serial_unhinted() {
-  local tmp
+  local tmp LC_ALL=C
+  export LC_ALL
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-unhinted.XXXXXX") || return 1
   portable_serial_weight_hints | awk 'NF { print $1 }' | LC_ALL=C sort -u >"$tmp/hinted"
   list_portable_serial | LC_ALL=C sort -u >"$tmp/serial"
@@ -869,8 +871,9 @@ select_lane() {
 }
 
 run_coverage_guard() {
-  local tmp missing extra a b shard unhinted serial_total
+  local tmp missing extra a b shard unhinted serial_total LC_ALL=C
   local -a saved_scripts=()
+  export LC_ALL
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
 
   all_repo_tests | LC_ALL=C sort -u >"$tmp/all"

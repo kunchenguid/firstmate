@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
-`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, enabled extension working namespaces under `state/extensions/`, away-mode state, generated Relay artifacts, parent-side remote ledger copies under `state/secondmate-summary-cache/`, one-shot Bearings reconcile requests under `state/reconcile-notify/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, the optional semantic captain-event journal under `state/captain-events/`, enabled extension working namespaces under `state/extensions/`, away-mode state, generated Relay artifacts, parent-side remote ledger copies under `state/secondmate-summary-cache/`, one-shot Bearings reconcile requests under `state/reconcile-notify/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
 
@@ -47,6 +47,41 @@ A captain-facing (verdict `captain`) branch outcome persists as one exact, seque
 The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
+
+## Semantic captain-event outbox (config/captain-event-outbox)
+
+The optional `config/captain-event-outbox` file enables the home-local `fm-captain-event.v1` journal for a pull consumer such as Magistrate.
+The file must be a regular single-link file containing exactly `enabled` followed by one newline.
+An absent file is the default-off state: the Pi producers do not invoke the outbox command and no `state/captain-events/` artifact is created.
+An unreadable, linked, or malformed file is an error rather than an implicit enable or disable decision.
+Enabled publication requires `bash` and `python3` with the standard POSIX `fcntl` module; a missing emitter dependency reports an error instead of dropping an event.
+
+Enable one home with:
+
+```sh
+printf 'enabled\n' > config/captain-event-outbox
+bin/fm-captain-event.sh validate
+```
+
+The tracked Pi primary extension then publishes visible primary assistant messages and final responses at the persisted turn boundary.
+Each Pi ship or scout receives the same producer in its generated extension, bound to that task's recorded `spawn_gen` incarnation.
+Other worker harnesses, the Pi supervision branch's private model conversation, and Herdr are unchanged.
+The summary is bounded and inert, and only typed allowlisted references can become active links in a consumer.
+
+Consumers page independently without changing Firstmate read state:
+
+```sh
+bin/fm-captain-event.sh read --after 0 --limit 100
+```
+
+After the consumer commits the returned source range and its own cursor durably in one transaction, it records that exact ingestion with `bin/fm-captain-event.sh ack --consumer <safe-id> --through <seq> --event-id <event_id>`.
+It must never acknowledge mere transport receipt, successful parsing, or a transaction that can still roll back.
+`validate` and `read` refuse while an interrupted publication needs recovery; `recover` or the next producer invocation finishes that publication idempotently.
+Removing the activation file stops new publication without deleting existing private state.
+The flag is not inherited into secondmate homes; each home is an independent source and must be enabled deliberately.
+
+[`docs/captain-event-outbox.md`](captain-event-outbox.md) owns the architecture, schema interpretation, consumer transaction, failure, upgrade, and rollback contract.
+The header of [`bin/fm-captain-event.sh`](../bin/fm-captain-event.sh) owns exact fields, bounds, paths, and command behavior.
 
 ## Pi supervision branch model and effort (config/supervision-branch-model, config/supervision-branch-effort)
 
