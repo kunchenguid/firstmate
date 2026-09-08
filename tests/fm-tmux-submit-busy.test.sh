@@ -339,6 +339,15 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   pane_busy omp-cross omp && fail "omp must ignore OpenCode's interrupt footer"
   printf 'Ctrl+c:cancel\n' > "$composer"
   pane_busy grok grok || fail "Grok cancel footer should be busy"
+  # Agy renders a lowercase ASCII `esc to cancel` footer while a turn runs. It
+  # is Agy-scoped: Codex's and older Claude's `esc to interrupt` is not Agy's
+  # signature, and neither of them may borrow Agy's cancel form.
+  printf 'esc to cancel\n' > "$composer"
+  pane_busy agy agy || fail "Agy cancel footer should be busy"
+  pane_busy agy-codex codex && fail "Codex must not borrow Agy's cancel footer"
+  pane_busy agy-claude claude && fail "Claude must not borrow Agy's cancel footer"
+  printf 'esc to interrupt\n' > "$composer"
+  pane_busy agy-cross agy && fail "Agy must ignore Codex's interrupt footer"
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
 }
 

@@ -174,8 +174,12 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     muse|muse-bin-*) printf 'agent' ;;
     # omp (Oh My Pi) is anchored for the same reason as muse: its live process
     # name is the bare word `omp` (verified, omp 18.1.11) and a glob would claim
-    # unrelated commands such as ompd or comp.
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|*agy*|pi|pi-signed|pi-launcher|Pi|omp) printf 'agent' ;;
+    # unrelated commands such as ompd or comp. agy (Anti-Gravity CLI) is a
+    # single ELF whose live process name is the bare word `agy` (verified, agy
+    # 1.1.27); a raw launch command may name a version-suffixed agy-<version>
+    # binary, so that digit-led suffix is the one widening allowed, because
+    # `agy` is a fragment of ordinary words such as strategy.
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp|agy|agy-[0-9]*) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then

@@ -59,6 +59,13 @@ ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 ln -s "$SLEEP_BIN" "$LAB/bin/omp"
 ln -s "$SLEEP_BIN" "$LAB/bin/ompd"
 ln -s "$SLEEP_BIN" "$LAB/bin/comp"
+# agy (Anti-Gravity CLI) is a single ELF whose live process name is the bare
+# word `agy`, or a version-suffixed agy-<version> under a raw launch command;
+# the two decoys are ordinary words an unanchored glob would claim.
+ln -s "$SLEEP_BIN" "$LAB/bin/agy"
+ln -s "$SLEEP_BIN" "$LAB/bin/agy-1.1.8"
+ln -s "$SLEEP_BIN" "$LAB/bin/strategy"
+ln -s "$SLEEP_BIN" "$LAB/bin/pedagogy"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
@@ -193,6 +200,28 @@ for decoy in ompd comp; do
     || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated omp-containing command names stay ambiguous"
+
+# --- agy's bare binary name -------------------------------------------------
+# agy (Anti-Gravity CLI) runs as a single ELF whose live process name is
+# exactly `agy`, so the anchored name is the only signal and the decoys prove
+# the match never widens into the `agy` fragment of ordinary words.
+
+new_window agy "$LAB/bin/agy" 900
+wait_for_state "$SESSION:agy" alive \
+  || fail "agy's bare binary name must classify alive"
+pass "tmux liveness: agy's bare binary name classifies alive"
+
+new_window agy-versioned "$LAB/bin/agy-1.1.8" 900
+wait_for_state "$SESSION:agy-versioned" alive \
+  || fail "a version-suffixed agy-<version> launch name must classify alive"
+pass "tmux liveness: a version-suffixed agy-<version> name classifies alive"
+
+for decoy in strategy pedagogy; do
+  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  wait_for_state "$SESSION:decoy-$decoy" ambiguous \
+    || fail "'$decoy' merely contains 'agy' and must not classify as a live agent pane"
+done
+pass "tmux liveness: unrelated agy-containing command names stay ambiguous"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that

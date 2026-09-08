@@ -2,10 +2,9 @@
 # Behavior tests for the verified Anti-Gravity CLI harness adapter.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
-SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 AGY_HOOK="$ROOT/bin/fm-agy-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-agy-harness)
@@ -145,19 +144,17 @@ test_plain_backends_share_agy_composer_contract() {
   pass "Herdr, Orca, and cmux consume the shared Agy composer interface"
 }
 
-make_spawn_fakebin() {
+# The shared spawn-world builders own the home, brief, and launch environment;
+# only the stateful Agy tmux fake (trust dialog, then composer, then the
+# delivered-brief footer) is this suite's own, so it replaces the shared spawn
+# tmux stub after the fakebin is built.
+agy_spawn_fakebin() {
   local dir=$1 fakebin
-  fakebin=$(fm_fakebin "$dir")
-  apply_fake_tmux "$fakebin/tmux"
+  fakebin=$(fm_test_make_spawn_fakebin "$dir" gh-axi gh agy)
+  cp "$ROOT/tests/fixtures/fm-agy-harness/fake-tmux.sh" "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh agy
   ln -s "$JQ_BIN" "$fakebin/jq"
   printf '%s\n' "$fakebin"
-}
-
-apply_fake_tmux() {
-  local path=$1
-  cp "$ROOT/tests/fixtures/fm-agy-fake-tmux.sh" "$path"
 }
 
 make_spawn_case() {
@@ -166,12 +163,10 @@ make_spawn_case() {
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'brief for agy\n' > "$home/data/$id/brief.md"
-  printf 'agy\n' > "$home/config/crew-harness"
+  fakebin=$(agy_spawn_fakebin "$case_dir/fake")
+  fm_test_spawn_home "$home" agy
+  fm_test_spawn_brief "$home" "$id" 'brief for agy'
   fm_git_worktree "$proj" "$wt" "wt-$name"
-  touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"
   : > "$case_dir/pointer.log"
   : > "$case_dir/agy.state"
@@ -183,19 +178,16 @@ make_spawn_case() {
 run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
   shift 6
-  HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+  FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
     FM_FAKE_AGY_STATE="$case_dir/agy.state" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_TMUX_ENV_LOG="$case_dir/tmux-env.log" \
-    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
+    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_AGY_READY_POLLS=5 FM_AGY_DELIVERY_POLLS=3 FM_AGY_POLL_INTERVAL=0 \
-    PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
+    PATH="$BASE_PATH" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" \
+      "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@"
 }
 
 read_spawn_record() {
@@ -221,7 +213,7 @@ test_agy_spawn_delivers_after_trust_and_registers_hook() {
   [ "$launch" = "agy --model 'gemini-3.6-flash-low' --effort 'high' --dangerously-skip-permissions" ] \
     || fail "Agy launch was not bare interactive with profile flags: $launch"
   assert_not_contains "$launch" "brief" "Agy launch raced the trust gate with an initial prompt"
-  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
+  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/launch-brief.md"
   pointer=$(cat "$CASE_DIR/pointer.log")
   [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
     || fail "Agy pointer was not the exact absolute-path instruction: $pointer"

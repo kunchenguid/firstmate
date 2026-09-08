@@ -115,6 +115,22 @@ The classifier was not at fault: the guard resolved the harness through a generi
 That binary exits immediately, leaving a bare shell in the pane.
 The guard now asks `fm_cursor_resolve_binary` first for `cursor`, which is the same verified owner `bin/fm-spawn.sh` uses, so the probe launches `cursor-agent` and the editor CLI can no longer masquerade as the harness.
 
+### 2026-09-08 Linux drift refresh adding Agy
+
+Running the guard with `FM_HARNESS_LIVENESS_DRIFT=1` on Linux 6.8 x86_64 with tmux 3.4 checked the 4 installed harnesses and classified every one `alive`, including Anti-Gravity CLI, which joined the guard's loop in this run:
+
+```text
+# claude 2.1.263 (Claude Code): title='claude' foreground=[claude ]
+# codex codex-cli 0.150.1: title='codex' foreground=[codex ]
+# cursor 2026.07.23-e383d2b: title='cursor-agent' foreground=[MainThread ]
+# agy 1.1.27: title='agy' foreground=[agy ]
+# unverified on this machine (not installed): opencode pi pi-signed grok kimi muse
+# checked 4 installed harness(es)
+```
+
+Agy is a single native executable whose live process name is the bare word `agy`, attributed by both name sources, so `bin/backends/tmux.sh` and `bin/fm-session-lock-lib.sh` anchor it exactly like omp, allowing only a digit-led `agy-<version>` suffix for a raw launch name, rather than globbing the `agy` fragment of ordinary words.
+`tests/fm-tmux-agent-liveness.test.sh` pins that anchoring with real processes, the `agy-1.1.8` form, and the `strategy` and `pedagogy` decoys.
+
 Bounded output from the 2026-08-03 run that produced the first table above:
 
 ```text

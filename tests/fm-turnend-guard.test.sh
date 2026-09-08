@@ -394,6 +394,7 @@ pi-signed|{"stop_hook_active":false}
 omp|{"stop_hook_active":false}
 Grok|{"sessionId":"grok-session","stopHookActive":false}
 Kimi|{"stop_hook_active":false}
+Agy|{"conversationId":"primary","executionNum":0,"workspacePaths":["$dir"]}
 EOF
   kill "$holder" "$pid" 2>/dev/null || true
   wait "$holder" "$pid" 2>/dev/null || true
