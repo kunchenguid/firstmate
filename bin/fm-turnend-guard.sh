@@ -474,28 +474,6 @@ if autoarm_owns_recovery; then
   exit 0
 fi
 
-# Prime recovery only on the refusal path. A blocked Stop aborts Claude's
-# in-flight asyncRewake hook, which is what turned one missed claim into a
-# deadlock: the arm never ran, the epoch could freeze or advance, and every
-# later Stop refused. --ensure-watcher uses this hook's harness ancestry,
-# detaches the bin/fm-watch-arm.sh owner as a handling successor so a primed
-# cycle is confirmed, ledgered, and not re-announced into a one-poll
-# resurface, and takes no generation claim, so the registered asyncRewake hook
-# still owns rewake once a later Stop is allowed. The primed process is already
-# setsid-detached and survives this refusal. Nothing here reads its result: the
-# refusal banner states the missing claim, which is true whether or not a cycle
-# was detached. Do not prime before the wait: that made every ordinary Claude
-# Stop start a handling successor and suppressed once-per-generation downtime
-# re-presentation. Do not call autoarm_owns_recovery here: that accounts the
-# failed-epoch budget.
-if ! fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" \
-  && ! fm_autoarm_claim_open "$STATE" "$GRACE" \
-  && [ -x "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" ]; then
-  printf '%s' "$PAYLOAD" \
-    | "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" --ensure-watcher \
-    || true
-fi
-
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.
 budget_account_current_epoch blocked-stop || block_stop
@@ -515,4 +493,30 @@ if [ "$terminal_status" -eq 0 ]; then
   exit 0
 fi
 [ "$terminal_status" -eq 2 ] && exit 0
+
+# Prime recovery only on the refusal path. A blocked Stop aborts Claude's
+# in-flight asyncRewake hook, which is what turned one missed claim into a
+# deadlock: the arm never ran, the epoch could freeze or advance, and every
+# later Stop refused. --ensure-watcher uses this hook's harness ancestry,
+# detaches the bin/fm-watch-arm.sh owner as a handling successor so a primed
+# cycle is confirmed, ledgered, and not re-announced into a one-poll
+# resurface, and takes no generation claim, so the registered asyncRewake hook
+# still owns rewake once a later Stop is allowed. The primed process is already
+# setsid-detached and survives this refusal. Nothing here reads its result: the
+# refusal banner states the missing claim, which is true whether or not a cycle
+# was detached. Do not prime before the wait: that made every ordinary Claude
+# Stop start a handling successor and suppressed once-per-generation downtime
+# re-presentation. Do not prime before terminal_fail_open either: that let a
+# cycle this Stop forked answer the health check the fail-open decides on, so
+# the mechanism for restoring supervision could silence the alarm that says
+# supervision is broken. Do not call autoarm_owns_recovery here: that accounts
+# the failed-epoch budget.
+if ! fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" \
+  && ! fm_autoarm_claim_open "$STATE" "$GRACE" \
+  && [ -x "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" ]; then
+  printf '%s' "$PAYLOAD" \
+    | "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" --ensure-watcher \
+    || true
+fi
+
 block_stop

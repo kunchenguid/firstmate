@@ -441,9 +441,9 @@ Two commits land after the trees named above, and neither has a fresh full-scrip
 It leaves `test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace` byte-identical to its state at `073a41f`, but no run at `1474acb` invoked that case, so the full-script failure above remains the only observation of it.
 The review commit that follows `1474acb` changes documentation only - the tree named for the isolated run just above, and one removed sentence in `docs/turnend-guard.md` - so it touches no code or test path any command in this entry exercises, and no re-run was taken for it.
 
-The review commit carrying this paragraph does change code, and it invalidates part of the isolated block above.
+`d8e407d` does change code, and it invalidates part of the isolated block above.
 It collapses the refusal banner to one unconditional sentence, removes the `--ensure-watcher` exit-status contract that existed only to choose between two wordings, and deletes `test_hook_claude_mode_away_refusal_claims_no_primed_start` - the fourth `ok` line above.
-That block therefore remains a record of `1474acb` and is not reproducible at HEAD, so the six surviving cases were re-run on this commit's tree by the same truncated-copy method.
+That block therefore remains a record of `1474acb` and is not reproducible from `d8e407d` onward, so the six surviving cases were re-run on that tree by the same truncated-copy method.
 
 Observed output of that re-run:
 
@@ -457,7 +457,13 @@ ok - fm-turnend-guard --claude: a frozen auto-arm epoch still reaches the bounde
 ```
 
 That copy exited 0, and the whole of `tests/fm-claude-stop-autoarm.test.sh` was run unmodified on the same tree: 46 cases, exit 0, including the two inert `--ensure-watcher` cases whose expected status returned to 0 with the contract gone.
-No full-script run of `tests/fm-turnend-guard.test.sh` was taken on this tree, so the `touch -d` failure above is still the only observation of that case.
+No full-script run of `tests/fm-turnend-guard.test.sh` was taken on that tree, so the `touch -d` failure above is still the only observation of that case.
+
+The review commit carrying this paragraph changes code once more, and it does not invalidate the six-case block above.
+It moves the priming call below `terminal_fail_open` so it sits immediately before the final `block_stop`, because above that point the attended fail-open could allow the same Stop that had just forked a handling successor - and that successor could both consume the unacknowledged downtime episode and win the home lock in time to answer the health check the fail-open decides on.
+It adds `test_hook_claude_mode_fail_open_allows_without_priming_a_cycle` for exactly that sequence, which was observed failing against the pre-move placement with the forked arm and watcher pids named in its message, and passing after the move.
+All six cases in the block above were re-run on this tree by the same truncated-copy method and still print those same `ok` lines, alongside the new case, so that record holds here as written.
+No full-script run of `tests/fm-turnend-guard.test.sh` was taken on this tree either.
 
 The Pi extension-model pull-guard correction (`bin/fm-guard.sh` no longer reports a false watcher-down on a Pi primary during the extension's own watcher hand-off) was verified on 2026-08-13 with the installed ShellCheck 0.11.0 and isolated behavior suites.
 The guard verdict itself reads only state files and process liveness, so the portable suites are the enforcing evidence; `bin/fm-harness.sh`'s Pi marker detection, which selects the model, is exercised in the same suite through `PI_CODING_AGENT`.

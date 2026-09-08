@@ -2117,6 +2117,42 @@ test_hook_claude_mode_advancing_epoch_refusal_cannot_guarantee_a_second_refusal(
 # stayed count=1 epoch=165 for forty minutes because the epoch identity that
 # deduplicates one Stop's several observations also suppressed the count across
 # Stops. A frozen auto-arm epoch must not pin the bound.
+# The bounded attended fail-open ALLOWS the stop, and priming used to run above
+# it, so the Stop that declares supervision genuinely down also forked a handling
+# successor. Two ways that hurt: the successor consumes the pending downtime
+# episode nobody has acknowledged, and its watcher can win the home lock in time
+# to answer the health check the fail-open decides on - letting the mechanism for
+# restoring supervision silence the alarm that says supervision is broken.
+test_hook_claude_mode_fail_open_allows_without_priming_a_cycle() {
+  local dir out status i marker
+  command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach a primed watcher"
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-fail-open-no-prime")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_gated_watch_fixture "$dir"
+  seed_claude_failure "$dir"
+  seed_claude_budget "$dir" 3
+  printf 'pending:downtime:failopen.1.aaa\n' > "$dir/state/.watcher-down"
+  chmod 600 "$dir/state/.watcher-down"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  expect_code 0 "$status" "an exhausted budget with a verified failure episode must still reach the attended fail-open"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the fail-open lost its attended alarm"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the fail-open did not consume its episode alarm"
+  i=0
+  while [ "$i" -lt 10 ]; do
+    [ -z "$(primed_cycle_pids "$dir")" ] \
+      || fail "the allowed fail-open stop primed a cycle: $(primed_cycle_pids "$dir")"
+    [ ! -e "$dir/state/.watch.lock/pid" ] || fail "the allowed fail-open stop started a watcher"
+    marker=
+    [ -e "$dir/state/.watcher-down" ] && read -r marker < "$dir/state/.watcher-down"
+    [ "$marker" = 'pending:downtime:failopen.1.aaa' ] \
+      || fail "the allowed fail-open stop consumed the unacknowledged downtime episode: $marker"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  pass "fm-turnend-guard --claude: the attended fail-open allows without priming a handling successor"
+}
+
 test_hook_claude_mode_frozen_epoch_still_reaches_the_bounded_fail_open() {
   local dir out status i count
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-frozen-epoch-budget")
@@ -2473,6 +2509,7 @@ test_hook_claude_mode_ordinary_stop_does_not_prime
 test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal
 test_hook_claude_mode_refused_stop_recovers_without_epoch_progress
 test_hook_claude_mode_advancing_epoch_refusal_cannot_guarantee_a_second_refusal
+test_hook_claude_mode_fail_open_allows_without_priming_a_cycle
 test_hook_claude_mode_frozen_epoch_still_reaches_the_bounded_fail_open
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_away_daemon_allows_between_watcher_cycles
