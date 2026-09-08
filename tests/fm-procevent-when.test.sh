@@ -974,4 +974,30 @@ done
 when "$H" retire repeat-edge >/dev/null
 pass "an --edge repeat watch fires immediately on a real change observed after a restart, never needing an extra false poll first"
 
+# --- --edge refuses any --stable other than 1 ---------------------------------
+# An --edge condition reports each transition true exactly once and then false
+# again once it rewrites its own snapshot, so two consecutive true polls can
+# only both land on the same transition by a timing accident. Arming --edge
+# with the default --stable 2 (or any --stable above 1) would therefore stall
+# past the deadline and report never-true instead of ever firing on a real
+# change - arm must refuse it up front rather than let a caller discover a
+# watch that can never fire.
+H="$TMP_ROOT/h-edge-stable-default"; new_home "$H"
+if when "$H" arm edge-default-stable --interval 0.1 --repeat --edge \
+  --condition true --action "$ACT" "$TMP_ROOT/edge-default-stable.log" >/dev/null 2>&1; then
+  when "$H" retire edge-default-stable >/dev/null 2>&1
+  fail "--edge must be refused without an explicit --stable 1; the default --stable 2 can never fire"
+fi
+assert_absent "$H/state/when/when-edge-default-stable.spec" \
+  "a refused arm must not leave a spec behind"
+pass "--edge with the default stable count is refused at arm time"
+
+H="$TMP_ROOT/h-edge-stable-two"; new_home "$H"
+if when "$H" arm edge-stable-two --interval 0.1 --stable 2 --repeat --edge \
+  --condition true --action "$ACT" "$TMP_ROOT/edge-stable-two.log" >/dev/null 2>&1; then
+  when "$H" retire edge-stable-two >/dev/null 2>&1
+  fail "--edge must be refused with an explicit --stable above 1; it can never accumulate enough consecutive trues to fire"
+fi
+pass "--edge with an explicit --stable above 1 is refused at arm time"
+
 printf 'all fm-procevent-when tests passed\n'

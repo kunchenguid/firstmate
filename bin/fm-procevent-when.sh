@@ -53,7 +53,12 @@
 #                                          poll); skip the generic repeat
 #                                          dedup below and count every true
 #                                          poll after a fire immediately. Only
-#                                          meaningful with --repeat.
+#                                          meaningful with --repeat. Requires
+#                                          --stable 1: a self-differencing
+#                                          condition reports each transition
+#                                          true only once, so a higher stable
+#                                          count could never accumulate enough
+#                                          consecutive trues to fire.
 #            The condition argv must exit 0 for true, 1 for a clean false;
 #            any other exit (or a per-poll timeout) is an error, never a true.
 #            POLICY, not enforceable here: both halves must be exact and
@@ -275,6 +280,12 @@ cmd_arm() {
   done
   [ "${#cond[@]}" -ge 1 ] || die "arm needs at least one --condition argv element"
   [ "${#act[@]}" -ge 1 ] || die "arm needs at least one --action argv element"
+  # An --edge condition reports each transition true exactly once, then false
+  # again once it rewrites its own snapshot - so two consecutive true polls
+  # can only both land on the same transition by a timing accident, never
+  # reliably. Any --stable above 1 would therefore make the watch stall past
+  # its deadline and report never-true instead of firing on a real change.
+  [ "$edge" = 1 ] && [ "$stable" -ne 1 ] && die "--edge requires --stable 1: a self-differencing condition reports each transition true only once, so a higher stable count can never accumulate enough consecutive trues to fire"
   local arg
   for arg in "${cond[@]}" "${act[@]}" ${env_assignments[@]+"${env_assignments[@]}"}; do
     case "$arg" in *$'\n'*) die "argv elements cannot contain newlines" ;; esac
