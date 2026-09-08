@@ -61,19 +61,62 @@ make_named_shells() {  # <dir> -> echoes <bindir>
   printf '%s' "$dir"
 }
 
+# A deterministic parent chain for the depth boundary. The detector process is
+# entry one; pid 100 is entry nine. FAKE_PS_FIRST_COMM lets anchored-name
+# negatives keep their immediate process identity without seeing the outer
+# harness that launched this suite.
+make_omp_ancestry_fakebin() {  # <dir>
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+pid=${!#}
+case "$*" in
+  *"comm="*)
+    if [ "$pid" = 100 ] && [ "${FAKE_OMP_AT_NINE:-0}" = 1 ]; then
+      printf '%s\n' omp
+    elif [ "$pid" != 800 ] && [ "$pid" != 700 ] && [ "$pid" != 600 ] \
+      && [ "$pid" != 500 ] && [ "$pid" != 400 ] && [ "$pid" != 300 ] \
+      && [ "$pid" != 200 ] && [ "$pid" != 100 ] \
+      && [ -n "${FAKE_PS_FIRST_COMM:-}" ]; then
+      printf '%s\n' "$FAKE_PS_FIRST_COMM"
+    else
+      printf '%s\n' bash
+    fi
+    ;;
+  *"ppid="*)
+    case "$pid" in
+      800) printf '%s\n' 700 ;;
+      700) printf '%s\n' 600 ;;
+      600) printf '%s\n' 500 ;;
+      500) printf '%s\n' 400 ;;
+      400) printf '%s\n' 300 ;;
+      300) printf '%s\n' 200 ;;
+      200) printf '%s\n' 100 ;;
+      100) printf '%s\n' 1 ;;
+      *) printf '%s\n' 800 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s' "$fakebin"
+}
+
 # --- 1. Detection --------------------------------------------------------------
 
 test_detection_anchored_name_and_marker_precedence() {
-  local bin out
+  local bin fakebin out
   bin=$(make_named_shells "$TMP_ROOT/named")
+  fakebin=$(make_omp_ancestry_fakebin "$TMP_ROOT/anchored-ancestry")
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
   for decoy in ompd comp; do
-    # shellcheck disable=SC2016 # the quoted body expands inside the named shell
     out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-      "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
+      FAKE_PS_FIRST_COMM="$decoy" PATH="$fakebin:$PATH" "$HARNESS")
     [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
   done
   # The marker beats an inherited CLAUDECODE only under a real omp ancestor.
@@ -82,11 +125,25 @@ test_detection_anchored_name_and_marker_precedence() {
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
   # ...and is inert when it leaks into a worker with no omp ancestor.
-  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    bash -c '"$1"; :' _ "$HARNESS")
+    PATH="$fakebin:$PATH" "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
+}
+
+test_detection_reaches_omp_at_ancestry_entry_nine() {
+  local fakebin out
+  fakebin=$(make_omp_ancestry_fakebin "$TMP_ROOT/entry-nine")
+
+  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FAKE_OMP_AT_NINE=1 PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = omp ] || fail "an omp process at ancestry entry nine must detect as omp, got '$out'"
+
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    FAKE_OMP_AT_NINE=1 PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = omp ] || fail "FM_OMP_HARNESS must outrank CLAUDECODE when omp is at ancestry entry nine, got '$out'"
+
+  pass "fm-harness: native startup wrappers may place omp at ancestry entry nine"
 }
 
 test_lock_identity_and_liveness_classification() {
@@ -575,6 +632,7 @@ EOF
 }
 
 test_detection_anchored_name_and_marker_precedence
+test_detection_reaches_omp_at_ancestry_entry_nine
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
