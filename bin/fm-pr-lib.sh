@@ -435,6 +435,9 @@ fm_pr_poll_revoke_final() {
   if [ -e "$FM_PR_POLL_CHECK_DEST" ] || [ -L "$FM_PR_POLL_CHECK_DEST" ]; then
     rm -f -- "$FM_PR_POLL_CHECK_DEST" || failed=1
   fi
+  # Accepted limit: revoking a failed publication also loses the delivery clock.
+  # A retry may delay a nudge; it cannot produce a wrong one. This rare failure
+  # announces itself through the command error, so no separate clock is persisted.
   if [ -e "$FM_PR_POLL_REG_DEST" ] || [ -L "$FM_PR_POLL_REG_DEST" ]; then
     rm -f -- "$FM_PR_POLL_REG_DEST" || failed=1
   fi

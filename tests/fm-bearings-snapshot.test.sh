@@ -3486,14 +3486,23 @@ SH
 }
 
 test_delivery_requires_matching_poll_evidence_and_no_open_decision() {
-  local home parent fakebin id out ledger
+  local home parent fakebin id out ledger worktree
   home=$(make_home delivery-evidence)
   make_valid_secondmate_home evidence-mate "$home"
   fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = 'axi status' ] || exit 0
+printf 'branch: %s\nhead: %s\nstatus: completed\noutcome: checks-passed\n' \
+  "$(git symbolic-ref --quiet --short HEAD)" "$(git rev-parse HEAD)"
+SH
   printf '## In flight\n' > "$home/data/backlog.md"
   for id in valid decision mismatch damaged missing; do
     printf -- '- [ ] %s - Delivery evidence (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" >> "$home/data/backlog.md"
-    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$home/projects" \
+    worktree="$home/projects/$id"
+    mkdir -p "$worktree"
+    [ "$id" != decision ] || fm_git_init_commit "$worktree"
+    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$worktree" \
       "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
     record_claude_state "$home/state" "$id" idle
     : > "$home/state/$id.status"
@@ -3509,7 +3518,7 @@ test_delivery_requires_matching_poll_evidence_and_no_open_decision() {
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "delivery evidence snapshot failed"
   printf '%s' "$out" | jq -e '
     [.tasks[] | select(.pr.merge_poll.armed) | .id] == ["decision", "valid"]
-      and (.tasks | any(.id == "decision" and .hints.pending_decision and .current_state.state == "paused"))
+      and (.tasks | any(.id == "decision" and .hints.pending_decision and .current_state.state == "done" and .current_state.source == "run-step"))
       and (.tasks | any(.id == "mismatch" and .pr.url == "https://github.com/acme/repo/pull/3" and .pr.merge_poll.armed_epoch == null))
   ' >/dev/null || fail "unverified poll evidence or a pending decision was lost: $out"
   out=$(run "$home" "$fakebin" --json) || fail "main delivery evidence projection failed"
@@ -3531,7 +3540,13 @@ test_delivery_requires_matching_poll_evidence_and_no_open_decision() {
     [.awaiting[].id] == ["evidence-mate/valid"]
       and ([.in_flight[].id] | sort) == ["evidence-mate/damaged", "evidence-mate/decision", "evidence-mate/mismatch", "evidence-mate/missing"]
   ' >/dev/null || fail "delivery evidence did not survive the parent projection: $out"
-  pass "both delivery projections retain unresolved approvals and reject mismatched, damaged, or missing poll artifacts"
+  printf 'resolved [key=approval]: captain approved\npaused: waiting on upstream review\n' >> "$home/state/decision.status"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "resolved approval ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    ([.awaiting_merge[].id] | sort) == ["decision", "valid"]
+      and (.decisions_open | any(.id == "decision") | not)
+  ' >/dev/null || fail "an explicitly resolved approval still prevented delivery: $ledger"
+  pass "both delivery projections retain approvals after green CI until resolution and reject invalid poll artifacts"
 }
 
 test_long_request_links_survive_all_child_projections() {
@@ -3618,7 +3633,7 @@ SH
   pass "lookup failures preserve keyed decisions and parent evidence until verified work resumes"
 }
 
-test_overdue_deliveries_exceed_both_presentation_bounds() {
+test_overdue_deliveries_survive_ledger_and_presentation_bounds() {
   local home parent fakebin id age out ledger threshold
   home=$(make_home overdue-overflow)
   make_valid_secondmate_home overdue-mate "$home"
@@ -3650,20 +3665,113 @@ test_overdue_deliveries_exceed_both_presentation_bounds() {
       FM_BEARINGS_AWAITING_NUDGE_DAYS=$threshold FM_SNAPSHOT_SECONDMATE_CHILDREN=2 \
       "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "overdue ledger failed"
     printf '%s' "$ledger" | jq -e --argjson threshold "$threshold" '
-      (if $threshold == 7 then 4 else 2 end) as $shown
-      | (.awaiting_merge | length) == $shown and .counts.awaiting_merge == 6
-        and (.omitted | any(.surface == "awaiting_merge" and .count == (6 - $shown)))
+      (.awaiting_merge | length) == 6 and .counts.awaiting_merge == 6
+        and (.omitted | any(.surface == "awaiting_merge") | not)
     ' >/dev/null || fail "the home bound did not preserve overdue deliveries at its configured threshold: $ledger"
     out=$(FM_BEARINGS_AWAITING_NUDGE_DAYS=$threshold FM_SNAPSHOT_SECONDMATE_CHILDREN=2 \
       FM_BEARINGS_AWAITING=2 run "$parent" "$fakebin" --json) || fail "overdue parent snapshot failed"
     printf '%s' "$out" | jq -e --argjson threshold "$threshold" '
       (if $threshold == 7 then 4 else 2 end) as $shown
       | (.awaiting | length) == $shown and all(.awaiting[]; .nudge == ($threshold == 7))
-        and (.omitted | any(.surface == ("secondmate overdue-mate delivered rows omitted by snapshot bound: " + ((6 - $shown) | tostring))))
-        and (.omitted | any(.surface | startswith("awaiting showing")) | not)
+        and (.omitted | any(.surface | startswith("secondmate overdue-mate delivered rows omitted")) | not)
+        and (.omitted | any(.surface == ("awaiting showing " + ($shown | tostring) + " of 6")))
     ' >/dev/null || fail "the parent bound lost nudges or misreported snapshot truncation: $out"
   done
-  pass "both delivery bounds retain every overdue row and disclose only younger omissions"
+  pass "the ledger retains every delivery and the consuming bound discloses only younger omissions"
+}
+
+test_status_urls_never_become_child_request_links() {
+  local home parent fakebin id ledger out
+  home=$(make_home status-link-children)
+  make_valid_secondmate_home status-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in paused-child working-child; do
+    printf -- '- [ ] %s - Child work (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$home/state" "$id" idle
+    printf 'paused: dependency https://github.com/acme/repo/pull/99 is still under review\n' > "$home/state/$id.status"
+  done
+  record_claude_state "$home/state" working-child busy
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "status link snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.tasks | length) == 2
+      and all(.tasks[]; .pr.source == "status_event" and .pr.url == "https://github.com/acme/repo/pull/99")
+  ' >/dev/null || fail "the fixture did not expose the prose-derived URL: $out"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "status link ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    [.active_children[] | {id,pr_url}] == [{id:"working-child",pr_url:null}]
+      and .awaiting_merge == []
+  ' >/dev/null || fail "a status URL selected a nonworking child or became its request link: $ledger"
+  parent=$(make_home status-link-parent)
+  append_secondmate_registry "$parent" status-mate "$home"
+  fm_write_secondmate_meta "$parent/state/status-mate.meta" "$home" "firstmate:fm-status-mate" firstmate
+  out=$(run "$parent" "$fakebin" --json) || fail "status link parent projection failed"
+  printf '%s' "$out" | jq -e '
+    [.in_flight[] | {id,pr_url}] == [{id:"status-mate/working-child",pr_url:null}]
+      and .awaiting == []
+  ' >/dev/null || fail "a prose-derived request reached the parent: $out"
+  pass "status URLs neither select nonworking children nor become working-child request links"
+}
+
+test_cached_deliveries_age_before_the_consuming_bound() {
+  local home parent fakebin sshbin id out ledger phase now epoch
+  home=$(make_home cached-delivery-home)
+  make_valid_secondmate_home cached-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in 1 2 3; do
+    printf -- '- [ ] delivery-%s - Awaiting review (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/delivery-$id.meta" "window=firstmate:fm-delivery-$id" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$home/state" "delivery-$id" idle
+    printf 'paused: waiting on maintainer\n' > "$home/state/delivery-$id.status"
+    arm_merge_poll "$home" "delivery-$id" "https://github.com/acme/repo/pull/$id" \
+      $((BEARINGS_FIXTURE_EPOCH - 6 * 86400))
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_NOW_EPOCH="$BEARINGS_FIXTURE_EPOCH" FM_SNAPSHOT_SECONDMATE_CHILDREN=2 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "young delivery ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    [.awaiting_merge[].id] == ["delivery-1","delivery-2","delivery-3"]
+      and (.omitted | any(.surface == "awaiting_merge") | not)
+  ' >/dev/null || fail "young delivery evidence was truncated at the ledger boundary: $ledger"
+  printf '%s\n' "$ledger" > "$home/state/home-summary.json"
+  parent=$(make_home cached-delivery-parent)
+  sshbin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  printf -- '- cached-mate - cached deliveries (host: fixture-host; root: /remote/root; home: %s; scope: fixture; projects: firstmate; added 2026-07-01)\n' \
+    "$home" > "$parent/data/secondmates.md"
+  fm_write_meta "$parent/state/cached-mate.meta" "kind=secondmate" "mode=secondmate" "harness=pi" \
+    "remote_host=fixture-host" "remote_root=/remote/root" "home=$home"
+  for phase in fresh cached; do
+    now=2026-07-11T18:00:00Z
+    epoch=$BEARINGS_FIXTURE_EPOCH
+    if [ "$phase" = cached ]; then
+      now=2026-07-13T18:00:00Z
+      epoch=$((BEARINGS_FIXTURE_EPOCH + 2 * 86400))
+      rm "$home/state/home-summary.json"
+    fi
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$parent" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$sshbin/fake-ssh" \
+      FM_TEST_LEDGER_CALL_LOG="$parent/ledger-calls.log" FM_SNAPSHOT_CACHE_DIR="$parent/state/summary-cache" \
+      FM_SNAPSHOT_BUDGET=3 FM_SNAPSHOT_NOW="$now" FM_SNAPSHOT_NOW_EPOCH="$epoch" \
+      FM_BEARINGS_NOW="$now" FM_BEARINGS_AWAITING=2 "$BEARINGS" --json) || fail "$phase delivery snapshot failed"
+    printf '%s' "$out" | jq -e --arg phase "$phase" '
+      .secondmates[0].freshness == $phase
+        and (if $phase == "fresh" then
+          (.awaiting | length) == 2 and all(.awaiting[]; .age_days == 6 and (.nudge | not))
+            and (.omitted | any(.surface == "awaiting showing 2 of 3"))
+        else
+          [.awaiting[].id] == ["cached-mate/delivery-1","cached-mate/delivery-2","cached-mate/delivery-3"]
+            and [.awaiting[].pr_url] == ["https://github.com/acme/repo/pull/1","https://github.com/acme/repo/pull/2","https://github.com/acme/repo/pull/3"]
+            and all(.awaiting[]; .age_days == 8 and .nudge)
+            and (.omitted | any(.surface | startswith("awaiting showing")) | not)
+        end)
+    ' >/dev/null || fail "$phase delivery evidence did not age across the cache boundary: $out"
+  done
+  pass "cached young deliveries retain every identity and link when age promotes them beyond the bound"
 }
 
 test_a_parked_delivery_does_not_make_its_secondmate_home_working() {
@@ -3729,7 +3837,9 @@ test_a_parked_delivery_does_not_make_its_secondmate_home_working
 test_failed_lookup_preserves_unresolved_decisions
 test_delivery_requires_matching_poll_evidence_and_no_open_decision
 test_long_request_links_survive_all_child_projections
-test_overdue_deliveries_exceed_both_presentation_bounds
+test_status_urls_never_become_child_request_links
+test_cached_deliveries_age_before_the_consuming_bound
+test_overdue_deliveries_survive_ledger_and_presentation_bounds
 test_a_secondmate_delivery_reaches_the_parent_as_a_delivered_row
 test_a_request_waiting_on_the_captain_never_lands_in_the_waiting_state
 test_a_delivery_that_resumed_and_failed_keeps_its_own_state

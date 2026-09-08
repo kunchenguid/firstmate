@@ -90,8 +90,9 @@
 #     awaiting_merge is that home's DELIVERED work under the declared-wait
 #     eligibility contract in bin/fm-bearings-snapshot.sh. Only such a child is a recognized
 #     terminal-facing state rather than an inventory fault; one that resumed and
-#     failed keeps its diagnostic. Oldest first, with every overdue delivery
-#     retained beyond the child bound. The field is additive: a ledger written before it simply
+#     failed keeps its diagnostic. All delivery evidence is retained, oldest first;
+#     the consuming snapshot computes current age before applying its bound.
+#     The field is additive: a ledger written before it simply
 #     omits it, and every reader must tolerate its absence. provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
@@ -769,28 +770,9 @@ task_json_lines() {
       printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
     )
 
-    # Durable keyed open-decision set: fold the WHOLE status stream
-    # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
-    # never mask a still-open captain decision. The set is derived purely from the
-    # keyed fold - never from report bodies or decision-like prose - and then
-    # reconciled against the crew LIFECYCLE, which only clears a stale decision the
-    # crew has provably moved past. Two lifecycle signals clear it, neither of which
-    # reads any report content:
-    #   - a live activity read (run-step or busy pane) that is working/done, so a
-    #     crew that resumed past a gate is not still reported as parked; and
-    #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
-    #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
-    #     report POINTER, never as a reopened pending decision.
-    # Secondmates are excluded from lifecycle clearing: they are persistent and
-    # multiplex many concerns onto one stream, so activity on one concern must
-    # never clear another concern's keyed decision. A parked/blocked state, or a
-    # non-authoritative status-log/none read on a still-live task, keeps the fold's
-    # open decision surfacing.
     open_decisions_tsv=$(status_open_decisions "$status_log")
-    if [ "$kind" != secondmate ] && \
-       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
-           && [ "$current_state" = working ]; } \
-         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
+    if [ "$kind" != secondmate ] && [ "$current_state" = working ] && \
+       { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; }; then
       open_decisions_tsv=""
     fi
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
@@ -942,7 +924,6 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
 secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
   jq -n \
     --arg paused_verb "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" \
-    --argjson nudge_days "$FM_BEARINGS_AWAITING_NUDGE_DAYS" \
     --arg generated "$SNAPSHOT_NOW" \
     --argjson generated_epoch "$SNAPSHOT_EPOCH" \
     --arg home "$FM_HOME" \
@@ -1028,12 +1009,12 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.id == $work.id)
          | select(.current_state.state == "working"
                   or ($work.current_role != "held"
-                      and .pr.url != null
+                      and .pr.source == "meta" and .pr.url != null
                       and (delivered_and_waiting($work) | not)))
          | {id,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             source:.current_state.source,
-            pr_url:(.pr.url // $work.pr_url // null),
+            pr_url:(if .pr.source == "meta" then .pr.url else null end),
             doing:((.current_state.detail // "") | trunc(120))} ]
        | sort_by(if .state == "working" then 0 else 1 end)) as $active_all
     | ([ $owned_in_flight[] as $work
@@ -1047,9 +1028,6 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             pr_url:$task.pr.url,
             delivered_epoch:($task.pr.merge_poll.armed_epoch)} ]
        | sort_by([(.delivered_epoch == null), .delivered_epoch, .id])) as $awaiting_all
-    | ([$awaiting_all[] | select(.delivered_epoch != null
-         and ($generated_epoch - .delivered_epoch) >= ($nudge_days * 86400))] | length) as $overdue_n
-    | $awaiting_all[:([$child_n, $overdue_n] | max)] as $awaiting_visible
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
@@ -1100,7 +1078,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         invalidity:$invalidity,
         state:$state,
         active_children:$active_all[:$child_n],
-        awaiting_merge:$awaiting_visible,
+        awaiting_merge:$awaiting_all,
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
         queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
@@ -1134,7 +1112,6 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         },
         omitted:[
           (if ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
-          (if ($awaiting_all | length) > ($awaiting_visible | length) then {surface:"awaiting_merge",count:(($awaiting_all | length) - ($awaiting_visible | length))} else empty end),
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
           (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
