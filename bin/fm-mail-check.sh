@@ -8,11 +8,13 @@
 #   fm-mail-check.sh --help
 #
 # `check` runs the mail poll from this home (sourcing the same .env and using
-# the same inbox state as fm-mail.sh itself) and prints one line only when
-# something is wrong, so it composes with the existing watcher state-check
-# contract instead of needing a schedule of its own. A successful poll prints
-# nothing: each new message is already surfaced directly by the poll as a
-# durable `check: mail <uid>` wake, so a healthy cadence has nothing to repeat.
+# the same inbox state as fm-mail.sh itself) and prints one line when a
+# successful poll surfaces new mail, or when something is wrong, so it
+# composes with the existing watcher state-check contract instead of needing
+# a schedule of its own. A successful poll with no new mail prints nothing.
+# When the poll surfaces new mail, the check emits one wake line so the
+# watcher wakes firstmate to drain the durable `check: mail <uid>` rows the
+# poll already queued.
 #
 # `arm` writes state/mail.check.sh and binds its bytes with
 # fm-check-register.sh, so the watcher dispatches it on its normal
@@ -64,7 +66,7 @@ MAX_LINE=240
 usage() {
   cat <<'EOF'
 Usage:
-  fm-mail-check.sh [check]   run the received-mail poll, silent on success
+  fm-mail-check.sh [check]   run the received-mail poll; wake line on new mail or failure
   fm-mail-check.sh arm       write and register state/mail.check.sh
   fm-mail-check.sh disarm    remove the check shim, its trust binding, and the record
   fm-mail-check.sh --help    print this help

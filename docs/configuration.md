@@ -566,7 +566,7 @@ A message whose header cannot be fetched is surfaced with a degraded summary ins
 A later poll retries that fetch and, on success, surfaces the real sender and subject; a persistently unfetchable message stays degraded without repeating that wake.
 
 A home that wants mail polled unattended arms the standing check in the live home: `bin/fm-mail-check.sh arm`.
-Arming writes `state/mail.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`), so the plane's `poll` runs on its own: new mail still surfaces as `check: mail <uid>` wakes from the poll, while the standing check itself prints a line (and the watcher turns that line into a wake) only when the poll fails, exceeds `FM_MAIL_CHECK_BUDGET` seconds (default 15, valid 5..25, cut to fit `FM_CHECK_TIMEOUT`), or `fm-mail.sh` is missing from the check's home.
+Arming writes `state/mail.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`), so the plane's `poll` runs on its own: new mail still surfaces as `check: mail <uid>` wakes from the poll, and the standing check itself also prints a line (and the watcher turns that line into a wake) when a successful poll surfaces new mail, when the poll fails, exceeds `FM_MAIL_CHECK_BUDGET` seconds (default 15, valid 5..25, cut to fit `FM_CHECK_TIMEOUT`), or `fm-mail.sh` is missing from the check's home.
 `bin/fm-mail-check.sh disarm` removes the standing check.
 
 ## Relay (.env)

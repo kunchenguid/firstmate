@@ -8,9 +8,10 @@
 #
 #   * the `check` action itself, which runs the real fm-mail.sh poll against a
 #     scratch home whose .env and fake python3 decide the outcome. The cases
-#     that matter are the reporting contract: a healthy poll is silent (the
-#     poll still surfaces new mail itself as durable wakes), a failing poll
-#     reports one line, and the same story is reported once until it changes.
+#     that matter are the reporting contract: a successful poll that surfaces
+#     new mail emits one wake line (the poll still also surfaces new mail as
+#     durable wakes), a failing poll reports one line, and the same story is
+#     reported once until it changes.
 #
 # No case ever contacts a real IMAP or SMTP server.
 set -u
@@ -145,7 +146,7 @@ test_arm_refuses_without_the_mail_plane() {
   pass "fm-mail-check: arm refuses without the mail plane"
 }
 
-test_successful_poll_is_silent_and_new_mail_still_surfaces() {
+test_successful_poll_with_new_mail_emits_one_wake_line() {
   local home out wakeq
   home=$(make_home success)
   write_env "$home"
@@ -154,14 +155,15 @@ test_successful_poll_is_silent_and_new_mail_still_surfaces() {
 printf "42\\t2026-09-05T00:00:00Z\\talice@example.com\\tHello\\n"'
   out="$home/out.txt"
   run_check "$home" "$out" "$CHECK"
-  [ ! -s "$out" ] || fail "a healthy poll must print nothing: $(cat "$out")"
-  assert_present "$home/state/.mail-check" "a healthy poll records its outcome"
+  assert_contains "$(cat "$out")" "mail: new mail: woke for 42" "a successful poll that surfaces new mail emits one wake line"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "a successful new-mail poll reports exactly one line: $(cat "$out")"
+  assert_present "$home/state/.mail-check" "a successful poll records its outcome"
   assert_contains "$(cat "$home/state/.mail-check")" "fm-mail-check-v1" "the record carries its schema"
-  assert_not_contains "$(cat "$home/state/.mail-check")" "reported=mail:" "the healthy record carries no reported finding"
+  assert_contains "$(cat "$home/state/.mail-check")" "reported=new mail: woke for 42" "the record carries the reported new-mail finding"
   wakeq="$home/state/.wake-queue"
   assert_contains "$(cat "$wakeq" 2>/dev/null)" "mail from alice@example.com" "the check-run poll still surfaces new mail as a durable wake"
   assert_contains "$(cat "$home/state/.mail-seen" 2>/dev/null)" "42" "the check-run poll still advances the inbox cursor"
-  pass "fm-mail-check: healthy poll stays silent while the poll still surfaces new mail"
+  pass "fm-mail-check: a successful poll that surfaces new mail emits one wake line"
 }
 
 test_failure_is_reported_once_until_it_changes() {
@@ -269,7 +271,7 @@ test_arm_writes_and_binds_the_check_and_disarm_removes_it
 test_arm_resolves_a_relative_home_into_the_shim
 test_arm_refuses_a_symlink_at_the_shim_path
 test_arm_refuses_without_the_mail_plane
-test_successful_poll_is_silent_and_new_mail_still_surfaces
+test_successful_poll_with_new_mail_emits_one_wake_line
 test_failure_is_reported_once_until_it_changes
 test_unconfigured_home_is_reported_once
 test_slow_poll_times_out_and_is_reported
