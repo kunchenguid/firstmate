@@ -308,32 +308,75 @@ test_paseo_endpoint_records_refuse_while_no_adapter_can_close_them() {
   pass "paseo endpoint validation: every backend=paseo cleanup record refuses and preserves task state"
 }
 
+# endpoint_fixture_lines: the per-backend identity fields a well-formed cleanup
+# record carries. Without these each backend but tmux is rejected by its own
+# validation arm on a tmux-shaped record, and the reachability loop below would
+# skip it while claiming to have checked it.
+endpoint_fixture_lines() {  # <backend> <task-id> -> one meta line per output line
+  local backend=$1 id=$2
+  case "$backend" in
+    tmux) printf '%s\n' "window=sess:fm-$id" ;;
+    herdr)
+      printf '%s\n' "window=sess:pane-1" "herdr_session=sess" \
+        "herdr_workspace_id=ws-1" "herdr_tab_id=tab-1" "herdr_pane_id=pane-1"
+      ;;
+    zellij)
+      printf '%s\n' "window=sess:7" "zellij_session=sess" \
+        "zellij_tab_id=3" "zellij_pane_id=7"
+      ;;
+    orca)
+      printf '%s\n' "window=fm-$id" "terminal=term-7" "orca_worktree_id=worktree-9"
+      ;;
+    cmux)
+      printf '%s\n' "window=ws-1:surface-2" "cmux_workspace_id=ws-1" \
+        "cmux_surface_id=surface-2"
+      ;;
+    *) printf '%s\n' "window=sess:fm-$id" ;;
+  esac
+}
+
 test_every_endpoint_backend_teardown_accepts_can_be_closed() {
   # The invariant the paseo refusal exists to keep: validation is what
   # authorizes teardown to destroy durable state, and teardown's close is
   # best-effort, so a backend may only pass validation if fm_backend_kill can
   # actually act on it. Drives both real functions rather than reading either.
-  local backend meta out rc target fb tool id=endpoint-reach
+  local backend meta out rc target fb tool line id=endpoint-reach
+  local accepted='' refused=''
+  local -a fixture
   # Stub every session-provider CLI so a backend that DOES dispatch a close
-  # never reaches a real multiplexer on the developer's machine. Only the
-  # presence of a dispatch arm is under test; what the arm then runs is each
-  # backend's own suite's business.
+  # never reaches a real multiplexer on the developer's machine, and stub sleep
+  # so an adapter's readiness poll against those inert stubs cannot stall the
+  # suite. Only the presence of a dispatch arm is under test; what the arm then
+  # runs is each backend's own suite's business.
   fb=$(mktemp -d "$TMP_ROOT/kill-reach.XXXXXX")
-  for tool in $FM_BACKEND_KNOWN jq; do
+  for tool in $FM_BACKEND_KNOWN jq sleep; do
     printf '#!/bin/sh\nexit 0\n' > "$fb/$tool"
     chmod +x "$fb/$tool"
   done
   for backend in $FM_BACKEND_KNOWN; do
-    meta=$(paseo_meta "$id" "window=sess:fm-$id" "endpoint_task_id=$id" \
+    fixture=()
+    while IFS= read -r line; do fixture+=("$line"); done \
+      < <(endpoint_fixture_lines "$backend" "$id")
+    meta=$(paseo_meta "$id" "${fixture[@]}" "endpoint_task_id=$id" \
       "worktree=/tmp/wt" "project=/tmp/proj" "backend=$backend")
     set +e
     fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1
     rc=$?
     set -e
-    [ "$rc" -eq 0 ] || continue
+    if [ "$rc" -ne 0 ]; then
+      # A backend that can CREATE endpoints must be closeable, so its refusal
+      # here is either a real gap or fixture drift that would silently turn this
+      # backend's reachability check back into a no-op.
+      if fm_backend_list_contains "$FM_BACKEND_SPAWN" "$backend"; then
+        fail "$backend is spawn-capable but its well-formed cleanup record does not validate; teardown could never close an endpoint it is allowed to create"
+      fi
+      refused="$refused $backend"
+      continue
+    fi
+    accepted="$accepted $backend"
     target=$FM_BACKEND_VALIDATED_TARGET
     set +e
-    out=$(PATH="$fb:$PATH" fm_backend_kill "$backend" "$target" 2>&1)
+    out=$(HOME="$fb" PATH="$fb:$PATH" fm_backend_kill "$backend" "$target" 2>&1)
     set -e
     case "$out" in
       *"no kill implementation"*)
@@ -341,7 +384,34 @@ test_every_endpoint_backend_teardown_accepts_can_be_closed() {
         ;;
     esac
   done
-  pass "endpoint identity: no known backend can pass cleanup validation without a reachable fm_backend_kill implementation"
+  accepted=${accepted# }
+  refused=${refused# }
+  [ -n "$accepted" ] || fail "no backend passed cleanup validation, so this loop asserted nothing"
+  pass "endpoint identity: every backend whose cleanup record validates ($accepted) has a reachable fm_backend_kill, and the rest refuse (${refused:-none})"
+}
+
+test_registering_a_backend_before_its_adapter_fails_closed() {
+  # paseo's refusal is the DEFAULT for this boundary, not a paseo special case:
+  # registering any name in FM_BACKEND_KNOWN before its lifecycle adapter lands
+  # must refuse cleanup rather than authorize teardown to destroy durable state
+  # that nothing can close. Exercised with a name that deliberately has no
+  # validation arm and no fm_backend_kill arm - exactly the shape paseo had when
+  # a well-formed record was accepted over a still-running terminal.
+  local meta out rc id=adapterless-reach
+  meta=$(paseo_meta "$id" "window=sess:fm-$id" "endpoint_task_id=$id" \
+    "worktree=/tmp/wt" "project=/tmp/proj" "backend=notyetimplemented")
+  set +e
+  out=$(FM_BACKEND_KNOWN="$FM_BACKEND_KNOWN notyetimplemented" \
+    fm_backend_validate_task_endpoint "$meta" "$id" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "a known backend with no cleanup arm was ACCEPTED; teardown would delete task state that no fm_backend_kill can close"
+  assert_contains "$out" "no lifecycle adapter" \
+    "the adapterless-backend refusal should name the missing adapter as the reason"
+  assert_contains "$out" "preserving task state" \
+    "the adapterless-backend refusal must say task state is preserved"
+  pass "endpoint identity: a backend registered before its lifecycle adapter fails CLOSED at cleanup validation, by default rather than per backend"
 }
 
 test_paseo_endpoint_refusal_refuses_before_any_runtime_call() {
@@ -383,4 +453,5 @@ test_paseo_autodetect_notice_and_explicit_override
 test_spawn_refuses_paseo_at_the_shared_boundary
 test_paseo_endpoint_records_refuse_while_no_adapter_can_close_them
 test_every_endpoint_backend_teardown_accepts_can_be_closed
+test_registering_a_backend_before_its_adapter_fails_closed
 test_paseo_endpoint_refusal_refuses_before_any_runtime_call

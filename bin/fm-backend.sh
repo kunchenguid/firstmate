@@ -586,19 +586,20 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       fi
       ;;
-    paseo)
-      # paseo refuses at THIS boundary for the same reason it refuses at
-      # fm_backend_validate_spawn: it has no lifecycle adapter. fm_backend_kill
-      # has no paseo arm, and every kill caller swallows failures because an
-      # already-gone endpoint is legitimately not an error. So accepting a paseo
-      # record here would let teardown return the worktree, delete the durable
-      # metadata, and report completion while the Paseo terminal is still
-      # running - destroying the only record of the endpoint it had left. No
-      # firstmate path writes a backend=paseo record while the adapter is
-      # absent, so any such record is unintended and its task state must be
-      # preserved. Per-field record-shape validation lands with the adapter that
-      # can actually act on the record.
-      echo "REFUSED: the EXPERIMENTAL paseo backend has no lifecycle adapter, so task $id's endpoint cannot be closed; preserving task state." >&2
+    *)
+      # Fail closed for any name registered in FM_BACKEND_KNOWN before its
+      # lifecycle adapter lands - paseo is the current occupant. Passing this
+      # boundary is what authorizes teardown to destroy durable state, while
+      # every kill caller swallows fm_backend_kill failures because an
+      # already-gone endpoint is legitimately not an error. So accepting a
+      # record no adapter can act on would let teardown return the worktree,
+      # delete the durable metadata, and report completion while the terminal is
+      # still running - destroying the only record of the endpoint it had left.
+      # No firstmate path writes such a record while the adapter is absent, so
+      # any that exists is unintended and its task state must be preserved.
+      # Per-field record-shape validation lands with the adapter that can
+      # actually act on the record.
+      echo "REFUSED: backend '$backend' has no lifecycle adapter, so task $id's endpoint cannot be closed; preserving task state." >&2
       return 1
       ;;
   esac
