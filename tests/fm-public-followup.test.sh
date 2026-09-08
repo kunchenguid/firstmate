@@ -274,7 +274,7 @@ expect_failure() {
 # non-ASCII characters, and control characters must never survive into the typed
 # event or the thread.
 test_outcome_text_is_bounded_without_corrupting_characters() {
-  local home event text long
+  local home event text long text_length
   home=$(make_home outcome-text)
   seed_commitment "$home" pf-text req-text discord main work-text
 
@@ -300,7 +300,9 @@ test_outcome_text_is_bounded_without_corrupting_characters() {
   event=$(find "$home/state/public-followup/events" -name '*.json' | head -1)
   text=$(jq -r '.public_safe_outcome' "$event") \
     || fail "an over-long outcome must still produce valid JSON"
-  [ "${#text}" -le 600 ] || fail "the outcome text was not bounded, got ${#text} characters"
+  text_length=$(printf '%s' "$text" | jq -Rr 'length') \
+    || fail "the bounded outcome text length could not be measured"
+  [ "$text_length" -le 600 ] || fail "the outcome text was not bounded, got $text_length characters"
   case "$text" in
     *[!é]*) fail "codepoint bounding split a multi-byte character" ;;
   esac
