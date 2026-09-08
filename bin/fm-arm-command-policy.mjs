@@ -921,6 +921,13 @@ function mergeReachableContexts(first, second, depth) {
   return merged;
 }
 
+function conditionalBranchesReachable(bindings) {
+  return bindings.every((binding) => {
+    if (binding.condition === null) return true;
+    return binding.hasElse ? binding.condition === false : binding.condition === true;
+  });
+}
+
 function nodeHasRedirection(tokens) {
   return tokens.some((token) => token.type === "redir");
 }
@@ -959,18 +966,28 @@ function analyzeProgram(command, context, depth = 0) {
   let unclassifiableProtected = false;
   const loopBindings = [];
   const conditionalBindings = [];
+  const caseBindings = [];
 
   for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
     const tokens = program.nodes[nodeIndex];
     const precedingSeparator = nodeIndex > 0 ? program.separators[nodeIndex - 1] : "";
     const position = commandPosition(tokens);
     const firstName = basename(position.words[0]?.value || "");
+    if (precedingSeparator === ";;" && caseBindings.length > 0) {
+      const branch = caseBindings.at(-1);
+      if (branch.branchCount === 0) branch.firstBranchContext = activeContext;
+      branch.branchCount += 1;
+      branch.reachableContext = mergeReachableContexts(activeContext, branch.reachableContext, depth);
+      activeContext = branch.entryContext;
+    }
     if (firstName === "else" && conditionalBindings.length > 0) {
       const branch = conditionalBindings.at(-1);
       branch.thenContext = activeContext;
       branch.hasElse = true;
       activeContext = branch.entryContext;
     }
+    const nodeReachable = conditionalBranchesReachable(conditionalBindings);
+    const pipelineDriveBeforeNode = pipelineDrive;
     if (firstName === "if") {
       const conditionName = basename(position.command?.value || "");
       conditionalBindings.push({
@@ -978,6 +995,20 @@ function analyzeProgram(command, context, depth = 0) {
         condition: conditionName === "true" || conditionName === ":" ? true : conditionName === "false" ? false : null,
         thenContext: null,
         hasElse: false,
+      });
+    }
+    if (firstName === "case") {
+      const selector = position.words[1];
+      const pattern = position.words[3];
+      const selectorValue = resolveKnownWord(selector, activeContext.knownVariables);
+      const patternValue = resolveKnownWord(pattern, activeContext.knownVariables);
+      const simplePattern = patternValue !== null && !/[*?\[]/.test(patternValue);
+      caseBindings.push({
+        entryContext: activeContext,
+        reachableContext: activeContext,
+        firstBranchContext: null,
+        branchCount: 0,
+        firstPatternMatches: selectorValue !== null && simplePattern ? selectorValue === patternValue : null,
       });
     }
     if (firstName === "while" || firstName === "until") {
@@ -1087,6 +1118,7 @@ function analyzeProgram(command, context, depth = 0) {
     }
     pgrepWatcher ||= nodePgrepWatcher;
     nestedProtected ||= nodeNestedProtected;
+    if (!nodeReachable) pipelineDrive = pipelineDriveBeforeNode;
     const loopBinding = forLoopBinding(position, nodeContext, depth);
     if (loopBinding) {
       loopBindings.push({ ...loopBinding, kind: "for", entryContext: activeContext });
@@ -1118,6 +1150,14 @@ function analyzeProgram(command, context, depth = 0) {
       activeContext = branch.condition === true ? thenContext
         : branch.condition === false ? elseContext
           : mergeReachableContexts(thenContext, elseContext, depth);
+    }
+    if (firstName === "esac" && caseBindings.length > 0) {
+      const branch = caseBindings.pop();
+      if (branch.branchCount === 1 && branch.firstPatternMatches !== null) {
+        activeContext = branch.firstPatternMatches ? branch.firstBranchContext : branch.entryContext;
+      } else {
+        activeContext = mergeReachableContexts(activeContext, branch.reachableContext, depth);
+      }
     }
     if (position.unresolvedWrapperOption) unsupported = true;
     nodeInfos.push({

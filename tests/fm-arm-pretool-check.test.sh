@@ -402,6 +402,7 @@ EOF
     'NM=no-mistakes; if false; then NM=echo; fi; "$NM" axi respond --action fix' \
     'ACTION=respond; ! true && ACTION=status; no-mistakes axi "$ACTION"' \
     'NM=no-mistakes; while false; do NM=echo; done; "$NM" axi respond --action fix' \
+    'ACTION=respond; case no in yes) ACTION=status;; esac; no-mistakes axi "$ACTION"' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
@@ -443,6 +444,7 @@ EOF
     'NM=no-mistakes; if false; then NM=echo; fi; "$NM" axi respond --action fix' \
     'ACTION=respond; ! true && ACTION=status; no-mistakes axi "$ACTION"' \
     'NM=no-mistakes; while false; do NM=echo; done; "$NM" axi respond --action fix' \
+    'ACTION=respond; case no in yes) ACTION=status;; esac; no-mistakes axi "$ACTION"' \
     'if no-mistakes axi respond --action fix; then echo done; fi' \
     'for x in 1; do no-mistakes axi respond --action fix; done'; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
@@ -481,6 +483,10 @@ EOF
     || fail "the primary must retain nested read-only pipeline status"
   FM_HOME="$primary" "$check" --command 'ACTION=$(printf status); no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
     || fail "the primary must retain dynamically selected read-only pipeline status"
+  FM_HOME="$primary" "$check" --command 'if false; then no-mistakes axi respond --action fix; fi' >/dev/null 2>&1 \
+    || fail "an unreachable conditional pipeline drive must remain allowed"
+  FM_HOME="$primary" "$check" --command 'ACTION=respond; case yes in yes) ACTION=status;; esac; no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
+    || fail "a matching case branch must preserve its read-only action"
   FM_HOME="$primary" "$check" --command 'ACTION=status; false && ACTION=respond; no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
     || fail "a skipped driving-action assignment must retain read-only pipeline status"
   FM_HOME="$primary" "$check" --command 'no-mistakes axi abort --run 01RUN' >/dev/null 2>&1 \
