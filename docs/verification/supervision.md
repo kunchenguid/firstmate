@@ -417,7 +417,8 @@ It reproduced with the same single failure on two consecutive runs, so it is det
 `tests/lib.sh` defines `fail()` as a `printf` plus `exit 1`, so that failure aborted the whole script, and `test_hook_no_afk_ignores_poll_derived_grace` - the only case invoked after it - therefore never ran at all in the run above.
 
 That abort left this correction's own guard-side cases with no stated result, because they are invoked earlier in the same script, so they were re-run on their own.
-`bin/fm-test-run.sh` selects whole scripts and has no per-case filter, so the isolated run used a copy of `tests/fm-turnend-guard.test.sh` truncated above its runner list - every function definition and helper intact, only the list of cases to invoke replaced - and it was captured on this review round's tree, which is commit `073a41f088a539e43cc3fa9deb60b4351a886242` plus the same round's removal of the banner's second primed-recovery line.
+`bin/fm-test-run.sh` selects whole scripts and has no per-case filter, so the isolated run used a copy of `tests/fm-turnend-guard.test.sh` truncated above its runner list - every function definition and helper intact, only the list of cases to invoke replaced.
+It was captured at commit `1474acb792630ece320089f14bf714a599705b02`, which is the tree that removed the banner's second primed-recovery line and re-pointed the three assertions naming it in the same change; reconstructing that whole commit is what reproduces the output below, because on `073a41f` with only the banner line deleted those assertions would still look for a string the banner no longer prints.
 
 Observed output of that isolated run:
 
@@ -434,6 +435,11 @@ ok - fm-turnend-guard --claude: a frozen auto-arm epoch still reaches the bounde
 That copy exited 0.
 It covers the six guard-side cases this correction adds - `test_hook_claude_mode_ordinary_stop_does_not_prime`, `test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal`, `test_hook_claude_mode_away_refusal_claims_no_primed_start`, `test_hook_claude_mode_refused_stop_recovers_without_epoch_progress`, `test_hook_claude_mode_advancing_epoch_refusal_cannot_guarantee_a_second_refusal`, and `test_hook_claude_mode_frozen_epoch_still_reaches_the_bounded_fail_open` - plus `test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy` for the unprimed banner wording.
 It says nothing about any other case in that script; the full-script result above remains the only record for those.
+
+Two commits land after the trees named above, and neither has a fresh full-script run of its own.
+`1474acb` follows the `073a41f` full-script run: it removed the banner's second primed-recovery line and re-pointed the three assertions that named it in the same change, which is why the guard-side cases were re-run in isolation on that newer tree rather than left on the older one.
+It leaves `test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace` byte-identical to its state at `073a41f`, but no run at `1474acb` invoked that case, so the full-script failure above remains the only observation of it.
+The review commit that follows `1474acb` changes documentation only - the tree named for the isolated run just above, and one removed sentence in `docs/turnend-guard.md` - so it touches no code or test path any command in this entry exercises, and no re-run was taken for it.
 
 The Pi extension-model pull-guard correction (`bin/fm-guard.sh` no longer reports a false watcher-down on a Pi primary during the extension's own watcher hand-off) was verified on 2026-08-13 with the installed ShellCheck 0.11.0 and isolated behavior suites.
 The guard verdict itself reads only state files and process liveness, so the portable suites are the enforcing evidence; `bin/fm-harness.sh`'s Pi marker detection, which selects the model, is exercised in the same suite through `PI_CODING_AGENT`.
