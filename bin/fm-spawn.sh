@@ -41,7 +41,11 @@
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
 #   worktree, and clears the previous harness's per-task wiring before arming
-#   the new incarnation.
+#   the new incarnation. The single exception is herdr's released stale
+#   `herdr:pi` cache, where that classifier still reports a Pi that already
+#   exited: only a verified fm-control parent's transaction-bound proof crosses
+#   it, rechecked here immediately before launch (see
+#   fm_spawn_released_herdr_pi_proof_valid below).
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile

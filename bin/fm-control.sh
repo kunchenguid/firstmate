@@ -101,9 +101,13 @@
 #     only through a private transaction proof rechecked by the verified parent
 #     immediately before launch. Any process, process-group, identity, session,
 #     ownership, transport, or parse ambiguity refuses without terminal input.
-#     The fleet-wide Herdr classifier remains conservative. A replacement is
+#     The fleet-wide Herdr classifier remains conservative. A Pi replacement is
 #     accepted only after a distinct valid `herdr:pi` generation and exactly one
-#     new Pi engine are observed stably on the same pane and copy.
+#     new Pi engine are observed stably on the same pane and copy; a replacement
+#     on another runtime is accepted only after exactly one independent target-
+#     harness process, with no Pi engine left below the pane shell, is observed
+#     the same way. A target whose process identity that proof cannot read is
+#     refused before any replacement is launched.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)

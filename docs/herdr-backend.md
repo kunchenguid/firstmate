@@ -15,7 +15,7 @@ Prerequisites:
 - Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
-- `python3` only for optional protocol-16 presentation-space ordering and native event subscription.
+- `python3` only for optional protocol-16 presentation-space ordering, native event subscription, and the narrow stale `herdr:pi` authority release under [Restart and liveness behavior](#restart-and-liveness-behavior), which refuses without it.
 
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
@@ -272,6 +272,9 @@ The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
 
+The session-start sweep uses this probe.
+Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
+
 Herdr 0.8.2 can retain official `herdr:pi` full-lifecycle authority when Pi exits back into the nested shell created by `treehouse get`, because that shell is not Herdr's original pane-shell process.
 `fm-control exit|relaunch` has one narrow recovery for an ordinary Pi ship or scout: it requires the exact recorded session/workspace/tab/pane/task/cwd, a structurally managed Treehouse copy, a valid Pi session generation, and two stable full-process-tree samples showing only pane shell -> `treehouse get` -> nested shell with no Pi descendant; it then verifies `pane.clear_agent_authority` support, clears only `herdr:pi` through the named session's owner-only socket, and proves twice that authority and session identity disappeared without a process-generation change.
 Herdr may retain a conservative process-detected Pi label after that clear, so only the still-running control transaction may carry its private proof into `fm-spawn --relaunch`, which rechecks the exact authority-free shell immediately before launch; a direct relaunch still refuses, and the replacement is accepted only after a distinct valid session generation and exactly one Pi engine are stable below the same pane shell.
@@ -282,9 +285,6 @@ The generic liveness classifier remains unchanged, all ambiguous identity/proces
 Because a doorbell holds that lock across one liveness read and one submission, the lifecycle entry points wait it out (`FM_TASK_CONTROL_LOCK_WAIT`, default 5s) instead of reporting an ordinary steer as a concurrent lifecycle action.
 Operators should use `fm-control` rather than manually typing another exit or clearing authority; a refusal means preserve the pane and copy for inspection.
 The hermetic coverage is `tests/fm-control-herdr-pi-relaunch.test.sh` plus `tests/herdr-clear-agent-authority.test.sh`, and the opt-in real regression is `FM_CONTROL_HERDR_PI_RELAUNCH_LIVE_E2E=1 tests/fm-control-herdr-pi-relaunch-live-e2e.test.sh`.
-
-The session-start sweep uses this probe.
-Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
 
 ## Push events and polling fallback
 
