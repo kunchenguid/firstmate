@@ -2974,3 +2974,216 @@ test_revealed_deferred_holds_show_their_deferral_reason
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
+
+# --- delivered work, its owner, and its request link -----------------------
+# The captain's fleet and its second mate both work the SAME repository, so
+# "repo" cannot say whose a row is, and a shipped change waiting on an outside
+# maintainer is neither underway nor landed. These pin both facts as structure.
+
+# 2026-07-11T18:00:00Z, the clock every bearings fixture in this file reads.
+BEARINGS_FIXTURE_EPOCH=1783792800
+
+# Set a file's modification time from an epoch, which is what the delivered wait
+# is measured from.
+touch_epoch() {  # <file> <epoch>
+  if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
+    touch -t "$(date -r "$2" +%Y%m%d%H%M.%S)" "$1"
+  else
+    touch -d "@$2" "$1"
+  fi
+}
+
+# Arm a task's merge watch the way bin/fm-pr-check.sh does, at <epoch>.
+arm_merge_poll() {  # <home> <id> <url> <epoch>
+  local reg="$1/state/$2.pr-poll-registration"
+  {
+    printf 'fm-pr-poll-registration-v2\n%s\ngithub\n%s\ngithub.com\nacme/repo\n7\n' "$2" "$3"
+    printf 'a\nb\n1:1\n1:2\n'
+  } > "$reg"
+  chmod 0600 "$reg"
+  touch_epoch "$reg" "$4"
+}
+
+# A home with one task still working and one shipped task whose merge watch is
+# armed at <armed-epoch>. Prints "<home>:<fakebin>".
+delivered_home() {  # <name> <armed-epoch>
+  local home fakebin
+  home=$(make_home "$1")
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] still-working - Work still moving (repo: firstmate) (kind: ship) (since 2026-07-01)
+- [ ] shipped-task - Delivered and waiting (repo: firstmate) (kind: ship) (since 2026-07-01)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/still-working.meta" \
+    "window=firstmate:fm-still-working" "worktree=$home/projects" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/acme/repo/pull/1"
+  record_claude_state "$home/state" still-working busy
+  fm_write_meta "$home/state/shipped-task.meta" \
+    "window=firstmate:fm-shipped-task" "worktree=$home/projects" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/acme/repo/pull/2"
+  record_claude_state "$home/state" shipped-task idle
+  printf 'done: PR https://github.com/acme/repo/pull/2 checks green\n' > "$home/state/shipped-task.status"
+  arm_merge_poll "$home" shipped-task https://github.com/acme/repo/pull/2 "$2"
+  printf '%s:%s\n' "$home" "$fakebin"
+}
+
+run_at() {  # <home> <fakebin> <epoch> <args...>
+  local home=$1 fakebin=$2 epoch=$3; shift 3
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    FM_BEARINGS_NOW_EPOCH="$epoch" NET_LOG="$home/net.log" "$BEARINGS" "$@"
+}
+
+test_delivered_work_leaves_underway_for_its_own_bucket() {
+  local pair home fakebin out
+  pair=$(delivered_home delivered-bucket $((BEARINGS_FIXTURE_EPOCH - 3 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.in_flight[].id] == ["still-working"])
+      and ((.awaiting | length) == 1)
+      and (.awaiting[0] | .id == "shipped-task"
+        and .owner == "(main)"
+        and .repo == "firstmate"
+        and .pr_url == "https://github.com/acme/repo/pull/2"
+        and .age_days == 3
+        and .nudge == false)
+      and ([.gates[].id] | index("shipped-task") == null)
+  ' >/dev/null || fail "a delivered task was not moved into its own bucket exactly once: $out"
+  pass "a delivered task leaves underway and the gates for one delivered row"
+}
+
+test_an_armed_merge_watch_does_not_move_work_that_is_still_running() {
+  local pair home fakebin out
+  pair=$(delivered_home delivered-still-working $((BEARINGS_FIXTURE_EPOCH - 3 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  arm_merge_poll "$home" still-working https://github.com/acme/repo/pull/1 \
+    $((BEARINGS_FIXTURE_EPOCH - 30 * 86400))
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.in_flight[].id] == ["still-working"]) and ([.awaiting[].id] == ["shipped-task"])
+  ' >/dev/null || fail "a running worker was reported as delivered: $out"
+  pass "an armed merge watch does not retire a worker that is still working"
+}
+
+test_an_underway_row_carries_its_owner_and_its_recorded_request() {
+  local pair home fakebin out
+  pair=$(delivered_home underway-owner $((BEARINGS_FIXTURE_EPOCH - 3 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .in_flight[0] | .owner == "(main)" and .pr_url == "https://github.com/acme/repo/pull/1"
+  ' >/dev/null || fail "an underway row lost its owner or its recorded request: $out"
+  pass "an underway row names its home and carries the request already recorded for it"
+}
+
+# The exit rule must be a number someone can point at, and it must be one-way:
+# a delivery that has waited long enough to be worth a nudge can never quietly
+# fall back into the delivered box on a later read.
+test_the_delivered_exit_rule_fires_at_its_threshold_and_never_reverses() {
+  local pair home fakebin out later
+  pair=$(delivered_home delivered-exit $((BEARINGS_FIXTURE_EPOCH - 7 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .awaiting_nudge_days == 7 and (.awaiting[0] | .age_days == 7 and .nudge == true)
+  ' >/dev/null || fail "the exit rule did not fire at its own threshold: $out"
+
+  out=$(run_at "$home" "$fakebin" $((BEARINGS_FIXTURE_EPOCH - 86400)) --json) \
+    || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '.awaiting[0] | .age_days == 6 and .nudge == false' >/dev/null \
+    || fail "the exit rule fired before its threshold: $out"
+
+  for later in 1 30 365; do
+    out=$(run_at "$home" "$fakebin" $((BEARINGS_FIXTURE_EPOCH + later * 86400)) --json) \
+      || fail "the snapshot failed"
+    printf '%s' "$out" | jq -e --argjson d "$later" '
+      .awaiting[0] | .nudge == true and .age_days == (7 + $d)
+    ' >/dev/null || fail "a crossed delivery fell back below the threshold after $later days: $out"
+  done
+  pass "the delivered exit rule fires at its named threshold and is one-way"
+}
+
+test_the_nudge_threshold_is_one_named_constant() {
+  local pair home fakebin out
+  pair=$(delivered_home delivered-threshold $((BEARINGS_FIXTURE_EPOCH - 3 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    FM_BEARINGS_NOW_EPOCH="$BEARINGS_FIXTURE_EPOCH" FM_BEARINGS_AWAITING_NUDGE_DAYS=2 \
+    NET_LOG="$home/net.log" "$BEARINGS" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .awaiting_nudge_days == 2 and (.awaiting[0] | .age_days == 3 and .nudge == true)
+  ' >/dev/null || fail "the threshold is not the single constant the output reports: $out"
+  pass "the exit rule reads one named threshold, and the output states which"
+}
+
+test_a_secondmate_child_is_told_apart_from_main_work_in_the_same_repo() {
+  local home fakebin mate out
+  home=$(make_home mate-owner)
+  fakebin=$(make_fakebin "$home")
+  write_fixture "$home"
+  # The fixture's child is parked on a decision; this case is about two homes
+  # working the same repository at once, so put it back to work.
+  mate=$(fixture_mate_home "$home")
+  record_claude_state "$mate/state" mate busy
+  printf 'working: second mate child at work\n' > "$mate/state/mate.status"
+  out=$(run "$home" "$fakebin" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.in_flight[] | select(.id == "ship-task") | .owner] == ["(main)"])
+      and ([.in_flight[] | select(.id | startswith("mate/")) | .owner] | unique) == ["mate"]
+      and (([.in_flight[] | select(.repo == "firstmate") | .owner] | unique | length) == 2)
+  ' >/dev/null || fail "two homes working one repository were not told apart: $out"
+  pass "an underway row from a second mate is distinguishable from main work in the same repo"
+}
+
+test_delivered_work_leaves_underway_for_its_own_bucket
+test_an_armed_merge_watch_does_not_move_work_that_is_still_running
+test_an_underway_row_carries_its_owner_and_its_recorded_request
+test_the_delivered_exit_rule_fires_at_its_threshold_and_never_reverses
+test_the_nudge_threshold_is_one_named_constant
+test_a_secondmate_child_is_told_apart_from_main_work_in_the_same_repo
+
+# The second mate delivers into a repository the fleet never merges, so the
+# delivered state is the terminal state of everything it produces. It has to
+# survive the trip through that home's own ledger, owner intact.
+test_a_secondmate_delivery_reaches_the_parent_as_a_delivered_row() {
+  local home fakebin mate out
+  home=$(make_home mate-delivered)
+  fakebin=$(make_fakebin "$home")
+  write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)
+- [ ] mate-shipped - Second mate delivery waiting upstream (repo: firstmate) (kind: ship) (since 2026-07-01)
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$mate/projects/mate-shipped"
+  fm_write_meta "$mate/state/mate-shipped.meta" \
+    "window=firstmate:fm-mate-shipped" "worktree=$mate/projects/mate-shipped" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/acme/repo/pull/77"
+  record_claude_state "$mate/state" mate-shipped idle
+  printf 'done: PR https://github.com/acme/repo/pull/77 checks green\n' > "$mate/state/mate-shipped.status"
+  arm_merge_poll "$mate" mate-shipped https://github.com/acme/repo/pull/77 \
+    $((BEARINGS_FIXTURE_EPOCH - 4 * 86400))
+  out=$(run "$home" "$fakebin" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.awaiting[] | select(.id == "mate/mate-shipped")
+      | .owner == "mate" and .pr_url == "https://github.com/acme/repo/pull/77" and .age_days == 4]
+      == [true])
+      and ([.in_flight[].id] | index("mate/mate-shipped") == null)
+  ' >/dev/null || fail "a second mate's delivery did not reach the parent as a delivered row: $out"
+  pass "a second mate's delivery reaches the parent as a delivered row with its owner and link"
+}
+
+test_a_secondmate_delivery_reaches_the_parent_as_a_delivered_row

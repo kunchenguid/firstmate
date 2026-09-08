@@ -58,11 +58,19 @@ SH
 
 # Build the board from <charted-json> and return what the renderer produced.
 render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
-  local home=$1 charted=$2 more=${3:-0} warning_more=${4:-0} data="$1/payload.json"
-  jq -n --argjson charted "$charted" --argjson more "$more" --argjson warning_more "$warning_more" '{
+  render_payload "$1" "$(jq -n --argjson charted "$2" \
+    --argjson more "${3:-0}" --argjson warning_more "${4:-0}" \
+    '{charted:$charted, charted_more:$more, charted_warning_more:$warning_more}')"
+}
+
+# Build the board from a partial payload (merged over the minimal valid one) and
+# return what the renderer produced.
+render_payload() {  # <home> <payload-overrides-json>
+  local home=$1 overrides=$2 data="$1/payload.json"
+  jq -n --argjson overrides "$overrides" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:[], landed:[],
-    charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
+    prs_live:false, captains_call:[], underway:[], awaiting:[], landed:[],
+    charted:[], awaiting_nudge_days:7} * $overrides' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
@@ -79,8 +87,8 @@ test_a_warning_row_reads_as_a_repair_not_as_queued_work() {
   local home out
   home=$(make_home warning-badge)
   out=$(render "$home" '[
-    {"id":"real-queued","repo":"sample","title":"Queued work","reason":"queued behind the cutover","dispatchable":true},
-    {"id":"main-inventory","repo":"sample","title":"Main inventory integrity","reason":"main inventory","dispatchable":false,"kind":"warning"}
+    {"id":"real-queued","repo":"sample","owner":"(main)","title":"Queued work","reason":"queued behind the cutover","dispatchable":true},
+    {"id":"main-inventory","repo":"sample","owner":"(main)","title":"Main inventory integrity","reason":"main inventory","dispatchable":false,"kind":"warning"}
   ]')
   printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
     || fail "the board rendered its fail-closed error instead of the fleet: $out"
@@ -100,9 +108,9 @@ test_warnings_are_excluded_from_the_charted_next_count() {
   local home out
   home=$(make_home warning-count)
   out=$(render "$home" '[
-    {"id":"queued-one","repo":"sample","title":"One","reason":"gated","dispatchable":true},
-    {"id":"warn-one","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"},
-    {"id":"warn-two","repo":"sample","title":"Inventory mismatch","reason":"main inventory","dispatchable":false,"kind":"warning"}
+    {"id":"queued-one","repo":"sample","owner":"(main)","title":"One","reason":"gated","dispatchable":true},
+    {"id":"warn-one","repo":"sample","owner":"(main)","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"},
+    {"id":"warn-two","repo":"sample","owner":"(main)","title":"Inventory mismatch","reason":"main inventory","dispatchable":false,"kind":"warning"}
   ]')
   [ "$(charted_next_count "$out")" = 1 ] \
     || fail "the charted next tally counted alarms as queued work: $out"
@@ -115,7 +123,7 @@ test_a_board_of_only_warnings_still_reports_nothing_queued() {
   local home out
   home=$(make_home warning-only)
   out=$(render "$home" '[
-    {"id":"warn-only","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
+    {"id":"warn-only","repo":"sample","owner":"(main)","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
   ]')
   [ "$(charted_next_count "$out")" = 0 ] \
     || fail "a warning-only board claimed queued work: $out"
@@ -130,7 +138,7 @@ test_omitted_warnings_never_count_as_more_queued() {
   local home out
   home=$(make_home warning-more)
   out=$(render "$home" '[
-    {"id":"warn-visible","repo":"sample","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
+    {"id":"warn-visible","repo":"sample","owner":"(main)","title":"Home unreadable","reason":"current home state unavailable","dispatchable":false,"kind":"warning"}
   ]' 0 1)
   [ "$(charted_next_count "$out")" = 0 ] \
     || fail "an omitted warning was counted as queued work: $out"
@@ -146,8 +154,8 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   local home out
   home=$(make_home default-kind)
   out=$(render "$home" '[
-    {"id":"with-reason","repo":"sample","title":"With reason","reason":"blocked on prep","dispatchable":true},
-    {"id":"no-reason","repo":"sample","title":"No reason","reason":"","dispatchable":true}
+    {"id":"with-reason","repo":"sample","owner":"(main)","title":"With reason","reason":"blocked on prep","dispatchable":true},
+    {"id":"no-reason","repo":"sample","owner":"(main)","title":"No reason","reason":"","dispatchable":true}
   ]' 2)
   [ "$(charted_next_count "$out")" = 4 ] \
     || fail "an omitted kind changed the charted next tally: $out"
@@ -158,8 +166,195 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   pass "an omitted kind renders exactly as queued work always did"
 }
 
+# --- ownership -------------------------------------------------------------
+# The captain's fleet and his second mate both work the SAME repository, so the
+# repo column cannot tell their rows apart. Ownership is a payload field, and
+# these pin that it reaches the board without anyone typing it into a title.
+
+owners_of() {  # <render-json> <tile-label>
+  printf '%s' "$1" | jq -r --arg l "$2" '.stats[] | select(.label == $l) | .owners'
+}
+
+test_underway_rows_name_their_home_when_the_repo_cannot() {
+  local home out
+  home=$(make_home owner-rows)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"Main fleet work"},
+    {"id":"fm-self/b","repo":"firstmate","owner":"fm-self","kind":"ship","state":"working","doing":"Second mate work"}
+  ]}')
+  printf '%s' "$out" | jq -e '
+    (.underway | length) == 2
+      and (.underway[0].sub | test("firstmate") and endswith("main"))
+      and (.underway[1].sub | test("firstmate") and endswith("fm-self"))
+  ' >/dev/null || fail "two same-repo rows did not name their different homes: $out"
+  pass "an underway row names the home that owns it, not just its repo"
+}
+
+test_the_tiles_break_down_by_owner_without_a_tile_of_their_own() {
+  local home out
+  home=$(make_home owner-breakdown)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"One"},
+    {"id":"fm-self/b","repo":"firstmate","owner":"fm-self","kind":"ship","state":"working","doing":"Two"},
+    {"id":"fm-self/c","repo":"firstmate","owner":"fm-self","kind":"ship","state":"working","doing":"Three"}
+  ]}')
+  [ "$(owners_of "$out" underway)" = "2 fm-self · 1 main" ] \
+    || fail "the underway tile did not break its count down by owner: $out"
+  printf '%s' "$out" | jq -e '[.stats[] | .label] | index("owner") == null' >/dev/null \
+    || fail "ownership took a tile of its own instead of a sub-line: $out"
+  pass "the tiles carry an ownership sub-line rather than an ownership tile"
+}
+
+test_a_single_owner_adds_no_breakdown_noise() {
+  local home out
+  home=$(make_home owner-single)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"One"},
+    {"id":"b","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"Two"}
+  ]}')
+  [ -z "$(owners_of "$out" underway)" ] \
+    || fail "a single-owner tile still printed a breakdown: $out"
+  pass "a tile whose rows share one home prints no ownership sub-line"
+}
+
+# THE INVIOLABLE RULE. What needs the captain needs him wherever it came from.
+# The needs-you tile must never be split by owner and never filtered by owner:
+# a partitioned tile is exactly how a second mate's call would end up in a
+# corner nobody reads. If a refactor ever splits or filters it, this fails.
+test_the_needs_you_tile_is_never_split_or_filtered_by_owner() {
+  local home out call_tiles
+  home=$(make_home needs-you-whole)
+  out=$(render_payload "$home" '{"captains_call":[
+    {"key":"main-call","type":"decision","repo":"firstmate","owner":"(main)","title":"Main home call",
+     "options":[{"value":"go","label":"Go"}]},
+    {"key":"mate-call","type":"decision","repo":"firstmate","owner":"fm-self","title":"Second mate call",
+     "options":[{"value":"go","label":"Go"}]},
+    {"key":"third-call","type":"decision","repo":"other","owner":"fm-self","title":"Another mate call",
+     "options":[{"value":"go","label":"Go"}]}
+  ]}')
+  call_tiles=$(printf '%s' "$out" | jq '[.stats[] | select(.label | test("need you"))] | length')
+  [ "$call_tiles" = 1 ] \
+    || fail "the needs-you tile was split into $call_tiles tiles: $out"
+  printf '%s' "$out" | jq -e '
+    .error == ""
+      and ([.stats[] | select(.label == "need you")] | length) == 1
+      and ([.stats[] | select(.label == "need you") | .n] == [3])
+      and ([.stats[] | select(.label == "need you") | .owners] == [""])
+      and (.call | length) == 3
+  ' >/dev/null || fail "the needs-you tile dropped, filtered, or split a home's calls: $out"
+  pass "the needs-you tile counts every home's calls in one undivided tile"
+}
+
+# --- delivered, waiting on a maintainer ------------------------------------
+
+test_a_delivered_row_leads_with_its_age_and_its_request_link() {
+  local home out
+  home=$(make_home delivered-rows)
+  out=$(render_payload "$home" '{"awaiting":[
+    {"id":"young","repo":"firstmate","owner":"(main)","what":"Newer delivery","age_days":1,
+     "pr_url":"https://github.com/o/r/pull/11"},
+    {"id":"older","repo":"firstmate","owner":"fm-self","what":"Older delivery","age_days":5,
+     "pr_url":"https://github.com/o/r/pull/22"}
+  ]}')
+  printf '%s' "$out" | jq -e '
+    (.awaiting | length) == 2
+      and (.awaiting[0] | .title == "Older delivery" and .age == "5d"
+        and .pr.href == "https://github.com/o/r/pull/22" and (.sub | endswith("waiting on the maintainer")))
+      and (.awaiting[1] | .title == "Newer delivery" and .age == "1d"
+        and .pr.href == "https://github.com/o/r/pull/11")
+  ' >/dev/null || fail "a delivered row lost its age, its link, or its order: $out"
+  printf '%s' "$out" | jq -e '[.stats[] | select(.label == "delivered") | .n] == [2]' >/dev/null \
+    || fail "the delivered rows were not counted in their own tile: $out"
+  pass "delivered rows lead with the wait, carry their request link, and count separately"
+}
+
+test_delivered_work_is_no_longer_counted_as_underway() {
+  local home out
+  home=$(make_home delivered-not-underway)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"Still moving"}
+  ],"awaiting":[
+    {"id":"b","repo":"firstmate","owner":"(main)","what":"Delivered","age_days":2,
+     "pr_url":"https://github.com/o/r/pull/33"}
+  ]}')
+  printf '%s' "$out" | jq -e '
+    ([.stats[] | select(.label == "underway") | .n] == [1])
+      and ([.stats[] | select(.label == "delivered") | .n] == [1])
+      and ((.underway | length) == 1)
+  ' >/dev/null || fail "a delivered row still inflated the underway count: $out"
+  pass "a delivered row counts once, in the delivered tile, not as work in the air"
+}
+
+test_an_empty_delivered_box_still_renders_its_state() {
+  local home out
+  home=$(make_home delivered-empty)
+  out=$(render_payload "$home" '{}')
+  printf '%s' "$out" | jq -e '
+    (.awaitingEmpty | length) == 1
+      and (.awaitingEmpty[0] | test("Nothing is waiting on a maintainer"))
+      and ([.stats[] | select(.label == "delivered") | .n] == [0])
+  ' >/dev/null || fail "the delivered section vanished when it was empty: $out"
+  pass "the delivered section always renders, with its own empty state"
+}
+
+test_an_aged_delivery_reaches_the_captain_as_a_nudge_card() {
+  local home out
+  home=$(make_home delivered-nudge)
+  out=$(render_payload "$home" '{"captains_call":[
+    {"key":"nudge.old-delivery","type":"nudge","repo":"firstmate","title":"Nudge the maintainer",
+     "age_days":23,"pr_url":"https://github.com/o/r/pull/44",
+     "detail":"Green and complete for 23 days; only the maintainer can merge it.",
+     "options":[{"value":"nudge","label":"Nudge them"},{"value":"leave","label":"Leave it"}]}
+  ]}')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+      and (.call | length) == 1
+      and (.call[0].title == "Nudge the maintainer")
+      and ([.call[0].badges[] | .text] | index("waiting 23d") != null)
+      and (.call[0].link == "https://github.com/o/r/pull/44")
+      and ([.stats[] | select(.label == "need you") | .n] == [1])
+  ' >/dev/null || fail "an aged delivery did not surface as a needs-you nudge: $out"
+  pass "an aged delivery rises into the captain's call carrying its wait and its link"
+}
+
+# Rollout safety: a board published before the delivered section existed is
+# still open in the captain's browser. It must keep rendering, not turn into a
+# load error, until the next rebuild adds the section.
+test_a_board_published_before_the_delivered_section_still_renders() {
+  local home data out
+  home=$(make_home delivered-legacy)
+  data="$home/payload.json"
+  jq -n '{
+    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
+    prs_live:false, captains_call:[], underway:[], landed:[], charted:[]}' > "$data"
+  # Written straight to the board path: build would (correctly) refuse this
+  # payload, and the case under test is a page that was published before the
+  # field existed.
+  mkdir -p "$home/.lavish"
+  BOARD_JSON="$(jq -c . "$data")" perl -pe \
+    "s/^__FM_BEARINGS_BOARD_DATA__\$/\$ENV{BOARD_JSON}/" \
+    "$ROOT/.agents/skills/bearings/assets/board-template.html" > "$home/.lavish/bearings-board.html"
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") \
+    || fail "the pre-upgrade board could not be rendered"
+  printf '%s' "$out" | jq -e '
+    .error == ""
+      and ([.stats[] | select(.label == "delivered") | .n] == [0])
+      and ((.awaitingEmpty | length) == 1)
+  ' >/dev/null || fail "a pre-upgrade board turned into a load error: $out"
+  pass "a board published before the delivered section still renders, with it empty"
+}
+
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
+test_underway_rows_name_their_home_when_the_repo_cannot
+test_the_tiles_break_down_by_owner_without_a_tile_of_their_own
+test_a_single_owner_adds_no_breakdown_noise
+test_the_needs_you_tile_is_never_split_or_filtered_by_owner
+test_a_delivered_row_leads_with_its_age_and_its_request_link
+test_delivered_work_is_no_longer_counted_as_underway
+test_an_empty_delivered_box_still_renders_its_state
+test_an_aged_delivery_reaches_the_captain_as_a_nudge_card
+test_a_board_published_before_the_delivered_section_still_renders

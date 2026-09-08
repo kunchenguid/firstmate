@@ -72,6 +72,21 @@
 # the template may display the routing id. Anything else refuses before the
 # existing board is touched.
 #
+# OWNERSHIP AND THE DELIVERED ROWS. Every underway, awaiting, landed, and
+# charted row also carries a non-empty `owner`, because homes that work the SAME
+# repository cannot be told apart by `repo` - the exact case that made a second
+# mate's rows indistinguishable from the main fleet's. A row may carry the
+# recorded `pr_url`; an `awaiting` row must, since a delivered row nobody can
+# open is not actionable at all.
+#
+# THE EXIT RULE IS ENFORCED HERE, NOT REMEMBERED. `awaiting` holds work that
+# shipped and now waits on a maintainer, and `awaiting_nudge_days` is the
+# snapshot's own threshold carried verbatim. A row that has already reached it
+# is refused: past that wait it is the captain's to nudge and belongs in
+# Captain's Call as a `nudge` card, so the delivered box cannot become a
+# graveyard for the rows that most need him. Age only grows, so that move is
+# one-way and a row can never oscillate between the two.
+#
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
 # session URL and the same canonical process-event source id. Injection escapes
@@ -123,10 +138,11 @@ validate_payload() {  # <data.json>
           and (keys | sort) == ["artifact", "version"]
           and (.artifact | slug(128))
           and (.version | version));
+    def nonneg_int: type == "number" and . >= 0 and (floor == .);
     def call_item:
       type == "object"
       and (.key | slug(128))
-      and (.type == "decision" or .type == "merge" or .type == "credential")
+      and (.type == "decision" or .type == "merge" or .type == "credential" or .type == "nudge")
       and repo_marker
       and (.title | nonempty_string)
       and (.options | type == "array")
@@ -150,10 +166,22 @@ validate_payload() {  # <data.json>
           and (.recommend_value as $recommend
             | ([.options[].value] | index($recommend) != null))))
       and ([.options[].value] | index("reconcile") == null)
-      and (if .type == "merge" then (.risk | nonempty_string) else true end);
+      and (if .type == "merge" then (.risk | nonempty_string) else true end)
+      and (if .type == "nudge" then
+             (has("pr_url") and (.pr_url | nonempty_string)) and (.age_days | nonneg_int)
+           else true end);
     def underway_item:
       type == "object" and repo_marker and (.id | nonempty_string)
-      and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string);
+      and (.owner | nonempty_string)
+      and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string)
+      and optional_https_url("pr_url");
+    def awaiting_item($nudge_days):
+      type == "object" and repo_marker and (.id | nonempty_string)
+      and (.owner | nonempty_string) and (.what | nonempty_string)
+      and (.pr_url | nonempty_string)
+      and optional_https_url("pr_url")
+      and (.age_days | nonneg_int)
+      and (.age_days < $nudge_days);
     def landed_item:
       type == "object" and repo_marker and (.id | nonempty_string)
       and (.what | nonempty_string) and (.owner | nonempty_string)
@@ -161,6 +189,8 @@ validate_payload() {  # <data.json>
       and optional_subject;
     def charted_item:
       type == "object" and repo_marker and (.id | slug(128))
+      and (.owner | nonempty_string)
+      and optional_https_url("pr_url")
       and (.title | nonempty_string) and (.reason | type == "string")
       and (.dispatchable | type == "boolean")
       and ((has("kind") | not) or (.kind == "queued" or .kind == "warning"))
@@ -172,14 +202,17 @@ validate_payload() {  # <data.json>
     and (.prs_live | type == "boolean")
     and (.captains_call | type == "array")
     and (.underway | type == "array")
+    and (.awaiting | type == "array")
     and (.landed | type == "array")
     and (.charted | type == "array")
+    and (.awaiting_nudge_days | type == "number" and . >= 1 and (floor == .))
     and ((has("charted_more") | not)
       or ((.charted_more | type == "number") and (.charted_more >= 0) and (.charted_more | floor == .)))
     and ((has("charted_warning_more") | not)
       or ((.charted_warning_more | type == "number") and (.charted_warning_more >= 0) and (.charted_warning_more | floor == .)))
     and ([.captains_call[] | call_item] | all)
     and ([.underway[] | underway_item] | all)
+    and (.awaiting_nudge_days as $nudge_days | [.awaiting[] | awaiting_item($nudge_days)] | all)
     and ([.landed[] | landed_item] | all)
     and ([.charted[] | charted_item] | all)
   ' "$1" >/dev/null

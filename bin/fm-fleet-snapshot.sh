@@ -65,6 +65,12 @@
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
+#     pr.merge_poll records the DELIVERY fact, not a display choice: armed is
+#     true exactly while this task carries a committed merge-poll registration
+#     (bin/fm-pr-lib.sh writes it once, after the worker's PR-ready signal, and
+#     retires it when the PR merges), and armed_epoch is that record's own
+#     creation time, so "delivered, waiting for the merge" and its age are read
+#     from the record instead of from a title or a status sentence.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -77,8 +83,14 @@
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
-#     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. provenance.summary_source
+#     Each structured-home record carries active_children, awaiting_merge,
+#     decisions_open, holds, queued, landed, endpoints, counts, and omitted.
+#     awaiting_merge is that home's DELIVERED work: an owned in-flight child
+#     whose merge watch is armed and whose worker has stopped. It is a
+#     recognized terminal-facing state rather than an inventory fault, so such a
+#     child does not make the home's books read as contradicting themselves. The
+#     field is additive: a ledger written before it simply omits it, and every
+#     reader must tolerate its absence. provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. Every successfully sampled home also carries
@@ -691,6 +703,7 @@ task_json_lines() {
   local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local merge_poll_armed merge_poll_epoch
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -730,6 +743,13 @@ task_json_lines() {
     fi
     if [ -z "$pr" ]; then
       pr_source=absent
+    fi
+    merge_poll_armed=false
+    merge_poll_epoch=null
+    if [ -f "$STATE/$id.pr-poll-registration" ]; then
+      merge_poll_armed=true
+      merge_poll_epoch=$(file_mtime_epoch "$STATE/$id.pr-poll-registration")
+      case "$merge_poll_epoch" in ''|*[!0-9]*) merge_poll_epoch=null ;; esac
     fi
 
     current_file="$SNAPSHOT_TASK_DIR/$id.json"
@@ -816,6 +836,8 @@ task_json_lines() {
       --arg remote_root "$remote_root" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
+      --argjson merge_poll_armed "$merge_poll_armed" \
+      --argjson merge_poll_epoch "$merge_poll_epoch" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
@@ -854,7 +876,8 @@ task_json_lines() {
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
-        pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+        pr:{url:($pr | if . == "" then null else . end),source:$pr_source,
+          merge_poll:{armed:$merge_poll_armed,armed_epoch:$merge_poll_epoch}},
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,
@@ -960,6 +983,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | $tasks[]
          | select(.kind != "secondmate")
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
+         | select((.pr.merge_poll.armed == true and .pr.url != null) | not)
          | {id,state:.current_state.state} ]) as $terminal_in_flight
     | ([if $backlog.present != true then
           {kind:"missing_backlog",ids:[],reason:"missing structured backlog"}
@@ -988,7 +1012,19 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | {id,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             source:.current_state.source,
+            pr_url:(((.pr.url // $work.pr_url) // null) | if . == null then null else trunc(500) end),
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
+    | ([ $owned_in_flight[] as $work
+         | select($work.current_role != "program")
+         | $tasks[]
+         | select(.id == $work.id and .kind != "secondmate")
+         | select(.pr.merge_poll.armed == true and .pr.url != null)
+         | select(.current_state.state != "working")
+         | {id,kind,state:.current_state.state,
+            repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
+            title:(($work.title // .id) | trunc(120)),
+            pr_url:(.pr.url | trunc(500)),
+            delivered_epoch:(.pr.merge_poll.armed_epoch)} ]) as $awaiting_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
@@ -1039,6 +1075,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         invalidity:$invalidity,
         state:$state,
         active_children:$active_all[:$child_n],
+        awaiting_merge:$awaiting_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
         queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
@@ -1059,6 +1096,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
         counts:{
           active_children:($active_all | length),
+          awaiting_merge:($awaiting_all | length),
           decisions_open:($decisions_all | length),
           holds:($holds_all | length),
           queued:($queued_all | length),
@@ -1067,6 +1105,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         },
         omitted:[
           (if ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
+          (if ($awaiting_all | length) > $child_n then {surface:"awaiting_merge",count:(($awaiting_all | length) - $child_n)} else empty end),
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
           (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
@@ -1810,6 +1849,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
          freshness:{status:$summary_freshness,observed_at:$observed,age_seconds:$summary_age},
          active_children:$summary.active_children,
+         awaiting_merge:($summary.awaiting_merge // []),
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
@@ -1842,7 +1882,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          reconcile_inventory:(if $summary_sampled then $summary.invalidity else null end),
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
-         active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
+         active_children:[],awaiting_merge:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,awaiting_merge:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}' >> "$records_file" || return 1
     fi
