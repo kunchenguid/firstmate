@@ -205,7 +205,7 @@ status_is_terminal_verb() {
 # (working, resolved, captain-held) and paused never match from free-text prose;
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
-# Regex matching ignores emission-time tags before the first colon, even malformed,
+# Regex matching ignores emission-time tags before the record separator, even malformed,
 # so existing FM_CAPTAIN_RE overrides keep matching; other metadata and note text
 # remain intact, as do the stored and surfaced event bytes.
 status_is_captain_relevant() {
@@ -222,12 +222,7 @@ status_is_captain_relevant() {
       done|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
-  unstamped=$(printf '%s' "$line" | awk '{
-    colon = index($0, ":")
-    head = substr($0, 1, colon)
-    gsub(/ \[at=[^]]*\]/, "", head)
-    print head substr($0, colon + 1)
-  }')
+  unstamped=$(printf '%s' "$line" | awk "$_FM_STATUS_UNTIMED_AWK"' { print untimed($0) }')
   _fm_classify_matches "$unstamped" "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
@@ -323,18 +318,23 @@ status_stamp_line() {  # <new-status-line> -> line (without newline)
   fi
 }
 
-# Retry deduplication ignores only the optional numeric time tag;
+# Match complete time tags before finding the separator: malformed values may
+# contain colons. Relevance and retry matching share this normalization.
+_FM_STATUS_UNTIMED_AWK='
+  function untimed(s, colon, head) {
+    if (!match(s, /^([^:]| \[at=[^]]*\])*:/)) return s
+    colon = RLENGTH
+    head = substr(s, 1, colon - 1)
+    gsub(/ \[at=[^]]*\]/, "", head)
+    return head substr(s, colon)
+  }
+'
+
+# Retry deduplication ignores only the optional time tags, even malformed;
 # all other bytes, including correlation metadata, still identify the event.
 status_event_recorded() {  # <status-file> <new-status-line>
   [ -f "$1" ] || return 1
-  FM_STATUS_COMPARE=$2 awk '
-    function untimed(s, colon, head) {
-      colon = index(s, ":")
-      if (!colon) return s
-      head = substr(s, 1, colon - 1)
-      gsub(/ \[at=[0-9]+\]/, "", head)
-      return head substr(s, colon)
-    }
+  FM_STATUS_COMPARE=$2 awk "$_FM_STATUS_UNTIMED_AWK"'
     BEGIN { wanted = untimed(ENVIRON["FM_STATUS_COMPARE"]) }
     untimed($0) == wanted { found = 1; exit }
     END { exit !found }
