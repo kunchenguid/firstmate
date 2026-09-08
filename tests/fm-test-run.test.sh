@@ -1539,9 +1539,9 @@ puts JSON.generate(
 }
 
 # Writes one synthetic portable-serial timing artifact: <file> <shard> <count>
-# <per-script-ms> [wall-ms|none]. The guard reads a shard's membership and
-# durations from the artifact itself, so a fixture needs no real lane, and it
-# counts coverage against the shard count the lane label declares.
+# <per-script-ms> [wall-ms]. The guard reads a shard's membership and durations
+# from the artifact itself, so a fixture needs no real lane, and it counts
+# coverage against the shard count the lane label declares.
 write_shard_timing_json() {
   local file=$1 shard=$2 count=$3 each=$4 wall=${5:-} partition
   partition=$(configured_serial_shards)
@@ -1560,12 +1560,14 @@ scripts = [
     }
     for i in range(count)
 ]
-summary = {"total": count, "failed": 0, "skipped_gate": 0}
 # The runner records the shard's wall time here and the guard measures headroom
-# against it, so a fixture can set it apart from the script sum, or drop it to
-# exercise the fallback.
-if wall != "none":
-    summary["duration_ms"] = int(wall) if wall else each * count
+# against it, so a fixture can set it apart from the script sum.
+summary = {
+    "total": count,
+    "failed": 0,
+    "skipped_gate": 0,
+    "duration_ms": int(wall) if wall else each * count,
+}
 json.dump(
     {
         "run_id": "fixture",
@@ -1607,15 +1609,8 @@ test_shard_balance_measures_the_recorded_wall_time() {
   [ "$rc" -ne 0 ] \
     || { rm -rf "$tmp"; fail "a shard whose wall time fills the cap must fail: $out"; }
   assert_contains "$out" "19.00 min" "the share must be taken from the recorded wall time"
-  # An artifact that carries no usable wall time still has to be checked, so the
-  # per-script sum stands in for it.
-  write_shard_timing_json "$tmp/2.json" 2 40 30000 none
-  out=$("$RUNNER" --check-shard-balance "$tmp/2.json" 2>&1) && rc=0 || rc=$?
-  [ "$rc" -ne 0 ] \
-    || { rm -rf "$tmp"; fail "a wall-less artifact must fall back to the script sum: $out"; }
-  assert_contains "$out" "20.00 min" "the fallback must be the sum of the scripts"
   rm -rf "$tmp"
-  pass "shard balance guard measures recorded wall time and falls back to the script sum"
+  pass "shard balance guard measures the shard's recorded wall time"
 }
 
 # How many serial shards the runner is configured for, read from the lanes it

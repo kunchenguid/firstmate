@@ -1092,19 +1092,6 @@ def minutes(ms):
     return "%.2f min" % (ms / 60000.0)
 
 
-# What the job cap bounds is the shard's wall clock, and the runner records
-# exactly that. The per-script sum only stands in for an artifact that carries
-# no usable one.
-def wall_ms_of(data, fallback):
-    summary = data.get("summary")
-    value = summary.get("duration_ms") if isinstance(summary, dict) else None
-    try:
-        wall = int(value)
-    except (TypeError, ValueError):
-        return fallback
-    return wall if wall > 0 else fallback
-
-
 shards = []
 declared_shards = 0
 for path in inputs:
@@ -1126,7 +1113,7 @@ for path in inputs:
     shards.append(
         {
             "lane": match.group(0),
-            "wall": wall_ms_of(data, sum(r[2] for r in rows)),
+            "wall": int(data["summary"]["duration_ms"]),
             "rows": rows,
         }
     )
