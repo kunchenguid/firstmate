@@ -13,6 +13,10 @@ export function encodeFirstmateOperationalInput(root, kind, content) {
     const script = existsSync(requested)
       ? requested
       : `${adapterRoot}/bin/fm-operational-input.sh`;
+    // Windows has no shebang: CreateProcess cannot execute a .sh at all, so a
+    // direct spawn fails there and the encoder would be dead on that platform.
+    // Every script reached this way declares `#!/usr/bin/env bash`, and bash
+    // reports the same $0 and BASH_SOURCE[0] either way.
     const invocation = process.platform === "win32"
       ? { command: "bash", args: [script, "encode", kind] }
       : { command: script, args: ["encode", kind] };

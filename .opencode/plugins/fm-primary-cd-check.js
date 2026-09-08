@@ -54,7 +54,11 @@ export const FmPrimaryCdCheck = async ({ directory, worktree }) => {
       const command = output?.args?.command;
       if (!command || typeof command !== "string") return;
 
-      const result = await runProcess(`${root}/bin/fm-cd-pretool-check.sh`, ["--command", command]);
+      // Spawned through bash, not by its shebang: Windows has no shebang, so
+      // CreateProcess refuses a .sh outright and runProcess's error handler
+      // turns that into a silent {code: 0}, which reads here as "allowed" and
+      // removes the seatbelt without ever reporting that it did.
+      const result = await runProcess("bash", [`${root}/bin/fm-cd-pretool-check.sh`, "--command", command]);
       if (result.code !== 2) return;
 
       const reason = result.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt";
