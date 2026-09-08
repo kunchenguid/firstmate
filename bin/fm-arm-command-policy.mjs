@@ -220,6 +220,12 @@ export class Lexer {
         this.tokens.push({ type: "op", value: control });
         continue;
       }
+      if ((char === "<" || char === ">") && this.source[this.index + 1] === "(") {
+        const word = this.readWord();
+        if (!word) break;
+        this.tokens.push(word);
+        continue;
+      }
       const redirection = this.readRedirection();
       if (redirection) {
         const token = { type: "redir", value: redirection.value, inlineTarget: redirection.inlineTarget, fd: redirection.fd };
@@ -310,7 +316,7 @@ export class Lexer {
     let consumed = false;
     while (this.index < this.source.length) {
       const char = this.source[this.index];
-      if (/\s/.test(char) || ";&|<>()".includes(char)) break;
+      if (/\s/.test(char) || ";&|()".includes(char) || ((char === "<" || char === ">") && this.source[this.index + 1] !== "(")) break;
       if (char === "#" && !consumed) break;
       consumed = true;
       if (char === "'") {
@@ -720,6 +726,12 @@ function sourcedScript(position) {
   return position.words[position.index + 1] || null;
 }
 
+function sourcedProcessPayload(position) {
+  const script = sourcedScript(position);
+  if (!script || script.value !== "" || script.subs.length !== 1 || script.subs[0].kind !== "process") return null;
+  return staticSubstitutionOutput(script.subs[0]);
+}
+
 function wordReferencesAny(word, names) {
   if (!word || names.size === 0) return false;
   for (const match of word.value.matchAll(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g)) {
@@ -729,7 +741,7 @@ function wordReferencesAny(word, names) {
 }
 
 function staticSubstitutionOutput(substitution) {
-  if (substitution.kind !== "command") return null;
+  if (!["command", "process"].includes(substitution.kind)) return null;
   const lexed = new Lexer(substitution.content).tokenize();
   if (lexed.error) return null;
   const program = splitProgram(lexed.tokens);
@@ -742,6 +754,7 @@ function staticSubstitutionOutput(substitution) {
   const format = values[1];
   if (!format.includes("%")) return format;
   if (format === "%s") return values.slice(2).join("");
+  if (format === "%s\\n") return `${values.slice(2).join("\n")}\n`;
   return null;
 }
 
@@ -950,6 +963,16 @@ function staticControlCondition(position, keyword) {
   return prefixes.length % 2 === 0 ? !succeeded : succeeded;
 }
 
+function controlFlowReachable(conditionals, loops, cases) {
+  const conditionalsReachable = conditionals.every((binding) => {
+    if (binding.condition === null) return true;
+    return binding.hasElse ? binding.condition === false : binding.condition === true;
+  });
+  const loopsReachable = loops.every((binding) => binding.zeroIterations !== true);
+  const casesReachable = cases.every((binding) => binding.branchReachable !== false);
+  return conditionalsReachable && loopsReachable && casesReachable;
+}
+
 function staticCasePatternMatches(selector, pattern) {
   if (selector === null || pattern === null) return null;
   if (pattern === "*") return true;
@@ -1008,6 +1031,8 @@ function analyzeProgram(command, context, depth = 0) {
       branch.branchCount += 1;
       branch.reachableContext = mergeReachableContexts(activeContext, branch.reachableContext, depth);
       activeContext = branch.entryContext;
+      const patternValue = resolveKnownWord(position.words[0], activeContext.knownVariables);
+      branch.branchReachable = staticCasePatternMatches(branch.selectorValue, patternValue);
     }
     if (firstName === "else" && conditionalBindings.length > 0) {
       const branch = conditionalBindings.at(-1);
@@ -1023,8 +1048,11 @@ function analyzeProgram(command, context, depth = 0) {
     if (openLoop?.kind === "conditional" && !openLoop.bodyStarted && firstName !== "do") {
       openLoop.zeroIterations = null;
     }
+    if (precedingSeparator === "|" && caseBindings.length > 0) caseBindings.at(-1).branchReachable = null;
     if (firstName === "then" && conditionalBindings.length > 0) conditionalBindings.at(-1).bodyStarted = true;
     if (firstName === "do" && loopBindings.length > 0) loopBindings.at(-1).bodyStarted = true;
+    const nodeReachable = controlFlowReachable(conditionalBindings, loopBindings, caseBindings);
+    const pipelineDriveBeforeNode = pipelineDrive;
     if (firstName === "if") {
       conditionalBindings.push({
         entryContext: activeContext,
@@ -1043,6 +1071,8 @@ function analyzeProgram(command, context, depth = 0) {
         reachableContext: activeContext,
         firstBranchContext: null,
         branchCount: 0,
+        selectorValue,
+        branchReachable: firstPatternMatches,
         firstPatternMatches,
       });
     }
@@ -1098,6 +1128,7 @@ function analyzeProgram(command, context, depth = 0) {
     const shellPayload = shell?.kind === "command" ? shell.payload : null;
     const shellScript = shell?.kind === "script" ? shell.payload : null;
     const sourceScript = sourcedScript(position);
+    const sourceProcessPayload = sourcedProcessPayload(position);
     const resolvedEvalPayload = evalPayload(position, nodeContext);
     const heredocPayloads = shellHeredocPayloads(tokens, position, nodeContext);
     const hereStringPayloads = shellHereStringPayloads(tokens, position, nodeContext);
@@ -1130,7 +1161,7 @@ function analyzeProgram(command, context, depth = 0) {
         unresolvedExecutionPayloadMentionsPipelineDrive(position.words.slice(position.index + 1))) {
       pipelineDrive = true;
     }
-    for (const payload of [resolvedEvalPayload, ...heredocPayloads, ...hereStringPayloads]) {
+    for (const payload of [resolvedEvalPayload, sourceProcessPayload, ...heredocPayloads, ...hereStringPayloads]) {
       if (payload === null) continue;
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
@@ -1159,6 +1190,7 @@ function analyzeProgram(command, context, depth = 0) {
     }
     pgrepWatcher ||= nodePgrepWatcher;
     nestedProtected ||= nodeNestedProtected;
+    if (!nodeReachable) pipelineDrive = pipelineDriveBeforeNode;
     const loopBinding = forLoopBinding(position, nodeContext, depth);
     if (loopBinding) {
       loopBindings.push({ ...loopBinding, kind: "for", entryContext: activeContext });
