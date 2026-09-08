@@ -14,13 +14,14 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 const SUMMARY_MAX = 600;
 const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
 const ENV_ASSIGNMENT_START = /\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*(?:\+\s*)?=\s*/g;
+const AUTHORIZATION_HEADER_START = /\b(?:Proxy-)?Authorization\s*:\s*/gi;
 const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)/gi,
   /\b[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s\/@"']+@[^\s,;"']+/gi,
   /\bAKIA[0-9A-Z]{16}\b/g,
   /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
-  /\b(?:Bearer|Authorization\s*:\s*Bearer)\s+[A-Za-z0-9._~+/=-]{12,}/gi,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
   /\b(?:password|passwd|api[_ -]?key|access[_ -]?token|pairing[_ -]?token|token|secret)\s*[:=]\s*[^\s,;]{6,}/gi,
 ];
 
@@ -58,6 +59,12 @@ function redactEnvironmentAssignments(value: string): string {
   return match ? `${value.slice(0, match.index)}[REDACTED]` : value;
 }
 
+function redactAuthorizationHeaders(value: string): string {
+  AUTHORIZATION_HEADER_START.lastIndex = 0;
+  const match = AUTHORIZATION_HEADER_START.exec(value);
+  return match ? `${value.slice(0, match.index)}[REDACTED]` : value;
+}
+
 function prepareSummary(raw: string): PreparedSummary | null {
   let text = raw.normalize("NFC").replace(ANSI_PATTERN, "");
   text = [...text].map((character) => (
@@ -65,6 +72,7 @@ function prepareSummary(raw: string): PreparedSummary | null {
   )).join("");
   text = text.replace(/\s+/gu, " ").trim();
   text = redactEnvironmentAssignments(text);
+  text = redactAuthorizationHeaders(text);
   for (const pattern of SECRET_PATTERNS) text = text.replace(pattern, "[REDACTED]");
   text = text.replace(/\s+/gu, " ").trim();
   if (!text) return null;

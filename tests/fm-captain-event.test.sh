@@ -186,6 +186,19 @@ for assignment_case in "${assignment_cases[@]}"; do
     || fail "assignment case $after retained text after its marker"
   after=$((after + 1))
 done
+authorization_cases=(
+  'AuThOrIzAtIoN: Basic dXNlcjpwYXNz visible suffix'
+  'pRoXy-AuThOrIzAtIoN: Bearer ordinarybearertoken visible suffix'
+  'AUTHORIZATION: Digest username="captain", response="private" visible suffix'
+)
+for authorization_case in "${authorization_cases[@]}"; do
+  primary_args "pi:authorization-$after" "Prefix $authorization_case"
+  FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "authorization case $after append failed"
+  authorization_row=$(FM_HOME="$home" "$OUTBOX" read --after "$after" --limit 1)
+  printf '%s\n' "$authorization_row" | jq -e '.summary == "Prefix [REDACTED]"' >/dev/null \
+    || fail "authorization case $after retained its credential value"
+  after=$((after + 1))
+done
 primary_args pi:bare-uri 'Prefix postgres://bareuser:barepass@db.example/prod remains'
 FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "bare URI append failed"
 bare_uri_row=$(FM_HOME="$home" "$OUTBOX" read --after "$after" --limit 1)
@@ -424,7 +437,15 @@ if command -v node >/dev/null 2>&1 && node --experimental-strip-types -e '' >/de
 #!/usr/bin/env bash
 set -eu
 [ "${1-}" = append ] || exit 0
-printf '%s\0' "$@" > "$FM_CAPTURE"
+shift
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --summary ]; then
+    printf '%s\n' "$2" >> "$FM_CAPTURE"
+    exit 0
+  fi
+  shift
+done
+exit 1
 SH
   chmod +x "$fake_root/bin/fm-captain-event.sh"
   REPO_ROOT="$ROOT" FIXTURE_HOME="$home" FIXTURE_ROOT="$fake_root" FM_CAPTURE="$capture" \
@@ -441,21 +462,26 @@ installCaptainEventPublisher(pi, {
   config: `${process.env.FIXTURE_HOME}/config`,
   sourceRole: "primary",
 });
-const message = {
-  role: "assistant",
-  content: [{ type: "text", text: "Ordinary prose postgres://bareuser:barepass@db.example/prod remains SaFe += privateappend visible suffix" }],
-  stopReason: "stop",
-  timestamp: 1,
-};
-const context = { sessionManager: { getSessionId: () => "pre", getEntries: () => [{ id: "e", type: "message", message }] } };
-for (const handler of handlers.get("turn_end") ?? []) await handler({ message }, context);
+async function emit(text, id) {
+  const message = { role: "assistant", content: [{ type: "text", text }], stopReason: "stop", timestamp: 1 };
+  const context = { sessionManager: { getSessionId: () => "pre", getEntries: () => [{ id, type: "message", message }] } };
+  for (const handler of handlers.get("turn_end") ?? []) await handler({ message }, context);
+}
+await emit("Ordinary prose postgres://bareuser:barepass@db.example/prod remains SaFe += privateappend visible suffix", "environment");
+await emit("Prefix AuThOrIzAtIoN: Basic dXNlcjpwYXNz visible suffix", "basic");
+await emit("Prefix pRoXy-AuThOrIzAtIoN: Bearer ordinarybearertoken visible suffix", "bearer");
+await emit('Prefix AUTHORIZATION: Digest username="captain", response="private" visible suffix', "digest");
 JS
   python3 - "$capture" <<'PY' || fail "Pi producer passed a credential-bearing environment assignment to the CLI"
 import sys
 
-args = open(sys.argv[1], "rb").read().split(b"\0")[:-1]
-summary = args[args.index(b"--summary") + 1].decode()
-assert summary == "Ordinary prose [REDACTED] remains [REDACTED]", summary
+summaries = open(sys.argv[1], encoding="utf-8").read().splitlines()
+assert summaries == [
+    "Ordinary prose [REDACTED] remains [REDACTED]",
+    "Prefix [REDACTED]",
+    "Prefix [REDACTED]",
+    "Prefix [REDACTED]",
+], summaries
 PY
 
   home=$(new_home pi-producer-disabled)

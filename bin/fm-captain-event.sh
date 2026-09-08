@@ -140,13 +140,14 @@ GITHUB_PR_RE = re.compile(r"^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z
 GITLAB_MR_RE = re.compile(r"^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$")
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 ENV_ASSIGNMENT_START_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*(?:\+\s*)?=\s*")
+AUTHORIZATION_HEADER_START_RE = re.compile(r"\b(?:Proxy-)?Authorization\s*:\s*", re.I)
 SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)", re.I),
     re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s/@\"']+@[^\s,;\"']+", re.I),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
-    re.compile(r"\b(?:Bearer|Authorization\s*:\s*Bearer)\s+[A-Za-z0-9._~+/=-]{12,}", re.I),
+    re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}", re.I),
     re.compile(r"\b(?:password|passwd|api[_ -]?key|access[_ -]?token|pairing[_ -]?token|token|secret)\s*[:=]\s*[^\s,;]{6,}", re.I),
 ]
 
@@ -287,6 +288,13 @@ def redact_environment_assignments(value):
     return value[:match.start()] + "[REDACTED]"
 
 
+def redact_authorization_headers(value):
+    match = AUTHORIZATION_HEADER_START_RE.search(value)
+    if match is None:
+        return value
+    return value[:match.start()] + "[REDACTED]"
+
+
 def clean_summary(value):
     value = unicodedata.normalize("NFC", value)
     value = ANSI_RE.sub("", value)
@@ -296,6 +304,7 @@ def clean_summary(value):
     )
     value = re.sub(r"\s+", " ", value, flags=re.UNICODE).strip()
     value = redact_environment_assignments(value)
+    value = redact_authorization_headers(value)
     for pattern in SECRET_PATTERNS:
         value = pattern.sub("[REDACTED]", value)
     value = re.sub(r"\s+", " ", value, flags=re.UNICODE).strip()
