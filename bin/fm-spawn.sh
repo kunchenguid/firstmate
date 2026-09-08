@@ -61,7 +61,7 @@
 #   The value is recorded as codex_home= in state/<id>.meta.
 #
 # --selection-receipt is the current primary selection receipt required for
-#   every Astra crewmate and for a resolved dispatch profile that sets
+#   every Astra crew or scout launch and for a resolved dispatch profile that sets
 #   requiresSelectionReceipt=true for its exact harness/model tuple. Its
 #   versioned schema, effective worker
 #   model, quota-axi evidence, freshness, and quota snapshot digest are owned
@@ -73,12 +73,12 @@
 #   or ranks a provider.
 #   Nothing else in this home's environment changes, and a spawn without the
 #   flag behaves exactly as it did before the flag existed.
-#   A LOCAL secondmate accepts it too, which pins that secondmate's own agent to
-#   one account; there is no dispatch profile behind that choice, so it is the
-#   caller's. The prefix reaches only the secondmate's own launch: its crewmates
-#   are separate spawns that resolve their own home, or none. The REMOTE
-#   secondmate route refuses the flag outright, because its launch is composed on
-#   another host whose Codex homes this one cannot validate.
+#   A LOCAL secondmate accepts --codex-home too, which pins that secondmate's own
+#   agent to one account; there is no dispatch profile behind that choice, so it
+#   is the caller's. The prefix reaches only the secondmate's own launch: its
+#   crewmates are separate spawns that resolve their own home, or none. The
+#   REMOTE secondmate route refuses --codex-home outright, because its launch is
+#   composed on another host whose Codex homes this one cannot validate.
 #   A --relaunch carries the recorded value forward whenever the replacement
 #   resolves to the codex harness, including through the raw-launch escape hatch
 #   (`--harness 'codex --search'`), and revalidates it; bin/fm-control.sh
