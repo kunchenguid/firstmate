@@ -22,12 +22,16 @@
 # THIS COVERS THE FIRST DIALOG ONLY. Claude Code 2.1.263 was observed on
 # 2026-09-07 to show a SECOND prompt, after this registration had already
 # suppressed the trust dialog: "Quick safety check ... This folder pre-approves
-# N tool permissions in .claude/settings.json". What configuration reaches that
-# prompt is UNESTABLISHED, so no settings shape is exempt. Nothing here
-# pre-registers it, and hasTrustDialogHooksAccepted is NOT ESTABLISHED as the
-# key that would. docs/verification/runtime-backends.md under "Claude workspace
-# trust" owns the figures, the settings-shape table, the sent-Enter analysis,
-# the open captain question, and why refreshing it needs a live spawn.
+# N tool permissions in .claude/settings.json". An allow-free tracked
+# .claude/settings.json is not an open case: Firstmate's own repository has
+# hooks and no permissions key, and routine worker spawns into its worktrees
+# have never met this prompt. What remains open is the tracked
+# permissions.allow dimension, and the record below owns that reasoning.
+# Nothing here pre-registers it, and hasTrustDialogHooksAccepted is NOT
+# ESTABLISHED as the key that would. docs/verification/runtime-backends.md
+# under "Claude workspace trust" owns the figures, the settings-shape table,
+# the sent-Enter analysis, the open captain question, and why refreshing it
+# needs a live spawn.
 #
 # THE SCOPE TEST IS THE SAFETY PROPERTY, and it is STRUCTURAL rather than a
 # path policy. <worktree> must be a LINKED git worktree - its own git dir,

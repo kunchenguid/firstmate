@@ -334,7 +334,7 @@ With only `hasTrustDialogAccepted` registered:
 | B | 8 `permissions.allow` entries, all narrow local-CLI subcommand patterns, no hooks | no |
 | C | one `SessionStart` hook, no `permissions.allow` | no |
 
-Those three are the same day's non-Firstmate spawns, and that column is scoped to each repo's TRACKED `.claude/settings.json` only.
+Those three are the same day's Firstmate spawns into projects other than Firstmate itself, and that column is scoped to each repo's TRACKED `.claude/settings.json` only.
 Note the KIND of rule, not just the count: the arm that prompted is the one whose two entries grant remote shell access, while the larger eight-entry set that did not prompt is local-CLI only.
 Every arm also carried hooks Firstmate itself injects: `bin/fm-spawn.sh` writes a `.claude/settings.local.json` with `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` entries into every claude worktree before launch, so no arm was hooks-free as Claude reads the folder.
 At the file level B was therefore a hooks-and-allow worktree that did NOT prompt, which rules out "hooks plus allow rules anywhere in the folder" as the trigger on its own.

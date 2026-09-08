@@ -23,7 +23,7 @@ A ship or scout spawn therefore pre-registers the worktree before launch, and th
 That covers the first dialog only.
 A second prompt can sit behind it: a "Quick safety check" listing the tool permissions the folder pre-approves in `.claude/settings.json`, with the cursor on `No, continue without these permissions`.
 It was observed on 2026-09-07 on Claude Code 2.1.263, after the trust dialog had been pre-registered, and it wedged two workers until a human answered it in the pane.
-That project's tracked `.claude/settings.json` carried both `PreToolUse` hooks and `permissions.allow` rules, but what configuration reaches the prompt is UNESTABLISHED, so treat no settings shape as exempt.
+An allow-free tracked `.claude/settings.json` is not an open case: Firstmate's own repository has hooks and no `permissions` key, and routine worker spawns into its worktrees have never met this prompt; what remains open is the tracked `permissions.allow` dimension, and the record below owns that reasoning.
 Nothing pre-registers that prompt today, and `hasTrustDialogHooksAccepted` is NOT ESTABLISHED as the key that would: it appears in the measured store only as `false` and never as `true`, so pre-registering it `true` would write a value the vendor has never been observed writing.
 `../../../docs/verification/runtime-backends.md` under "Claude workspace trust" owns that observation, what it rules out, and why refreshing it needs a live spawn.
 
