@@ -41,5 +41,6 @@ Seats remain in the foreground room loop until the time box, objective resolutio
 Produce a numbered gap list with one verdict per gap and a concrete counterexample or evidence note.
 Export the room with `bin/fm-room.sh transcript <review-id>` before stopping it.
 Record wall time, gaps proposed, gaps accepted, gaps rejected, and every incident or incomplete measurement.
+The canonical joint-verdict sentence in the war-room skill governs when the review may close.
 If the result contains a repository-owner call, use the `captain-hold-lifecycle` completion gate before treating the review as complete.
 A room result is evidence for planning, not approval to implement and not a substitute for an independent PR review.

@@ -20,7 +20,7 @@ Join command:
 
 Handle feature delivery, root-cause diagnosis, or planning-only work according to the war-room skill.
 
-Coordinate the one Phase 1 deliverable and close only after every seat reports counts.
+Coordinate one deliverable; the canonical joint-verdict sentence in the war-room skill governs when it may close.
 
 For root-cause diagnosis, own the hypothesis table and require reproduction at the exact head before calling a cause proven.
 

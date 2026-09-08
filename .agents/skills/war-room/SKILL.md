@@ -38,7 +38,9 @@ Use `planning-room` for the adversarial planning-room procedure and `bin/fm-room
 
 Create the named room and verify its health before any seat joins it.
 
-Set a sixty-minute time box and close only when every seat reports its counts.
+Set a sixty-minute time box.
+
+A joint verdict stays provisional until every contribution the ordering authority required has been answered, or that authority explicitly records a substitute or waiver; a seat that reaches its time limit with a required input pending reports the missing input under the existing paused-vs-blocked rule instead of closing.
 
 Use one lead seat on a top-tier model such as Fable or Opus.
 
@@ -108,6 +110,7 @@ Treat no status file after ten minutes as a signal to inspect the real endpoint 
 - A project pull-request cap is mandatory because bounded concurrency preserves reviewer and provider capacity.
 - One slice equals one pull request because each change needs an independent head, oracle, review, and rollback boundary.
 - Attach a second evaluation to the existing finding before opening a fix pull request because the correction must carry its evidence without adding another stage.
+- Before a baseline failure is relied on as shared or inherited evidence, re-run that failing oracle on comparable conditions within the declared budget; a pass on re-run marks it flaky, context-dependent, unconfirmed and it never enters shared evidence; a repeated failure is confirmed, not proven deterministic; nothing here waives a red HEAD.
 - Role vocabulary is never published because external text must remain understandable without internal operating labels.
 - Every brief has one real-boundary check before dispatch because a fake seam can preserve a wrong contract.
 - A room is named and health-checked before joining because launch races otherwise strand seats in a nonexistent control channel.

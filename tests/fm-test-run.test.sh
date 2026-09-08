@@ -140,6 +140,7 @@ init_changed_fixture_repo() {
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
+    fm-skill-war-room.test.sh \
     fm-ask-user-authority.test.sh \
     fm-documentation-audiences.test.sh \
     fm-test-isolation-proof.test.sh \
@@ -220,9 +221,11 @@ init_changed_fixture_repo() {
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
   mkdir -p \
     "$repo/.agents/skills/example" \
+    "$repo/.agents/skills/war-room/templates" \
     "$repo/.agents/skills/harness-adapters/references/common" \
     "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src"
   : >"$repo/.agents/skills/example/SKILL.md"
+  : >"$repo/.agents/skills/war-room/templates/lead.md"
   : >"$repo/.agents/skills/harness-adapters/SKILL.md"
   : >"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
   printf '{}\n' >"$repo/.backpassrc.json"
@@ -521,6 +524,22 @@ test_changed_dependency_selection_and_unmapped_failure() {
     || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
   rm -rf "$tmp"
   pass "changed selection covers dependents and fails closed for unmapped source"
+}
+
+test_changed_war_room_template_selects_contract_family() {
+  local tmp repo listed expected
+  tmp=$(fm_test_tmproot fm-test-run-war-room-template)
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/.agents/skills/war-room/templates/lead.md"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) \
+    || fail "changed room template must select tests instead of refusing its path"
+  expected=$(cd "$repo" && bin/fm-test-run.sh --list --family pure-contract-unit)
+  [ "$listed" = "$expected" ] || fail "room template must select the existing contract family"
+  assert_contains "$listed" "tests/fm-skill-war-room.test.sh" \
+    "room template must select its skill contract suite"
+  pass "changed room template selects the contract family including its skill suite"
 }
 
 # A direct test reference is per-script evidence. Widening it to the referencing
@@ -1613,6 +1632,7 @@ test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_runner_surfaces_select_their_family
+test_changed_war_room_template_selects_contract_family
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family
 test_changed_uses_bounded_automatic_concurrency
