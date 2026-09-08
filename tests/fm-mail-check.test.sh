@@ -256,6 +256,32 @@ test_repeated_failure_that_queued_new_mail_still_wakes() {
   pass "fm-mail-check: a repeated failure that queued new mail still wakes"
 }
 
+test_repeated_timeout_still_wakes() {
+  # A timeout can kill the poll after wake_for queued mail and before the
+  # woke-for line is printed. Difference-record silence would then leave that
+  # mail undrained; a timeout always prints so the watcher wakes.
+  local tmpbin home out check_bin
+  tmpbin="$TMP_ROOT/repeat-timeout/bin"
+  home="$TMP_ROOT/repeat-timeout/home"
+  mkdir -p "$tmpbin" "$home/state"
+  check_bin="$tmpbin/fm-mail-check.sh"
+  cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+    [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
+  done
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 124' > "$tmpbin/fm-mail.sh"
+  chmod +x "$tmpbin/fm-mail.sh"
+
+  out="$home/out1.txt"
+  run_check "$home" "$out" "$check_bin"
+  assert_contains "$(cat "$out")" "mail: poll did not finish within" "the first timeout reports"
+
+  out="$home/out2.txt"
+  run_check "$home" "$out" "$check_bin"
+  assert_contains "$(cat "$out")" "mail: poll did not finish within" "a repeated timeout must still print so queued mail is not stranded"
+  pass "fm-mail-check: a repeated timeout still wakes"
+}
+
 test_fail_closed_poll_after_wake_reports_the_failure() {
   # A poll can publish a wake and then fail closed (stale retry still on disk
   # and unwritable). The standing check must report that failure, not the
@@ -305,4 +331,5 @@ test_unconfigured_home_is_reported_once
 test_slow_poll_times_out_and_is_reported
 test_fail_closed_poll_after_wake_reports_the_failure
 test_repeated_failure_that_queued_new_mail_still_wakes
+test_repeated_timeout_still_wakes
 test_missing_mail_plane_is_reported

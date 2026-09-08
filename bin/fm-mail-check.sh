@@ -30,9 +30,10 @@
 # Reporting is by difference against the last reported state stored in
 # state/.mail-check: a poll that keeps reporting the same finding reports
 # its line once, and a poll that changes the story reports the change. A
-# repeated finding still prints when that poll queued new mail, so the
-# watcher wakes to drain it. A successful poll with no new mail clears the
-# record, so the next new-mail or failure line is news again.
+# repeated finding still prints when that poll queued new mail, and a
+# timeout always prints, so a kill between wake_for and its woke-for line
+# cannot leave queued mail silent. A successful poll with no new mail
+# clears the record, so the next new-mail or failure line is news again.
 #
 # The poll must finish inside the watcher's per-check bound
 # (FM_CHECK_TIMEOUT, default 30, read from this check's own environment
@@ -190,11 +191,13 @@ action_check() {
   record_read
   # Report before recording, so a record that cannot be written costs a
   # repeated report rather than a lost one. The record keeps the whole line so
-  # the news key and the printed report never diverge. A repeated failure or
-  # timeout still prints when this poll queued new mail: otherwise the watcher
-  # sees empty output and the durable mail rows sit undrained.
+  # the news key and the printed report never diverge. A repeated failure still
+  # prints when this poll queued new mail. A timeout always prints: the poll
+  # may have appended a durable mail wake after wake_for and before the
+  # woke-for line, so stdout is not proof that nothing was queued.
   if [ -n "$line" ] && {
     [ "$line" != "$RECORD_REPORTED" ] \
+      || [ "${rc:-0}" -eq 124 ] \
       || { [ -n "${out:-}" ] && printf '%s\n' "$out" | grep -q '^fm-mail: woke for '; }
   }; then
     fm_cap_line_var "mail: $line" "$MAX_LINE"
