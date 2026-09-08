@@ -363,8 +363,9 @@ The two project-A worktree slots where the captain answered "Yes, I trust this f
 Whatever persists that acceptance, it is not this key, so nothing in `bin/fm-claude-trust.sh` pre-registers the second prompt and a worker that meets it still wedges.
 
 Refreshing this observation is manual and has no live guard, because reaching the prompt needs a real project whose settings trigger it rather than a scratch repo.
-It needs both arms, because the three rows above show most projects never prompt at all: an absent prompt in the treatment arm alone would prove nothing.
-Remove the worktree's entry from `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json` before each arm.
+It needs both arms, because the three rows above show most projects never prompt at all: unless the control arm first shows the prompt on this worktree, an absent prompt on a later control-arm rerun would prove nothing.
+Remove the worktree's entry from `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json` before every control-arm launch, including the reruns below.
+The treatment arm is not a launch of its own - it continues on the control arm's pane, with the entry left exactly as the control arm registered it, so do NOT clear it again before answering.
 
 Control arm - confirm this worktree reaches the prompt at all:
 
@@ -377,24 +378,25 @@ tmux capture-pane -p -t tp-h1
 
 The arm is only usable if that pane shows the Quick safety check; if it does not, the project does not reproduce and no candidate can be tested on it.
 
-Treatment arm - snapshot the store FIRST, then answer the prompt by hand in that pane, then diff the two snapshots to see what the acceptance actually wrote:
+Treatment arm - snapshot the store FIRST, then answer the prompt by hand in the control arm's `tp-h1` pane, then diff the two snapshots to see what the acceptance actually wrote:
 
 ```sh
-cp ~/.claude.json /tmp/claude-store-before.json   # must run BEFORE answering
-# answer "Yes, I trust this folder" by hand in the pane, then:
+STORE=${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json   # the same store the control arm registered into
+cp "$STORE" /tmp/claude-store-before.json        # must run BEFORE answering
+# answer "Yes, I trust this folder" by hand in the tp-h1 pane, then:
 node -e 'const fs=require("node:fs");
 const walk=(x,y,p)=>{const o=v=>v&&typeof v==="object"&&!Array.isArray(v);
 if(o(x)&&o(y)){for(const k of new Set([...Object.keys(x),...Object.keys(y)]))walk(x[k],y[k],p.concat(k));return;}
 if(JSON.stringify(x)!==JSON.stringify(y))console.log(p.join("."),JSON.stringify(x),"->",JSON.stringify(y));};
 walk(JSON.parse(fs.readFileSync("/tmp/claude-store-before.json","utf8")),
-     JSON.parse(fs.readFileSync(process.env.HOME+"/.claude.json","utf8")),[]);'
+     JSON.parse(fs.readFileSync(process.argv[1],"utf8")),[]);' "$STORE"
 ```
 
 Diff the WHOLE parsed store, not `projects[<worktree>]` alone.
 The two slots the captain answered by hand were already observed holding exactly `{"hasTrustDialogAccepted": true}` afterwards, so that per-project object is known NOT to change: a per-project diff returns nothing because of where it looked, not because the acceptance persists nothing, and reading its empty output as "no candidate keys" is the wrong conclusion.
 The whole-store walk also surfaces ordinary session bookkeeping written by any concurrent Claude session, so quiet the machine first and read the output for a newly appearing trust or permission key rather than for a single line.
 The keys that change there are the candidates; pre-register one, clear the entry, and rerun the control arm to see whether the prompt is gone.
-If nothing outside that bookkeeping changes, the acceptance is persisted somewhere other than `~/.claude.json`, or not persisted at all, and the search moves off this file.
+If nothing outside that bookkeeping changes, the acceptance is persisted somewhere other than that store, or not persisted at all, and the search moves off this file.
 Rerun this after a Claude Code upgrade rather than trusting the version above.
 
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
