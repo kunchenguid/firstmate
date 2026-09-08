@@ -150,8 +150,9 @@ fi
 # The "spend" object already carries the human dollar figures the CLI footer
 # shows (used/limit as minor units + exponent, plus a rounded percent), so it
 # is preferred over hand-computing from "extra_usage". Fall back to
-# "extra_usage" only if "spend" is absent, for resilience against upstream
-# response shape drift on this undocumented endpoint.
+# "extra_usage" if "spend" is absent or its "enabled" field is explicitly
+# false, for resilience against upstream response shape drift on this
+# undocumented endpoint.
 SUMMARY=$(jq -r '
   def money(obj):
     if obj == null then null
