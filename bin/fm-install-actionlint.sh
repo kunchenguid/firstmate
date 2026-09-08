@@ -4,10 +4,11 @@
 # Downloads the official GitHub release archive for the host OS/arch, verifies
 # its per-archive SHA-256 pin, and installs the binary into the destination
 # directory. Supported platforms: linux amd64/x86_64, linux arm64/aarch64,
-# darwin amd64/x86_64, darwin arm64/aarch64. Pins come from the official
-# actionlint release checksums file. Verification uses sha256sum when present,
-# otherwise shasum -a 256. An unsupported OS/arch or a missing pin fails
-# without downloading.
+# darwin amd64/x86_64, darwin arm64/aarch64, and windows x86_64 under Git
+# Bash/MSYS (the .zip asset, extracted with unzip). Pins come from the
+# official actionlint release checksums file. Verification uses sha256sum when
+# present, otherwise shasum -a 256. An unsupported OS/arch or a missing pin
+# fails without downloading.
 #
 # Usage:
 #   fm-install-actionlint.sh <destination-directory>
@@ -27,6 +28,8 @@ os=$(uname -s)
 arch=$(uname -m)
 # SHA-256 pins are from actionlint_1.7.12_checksums.txt on the official
 # v1.7.12 release (https://github.com/rhysd/actionlint/releases/tag/v1.7.12).
+BIN_SRC=actionlint
+BIN_DEST=actionlint
 case "${os}-${arch}" in
   Linux-x86_64|Linux-amd64)
     ARCHIVE="actionlint_${VERSION}_linux_amd64.tar.gz"
@@ -44,11 +47,21 @@ case "${os}-${arch}" in
     ARCHIVE="actionlint_${VERSION}_darwin_arm64.tar.gz"
     SHA256=aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f
     ;;
+  MINGW*_NT*-x86_64|MSYS_NT*-x86_64)
+    # The Windows asset is a .zip holding actionlint.exe at its root.
+    ARCHIVE="actionlint_${VERSION}_windows_amd64.zip"
+    SHA256=6e7241b51e6817ea6a047693d8e6fed13b31819c9a0dd6c5a726e1592d22f6e9
+    BIN_SRC=actionlint.exe
+    BIN_DEST=actionlint.exe
+    ;;
   *)
-    die "unsupported platform ${os}-${arch}; need linux or darwin on amd64/x86_64 or arm64/aarch64"
+    die "unsupported platform ${os}-${arch}; need linux or darwin on amd64/x86_64 or arm64/aarch64, or windows (Git Bash/MSYS) on x86_64"
     ;;
 esac
 [ -n "$SHA256" ] || die "no pinned checksum for ${os}-${arch}"
+case "$ARCHIVE" in
+  *.zip) command -v unzip >/dev/null 2>&1 || die "need unzip to extract $ARCHIVE" ;;
+esac
 
 URL="https://github.com/rhysd/actionlint/releases/download/v${VERSION}/${ARCHIVE}"
 TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-actionlint.XXXXXX")
@@ -78,7 +91,10 @@ fi
     "$ARCHIVE" "$SHA256" "$ACTUAL_SHA256" >&2
   exit 1
 }
-tar -xzf "$TMP/$ARCHIVE" -C "$TMP"
+case "$ARCHIVE" in
+  *.zip) unzip -oq "$TMP/$ARCHIVE" -d "$TMP" ;;
+  *) tar -xzf "$TMP/$ARCHIVE" -C "$TMP" ;;
+esac
 mkdir -p "$DESTINATION"
-install -m 0755 "$TMP/actionlint" "$DESTINATION/actionlint"
-"$DESTINATION/actionlint" -version
+install -m 0755 "$TMP/$BIN_SRC" "$DESTINATION/$BIN_DEST"
+"$DESTINATION/$BIN_DEST" -version
