@@ -37,9 +37,6 @@ fm_git_identity fmtest fmtest@example.invalid
 . "$ROOT/bin/fm-backend.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
-# Shared project locks use FM_HOME/state even when cases override state paths.
-export FM_HOME="$TMP_ROOT/firstmate-home"
-mkdir -p "$FM_HOME/state"
 # A claude spawn writes workspace trust into the launching user's own store,
 # and the script resolves it as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so the value
 # is pinned EMPTY beside the throwaway HOME: an inherited one would beat that
