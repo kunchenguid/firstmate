@@ -727,11 +727,19 @@ prefetch_task_current_states() {
 
 task_json_lines() {
   local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
-  local remote_host remote_root current_file endpoint_file components_file observation_line index=0
+  local remote_host remote_root current_file endpoint_file components_file lines_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
+  # Rows accumulate in a file, never through a piped loop: composition failures
+  # must fail this function rather than abort a subshell and leave a sorted
+  # truncated prefix as the published inventory.
+  lines_file="$SNAPSHOT_TASK_DIR/task-lines.jsonl"
+  : > "$lines_file" || {
+    snapshot_task_cleanup
+    return 1
+  }
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
     index=$((index + 1))
@@ -923,8 +931,12 @@ task_json_lines() {
              steer:"bin/fm-send.sh fm-\($id) \u0027<instruction>\u0027",
              return_channel_note:null}
           end)
-      }'
-  done | jq -s 'sort_by(.id)'
+      }' >> "$lines_file" || {
+      snapshot_task_cleanup
+      return 1
+    }
+  done
+  jq -s 'sort_by(.id)' < "$lines_file"
 }
 
 # Main-home current-inventory validity: same orphan / unstructured-current checks
@@ -1697,7 +1709,7 @@ parent_evidence_reconciliation_json() {  # <summary-json-file> <parent-evidence-
 secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
   local tasks_file=$1 output_file=$2 registry_file union_file records_file rows total_registered total shown truncated
   local row id home host remote registered registry_error task sampled_spawn_gen status_file status_observation_file event_raw event_note event_epoch event_age
-  local activity_scan reconciliation provenance freshness reason summary_file evidence_file note_file summary_sampled summary_valid summary_invalidity state terminal terminal_contradiction contradiction
+  local activity_scan reconciliation provenance freshness reason summary_file evidence_file summary_sampled summary_valid summary_invalidity state terminal terminal_contradiction contradiction
   local summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot summary_index=0
   local seen_homes=''
   registry_file="$JSON_TRANSPORT_DIR/secondmate-registry.json"
@@ -1760,12 +1772,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
     summary_index=$((summary_index + 1))
     summary_file="$SNAPSHOT_COLLECT_DIR/selected-summary-$summary_index.json"
     evidence_file="$SNAPSHOT_COLLECT_DIR/parent-evidence-$summary_index.json"
-    note_file="$SNAPSHOT_COLLECT_DIR/parent-event-note-$summary_index.txt"
     printf '{}\n' > "$summary_file" || return 1
-    json_envelope_file "$evidence_file" \
-      task "$task" \
-      activity_scan "$activity_scan" || return 1
-    printf '%s' "$event_note" > "$note_file" || return 1
     summary_sampled=false
     summary_valid=false
     if [ -z "$reason" ] && [ -z "$home" ]; then reason="no recorded secondmate home"; fi
@@ -1840,11 +1847,17 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
 
     if [ -z "$reason" ]; then
       state=$(jq -r '.state' "$summary_file")
+      json_envelope_file "$evidence_file" \
+        task "$task" \
+        activity_scan "$activity_scan" || return 1
       reconciliation=$(parent_evidence_reconciliation_json "$summary_file" "$evidence_file")
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
       terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r \
-        --rawfile note "$note_file" '
-        any(.activities[]; .verdict == "contradicts" and .summary == $note)')
+        --slurpfile evidence "$evidence_file" \
+        "$JQ_ENVELOPE_PRELUDE"'
+        (envelope($evidence; "parent evidence") | member("task")
+         | .paths.status_log.last_event.note // "") as $note
+        | any(.activities[]; .verdict == "contradicts" and .summary == $note)')
       if [ "$terminal_contradiction" = true ]; then
         terminal=$(terminal_evidence_json "$task" "$event_note" true)
       else

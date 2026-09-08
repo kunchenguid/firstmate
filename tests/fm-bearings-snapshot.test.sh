@@ -1588,6 +1588,51 @@ test_large_task_decision_inventory_avoids_argument_transport() {
   pass "large task-decision inventories avoid argument transport"
 }
 
+# Fail the Nth per-task open-decision fold, so one task in the middle of the
+# inventory loses a composition component while its neighbours stay intact.
+install_failing_task_component() {  # <fakebin> <counter-file> <occurrence>
+  local fakebin=$1 counter=$2 occurrence=$3 real
+  real=$(command -v jq)
+  rm -f "$counter"
+  cat > "$fakebin/jq" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'(?<verb>'*)
+    count=0
+    [ ! -f "$counter" ] || count=\$(cat "$counter")
+    count=\$((count + 1))
+    printf '%s' "\$count" > "$counter"
+    [ "\$count" -ne $occurrence ] || exit 9
+    ;;
+esac
+exec "$real" "\$@"
+SH
+  chmod +x "$fakebin/jq"
+}
+
+# A per-task component that fails partway through the inventory must fail the
+# whole snapshot. Composition feeds a sorted collector, so a failure that only
+# aborts a subshell leaves the collector succeeding on the truncated prefix and
+# publishes an exit-0 snapshot with tasks silently missing - and the observation
+# directory that later parent reads depend on already torn down.
+test_task_component_failure_fails_closed() {
+  local home fakebin out err rc
+  home=$(make_home task-component-fail-closed); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  install_failing_task_component "$fakebin" "$home/fold.count" 2
+  err="$home/task-component.err"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH=1783792800 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json 2> "$err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed task component published an exit-0 snapshot: $out"
+  if printf '%s' "$out" | jq -e '.tasks' >/dev/null 2>&1; then
+    fail "a failed task component still emitted a task inventory: $out"
+  fi
+  grep -F 'task snapshot failed' "$err" >/dev/null \
+    || fail "a failed task component lacked a diagnostic: $(cat "$err")"
+  pass "a failed per-task component fails the snapshot instead of dropping tasks"
+}
+
 install_failing_jq() {  # <fakebin> <model|toon>
   local fakebin=$1 phase=$2 real
   real=$(command -v jq)
@@ -3036,4 +3081,5 @@ test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_large_candidate_pr_inventory_avoids_argument_transport
 test_large_task_decision_inventory_avoids_argument_transport
+test_task_component_failure_fails_closed
 test_projection_and_toon_fail_closed
