@@ -1095,15 +1095,10 @@ def minutes(ms):
 shards = []
 declared_shards = 0
 for path in inputs:
-    if not path.exists():
-        continue
     data = json.loads(path.read_text())
     match = LANE_RE.match(lane_of(data))
-    scripts = [s for s in data.get("scripts", []) if s.get("path")]
-    if not scripts:
-        continue
     rows = []
-    for s in scripts:
+    for s in data["scripts"]:
         real = int(s["duration_ms"])
         hint = hints.get(s["path"], default_ms)
         rows.append((real - hint, s["path"], real, hint, s["path"] not in hints))
@@ -1117,12 +1112,6 @@ for path in inputs:
     )
 
 shards.sort(key=lambda s: s["lane"])
-if not shards:
-    print(
-        "FM_TEST_SHARD_BALANCE skipped no portable serial timing artifacts "
-        "(a cancelled shard uploads none)"
-    )
-    sys.exit(0)
 
 # The artifacts declare the partition they ran as, so coverage is counted
 # against that rather than against whatever this runner is configured for now.
