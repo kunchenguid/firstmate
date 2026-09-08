@@ -381,7 +381,7 @@ test_ring_stops_enter_retries_when_composer_changes() {
   rc=0
   PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
     FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
-    FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-mixed.txt" FM_TASK_INBOX_COMMIT_SLEEP=0 \
+    FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-mixed.txt" \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 1 ] || fail "recovery should stop when human draft text appears, got $rc"
   [ "$(grep -c '^Enter$' "$keylog")" = 1 ] || fail "recovery must not retry Enter after draft text appears:"$'\n'"$(cat "$keylog")"
@@ -393,7 +393,7 @@ test_ring_stops_enter_retries_when_composer_changes() {
   rc=0
   PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
     FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
-    FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-mixed.txt" FM_TASK_INBOX_COMMIT_SLEEP=0 \
+    FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-mixed.txt" \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 1 ] || fail "initial submission should stop when human draft text appears, got $rc"
   [ "$(grep -c '^Enter$' "$keylog")" = 1 ] || fail "initial submission must not retry Enter after draft text appears:"$'\n'"$(cat "$keylog")"
@@ -423,7 +423,7 @@ test_ring_guards_unknown_and_failed_enter_retries() {
     FM_FAKE_TMUX_CAPTURE_AFTER_LITERAL="$dir/capture-doorbell.txt" \
     FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-empty.txt" \
     FM_FAKE_TMUX_ENTER_COUNT_FILE="$dir/enter-count" FM_FAKE_TMUX_CAPTURE_AFTER_ENTER_AT=2 \
-    FM_FAKE_SUBMIT_VERDICT=unknown FM_TASK_INBOX_COMMIT_SLEEP=0 \
+    FM_FAKE_SUBMIT_VERDICT=unknown \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 0 ] || fail "an unknown verdict with the exact doorbell should retry safely, got $rc"
   [ "$(grep -c '^Enter$' "$keylog")" = 2 ] || fail "an unknown verdict should get one guarded retry:"$'\n'"$(cat "$keylog")"
@@ -437,7 +437,7 @@ test_ring_guards_unknown_and_failed_enter_retries() {
     FM_FAKE_TMUX_CAPTURE_AFTER_LITERAL="$dir/capture-doorbell.txt" \
     FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-mixed.txt" \
     FM_FAKE_TMUX_ENTER_COUNT_FILE="$dir/enter-count" FM_FAKE_TMUX_CAPTURE_AFTER_ENTER_AT=1 \
-    FM_FAKE_SUBMIT_VERDICT=unknown FM_TASK_INBOX_COMMIT_SLEEP=0 \
+    FM_FAKE_SUBMIT_VERDICT=unknown \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 1 ] || fail "an unknown verdict with changed composer text should remain undelivered, got $rc"
   [ "$(grep -c '^Enter$' "$keylog")" = 1 ] || fail "an unknown verdict must not retry Enter over changed text:"$'\n'"$(cat "$keylog")"
@@ -450,7 +450,7 @@ test_ring_guards_unknown_and_failed_enter_retries() {
     FM_FAKE_TMUX_CAPTURE_AFTER_LITERAL="$dir/capture-doorbell.txt" \
     FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-empty.txt" \
     FM_FAKE_TMUX_FAIL_FIRST_ENTER_FILE="$dir/failed-enter" \
-    FM_FAKE_SUBMIT_VERDICT=send-failed FM_TASK_INBOX_COMMIT_SLEEP=0 \
+    FM_FAKE_SUBMIT_VERDICT=send-failed \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 0 ] || fail "a failed first Enter with the exact doorbell should retry safely, got $rc"
   [ "$(grep -c '^Enter$' "$keylog")" = 2 ] || fail "a failed first Enter should get one guarded retry:"$'\n'"$(cat "$keylog")"
@@ -464,11 +464,33 @@ test_ring_guards_unknown_and_failed_enter_retries() {
     FM_FAKE_TMUX_CAPTURE_AFTER_LITERAL="$dir/capture-doorbell.txt" \
     FM_FAKE_TMUX_CAPTURE_AFTER_FAILED_ENTER="$dir/capture-mixed.txt" \
     FM_FAKE_TMUX_FAIL_FIRST_ENTER_FILE="$dir/failed-enter" \
-    FM_FAKE_SUBMIT_VERDICT=send-failed FM_TASK_INBOX_COMMIT_SLEEP=0 \
+    FM_FAKE_SUBMIT_VERDICT=send-failed \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 1 ] || fail "a failed first Enter with changed composer text should remain undelivered, got $rc"
   [ "$(grep -c '^Enter$' "$keylog")" = 1 ] || fail "a failed first Enter must not retry over changed text:"$'\n'"$(cat "$keylog")"
-  pass "inbox: unknown and failed first Enter retries preserve composer text"
+
+  cp "$dir/capture-doorbell.txt" "$dir/capture.txt"
+  : > "$keylog"; rm -f "$dir/failed-enter"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-empty.txt" \
+    FM_FAKE_TMUX_FAIL_FIRST_ENTER_FILE="$dir/failed-enter" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "a transient recovery Enter failure should use the remaining retry budget, got $rc"
+  [ "$(grep -c '^Enter$' "$keylog")" = 2 ] || fail "recovery should retry after a transient Enter failure:"$'\n'"$(cat "$keylog")"
+
+  cp "$dir/capture-doorbell.txt" "$dir/capture.txt"
+  : > "$keylog"; rm -f "$dir/failed-enter"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_FAILED_ENTER="$dir/capture-empty.txt" \
+    FM_FAKE_TMUX_FAIL_FIRST_ENTER_FILE="$dir/failed-enter" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "a failed recovery key that landed should report delivery, got $rc"
+  [ "$(grep -c '^Enter$' "$keylog")" = 1 ] || fail "recovery should stop after a failed key lands:"$'\n'"$(cat "$keylog")"
+  pass "inbox: unknown and failed Enter retries preserve composer text"
 }
 
 # The other direction, and the one that must never regress: a composer holding

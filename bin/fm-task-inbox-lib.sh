@@ -87,11 +87,9 @@ FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
 FM_TASK_INBOX_RING_MAX_DEFAULT=3
 FM_TASK_INBOX_LOCK_WAIT_DEFAULT=5
-# Enter-only retries (and spacing) used to commit a doorbell that is already
-# sitting unsubmitted in the composer. Never retypes; see
-# fm_task_inbox_commit_pending_doorbell.
-FM_TASK_INBOX_COMMIT_RETRIES=${FM_TASK_INBOX_COMMIT_RETRIES:-3}
-FM_TASK_INBOX_COMMIT_SLEEP=${FM_TASK_INBOX_COMMIT_SLEEP:-0.4}
+# A doorbell gets at most three Enter attempts, spaced 0.4 seconds apart.
+_FM_TASK_INBOX_COMMIT_RETRIES=3
+_FM_TASK_INBOX_COMMIT_SLEEP=0.4
 
 fm_task_inbox_grace_secs() {
   local g=${FM_TASK_INBOX_GRACE_SECS:-$FM_TASK_INBOX_GRACE_DEFAULT}
@@ -317,24 +315,24 @@ fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <record-path> [e
 # the composer, with a bounded Enter-only retry. Retyping is never correct
 # here - the text is already there, and a second copy would be delivered as
 # well as the first. True when the composer is proven empty.
-fm_task_inbox_commit_pending_doorbell() {  # <backend> <target> <record-path> [expected-label] [attempts]
-  local backend=$1 target=$2 rec=$3 label=${4:-} retries=${5:-$FM_TASK_INBOX_COMMIT_RETRIES} state i=0
-  case "$retries" in ''|*[!0-9]*|0) retries=3 ;; esac
-  while [ "$i" -lt "$retries" ]; do
+fm_task_inbox_commit_pending_doorbell() {  # <backend> <target> <record-path> [expected-label] [attempts-spent]
+  local backend=$1 target=$2 rec=$3 label=${4:-} state i=${5:-0}
+  case "$i" in 0|1) ;; *) i=0 ;; esac
+  while [ "$i" -lt "$_FM_TASK_INBOX_COMMIT_RETRIES" ]; do
     if ! fm_task_inbox_composer_holds_doorbell "$backend" "$target" "$rec" "$label"; then
       state=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || state=unknown
       [ "$state" = empty ] && return 0
       return 1
     fi
-    fm_backend_send_key "$backend" "$target" Enter "$label" || return 1
-    sleep "$FM_TASK_INBOX_COMMIT_SLEEP"
-    state=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || state=unknown
-    case "$state" in
-      empty) return 0 ;;
-      pending|pending-unproven) ;;
-      *) return 1 ;;
-    esac
+    fm_backend_send_key "$backend" "$target" Enter "$label" || true
     i=$((i + 1))
+    sleep "$_FM_TASK_INBOX_COMMIT_SLEEP"
+    if fm_task_inbox_composer_holds_doorbell "$backend" "$target" "$rec" "$label"; then
+      continue
+    fi
+    state=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || state=unknown
+    [ "$state" = empty ] && return 0
+    return 1
   done
   return 1
 }
@@ -359,7 +357,7 @@ fm_task_inbox_commit_pending_doorbell() {  # <backend> <target> <record-path> [e
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict retries
+  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
@@ -398,10 +396,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
     pending|pending-unproven|unknown) ;;
     *) return 0 ;;
   esac
-  retries=$FM_TASK_INBOX_COMMIT_RETRIES
-  case "$retries" in ''|*[!0-9]*|0) retries=3 ;; esac
-  [ "$retries" -gt 1 ] || return 1
-  fm_task_inbox_commit_pending_doorbell "$backend" "$target" "$rec" "$label" "$((retries - 1))" || return 1
+  fm_task_inbox_commit_pending_doorbell "$backend" "$target" "$rec" "$label" 1 || return 1
   return 0
 }
 
