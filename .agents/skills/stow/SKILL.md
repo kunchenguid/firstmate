@@ -212,6 +212,18 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 
 1. **Sweep the session for uncaptured durable knowledge.**
    Look for operational learnings, captain preferences expressed in passing, project-intrinsic facts, standing decisions, and undone next steps.
+   When this session produced a `bin/fm-model-telemetry.sh sheet --format json`, read only that sheet for lesson candidates; do not parse `data/routing-outcomes.jsonl` separately.
+   A row is a candidate when the sheet's `stepReruns` column is present and greater than zero, or when `primaryFailureClass` is present and not `none`; absent or null means unknown, never clean, and never a candidate on its own.
+   `correctionCount` alone is not a candidate.
+   A candidate is not a lesson: Save, Improve, Absorb, or Drop only with an instruction-shaped reusable fact and a named regression or verification artifact (a failed test, a reviewer finding, or `oracle=fail`) observed in the session, never inferred from the sheet alone.
+   The distiller is never the actor.
+   Inspect-then-update the canonical owner.
+   Archive superseded text to the cold tier.
+   Never rewrite a whole file, and never append a duplicate without grepping for overlap first.
+   Existing perishable, aging, and budget rules still govern expiry.
+   A perishable condition binds to the behavior and its verified oracle, not to a filesystem path.
+   Named triggers include M4 bug-bash regression pointers, owner or reviewer corrections, and ledger rows with explicit gate-evidence failure.
+   `/stow` runs only on actual invocation; the turn-end guard calls `bin/fm-stow-cadence-lab.sh activity`, not `run`, so do not add a scheduler.
 2. **Route each finding using AGENTS.md's knowledge-routing table.**
    AGENTS.md section 6 is the source of truth for destinations.
    Do not re-derive or duplicate that mapping here.
