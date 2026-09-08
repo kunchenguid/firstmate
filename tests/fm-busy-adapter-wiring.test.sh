@@ -59,17 +59,20 @@ drive_pi_ext() {
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
-mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+mod.default({ on: (name, fn) => { handlers[name] = [...(handlers[name] ?? []), fn]; } });
 const ctx = { isIdle: () => process.env.MODE !== "settle-continuing" };
+const emit = async (name) => {
+  for (const handler of handlers[name] ?? []) await handler({}, ctx);
+};
 switch (process.env.MODE) {
-  case "agent-start": await handlers["agent_start"]({}, ctx); break;
-  case "settle-idle": await handlers["agent_settled"]({}, ctx); break;
-  case "settle-continuing": await handlers["agent_settled"]({}, ctx); break;
+  case "agent-start": await emit("agent_start"); break;
+  case "settle-idle": await emit("agent_settled"); break;
+  case "settle-continuing": await emit("agent_settled"); break;
   case "settle-then-start":
-    await handlers["agent_settled"]({}, ctx);
-    await handlers["agent_start"]({}, ctx);
+    await emit("agent_settled");
+    await emit("agent_start");
     break;
-  case "turn-end": await handlers["turn_end"]({}, ctx); break;
+  case "turn-end": await emit("turn_end"); break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
 if (process.env.MODE === "turn-end") {

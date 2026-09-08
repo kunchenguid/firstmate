@@ -98,6 +98,12 @@ The branch handles those rows, stores the outcome durably, and merges it back in
 A captain-facing outcome persists as one exact, sequence-keyed visible transcript entry and then opens one sequence-keyed processing turn on main, which only main's sequence-bound acknowledgement closes.
 [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns row eligibility, dispatch architecture, deterministic outcome delivery, and processing re-presentation, while the generated [Pi supervision protocol](supervision-protocols/pi.md) owns MAIN's merged-event handling and acknowledgement duty; every other harness keeps the wake-to-main path unchanged.
 
+### Semantic captain activity
+
+Current-state projections and purpose-specific outcome stores do not provide a complete semantic record of visible prose emitted only inside a primary or task-worker harness.
+The optional [`fm-captain-event.v1` outbox](captain-event-outbox.md) owns the narrow semantic-journal architecture, producer and consumer boundaries, and upgrade and rollback contract without taking ownership from branch outcomes or public followups.
+Its exact storage and command contract remains with [`fm-captain-event.sh`](../bin/fm-captain-event.sh).
+
 ### Registered secondmate current state
 
 A registered secondmate's validated home is the authority for bearings current state because it owns the child metadata inventory, each child's current-state result, endpoint observations, backlog holds and dependencies, keyed unresolved decisions, and recent Done baseline.

@@ -297,6 +297,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/captain-event-outbox.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },

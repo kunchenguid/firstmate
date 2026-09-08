@@ -129,6 +129,11 @@
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
+#   A ship/scout Pi extension also publishes visible assistant text at Pi's
+#   persisted turn boundary into the optional fm-captain-event.v1 outbox, using
+#   this task's spawn_gen as its worker incarnation. The shared publisher checks
+#   config/captain-event-outbox before doing any work, so an unconfigured home
+#   keeps the historical extension behavior and creates no outbox artifact.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
@@ -3125,6 +3130,10 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+# One replacement-incarnation token is minted before adapter wiring so the Pi
+# semantic-message producer and the eventual metadata record bind to exactly
+# the same durable worker incarnation.
+SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -3309,8 +3318,9 @@ EOF
       # loaded from inside the project (verified live), but an explicit -e path
       # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
       cat > "$STATE/$ID.pi-ext.ts" <<EOF
-// Firstmate semantic busy-state events + turn-end notification; written by
-// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Firstmate semantic busy-state events, semantic captain messages, and turn-end
+// notification; written by fm-spawn under the contracts owned by
+// bin/fm-busy-lib.sh and bin/fm-captain-event.sh.
 // Semantic state: "agent_start" -> busy when a low-level agent run begins;
 // "agent_settled" -> idle only when ctx.isIdle() confirms Pi will not
 // continue automatically - auto-retries, auto-compaction retries, tool
@@ -3318,8 +3328,11 @@ EOF
 // that raced another extension's fresh run keeps state busy via isIdle().
 // "turn_end" fires at every inner turn boundary (one LLM response plus its
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
-// current-state truth.
+// current-state truth. At that post-persistence boundary, the shared publisher
+// emits only visible assistant text when this home explicitly enabled its
+// private semantic outbox.
 import { execFile } from "node:child_process";
+import { installCaptainEventPublisher } from "$(json_escape "$FM_ROOT/.pi/extensions/lib/fm-captain-event.ts")";
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -3334,6 +3347,15 @@ export default function (pi: any) {
     return busyEvent("idle", "agent-settled");
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  installCaptainEventPublisher(pi, {
+    fmHome: "$(json_escape "$FM_HOME")",
+    fmRoot: "$(json_escape "$FM_ROOT")",
+    state: "$(json_escape "$STATE_REAL")",
+    config: "$(json_escape "$CONFIG")",
+    sourceRole: "worker",
+    taskId: "$(json_escape "$ID")",
+    incarnation: "$(json_escape "$SPAWN_GEN")",
+  });
 }
 EOF
       ;;
@@ -3548,7 +3570,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
