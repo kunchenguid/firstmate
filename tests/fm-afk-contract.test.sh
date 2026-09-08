@@ -60,6 +60,9 @@ test_grammar_refuses_each_missing_part_by_name() {
   compile_refusal 'merge task x PR when red' 'when - no verifiable condition' 'red merge without a named check'
   compile_refusal 'land task x branch when checks fail' 'when - no verifiable condition' 'red landing without a named check'
   compile_refusal 'merge task x PR when looks red enough' 'when - no verifiable condition' 'red wording outside the approved forms'
+  compile_refusal 'merge task x PR when red on all checks' 'when - the failing check must be one specific named check' 'red merge names a check class'
+  compile_refusal 'merge task x PR when any check is red' 'when - the failing check must be one specific named check' 'red merge names any check'
+  compile_refusal 'merge task x PR when checks is red' 'when - the failing check must be one specific named check' 'red merge names bare checks'
   compile_refusal 'rerun task z when after clause 7' "when - 'after clause 7' names this clause or a later one" 'forward clause reference'
   compile_refusal 'merge task x PR when checks green stop' 'stop - "stop" was given with no condition after it' 'empty stop'
   compile_refusal 'merge PR when checks green' 'object - no named task, PR role, repo, machine, or run' 'unnamed PR'
@@ -70,6 +73,8 @@ test_grammar_refuses_each_missing_part_by_name() {
   compile_refusal 'answer task q credential-prompt when prompt starts' 'object - the never-set refuses it' 'never-set: credential compound'
   compile_refusal 'answer task q credentials/keys when prompt starts' 'object - the never-set refuses it' 'never-set: credential punctuation'
   compile_refusal 'answer task q attended-prompt when prompt starts' 'object - the never-set refuses it' 'never-set: attended compound'
+  compile_refusal 'answer task q payments when prompt starts' 'object - the never-set refuses it' 'never-set: payment prefix'
+  compile_refusal 'discard task anything, when checks green' "object - names a class ('anything')" 'class object with punctuation'
   pass "every malformed clause is refused with its missing part named"
 }
 
@@ -157,12 +162,14 @@ test_readback_renders_words_verbatim_and_both_lists() {
 }
 
 test_propose_confirm_writes_the_record_and_announces_hold_for_return() {
-  local home out record
+  local home out record proposed_epoch
   home=$(make_home lifecycle)
   contract "$home" propose --words 'merge it when green' --clause 'merge task a PR when checks green' \
     --clause 'merge everything when regardless' >/dev/null 2>&1 || true
   [ -f "$home/state/.afk-contract.proposed" ] || fail "propose did not write the proposal"
+  proposed_epoch=$(contract "$home" field entered_epoch --proposal)
   contract "$home" present && fail "a proposal alone must not count as the posture"
+  sleep 1
   out=$(contract "$home" confirm 2>&1) || fail "confirm failed: $out"
   record="$home/state/.afk-contract"
   [ -f "$record" ] || fail "confirm did not write the record"
@@ -177,6 +184,7 @@ test_propose_confirm_writes_the_record_and_announces_hold_for_return() {
   [ "$(contract "$home" field reach_channels)" = none ] || fail "reach channels are not none"
   case "$(contract "$home" field confirmed_epoch)" in ''|*[!0-9]*) fail "confirmed_epoch is not numeric" ;; esac
   case "$(contract "$home" field entered_epoch)" in ''|*[!0-9]*) fail "entered_epoch is not numeric" ;; esac
+  [ "$(contract "$home" field entered_epoch)" -gt "$proposed_epoch" ] || fail "entry time was not stamped at confirmation"
   [ "$(contract "$home" words)" = 'merge it when green' ] || fail "words did not round-trip"
   [ "$(contract "$home" clauses)" = "$(printf '1\tmerge\ttask a PR\tchecks green\t-')" ] || fail "clauses TSV is wrong: $(contract "$home" clauses)"
   [ "$(contract "$home" refused | cut -f1,2)" = "$(printf '2\tmerge everything when regardless')" ] || fail "refused TSV is wrong: $(contract "$home" refused)"
@@ -214,10 +222,11 @@ test_confirming_a_new_proposal_archives_the_standing_record() {
   sleep 1
   contract "$home" propose --clause 'merge task a PR when checks green' >/dev/null 2>&1 || fail "second propose failed"
   contract "$home" confirm >/dev/null 2>&1 || fail "second confirm failed"
-  archived=$(contract "$home" archived "$first_epoch") || fail "the replaced record was not archived"
-  [ -f "$archived" ] || fail "archived path does not exist: $archived"
+  archived=$(find "$home/state/afk-contracts" -name "$first_epoch-superseded-*.afk-contract" -print -quit)
+  [ -f "$archived" ] || fail "the superseded record was not archived"
+  [ "$(contract "$home" field entered_epoch)" = "$first_epoch" ] || fail "replacement changed the away session start"
   [ "$(contract "$home" clauses | cut -f2)" = merge ] || fail "the new record does not carry the new clause"
-  pass "a proposal confirmed over a standing record archives the old record first"
+  pass "a replacement archives the old mandate and keeps the session start"
 }
 
 test_failed_replacement_keeps_the_standing_record() {

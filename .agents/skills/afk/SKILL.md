@@ -31,7 +31,7 @@ Hold-for-return is the default and the only reach profile this release records: 
    Run `bin/fm-afk-launch.sh confirm`; it promotes the proposal into the record and prints the entry announcement.
    Relay that announcement verbatim in spirit: hold-for-return only, no phone channel, anything that needs the captain waits for their return, N clauses recorded and M refused, and that recorded clauses are held for the return brief and are not executed by this release.
    With no words, run `propose` and `confirm` back to back; the announcement is the same.
-   Re-invoking `/afk` while already away with no new words is a refresh and leaves the standing record untouched; new words replace the record after the same read-back, and the earlier record is archived.
+   Re-invoking `/afk` while already away with no new words is a refresh and leaves the standing record untouched; new words replace the mandate after the same read-back, preserve the original session entry, and archive the superseded mandate for the return brief.
 4. **Per harness, after the record exists:**
    - **Pi and pi-signed**: stop here.
      The away daemon is no longer launched on Pi; the ordinary supervision session (`docs/pi-supervision-branch.md`) keeps running with the record present, and `bin/fm-afk-launch.sh start` refuses on these harnesses.

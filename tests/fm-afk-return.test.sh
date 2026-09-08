@@ -392,6 +392,31 @@ test_return_brief_composes_from_record_store_and_held_set() {
   pass "the return brief renders health, mandate, waiting, could-not-fix, handled, and cost from durable records, and the gate shrinks to what the away session could not fix"
 }
 
+test_return_brief_keeps_refresh_history() {
+  local dir out first_epoch
+  dir="$TMP_ROOT/brief-refresh"
+  install_runner "$dir"
+  contract_in "$dir" propose --words 'first mandate' \
+    --clause 'merge task first PR when checks green' >/dev/null 2>&1 || fail "could not propose the first mandate"
+  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the first mandate"
+  first_epoch=$(contract_in "$dir" field entered_epoch)
+  outcome_in "$dir" append --task first --verdict routine \
+    --summary 'completed before the mandate refresh' --wake 'signal: first.status' >/dev/null \
+    || fail "could not seed the pre-refresh outcome"
+  contract_in "$dir" propose --words 'replacement mandate' \
+    --clause 'wake-me task second when at 2026-09-08T08:00Z' >/dev/null 2>&1 || fail "could not propose the replacement mandate"
+  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the replacement mandate"
+  [ "$(contract_in "$dir" field entered_epoch)" = "$first_epoch" ] || fail "refresh changed the away-window boundary"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "refreshed posture return did not clear: $out"
+  assert_contains "$out" 'merge task first PR when checks green - superseded at ' "the superseded mandate was omitted"
+  assert_contains "$out" 'wake-me task second when at 2026-09-08T08:00Z - recorded' "the final mandate was omitted"
+  assert_contains "$out" 'first: completed before the mandate refresh' "the pre-refresh outcome was omitted"
+  [ -f "$dir/home/state/afk-contracts/$first_epoch.afk-contract" ] || fail "return did not archive the final session record at the canonical path"
+  pass "a refreshed posture keeps its original window, superseded mandate, and earlier outcomes"
+}
+
 test_return_guard_refuses_while_the_record_exists() {
   local dir out rc
   dir="$TMP_ROOT/guard-record"
@@ -451,6 +476,7 @@ test_evidence_publication_failure_preserves_wake_for_redrain
 test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown
 test_return_brief_composes_from_record_store_and_held_set
+test_return_brief_keeps_refresh_history
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_without_a_record_reports_the_legacy_flag

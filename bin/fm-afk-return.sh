@@ -13,8 +13,9 @@
 # (bin/fm-afk-contract.sh), the supervision outcome store
 # (bin/fm-branch-outcome.sh), the held set in the backlog (tasks-axi), and the
 # status logs. Its order is fixed: supervisor health across the away window
-# first, then every mandate clause the captain recorded (this release records
-# clauses and does not execute them, and the brief says so), then what is
+# first, then every mandate clause the captain recorded, including superseded
+# in-session read-backs (this release records clauses and does not execute them,
+# and the brief says so), then what is
 # waiting on the captain, then what was tried and failed or could not be fixed,
 # then what the away session handled, then cost. The health snapshot is taken
 # BEFORE the daemon shutdown so the shutdown itself cannot read as a gap.
@@ -28,7 +29,9 @@
 # Captain-verdict outcomes are listed under "waiting on you", but cannot exempt
 # a blocker because decision-key provenance is deferred to phase 4
 # (fm-afk-clauses-execute-r1). Away-window attribution uses second-resolution
-# epochs; a durable sequence boundary is deferred to that phase as well.
+# epochs; a durable sequence boundary and archive-chain identity are deferred to
+# that phase as well. Replacement records carry the original entry boundary and
+# superseded mandates are included as the phase-1 fail-safe.
 #
 # The durable state/.afk-return-catchup file is written BEFORE daemon shutdown,
 # so a crash between stopping, wake presentation, and blocker handling fails
@@ -248,8 +251,39 @@ strip_axi_help() {
   awk '/^help\[/ { skip = 1; next } skip && /^  / { next } { skip = 0; print }'
 }
 
+MANDATE_COUNT=0
+render_mandate_record() {  # <record> [superseded-time]
+  local record=$1 superseded=${2:-} id action object when stop text missing suffix=""
+  [ -z "$superseded" ] || suffix=" - superseded at $superseded"
+  while IFS="$(printf '\t')" read -r id action object when stop; do
+    [ -n "$id" ] || continue
+    MANDATE_COUNT=$((MANDATE_COUNT + 1))
+    text="$id. $action $object when $when"
+    [ "$stop" = - ] || text="$text stop $stop"
+    printf '  - %s%s - recorded, not executed by this release\n' "$text" "$suffix"
+  done <<EOF
+$("$CONTRACT" clauses --path "$record")
+EOF
+  while IFS="$(printf '\t')" read -r id text missing; do
+    [ -n "$id" ] || continue
+    MANDATE_COUNT=$((MANDATE_COUNT + 1))
+    printf '  - %s. "%s"%s - refused at entry: missing %s\n' "$id" "$text" "$suffix" "$missing"
+  done <<EOF
+$("$CONTRACT" refused --path "$record")
+EOF
+  text=$("$CONTRACT" words --path "$record")
+  if [ -n "$text" ]; then
+    if [ -n "$superseded" ]; then
+      printf '  your words superseded at %s:\n' "$superseded"
+    else
+      printf '  your words at entry:\n'
+    fi
+    printf '%s\n' "$text" | sed 's/^/    /'
+  fi
+}
+
 render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
-  local evidence=$1 blockers=$2 since=$3 now record id action object when stop text missing
+  local evidence=$1 blockers=$2 since=$3 now record superseded superseded_at archive_dir stamp
   local tag task key summary count routine captain live held_err last verb rows
   now=$(date +%s)
   printf '=== Return brief'
@@ -265,31 +299,20 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
   # 2. the mandate.
   printf 'Mandate clauses:\n'
   record=""
+  MANDATE_COUNT=0
   [ -z "$since" ] || record=$("$CONTRACT" archived "$since" 2>/dev/null || true)
   if [ -n "$record" ]; then
-    count=0
-    while IFS="$(printf '\t')" read -r id action object when stop; do
-      [ -n "$id" ] || continue
-      count=$((count + 1))
-      text="$id. $action $object when $when"
-      [ "$stop" = - ] || text="$text stop $stop"
-      printf '  - %s - recorded, not executed by this release\n' "$text"
-    done <<EOF
-$("$CONTRACT" clauses --path "$record")
-EOF
-    while IFS="$(printf '\t')" read -r id text missing; do
-      [ -n "$id" ] || continue
-      count=$((count + 1))
-      printf '  - %s. "%s" - refused at entry: missing %s\n' "$id" "$text" "$missing"
-    done <<EOF
-$("$CONTRACT" refused --path "$record")
-EOF
-    [ "$count" -gt 0 ] || printf '  (none recorded)\n'
-    text=$("$CONTRACT" words --path "$record")
-    if [ -n "$text" ]; then
-      printf '  your words at entry:\n'
-      printf '%s\n' "$text" | sed 's/^/    /'
-    fi
+    archive_dir=$(fm_afk_contract_archive_dir "$STATE")
+    for superseded in "$archive_dir/$since-superseded-"*.afk-contract; do
+      [ -f "$superseded" ] || continue
+      stamp=${superseded##*/$since-superseded-}
+      stamp=${stamp%%-*}
+      stamp=${stamp%.afk-contract}
+      case "$stamp" in ''|*[!0-9]*) superseded_at=unknown ;; *) superseded_at=$(epoch_to_iso "$stamp") ;; esac
+      render_mandate_record "$superseded" "$superseded_at"
+    done
+    render_mandate_record "$record"
+    [ "$MANDATE_COUNT" -gt 0 ] || printf '  (none recorded)\n'
   else
     printf '  (no away-posture record for this window; legacy away flag only)\n'
   fi
