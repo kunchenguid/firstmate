@@ -124,11 +124,20 @@ FM_LINT_MEM_MECHANISM=
 # memory ceiling at all rather than a silently wrong one; the wall-clock
 # timeout still bounds every file there, and fm_lint_resolve_mem_mechanism
 # reports the gap once per process instead of claiming an enforcement that
-# is not happening.
+# is not happening. A responsive user manager is not sufficient on its own:
+# a host can have `systemd --user` running yet refuse the actual transient
+# scope (no cgroup delegation, `MemoryMax`/`MemorySwapMax` not settable), in
+# which case every per-file `systemd-run` launch would fail before ShellCheck
+# ever starts. The probe launches a real, trivial scope with the same
+# properties fm_lint_run_one_attempt uses, so a host that can respond to
+# `systemctl --user show-environment` but cannot actually honor the ceiling
+# still falls back to timeout-only linting instead of failing every file.
 fm_lint_resolve_mem_mechanism() {
   [ -z "$FM_LINT_MEM_MECHANISM" ] || return 0
   if [ "$(uname -s)" = Linux ] && command -v systemd-run >/dev/null 2>&1 \
-    && systemctl --user show-environment >/dev/null 2>&1
+    && systemctl --user show-environment >/dev/null 2>&1 \
+    && systemd-run --user --scope --quiet -p MemoryMax=64M -p MemorySwapMax=0 \
+      -- true >/dev/null 2>&1
   then
     FM_LINT_MEM_MECHANISM=systemd
   else
@@ -362,7 +371,7 @@ fm_lint_run_one_file() {  # <mem-kb> <timeout-s> <output-file> <path> -- <shellc
     fallback_rc=$FM_LINT_ATTEMPT_RC
     fallback_timed_out=$FM_LINT_ATTEMPT_TIMED_OUT
     if ! fm_lint_is_ceiling_failure "$fallback_timed_out" "$fallback_rc" "$fallback_current"; then
-      printf 'fm-lint.sh: %s exceeded its bound analyzing every sourced file (--external-sources); retried without it and finished cleanly (narrower analysis; see docs/fm-lint-external-sources-fallback.md).\n' \
+      printf 'fm-lint.sh: %s exceeded its bound analyzing every sourced file (--external-sources); retried without it and completed narrower analysis (see docs/fm-lint-external-sources-fallback.md).\n' \
         "$path" >> "$output"
       cat "$fallback_current" >> "$output"
       rm -f "$current" "$fallback_current"
