@@ -1268,27 +1268,6 @@ summary_file_read() {  # <file> <expected-home> <output-file>
   return 0
 }
 
-summary_file_has_schema() {  # <file> <expected-home> <schema>
-  local file=$1 home=$2 schema=$3 captured bytes
-  [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  captured=$(umask 077; mktemp "$SNAPSHOT_COLLECT_DIR/.schema-summary.XXXXXX") || return 1
-  if ! LC_ALL=C head -c "$((FM_SNAPSHOT_SECONDMATE_MAX_BYTES + 1))" "$file" > "$captured"; then
-    rm -f -- "$captured"
-    return 1
-  fi
-  bytes=$(LC_ALL=C wc -c < "$captured" | tr -d ' ')
-  case "$bytes" in
-    ''|*[!0-9]*) rm -f -- "$captured"; return 1 ;;
-  esac
-  if [ "$bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ] \
-    || ! jq -e -s --arg home "$home" --arg schema "$schema" '
-      length == 1 and .[0].schema == $schema and .[0].home == $home
-    ' "$captured" >/dev/null 2>&1; then
-    rm -f -- "$captured"
-    return 1
-  fi
-  rm -f -- "$captured"
-}
 
 summary_file_oversized() {  # <file>
   local bytes
