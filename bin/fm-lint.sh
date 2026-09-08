@@ -22,8 +22,11 @@
 # That same default path runs bin/fm-prepush-voice-guard.sh, which reads back
 # every commit message not yet on the default branch and refuses firstmate's
 # internal voice before the first push. It lives here because .no-mistakes.yaml pins
-# commands.lint to this script and the gate runs lint last before push, so this
-# is the final firstmate-owned code to see the gate's own fix-agent commits.
+# commands.lint to this script and the gate runs lint last before its first
+# push, so it reads the commits made during the preceding review, test, and
+# document steps. The later CI step can add commits after that push and is not
+# covered; docs/architecture.md "Internal-voice refusal before the first push"
+# owns that declared gap.
 #
 # With no explicit paths, the file set and source-following posture depend
 # on context:
