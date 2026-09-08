@@ -42,6 +42,7 @@ The summary is normalized Unicode, stripped of ANSI and control characters, coll
 The complete canonical event including its newline is capped at 8 KiB.
 Consumers must render `summary` as inert text and make links only from the structured `refs` allowlist.
 The current reference keys are `pr_url`, `report_id`, `report_path`, and `branch_outcome_seq`; unknown keys are corruption, not future-looking passthrough data.
+The `pr_url` reference accepts only the canonical GitHub pull-request and GitLab merge-request URL forms already owned by [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh); other hosts, userinfo, ports, query strings, fragments, encodings, and extra path segments fail closed.
 
 The P0 spool has a hard 10,000-event ceiling, so its maximum serialized journal is 81,920,000 bytes.
 It does not prune or reuse sequence numbers automatically.

@@ -19,8 +19,7 @@ const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
   /\b(?:Bearer|Authorization\s*:\s*Bearer)\s+[A-Za-z0-9._~+/=-]{12,}/gi,
-  /\b[A-Z][A-Z0-9_]{1,127}\s*=\s*(?:"[A-Za-z][A-Za-z0-9+.-]{1,31}:\/\/[^"\s\/@]+@[^"\s]+"|'[A-Za-z][A-Za-z0-9+.-]{1,31}:\/\/[^'\s\/@]+@[^'\s]+'|[A-Za-z][A-Za-z0-9+.-]{1,31}:\/\/[^\s\/@]+@[^\s,;]+)/gi,
-  /\b(?=[A-Z][A-Z0-9_]{1,127}\s*=)(?=[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL|API_KEY|ACCESS_KEY|PRIVATE_KEY))[A-Z][A-Z0-9_]{1,127}\s*=\s*(?:"[^"]{0,4096}"|'[^']{0,4096}'|[^\s,;]{1,4096})/gi,
+  /\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*=\s*(?:"[^"]{0,4096}"|'[^']{0,4096}'|[^\s,;]{1,4096})/g,
   /\b(?:password|passwd|api[_ -]?key|access[_ -]?token|pairing[_ -]?token|token|secret)\s*[:=]\s*[^\s,;]{6,}/gi,
 ];
 

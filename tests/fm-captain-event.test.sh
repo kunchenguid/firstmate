@@ -142,11 +142,11 @@ long=$(python3 - <<'PY'
 print("🧭" * 700)
 PY
 )
-primary_args pi:bounded $'\033[31mLine one\033[0m\nLine two token=supersecretvalue AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY database_password=hunter2 database_url=postgres://alice:dbpass@db.example/prod ordinary prose '
-PRIMARY_ARGS+=(--summary-truncated true --ref pr_url=https://example.test/pull/7 --ref report_id=soak-report --ref report_path=data/soak-report/report.md --ref branch_outcome_seq=9)
+primary_args pi:bounded $'\033[31mLine one\033[0m\nLine two token=supersecretvalue AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod ordinary prose '
+PRIMARY_ARGS+=(--summary-truncated true --ref pr_url=https://github.com/example/repo/pull/7 --ref report_id=soak-report --ref report_path=data/soak-report/report.md --ref branch_outcome_seq=9)
 # Replace the summary argument with a value that exercises both redaction and
 # the Unicode cap without risking shell byte slicing.
-PRIMARY_ARGS[15]=$'\033[31mLine one\033[0m\nLine two \u202etoken=supersecretvalue AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY database_password=hunter2 database_url=postgres://alice:dbpass@db.example/prod ordinary prose '"$long"
+PRIMARY_ARGS[15]=$'\033[31mLine one\033[0m\nLine two \u202etoken=supersecretvalue AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod ordinary prose '"$long"
 FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "bounded append failed"
 row=$(FM_HOME="$home" "$OUTBOX" read --after 0)
 printf '%s\n' "$row" | jq -e '
@@ -156,6 +156,7 @@ printf '%s\n' "$row" | jq -e '
   and (.summary | contains("supersecretvalue") | not)
   and (.summary | contains("wJalrXUtnFEMI") | not)
   and (.summary | contains("hunter2") | not)
+  and (.summary | contains("privatevalue") | not)
   and (.summary | contains("dbpass") | not)
   and (.summary | contains("ordinary prose"))
   and (.refs | keys) == ["branch_outcome_seq","pr_url","report_id","report_path"]
@@ -180,14 +181,20 @@ primary_args pi:bad-url bad
 PRIMARY_ARGS+=(--ref pr_url=http://example.test/7)
 FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null 2>&1 \
   && fail "non-https PR reference was accepted"
+primary_args pi:gitlab-url safe
+PRIMARY_ARGS+=(--ref pr_url=https://gitlab.example.test/team/repo/-/merge_requests/8)
+FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null \
+  || fail "canonical GitLab MR reference was rejected"
 for unsafe_url in \
+  'https://example.test/pull/7' \
   'https://user:password@example.test/pull/7' \
-  'https://example.test/pull/7?access_token=supersecretvalue' \
-  'https://example.test/pull/7#access_token=supersecretvalue' \
-  'https://example.test/pull/7/access_token=supersecretvalue' \
-  'https://example.test/pull/7/access_token%3Dsupersecretvalue' \
-  'https://example.test/pull/7?' \
-  'https://example.test/pull/7#'; do
+  'https://github.com/example/repo/pull/7?access_token=supersecretvalue' \
+  'https://github.com/example/repo/pull/7#access_token=supersecretvalue' \
+  'https://github.com/example/repo/pull/7/access_token/supersecretvalue' \
+  'https://github.com/example/repo/pull/7/access_token=supersecretvalue' \
+  'https://github.com/example/repo/pull/7/access_token%3Dsupersecretvalue' \
+  'https://github.com/example/repo/pull/7?' \
+  'https://github.com/example/repo/pull/7#'; do
   primary_args "pi:unsafe-url-$RANDOM" bad
   PRIMARY_ARGS+=(--ref "pr_url=$unsafe_url")
   FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null 2>&1 \
@@ -389,7 +396,7 @@ installCaptainEventPublisher(pi, {
 });
 const message = {
   role: "assistant",
-  content: [{ type: "text", text: "Ordinary prose AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY database_password=hunter2 database_url=postgres://alice:dbpass@db.example/prod remains" }],
+  content: [{ type: "text", text: "Ordinary prose AwS_SeCrEt_AcCeSs_KeY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DB_PASS=hunter2 harmless_name=privatevalue database_url=postgres://alice:dbpass@db.example/prod remains" }],
   stopReason: "stop",
   timestamp: 1,
 };
@@ -401,7 +408,7 @@ import sys
 
 args = open(sys.argv[1], "rb").read().split(b"\0")[:-1]
 summary = args[args.index(b"--summary") + 1].decode()
-assert summary == "Ordinary prose [REDACTED] [REDACTED] [REDACTED] remains", summary
+assert summary == "Ordinary prose [REDACTED] [REDACTED] [REDACTED] [REDACTED] remains", summary
 PY
 
   home=$(new_home pi-producer-disabled)

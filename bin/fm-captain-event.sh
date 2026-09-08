@@ -101,7 +101,6 @@ import time
 import unicodedata
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit
 
 try:
     import fcntl
@@ -132,6 +131,8 @@ SLUG_RE = re.compile(r"^(?!\.)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 PRODUCER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 EVENT_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+GITHUB_PR_RE = re.compile(r"^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$")
+GITLAB_MR_RE = re.compile(r"^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$")
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)", re.I),
@@ -139,8 +140,7 @@ SECRET_PATTERNS = [
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\b(?:Bearer|Authorization\s*:\s*Bearer)\s+[A-Za-z0-9._~+/=-]{12,}", re.I),
-    re.compile(r'''\b[A-Z][A-Z0-9_]{1,127}\s*=\s*(?:"[A-Za-z][A-Za-z0-9+.-]{1,31}://[^"\s/@]+@[^"\s]+"|'[A-Za-z][A-Za-z0-9+.-]{1,31}://[^'\s/@]+@[^'\s]+'|[A-Za-z][A-Za-z0-9+.-]{1,31}://[^\s/@]+@[^\s,;]+)''', re.I),
-    re.compile(r'''\b(?=[A-Z][A-Z0-9_]{1,127}\s*=)(?=[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL|API_KEY|ACCESS_KEY|PRIVATE_KEY))[A-Z][A-Z0-9_]{1,127}\s*=\s*(?:"[^"]{0,4096}"|'[^']{0,4096}'|[^\s,;]{1,4096})''', re.I),
+    re.compile(r'''\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*=\s*(?:"[^"]{0,4096}"|'[^']{0,4096}'|[^\s,;]{1,4096})'''),
     re.compile(r"\b(?:password|passwd|api[_ -]?key|access[_ -]?token|pairing[_ -]?token|token|secret)\s*[:=]\s*[^\s,;]{6,}", re.I),
 ]
 
@@ -288,6 +288,33 @@ def clean_summary(value):
     return value
 
 
+def canonical_pr_url(value):
+    github = GITHUB_PR_RE.fullmatch(value)
+    if github:
+        owner, repo, _number = github.groups()
+        return "--" not in owner and repo not in {".", ".."}
+    gitlab = GITLAB_MR_RE.fullmatch(value)
+    if not gitlab:
+        return False
+    host, path, _number = gitlab.groups()
+    if host == "github.com" or host.startswith(".") or host.endswith(".") or ".." in host:
+        return False
+    if any(len(label) > 63 or label.startswith("-") or label.endswith("-") for label in host.split(".")):
+        return False
+    if len(path) < 3 or len(path) > 1024 or path.startswith("/") or path.endswith("/") or "//" in path:
+        return False
+    segments = path.split("/")
+    if len(segments) < 2 or len(segments) > 20:
+        return False
+    return all(
+        1 <= len(segment) <= 255
+        and segment not in {".", ".."}
+        and not segment.startswith("-")
+        and not segment.endswith((".git", ".atom"))
+        for segment in segments
+    )
+
+
 def parse_refs(values):
     refs = {}
     for item in values:
@@ -301,18 +328,8 @@ def parse_refs(values):
         if key == "pr_url":
             if len(value) > 2048 or any(
                 ch.isspace() or unicodedata.category(ch).startswith("C") for ch in value
-            ) or any(marker in value for marker in "?#=%") or clean_summary(value) != value:
-                raise OutboxError("pr_url is invalid or oversized")
-            try:
-                parsed = urlsplit(value)
-                hostname = parsed.hostname
-            except ValueError as error:
-                raise OutboxError("pr_url is malformed") from error
-            if (
-                parsed.scheme != "https" or not hostname or parsed.username or parsed.password
-                or parsed.query or parsed.fragment
-            ):
-                raise OutboxError("pr_url must be a credential-free canonical https URL")
+            ) or not canonical_pr_url(value):
+                raise OutboxError("pr_url must be a canonical supported PR or MR URL")
             refs[key] = value
         elif key == "report_id":
             if not SLUG_RE.fullmatch(value):
