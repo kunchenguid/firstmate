@@ -459,6 +459,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     herdr)
       [ "$binding" = "$id" ] || {
         echo "REFUSED: legacy Herdr endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
+        echo "Verify and record ownership with bin/fm-endpoint-rebind.sh $id before retrying cleanup." >&2
         return 1
       }
       recorded_session=$(fm_backend_meta_exact_value "$meta" herdr_session) || recorded_session=
