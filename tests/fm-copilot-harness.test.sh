@@ -478,6 +478,18 @@ test_notification_injects_watcher_followup_only_for_watcher_arm_completion() {
     ./bin/fm-copilot-hook.sh notification < "$dir/state-rebind.json")
   [ -z "$out" ] || fail "an FM_STATE_OVERRIDE-rebound watcher completion must stay inert, got: $out"
 
+  jq -n --arg cmd $'printf ready\nexec ./bin/fm-watch-arm.sh' \
+    '{notification_type:"shell_completed",command:$cmd}' > "$dir/multiline-command.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/multiline-command.json")
+  [ -z "$out" ] || fail "a multiline prefixed watcher completion must stay inert, got: $out"
+
+  jq -n --arg cmd $'{ printf ready; }\nexec ./bin/fm-watch-arm.sh' \
+    '{notification_type:"shell_completed",commandLine:$cmd}' > "$dir/multiline-commandline.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/multiline-commandline.json")
+  [ -z "$out" ] || fail "a multiline bundled watcher completion in commandLine must stay inert, got: $out"
+
   printf '%s' '{"notification_type":"shell_completed","command":"sleep 1; printf done > background-result"}' > "$dir/other.json"
   out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
     ./bin/fm-copilot-hook.sh notification < "$dir/other.json")

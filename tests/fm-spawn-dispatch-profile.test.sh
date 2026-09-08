@@ -153,18 +153,41 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
 }
 
 test_non_copilot_launch_clears_inherited_copilot_markers() {
-  local rec id out status launch
-  id=profile-claude-copilot-markers-z1c
-  rec=$(make_spawn_case profile-claude-copilot-markers claude "$id")
-  read_case_record "$rec"
+  local harness rec id out status launch
+  for harness in claude rovo omp; do
+    id="profile-$harness-copilot-markers-z1c"
+    rec=$(make_spawn_case "profile-$harness-copilot-markers" "$harness" "$id")
+    read_case_record "$rec"
+    case "$harness" in
+      rovo)
+        cat > "$FAKEBIN_DIR/rovo" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+        chmod +x "$FAKEBIN_DIR/rovo"
+        ;;
+      omp)
+        make_spawn_pi_probe "$FAKEBIN_DIR" omp
+        ;;
+    esac
 
-  out=$(COPILOT_CLI=1 COPILOT_AGENT_SESSION_ID=s1 COPILOT_LOADER_PID=42 COPILOT_CLI_BINARY_VERSION=1 \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "claude spawn under Copilot markers should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION" \
-    "non-copilot launch must clear inherited Copilot identity markers"
+    out=$(COPILOT_CLI=1 COPILOT_AGENT_SESSION_ID=s1 COPILOT_LOADER_PID=42 COPILOT_CLI_BINARY_VERSION=1 \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    case "$harness" in
+      rovo)
+        [ "$status" -ne 0 ] || fail "rovo's fake pane should still fail its ready gate after logging the launch command"
+        assert_contains "$out" "rovo did not show a verified ready signal" \
+          "rovo's fake-pane readiness failure changed unexpectedly"
+        ;;
+      *)
+        expect_code 0 "$status" "$harness spawn under Copilot markers should succeed"
+        ;;
+    esac
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION" \
+      "$harness launch must clear inherited Copilot identity markers"
+  done
   pass "non-copilot launches clear inherited Copilot identity markers"
 }
 

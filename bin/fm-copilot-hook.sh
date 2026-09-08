@@ -34,12 +34,11 @@ copilot_notification_has_watcher_completion() {
   home=$(copilot_hook_home "$root")
   policy="$SCRIPT_DIR/fm-arm-command-policy.mjs"
   [ -f "$policy" ] || return 1
-  while IFS= read -r command; do
+  while IFS= read -r -d '' command; do
     [ -n "$command" ] || continue
     verdict=$(node "$policy" watcher-arm --root "$root" --home "$home" --command "$command" 2>/dev/null || true)
     [ "$verdict" = watch-arm ] && return 0
-  done <<EOF
-$(printf '%s' "$payload" | jq -r '
+  done < <(printf '%s' "$payload" | jq -j '
   [
     .command,
     .commandLine,
@@ -55,10 +54,9 @@ $(printf '%s' "$payload" | jq -r '
     .data.command_line
   ]
   | map(select(type == "string" and length > 0))
-  | unique
-  | .[]
+  | unique[]
+  | ., "\u0000"
 ' 2>/dev/null)
-EOF
   return 1
 }
 

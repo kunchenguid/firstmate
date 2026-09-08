@@ -3891,7 +3891,7 @@ case "$HARNESS" in
     ;;
 esac
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
     LAUNCH="env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION $LAUNCH"
     ;;
 esac
