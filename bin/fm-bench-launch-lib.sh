@@ -103,6 +103,7 @@ fm_refuse_unconfined_remote_benchmark_entrant() {  # <task-id>
 
 fm_bench_wrap_entrant_launch() {  # <task-id> <worktree> <shell-command>
   local id=${1-} worktree=${2-} command=${3-} root wrapped isolation_hash receipt_hash
+  local harness=${4-} model=${5-} effort=${6-} raw=${7:-0} kind=${8:-ship}
   case "$id" in
     bench-*) ;;
     *) printf '%s' "$command"; return 0 ;;
@@ -116,7 +117,8 @@ fm_bench_wrap_entrant_launch() {  # <task-id> <worktree> <shell-command>
     echo "error: benchmark entrant $id preflight does not cover the current isolation layout; launch refused" >&2
     return 1
   fi
-  wrapped=$(python3 - "$root/isolation.json" "$id" "$worktree" "$command" <<'PY'
+  wrapped=$(python3 - "$root/isolation.json" "$id" "$worktree" "$command" \
+    "$harness" "$model" "$effort" "$raw" "$kind" "${9-}" "${10-}" "${11-}" "${12-}" "${13-}" <<'PY'
 import json
 import os
 import shlex
@@ -124,7 +126,7 @@ import shutil
 import sys
 from pathlib import Path
 
-path, entrant_id, worktree, command = sys.argv[1:]
+path, entrant_id, worktree, command, harness, model, effort, raw, kind, brief, code_root, state, turnend, binary = sys.argv[1:]
 try:
     record = json.loads(Path(path).read_text(encoding="utf-8"))
 except (OSError, json.JSONDecodeError) as exc:
@@ -135,9 +137,24 @@ if not isinstance(wrapper, list) or not wrapper or not all(isinstance(item, str)
     raise SystemExit("isolation.json has no launch-capable confinement wrapper")
 if not isinstance(entrants, list):
     raise SystemExit("isolation.json has no provisioned entrants")
-entrant = next((item for item in entrants if isinstance(item, dict) and item.get("id") == entrant_id), None)
+matched_entrants = [item for item in entrants if isinstance(item, dict) and item.get("id") == entrant_id]
+entrant = matched_entrants[0] if len(matched_entrants) == 1 else None
 if entrant is None:
     raise SystemExit(f"isolation.json has no entrant {entrant_id}")
+plan = json.loads(Path(path).with_name("benchmark.json").read_text(encoding="utf-8"))
+track = plan.get("tracks", {}).get(entrant.get("track"), {})
+role = entrant.get("role", "entrant")
+candidates = track.get("entrants", []) if role == "entrant" else [track.get("baseline")] if role == "baseline" else []
+matches = [item for item in candidates if isinstance(item, dict) and item.get("name") == entrant.get("candidate")]
+if len(matches) != 1:
+    raise SystemExit("entrant task id is not bound to exactly one planned candidate")
+candidate = matches[0]
+if (harness, model, effort or None) != (candidate.get("harness"), candidate.get("model"), candidate.get("effort")):
+    raise SystemExit("resolved launch harness/model/effort differs from the planned candidate")
+if raw != "0" or kind == "secondmate":
+    raise SystemExit("benchmark entrants require a standard worker launch template")
+if harness not in ("claude", "codex", "opencode", "pi", "pi-signed", "cursor", "gemini"):
+    raise SystemExit("benchmark confinement does not support this harness's launch dependencies")
 declared_root = Path(str(entrant.get("root", ""))).resolve()
 if not declared_root.is_dir() or Path(worktree).resolve() != declared_root:
     raise SystemExit("spawn worktree is not the preflight-proven entrant root")
@@ -169,6 +186,56 @@ if "/" in launcher:
         raise SystemExit(f"verified confinement wrapper is unavailable: {launcher}")
 elif shutil.which(launcher) is None:
     raise SystemExit(f"verified confinement wrapper is unavailable: {launcher}")
+if brief:
+    import tempfile
+
+    stage = Path(tempfile.mkdtemp(prefix="launch-", dir=private["private_session"]))
+    stage.chmod(0o700)
+    staged_state = stage / "state"
+    staged_state.mkdir()
+    staged_bin = stage / "bin"
+    staged_bin.mkdir()
+    def quote(value):
+        return "'" + str(value).replace("'", "'\\''") + "'"
+    rewrites = {
+        brief: str(stage / "brief.md"),
+        str(Path(code_root) / "bin" / "fm-operational-input.sh"): str(staged_bin / "fm-operational-input.sh"),
+        str(Path(code_root) / "bin" / "fm-busy-event.sh"): str(staged_bin / "fm-busy-event.sh"),
+        state: str(staged_state),
+        str(Path(state).resolve()): str(staged_state),
+        turnend: str(staged_state / Path(turnend).name),
+    }
+    def rewrite(text):
+        for old, new in sorted(rewrites.items(), key=lambda pair: -len(pair[0])):
+            if old:
+                text = text.replace(quote(old), quote(new)).replace(old, new)
+        return text
+    try:
+        shutil.copyfile(brief, stage / "brief.md")
+        for name in ("fm-operational-input.sh", "fm-busy-event.sh", "fm-busy-lib.sh"):
+            shutil.copyfile(Path(code_root) / "bin" / name, staged_bin / name)
+            (staged_bin / name).chmod(0o700)
+        for suffix in ("pi-ext.ts", "omp-ext.ts", "gemini-settings.json", "busy-gen", "busy-state"):
+            source = Path(state) / f"{entrant_id}.{suffix}"
+            if source.is_file():
+                (staged_state / source.name).write_text(rewrite(source.read_text(encoding="utf-8")), encoding="utf-8")
+        for relative in (".claude/settings.local.json", ".opencode/plugins/fm-busy-state.js"):
+            source = declared_root / relative
+            if source.is_file():
+                source.write_text(rewrite(source.read_text(encoding="utf-8")), encoding="utf-8")
+        command = rewrite(command)
+        if harness in ("pi", "pi-signed"):
+            extension = staged_state / f"{entrant_id}.pi-ext.ts"
+            if not extension.is_file():
+                raise SystemExit("the Pi launch extension is unavailable")
+            runtime_extension = f"/tmp/fm-bench-{stage.name}.ts"
+            command = command.replace(quote(extension), quote(runtime_extension))
+            command = f"cp {quote(extension)} {quote(runtime_extension)} && " + command
+        if binary:
+            command = command.replace(quote(binary), shlex.quote(Path(binary).name))
+    except (OSError, UnicodeError):
+        shutil.rmtree(stage)
+        raise
 env = [f"BENCH_PRIVATE_ROOT={declared_root}", f"BENCH_PRIVATE_OBJECT_STORE={private['private_object_store']}", f"BENCH_PRIVATE_TMP={private['private_tmp']}", f"BENCH_PRIVATE_HOME={private['private_home']}", f"BENCH_PRIVATE_SESSION={private['private_session']}"]
 print(" ".join(shlex.quote(item) for item in ["env", *env, *argv, "/bin/sh", "-lc", command]))
 PY

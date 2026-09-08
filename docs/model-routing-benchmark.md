@@ -30,11 +30,18 @@ Every frozen track positively declares whether it needs a baseline, neutral capt
 Neutral capture is itself a specification-requiring design seat, so a capture track cannot opt out of its author and audit evidence.
 Every track emits a spec-seat verdict, while a specification-required track must name its author and family, keep that author out of its judging and entrant seats, disclose same-family adjacency, and carry one independent accepted pre-freeze audit per packet.
 
+Both archive validation and promotion require the current plan to match its freeze and passing preflight receipt before interpreting results.
+They share one failure-policy validator: voids must match their frozen disposition, sibling access must carry a blocker, and candidate-caused failures must carry zero deterministic and panel scores.
+
 ## Where the refusal actually bites
 
 A gate an operator can forget to run is not enforcement.
 `bin/fm-bench-launch-lib.sh` is sourced by `bin/fm-spawn.sh` and refuses any task id under the reserved `bench-` prefix unless a passing preflight receipt exists and still matches `benchmark.json`'s current bytes.
-Before delivery, the same launch boundary also verifies `isolation.json` against its receipt hash, resolves the matching entrant, requires the actual worktree and every private path to still equal the preflight-proven layout, and wraps the harness command in the same verified confinement argv that the probes cleared.
+Before delivery, the launch boundary compares the resolved harness, model, and effort with the candidate and role assigned to that task id in the preflight-bound isolation record.
+It stages the brief, operational-input encoder, and task-specific extensions and lifecycle helpers beneath the entrant’s private session directory, then rewrites their launch paths and resolves the harness binary inside the runtime image.
+Pi loads its staged extension from the container’s temporary directory so the extension remains outside the project trust boundary.
+Raw commands, secondmates, and adapters with unsupported launch dependencies are refused.
+The same launch boundary also verifies `isolation.json` against its receipt hash, resolves the matching entrant, requires the actual worktree and every private path to still equal the preflight-proven layout, and wraps the harness command in the same verified confinement argv that the probes cleared.
 An unavailable wrapper or changed path refuses the launch rather than falling back to the ordinary shell command.
 Because the verified wrapper and private paths are local evidence, a remote secondmate route refuses a `bench-` entrant rather than silently crossing to an unconfined remote launch.
 Editing the plan after a pass invalidates every receipt written against it, so a relaxed threshold or a swapped packet cannot ride an old clearance.
@@ -72,10 +79,12 @@ Every execution is blinded: the gate stages the evaluator's own frozen code pack
 The evaluator therefore never learns which record it is being asked to derive, an answer table keyed on the input path matches nothing, and the frozen expected outputs and the `evaluator/execution.json` mapping that keys them are outside the cage entirely.
 Only lstat-verified directories and regular files are staged, so a symlink planted under `scoring/` cannot resolve an expected-output record back inside the cage.
 The evaluator receives only that opaque input, its stdout must equal the separately frozen expected output, and that expected output must bind the evaluator evidence record byte for byte.
-The two records carry different schemas, live under different frozen roots, and are refused when their bytes coincide, so a program that merely cats or echoes its input cannot clear preflight for any choice of fixture bytes.
+The input contract accepts raw pixel buffers and accessibility violations for golden runs, boolean check outcomes for mutation runs, and source identities for capture bindings.
+It rejects expected measurements, score vectors, deltas, and derived result hashes as inputs.
+A program that merely renames the input envelope therefore cannot reproduce the expected result.
 Reproducibility is then executed rather than declared: the same frozen golden input is run a second time through a different opaque path and must reproduce byte-identical output, and there is no authored tolerance that can stand in for that.
-Input dependence is executed too: the gate builds its own form- and length-preserving edit for every perturbable scalar of that golden input, runs them in a stable pointer order, and stops at the first edit that moves the output.
-An evaluator is called input-blind only when no edit to any perturbable scalar changes what it emits, so an evaluator that legitimately ignores one value is not mistaken for one that reads nothing.
+Input dependence is executed too: the gate edits the raw pixel buffers and requires a measured pixel or accessibility result to change.
+Echoing changed provenance or other metadata does not count as measurement dependence.
 Mutation movement and capture bindings are then derived from the executed result rather than from a detached record.
 Every confined invocation - probes, preflight evaluator executions, and restore-drill replays alike - hands the wrapper the operator's own environment, because the wrapper resolves its container runtime there and a stripped environment loses the endpoint an operator on colima, a remote Docker context, or rootless podman actually uses.
 Nothing is granted by doing so: `bin/fm-bench-confine.sh` scrubs the environment that reaches the confined command down to its own allowlist, so the evaluator sees the same fixed environment either way.

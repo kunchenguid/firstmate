@@ -16,7 +16,7 @@ set -u
 
 GATE="$ROOT/bin/fm-bench-gate.sh"
 CONFINE="$ROOT/bin/fm-bench-confine.sh"
-IMAGE=${FM_BENCH_CONFINE_IMAGE:-debian:stable-slim}
+IMAGE=${FM_BENCH_CONFINE_IMAGE:-python:3.12-slim}
 TMP_ROOT=$(fm_test_tmproot fm-bench-gate)
 
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; exit 0; }
@@ -262,6 +262,12 @@ elif isolation.is_file():
     receipt["isolation_sha256"] = hashlib.sha256(isolation.read_bytes()).hexdigest()
 (bench / "preflight.receipt").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
 PY
+}
+
+bind_result_plan() {
+  write_freeze_inputs "$1"
+  run_gate "$1" freeze >/dev/null || fail "result fixture must freeze"
+  write_receipt "$1"
 }
 
 run_gate_env() {  # <env-argument...> -- <bench-dir> <gate> [args...]
@@ -657,8 +663,33 @@ write_evaluator() {  # <bench-dir> [captures]
   cat > "$bench/scoring/evaluator.sh" <<'EOF'
 #!/bin/sh
 [ "${1:-}" = --evaluate ] && [ -f "${2:-}" ] || exit 2
-sed 's/"schema":"fm-bench-evaluator-input.v1","fixture":/"schema":"fm-bench-evaluator-output.v1","result":/' "$2"
+exec python3 "$(dirname "$0")/measure.py" "$2"
 EOF
+  cat > "$bench/scoring/measure.py" <<'PYMEASURE'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+fixture = json.loads(Path(sys.argv[1]).read_text())["fixture"]
+if "reference_pixels" in fixture:
+    reference = bytes.fromhex(fixture["reference_pixels"])
+    observed = bytes.fromhex(fixture["observed_pixels"])
+    result = {"golden_head": fixture["head"],
+              "pixel": sum(a != b for a, b in zip(reference, observed)) / len(reference),
+              "axe": len(fixture["violations"])}
+elif "before_checks" in fixture:
+    before = {key: 10 * sum(values) / len(values) for key, values in fixture["before_checks"].items()}
+    after = {key: 10 * sum(values) / len(values) for key, values in fixture["after_checks"].items()}
+    result = {"dimension": fixture["dimension"], "movement_threshold": 1.0,
+              "scores_before": before, "scores_after": after,
+              "dimension_deltas": {key: after[key] - before[key] for key in before}}
+else:
+    result = dict(fixture)
+    payload = (json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    result["result_hash"] = hashlib.sha256(payload).hexdigest()
+print(json.dumps({"schema": "fm-bench-evaluator-output.v1", "result": result}, sort_keys=True))
+PYMEASURE
   chmod +x "$bench/scoring/evaluator.sh"
   cat > "$e/lock.json" <<'EOF'
 {"browser":"chromium","browser_version":"141.0.7390.54","playwright_version":"1.58.2",
@@ -743,9 +774,19 @@ for record in [
     output_path = bench / "ground-truth" / "evaluator-outputs" / relative
     input_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if relative.parts[0] == "determinism":
+        fixture = {"head": result["golden_head"], "reference_pixels": "00" * 10000,
+                   "observed_pixels": "ff" * 31 + "00" * 9969, "violations": []}
+    elif relative.parts[0] == "mutations":
+        fixture = {"dimension": result["dimension"],
+                   "before_checks": {key: [True] * 10 for key in result["scores_before"]},
+                   "after_checks": {key: [True] * int(value) + [False] * (10 - int(value))
+                                    for key, value in result["scores_after"].items()}}
+    else:
+        fixture = {key: value for key, value in result.items() if key != "result_hash"}
     input_path.write_text(json.dumps({
         "schema": "fm-bench-evaluator-input.v1",
-        "fixture": result,
+        "fixture": fixture,
     }, separators=(",", ":")) + "\n")
     output_path.write_text(json.dumps({
         "schema": "fm-bench-evaluator-output.v1",
@@ -997,6 +1038,7 @@ bench, confine, entrant = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
     "exec_wrapper": [confine, "--mechanism", "none", "--allow", "{root}", "--"],
     "launch_wrapper": [confine, "--mechanism", "none", "--allow", "{root}", "--"],
     "entrants": [{"id": "bench-b1-k7", "root": str(entrant),
+                  "track": "A", "candidate": "Fable 5 High", "role": "entrant",
                   "private_object_store": str(entrant / "objects"),
                   "private_tmp": str(entrant / "tmp"),
                   "private_home": str(entrant / "home with space"),
@@ -1014,13 +1056,84 @@ out=$(FM_BENCH_ROOT="$BENCH" bash -c '
 [ "$out" = "printf untouched" ] || fail "ordinary launch preparation changed the launch command"
 wrapped=$(FM_BENCH_ROOT="$BENCH" bash -c '
   . "$1/bin/fm-bench-launch-lib.sh"
-  fm_bench_wrap_entrant_launch bench-b1-k7 "$2" "printf \"%s|%s|%s\" \"\$BENCH_PRIVATE_ROOT\" \"\$BENCH_PRIVATE_HOME\" \"\$BENCH_PRIVATE_TMP\""
+  fm_bench_wrap_entrant_launch bench-b1-k7 "$2" "printf \"%s|%s|%s\" \"\$BENCH_PRIVATE_ROOT\" \"\$BENCH_PRIVATE_HOME\" \"\$BENCH_PRIVATE_TMP\"" claude fable high
 ' _ "$ROOT" "$ENTRY_ROOT") || fail "a benchmark launch must bind the proven confinement"
 out=$(bash -c "$wrapped") || fail "the bound benchmark launch must execute: $out"
 assert_contains "$out" "$ENTRY_ROOT|$ENTRY_HOME|$ENTRY_ROOT/tmp" "the proven private root, home, and temp reach the entrant"
+for tuple in 'claude opus high' 'pi fable high' 'claude fable low'; do
+  read -r tuple_harness tuple_model tuple_effort <<< "$tuple"
+  out=$(FM_BENCH_ROOT="$BENCH" bash -c '
+    . "$1/bin/fm-bench-launch-lib.sh"
+    fm_bench_wrap_entrant_launch bench-b1-k7 "$2" "touch $2/wrong-model-ran" "$3" "$4" "$5"
+  ' _ "$ROOT" "$ENTRY_ROOT" "$tuple_harness" "$tuple_model" "$tuple_effort" 2>&1) && status=0 || status=$?
+  expect_code 1 "$status" "a changed resolved launch tuple must be refused"
+  assert_contains "$out" "differs from the planned candidate" "the launch binds all three tuple axes"
+done
+assert_absent "$ENTRY_ROOT/wrong-model-ran" "a mismatched model never reaches launch"
+LAUNCH_INPUTS="$BENCH/host inputs"
+mkdir -p "$LAUNCH_INPUTS/bin" "$LAUNCH_INPUTS/state"
+cp "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-busy-event.sh" "$ROOT/bin/fm-busy-lib.sh" "$LAUNCH_INPUTS/bin/"
+printf 'entrant-specific brief\n' > "$LAUNCH_INPUTS/brief.md"
+printf 'extension payload\n' > "$LAUNCH_INPUTS/state/bench-b1-k7.pi-ext.ts"
+wrapped=$(FM_BENCH_ROOT="$BENCH" bash -c '
+  . "$1/bin/fm-bench-launch-lib.sh"
+  command=$(python3 - "$3" <<"PY"
+import shlex, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+print(shlex.quote(str(root / "bin/fm-operational-input.sh")) + " encode launch-brief < " + shlex.quote(str(root / "brief.md")) + "; cat " + shlex.quote(str(root / "state/bench-b1-k7.pi-ext.ts")))
+PY
+)
+  fm_bench_wrap_entrant_launch bench-b1-k7 "$2" "$command" claude fable high 0 ship \
+    "$3/brief.md" "$3" "$3/state" "$3/state/bench-b1-k7.turn-ended"
+' _ "$ROOT" "$ENTRY_ROOT" "$LAUNCH_INPUTS") || fail "launch inputs must stage under the private root"
+rm -rf "$LAUNCH_INPUTS"
+out=$(bash -c "$wrapped") || fail "launch must work after host inputs become unavailable"
+assert_contains "$out" "FIRSTMATE_OP: v1 launch-brief: entrant-specific brief" "the staged encoder delivers the staged brief"
+assert_contains "$out" "extension payload" "the staged extension can be loaded without host state"
+mkdir -p "$LAUNCH_INPUTS/bin" "$LAUNCH_INPUTS/state" "$BENCH/runtime-bin"
+cp "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-busy-event.sh" "$ROOT/bin/fm-busy-lib.sh" "$LAUNCH_INPUTS/bin/"
+printf 'Pi brief\n' > "$LAUNCH_INPUTS/brief.md"
+printf 'Pi extension\n' > "$LAUNCH_INPUTS/state/bench-b1-k7.pi-ext.ts"
+cat > "$BENCH/runtime-bin/pi" <<'EOF'
+#!/bin/sh
+[ "$1" = -e ] && [ -f "$2" ] || exit 1
+case "$2" in "$BENCH_PRIVATE_ROOT"/*) exit 2 ;; esac
+cat "$2"
+rm "$2"
+printf '%s\n' "$3"
+EOF
+chmod +x "$BENCH/runtime-bin/pi"
+python3 - "$BENCH/isolation.json" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+record = json.loads(path.read_text())
+record["entrants"][0]["candidate"] = "GPT 5.6 Sol High"
+path.write_text(json.dumps(record))
+PY
+write_receipt "$BENCH"
+wrapped=$(FM_BENCH_ROOT="$BENCH" bash -c '
+  . "$1/bin/fm-bench-launch-lib.sh"
+  command=$(python3 - "$3" <<"PY"
+import shlex, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+quote = lambda path: shlex.quote(str(root / path))
+print("PATH=" + shlex.quote(str(root.parent / "runtime-bin")) + ":$PATH " + quote("bin/pi") + " -e " + quote("state/bench-b1-k7.pi-ext.ts") + " \"$(" + quote("bin/fm-operational-input.sh") + " encode launch-brief < " + quote("brief.md") + ")\"")
+PY
+)
+  fm_bench_wrap_entrant_launch bench-b1-k7 "$2" "$command" pi openai-codex/gpt-5.6-sol high 0 ship \
+    "$3/brief.md" "$3" "$3/state" "$3/state/bench-b1-k7.turn-ended" "$3/bin/pi"
+' _ "$ROOT" "$ENTRY_ROOT" "$LAUNCH_INPUTS") || fail "Pi dependencies must stage for a confined launch"
+rm -rf "$LAUNCH_INPUTS"
+out=$(PATH="$BENCH/runtime-bin:$PATH" bash -c "$wrapped") || fail "the runtime binary must load the extension outside the project"
+assert_contains "$out" "Pi extension" "the runtime binary receives its extension"
+assert_contains "$out" "launch-brief: Pi brief" "the runtime binary receives its encoded brief"
 python3 - "$BENCH/isolation.json" <<'PY'
 import json, sys
 p = sys.argv[1]; d = json.load(open(p))
+d["entrants"][0]["candidate"] = "Fable 5 High"
 d["leak_marker"] = "FM_BENCH_CHANGED_"
 json.dump(d, open(p, "w"), indent=2, sort_keys=True)
 PY
@@ -1272,12 +1385,12 @@ done
 
 write_isolation() {  # <bench-dir> <mechanism>
   local bench=$1 mechanism=$2
-  python3 - "$bench/isolation.json" "$ROOT/bin/fm-bench-confine.sh" "$mechanism" "$ISO" <<'PY'
+  python3 - "$bench/isolation.json" "$ROOT/bin/fm-bench-confine.sh" "$mechanism" "$ISO" "$IMAGE" <<'PY'
 import json, sys
-path, confine, mechanism, iso = sys.argv[1:5]
+path, confine, mechanism, iso, image = sys.argv[1:]
 json.dump({
     "schema": "fm-bench-isolation.v1",
-    "exec_wrapper": [confine, "--mechanism", mechanism, "--allow", "{root}", "--"],
+    "exec_wrapper": [confine, "--mechanism", mechanism, "--image", image, "--allow", "{root}", "--"],
     "launch_wrapper": [confine, "--purpose", "entrant", "--mechanism", "container",
                        "--image", "firstmate-benchmark-runtime@sha256:test",
                        "--provider-network", "{provider_network}",
@@ -1288,6 +1401,8 @@ json.dump({
     "protected_paths": [f"{iso}/sealed"],
     "entrants": [
         {"id": f"bench-b1-{label}", "root": f"{iso}/{name}",
+         "track": "A", "role": "entrant",
+         "candidate": "Fable 5 High" if label == "k7" else "GPT 5.6 Sol High",
          "private_object_store": f"{iso}/{name}/objects",
          "private_tmp": f"{iso}/{name}/tmp",
          "private_home": f"{iso}/{name}/home",
@@ -1375,8 +1490,8 @@ PY
   run_gate "$BENCH" freeze >/dev/null
   out=$(run_gate "$BENCH" evaluator-execute-verify) && status=0 || status=$?
   expect_code 1 "$status" "self-reported mutation deltas cannot replace executed score movement"
-  assert_contains "$out" "declared deltas differ from executed score vectors" \
-    "the gate derives calibration deltas from evaluator execution"
+  assert_contains "$out" "mutation fixture must contain raw before/after check outcomes" \
+    "the gate refuses scores substituted for raw mutation checks"
   write_evaluator "$BENCH"
   python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -1524,8 +1639,7 @@ program.write_text(
     f"[ -e {contract} ] && exit 8\n"
     f"[ -e {outputs} ] && exit 9\n"
     '[ -e "$here/../evaluator/execution.json" ] && exit 10\n'
-    "sed 's/\"schema\":\"fm-bench-evaluator-input.v1\",\"fixture\":/"
-    "\"schema\":\"fm-bench-evaluator-output.v1\",\"result\":/' \"$2\"\n"
+    'exec python3 "$here/measure.py" "$2"\n'
 )
 program.chmod(0o755)
 contract_path = bench / "evaluator" / "execution.json"
@@ -1570,14 +1684,8 @@ from pathlib import Path
 bench = Path(sys.argv[1])
 program = bench / "scoring" / "evaluator.sh"
 golden = json.loads((bench / "evaluator" / "determinism" / "run-1.json").read_text())
-program.write_text(
-    "#!/bin/sh\n"
-    "[ \"${1:-}\" = --evaluate ] && [ -f \"${2:-}\" ] || exit 2\n"
-    "sed -e 's/\"golden_head\":\"[^\"]*\"/\"golden_head\":\"%s\"/' \\\n"
-    "    -e 's/\"schema\":\"fm-bench-evaluator-input.v1\",\"fixture\":/"
-    "\"schema\":\"fm-bench-evaluator-output.v1\",\"result\":/' \"$2\"\n"
-    % golden["golden_head"]
-)
+measure = bench / "scoring" / "measure.py"
+measure.write_text(measure.read_text().replace('fixture["head"]', repr(golden["golden_head"])))
 program.chmod(0o755)
 contract_path = bench / "evaluator" / "execution.json"
 contract = json.loads(contract_path.read_text())
@@ -1587,7 +1695,7 @@ PY
   run_gate "$BENCH" freeze >/dev/null
   out=$(run_gate "$BENCH" evaluator-execute-verify) \
     || fail "an evaluator that reads a later scalar must not be called input-blind: $out"
-  assert_contains "$out" "edit of /fixture/pixel in determinism/run-1.json moved" \
+  assert_contains "$out" "edit of /fixture/observed_pixels in determinism/run-1.json moved" \
     "the gate escalates past a scalar the evaluator legitimately ignores"
   pass "the dependence probe escalates across every perturbable golden scalar"
 
@@ -1604,19 +1712,8 @@ from pathlib import Path
 bench = Path(sys.argv[1])
 program = bench / "scoring" / "evaluator.sh"
 golden = json.loads((bench / "evaluator" / "determinism" / "run-1.json").read_text())
-normalise = "".join(
-    "    -e 's/\"%s\":[^,}]*/\"%s\":%s/' \\\n"
-    % (key, key, json.dumps(value, separators=(",", ":")))
-    for key, value in sorted(golden.items())
-)
-program.write_text(
-    "#!/bin/sh\n"
-    "[ \"${1:-}\" = --evaluate ] && [ -f \"${2:-}\" ] || exit 2\n"
-    "sed \\\n"
-    + normalise
-    + "    -e 's/\"schema\":\"fm-bench-evaluator-input.v1\",\"fixture\":/"
-    "\"schema\":\"fm-bench-evaluator-output.v1\",\"result\":/' \"$2\"\n"
-)
+measure = bench / "scoring" / "measure.py"
+measure.write_text(measure.read_text().replace('reference = bytes.fromhex(fixture["reference_pixels"])', 'reference = bytes.fromhex("00" * 10000)').replace('observed = bytes.fromhex(fixture["observed_pixels"])', 'observed = bytes.fromhex("ff" * 31 + "00" * 9969)'))
 program.chmod(0o755)
 contract_path = bench / "evaluator" / "execution.json"
 contract = json.loads(contract_path.read_text())
@@ -1687,6 +1784,66 @@ assert_contains "$out" "no usable container runtime" \
   "the refusal names the wrapper failure instead of a stdout parse error"
 pass "preflight evaluator execution resolves its runtime through the operator's endpoint"
 
+BENCH="$TMP_ROOT/evaluator-renamed-answer"
+write_plan "$BENCH"
+write_evaluator "$BENCH"
+write_freeze_inputs "$BENCH"
+write_isolation "$BENCH" container
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+program = bench / "scoring/evaluator.sh"
+program.write_text('''#!/bin/sh
+sed 's/"schema":"fm-bench-evaluator-input.v1","fixture":/"schema":"fm-bench-evaluator-output.v1","result":/' "$2"
+''')
+contract_path = bench / "evaluator/execution.json"
+contract = json.loads(contract_path.read_text())
+contract["sha256"] = hashlib.sha256(program.read_bytes()).hexdigest()
+for name, record in contract["records"].items():
+    result = json.loads((bench / "evaluator" / name).read_text())
+    path = bench / record["input"]["path"]
+    path.write_text(json.dumps({"schema": "fm-bench-evaluator-input.v1", "fixture": result}, separators=(",", ":")) + "\n")
+    record["input"]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+contract_path.write_text(json.dumps(contract))
+PY
+run_gate "$BENCH" freeze >/dev/null
+out=$(run_gate_env "PATH=$ENDPOINT_BIN:$PATH" "DOCKER_HOST=tcp://benchmark-endpoint:2375" \
+  -- "$BENCH" evaluator-execute-verify) && status=0 || status=$?
+expect_code 1 "$status" "renaming an answer envelope must not count as measurement"
+assert_contains "$out" "never expected measurements" "the fixture contract rejects embedded answers"
+
+BENCH="$TMP_ROOT/evaluator-echoed-pixels"
+write_plan "$BENCH"
+write_evaluator "$BENCH"
+write_freeze_inputs "$BENCH"
+write_isolation "$BENCH" container
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+measure = bench / "scoring/measure.py"
+measure.write_text(measure.read_text().replace('sum(a != b for a, b in zip(reference, observed)) / len(reference)', 'fixture["observed_pixels"]'))
+contract_path = bench / "evaluator/execution.json"
+contract = json.loads(contract_path.read_text())
+for name in ("determinism/run-1.json", "determinism/run-2.json"):
+    execution = contract["records"][name]
+    fixture = json.loads((bench / execution["input"]["path"]).read_text())["fixture"]
+    evidence = bench / "evaluator" / name
+    result = json.loads(evidence.read_text())
+    result["pixel"] = fixture["observed_pixels"]
+    evidence.write_text(json.dumps(result))
+    expected = bench / execution["expected_output"]["path"]
+    expected.write_text(json.dumps({"schema": "fm-bench-evaluator-output.v1", "result": result}))
+    execution["expected_output"]["sha256"] = hashlib.sha256(expected.read_bytes()).hexdigest()
+contract_path.write_text(json.dumps(contract))
+PY
+run_gate "$BENCH" freeze >/dev/null
+out=$(run_gate_env "PATH=$ENDPOINT_BIN:$PATH" "DOCKER_HOST=tcp://benchmark-endpoint:2375" \
+  -- "$BENCH" evaluator-execute-verify) && status=0 || status=$?
+expect_code 1 "$status" "echoing a raw pixel buffer must not count as measuring it"
+assert_contains "$out" "finite pixel mismatch fraction" "measurement results have numeric semantics"
+
 BENCH="$TMP_ROOT/evaluator-wrapper-failure"
 write_plan "$BENCH"
 write_evaluator "$BENCH"
@@ -1716,8 +1873,9 @@ BENCH="$TMP_ROOT/iso-conditional-wrapper"
 write_plan "$BENCH"
 write_isolation "$BENCH" none
 CONDITIONAL_WRAPPER="$TMP_ROOT/conditional-wrapper.sh"
-cat > "$CONDITIONAL_WRAPPER" <<'EOF'
+cat > "$CONDITIONAL_WRAPPER" <<EOF
 #!/usr/bin/env bash
+touch '$TMP_ROOT/rejected-wrapper-ran'
 printf 'PROBE DENIED conditional fixture\n'
 EOF
 chmod +x "$CONDITIONAL_WRAPPER"
@@ -1733,6 +1891,7 @@ expect_code 1 "$status" "a probe-specific wrapper cannot clear entrant confineme
 assert_contains "$out" "isolation.exec_wrapper fail" "the shared isolation boundary rejects the wrapper"
 assert_contains "$out" "must use the executable bin/fm-bench-confine.sh" \
   "only the launch-capable trusted wrapper may supply isolation evidence"
+assert_absent "$TMP_ROOT/rejected-wrapper-ran" "a rejected wrapper must never execute"
 pass "probe-only confinement cannot substitute for the entrant launch wrapper"
 
 # The process probe must still measure a shared process table when the image
@@ -1842,19 +2001,6 @@ pass "private paths outside the proven entrant root are refused during isolation
 BENCH="$TMP_ROOT/iso-private-tree"
 write_plan "$BENCH"
 write_isolation "$BENCH" none
-DENY_WRAPPER="$TMP_ROOT/deny-all-probes.sh"
-cat > "$DENY_WRAPPER" <<'EOF'
-#!/usr/bin/env bash
-printf 'PROBE DENIED fixture confinement\n'
-EOF
-chmod +x "$DENY_WRAPPER"
-python3 - "$BENCH/isolation.json" "$DENY_WRAPPER" <<'PY'
-import json, sys
-path, wrapper = sys.argv[1:]
-d = json.load(open(path))
-d["exec_wrapper"] = [wrapper]
-json.dump(d, open(path, "w"), indent=2, sort_keys=True)
-PY
 git -C "$ISO/e1" add -f tmp/canary.txt
 git -C "$ISO/e1" -c user.name=t -c user.email=t@x commit -qm private-tree-fixture
 out=$(run_gate "$BENCH" isolation-verify) && status=0 || status=$?
@@ -1906,6 +2052,8 @@ json.dump({
     "protected_paths": [f"{iso}/sealed"],
     "entrants": [
         {"id": f"bench-b1-{label}", "root": f"{iso}/{name}",
+         "track": "A", "role": "entrant",
+         "candidate": "Fable 5 High" if label == "k7" else "GPT 5.6 Sol High",
          "private_object_store": f"{iso}/{name}/objects",
          "private_tmp": f"{iso}/{name}/tmp",
          "private_home": f"{iso}/{name}/home",
@@ -1918,8 +2066,8 @@ json.dump({
 PY
 out=$(run_gate "$BENCH" isolation-verify) && status=0 || status=$?
 expect_code 1 "$status" "partial confinement earns no partial credit"
-assert_contains "$out" "isolation.bench-b1-k7.environment_leakage ok" "the environment probe really flips to denied"
-assert_contains "$out" "isolation.bench-b1-k7.sibling_file_read fail" "shared filesystem access still refuses the gate"
+assert_contains "$out" "isolation.exec_wrapper fail" "partial wrappers are rejected before probing"
+assert_not_contains "$out" "environment_leakage ok" "a rejected wrapper earns no probe credit"
 pass "per-probe verdicts are real, and partial confinement still refuses the launch"
 
 BENCH="$TMP_ROOT/iso-missing-tool"
@@ -1947,8 +2095,9 @@ json.dump(d, open(path, "w"), indent=2, sort_keys=True)
 PY
 out=$(run_gate "$BENCH" isolation-verify) && status=0 || status=$?
 expect_code 1 "$status" "a missing probe utility cannot count as an isolation denial"
-assert_contains "$out" "required tool is unavailable: find" "the absent required utility is reported"
-assert_contains "$out" "inconclusive against" "the gate refuses an unmeasurable confined probe"
+assert_contains "$out" "isolation.exec_wrapper fail" "an untrusted wrapper is refused before probing"
+out=$(PATH="$NO_FIND_BIN" "$ROOT/bin/fm-bench-probe.sh" sibling_file_read "$ISO/e1" 2>&1) && status=0 || status=$?
+assert_contains "$out" "required tool is unavailable: find" "the public probe reports its missing utility"
 pass "a confinement missing a required probe utility is inconclusive, never denied"
 
 # A target that does not exist would report "denied" for the wrong reason.
@@ -1977,15 +2126,15 @@ pass "an unprovisioned benchmark is refused before any entrant launches"
 
 write_restore_confinement() {  # <bench-dir> [mechanism]
   local bench=$1 mechanism=${2:-$RESTORE_MECHANISM}
-  python3 - "$bench" "$CONFINE" "$mechanism" <<'PY'
+  python3 - "$bench" "$CONFINE" "$mechanism" "$IMAGE" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
 
-bench, confine, mechanism = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+bench, confine, mechanism, image = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 isolation = bench / "isolation.json"
 isolation.write_text(json.dumps({
     "schema": "fm-bench-isolation.v1",
-    "exec_wrapper": [confine, "--mechanism", mechanism, "--allow", "{root}", "--"],
+    "exec_wrapper": [confine, "--mechanism", mechanism, "--image", image, "--allow", "{root}", "--"],
 }, indent=2, sort_keys=True) + "\n")
 (bench / "preflight.receipt").write_text(json.dumps({
     "schema": "fm-bench-preflight-receipt.v1",
@@ -2143,13 +2292,57 @@ PY
 
 BENCH="$TMP_ROOT/archive"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo"
 out=$(run_gate "$BENCH" archive-verify) || fail "the complete archive must verify: $out"
 assert_contains "$out" "8 evidence groups" "every archive carries all eight evidence groups"
 pass "one content-addressed archive per scored output verifies against its stored bytes"
 
+python3 - "$BENCH/archive" "$TMP_ROOT/archive-original-evidence.json" <<'PY'
+import json, sys
+from pathlib import Path
+sample = sorted(Path(sys.argv[1]).iterdir())[0]
+Path(sys.argv[2]).write_text(json.dumps({"sample": sample.name, "files": {
+    name: (sample / name).read_text() for name in ("timing.json", "capture.json", "judging.json", "manifest.json")}}))
+PY
+for failure_case in hidden_blocker positive_failure zero_failure; do
+  python3 - "$BENCH/archive" "$TMP_ROOT/archive-original-evidence.json" "$failure_case" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+archive, original, case = Path(sys.argv[1]), json.loads(Path(sys.argv[2]).read_text()), sys.argv[3]
+sample = archive / original["sample"]
+documents = {name: json.loads(value) for name, value in original["files"].items()}
+documents["timing.json"]["failure"]["class"] = "sibling_access" if case == "hidden_blocker" else "candidate_caused"
+if case == "zero_failure":
+    documents["capture.json"]["deterministic"] = 0
+    documents["judging.json"]["scores"] = [0 for _ in documents["judging.json"]["scores"]]
+manifest = documents.pop("manifest.json")
+for name, document in documents.items():
+    payload = json.dumps(document).encode()
+    (sample / name).write_bytes(payload)
+    manifest["files"][name] = hashlib.sha256(payload).hexdigest()
+(sample / "manifest.json").write_text(json.dumps(manifest))
+PY
+  out=$(run_gate "$BENCH" archive-verify) && status=0 || status=$?
+  if [ "$failure_case" = zero_failure ]; then
+    expect_code 0 "$status" "a candidate-caused failure with zero scores remains archivable"
+  else
+    expect_code 1 "$status" "archive validation must enforce the failure disposition"
+    assert_contains "$out" "failure" "archive refusal identifies inconsistent failure evidence"
+  fi
+done
+python3 - "$BENCH/archive" "$TMP_ROOT/archive-original-evidence.json" <<'PY'
+import json, sys
+from pathlib import Path
+original = json.loads(Path(sys.argv[2]).read_text())
+sample = Path(sys.argv[1]) / original["sample"]
+for name, content in original["files"].items():
+    (sample / name).write_text(content)
+PY
+
 ATTEMPT_BENCH="$TMP_ROOT/archive-attempts"
 write_plan "$ATTEMPT_BENCH"
+bind_result_plan "$ATTEMPT_BENCH"
 python3 - "$BENCH/archive" "$ATTEMPT_BENCH/archive" <<'PY'
 import hashlib, json, shutil, sys
 from pathlib import Path
@@ -2193,6 +2386,7 @@ pass "archive identity preserves a void-to-void-to-scored attempt chain"
 
 UNLINKED_ATTEMPT_BENCH="$TMP_ROOT/archive-unlinked-attempt"
 write_plan "$UNLINKED_ATTEMPT_BENCH"
+bind_result_plan "$UNLINKED_ATTEMPT_BENCH"
 python3 - "$ATTEMPT_BENCH/archive" "$UNLINKED_ATTEMPT_BENCH/archive" <<'PY'
 import json, shutil, sys
 from pathlib import Path
@@ -2211,6 +2405,7 @@ pass "every retained void must be linked to its scored rerun"
 
 FORKED_ATTEMPT_BENCH="$TMP_ROOT/archive-forked-attempt"
 write_plan "$FORKED_ATTEMPT_BENCH"
+bind_result_plan "$FORKED_ATTEMPT_BENCH"
 python3 - "$ATTEMPT_BENCH/archive" "$FORKED_ATTEMPT_BENCH/archive" <<'PY'
 import json, shutil, sys
 from pathlib import Path
@@ -2238,6 +2433,7 @@ pass "archive attempt chains refuse forks"
 
 DANGLING_ATTEMPT_BENCH="$TMP_ROOT/archive-dangling-attempt"
 write_plan "$DANGLING_ATTEMPT_BENCH"
+bind_result_plan "$DANGLING_ATTEMPT_BENCH"
 python3 - "$ATTEMPT_BENCH/archive" "$DANGLING_ATTEMPT_BENCH/archive" <<'PY'
 import json, shutil, sys
 from pathlib import Path
@@ -2266,6 +2462,7 @@ pass "archive attempt chains refuse dangling links"
 
 CYCLIC_ATTEMPT_BENCH="$TMP_ROOT/archive-cyclic-attempt"
 write_plan "$CYCLIC_ATTEMPT_BENCH"
+bind_result_plan "$CYCLIC_ATTEMPT_BENCH"
 python3 - "$ATTEMPT_BENCH/archive" "$CYCLIC_ATTEMPT_BENCH/archive" <<'PY'
 import json, shutil, sys
 from pathlib import Path
@@ -2290,6 +2487,7 @@ pass "archive attempt chains refuse cycles"
 copy_archive_fixture() {  # <source-bench> <target-bench>
   local source=$1 target=$2
   write_plan "$target"
+  bind_result_plan "$target"
   python3 - "$source/archive" "$target/archive" <<'PY'
 import shutil, sys
 shutil.copytree(sys.argv[1], sys.argv[2])
@@ -2334,6 +2532,7 @@ pass "archive sample roots must be self-contained real directories"
 
 ARCHIVE_LINK_BENCH="$TMP_ROOT/archive-directory-link"
 write_plan "$ARCHIVE_LINK_BENCH"
+bind_result_plan "$ARCHIVE_LINK_BENCH"
 python3 - "$BENCH/archive" "$ARCHIVE_LINK_BENCH" <<'PY'
 import sys
 from pathlib import Path
@@ -2413,6 +2612,7 @@ archive_escape_refused() {  # <label> <path-kind>
   local label=$1 kind=$2 bench
   bench="$TMP_ROOT/archive-escape-$kind"
   write_plan "$bench"
+  bind_result_plan "$bench"
   write_archive "$bench" "$TMP_ROOT/srcrepo-escape-$kind"
   python3 - "$bench" "$kind" <<'PY'
 import hashlib, json, os, sys
@@ -2454,6 +2654,7 @@ pass "external archive evidence paths cannot make an archive self-contained only
 
 BENCH="$TMP_ROOT/archive-unlisted"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-unlisted"
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -2468,6 +2669,7 @@ pass "every archived evidence file is content-addressed"
 
 BENCH="$TMP_ROOT/archive-nested-manifest"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-nested-manifest"
 python3 - "$BENCH" <<'PY'
 import sys
@@ -2498,6 +2700,7 @@ pass "restore drill rejects an unconfined evaluator fallback"
 
 BENCH="$TMP_ROOT/archive-unlisted-evaluator"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-unlisted-evaluator"
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -2516,6 +2719,7 @@ pass "every archive statically declares a content-addressed evaluator"
 
 BENCH="$TMP_ROOT/archive-malformed-evaluator"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-malformed-evaluator"
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -2533,6 +2737,7 @@ pass "the restore drill rejects arbitrary evaluator commands portably"
 
 BENCH="$TMP_ROOT/archive-unvalidated-later-sample"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-unvalidated-later-sample"
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -2552,6 +2757,7 @@ if [ -n "$RESTORE_MECHANISM" ]; then
 
 BENCH="$TMP_ROOT/archive-noop-evaluator"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-noop-evaluator"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -2580,6 +2786,7 @@ pass "the restore drill refuses an executable evaluator that ignores restored co
 
 BENCH="$TMP_ROOT/archive-real-content-inputs"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-real-content-inputs"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, struct, sys, zlib
@@ -2662,6 +2869,7 @@ pass "TypeScript, CSS, HTML, and PNG prove dependence through pure-data declarat
 
 BENCH="$TMP_ROOT/archive-metadata-evaluator"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-metadata-evaluator"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -2691,6 +2899,7 @@ pass "differential evaluator trees expose identical normalized metadata"
 
 BENCH="$TMP_ROOT/archive-size-only-evaluator"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-size-only-evaluator"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -2724,6 +2933,7 @@ pass "every declared input has equal prepared size in both runs"
 
 BENCH="$TMP_ROOT/archive-length-changing-perturbation"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-length-changing-perturbation"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -2751,6 +2961,7 @@ pass "length-changing declarations cannot bypass the prepared-tree size invarian
 
 BENCH="$TMP_ROOT/archive-role-name-input"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-role-name-input"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -2778,6 +2989,7 @@ pass "differential execution results use a collision-free key space"
 
 BENCH="$TMP_ROOT/archive-png-encoding-evaluator"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-png-encoding-evaluator"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -2812,6 +3024,7 @@ pass "PNG differential copies share one deterministic encoding pipeline"
 
 BENCH="$TMP_ROOT/archive-overbroad-perturbation"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-overbroad-perturbation"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -2841,6 +3054,7 @@ pass "the prepared-tree byte and metadata invariant can fail closed"
 
 BENCH="$TMP_ROOT/archive-stateful-evaluator"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-stateful-evaluator"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -2864,6 +3078,7 @@ pass "differential evaluator runs use independent scratch state"
 
 BENCH="$TMP_ROOT/archive-self-identifying-evaluator"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-self-identifying-evaluator"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -2894,6 +3109,7 @@ pass "differential evaluator runs hide their role in paths and environment"
 
 BENCH="$TMP_ROOT/archive-fixed-marker-evaluator"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-fixed-marker-evaluator"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -2925,6 +3141,7 @@ fi
 
 BENCH="$TMP_ROOT/archive-no-perturbable-input"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-no-perturbable-input"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -2952,6 +3169,7 @@ pass "every archived evaluator proves dependence on at least one scored input"
 
 BENCH="$TMP_ROOT/archive-no-scored-inputs"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-no-scored-inputs"
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -2969,6 +3187,7 @@ pass "every archived evaluator declares a non-empty scored-input set"
 
 BENCH="$TMP_ROOT/archive-duplicate-scored-input"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-duplicate-scored-input"
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -2987,6 +3206,7 @@ pass "scored-input perturbation declarations are one-to-one"
 
 BENCH="$TMP_ROOT/archive-invalid-perturbation-pointer"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-invalid-perturbation-pointer"
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -3005,6 +3225,7 @@ pass "scored-input perturbation pointers are validated against restored content"
 
 BENCH="$TMP_ROOT/archive-oversized-png"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-oversized-png" oversized
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -3025,6 +3246,7 @@ pass "untrusted PNG scored inputs are bounded before decompression"
 
 BENCH="$TMP_ROOT/archive-executable-perturbation"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-executable-perturbation"
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -3043,6 +3265,7 @@ pass "archived evaluators cannot supply code for their dependence perturbation"
 
 BENCH="$TMP_ROOT/archive-escaping-scored-input"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-escaping-scored-input"
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -3065,6 +3288,7 @@ pass "declared scored inputs stay inside the restored candidate"
 # inside one must not be able to forge a BENCH_CHECK or BENCH_RESULT line.
 BENCH="$TMP_ROOT/archive-forged-status-line"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-forged-status-line"
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -3090,6 +3314,7 @@ if [ -n "$RESTORE_MECHANISM" ]; then
 
 BENCH="$TMP_ROOT/archive-perturbation-inconclusive"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-perturbation-inconclusive"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, shlex, sys
@@ -3124,6 +3349,7 @@ pass "perturbation failures are inconclusive rather than invariant"
 # may not forge extra lines in the gate's line-oriented BENCH_CHECK contract.
 BENCH="$TMP_ROOT/archive-perturbation-stderr"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-perturbation-stderr"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, shlex, sys
@@ -3159,6 +3385,7 @@ pass "archived evaluator stderr cannot forge gate status lines"
 
 BENCH="$TMP_ROOT/archive-scratch-evaluator"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-scratch-evaluator"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -3186,6 +3413,7 @@ pass "archived evaluators rerun in scratch rather than certified storage"
 
 BENCH="$TMP_ROOT/archive-post-rerun"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-post-rerun"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, shlex, sys
@@ -3211,6 +3439,7 @@ pass "confined archived evaluators cannot dirty certified evidence"
 
 BENCH="$TMP_ROOT/archive-stability"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-stability"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
@@ -3273,6 +3502,7 @@ pass "the restore drill refuses an archive that changes during replay"
 
 BENCH="$TMP_ROOT/archive-binding"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-binding"
 out=$(run_gate "$BENCH" restore-drill) || fail "the binding fixture needs a genuine drill receipt: $out"
 out=$(run_gate "$BENCH" cleanup-gate) || fail "a genuine drill receipt must authorise cleanup before mutation: $out"
@@ -3292,6 +3522,7 @@ pass "a changed archive manifest withdraws genuine cleanup authority"
 
 BENCH="$TMP_ROOT/archive-evaluator-drift"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-evaluator-drift"
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -3330,6 +3561,7 @@ fi
 
 BENCH="$TMP_ROOT/archive-bundleless"
 write_plan "$BENCH"
+bind_result_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo2"
 python3 - "$BENCH" <<'PY'
 import json, sys
@@ -3403,7 +3635,7 @@ def write(
             "dispatch_accepted_to_first_valid_final_commit": 1200,
             "first_assistant_event_to_first_valid_final_commit": 1100,
         }, "failure": {"status": status, "blocker_class": blocker,
-                        "class": "none" if status == "scored" else "provider_outage"}},
+                        "class": ("sibling_access" if blocker else "none") if status == "scored" else "provider_outage"}},
     }
     if status == "scored":
         evidence.update({
@@ -3522,6 +3754,7 @@ for name in sorted(plan["tracks"]):
                 suffix="-void",
             )
 PY
+  bind_result_plan "$1"
 }
 
 BENCH="$TMP_ROOT/promote"
@@ -3533,6 +3766,57 @@ assert_contains "$out" "standing route eligible" "a sweep with margin is eligibl
 assert_contains "$out" "subject to the captain's explicit word" "promotion still needs the captain"
 assert_contains "$out" "no benchmark candidate ships directly" "the no-direct-ship rule is restated at the verdict"
 pass "a six-of-six sweep with margin and no regression is the only promotable result"
+
+BENCH="$TMP_ROOT/promote-edited-margin"
+write_plan "$BENCH"
+write_results "$BENCH" thin
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "a thin sweep must fail under the original margin"
+assert_contains "$out" "below the predeclared bar" "the original margin is enforced"
+python3 - "$BENCH/benchmark.json" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+plan = json.loads(path.read_text())
+plan["promotion_rule"]["practical_margin"] = 0.1
+path.write_text(json.dumps(plan))
+PY
+for gate in promote-evaluate archive-verify; do
+  out=$(run_gate "$BENCH" "$gate") && status=0 || status=$?
+  expect_code 1 "$status" "post-run gates must reject a changed plan"
+  assert_contains "$out" "plan differs from its frozen or passing preflight binding" "the result cannot use relaxed rules"
+done
+run_gate "$BENCH" freeze >/dev/null
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "refreezing cannot replace the original preflight binding"
+assert_contains "$out" "plan differs from its frozen or passing preflight binding" "preflight also binds the plan"
+
+for failure_case in hidden_blocker positive_failure scored_outage unknown_class false_blocker; do
+  BENCH="$TMP_ROOT/promote-failure-$failure_case"
+  write_plan "$BENCH"
+  write_results "$BENCH" sweep
+  python3 - "$BENCH" "$failure_case" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench, case = Path(sys.argv[1]), sys.argv[2]
+sample = sorted((bench / "archive").iterdir())[0]
+path = sample / "timing.json"
+timing = json.loads(path.read_text())
+failure = timing["failure"]
+failure["class"] = {"hidden_blocker": "sibling_access", "positive_failure": "candidate_caused",
+                    "scored_outage": "provider_outage", "unknown_class": "invented", "false_blocker": "none"}[case]
+if case == "false_blocker":
+    failure["blocker_class"] = True
+path.write_text(json.dumps(timing))
+manifest_path = sample / "manifest.json"
+manifest = json.loads(manifest_path.read_text())
+manifest["files"]["timing.json"] = hashlib.sha256(path.read_bytes()).hexdigest()
+manifest_path.write_text(json.dumps(manifest))
+PY
+  out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+  expect_code 1 "$status" "inconsistent content-addressed failure evidence must refuse promotion"
+  assert_contains "$out" "promote.evidence fail" "failure policy is checked at evidence loading"
+done
 
 # promote-evaluate never runs check_plan, so a baseline declared with no
 # preregistered strata reaches the veto with nothing to average.
@@ -3614,10 +3898,7 @@ manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
 expect_code 1 "$status" "a track with no declared judge panel is a named refusal"
-assert_contains "$out" "declares no judge panel to score against" \
-  "an empty panel cannot reach the composite arithmetic"
-assert_contains "$out" "BENCH_RESULT promote-evaluate refused" \
-  "the refusal is a verdict rather than a traceback"
+assert_contains "$out" "plan differs from its frozen or passing preflight binding" "edited panels revoke promotion"
 pass "promotion refuses an empty judge panel before averaging it"
 
 BENCH="$TMP_ROOT/promote-sample-link"
@@ -3649,7 +3930,7 @@ json.dump(plan, open(path, "w"), indent=2, sort_keys=True)
 PY
 out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
 expect_code 1 "$status" "promotion independently refuses invalid frozen composite weights"
-assert_contains "$out" "promote.composite_rule fail" "promotion reads the plan-owned blend"
+assert_contains "$out" "results.plan_binding fail" "promotion refuses a blend changed after preflight"
 pass "promotion cannot invent or bypass the frozen composite blend"
 
 BENCH="$TMP_ROOT/promote-nonfinite"

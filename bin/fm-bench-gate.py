@@ -1558,6 +1558,7 @@ def check_isolation(root: Path, report: Report, timeout: int) -> None:
     mechanism, wrapper_detail = validate_confinement_wrapper(wrapper, require_enforcing=False)
     if mechanism is None:
         report.fail("isolation.exec_wrapper", wrapper_detail)
+        return
     else:
         report.ok("isolation.exec_wrapper", wrapper_detail)
     launch_wrapper = record.get("launch_wrapper")
@@ -1568,6 +1569,7 @@ def check_isolation(root: Path, report: Report, timeout: int) -> None:
     )
     if launch_mechanism is None:
         report.fail("isolation.launch_wrapper", launch_detail)
+        return
     else:
         report.ok(
             "isolation.launch_wrapper",
@@ -1576,6 +1578,22 @@ def check_isolation(root: Path, report: Report, timeout: int) -> None:
     entrants = record.get("entrants")
     if not isinstance(entrants, list) or not entrants:
         report.fail("isolation.entrants", "entrants must be a non-empty list of provisioned per-entrant roots")
+        return
+
+    try:
+        plan = load_json(root / "benchmark.json", PLAN_SCHEMA)
+        ids = [item.get("id") for item in entrants if isinstance(item, dict)]
+        if len(ids) != len(entrants) or any(not nonempty_str(value) for value in ids) or len(ids) != len(set(ids)):
+            raise GateError("entrant task ids must be nonempty and unique")
+        for entrant in entrants:
+            track = as_object(as_object(plan.get("tracks")).get(entrant.get("track")))
+            role = entrant.get("role", "entrant")
+            candidates = as_sequence(track.get("entrants")) if role == "entrant" else [track.get("baseline")] if role == "baseline" else []
+            matches = [item for item in candidates if isinstance(item, dict) and item.get("name") == entrant.get("candidate")]
+            if len(matches) != 1:
+                raise GateError(f"entrant {entrant['id']} must bind exactly one planned candidate and role")
+    except GateError as exc:
+        report.fail("isolation.candidate_binding", str(exc))
         return
 
     network_fields = ("provider_network", "provider_proxy", "provider_proxy_container")
@@ -1917,6 +1935,54 @@ def check_evaluator(
 EVALUATOR_DEPENDENCE_RECORD = "determinism/run-1.json"
 
 
+def validate_measurement_fixture(fixture: Any, record_name: str) -> None:
+    if not isinstance(fixture, dict):
+        raise GateError("measurement fixture must be an object")
+    group = record_name.split("/", 1)[0]
+    if group == "determinism":
+        if set(fixture) != {"head", "reference_pixels", "observed_pixels", "violations"}:
+            raise GateError("golden fixture must contain raw pixel buffers and accessibility violations, never expected measurements")
+        for key in ("reference_pixels", "observed_pixels"):
+            value = fixture[key]
+            if not isinstance(value, str) or not value or len(value) % 2 or re.fullmatch(r"[0-9a-f]+", value) is None:
+                raise GateError("pixel buffers must be nonempty lowercase hexadecimal bytes")
+        if len(fixture["reference_pixels"]) != len(fixture["observed_pixels"]):
+            raise GateError("golden pixel buffers must have matching lengths")
+        if not nonempty_str(fixture["head"]) or not isinstance(fixture["violations"], list) or any(
+            value not in ("minor", "moderate", "serious", "critical") for value in fixture["violations"]
+        ):
+            raise GateError("golden fixture has invalid head or accessibility violations")
+    elif group == "mutations":
+        if set(fixture) != {"dimension", "before_checks", "after_checks"} or not nonempty_str(fixture["dimension"]):
+            raise GateError("mutation fixture must contain raw before/after check outcomes, never scores or deltas")
+        before, after = fixture["before_checks"], fixture["after_checks"]
+        if not isinstance(before, dict) or not before or not isinstance(after, dict) or set(before) != set(after):
+            raise GateError("mutation check sets must cover the same dimensions")
+        if fixture["dimension"] not in before:
+            raise GateError("mutation dimension is absent from its check sets")
+        for checks in (*before.values(), *after.values()):
+            if not isinstance(checks, list) or not checks or any(type(value) is not bool for value in checks):
+                raise GateError("raw check outcomes must be nonempty boolean arrays")
+    elif group == "captures":
+        fields = {"entrant", "packet", "original_sha", "original_tree", "neutral_sha", "neutral_tree", "base_tree", "patch_hash"}
+        if set(fixture) != fields or any(not nonempty_str(value) for value in fixture.values()):
+            raise GateError("capture fixture must contain source identities, never a derived result hash")
+    else:
+        raise GateError("unsupported measurement fixture kind")
+
+
+def validate_golden_measurements(result: Any) -> None:
+    if not isinstance(result, dict):
+        raise GateError("golden measurements must be a result object")
+    pixel, axe = result.get("pixel"), result.get("axe")
+    if (
+        not isinstance(pixel, (int, float)) or isinstance(pixel, bool)
+        or not 0 <= pixel <= 1
+        or type(axe) is not int or axe < 0
+    ):
+        raise GateError("golden measurements must be a finite pixel mismatch fraction and an integer violation count")
+
+
 def fixture_scalar_pointers(fixture: Any) -> list[str]:
     """Every scalar inside a frozen input fixture, in a deterministic order."""
     pointers: list[str] = []
@@ -1946,11 +2012,21 @@ def frozen_fixture_perturbations(original: bytes, entropy: bytes) -> list[tuple[
     """
     document = json.loads(original.decode("utf-8"))
     variants: list[tuple[str, bytes]] = []
-    for pointer in fixture_scalar_pointers(document.get("fixture")):
-        try:
-            variants.append((pointer, perturb_json_bytes(original, pointer, entropy)[0]))
-        except ValueError:
-            continue
+    fixture = document.get("fixture")
+    validate_measurement_fixture(fixture, EVALUATOR_DEPENDENCE_RECORD)
+    offset = int.from_bytes(entropy[:4], "big") % (len(fixture["observed_pixels"]) // 2)
+    for key, other in (("observed_pixels", "reference_pixels"), ("reference_pixels", "observed_pixels")):
+        value = fixture[key]
+        index = offset * 2
+        pixel = int(value[index:index + 2], 16)
+        opposite = int(fixture[other][index:index + 2], 16)
+        replacement = opposite if pixel != opposite else pixel ^ 1
+        changed = value[:index] + format(replacement, "02x") + value[index + 2:]
+        pattern = rb'("' + key.encode() + rb'"\s*:\s*")([0-9a-f]+)(")'
+        perturbed, count = re.subn(pattern, lambda match: match[1] + changed.encode() + match[3], original)
+        if count != 1:
+            raise ValueError("golden input must contain one pixel buffer per field")
+        variants.append((f"/fixture/{key}", perturbed))
     if not variants:
         raise ValueError("no frozen evaluator input scalar carries a form-preserving perturbation")
     return variants
@@ -2182,6 +2258,11 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
             if set(input_fixture) != {"schema", "fixture"}:
                 report.fail("evaluator.execution", f"{relative_name} input does not match the frozen input schema")
                 return
+            try:
+                validate_measurement_fixture(input_fixture["fixture"], relative_name)
+            except GateError as exc:
+                report.fail("evaluator.execution", f"{relative_name}: {exc}")
+                return
             if set(expected_output) != {"schema", "result"} or expected_output.get("result") != recorded:
                 report.fail(
                     "evaluator.execution",
@@ -2221,6 +2302,12 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
             if not isinstance(observed, dict):
                 report.fail("evaluator.execution", f"{relative} did not produce a derived result object")
                 return
+            if relative.parts[0] == "determinism":
+                try:
+                    validate_golden_measurements(observed)
+                except GateError as exc:
+                    report.fail("evaluator.execution", f"{relative}: {exc}")
+                    return
             if relative.parts[0] == "mutations":
                 before = observed.get("scores_before")
                 after = observed.get("scores_after")
@@ -2308,7 +2395,17 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
                     f"{confinement_stderr(perturbed.stderr)}",
                 )
                 return
-            if perturbed.stdout != dependence_stdout:
+            try:
+                perturbed_result = json.loads(perturbed.stdout)["result"]
+                genuine_result = json.loads(dependence_stdout)["result"]
+                validate_golden_measurements(perturbed_result)
+                measured_change = any(
+                    perturbed_result.get(key) != genuine_result.get(key) for key in ("pixel", "axe")
+                )
+            except (GateError, ValueError, KeyError, TypeError, AttributeError):
+                report.fail("evaluator.input_dependence", "perturbed execution did not return numeric measurements")
+                return
+            if measured_change:
                 moved_by = pointer
                 break
         report.require(
@@ -2726,8 +2823,55 @@ def attempt_chain_issues(attempts: list[dict[str, Any]]) -> list[str]:
     return issues
 
 
+def check_result_plan_binding(root: Path, plan: dict[str, Any], report: Report) -> None:
+    try:
+        frozen = load_json(root / "freeze.json", FREEZE_SCHEMA)
+        receipt = load_json(root / "preflight.receipt", RECEIPT_SCHEMA)
+        current = sha256_file(root / "benchmark.json")
+        valid = (
+            receipt.get("verdict") == "pass"
+            and receipt.get("plan_sha256") == current
+            and as_object(frozen.get("hashes")).get("benchmark.json") == current
+            and load_json(root / "benchmark.json", PLAN_SCHEMA) == plan
+        )
+        report.require(valid, "results.plan_binding", "plan matches its frozen and passing preflight bindings",
+                       "plan differs from its frozen or passing preflight binding")
+    except GateError as exc:
+        report.fail("results.plan_binding", str(exc))
+
+
+def validate_attempt_failure(
+    plan: dict[str, Any], failure: Any, status: str, deterministic: Any = None, scores: Any = None
+) -> None:
+    if not isinstance(failure, dict) or failure.get("status") != status:
+        raise GateError("attempt status is not proven by its failure evidence")
+    failure_class = failure.get("class")
+    if not isinstance(failure_class, str):
+        raise GateError("attempt has no valid failure class")
+    if failure_class == "none":
+        disposition = "scored"
+    else:
+        disposition = as_object(plan.get("failure_policy")).get(failure_class)
+        if failure_class not in REQUIRED_FAILURE_POLICY or disposition != REQUIRED_FAILURE_POLICY[failure_class]:
+            raise GateError("attempt failure class has no valid frozen disposition")
+    expected_status = "void" if disposition == "void_and_rerun" else "scored"
+    if status != expected_status or failure.get("blocker_class") is not (disposition == "blocker_class"):
+        raise GateError("attempt status or blocker flag contradicts its frozen failure disposition")
+    if "disposition" in failure and failure["disposition"] != disposition:
+        raise GateError("attempt disposition contradicts the frozen failure policy")
+    if disposition == "score_zero" and (
+        not isinstance(deterministic, (int, float)) or isinstance(deterministic, bool)
+        or deterministic != 0 or not isinstance(scores, list) or not scores
+        or any(isinstance(value, bool) or not isinstance(value, (int, float)) or value != 0 for value in scores)
+    ):
+        raise GateError("candidate-caused failure must have zero deterministic and panel scores")
+
+
 def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[bool, str]:
     """Verify every sample archive by recomputing its content addresses."""
+    check_result_plan_binding(root, plan, report)
+    if report.failed:
+        return False, ""
     archive_root = root / "archive"
     invalid_roots: list[str] = []
     try:
@@ -2838,12 +2982,11 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
                 and float(intervals[name]) >= 0
                 for name in REQUIRED_TIMING_INTERVALS
             )
-            valid_failure = (
-                isinstance(failure, dict)
-                and failure.get("status") == "void"
-                and failure.get("class") in ("evaluator_infrastructure", "provider_outage", "quota_exhaustion")
-                and failure.get("blocker_class") is False
-            )
+            try:
+                validate_attempt_failure(plan, failure, "void")
+                valid_failure = True
+            except GateError:
+                valid_failure = False
             if (
                 not stat.S_ISREG(timing_mode)
                 or sha256_file(timing_path) != files.get("timing.json")
@@ -2983,8 +3126,12 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             ok = False
             continue
         failure = timing.get("failure")
-        if not isinstance(failure, dict) or failure.get("status") != "scored":
-            report.fail(check, "terminal attempt status is not proven by its content-addressed timing evidence")
+        try:
+            capture = load_json(sample / "capture.json")
+            judging = load_json(sample / "judging.json")
+            validate_attempt_failure(plan, failure, "scored", capture.get("deterministic"), judging.get("scores"))
+        except GateError as exc:
+            report.fail(check, str(exc))
             ok = False
             continue
         digests.append(
@@ -4078,6 +4225,15 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
         if not timing_ok or not isinstance(failure, dict) or failure.get("status") != status:
             report.fail("promote.evidence", f"{path.name} has no valid centrally recorded attempt status and timing")
             continue
+        try:
+            validate_attempt_failure(
+                plan, failure, status,
+                evidence_parts.get("capture.json", {}).get("deterministic"),
+                evidence_parts.get("judging.json", {}).get("scores"),
+            )
+        except GateError as exc:
+            report.fail("promote.evidence", f"{path.name}: {exc}")
+            continue
         common = {
             "_path": path.name,
             "track": track_name,
@@ -4090,12 +4246,6 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
             "blocker_class": failure.get("blocker_class") is True,
         }
         if status == "void":
-            if (
-                failure.get("class") not in ("evaluator_infrastructure", "provider_outage", "quota_exhaustion")
-                or failure.get("blocker_class") is not False
-            ):
-                report.fail("promote.evidence", f"{path.name} void lacks an approved centrally recorded failure class")
-                continue
             records.append(common)
             continue
         expected_panel = [
@@ -4175,6 +4325,10 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
 
 
 def promote_evaluate(root: Path, plan: dict[str, Any], report: Report) -> None:
+    check_result_plan_binding(root, plan, report)
+    if report.failed:
+        report.fail("promote.verdict", "no standing route: frozen preflight bindings are invalid")
+        return
     rule = as_object(plan.get("promotion_rule"))
     try:
         samples = plan_count(plan, "samples_per_entrant")
@@ -4737,7 +4891,12 @@ def build_parser() -> argparse.ArgumentParser:
             "freeze.json, results/<sample>.json, archive/<sample>/manifest.json with structured sample and attempt identities, "
             "the eight role-specific evidence groups, evaluator_rerun.scored_inputs, and at least one pure-data "
             "evaluator_rerun.input_perturbations entry, and the generated preflight.receipt and "
-            "archive/restore-drill.json."
+            "archive/restore-drill.json. Isolation entrants bind id, track, role (entrant or baseline), and candidate name. "
+            "Evaluator input fixtures use exactly: determinism={head,reference_pixels,observed_pixels,violations}, "
+            "with equal-length hexadecimal pixel buffers and violation severity strings; "
+            "mutations={dimension,before_checks,after_checks}, with dimension-keyed boolean check arrays; "
+            "captures={entrant,packet,original_sha,original_tree,neutral_sha,neutral_tree,base_tree,patch_hash}. "
+            "Expected measurements, scores, deltas, and result hashes belong only in expected outputs."
         ),
     )
     parser.add_argument("--bench", help="benchmark directory (default: $FM_BENCH_ROOT)")

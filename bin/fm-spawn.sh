@@ -3812,7 +3812,8 @@ esac
 # Forward firstmate's own resolved store onto the claude launch so the crewmate
 # uses the same credential/config firstmate is authenticated with. Only when set;
 # an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ] \
+   && { [[ "$ID" != bench-* ]] || [ "${FM_BENCH_LAUNCH_BYPASS:-}" = 1 ]; }; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
@@ -3841,7 +3842,15 @@ fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
-LAUNCH=$(fm_bench_wrap_entrant_launch "$ID" "$WT" "$LAUNCH") || exit 1
+BENCH_HARNESS_BIN=
+if [[ "$ID" == bench-* ]] && [ "${FM_BENCH_LAUNCH_BYPASS:-}" != 1 ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  case "$HARNESS" in
+    pi|pi-signed) BENCH_HARNESS_BIN=$PI_BIN ;;
+    cursor) BENCH_HARNESS_BIN=$CURSOR_BIN ;;
+  esac
+fi
+LAUNCH=$(fm_bench_wrap_entrant_launch "$ID" "$WT" "$LAUNCH" "$HARNESS" "$MODEL" "$EFFORT" \
+  "$RAW_LAUNCH" "$KIND" "$BRIEF" "$FM_ROOT" "$STATE" "$TURNEND" "$BENCH_HARNESS_BIN") || exit 1
 
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" status=0 acquired=0

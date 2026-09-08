@@ -72,10 +72,8 @@ from pathlib import Path
 
 bench, confine, mechanism, iso = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 bench.mkdir(parents=True, exist_ok=True)
-# The isolation gate reads only the plan's schema, so a minimal valid plan is
-# enough here; the full plan contract is exercised in fm-bench-gate.test.sh.
 (bench / "benchmark.json").write_text(json.dumps({
-    "schema": "fm-bench-plan.v1", "benchmark_id": "isolation-e2e", "tracks": {}}, indent=2) + "\n")
+    "schema": "fm-bench-plan.v1", "benchmark_id": "isolation-e2e", "tracks": {"A": {"entrants": [{"name": "e1"}, {"name": "e2"}]}}}, indent=2) + "\n")
 (bench / "isolation.json").write_text(json.dumps({
     "schema": "fm-bench-isolation.v1",
     "exec_wrapper": [confine, "--mechanism", mechanism, "--allow", "{root}", "--"],
@@ -89,6 +87,7 @@ bench.mkdir(parents=True, exist_ok=True)
     "protected_paths": [f"{iso}/sealed"],
     "entrants": [
         {"id": f"bench-b1-{label}", "root": f"{iso}/{name}",
+         "track": "A", "role": "entrant", "candidate": name,
          "private_object_store": f"{iso}/{name}/objects",
          "private_tmp": f"{iso}/{name}/tmp",
          "private_home": f"{iso}/{name}/home",
