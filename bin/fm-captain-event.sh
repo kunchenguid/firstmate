@@ -537,9 +537,12 @@ def atomic_write(path, payload, mode=0o600):
             pass
 
 
+def encode_journal(rows):
+    return b"".join(validate_event(row, index, f"captain-event row {index}") for index, row in enumerate(rows, 1))
+
+
 def write_journal(journal, rows):
-    payload = b"".join(validate_event(row, index, f"captain-event row {index}") for index, row in enumerate(rows, 1))
-    atomic_write(journal, payload)
+    atomic_write(journal, encode_journal(rows))
 
 
 def pending_files(root, pending):
@@ -585,10 +588,10 @@ def remove_durable(path):
 
 def recover_pending(root, pending, journal, rows):
     files, temporary = pending_files(root, pending)
-    for path in temporary:
-        path.unlink()
     events = [load_pending(path) for path in files]
     events.sort(key=lambda row: (row["seq"], row["event_id"]))
+    simulated_rows = list(rows)
+    removals = []
     seen_seq = set()
     for event in events:
         if event["seq"] in seen_seq:
@@ -596,19 +599,25 @@ def recover_pending(root, pending, journal, rows):
         seen_seq.add(event["seq"])
         seq = event["seq"]
         path = pending / (event["event_id"].split(":", 1)[1] + ".json")
-        if seq <= len(rows):
-            if rows[seq - 1] != event:
+        if seq <= len(simulated_rows):
+            if simulated_rows[seq - 1] != event:
                 raise OutboxError(f"pending seq {seq} conflicts with the published journal")
-            remove_durable(path)
+            removals.append(path)
             continue
-        if seq != len(rows) + 1:
+        if seq != len(simulated_rows) + 1:
             raise OutboxError(f"pending seq {seq} would create a journal gap")
-        if any(row["event_id"] == event["event_id"] for row in rows):
+        if any(row["event_id"] == event["event_id"] for row in simulated_rows):
             raise OutboxError(f"pending event {event['event_id']} reuses an earlier identity")
-        rows.append(event)
-        write_journal(journal, rows)
+        simulated_rows.append(event)
+        removals.append(path)
+    payload = encode_journal(simulated_rows)
+    if simulated_rows != rows:
+        atomic_write(journal, payload)
+    for path in removals:
         remove_durable(path)
-    return rows
+    for path in temporary:
+        remove_durable(path)
+    return simulated_rows
 
 
 def semantic_payload(event):

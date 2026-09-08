@@ -395,7 +395,33 @@ expect_code 98 "$status" "after-replace crash injection"
   || fail "post-rename retry did not reconcile idempotently"
 [ "$(wc -l < "$home/state/captain-events/events.jsonl" | tr -d ' ')" = 1 ] \
   || fail "post-rename retry duplicated the event"
-pass "pending publication recovers across both atomic-rename crash windows"
+
+home=$(new_home duplicate-pending)
+enable_home "$home"
+primary_args pi:duplicate-pending-one one
+FM_CAPTAIN_EVENT_TEST_CRASH=after-pending FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null 2>&1
+status=$?
+expect_code 97 "$status" "first duplicate-pending crash injection"
+other_home=$(new_home duplicate-pending-other)
+enable_home "$other_home"
+primary_args pi:duplicate-pending-two two
+FM_CAPTAIN_EVENT_TEST_CRASH=after-pending FM_HOME="$other_home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null 2>&1
+status=$?
+expect_code 97 "$status" "second duplicate-pending crash injection"
+pending_dir="$home/state/captain-events/pending"
+cp "$other_home/state/captain-events/pending/"*.json "$pending_dir/"
+pending_before="$home/pending-before"
+mkdir "$pending_before"
+cp "$pending_dir/"*.json "$pending_before/"
+primary_args pi:duplicate-pending-three three
+out=$(FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" 2>&1)
+status=$?
+[ "$status" -ne 0 ] || fail "duplicate pending sequence was recovered"
+assert_contains "$out" 'multiple pending events reserve seq 1' "duplicate pending refusal lost its cause"
+assert_absent "$home/state/captain-events/events.jsonl" "duplicate pending recovery partially advanced the journal"
+diff -r "$pending_before" "$pending_dir" >/dev/null \
+  || fail "duplicate pending recovery changed pending record bytes"
+pass "pending recovery is atomic across crashes and invalid pending sets"
 
 # Each corruption shape blocks validation, reads, and appends without salvage.
 make_corrupt_case() {
