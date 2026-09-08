@@ -30,8 +30,6 @@ set -u
 fm_live_gate opt-in FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E pi tmux git
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=tests/git-config-helpers.sh
-. "$ROOT/tests/git-config-helpers.sh"
 TMUX_SOCKET="fm-sessionstart-instruction-refresh-$$"
 TMUX_SESSION="instruction-refresh"
 LAB=${TMPDIR:-/tmp}
