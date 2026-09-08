@@ -3142,6 +3142,127 @@ test_a_secondmate_child_is_told_apart_from_main_work_in_the_same_repo() {
   pass "an underway row from a second mate is distinguishable from main work in the same repo"
 }
 
+# THE INVIOLABLE RULE, SECOND FACE. Nothing that needs the captain may be hidden
+# - not by splitting the needs-you tile, and not by re-labelling a row into the
+# waiting state. A request whose merge he still owes an answer on is his call,
+# however complete it is on our side, so it must never reach the delivered
+# bucket, never age there, and never wear a waiting badge. This one nearly got
+# past both the author and the review, which is exactly why it is a test.
+# R4: an upcoming row from a second mate must reach the parent with its recorded
+# request link, not a null. The link lives in the child home task metadata, so it
+# has to survive that home ledger projection to be usable at all.
+test_a_secondmate_queued_row_carries_its_recorded_request_link() {
+  local home fakebin mate out
+  home=$(make_home mate-queued-link)
+  fakebin=$(make_fakebin "$home")
+  write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)
+- [ ] mate-held - Held delivery with a recorded request (repo: firstmate) (kind: ship) (hold: waiting on the release) (hold-kind: external) (since 2026-07-01)
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$mate/projects/mate-held"
+  fm_write_meta "$mate/state/mate-held.meta" \
+    "window=firstmate:fm-mate-held" "worktree=$mate/projects/mate-held" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/acme/repo/pull/91"
+  record_claude_state "$mate/state" mate-held idle
+  printf 'paused: waiting on the upstream release\n' > "$mate/state/mate-held.status"
+  out=$(run "$home" "$fakebin" --json) || fail "the snapshot failed"
+  # A secondmate gate keeps the child id and names its home in owner.
+  printf '%s' "$out" | jq -e '
+    [.gates[] | select(.id == "mate-held") | {owner, pr_url}]
+      == [{owner: "mate", pr_url: "https://github.com/acme/repo/pull/91"}]
+  ' >/dev/null || fail "a second mate upcoming row reached the parent without its link: $out"
+  pass "an upcoming row from a second mate carries its recorded request link to the parent"
+}
+
+test_a_request_waiting_on_the_captain_never_lands_in_the_waiting_state() {
+  local pair home fakebin out
+  pair=$(delivered_home captain-owed $((BEARINGS_FIXTURE_EPOCH - 30 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  # Same delivery as the plain case, except the captain owes an answer on it.
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] still-working - Work still moving (repo: firstmate) (kind: ship) (since 2026-07-01)
+- [ ] shipped-task - Delivered and waiting (repo: firstmate) (kind: ship) (hold: merge this? ) (hold-kind: captain) (since 2026-07-01)
+
+## Queued
+
+## Done
+EOF
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.awaiting[].id] | index("shipped-task")) == null
+  ' >/dev/null || fail "a request the captain owes an answer on was filed as delivered: $out"
+  printf '%s' "$out" | jq -e '
+    ([.decisions_open[].id] | index("shipped-task")) != null
+  ' >/dev/null || fail "the captain call was hidden from Captain's Call as well: $out"
+  # A thirty-day wait is well past the exit rule, so aging cannot smuggle it back.
+  printf '%s' "$out" | jq -e '[.awaiting[] | select(.nudge)] == []' >/dev/null \
+    || fail "the captain call reappeared as an aged delivered row: $out"
+  pass "a request the captain owes an answer on is never re-labelled into the waiting state"
+}
+
+# R2: a delivery can resume for corrections and then fail. Its own state and
+# detail must survive rather than being reported as delivered.
+test_a_delivery_that_resumed_and_failed_keeps_its_own_state() {
+  local pair home fakebin out
+  pair=$(delivered_home resumed-failed $((BEARINGS_FIXTURE_EPOCH - 3 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  printf 'failed: corrections could not be validated\n' >> "$home/state/shipped-task.status"
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.awaiting[].id] | index("shipped-task")) == null
+  ' >/dev/null || fail "a resumed delivery that failed was still reported as delivered: $out"
+  pass "a delivery that resumed and failed keeps its own state instead of reading as delivered"
+}
+
+# R6: the bound must never be what drops a row that has aged out of this bucket.
+test_an_overdue_delivery_survives_the_awaiting_bound() {
+  local pair home fakebin out i
+  pair=$(delivered_home overdue-bound $((BEARINGS_FIXTURE_EPOCH - 1 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  : > "$home/data/backlog.md"
+  printf '## In flight\n' >> "$home/data/backlog.md"
+  printf -- '- [ ] still-working - Work still moving (repo: firstmate) (kind: ship) (since 2026-07-01)\n' \
+    >> "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 4 ]; do
+    printf -- '- [ ] recent-%s - Recent delivery %s (repo: firstmate) (kind: ship) (since 2026-07-01)\n' \
+      "$i" "$i" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/recent-$i.meta" \
+      "window=firstmate:fm-recent-$i" "worktree=$home/projects" "project=firstmate" \
+      "harness=claude" "kind=ship" "mode=no-mistakes" \
+      "pr=https://github.com/acme/repo/pull/1$i"
+    record_claude_state "$home/state" "recent-$i" idle
+    printf 'done: PR https://github.com/acme/repo/pull/1%s checks green\n' "$i" \
+      > "$home/state/recent-$i.status"
+    arm_merge_poll "$home" "recent-$i" "https://github.com/acme/repo/pull/1$i" \
+      $((BEARINGS_FIXTURE_EPOCH - 86400))
+    i=$((i + 1))
+  done
+  printf -- '- [ ] shipped-task - Delivered and waiting (repo: firstmate) (kind: ship) (since 2026-07-01)\n' \
+    >> "$home/data/backlog.md"
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  arm_merge_poll "$home" shipped-task https://github.com/acme/repo/pull/2 \
+    $((BEARINGS_FIXTURE_EPOCH - 40 * 86400))
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    FM_BEARINGS_NOW_EPOCH="$BEARINGS_FIXTURE_EPOCH" FM_BEARINGS_AWAITING=2 \
+    NET_LOG="$home/net.log" "$BEARINGS" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.awaiting | length) == 2
+      and (.awaiting[0] | .id == "shipped-task" and .nudge == true and .age_days == 40)
+      and ([.omitted[].surface] | any(test("awaiting showing 2 of 5")))
+  ' >/dev/null || fail "the bound dropped the overdue delivery instead of ranking it first: $out"
+  pass "an overdue delivery outranks recent ones so the bound never drops it"
+}
+
 test_delivered_work_leaves_underway_for_its_own_bucket
 test_an_armed_merge_watch_does_not_move_work_that_is_still_running
 test_an_underway_row_carries_its_owner_and_its_recorded_request
@@ -3187,3 +3308,7 @@ EOF
 }
 
 test_a_secondmate_delivery_reaches_the_parent_as_a_delivered_row
+test_a_request_waiting_on_the_captain_never_lands_in_the_waiting_state
+test_a_delivery_that_resumed_and_failed_keeps_its_own_state
+test_an_overdue_delivery_survives_the_awaiting_bound
+test_a_secondmate_queued_row_carries_its_recorded_request_link

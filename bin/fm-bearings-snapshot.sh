@@ -47,17 +47,39 @@
 # gaps in omitted[] and, when invalid, a Charted Next gate line so the five-section
 # chat cannot claim an empty fleet while main current state is broken.
 #
-# DELIVERED, WAITING ON A MAINTAINER, is its own bucket rather than a flavour of
-# in_flight. A task whose merge watch is armed (the canonical snapshot's
-# pr.merge_poll, written only after the worker's PR-ready signal) and whose
-# worker is no longer working has shipped: nothing local progresses and nothing
-# in it is the captain's to answer yet. Those rows leave in_flight and gates and
-# become awaiting[], so the same work is never counted twice. age_days is how
-# long that delivery's merge watch has been armed - re-recording a PR restarts
-# it, because a re-recorded delivery is a new delivery - and nudge is the exit
-# rule at FM_BEARINGS_AWAITING_NUDGE_DAYS: past it the row stops being a
+# DELIVERED, WAITING ON A MERGE WE DO NOT CONTROL, is its own bucket rather than
+# a flavour of in_flight, and it is named for what the data proves rather than
+# for a stronger claim. A row qualifies only when BOTH halves hold: the work is
+# complete on our side, and no captain action is outstanding on that task.
+#
+# Complete on our side is affirmative, never "any state except working". The
+# delivery must be recorded (pr.merge_poll armed with a URL, which firstmate
+# writes only after a PR-ready signal), the last recorded event must declare
+# done or the bounded external wait paused, and the live state must not be
+# working, blocked, or parked. Work that resumed and then failed keeps its own
+# state and detail rather than being filed as delivered.
+#
+# No captain action outstanding is read from the structured captain-hold
+# classification and nothing else. This is the same guarantee as the never-split
+# needs-you tile, wearing its other face: nothing that needs the captain may be
+# hidden, whether by splitting a tile or by re-labelling a row.
+#
+# Qualifying rows leave in_flight and gates, so the same work is counted once.
+# age_days is the wait measured from this delivery's own durable record, which
+# bin/fm-pr-check.sh preserves when the SAME pull request is re-recorded, so an
+# ordinary re-registration cannot turn a three-week wait into zero. nudge is the
+# exit rule at FM_BEARINGS_AWAITING_NUDGE_DAYS: past it the row stops being a
 # delivered row and becomes the captain's to nudge. Age only grows, so the exit
-# is one-way and no row can oscillate between the two.
+# is one-way and no row can oscillate between the two. Overdue and oldest rows
+# sort first, so the bound can never be what drops one.
+#
+# WHAT THIS DELIBERATELY DOES NOT CLAIM. The state was first specified as
+# "delivered, awaiting an OUTSIDE MAINTAINER", requiring that the only remaining
+# actor be outside this fleet. Nothing in fleet state records that a repository
+# is one we never merge into - only prose in a project description - so that
+# condition was not testable and the state was narrowed to what structure
+# proves. Do not infer the missing fact from a description, from yolo, or from
+# any other proxy; adding it is a registered project posture, tracked separately.
 #
 # OWNERSHIP IS STRUCTURAL. Every in_flight, awaiting, landed, and gates row
 # carries owner - "(main)" for this home, the registered secondmate id for a
@@ -179,10 +201,13 @@ For every registered secondmate, readable structured facts from its own home are
   Parent events and bounded terminal reads are labeled fallback or contradiction
   evidence and never become current work. The provenance and freshness fields
   distinguish live and cached ledgers; a home without either is explicitly unreadable.
-awaiting holds work that shipped and now waits on a maintainer: its merge watch is
-  armed and its worker has stopped, so it is neither in_flight nor a gate. age_days
-  is the armed wait in whole days and nudge marks a row at or past awaiting_nudge_days
+awaiting holds work that shipped and now waits on a merge we do not control: the
+  delivery is recorded, the last event declares done or paused, the live state is not
+  working/blocked/parked, and no captain action is outstanding - so it is neither
+  in_flight nor a gate. age_days is that wait in whole days, preserved when the same
+  PR is re-recorded, and nudge marks a row at or past awaiting_nudge_days
   (FM_BEARINGS_AWAITING_NUDGE_DAYS), which belongs in Captain's Call instead.
+  Overdue then oldest rows sort first so the bound never drops one.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight, --all-awaiting,
   --all-decisions (all open decisions and captain holds in the bounded snapshot),
   --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
@@ -437,6 +462,30 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   def delivered_age($now; $epoch):
     if $epoch == null or $now == 0 then null
     else (($now - $epoch) / 86400 | floor | if . < 0 then 0 else . end) end;
+  # THE DELIVERY RECORD. Firstmate arms this watch only after a PR-ready signal
+  # from the worker, so an armed watch with a recorded URL is what "we shipped
+  # it" looks like in structure instead of in a title.
+  def delivery_recorded:
+    .pr.merge_poll.armed == true and .pr.url != null;
+  # COMPLETE ON OUR SIDE, stated affirmatively rather than as "any state except
+  # working". The last recorded event must declare a terminal-for-us state -
+  # done, or the paused that AGENTS.md section 8 defines as a bounded external
+  # wait - and the live state must not show work that resumed, needs firstmate,
+  # or sits at a gate. Work that resumed and then failed or blocked keeps that
+  # state and its detail instead of being reported as delivered.
+  def complete_on_our_side:
+    . as $t
+    | ((($t.paths.status_log.last_event.state // "")) | . == "done" or . == "paused")
+      and ((["working", "blocked", "parked"] | index($t.current_state.state)) == null);
+  # NOTHING THE CAPTAIN OWES IS EVER RE-LABELLED. A task he still owes an answer
+  # on is his call, whatever else is true of it, so it never reaches this bucket.
+  # The test is the structured captain-hold classification and nothing else.
+  def captain_owed:
+    .backlog.hold_kind == "captain" or .backlog.hold_bucket != null
+    or .backlog.captain_actionable == true;
+  def delivered_and_waiting:
+    delivery_recorded and complete_on_our_side and (.backlog.state != "done")
+    and (captain_owed | not);
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -506,9 +555,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           reason:(.current.reason // "-")} ]) as $secondmates_all
   | ([ .tasks[]
        | select(.kind != "secondmate")
-       | select(.pr.merge_poll.armed == true and .pr.url != null)
-       | select(.current_state.state != "working")
-       | select(.backlog.state != "done")
+       | select(delivered_and_waiting)
        | (delivered_age($now_epoch; .pr.merge_poll.armed_epoch)) as $age
        | {id,
           what:((.backlog.title // .id) | trunc(70)),
@@ -526,7 +573,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             owner:$m.id,
             pr_url:.pr_url,
             age_days:$age,
-            nudge:($age != null and $age >= $nudge_days)} ]) as $awaiting_all
+            nudge:($age != null and $age >= $nudge_days)} ]
+     # Overdue first, then longest wait: the cap must never be what drops the
+     # one row that has aged out of this bucket and into the captain call.
+     | sort_by([(if .nudge then 0 else 1 end), -(.age_days // 0), .id])) as $awaiting_all
   | ([ $awaiting_all[] | .id ]) as $awaiting_ids
   | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta")
        | {key:.id, value:.pr.url} ] | from_entries) as $recorded_pr_by_id

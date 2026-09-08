@@ -433,12 +433,7 @@ __FM_BEARINGS_BOARD_DATA__
     renderBoardError("Unsupported board data schema: " + (data && data.schema ? data.schema : "(none)"));
     return;
   }
-  var fleetLists = [data.captains_call, data.underway, data.landed, data.charted];
-  /* A board published before the delivered section existed is still a readable
-     board: treat a missing awaiting list as an empty one rather than replacing
-     the captain's open page with a load error. build still REQUIRES the field,
-     so nothing published from here on can omit it. */
-  var awaitingRows = Array.isArray(data.awaiting) ? data.awaiting : [];
+  var fleetLists = [data.captains_call, data.underway, data.awaiting, data.landed, data.charted];
   var callItemsValid = Array.isArray(data.captains_call) && data.captains_call.every(function (item) {
     return item && typeof item === "object" &&
       typeof item.key === "string" && item.key.length > 0 &&
@@ -481,9 +476,11 @@ __FM_BEARINGS_BOARD_DATA__
   /* Owner labels are a payload field, never words read out of a title. "(main)"
      is the snapshot's marker for this home; the strip prints it as "main". */
   function ownerLabel(o) { return o === "(main)" ? "main" : o; }
-  /* "3 main · 2 fm-self", most rows first, or "" when one home owns them all -
-     a single-owner breakdown says nothing the tile does not already say. */
-  function ownerBreakdown(rows) {
+  /* "3 main · 2 fm-self", most rows first. A tile owned entirely by one home
+     still names it: hiding ownership in the commonest case is the very defect
+     this sub-line exists to correct. `omitted` says the counts describe only
+     the rows on screen, so a truncated section cannot imply a false total. */
+  function ownerBreakdown(rows, omitted) {
     var order = [], counts = {};
     (rows || []).forEach(function (r) {
       var o = ownerLabel(r && r.owner);
@@ -491,11 +488,11 @@ __FM_BEARINGS_BOARD_DATA__
       if (!(o in counts)) { counts[o] = 0; order.push(o); }
       counts[o] += 1;
     });
-    if (order.length < 2) return "";
+    if (!order.length) return "";
     return order
       .sort(function (a, b) { return counts[b] - counts[a] || order.indexOf(a) - order.indexOf(b); })
       .map(function (o) { return counts[o] + " " + o; })
-      .join(" · ");
+      .join(" · ") + (omitted ? " shown" : "");
   }
   var callTotal = data.captains_call.length;
   /* INVIOLABLE: the needs-you tile is never split and never filtered by owner.
@@ -504,17 +501,17 @@ __FM_BEARINGS_BOARD_DATA__
   var stats = [
     { n: callTotal, l: "need you", call: true },
     { n: data.underway.length, l: "underway", owners: data.underway },
-    { n: awaitingRows.length, l: "delivered", owners: awaitingRows },
+    { n: data.awaiting.length, l: "delivered", owners: data.awaiting },
     { n: data.landed.length, l: "landed recently", owners: data.landed },
     { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "charted next",
-      owners: chartedQueued(data.charted) }
+      owners: chartedQueued(data.charted), omitted: chartedMoreQueued > 0 }
   ];
   var strip = document.getElementById("bb-stats");
   stats.forEach(function (s) {
     var t = el("div", "bb-stat" + (s.call ? " bb-stat--call" : ""));
     t.appendChild(el("span", "bb-stat__num", String(s.n)));
     t.appendChild(el("span", "bb-stat__label", s.l));
-    var owners = s.call ? "" : ownerBreakdown(s.owners);
+    var owners = s.call ? "" : ownerBreakdown(s.owners, s.omitted);
     if (owners) t.appendChild(el("span", "bb-stat__owners", owners));
     strip.appendChild(t);
   });
@@ -709,24 +706,24 @@ __FM_BEARINGS_BOARD_DATA__
      awaiting_nudge_days is not in this list at all - it is a Captain's Call
      nudge card by then, and the payload validator refuses it here. */
   var aw = document.getElementById("bb-awaiting");
-  if (!awaitingRows.length) {
-    aw.appendChild(el("div", "bb-empty", "Nothing is waiting on a maintainer."));
+  if (!data.awaiting.length) {
+    aw.appendChild(el("div", "bb-empty", "Nothing is waiting on a merge we do not control."));
   }
-  awaitingRows.slice().sort(function (a, b) { return (b.age_days || 0) - (a.age_days || 0); })
+  data.awaiting.slice().sort(function (a, b) { return (b.age_days || 0) - (a.age_days || 0); })
     .forEach(function (t) {
       var row = el("div", "bb-row");
       row.appendChild(badge("info", "delivered"));
       var main = el("div", "bb-row__main");
       main.appendChild(el("div", "bb-row__title", t.what));
       main.appendChild(el("div", "bb-row__sub",
-        (t.repo || t.id) + " · " + ownerLabel(t.owner) + " · waiting on the maintainer"));
+        (t.repo || t.id) + " · " + ownerLabel(t.owner) + " · waiting on a merge we do not control"));
       row.appendChild(main);
       row.appendChild(el("span", "bb-row__age", t.age_days + "d"));
       row.appendChild(prLink(t.pr_url));
       aw.appendChild(row);
     });
   document.getElementById("bb-awaiting-sub").textContent =
-    awaitingRows.length ? "nudge-worthy after " + data.awaiting_nudge_days + " days" : "";
+    data.awaiting.length ? "nudge-worthy after " + data.awaiting_nudge_days + " days" : "";
 
   /* Charted Next + dispatch picker */
   var ch = document.getElementById("bb-charted");

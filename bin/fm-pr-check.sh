@@ -93,6 +93,38 @@ pr_check_cleanup() {
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
+
+# THE DELIVERY CLOCK MUST SURVIVE A RE-RECORDING. The registration is
+# republished wholesale on every run, and its creation time is the only durable
+# local record of when a reader could first say "this was delivered and is now
+# waiting". Re-recording the SAME pull request is an ordinary supported
+# operation - a re-verified head, a repaired watch - and it must not turn a
+# three-week wait into zero and silently discard the nudge that wait had earned.
+# So when the registration already present names this exact delivery, its
+# original time is carried onto the replacement. A DIFFERENT pull request is a
+# different delivery and starts its own clock. Identity is compared field by
+# field from the parsed record, never from the file name.
+# Only the timestamp is carried: the bytes, the inode identity, and the hashes
+# bound to them are produced by the transactional publication and left alone.
+if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
+  pr_check_mtime() { /usr/bin/stat -f '%m' "$1" 2>/dev/null || true; }
+  pr_check_set_mtime() { touch -t "$(date -r "$2" +%Y%m%d%H%M.%S)" "$1" 2>/dev/null || true; }
+else
+  pr_check_mtime() { stat -c '%Y' "$1" 2>/dev/null || true; }
+  pr_check_set_mtime() { touch -d "@$2" "$1" 2>/dev/null || true; }
+fi
+DELIVERED_SINCE=
+if fm_pr_poll_registration_parse "$STATE/$ID.pr-poll-registration" \
+  && [ "$FM_PR_REG_ID" = "$ID" ] \
+  && [ "$FM_PR_REG_PROVIDER" = "$PROVIDER" ] \
+  && [ "$FM_PR_REG_URL" = "$URL" ] \
+  && [ "$FM_PR_REG_HOST" = "$HOST" ] \
+  && [ "$FM_PR_REG_PATH" = "$PROJECT_PATH" ] \
+  && [ "$FM_PR_REG_NUMBER" = "$NUMBER" ]; then
+  DELIVERED_SINCE=$(pr_check_mtime "$STATE/$ID.pr-poll-registration")
+  case "$DELIVERED_SINCE" in ''|*[!0-9]*) DELIVERED_SINCE= ;; esac
+fi
+
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
@@ -134,6 +166,8 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+[ -z "$DELIVERED_SINCE" ] \
+  || pr_check_set_mtime "$STATE/$ID.pr-poll-registration" "$DELIVERED_SINCE"
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything

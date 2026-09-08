@@ -849,6 +849,30 @@ test_build_requires_a_nudge_card_to_carry_its_link_and_its_age() {
   pass "build refuses a nudge card that cannot say how long or point where"
 }
 
+# R5: a secondmate row id carries a slash, which is not a slug. The encoded key
+# must survive the payload validator and reach the board unchanged, and it must
+# be reversible so two rows can never collide on one key.
+test_an_encoded_secondmate_nudge_key_is_accepted_and_preserved() {
+  local home data
+  home=$(make_home nudge-key)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call += [
+        {"key":"nudge.mate_smate-shipped","type":"nudge","repo":"sample","title":"Nudge the maintainer",
+         "age_days":21,"pr_url":"https://github.com/o/r/pull/9",
+         "options":[{"value":"nudge","label":"Nudge them"},{"value":"leave","label":"Leave it"}]},
+        {"key":"nudge.mate_ushipped","type":"nudge","repo":"sample","title":"Nudge the other one",
+         "age_days":30,"pr_url":"https://github.com/o/r/pull/10",
+         "options":[{"value":"nudge","label":"Nudge them"}]}
+      ]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "an encoded secondmate nudge key was refused"
+  extract_payload "$home/.lavish/bearings-board.html" \
+    | jq -e '[.captains_call[] | select(.type == "nudge") | .key]
+        == ["nudge.mate_smate-shipped", "nudge.mate_ushipped"]' >/dev/null \
+    || fail "the encoded nudge keys did not survive the build unchanged"
+  pass "an encoded secondmate nudge key passes validation and reaches the board intact"
+}
+
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
@@ -872,3 +896,4 @@ test_build_requires_a_delivered_row_to_carry_its_link_and_its_age
 test_build_refuses_a_delivered_row_that_has_already_aged_out
 test_build_accepts_a_delivered_row_and_a_nudge_card
 test_build_requires_a_nudge_card_to_carry_its_link_and_its_age
+test_an_encoded_secondmate_nudge_key_is_accepted_and_preserved

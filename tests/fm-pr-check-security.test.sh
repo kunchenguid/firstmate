@@ -201,6 +201,14 @@ write_poll_meta() {
 }
 
 
+if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
+  file_mtime_epoch() { /usr/bin/stat -f '%m' "$1"; }
+  set_mtime_epoch() { touch -t "$(date -r "$2" +%Y%m%d%H%M.%S)" "$1"; }
+else
+  file_mtime_epoch() { stat -c '%Y' "$1"; }
+  set_mtime_epoch() { touch -d "@$2" "$1"; }
+fi
+
 run_check_entry() {
   local dir=$1
   shift
@@ -480,6 +488,41 @@ test_invalid_entrypoints_have_zero_side_effects() {
   [ ! -s "$dir/guard.log" ] || fail "invalid direct or merge data called the guard"
   [ ! -e "$TMP_ROOT/escape.check.sh" ] || fail "task traversal wrote outside state"
   pass "PR and teardown entrypoints reject invalid arguments before every side effect"
+}
+
+# THE DELIVERY CLOCK. The registration record is republished wholesale on every
+# run, and its creation time is the only durable local record of when a delivery
+# began waiting. Re-recording the SAME pull request is an ordinary operation and
+# must not reset that wait; a DIFFERENT pull request is a different delivery and
+# must start its own clock.
+test_rerecording_the_same_pr_preserves_the_delivery_clock() {
+  local dir reg first second third old
+  dir=$(make_case delivery-clock)
+  write_task_meta "$dir"
+  reg="$dir/home/state/task-a.pr-poll-registration"
+
+  run_check_entry "$dir" task-a https://github.com/my-org/repo/pull/7 \
+    >/dev/null 2>/dev/null || fail "the first recording failed"
+  # Backdate the delivery by three weeks, which is what an old wait looks like.
+  old=$(( $(file_mtime_epoch "$reg") - 21 * 86400 ))
+  set_mtime_epoch "$reg" "$old"
+  first=$(file_mtime_epoch "$reg")
+  [ "$first" = "$old" ] || fail "the delivery clock could not be backdated for the test"
+
+  run_check_entry "$dir" task-a https://github.com/my-org/repo/pull/7 \
+    >/dev/null 2>/dev/null || fail "re-recording the same PR failed"
+  second=$(file_mtime_epoch "$reg")
+  [ "$second" = "$first" ] \
+    || fail "re-recording the same PR reset the delivery clock from $first to $second"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "carrying the delivery clock broke the poll provenance binding"
+
+  run_check_entry "$dir" task-a https://github.com/my-org/repo/pull/8 \
+    >/dev/null 2>/dev/null || fail "recording a different PR failed"
+  third=$(file_mtime_epoch "$reg")
+  [ "$third" -gt "$first" ] \
+    || fail "a different PR inherited the previous delivery clock ($third)"
+  pass "re-recording one PR keeps its delivery clock while a different PR starts its own"
 }
 
 test_valid_recording_and_merge_derivation() {
@@ -2142,6 +2185,7 @@ test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
+test_rerecording_the_same_pr_preserves_the_delivery_clock
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract

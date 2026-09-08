@@ -67,10 +67,12 @@
 #     without a probe, and other tasks use "not_checked".
 #     pr.merge_poll records the DELIVERY fact, not a display choice: armed is
 #     true exactly while this task carries a committed merge-poll registration
-#     (bin/fm-pr-lib.sh writes it once, after the worker's PR-ready signal, and
-#     retires it when the PR merges), and armed_epoch is that record's own
-#     creation time, so "delivered, waiting for the merge" and its age are read
-#     from the record instead of from a title or a status sentence.
+#     (bin/fm-pr-lib.sh writes it after a PR-ready signal, and retires it when
+#     the PR merges), and armed_epoch is that record's own creation time, which
+#     bin/fm-pr-check.sh carries forward when the SAME pull request is
+#     re-recorded. So "delivered, waiting for the merge" and how long it has
+#     waited are read from the record instead of from a title or a status
+#     sentence, and an ordinary re-registration cannot reset that wait.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -86,11 +88,13 @@
 #     Each structured-home record carries active_children, awaiting_merge,
 #     decisions_open, holds, queued, landed, endpoints, counts, and omitted.
 #     awaiting_merge is that home's DELIVERED work: an owned in-flight child
-#     whose merge watch is armed and whose worker has stopped. It is a
-#     recognized terminal-facing state rather than an inventory fault, so such a
-#     child does not make the home's books read as contradicting themselves. The
-#     field is additive: a ledger written before it simply omits it, and every
-#     reader must tolerate its absence. provenance.summary_source
+#     whose delivery is recorded, whose last event declares done or the bounded
+#     external wait paused, whose live state is not working/blocked/parked, and
+#     on which the captain owes nothing. Only such a child is a recognized
+#     terminal-facing state rather than an inventory fault; one that resumed and
+#     failed keeps its diagnostic. Oldest first, so the child bound never drops
+#     the longest wait. The field is additive: a ledger written before it simply
+#     omits it, and every reader must tolerate its absence. provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. Every successfully sampled home also carries
@@ -983,7 +987,10 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | $tasks[]
          | select(.kind != "secondmate")
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
-         | select((.pr.merge_poll.armed == true and .pr.url != null) | not)
+         | select(($work.hold_kind != "captain" and $work.hold_bucket == null
+                   and .pr.merge_poll.armed == true and .pr.url != null
+                   and (((.paths.status_log.last_event.state // "")) as $event
+                        | $event == "done" or $event == "paused")) | not)
          | {id,state:.current_state.state} ]) as $terminal_in_flight
     | ([if $backlog.present != true then
           {kind:"missing_backlog",ids:[],reason:"missing structured backlog"}
@@ -1016,15 +1023,22 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ([ $owned_in_flight[] as $work
          | select($work.current_role != "program")
-         | $tasks[]
-         | select(.id == $work.id and .kind != "secondmate")
-         | select(.pr.merge_poll.armed == true and .pr.url != null)
-         | select(.current_state.state != "working")
-         | {id,kind,state:.current_state.state,
-            repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
-            title:(($work.title // .id) | trunc(120)),
-            pr_url:(.pr.url | trunc(500)),
-            delivered_epoch:(.pr.merge_poll.armed_epoch)} ]) as $awaiting_all
+         | select($work.hold_kind != "captain" and $work.hold_bucket == null
+                  and $work.captain_actionable != true)
+         | $tasks[] as $task
+         | select($task.id == $work.id and $task.kind != "secondmate")
+         | select($task.pr.merge_poll.armed == true and $task.pr.url != null)
+         | select((($task.paths.status_log.last_event.state // "")) as $event
+                  | $event == "done" or $event == "paused")
+         | select((["working", "blocked", "parked"]
+                   | index($task.current_state.state)) == null)
+         | {id:$task.id,kind:$task.kind,state:$task.current_state.state,
+            repo:(($work.repo // $task.project // null) | if . == null then null else trunc(120) end),
+            title:(($work.title // $task.id) | trunc(120)),
+            pr_url:($task.pr.url | trunc(500)),
+            delivered_epoch:($task.pr.merge_poll.armed_epoch)} ]
+       # Longest wait first: the child bound must never drop the oldest delivery.
+       | sort_by([-(.delivered_epoch // 0)]) | reverse) as $awaiting_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
@@ -1090,6 +1104,10 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           hold_age_days:(.hold_age_days // null),
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
+          pr_url:(. as $row
+            | ((.pr_url // ([$tasks[] | select(.id == $row.id and .pr.source == "meta")
+                             | .pr.url] | first) // null)
+               | if . == null then null else trunc(500) end)),
           kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,

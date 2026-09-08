@@ -190,6 +190,33 @@ test_underway_rows_name_their_home_when_the_repo_cannot() {
   pass "an underway row names the home that owns it, not just its repo"
 }
 
+test_a_tile_owned_by_one_home_still_names_it() {
+  local home out
+  home=$(make_home owner-single)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"One"},
+    {"id":"b","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"Two"}
+  ]}')
+  [ "$(owners_of "$out" underway)" = "2 main" ] \
+    || fail "a tile owned entirely by one home refused to name it: $out"
+  pass "a tile whose rows share one home still says which home"
+}
+
+# A truncated section must not let its breakdown imply a total it cannot see.
+test_a_truncated_tile_says_its_breakdown_covers_only_the_shown_rows() {
+  local home out
+  home=$(make_home owner-truncated)
+  out=$(render_payload "$home" '{"charted":[
+    {"id":"a","repo":"firstmate","owner":"(main)","title":"One","reason":"gated","dispatchable":true},
+    {"id":"b","repo":"firstmate","owner":"fm-self","title":"Two","reason":"gated","dispatchable":true}
+  ],"charted_more":20}')
+  [ "$(owners_of "$out" "charted next")" = "1 main · 1 fm-self shown" ] \
+    || fail "a truncated tile implied its breakdown covered every row: $out"
+  printf '%s' "$out" | jq -e '[.stats[] | select(.label == "charted next") | .n] == [22]' >/dev/null \
+    || fail "the truncated tile lost its real total: $out"
+  pass "a truncated tile counts every row but says its breakdown covers the shown ones"
+}
+
 test_the_tiles_break_down_by_owner_without_a_tile_of_their_own() {
   local home out
   home=$(make_home owner-breakdown)
@@ -203,18 +230,6 @@ test_the_tiles_break_down_by_owner_without_a_tile_of_their_own() {
   printf '%s' "$out" | jq -e '[.stats[] | .label] | index("owner") == null' >/dev/null \
     || fail "ownership took a tile of its own instead of a sub-line: $out"
   pass "the tiles carry an ownership sub-line rather than an ownership tile"
-}
-
-test_a_single_owner_adds_no_breakdown_noise() {
-  local home out
-  home=$(make_home owner-single)
-  out=$(render_payload "$home" '{"underway":[
-    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"One"},
-    {"id":"b","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"Two"}
-  ]}')
-  [ -z "$(owners_of "$out" underway)" ] \
-    || fail "a single-owner tile still printed a breakdown: $out"
-  pass "a tile whose rows share one home prints no ownership sub-line"
 }
 
 # THE INVIOLABLE RULE. What needs the captain needs him wherever it came from.
@@ -259,7 +274,7 @@ test_a_delivered_row_leads_with_its_age_and_its_request_link() {
   printf '%s' "$out" | jq -e '
     (.awaiting | length) == 2
       and (.awaiting[0] | .title == "Older delivery" and .age == "5d"
-        and .pr.href == "https://github.com/o/r/pull/22" and (.sub | endswith("waiting on the maintainer")))
+        and .pr.href == "https://github.com/o/r/pull/22" and (.sub | endswith("waiting on a merge we do not control")))
       and (.awaiting[1] | .title == "Newer delivery" and .age == "1d"
         and .pr.href == "https://github.com/o/r/pull/11")
   ' >/dev/null || fail "a delivered row lost its age, its link, or its order: $out"
@@ -291,7 +306,7 @@ test_an_empty_delivered_box_still_renders_its_state() {
   out=$(render_payload "$home" '{}')
   printf '%s' "$out" | jq -e '
     (.awaitingEmpty | length) == 1
-      and (.awaitingEmpty[0] | test("Nothing is waiting on a maintainer"))
+      and (.awaitingEmpty[0] | test("Nothing is waiting on a merge we do not control"))
       and ([.stats[] | select(.label == "delivered") | .n] == [0])
   ' >/dev/null || fail "the delivered section vanished when it was empty: $out"
   pass "the delivered section always renders, with its own empty state"
@@ -320,30 +335,6 @@ test_an_aged_delivery_reaches_the_captain_as_a_nudge_card() {
 # Rollout safety: a board published before the delivered section existed is
 # still open in the captain's browser. It must keep rendering, not turn into a
 # load error, until the next rebuild adds the section.
-test_a_board_published_before_the_delivered_section_still_renders() {
-  local home data out
-  home=$(make_home delivered-legacy)
-  data="$home/payload.json"
-  jq -n '{
-    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:[], landed:[], charted:[]}' > "$data"
-  # Written straight to the board path: build would (correctly) refuse this
-  # payload, and the case under test is a page that was published before the
-  # field existed.
-  mkdir -p "$home/.lavish"
-  BOARD_JSON="$(jq -c . "$data")" perl -pe \
-    "s/^__FM_BEARINGS_BOARD_DATA__\$/\$ENV{BOARD_JSON}/" \
-    "$ROOT/.agents/skills/bearings/assets/board-template.html" > "$home/.lavish/bearings-board.html"
-  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") \
-    || fail "the pre-upgrade board could not be rendered"
-  printf '%s' "$out" | jq -e '
-    .error == ""
-      and ([.stats[] | select(.label == "delivered") | .n] == [0])
-      and ((.awaitingEmpty | length) == 1)
-  ' >/dev/null || fail "a pre-upgrade board turned into a load error: $out"
-  pass "a board published before the delivered section still renders, with it empty"
-}
-
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
@@ -351,10 +342,10 @@ test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
 test_underway_rows_name_their_home_when_the_repo_cannot
 test_the_tiles_break_down_by_owner_without_a_tile_of_their_own
-test_a_single_owner_adds_no_breakdown_noise
+test_a_tile_owned_by_one_home_still_names_it
+test_a_truncated_tile_says_its_breakdown_covers_only_the_shown_rows
 test_the_needs_you_tile_is_never_split_or_filtered_by_owner
 test_a_delivered_row_leads_with_its_age_and_its_request_link
 test_delivered_work_is_no_longer_counted_as_underway
 test_an_empty_delivered_box_still_renders_its_state
 test_an_aged_delivery_reaches_the_captain_as_a_nudge_card
-test_a_board_published_before_the_delivered_section_still_renders
