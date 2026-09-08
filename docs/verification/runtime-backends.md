@@ -388,10 +388,11 @@ if(fs.readFileSync(f,"utf8")!==was){fs.unlinkSync(t);throw new Error("store move
 fs.renameSync(t,f);' "$cfg/.claude.json" "$wt" || exit 1   # never run after a candidate key has been written
 bin/fm-claude-trust.sh "$wt" <project> || exit 1   # a refusal must stop the arm, not fall through to the launch
 mkdir -p "$wt/.claude"   # stand in for the hooks bin/fm-spawn.sh injects into every claude worktree
-printf '%s\n' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"true"}]}],"Stop":[{"hooks":[{"type":"command","command":"true"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"true"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"true"}]}]}}' \
+[ -e "$wt/.claude/settings.local.json" ] || printf '%s\n' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"true"}]}],"Stop":[{"hooks":[{"type":"command","command":"true"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"true"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"true"}]}]}}' \
   > "$wt/.claude/settings.local.json"
+# candidate rerun only: write the candidate key into projects["$wt"] HERE, after the registration and before the launch
 tmux new-session -d -s tp-h1 -c "$wt" \
-  "CLAUDE_CONFIG_DIR=$cfg CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions 'reply with exactly: BRIEF-REACHED'" || exit 1
+  "${CLAUDE_CONFIG_DIR:+CLAUDE_CONFIG_DIR=$cfg }CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions 'reply with exactly: BRIEF-REACHED'" || exit 1
 pane=
 for _ in $(seq 60); do   # new-session -d returns before claude has rendered anything
   pane=$(tmux capture-pane -p -t tp-h1)
@@ -435,7 +436,7 @@ rm -f "$snap"   # the snapshot is a full copy of a credential-bearing store; do 
 Diff the WHOLE parsed store, not `projects[<worktree>]` alone.
 The two slots the captain answered by hand were already observed holding exactly `{"hasTrustDialogAccepted": true}` afterwards, so that per-project object is known NOT to change: a per-project diff returns nothing because of where it looked, not because the acceptance persists nothing, and reading its empty output as "no candidate keys" is the wrong conclusion.
 The whole-store walk also surfaces ordinary session bookkeeping written by any concurrent Claude session, so quiet the machine first and read the output for a newly appearing trust or permission key rather than for a single line.
-The keys that change there are the candidates. Test one in this order: clear the entry, run `bin/fm-claude-trust.sh`, THEN write the candidate key into that same entry - keyed on `$wt`, the resolved path the script itself uses - and only then rerun the control arm to see whether the prompt is gone.
+The keys that change there are the candidates. Test one by inserting its write into the control arm itself, at the commented step after the registration - keyed on `$wt`, the resolved path the script itself uses - and rerunning the whole arm from the top, rather than writing it before the rerun.
 Clearing after the candidate is written deletes the key under test - the entry removal drops the whole per-project object, and `bin/fm-claude-trust.sh` rebuilds it with `hasTrustDialogAccepted` alone - so the arm would launch with exactly the shape that already prompts and every candidate would read as ruled out without ever having been carried into a launch.
 The script merges into an existing entry rather than replacing it, so writing the candidate before or after the registration both work; only clearing after it does not.
 If nothing outside that bookkeeping changes, the acceptance is persisted somewhere other than that store, or not persisted at all, and the search moves off this file.
