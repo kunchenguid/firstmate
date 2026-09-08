@@ -284,12 +284,9 @@ Independence is decided over the whole ancestry up to the pane shell, so a harne
 Target processes are identified by the same fleet-wide harness-process identity rules the session lock uses - a version-named native install, a macOS-truncated `comm` answered by `argv[0]`, and an npm-installed Claude Code running under a bare `node` all count, the last one only when the interpreter's own script path carries that harness's program directory (`.../@anthropic-ai/claude-code/cli.js`), never merely because an argument mentions the harness, so a hook or MCP wrapper under `~/.claude` is not a worker - and an adapter whose process identity those rules cannot name is refused before any replacement is launched, leaving the prior record and no target worker running.
 A Pi engine that is positively visible in the pane's foreground processes or anywhere below the pane shell - including as `pi-launcher`, or behind a tool child that owns the foreground process group - is classified live BEFORE any identity, cwd, or ownership gate, so an unprovable Treehouse copy never takes ordinary `exit`/`relaunch` away from a worker that is running normally; ownership is proved only before authority is released.
 The generic liveness classifier remains unchanged, all ambiguous identity/process/session shapes refuse without terminal input, and steering doorbells serialize on the same lifecycle lock so none can land during the shell-to-agent transition.
-Because a doorbell holds that lock across one liveness read and one submission, the lifecycle entry points wait it out (`FM_TASK_CONTROL_LOCK_WAIT`, default 5s) instead of reporting an ordinary steer as a concurrent lifecycle action.
-In the other direction, a doorbell that finds the lock already held by a lifecycle action is deferred without typing anything and without consuming re-ring budget, so an exit or relaunch spanning several watcher polls can never escalate a healthy steer into stuck-crewmate recovery; the watcher rings it on the first poll after control releases.
-That deferral is bounded in turn: once CONSECUTIVELY OBSERVED deferrals for one steer span `FM_TASK_INBOX_DEFER_HORIZON_SECS` (default: one full re-ring ladder plus a grace), a lock nothing is going to release - a leaked lock directory, a wedged lifecycle action - surfaces the unread steer once as an ordinary stale wake, and the steer stays pending so it is still rung normally if control does release.
-Only deferral the watcher actually watched counts toward that span: a poll that skips the doorbell because the worker is busy, a served or escalated record, and a gap wider than a few of the watcher's own cycles each end the span, so a later brief lock is never reported as one held for the whole time.
+Both directions of that serialization are fleet-wide rather than herdr-specific, and their owners hold the exact bounds: `bin/fm-wake-lib.sh` for how a lifecycle entry point waits a doorbell's brief hold out instead of reporting an ordinary steer as a concurrent lifecycle action, and `bin/fm-task-inbox-lib.sh` for a deferred doorbell spending no re-ring budget until its own observed-deferral horizon surfaces the unread steer once ([architecture.md](architecture.md#event-driven-supervision)).
+Here that means an exit or relaunch spanning several watcher polls can never escalate a healthy steer into stuck-crewmate recovery; the watcher rings it on the first poll after control releases.
 Operators should use `fm-control` rather than manually typing another exit or clearing authority; a refusal means preserve the pane and copy for inspection.
-The hermetic coverage is `tests/fm-control-herdr-pi-relaunch.test.sh` plus `tests/herdr-clear-agent-authority.test.sh`, and the opt-in real regression is `FM_CONTROL_HERDR_PI_RELAUNCH_LIVE_E2E=1 tests/fm-control-herdr-pi-relaunch-live-e2e.test.sh`.
 
 ## Push events and polling fallback
 
@@ -357,6 +354,9 @@ tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
+tests/fm-control-herdr-pi-relaunch.test.sh
+tests/herdr-clear-agent-authority.test.sh
+tests/fm-control-herdr-pi-relaunch-live-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
