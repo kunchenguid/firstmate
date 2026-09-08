@@ -1034,7 +1034,11 @@ EOF
     "kind=ship" \
     "mode=no-mistakes"
   record_claude_idle "$home/state" terminal-ship
-  printf 'done: complete\n' > "$home/state/terminal-ship.status"
+  # A landing, not merely an implementation commit: on a mode that ends in a PR,
+  # a `done:` with no PR is the pipeline handoff signal and reads as parked
+  # (bin/fm-classify-lib.sh's status_done_without_pr), which is asserted right
+  # below. Only a genuine landing exercises terminal_in_flight.
+  printf 'done: PR https://github.com/o/r/pull/12 checks green\n' > "$home/state/terminal-ship.status"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
   printf '%s' "$out" | jq -e '
     .valid == false
@@ -1042,6 +1046,15 @@ EOF
       and (.reason | contains("terminal-ship=done"))
       and (.reason | contains("mate=") | not)
   ' >/dev/null || fail "ordinary terminal in-flight ship must still produce terminal_in_flight without listing the secondmate: $out"
+
+  # The same child reporting completion on its implementation commit has not
+  # landed, so the home is not invalid for holding it in flight: it is still
+  # owed a PR and stays ordinary supervised work.
+  printf 'done: complete\n' > "$home/state/terminal-ship.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .invalidity.kind != "terminal_in_flight"
+  ' >/dev/null || fail "a done with no PR on a no-mistakes ship must not read as terminal: $out"
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
