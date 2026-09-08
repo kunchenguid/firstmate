@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC1091,SC2016,SC2088
-# Behavior tests for the primary shell PreToolUse seatbelt (docs/arm-pretool-check.md).
+# Behavior tests for the watcher-arm PreToolUse seatbelt (docs/arm-pretool-check.md).
 #
 # bin/fm-arm-command-policy.mjs is the single owner of command classification.
 # This suite drives the stable shell transport through all five harness entry
@@ -299,265 +299,10 @@ test_stdin_unrelated_command_allowed() {
   pass "stdin: unrelated command is a fast allow"
 }
 
-test_primary_pipeline_drive_is_denied_without_blocking_workers() {
-  local dir primary worker check payload heredoc_payload alternate_heredoc_payload out err rc entry
-  dir=$(fm_test_tmproot fm-primary-pipeline-drive)
-  primary="$dir/primary"
-  worker="$dir/worker"
-  mkdir -p "$primary/bin" "$primary/state"
-  cp "$ROOT/bin/fm-arm-pretool-check.sh" "$ROOT/bin/fm-arm-command-policy.mjs" \
-    "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-hook-host-lib.sh" "$primary/bin/"
-  chmod +x "$primary/bin/fm-arm-pretool-check.sh" "$primary/bin/fm-arm-command-policy.mjs"
-  printf '# fixture\n' > "$primary/AGENTS.md"
-  printf 'fixture-secondmate\n' > "$primary/.fm-secondmate-home"
-  printf '%s\n' 'no-mistakes axi respond --action fix' > "$primary/drive.sh"
-  git -C "$primary" init -q
-  git -C "$primary" add AGENTS.md .fm-secondmate-home drive.sh bin
-  git -C "$primary" -c user.name=test -c user.email=test@example.com commit -qm fixture
-  git -C "$primary" worktree add -q --detach "$worker"
-  git -C "$worker" checkout -qb fm/fixture-worker
-  mkdir -p "$worker/state"
-  check="$primary/bin/fm-arm-pretool-check.sh"
-
-  # This reproduces the incident path through every supported shell-hook
-  # transport. OMP and pi-signed share Pi's CLI form, while OpenCode also uses
-  # it; Cursor has its distinct successful-deny JSON shape.
-  for entry in codex claude grok opencode pi omp pi-signed cursor; do
-    out="$dir/$entry.out"
-    err="$dir/$entry.err"
-    case "$entry" in
-      codex)
-        payload='{"tool_name":"Bash","tool_input":{"command":"no-mistakes axi respond --action fix"}}'
-        printf '%s' "$payload" | FM_HOME="$primary" "$check" >"$out" 2>"$err"; rc=$?
-        ;;
-      claude)
-        payload='{"tool_name":"Bash","tool_input":{"command":"no-mistakes axi respond --action fix"}}'
-        printf '%s' "$payload" | FM_HOME="$primary" "$check" --claude >"$out" 2>"$err"; rc=$?
-        ;;
-      grok)
-        payload='{"toolName":"run_terminal_command","toolInput":{"command":"no-mistakes axi respond --action fix"}}'
-        printf '%s' "$payload" | FM_HOME="$primary" "$check" >"$out" 2>"$err"; rc=$?
-        ;;
-      cursor)
-        payload='{"tool_name":"Shell","tool_input":{"command":"no-mistakes axi respond --action fix"}}'
-        printf '%s' "$payload" | FM_HOME="$primary" "$check" --cursor >"$out" 2>"$err"; rc=$?
-        ;;
-      *)
-        FM_HOME="$primary" "$check" --command 'no-mistakes axi respond --action fix' >"$out" 2>"$err"; rc=$?
-        ;;
-    esac
-    if [ "$entry" = cursor ]; then
-      [ "$rc" -eq 0 ] || fail "$entry primary pipeline deny must use its successful response shape, got $rc"
-      jq -e '.permission == "deny" and (.user_message | contains("[primary-pipeline-drive]"))' "$out" >/dev/null \
-        || fail "$entry primary pipeline deny omitted its reason: $(cat "$out")"
-    else
-      [ "$rc" -eq 2 ] || fail "$entry primary pipeline drive must deny, got $rc"
-      jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | contains("[primary-pipeline-drive]"))' "$err" >/dev/null \
-        || fail "$entry primary pipeline deny omitted its reason: $(cat "$err")"
-    fi
-  done
-
-  cat > "$primary/state/fixture-secondmate.meta" <<EOF
-kind=secondmate
-worktree=$worker
-EOF
-  FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
-    --command 'no-mistakes axi respond --action fix' >"$dir/secondmate.out" 2>"$dir/secondmate.err"
-  rc=$?
-  [ "$rc" -eq 2 ] || fail "a marker-backed persistent secondmate home must remain primary, got $rc"
-  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | contains("[primary-pipeline-drive]"))' \
-    "$dir/secondmate.err" >/dev/null \
-    || fail "the persistent secondmate-home deny omitted its stable reason"
-
-  rm "$primary/state/fixture-secondmate.meta"
-  cat > "$primary/state/fixture-worker.meta" <<EOF
-kind=ship
-worktree=$worker
-EOF
-  heredoc_payload=$(printf "source /dev/stdin <<'EOF'\\nno-mistakes axi respond --action fix\\nEOF\\n")
-  alternate_heredoc_payload=$(printf "source /dev/fd/3 3<<'EOF'\\nno-mistakes axi respond --action fix\\nEOF\\n")
-  process_source_payload="source <(printf '%s\\n' 'no-mistakes axi respond --action fix')"
-  echo_process_source_payload="source <(echo 'no-mistakes axi respond --action fix')"
-  cat_process_source_payload=$(printf "source <(cat <<'EOF'\\nno-mistakes axi respond --action fix\\nEOF\\n)")
-  for payload in \
-    'no-mistakes axi respond --action fix' \
-    'nice no-mistakes axi respond --action fix' \
-    "nice 'no-mistakes' axi respond --action fix" \
-    'nice -n 5 no-mistakes axi respond --action fix' \
-    "caffeinate 'no-mistakes' axi respond --action fix" \
-    'time no-mistakes axi respond --action fix' \
-    'time -p no-mistakes axi respond --action fix' \
-    '/usr/bin/time -l no-mistakes axi respond --action fix' \
-    'coproc no-mistakes axi respond --action fix' \
-    'coproc JOB no-mistakes axi respond --action fix' \
-    'coproc JOB MODE=fix no-mistakes axi respond --action fix' \
-    'NM=no-mistakes; coproc JOB "$NM" axi respond --action fix' \
-    'coproc JOB env no-mistakes axi respond --action fix' \
-    'coproc JOB { no-mistakes axi respond --action fix; }' \
-    'no-mistakes axi respond --action fix & wait' \
-    "bash -o posix -c 'no-mistakes axi respond --action fix'" \
-    "CMD='no-mistakes axi respond --action fix'; bash -c \"\$CMD\"" \
-    "CMD='no-mistakes axi respond --action fix'; eval \"\$CMD\"" \
-    'NM=no-mistakes; $NM axi respond --action fix' \
-    'for NM in no-mistakes; do "$NM" axi respond --action fix; done' \
-    'for NM in echo; do NM=no-mistakes; done; "$NM" axi respond --action fix' \
-    'NM=no-mistakes; false && NM=echo; "$NM" axi respond --action fix' \
-    "bash -c \"\$(printf '%s' 'no-mistakes axi respond --action fix')\"" \
-    'bash -c '\''exec "$0" "$@"'\'' no-mistakes axi respond --action fix' \
-    'ACTION=$(printf respond); no-mistakes axi "$ACTION" --action fix' \
-    'ACTION=$(unknown-action); no-mistakes axi "$ACTION" --action fix' \
-    '$(command -v no-mistakes) axi respond --action fix' \
-    "SH=bash; \"\$SH\" -c 'no-mistakes axi respond --action fix'" \
-    "bash -c -- 'no-mistakes axi respond --action fix'" \
-    'CMD=$(echo no-mistakes); "$CMD" axi respond --action fix' \
-    'ACTION=respond; for x in; do ACTION=status; done; no-mistakes axi "$ACTION"' \
-    'NM=no-mistakes; if false; then NM=echo; fi; "$NM" axi respond --action fix' \
-    'ACTION=respond; ! true && ACTION=status; no-mistakes axi "$ACTION"' \
-    'NM=no-mistakes; while false; do NM=echo; done; "$NM" axi respond --action fix' \
-    'ACTION=respond; case no in yes) ACTION=status;; esac; no-mistakes axi "$ACTION"' \
-    'if ! false; then no-mistakes axi respond --action fix; fi' \
-    'if false || true; then no-mistakes axi respond --action fix; fi' \
-    'if false; true; then no-mistakes axi respond --action fix; fi' \
-    'if false; then :; elif true; then no-mistakes axi respond --action fix; fi' \
-    'case x in y|x) no-mistakes axi respond --action fix;; esac' \
-    'if false; then no-mistakes axi respond --action fix; fi' \
-    'while false; do no-mistakes axi respond --action fix; done' \
-    'case no in yes) no-mistakes axi respond --action fix;; esac' \
-    'if ./false; then no-mistakes axi respond --action fix; fi' \
-    'if no-mistakes axi respond --action fix; then echo done; fi' \
-    'for x in 1; do no-mistakes axi respond --action fix; done' \
-    'set -- no-mistakes axi respond; "$@" --action fix' \
-    'bash ./drive.sh' \
-    './drive.sh' \
-    "$heredoc_payload" \
-    "$alternate_heredoc_payload" \
-    "$process_source_payload" \
-    "$echo_process_source_payload" \
-    "$cat_process_source_payload"; do
-    FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
-      --command "$payload" >"$dir/worker.out" 2>"$dir/worker.err"
-    rc=$?
-    [ "$rc" -eq 0 ] || fail "an exactly recorded ship worker must retain its pipeline drive call, got $rc for: $payload"
-    [ ! -s "$dir/worker.out" ] && [ ! -s "$dir/worker.err" ] \
-      || fail "an allowed task-worker pipeline drive must stay silent"
-  done
-
-  for payload in \
-    'no-mistakes axi run --intent test' \
-    'nice no-mistakes axi respond --action fix' \
-    "nice 'no-mistakes' axi respond --action fix" \
-    'nice -n 5 no-mistakes axi respond --action fix' \
-    "caffeinate 'no-mistakes' axi respond --action fix" \
-    'env NO_COLOR=1 no-mistakes axi respond --action fix' \
-    "bash -lc 'no-mistakes axi respond --action fix'" \
-    'time no-mistakes axi respond --action fix' \
-    'time -p no-mistakes axi respond --action fix' \
-    '/usr/bin/time -l no-mistakes axi respond --action fix' \
-    'coproc no-mistakes axi respond --action fix' \
-    'coproc JOB no-mistakes axi respond --action fix' \
-    'coproc JOB MODE=fix no-mistakes axi respond --action fix' \
-    'NM=no-mistakes; coproc JOB "$NM" axi respond --action fix' \
-    'coproc JOB env no-mistakes axi respond --action fix' \
-    'coproc JOB { no-mistakes axi respond --action fix; }' \
-    'no-mistakes axi respond --action fix & wait' \
-    "bash -o posix -c 'no-mistakes axi respond --action fix'" \
-    "CMD='no-mistakes axi respond --action fix'; bash -c \"\$CMD\"" \
-    "CMD='no-mistakes axi respond --action fix'; eval \"\$CMD\"" \
-    'NM=no-mistakes; $NM axi respond --action fix' \
-    'for NM in no-mistakes; do "$NM" axi respond --action fix; done' \
-    'for NM in echo; do NM=no-mistakes; done; "$NM" axi respond --action fix' \
-    'NM=no-mistakes; false && NM=echo; "$NM" axi respond --action fix' \
-    "bash -c \"\$(printf '%s' 'no-mistakes axi respond --action fix')\"" \
-    'bash -c '\''exec "$0" "$@"'\'' no-mistakes axi respond --action fix' \
-    'ACTION=$(printf respond); no-mistakes axi "$ACTION" --action fix' \
-    'ACTION=$(unknown-action); no-mistakes axi "$ACTION" --action fix' \
-    '$(command -v no-mistakes) axi respond --action fix' \
-    "SH=bash; \"\$SH\" -c 'no-mistakes axi respond --action fix'" \
-    "bash -c -- 'no-mistakes axi respond --action fix'" \
-    'CMD=$(echo no-mistakes); "$CMD" axi respond --action fix' \
-    'ACTION=respond; for x in; do ACTION=status; done; no-mistakes axi "$ACTION"' \
-    'NM=no-mistakes; if false; then NM=echo; fi; "$NM" axi respond --action fix' \
-    'ACTION=respond; ! true && ACTION=status; no-mistakes axi "$ACTION"' \
-    'NM=no-mistakes; while false; do NM=echo; done; "$NM" axi respond --action fix' \
-    'ACTION=respond; case no in yes) ACTION=status;; esac; no-mistakes axi "$ACTION"' \
-    'if ! false; then no-mistakes axi respond --action fix; fi' \
-    'if false || true; then no-mistakes axi respond --action fix; fi' \
-    'if false; true; then no-mistakes axi respond --action fix; fi' \
-    'if false; then :; elif true; then no-mistakes axi respond --action fix; fi' \
-    'case x in y|x) no-mistakes axi respond --action fix;; esac' \
-    'if ./false; then no-mistakes axi respond --action fix; fi' \
-    'if no-mistakes axi respond --action fix; then echo done; fi' \
-    'for x in 1; do no-mistakes axi respond --action fix; done' \
-    'set -- no-mistakes axi respond; "$@" --action fix' \
-    'bash ./drive.sh' \
-    './drive.sh' \
-    "$heredoc_payload" \
-    "$alternate_heredoc_payload" \
-    "$process_source_payload" \
-    "$echo_process_source_payload" \
-    "$cat_process_source_payload"; do
-    FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
-    rc=$?
-    [ "$rc" -eq 2 ] || fail "the primary pipeline drive must deny through recognized execution wrappers, got $rc for: $payload"
-    jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | contains("[primary-pipeline-drive]"))' "$dir/run.err" >/dev/null \
-      || fail "the primary pipeline-run deny omitted its stable reason"
-  done
-  FM_HOME="$primary" "$check" \
-    --command 'case x in *) no-mistakes axi respond --action fix;; esac' >"$dir/case.out" 2>"$dir/case.err"
-  rc=$?
-  [ "$rc" -eq 2 ] || fail "an executed case-body pipeline drive must be denied, got $rc"
-  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | contains("[primary-pipeline-drive]"))' \
-    "$dir/case.err" >/dev/null || fail "the case-body pipeline deny omitted its stable reason"
-  for payload in \
-    "echo 'no-mistakes axi respond --action fix'" \
-    "printf '%s %s %s\\n' no-mistakes axi respond" \
-    "time echo 'no-mistakes axi run --intent data'" \
-    "/usr/bin/time -l echo 'no-mistakes axi run --intent data'" \
-    "coproc echo 'no-mistakes axi respond --action data'" \
-    "CMD='no-mistakes axi respond --action data'; echo \"\$CMD\"" \
-    "CMD='no-mistakes axi respond --action data'; \"\$CMD\"" \
-    'for NM in no-mistakes; do echo "$NM axi respond --action data"; done' \
-    'for NM in no-mistakes echo; do :; done; "$NM" axi respond --action data' \
-    'NM=no-mistakes; true && NM=echo; "$NM" axi respond --action data' \
-    'NM=no-mistakes; if true; then NM=echo; fi; "$NM" axi respond --action data' \
-    "echo \"\$(printf '%s' 'no-mistakes axi respond --action data')\"" \
-    'bash -c '\''echo "$0 $@"'\'' no-mistakes axi respond --action data' \
-    "if echo 'no-mistakes axi respond --action data'; then echo done; fi" \
-    "case \"\$x\" in *) echo 'no-mistakes axi run';; esac"; do
-    FM_HOME="$primary" "$check" --command "$payload" >/dev/null 2>&1 \
-      || fail "a pipeline command mentioned only as data must remain allowed: $payload"
-  done
-  FM_HOME="$primary" "$check" --command 'no-mistakes axi status' >/dev/null 2>&1 \
-    || fail "the primary must retain read-only pipeline status"
-  FM_HOME="$primary" "$check" --command "source <(echo 'no-mistakes axi status')" >/dev/null 2>&1 \
-    || fail "sourced process output must retain read-only pipeline status"
-  FM_HOME="$primary" "$check" --command "source <(printf '%s\\n' 'no-mistakes axi status')" >/dev/null 2>&1 \
-    || fail "printf-sourced process output must retain read-only pipeline status"
-  FM_HOME="$primary" "$check" --command "source <(echo 'no-mistakes axi respond' >&2)" >/dev/null 2>&1 \
-    || fail "sourced empty stdout must remain allowed"
-  FM_HOME="$primary" "$check" --command "bash -c -- 'no-mistakes axi status'" >/dev/null 2>&1 \
-    || fail "the primary must retain nested read-only pipeline status"
-  FM_HOME="$primary" "$check" --command 'ACTION=$(printf status); no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
-    || fail "the primary must retain dynamically selected read-only pipeline status"
-  FM_HOME="$primary" "$check" --command 'if false; then no-mistakes axi respond --action fix; fi' >/dev/null 2>&1 \
-    || fail "an unreachable conditional pipeline drive must remain allowed"
-  FM_HOME="$primary" "$check" --command 'while false; do no-mistakes axi respond --action fix; done' >/dev/null 2>&1 \
-    || fail "an unreachable while-loop pipeline drive must remain allowed"
-  FM_HOME="$primary" "$check" --command 'case no in yes) no-mistakes axi respond --action fix;; esac' >/dev/null 2>&1 \
-    || fail "an unreachable case pipeline drive must remain allowed"
-  FM_HOME="$primary" "$check" --command 'ACTION=respond; case yes in yes) ACTION=status;; esac; no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
-    || fail "a matching case branch must preserve its read-only action"
-  FM_HOME="$primary" "$check" --command 'ACTION=status; false && ACTION=respond; no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
-    || fail "a skipped driving-action assignment must retain read-only pipeline status"
-  FM_HOME="$primary" "$check" --command 'no-mistakes axi abort --run 01RUN' >/dev/null 2>&1 \
-    || fail "the primary must retain explicit recovery controls"
-  pass "foreground pipeline drives are denied across primary harness transports while workers retain ownership"
-}
-
 test_prefilter_is_strict_superset() {
   local rc
-  # A command with neither protected substring is fast-allowed by the
-  # transport prefilter without ever invoking the classifier.
+  # A command with no fm-watch substring is fast-allowed by the transport
+  # prefilter without ever invoking the classifier.
   "$CHECK" --command 'ls -la /bin && echo done' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "a command with no fm-watch substring must be fast-allowed, got exit $rc"
@@ -603,7 +348,7 @@ test_prefilter_is_strict_superset() {
   "$CHECK" --command "echo 'pkill -f fm-watch'" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "a benign fm-watch-substring command must be classified and allowed, got exit $rc"
-  pass "transport prefilter is a strict superset: unrelated commands fast-allow, protected commands reach the classifier"
+  pass "transport prefilter is a strict superset: non-fm-watch fast-allows, every fm-watch and quoting-decoder-marker command reaches the classifier"
 }
 
 # --- fail-open ----------------------------------------------------------------
@@ -718,7 +463,6 @@ test_stdin_grok_schema_deny
 test_stdin_claude_codex_schema_allow
 test_stdin_claude_codex_schema_deny
 test_stdin_unrelated_command_allowed
-test_primary_pipeline_drive_is_denied_without_blocking_workers
 test_prefilter_is_strict_superset
 test_failopen_empty_stdin
 test_failopen_garbage_stdin

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Stable PreToolUse transport for primary shell-command safety.
+# Stable PreToolUse transport for the watcher-arm command policy.
 #
-# A firstmate primary must leave worker-owned no-mistakes runs with their worker,
-# and must arm the watcher or run a Codex checkpoint as a standalone verified
-# harness call.
+# A firstmate primary must arm the watcher or run a Codex checkpoint as a
+# standalone verified harness call.
 # bin/fm-arm-command-policy.mjs is the sole owner of shell classification,
 # protected execution identity, the blessed setup tree, and deny reason codes.
 # This wrapper only acquires the harness payload, discovers the active roots,
@@ -129,10 +128,9 @@ fi
 
 # Strict-superset prefilter (transport only; owns zero classification semantics).
 # Every protected watcher execution and every broad watcher kill resolves to the
-# fm-watch byte sequence, and every primary pipeline drive resolves to the
-# no-mistakes byte sequence, AFTER the classifier's byte normalization.
-# A command that cannot contain either sequence can never be denied and is
-# fast-allowed without the Node policy owner.
+# fm-watch byte sequence AFTER the classifier's byte normalization, so a command
+# that cannot contain fm-watch even after that normalization can never be a
+# deniable watcher command and is fast-allowed without the Node policy owner.
 # We mirror the classifier's cheapest byte transforms here (drop line-
 # continuation and escape backslashes, quotes, and newlines) so obfuscated
 # protected paths such as fm-watc\<newline>h-arm.sh or fm-"watch"-arm.sh still
@@ -161,7 +159,7 @@ case "$CMD" in
   *"\$'"*|*'$"'*) ;;
   *)
     case "$PREFILTER" in
-      *fm-watch*|*no-mistakes*|*sh\ *|*/*) ;;
+      *fm-watch*) ;;
       *) exit 0 ;;
     esac
     ;;
@@ -170,75 +168,12 @@ esac
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
 ACTIVE_HOME=${FM_HOME:-$ROOT}
-ACTIVE_STATE=${FM_STATE_OVERRIDE:-$ACTIVE_HOME/state}
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
-PRIMARY_SCOPE=false
-# shellcheck source=bin/fm-primary-scope-lib.sh
-. "$SCRIPT_DIR/fm-primary-scope-lib.sh" || exit 0
-
-canonical_git_dir() {
-  local base=$1 path=$2
-  case "$path" in /*) ;; *) path="$base/$path" ;; esac
-  (CDPATH='' cd -- "$path" 2>/dev/null && pwd -P)
-}
-
-meta_exact_value() {
-  local meta=$1 key=$2
-  awk -v key="$key" '
-    index($0, key "=") == 1 { count++; value=substr($0, length(key) + 2) }
-    END { if (count == 1) print value; else exit 1 }
-  ' "$meta" 2>/dev/null
-}
-
-linked_checkout_has_task_owner() {
-  local root=$1 git_dir common_dir common_abs owner candidate candidate_git meta kind worktree resolved
-  git_dir=$(git -C "$root" rev-parse --git-dir 2>/dev/null) || return 1
-  common_dir=$(git -C "$root" rev-parse --git-common-dir 2>/dev/null) || return 1
-  git_dir=$(canonical_git_dir "$root" "$git_dir") || return 1
-  common_abs=$(canonical_git_dir "$root" "$common_dir") || return 1
-  [ "$git_dir" != "$common_abs" ] || return 1
-  owner=$(git -C "$root" worktree list --porcelain 2>/dev/null | while IFS= read -r line; do
-    case "$line" in
-      'worktree '*)
-        candidate=${line#worktree }
-        candidate_git=$(git -C "$candidate" rev-parse --git-dir 2>/dev/null) || continue
-        candidate_git=$(canonical_git_dir "$candidate" "$candidate_git") || continue
-        if [ "$candidate_git" = "$common_abs" ]; then
-          (CDPATH='' cd -- "$candidate" 2>/dev/null && pwd -P)
-          break
-        fi
-        ;;
-    esac
-  done)
-  [ -n "$owner" ] || return 1
-  root=$(CDPATH='' cd -- "$root" 2>/dev/null && pwd -P) || return 1
-  for meta in "$owner/state"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-    kind=$(meta_exact_value "$meta" kind) || continue
-    case "$kind" in ship|scout) ;; *) continue ;; esac
-    worktree=$(meta_exact_value "$meta" worktree) || continue
-    resolved=$(canonical_git_dir "$owner" "$worktree") || continue
-    [ "$resolved" = "$root" ] && return 0
-  done
-  return 1
-}
-
-if fm_primary_scope_matches "$ROOT" "$ACTIVE_STATE"; then
-  PRIMARY_SCOPE=true
-  GIT_DIR=$(git -C "$ROOT" rev-parse --git-dir 2>/dev/null || true)
-  GIT_COMMON_DIR=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)
-  GIT_DIR=$(canonical_git_dir "$ROOT" "$GIT_DIR" 2>/dev/null || true)
-  GIT_COMMON_DIR=$(canonical_git_dir "$ROOT" "$GIT_COMMON_DIR" 2>/dev/null || true)
-  if [ -n "$GIT_DIR" ] && [ -n "$GIT_COMMON_DIR" ] && \
-     [ "$GIT_DIR" != "$GIT_COMMON_DIR" ] && linked_checkout_has_task_owner "$ROOT"; then
-    PRIMARY_SCOPE=false
-  fi
-fi
 
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 
-POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" --primary "$PRIMARY_SCOPE" 2>/dev/null) || exit 0
+POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || exit 0
 [ -n "$POLICY_OUTPUT" ] || exit 0
 
 TAB=$(printf '\t')
