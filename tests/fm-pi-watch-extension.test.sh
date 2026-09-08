@@ -76,7 +76,7 @@ JS
 }
 
 write_pi_terminal_footer_case() {
-  local home=$1 delivered=$2 style=${3:-herdr} key hash sig
+  local home=$1 delivered=$2 style=${3:-herdr} key hash
   mkdir -p "$home/state" "$home/config" "$home/fakebin"
   cat > "$home/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -103,8 +103,10 @@ SH
   else
     printf 'finished, awaiting review\n⏱  15m | 12%% context\n' > "$home/state/pane.txt"
   fi
-  sig=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_wake_signal_sig "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/footer.status")
-  printf '%s' "$sig" > "$home/state/.seen-footer_status"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/footer.status" || return 1
   key=test_fm-footer
   if [ "$style" = claude-statusline ]; then
     hash=$(hash_text $'finished, awaiting review\n5h ███ 61% (1h34m) | api wait 10s')

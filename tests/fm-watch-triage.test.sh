@@ -154,6 +154,11 @@ seen_sig() {
   esac
 }
 
+hb_marker_reports_current_status() {
+  local marker=$1 file=$2
+  status_presentation_marker_reported_matches "$marker" "$(status_observed_signature "$file")"
+}
+
 # Prime <file>'s .seen-* suppressor to its CURRENT signature, so the per-poll
 # no-verb signal scan (which watches every *.turn-ended for a size:mtime change)
 # treats a just-created or just-backdated turn-ended marker as already seen.
@@ -1832,7 +1837,7 @@ await_absorbed_stale() {  # <pid> <out> <marker> <hash> [limit-tenths]
 
 test_delivered_terminal_footer_change_is_absorbed() {
   local dir state fakebin out capture_file window key first_hash second_hash pid status_file
-  local raw_capture raw_status raw_window raw_key raw_hash sig absorbed
+  local raw_capture raw_status raw_window raw_key raw_hash absorbed
   dir=$(make_case terminal-footer-change); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-footer"
@@ -1895,7 +1900,7 @@ test_delivered_terminal_footer_change_is_absorbed() {
   pid=$!
   wait_for_exit "$pid" 40 || { reap "$pid"; fail "the first undelivered terminal state did not wake"; }
   [ "$(grep -cF "stale: $raw_window" "$out")" -eq 1 ] || fail "the first undelivered terminal state did not wake exactly once: $(cat "$out")"
-  [ "$(cat "$state/.hb-surfaced-raw")" = "done: PR https://example.test/pr/raw" ] || fail "the first terminal wake did not record delivery"
+  hb_marker_reports_current_status "$state/.hb-surfaced-raw" "$raw_status" || fail "the first terminal wake did not record delivery"
   ack_stopped_cycle "$state" || fail "could not acknowledge the first raw terminal wake"
 
   printf 'blocked: credentials expired\n' >> "$raw_status"
@@ -1911,7 +1916,7 @@ test_delivered_terminal_footer_change_is_absorbed() {
   pid=$!
   wait_for_exit "$pid" 40 || { reap "$pid"; fail "a later blocked transition did not wake"; }
   [ "$(grep -cF "stale: $raw_window" "$out")" -eq 1 ] || fail "the blocked stale transition did not wake exactly once: $(cat "$out")"
-  [ "$(cat "$state/.hb-surfaced-raw")" = "blocked: credentials expired" ] || fail "the blocked transition did not record delivery"
+  hb_marker_reports_current_status "$state/.hb-surfaced-raw" "$raw_status" || fail "the blocked transition did not record delivery"
   ack_stopped_cycle "$state" || fail "could not acknowledge the blocked terminal wake"
 
   printf 'needs-decision [key=credential]: renew credentials\n' >> "$raw_status"
@@ -1922,8 +1927,7 @@ test_delivered_terminal_footer_change_is_absorbed() {
   pid=$!
   wait_for_exit "$pid" 40 || { reap "$pid"; fail "a later keyed decision transition did not wake"; }
   grep -F "signal: $raw_status" "$out" >/dev/null || fail "the keyed decision transition did not wake through the signal path: $(cat "$out")"
-  sig=$(last_status_line "$raw_status")
-  [ "$(cat "$state/.hb-surfaced-raw")" = "$sig" ] || fail "the keyed decision transition did not record delivery"
+  hb_marker_reports_current_status "$state/.hb-surfaced-raw" "$raw_status" || fail "the keyed decision transition did not record delivery"
   pass "a delivered terminal lifecycle absorbs changing cosmetic footer content"
 }
 
@@ -1968,7 +1972,7 @@ $row")
   else
     grep -F "signal: $status_file" "$out" >/dev/null || return 1
   fi
-  [ "$(cat "$state/.hb-surfaced-claude-statusline")" = "$line" ] || return 1
+  hb_marker_reports_current_status "$state/.hb-surfaced-claude-statusline" "$status_file" || return 1
   ack_stopped_cycle "$state" || return 1
 }
 
@@ -2018,7 +2022,7 @@ test_delivered_terminal_claude_statusline_change_is_absorbed() {
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "the first undelivered Claude statusLine terminal state did not wake"; }
   [ "$(grep -cF "stale: $raw_window" "$raw_out")" -eq 1 ] || fail "the first undelivered Claude statusLine state did not wake exactly once: $(cat "$raw_out")"
-  [ "$(cat "$raw_state/.hb-surfaced-claude-statusline")" = "done: PR https://example.test/pr/claude-statusline" ] || fail "the first Claude statusLine wake did not record delivery"
+  hb_marker_reports_current_status "$raw_state/.hb-surfaced-claude-statusline" "$status_file" || fail "the first Claude statusLine wake did not record delivery"
   ack_stopped_cycle "$raw_state" || fail "could not acknowledge the first Claude statusLine wake"
 
   run_claude_statusline_transition "$raw_state" "$raw_fakebin" "$raw_out" "$raw_capture" "$status_file" "$raw_window" \

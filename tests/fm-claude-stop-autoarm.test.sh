@@ -194,7 +194,7 @@ SH
 }
 
 write_real_terminal_watch_fixture() {
-  local dir=$1 delivered=$2 style=${3:-herdr} key hash sig
+  local dir=$1 delivered=$2 style=${3:-herdr} key hash
   mkdir -p "$dir/fakebin"
   cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -218,8 +218,10 @@ SH
   else
     printf 'finished, awaiting review\n⏱  15m | 12%% context\n' > "$dir/state/pane.txt"
   fi
-  sig=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_wake_signal_sig "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state/footer.status")
-  printf '%s' "$sig" > "$dir/state/.seen-footer_status"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" "$dir/state/footer.status" || return 1
   key=test_fm-footer
   if [ "$style" = claude-statusline ]; then
     hash=$(hash_text $'finished, awaiting review\n5h ███ 61% (1h34m) | api wait 10s')
