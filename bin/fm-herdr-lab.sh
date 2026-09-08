@@ -21,8 +21,11 @@
 # delete is available only through teardown.
 # Both paths perform a fresh refuse-default check immediately before each
 # destructive call.
-# Provision records the running default session as a fleet-state tripwire and
-# teardown requires that record to be identical afterward.
+# Provision snapshots the default session as a fleet-state tripwire and teardown
+# requires that record to be byte-identical afterward. The before-picture may be
+# a stopped default: what proves safety is the comparison, not the starting
+# state, because an identical after-check shows the lab never started, stopped,
+# or replaced the default session.
 set -u
 
 fm_herdr_lab_error() {
@@ -66,13 +69,13 @@ fm_herdr_lab_fleet_state() { # <session>
   }
   snapshot=$(printf '%s' "$sessions" | jq -c '
     [.sessions[]? | select(.default == true)]
-    | if length == 1 and .[0].name == "default" and .[0].running == true
+    | if length == 1 and .[0].name == "default"
       then .[0] | {name, default, running, socket_path}
       else empty
       end
   ' 2>/dev/null)
   [ -n "$snapshot" ] || {
-    fm_herdr_lab_error "fleet-state tripwire requires exactly one running default session"
+    fm_herdr_lab_error "fleet-state tripwire requires exactly one default session"
     return 1
   }
   printf '%s\n' "$snapshot"

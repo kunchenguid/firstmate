@@ -83,11 +83,15 @@ def main(argv):
     if not panes or timeout <= 0:
         return 2
 
+    # AttributeError: win32 builds expose no socket.AF_UNIX at all, so the
+    # attribute lookup raises before any OSError can. Without it here the
+    # subscriber dies with a traceback instead of reporting itself unavailable,
+    # and the caller loses its documented fall back to polling.
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(CONNECT_TIMEOUT)
         sock.connect(sock_path)
-    except OSError:
+    except (AttributeError, OSError):
         return 2
 
     subscriptions = [

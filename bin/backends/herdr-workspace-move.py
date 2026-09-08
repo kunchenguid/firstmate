@@ -68,11 +68,15 @@ def main(argv):
     if insert_index < 0 or str(insert_index) != raw_index:
         return 2
 
+    # AttributeError: win32 builds expose no socket.AF_UNIX at all, so the
+    # attribute lookup raises before any OSError can. Without it here the
+    # sender dies with a traceback instead of reporting itself unavailable,
+    # and ordering loses its documented best-effort skip.
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(CONNECT_TIMEOUT)
         sock.connect(socket_path)
-    except OSError:
+    except (AttributeError, OSError):
         return 2
 
     request = {
