@@ -474,6 +474,14 @@ The locked bootstrap inheritance pass uses the same placement-specific behavior;
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Windows symlink mode (Git Bash / MSYS)
+
+On a native Windows Git Bash (MSYS) host, `MSYS=winsymlinks:sys` must be present in the environment of every firstmate process.
+Without it, `ln -s` silently creates a directory or file copy instead of a link, which permanently poisons the symlink-based session and watcher locks the moment one is taken.
+`winsymlinks:nativestrict` is not a safe alternative: without Windows Developer Mode it crashes bash outright (observed as STATUS_STACK_OVERFLOW), and `winsymlinks:native` silently falls back to copies in the same case.
+The tracked [`.claude/settings.json`](../.claude/settings.json) `env` block sets it for Claude Code primary sessions, including their hooks and the watcher processes those hooks launch; the variable is inert on non-MSYS hosts.
+Any other primary harness, any crew pane shell, and any manually opened shell must export it before running firstmate commands, for example from the shell profile.
+
 ## Watched tool updates (config/watched-tools.json)
 
 `config/watched-tools.json` is an optional local, gitignored list of the tools this home depends on.
@@ -911,6 +919,7 @@ FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on Relay completion follow-ups per linked mention
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
+FM_FS_MODES_HONORED=    # override the mode-bit capability probe in bin/fm-platform-lib.sh, shared by the private-file contract in bin/fm-pr-lib.sh and the presentation lock namespace in bin/backends/herdr.sh (1 = exact strict mode contract, 0 = filesystem cannot store modes, keep only the structural guards); unset probes the filesystem per directory, mainly for tests
 FM_LOCK_STALE_AFTER=2   # grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); dead numeric PIDs have no age grace
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3

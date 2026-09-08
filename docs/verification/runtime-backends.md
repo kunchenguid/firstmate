@@ -573,6 +573,7 @@ No reasoning-effort axis was found; `gemini --help` on 0.58.0 exposes no effort,
 
 The compatibility floor is protocol 14.
 The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64, while focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
+Herdr 0.8.2 protocol 20 is separately verified on Windows x86_64 under MSYS2 Git Bash, which is the platform the installer's single 0.8.2 pin exists to serve; that lane's evidence and its Windows-specific fallbacks are recorded under [Windows x86_64](#windows-x86_64).
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 Default-on presentation projection has its own floor at Herdr 0.8.0, protocol 19, verified below.
 
@@ -835,7 +836,9 @@ The floor's structural signal is the selected running server's protocol number, 
 | preview-2026-07-29-44b3adb12552 | 0.7.5-preview.2026-07-29-44b3adb12552 | 18 | yes | below |
 | preview-2026-08-04-d78e3d3b5126 | 0.8.0-preview.2026-08-04-d78e3d3b5126 | 19 | yes | above |
 | v0.8.0 | 0.8.0 | 19 | yes | above |
+| v0.8.2 | 0.8.2 | 20 | yes | above |
 
+The 0.8.2 row is the one entry not produced by that macOS aarch64 sweep; its version and protocol were read from the Windows x86_64 asset's own `status --json` under [Windows x86_64](#windows-x86_64), and it is listed here because the installer pins it on every platform.
 No build lacking both fixes reaches protocol 19, and every pre-fix build tops out at 17, so protocol 19 is a safe structural expression of the 0.8.0 floor.
 The one post-fix build below it is a preview that still reports a 0.7.5 version, so it is conservatively treated as below the floor, which costs a preview build its projection and never lets an unfixed build through.
 The 2026-08-05 named-lab cross-version probe started a server from Herdr 0.7.5 and queried it with the installed 0.8.0 client; status reported client version 0.8.0 protocol 19, server version 0.7.5 protocol 17, server running true, and server compatible false.
@@ -974,6 +977,87 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+### Windows x86_64
+
+The Windows lane was measured on Windows 11 x86_64 under MSYS2 Git Bash with no WSL, against Herdr 0.8.2 protocol 20 installed by `bin/fm-install-herdr.sh` to `%LOCALAPPDATA%/Programs/herdr-fm/herdr.exe` and deliberately kept off `PATH`, with the pane shell set to Git Bash through `[terminal] default_shell` in `%APPDATA%/herdr/config.toml`.
+Every live suite runs through the same guarded lab helper as the other platforms, and the default session was byte-identical before and after each run.
+
+Observed results: the backend smoke lane reported 13 ok with no presentation-lock warnings, the control smoke lane reported 5 ok clean, the idle-shell proof passed, and a proved pane close removed the shell from the process table.
+
+Five Windows mechanisms differ from the POSIX lane and are each carried by an explicit adapter path rather than by accident:
+
+- Herdr reports a native socket path such as `C:\Users\...\sessions\<name>\herdr.sock`, so the canonical socket resolver folds every spelling through `fm_path_posix` before its absolute test; without that fold, lock-path resolution failed before the namespace was created.
+- The presentation lock namespace cannot be created at mode 700 on a `noacl` NTFS mount, so the mode gate alone is probe-and-accept while the directory, symlink, and owner checks remain unconditional on every platform.
+- Herdr names a Git Bash pane shell `bash.exe`, so one shared normalizer strips a BSD login dash everywhere and strips backslash paths and the `.exe` suffix only under MSYS before the bare-shell comparison.
+- MSYS `ps` supports no `-o` selectors at all, so the process reads are served from `bin/fm-winproc-lib.sh` in native Windows pid space, and signalling uses `/usr/bin/kill -W` by absolute path because the Bash builtin has no `-W`.
+- The pane object carries no `foreground_cwd` key on this build while its `.cwd` is live rather than frozen, so `current_path` falls back to `.cwd` under MSYS only and folds the native value through `fm_path_posix`.
+
+`/usr/bin/kill -W` cannot address a purely native process outside the MSYS runtime.
+That is a safety property rather than a gap: the signalling path can never reach a process the adapter did not itself resolve as an MSYS-runtime pane shell.
+
+One capability has no Windows route and degrades to its documented fallback.
+`python3` on win32 has no `AF_UNIX`, so the optional event reader and workspace-move helpers exit at their designed clean status instead of raising, and ordering falls back to polling and flat placement.
+
+The `current_path` field choice was remeasured on 2026-08-24 against Herdr 0.8.2, on a real pane in a guarded lab session:
+
+```sh
+herdr pane get "$PANE" --session "$SESSION" | jq -r '.result.pane | keys[]'
+herdr pane get "$PANE" --session "$SESSION" | jq -r '.result.pane | has("foreground_cwd")'
+```
+
+The key list is `agent_status cwd focused pane_id revision scroll tab_id terminal_id terminal_title terminal_title_stripped workspace_id`, and `has("foreground_cwd")` answers `false`: on this build the key is absent rather than null.
+`.cwd` is live on this platform rather than frozen at creation, and polling every 0.25s after each of `cd /c/Windows`, `cd /c/Users/nrosq`, and `cd /tmp` reported `C:\Windows\`, `C:\Users\nrosq\`, and `C:\Users\nrosq\AppData\Local\Temp\` on the first poll every time.
+`fm_backend_herdr_current_path` therefore falls back to `.cwd` under MSYS and folds the native value through `fm_path_posix`, which maps that last reading back to `/tmp` through the Git Bash mount table, then strips the trailing separator.
+The fallback is gated on MSYS because `.cwd` is genuinely frozen on macOS and Linux, where reading it would report a stale creation-time path as though it were live.
+The MSYS reading tracks the pane's top-level shell and not a background subshell: during a backgrounded `bash -c 'cd /c/Users; sleep 3'` the reported cwd stayed at the parent's.
+
+An earlier revision of this record read `foreground_cwd` as null and `.cwd` as frozen, so the read was empty rather than merely shell-scoped.
+The correction above makes `current_path` answer on this platform for every caller that reads a pane's own shell, which is what the stale-detection and relaunch paths need.
+It does NOT make the spawn-time worktree wait succeed here.
+That loop watches the pane leave the project while `treehouse get` runs as a foreground subshell, and the MSYS reading never follows a subshell's own `cd`, so it still refuses at its deadline with `treehouse get did not enter an isolated worktree within 60s`, and the relaunch path refuses for the same reason.
+Both refusals are the guard behaving correctly rather than a guard going missing: an unreadable or stale cwd can never be mistaken for a confirmed worktree, so no spawn is recorded against an unverified directory.
+Acquiring a task worktree on the Herdr backend is therefore still an open Windows limitation, tracked separately from the adapter work recorded here.
+
+
+#### Full task lifecycle with a live agent
+
+Measured 2026-08-30 on Windows 11 x86_64, MSYS2 Git Bash, no WSL, against Herdr 0.8.2 and Claude Code as the crewmate harness.
+Every earlier Windows result on this page is backend plumbing measured with no real agent launched; this is the first end-to-end run of a real firstmate task on this platform.
+An isolated throwaway `FM_HOME` and a throwaway origin-backed repository were used, so no fleet state was touched.
+
+This run was measured on a build that acquired the task worktree outside the pane, so its spawn step does not reproduce on the terminal-driven acquisition this checkout ships; see the open limitation recorded under `current_path` above.
+Every step other than worktree acquisition is unaffected and is recorded here because it is the only end-to-end Windows evidence there is.
+
+The complete spine ran green:
+
+1. `bin/fm-session-start.sh` acquired the lock, ran bootstrap, drained the queue, emitted the supervision block, exit 0.
+2. `bin/fm-brief.sh <id> <repo> --scout` scaffolded the scout contract.
+3. `bin/fm-spawn.sh <id> <project> --scout` acquired a Treehouse worktree, created the Herdr pane, launched a real agent, and recorded the task metadata, exit 0.
+4. The agent read its brief - the pane title became the brief's own subject - executed it, and wrote `data/<id>/report.md`.
+5. It appended its own status line, and `bin/fm-crew-state.sh` reconciled `working` to `done · source: status-log` carrying the agent's summary.
+6. `bin/fm-teardown.sh` returned the worktree to the pool, closed the exact pane, removed the task's state, preserved the scout report, and printed the backlog follow-up, exit 0.
+
+One refusal was exercised deliberately and behaved correctly.
+A first attempt used a repository with no `origin`; `fm-spawn` refused with "could not fetch origin for pooled worktree ...; refusing to launch from a potentially stale base" before exiting non-zero.
+No task record was created against the unverified base.
+
+Two operator-visible gaps, neither fatal:
+
+- **The harness trust dialog blocks the spawn until the supervisor clears it.**
+  Claude Code opened its "Is this a project you trust?" prompt and the agent sat there indefinitely.
+  Clearing it needs `herdr pane send-keys <pane> down` then `enter`; the agent then started immediately.
+  `AGENTS.md` section 7 already makes clearing a trust dialog the supervisor's job, so this is expected work rather than a defect, but on this platform nothing surfaces that the dialog is waiting.
+  `bin/fm-crew-state.sh` reports `state: working` both while parked at the dialog and while genuinely working.
+  The distinguishing evidence is only in the reason text - `harness busy (fm-spawn)` while parked, against `harness busy (claude-hook)` once the agent's own hook is registered - because a parked agent has not yet registered with Herdr's agent registry.
+  A supervisor reading the state word alone cannot tell a stuck spawn from a working one.
+- **A quarantined presentation journal survives teardown.**
+  `state/<id>.herdr-presentation` remained after a successful teardown, which reported "herdr presentation journal ... remains quarantined; no workspace cleanup was attempted".
+  That record is never task or endpoint authority, so this is a small orphaned file rather than a correctness problem.
+
+Three non-fatal warnings appeared during teardown and are recorded so they are not re-investigated as new:
+`lsof is unavailable; cannot resolve a process-group fallback for herdr task`,
+`fm-remote-job-reap-orphans: cannot scan this account's processes for remote job workers`,
+and the presentation-journal line above.
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.
@@ -1001,7 +1085,7 @@ tests/fm-backend-zellij.test.sh
 tests/fm-backend-zellij-smoke.test.sh
 ```
 
-The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discovery, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.
+The real lifecycle smoke proved spawn, metadata, nested-subshell cwd reads, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.
 
 ## Orca
 
