@@ -295,6 +295,9 @@ test_rovo_readiness_gate_precedes_pointer() {
     || fail "a failed rovo readiness gate must tear down the exact endpoint it created instead of leaking an orphaned --yolo process"
   status_line_at_epoch "$line" >/dev/null \
     || fail "new rovo spawn failure has unknown emission time: $line"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'Rovo readiness failure CLI output:\n%s\nPersisted status:\n%s\n' "$out" "$line"
+  fi
   pass "fm-spawn: rovo never sends the brief pointer before an observable ready signal, and tears down the created endpoint on failure"
 }
 
