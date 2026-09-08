@@ -12,20 +12,59 @@
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
+# The mark every firstmate-launched no-mistakes invocation carries, and the ONE
+# owner of it.
+#
+# fm_nm_run_bounded below runs `no-mistakes` INSIDE the task's own worktree, which
+# is exactly the binding bin/fm-classify-lib.sh's live-run wedge probe reads as
+# "this crew is still validating". Without a mark those two are indistinguishable:
+# firstmate's own read-only attribution query is a `no-mistakes axi status` whose
+# working directory is the task worktree, and it shares its first argument with a
+# real fix round (`axi respond --action fix`), so no subcommand filter can separate
+# them. A genuinely wedged crew that crossed the escalation threshold while such a
+# query was in flight would then be deferred instead of escalated, which is the one
+# direction that supervision must never fail in.
+#
+# The mark is carried as an `env` assignment in the WRAPPER's argument vector, not
+# in the environment, because a process environment is not readable for another
+# process on macOS while an argument vector is readable on both platforms. `env`
+# execs the real command in place, so the no-mistakes process keeps the exact
+# argv it had before and every caller's stdout, stderr, and exit status are
+# unchanged; what gains the mark is the bounding process that stays alive as its
+# direct parent - `timeout`, `gtimeout`, or the forking perl fallback, all three of
+# which fork the command and wait rather than exec it.
+#
+# The probe reads the mark from a candidate's direct parent, so that parent
+# relationship is a contract between this function and
+# crew_nm_run_process_alive in bin/fm-classify-lib.sh: an arm that grew another
+# process between the mark and `no-mistakes` would silently restore the false
+# positive.
+#
+# Marking is best-effort and never a precondition of the call. A caller with a
+# deliberately minimal PATH that has no `env` still gets the identical bounded
+# invocation it got before, unmarked; the probe then reads that invocation as an
+# ordinary crew run, which is the behavior that predates the mark rather than a new
+# failure mode.
+FM_NM_OWN_RUN_MARK='FM_NM_OWN_RUN=1'
+
 # Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
+# Every arm carries the mark above, so firstmate's own queries never read as crew
+# progress; see that constant for why the mark lives in the wrapper's argv.
 fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
   local dir=$1 timeout_secs=$2 have_timeout=none
+  local -a mark=()
   shift 2
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
   elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
   elif command -v perl >/dev/null 2>&1; then have_timeout=perl
   fi
+  if command -v env >/dev/null 2>&1; then mark=( env "$FM_NM_OWN_RUN_MARK" ); fi
   case "$have_timeout" in
-    timeout)  ( cd "$dir" && timeout "$timeout_secs" no-mistakes "$@" ) ;;
-    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" no-mistakes "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" no-mistakes "$@" ) ;;
+    timeout)  ( cd "$dir" && timeout "$timeout_secs" ${mark[@]+"${mark[@]}"} no-mistakes "$@" ) ;;
+    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" ${mark[@]+"${mark[@]}"} no-mistakes "$@" ) ;;
+    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" ${mark[@]+"${mark[@]}"} no-mistakes "$@" ) ;;
     *)        return 1 ;;
   esac
 }

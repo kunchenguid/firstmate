@@ -1248,8 +1248,18 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
       ;;
+    bin/fm-classify-lib.sh)
+      # The one library in the watcher group that teardown's kill path consumes:
+      # bin/fm-teardown.sh sources it and reaps leaked descendants through its cwd
+      # scan, where a narrowed or wrong pid list is unsafe. The watcher family
+      # drives that parser through a fake lsof, so only pr-forge covers the real
+      # reap; both families are required here. The rest of the group below has no
+      # teardown consumer and keeps its narrower selection.
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' pr-forge
+      ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
-    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-afk*)
@@ -1351,11 +1361,16 @@ families_for_changed_path() {
       printf '%s\n' pr-forge
       ;;
     bin/fm-nm-run-lib.sh)
-      # Shared no-mistakes run-attribution primitives, sourced by both
-      # bin/fm-crew-state.sh (pure-contract-unit) and bin/fm-teardown.sh's
-      # pre-teardown run abort (pr-forge).
+      # Shared no-mistakes run-attribution primitives, sourced by
+      # bin/fm-crew-state.sh (pure-contract-unit), bin/fm-teardown.sh's
+      # pre-teardown run abort (pr-forge), and bin/fm-classify-lib.sh, which reads
+      # this library's FM_NM_OWN_RUN_MARK so firstmate's own bounded queries never
+      # read as crew progress. That mark's only regression lives in the watcher
+      # suite, so a change here must select watcher-wake-lock too or the guard
+      # could be dropped with every selected family still green.
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
+      printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-control-lib.sh)
       printf '%s\n' backend-dispatch
