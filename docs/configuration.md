@@ -906,6 +906,7 @@ A watch armed one-shot fires at most once and every one of its outcomes is termi
 A watch armed to repeat answers "ring X every time Y changes" instead: its successful fire is the single non-terminal outcome, and it is also the single silent one, so the runner records it handled without a wake and restarts the poll rather than retiring the source.
 That fire is journalled under `state/when/`, and a repeat watch's deadline is measured from its last fire rather than from arming, so the deadline means the condition stopped changing instead of the watch getting old.
 A repeat action must therefore be safe to run again, which is the standard the one-shot action already had to meet.
+By default a repeat watch also requires an observed false poll between two fires, so a level condition that never flaps cannot refire on a change that never happened; a watch armed `--edge` declares that its own condition already de-dups its transitions (it rewrites its snapshot on every poll, true or false) and skips that generic dedup, because requiring a false poll there could discard a real transition the condition already reported and will never report again.
 Every failure path - a mutated spec or action executable, a condition error past its budget, an expired deadline, a failed action, or, for a one-shot watch, an earlier fire whose outcome was never captured - produces a terminal captured outcome that wakes firstmate rather than a silent retry, in both modes.
 A durable single-fire marker claimed before the action makes restarts and re-polls unable to fire it twice; a repeat watch releases that marker only once its fire has been emitted, so a lost capture costs one extra ring instead of ending the watch.
 The adapter automates only the exact deterministic subset: anything needing judgment, and anything destructive, irreversible, or security-sensitive, keeps the ordinary check-fires-then-firstmate-decides flow, and the adapter's header and `--help` own its commands, flags, and outcome document.
@@ -1060,6 +1061,7 @@ The condition compares a PROJECTION of `no-mistakes axi status` (`status`, `outc
 A missing key contributes an empty field, so a no-mistakes release that renames a key degrades the watch to a coarser one rather than to a wrong one.
 The first poll after arming writes the snapshot and returns false, so arming never fires on its own baseline.
 A probe that errors exits 2 and is counted against the source's error budget; it is never read as a true.
+It is also armed with `--edge`, because the condition rewrites its own snapshot to the current projection on every poll, true or false, so it is already edge-detecting and can never report the same transition twice; without `--edge`, the generic repeat dedup that requires an observed false between fires could discard a real transition observed by the fresh poller a reconcile restarts between fires, stalling the watch on a state the pipeline has already left.
 
 `bin/fm-spawn.sh` arms it and `bin/fm-teardown.sh` retires it. Arming is best-effort: a failure warns and the spawn continues, and the worker then falls back to one status check per resume.
 

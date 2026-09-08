@@ -884,7 +884,7 @@ pass "a failing action ends a repeat watch and wakes firstmate"
 H="$TMP_ROOT/h-spawn-shape"; new_home "$H"
 RING_TASK=ring-task
 printf 'window=none\nbackend=tmux\n' > "$H/state/$RING_TASK.meta"
-when "$H" arm "nm-state-$RING_TASK" --interval 0.1 --stable 1 --repeat \
+when "$H" arm "nm-state-$RING_TASK" --interval 0.1 --stable 1 --repeat --edge \
   --action-env "FM_HOME=$H" \
   --condition true \
   --action "$ROOT/bin/fm-send.sh" "$RING_TASK" 'no-mistakes state changed' >/dev/null
@@ -896,5 +896,77 @@ assert_grep 'repeat: continues' "$RESULT" "the spawn-shaped watch keeps watching
 assert_present "$H/state/$RING_TASK.inbox" "the ring landed in the task's steering inbox"
 when "$H" retire "nm-state-$RING_TASK" >/dev/null
 pass "the watch shape fm-spawn arms rings a task and keeps watching"
+
+# --- an --edge repeat watch survives a restart between two real changes -----
+# bin/fm-nm-state-condition.sh (the only condition fm-spawn arms this feature
+# for) is itself edge-detecting: it rewrites its own snapshot to the current
+# value on the poll that first creates it and on any poll that finds a real
+# difference, but never on an unchanged poll. A repeat watch armed WITHOUT
+# --edge requires an observed false poll between two fires; composed with a
+# condition like this, a SECOND real change observed by the fresh poller a
+# restart spins up between fires would be discarded (no false was ever seen),
+# and the very next poll would then compare against its own just-rewritten
+# snapshot and find no difference - stalling the watch on a state the
+# pipeline already left. This proves --edge closes that gap: the new runner's
+# first poll after a restart, finding a real change, must fire immediately.
+H="$TMP_ROOT/h-repeat-edge"; new_home "$H"
+EDGE_VALUE="$TMP_ROOT/edge-value"
+EDGE_SNAPSHOT="$TMP_ROOT/edge-snapshot"
+EDGE_LOG="$TMP_ROOT/edge-act"
+EDGECOND="$TMP_ROOT/edgecond.sh"
+cat > "$EDGECOND" <<'SH'
+#!/usr/bin/env bash
+# A self-differencing condition mirroring bin/fm-nm-state-condition.sh: it
+# rewrites its own snapshot whenever the current value first appears or
+# differs from what is stored, and only then reports true.
+value_file=$1
+snapshot=$2
+current=$(cat "$value_file" 2>/dev/null || true)
+if [ ! -f "$snapshot" ]; then
+  printf '%s' "$current" > "$snapshot"
+  exit 1
+fi
+previous=$(cat "$snapshot" 2>/dev/null || true)
+[ "$current" = "$previous" ] && exit 1
+printf '%s' "$current" > "$snapshot"
+exit 0
+SH
+chmod +x "$EDGECOND"
+printf 'A' > "$EDGE_VALUE"
+when "$H" arm repeat-edge --interval 0.1 --stable 1 --repeat --edge \
+  --condition "$EDGECOND" "$EDGE_VALUE" "$EDGE_SNAPSHOT" \
+  --action "$ACT" "$EDGE_LOG" >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_file "$EDGE_SNAPSHOT" || fail "the edge condition never wrote its baseline snapshot"
+printf 'B' > "$EDGE_VALUE"
+wait_for_result "$H" when-repeat-edge || fail "the first real transition (A->B) never fired"
+RESULT=$(first_result "$H" when-repeat-edge)
+assert_grep 'status: fired' "$RESULT" "the first edge transition fires"
+assert_grep 'repeat: continues' "$RESULT" "an --edge repeat watch still continues after firing"
+assert_absent "$H/state/when/when-repeat-edge.needs-edge" \
+  "an --edge watch never sets the generic needs-edge marker"
+[ "$(count_lines "$EDGE_LOG")" -eq 1 ] || fail "the first edge transition must run the action exactly once"
+# The polling child that observed A->B has already exited (every `run`
+# invocation ends after one outcome); advance the value a SECOND time while no
+# poller is watching, simulating the pipeline changing more than once during
+# the reconcile gap between runner restarts.
+printf 'C' > "$EDGE_VALUE"
+pe "$H" reconcile >/dev/null
+for _ in $(seq 1 150); do
+  [ "$(count_lines "$EDGE_LOG")" -ge 2 ] && break
+  pe "$H" reconcile >/dev/null 2>&1
+  sleep 0.1
+done
+[ "$(count_lines "$EDGE_LOG")" -ge 2 ] || \
+  fail "an --edge watch must fire on the very first poll after a restart when the state already changed again, not require an extra false poll first"
+# A genuine no-change poll afterwards must not spuriously refire it again.
+for _ in $(seq 1 15); do
+  pe "$H" reconcile >/dev/null 2>&1
+  sleep 0.1
+done
+[ "$(count_lines "$EDGE_LOG")" -eq 2 ] || \
+  fail "an --edge watch must not refire on a poll that observes no change"
+when "$H" retire repeat-edge >/dev/null
+pass "an --edge repeat watch fires immediately on a real change observed after a restart, never needing an extra false poll first"
 
 printf 'all fm-procevent-when tests passed\n'

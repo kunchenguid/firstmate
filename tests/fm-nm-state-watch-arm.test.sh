@@ -6,7 +6,7 @@
 # single-fire watch only rings once. This drives the real bin/fm-spawn.sh
 # and inspects the watch's own on-disk spec (bin/fm-procevent-when.sh's
 # "fm-when-spec-v1" format) rather than reading fm-spawn.sh's source, so a
-# future edit that drops --repeat or --action-env fails here.
+# future edit that drops --repeat, --edge, or --action-env fails here.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -33,9 +33,11 @@ SPEC="$home/state/when/when-nm-state-$id.spec"
 assert_present "$SPEC" "the pipeline-state watch's on-disk spec was not written"
 assert_grep "repeat=1" "$SPEC" \
   "fm-spawn.sh must arm the pipeline-state watch with --repeat, or a worker stalls after its first pipeline-state change"
+assert_grep "edge=1" "$SPEC" \
+  "fm-spawn.sh must arm the pipeline-state watch with --edge, or the generic repeat dedup can swallow a real transition observed after a restart (the condition is itself edge-detecting)"
 assert_grep "env_argc=1" "$SPEC" \
   "fm-spawn.sh must arm the pipeline-state watch with exactly one --action-env assignment (FM_HOME)"
 assert_grep "FM_HOME=$home" "$SPEC" \
   "fm-spawn.sh must pass FM_HOME=<home> as the watch's action-env, or fm-send.sh cannot resolve the ring target"
 
-pass "fm-spawn.sh arms the D5 pipeline-state watch with --repeat and FM_HOME"
+pass "fm-spawn.sh arms the D5 pipeline-state watch with --repeat, --edge, and FM_HOME"

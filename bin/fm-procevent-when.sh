@@ -46,6 +46,14 @@
 #              --repeat                    keep watching after a successful
 #                                          fire instead of ending there (see
 #                                          REPEAT MODE below)
+#              --edge                      the condition script is itself
+#                                          edge-detecting (it de-dups its own
+#                                          transitions, e.g. by diffing against
+#                                          a snapshot it rewrites on every
+#                                          poll); skip the generic repeat
+#                                          dedup below and count every true
+#                                          poll after a fire immediately. Only
+#                                          meaningful with --repeat.
 #            The condition argv must exit 0 for true, 1 for a clean false;
 #            any other exit (or a per-poll timeout) is an error, never a true.
 #            POLICY, not enforceable here: both halves must be exact and
@@ -119,6 +127,21 @@
 #   within its own poll, so only a fire whose outcome was emitted lets the next
 #   one happen. A repeat action must therefore be safe to run again, which is
 #   the standard the one-shot action already had to meet.
+#
+#   By default a repeat watch also requires an observed false poll between two
+#   fires, so a level condition that never flaps cannot refire on a change that
+#   never actually happened. That dedup is wrong for a condition that is
+#   itself edge-detecting - one that always rewrites its own snapshot on every
+#   poll, true or false, so a true poll can never repeat the same transition
+#   twice. Composing the generic dedup with a self-differencing condition can
+#   lose a real transition: the runner restarts between fires (a repeat fire
+#   always ends the polling child; only the next reconcile relaunches it), and
+#   if the underlying state changes twice while the watch is dormant, the new
+#   run's first poll reports the second change truthfully but the dedup
+#   discards it because no false was observed first - and the state then never
+#   changes again to produce one. `--edge` declares that the condition already
+#   guarantees this itself, so the runner never requires a false poll between
+#   fires for that watch.
 #
 # Outcome document (the captured result named by the wake):
 #   when: <source-id>
@@ -222,7 +245,7 @@ action_executable() {  # <argv-zero>: print the executable's absolute path
 
 cmd_arm() {
   local name=${1-} sid interval=60 stable=2 deadline=604800
-  local condition_timeout=60 action_timeout=1800 error_budget=3 repeat=0
+  local condition_timeout=60 action_timeout=1800 error_budget=3 repeat=0 edge=0
   local -a cond=() act=() env_assignments=()
   [ -n "$name" ] || usage
   shift
@@ -238,6 +261,7 @@ cmd_arm() {
       --error-budget)      positive_int "${2-}" || die "--error-budget needs a positive integer"; error_budget=$2; shift 2 ;;
       --action-env)        env_assignment_valid "${2-}" || die "--action-env needs NAME=VALUE with a shell-safe NAME: ${2-}"; env_assignments+=("$2"); shift 2 ;;
       --repeat)            repeat=1; shift ;;
+      --edge)              edge=1; shift ;;
       --condition)
         shift
         while [ "$#" -gt 0 ] && [ "$1" != --action ]; do cond+=("$1"); shift; done
@@ -288,6 +312,7 @@ cmd_arm() {
     printf 'action_timeout=%s\n' "$action_timeout"
     printf 'error_budget=%s\n' "$error_budget"
     printf 'repeat=%s\n' "$repeat"
+    printf 'edge=%s\n' "$edge"
     printf 'action_sha256=%s\n' "$action_hash"
     printf 'condition_argc=%s\n' "${#cond[@]}"
     printf 'action_argc=%s\n' "${#act[@]}"
@@ -352,7 +377,7 @@ spec_load() {
 
   SPEC_ARMED='' SPEC_INTERVAL='' SPEC_STABLE='' SPEC_DEADLINE=''
   SPEC_CONDITION_TIMEOUT='' SPEC_ACTION_TIMEOUT='' SPEC_ERROR_BUDGET=''
-  SPEC_ACTION_SHA256='' SPEC_REPEAT=0
+  SPEC_ACTION_SHA256='' SPEC_REPEAT=0 SPEC_EDGE=0
   local cond_argc='' act_argc='' env_argc=0 in_argv=0 read_cond=0 read_act=0 read_env=0
   {
     IFS= read -r version || { SPEC_ERROR="spec is empty"; return 1; }
@@ -371,6 +396,7 @@ spec_load() {
           action_timeout)    SPEC_ACTION_TIMEOUT=$value ;;
           error_budget)      SPEC_ERROR_BUDGET=$value ;;
           repeat)            SPEC_REPEAT=$value ;;
+          edge)              SPEC_EDGE=$value ;;
           action_sha256)     SPEC_ACTION_SHA256=$value ;;
           condition_argc)    cond_argc=$value ;;
           action_argc)       act_argc=$value ;;
@@ -401,6 +427,7 @@ spec_load() {
   positive_int "$SPEC_ACTION_TIMEOUT" || { SPEC_ERROR="spec action timeout is malformed"; return 1; }
   positive_int "$SPEC_ERROR_BUDGET" || { SPEC_ERROR="spec error budget is malformed"; return 1; }
   case "$SPEC_REPEAT" in 0|1) ;; *) SPEC_ERROR="spec repeat flag is malformed"; return 1 ;; esac
+  case "$SPEC_EDGE" in 0|1) ;; *) SPEC_ERROR="spec edge flag is malformed"; return 1 ;; esac
   [[ "$SPEC_ACTION_SHA256" =~ ^[0-9a-f]{64}$ ]] \
     || { SPEC_ERROR="spec action hash is malformed"; return 1; }
   positive_int "${cond_argc:-}" || { SPEC_ERROR="spec condition argc is malformed"; return 1; }
@@ -502,8 +529,12 @@ cmd_run() {
   # A repeat watch that already fired must see the condition go false before
   # another stable-true run is allowed to fire again - otherwise a condition
   # that never flaps would just refire on every reconcile of a level that
-  # never changed, which is not "ring X every time Y changes".
-  [ "$SPEC_REPEAT" = 1 ] && [ -e "$(edge_file "$sid")" ] && needs_edge=1
+  # never changed, which is not "ring X every time Y changes". A watch armed
+  # --edge declares its condition already de-dups itself (it rewrites its own
+  # snapshot on every poll, true or false), so this generic dedup is skipped
+  # entirely: requiring an observed false here can lose a real transition that
+  # the condition already reported once and will never report again.
+  [ "$SPEC_REPEAT" = 1 ] && [ "$SPEC_EDGE" != 1 ] && [ -e "$(edge_file "$sid")" ] && needs_edge=1
 
   # A fired marker with this runner not mid-action means an earlier run claimed
   # the fire and died before its outcome was durably captured. For a one-shot
@@ -635,16 +666,19 @@ cmd_run() {
   if [ "$SPEC_REPEAT" = 1 ]; then
     # Mark that the next run must see the condition go false before it may
     # fire again: a still-true level on the next reconcile is not a new
-    # change, and refiring on it would be a duplicate ring. A write failure
-    # here is treated the same as a failed journal write below: without the
-    # marker, a fresh run on a level that never went false would refire
-    # immediately, reproducing the exact duplicate-ring bug this file exists
-    # to prevent.
-    if ! (umask 077; : > "$(edge_file "$sid")") 2>/dev/null; then
-      emit_doc "$sid" fired \
-        "the condition held and the action exited 0, but the edge marker could not be written; the watch stops here" \
-        "$polls" "$rc" "$out"
-      exit 0
+    # change, and refiring on it would be a duplicate ring. Skipped for an
+    # --edge watch, whose condition already guarantees this on its own. A
+    # write failure here is treated the same as a failed journal write below:
+    # without the marker, a fresh run on a level that never went false would
+    # refire immediately, reproducing the exact duplicate-ring bug this file
+    # exists to prevent.
+    if [ "$SPEC_EDGE" != 1 ]; then
+      if ! (umask 077; : > "$(edge_file "$sid")") 2>/dev/null; then
+        emit_doc "$sid" fired \
+          "the condition held and the action exited 0, but the edge marker could not be written; the watch stops here" \
+          "$polls" "$rc" "$out"
+        exit 0
+      fi
     fi
     # Journal first, then release the claim: a crash between the two costs one
     # duplicate ring on restart, while the reverse order could lose the fire's
