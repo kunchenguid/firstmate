@@ -130,6 +130,7 @@ test_missing_or_malformed_credentials_are_refused() {
 
 test_successful_spend_report_and_token_never_leaks() {
   local dir out
+  local FAKE_TOKEN
   dir=$(make_case success)
   FAKE_TOKEN='super-secret-token-xyz'
   printf '{"claudeAiOauth":{"accessToken":"%s"}}\n' "$FAKE_TOKEN" > "$dir/creds.json"
