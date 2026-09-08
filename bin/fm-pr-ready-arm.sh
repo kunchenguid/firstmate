@@ -10,10 +10,13 @@
 #
 # The PR list lives in the .prs sidecar, so editing it later needs no
 # re-registration; editing the shim itself (this template) does. The watcher
-# executes a hash-verified snapshot of the shim, possibly from a different
-# location than where it was armed, so the id and the sidecar's arm-time path
-# are both baked into the shim literally rather than recomputed relative to
-# the snapshot's own location.
+# executes a hash-verified snapshot of the shim from a temp file inside the
+# same state directory (fm_custom_check_snapshot_prepare), so deriving
+# FM_HOME from that snapshot's own path only happens to work when state is
+# exactly FM_HOME/state; under FM_STATE_OVERRIDE it resolves the wrong
+# installation and the exec below silently never runs. The id, FM_HOME, and
+# the sidecar's arm-time path are therefore all baked into the shim literally
+# rather than recomputed relative to the snapshot's own location.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,16 +43,17 @@ SIDECAR="$STATE/$ID.prs"
 cat > "$SHIM" <<EOF
 #!/usr/bin/env bash
 # Per-task shim for the generic PR readiness check (bin/fm-pr-ready-check.sh).
-# Reads the PR list from $SIDECAR, its arm-time path baked in literally (like
-# the id below) so an FM_STATE_OVERRIDE used at arm time is not lost: the
-# watcher executes a hash-verified snapshot of this file, possibly from a
-# different location, so a path recomputed from the snapshot's own location
-# would silently miss a sidecar that was written outside FM_HOME/state.
+# FM_HOME and the PR-list sidecar path are both baked in literally at arm
+# time (like the id below), never re-derived from this file's own path: the
+# watcher executes a hash-verified snapshot of this file from a temp copy
+# inside the state directory, and under FM_STATE_OVERRIDE that state
+# directory need not sit one level below FM_HOME, so a re-derived path can
+# silently resolve to the wrong installation or miss the sidecar entirely.
 # Change the PR list in the .prs sidecar only; changing this shim requires
 # re-registering the trust binding.
 set -u
 ID=$ID
-FM_HOME="\$(cd "\$(dirname "\$0")/.." && pwd)"
+FM_HOME="$FM_HOME"
 SIDECAR="$SIDECAR"
 [ -f "\$SIDECAR" ] && [ ! -L "\$SIDECAR" ] || exit 0
 mapfile -t prs < "\$SIDECAR"

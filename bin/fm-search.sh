@@ -5,6 +5,13 @@
 # APIs, news) without inventing them from memory. Tavily was the prior tool;
 # its key is absent in this home, so you.com is now the search path.
 #
+# Intentionally single-vendor for now: this hard-embeds you.com's endpoint,
+# auth, and response shape rather than a provider-adapter abstraction, since
+# no such adapter pattern exists elsewhere in this repo (bin/backends/ is
+# runtime spawn backends, unrelated) and a two-line key-source swap does not
+# by itself justify inventing one. Revisit if a second search provider shows
+# up.
+#
 # API: you.com Web Search API, https://api.you.com/v1/search
 #   - GET works and is used here (extraction is POST-only and not implemented).
 #   - Auth: X-API-Key header. Key sources, first match wins:

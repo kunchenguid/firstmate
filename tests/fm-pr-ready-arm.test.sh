@@ -85,14 +85,17 @@ SH
   esac
 }
 
-# Regression for the state-override-loses-sidecar bug: when FM_STATE_OVERRIDE
-# points somewhere other than FM_HOME/state, the shim must still find the
-# sidecar it was actually written next to, not recompute a $FM_HOME/state
-# path that was never written to.
+# Regression for the state-override-loses-sidecar bug AND the follow-on
+# snapshot-loses-FM_HOME bug: when FM_STATE_OVERRIDE points somewhere that is
+# NOT one level below FM_HOME (the general case; the watcher's real snapshot
+# copy lives inside that same directory too, per
+# fm_custom_check_snapshot_prepare), the shim must still find both its own
+# sidecar and the real fm-pr-ready-check.sh, never a path re-derived from
+# where the shim happens to be running from.
 test_state_override_sidecar_resolves() {
   local home altstate
   home=$(new_home "$TMP_ROOT/override")
-  altstate="$home/altstate"
+  altstate="$TMP_ROOT/override-external-state"
   mkdir -p "$home/bin" "$altstate"
   cat > "$home/bin/fm-pr-ready-check.sh" <<'SH'
 #!/usr/bin/env bash
@@ -106,10 +109,16 @@ SH
   [ -f "$altstate/watch4.prs" ] || fail "sidecar was not written under the state override"
   [ ! -e "$home/state/watch4.prs" ] || fail "sidecar should not land under FM_HOME/state when overridden"
 
-  out=$("$altstate/watch4.check.sh" 2>&1)
+  # Exercise it as a snapshot would: copied to a temp name inside the same
+  # (externally located) state directory, same as
+  # fm_custom_check_snapshot_prepare's `mktemp "$state/.fm-custom-check.XXXXXX"`.
+  snapshot="$altstate/.fm-custom-check.snaptest"
+  cp "$altstate/watch4.check.sh" "$snapshot"
+  chmod 700 "$snapshot"
+  out=$("$snapshot" 2>&1)
   case "$out" in
     *"called-with: acme/widgets#5"*)
-      pass "shim under a state override still finds and forwards its own sidecar" ;;
+      pass "shim run as an externally-rooted snapshot still finds its sidecar and FM_HOME" ;;
     *) fail "expected shim to forward the overridden sidecar's PRs, got: $out" ;;
   esac
 }
