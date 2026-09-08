@@ -376,7 +376,9 @@ Spawn through `bin/fm-spawn.sh` where that is possible; otherwise write the file
 
 ```sh
 tmux kill-session -t tp-h1 2>/dev/null || true   # kill and entry removal come FIRST, ahead of the registration
-# now remove projects[<worktree>] from the store - never after a candidate key has been written
+node -e 'const fs=require("node:fs"),f=process.argv[1];const j=JSON.parse(fs.readFileSync(f,"utf8"));
+delete (j.projects||{})[process.argv[2]];fs.writeFileSync(f,`${JSON.stringify(j,null,2)}\n`,{mode:0o600});' \
+  "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json" <worktree> || exit 1   # never after a candidate key has been written
 bin/fm-claude-trust.sh <worktree> <project> || exit 1   # a refusal must stop the arm, not fall through to the launch
 mkdir -p <worktree>/.claude   # stand in for the hooks bin/fm-spawn.sh injects into every claude worktree
 printf '%s\n' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"true"}]}],"Stop":[{"hooks":[{"type":"command","command":"true"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"true"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"true"}]}]}}' \
@@ -386,7 +388,7 @@ tmux new-session -d -s tp-h1 -c <worktree> \
 pane=
 for _ in $(seq 60); do   # new-session -d returns before claude has rendered anything
   pane=$(tmux capture-pane -p -t tp-h1)
-  case $pane in *"Quick safety check"*|*BRIEF-REACHED*) break ;; esac
+  case $pane in *"Quick safety check"*|*". BRIEF-REACHED"*) break ;; esac
   sleep 1
 done
 printf '%s\n' "$pane"
@@ -395,21 +397,26 @@ printf '%s\n' "$pane"
 "Shows the Quick safety check" is NOT a usable readout: both prompts open with that byte-identical first line and both offer `Yes, I trust this folder`.
 The arm reproduces only if the pane shows the SECOND prompt, so key the readout on the discriminator - its next line is `This folder pre-approves N tool permissions in .claude/settings.json` and its first option is `No, continue without these permissions`, where the first dialog instead says Claude will be able to read, edit, and execute files here and offers `No, exit`.
 If the pane shows the FIRST dialog the registration did not take effect; fix the registration and rerun rather than answering, because answering it writes `hasTrustDialogAccepted` and the treatment arm's walk would then report the key this script already writes as a candidate.
-Apply that readout only to a pane the poll above settled: if neither prompt nor the reply ever appears the loop runs out, and only then does the project count as not reproducing.
+Apply that readout only to a pane the poll settled on one of those two prompts.
+Loop exhaustion is NOT non-reproduction: it is equally what an empty pane looks like when the session died after creation - which the `|| exit 1` on the launch cannot catch, because it only guards session creation - and what the machine-scoped Bypass Permissions warning above or any other dialog looks like, none of which reached the trust stage at all.
+Treat every one of those as an INCONCLUSIVE arm to rerun, never as a result.
+The only pane that retires this project is one that positively shows the worker past the gate with no prompt having appeared: the answered brief, which is `. BRIEF-REACHED` on its own line and not the `> reply with exactly: BRIEF-REACHED` the UI echoes back, as the capture above shows.
 
 Treatment arm - snapshot the store FIRST, then answer the second prompt by hand in the control arm's `tp-h1` pane, then diff the two snapshots to see what the acceptance actually wrote:
 
 ```sh
 STORE=${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json   # the same store the control arm registered into
-cp "$STORE" /tmp/claude-store-before.json        # must run BEFORE answering
+snap=$(umask 077; mktemp "${TMPDIR:-$HOME}/claude-store-before.XXXXXX") || exit 1
+cp "$STORE" "$snap"   # must run BEFORE answering; the store is 0600 and carries account and MCP credentials,
+                      # so the snapshot gets an unpredictable name and 0600 too, never a fixed path under /tmp
 # answer "Yes, I trust this folder" by hand in tp-h1, on the prompt whose other option
 # is "No, continue without these permissions" - never on the "No, exit" trust dialog. Then:
 node -e 'const fs=require("node:fs");
 const walk=(x,y,p)=>{const o=v=>v&&typeof v==="object"&&!Array.isArray(v);
 if(o(x)&&o(y)){for(const k of new Set([...Object.keys(x),...Object.keys(y)]))walk(x[k],y[k],p.concat(k));return;}
 if(JSON.stringify(x)!==JSON.stringify(y))console.log(p.join("."),JSON.stringify(x),"->",JSON.stringify(y));};
-walk(JSON.parse(fs.readFileSync("/tmp/claude-store-before.json","utf8")),
-     JSON.parse(fs.readFileSync(process.argv[1],"utf8")),[]);' "$STORE"
+walk(JSON.parse(fs.readFileSync(process.argv[1],"utf8")),
+     JSON.parse(fs.readFileSync(process.argv[2],"utf8")),[]);' "$snap" "$STORE"
 ```
 
 Diff the WHOLE parsed store, not `projects[<worktree>]` alone.
