@@ -59,6 +59,7 @@ Retire or clean that home first, and re-scaffold a stale project-bearing charter
 Keep custom charter text focused on the persistent responsibility, available project clones, and genuinely domain-specific hard rules.
 The scaffolded charter, later copied to `data/charter.md`, owns the standard lifecycle and escalation wording.
 Preserve the generated charter sections unless the domain genuinely needs a hard rule.
+For shipwright reseeds, copy [`.agents/skills/secondmate-provisioning/templates/shipwright-charter.md`](templates/shipwright-charter.md) into `data/shipwright/brief.md` before `bin/fm-home-seed.sh`; that template is the canonical charter body for the project-less shipwright home.
 
 Provision a local persistent home and registry entry after the charter is filled:
 

@@ -252,7 +252,7 @@ family_for_basename() {
     fm-quota-utilization.test.sh|\
     fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
-    fm-subagent-pretool-check.test.sh|fm-skill-war-room.test.sh|\
+    fm-subagent-pretool-check.test.sh|fm-skill-bugfix-pair-room.test.sh|fm-skill-war-room.test.sh|\
     fm-supervision-fault.test.sh|fm-supervision-instructions.test.sh|fm-supervision-oracle.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|fm-unadvanceable-work.test.sh|\

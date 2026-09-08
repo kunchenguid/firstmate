@@ -144,6 +144,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/bugfix-pair-room/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/captain-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -261,6 +265,10 @@
     },
     {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/secondmate-provisioning/templates/shipwright-charter.md",
       "audience": "agent-runtime"
     },
     {
