@@ -1,2 +1,8 @@
+# Every text file checks out with LF on every platform. Git for Windows ships
+# core.autocrlf=true in its system config, and a CRLF working tree breaks the
+# pinned shellcheck run (SC1017) and any test that compares file bytes.
+* text=auto eol=lf
+
 # Bash parses shell scripts with LF line endings on every supported platform.
+# Listed last so the explicit rule wins for scripts.
 *.sh text eol=lf

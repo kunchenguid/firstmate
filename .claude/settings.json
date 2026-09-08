@@ -1,4 +1,7 @@
 {
+  "env": {
+    "MSYS": "winsymlinks:sys"
+  },
   "hooks": {
     "SessionStart": [
       {
