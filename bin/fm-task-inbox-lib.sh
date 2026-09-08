@@ -389,6 +389,11 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
     send-failed)
       if ! fm_task_inbox_composer_holds_doorbell "$backend" "$target" "$rec" "$label"; then
         cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+        # send-failed cannot distinguish an Enter that landed from a literal
+        # send that never typed anything without widening the backend contract.
+        # Report failure in both cases so an empty composer cannot falsely mark
+        # an unsent doorbell delivered. The durable record makes the resulting
+        # re-ring safe, and a duplicate doorbell is a no-op after handling.
         [ "$cstate" = empty ] && return 2
         return 1
       fi
