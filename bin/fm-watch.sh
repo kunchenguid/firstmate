@@ -66,7 +66,17 @@
 #                          wake and writes STATE/.wedge-permanent-<key>-<hash12>;
 #                          subsequent polls for that hash short-circuit until
 #                          FM_CAP_HORIZON_SECS elapse, the pane hash changes, or
-#                          the operator manually removes the marker.
+#                          the operator manually removes the marker. v12 also
+#                          writes a window-scoped STATE/.wedge-permanent-<key>
+#                          marker that silences ALL hashes for the window until
+#                          FM_CAP_HORIZON_SECS elapses or the operator manually
+#                          removes it (so a busy pane churning its rendered
+#                          hash on every poll cannot rebuild the escalation
+#                          counter per fresh hash and re-fire). v13 inverts the
+#                          ordering so the durable wake row is queued BEFORE
+#                          either marker is written - this leaves no state
+#                          where a marker silences retries but no wake was
+#                          queued, and rolling back a partial cap is exact.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -1078,27 +1088,62 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # entry durable before `wake` runs.
         if [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this (window, hash) until FM_CAP_HORIZON_SECS (default 86400s) elapses, the pane hash changes, or operator manually removes STATE/.wedge-permanent-<key>-<hash12>; local patch 2026-08-19)"
-          if ! date +%s > "$permanent_marker" 2>/dev/null; then
-            triage_log "wedge permanent marker write FAILED: $permanent_marker - aborting cap without firing terminal wake (next poll will retry)"
+          # v13 (2026-09-08, Greptile review of v12): order writes so the
+          # durable wake is on disk BEFORE any marker exists. This closes
+          # three v12 bugs that shared the same root cause (markers written
+          # before the wake, with incomplete rollback):
+          #
+          #   P1 #1 (line 2440): "Marker precedes durable wake" - if the
+          #   watcher dies between the per-hash marker write and fm_wake_append,
+          #   the marker silences retries but no wake was queued. Fixed by
+          #   doing fm_wake_append first.
+          #
+          #   P1 #2 (line 1058): "Window marker survives append failure" -
+          #   the v12 rollback only removed the per-hash marker on
+          #   fm_wake_append failure; the window-scoped marker remained and
+          #   suppressed every hash in the window. Fixed by writing the
+          #   window-scoped marker AFTER fm_wake_append succeeds, so no
+          #   rollback is ever needed for fm_wake_append failure.
+          #
+          #   P1 #3 (line 1043): "Failed window marker permits repeats" -
+          #   on window-scoped marker write failure v12 logged and continued,
+          #   so a subsequent hash-churning loop rebuilt the escalation
+          #   counter and re-fired. Fixed by treating the window-scoped
+          #   marker write as fatal: rm the per-hash marker (which we just
+          #   wrote) and exit 1, so the operator-visible triage_log is the
+          #   only lingering artifact; the next poll re-escalates from 1
+          #   with no markers and a fresh durable wake.
+          #
+          # Failure semantics: a wedge-cap attempt that fails between step
+          # 2 and step 4 leaves NO markers behind and a durable wake row
+          # that may or may not still be visible. The next poll re-escalates
+          # from 1, the captain may see one extra wake during the failure,
+          # but the unattended loop is still bounded by the durable
+          # FM_WEDGE_MAX_ESCALATIONS threshold.
+          if ! fm_wake_append stale "$win" "$reason"; then
+            triage_log "wedge fm_wake_append FAILED for cap on $win, no markers written (next poll will retry)"
             exit 1
           fi
-          # v12 (2026-09-07, Greptile P1 follow-up): also write the window-
-          # scoped marker so all subsequent hashes for this window are
-          # silenced until the wedge genuinely resolves (busy->idle
-          # transition) or the cap horizon elapses. Without this, a busy
-          # pane churning its rendered hash on every poll rebuilds the
-          # escalation counter per fresh hash and re-fires PERMANENTLY-WEDGED
-          # every FM_WEDGE_MAX_ESCALATIONS polls, even with v11 counter
-          # reset. A genuine busy->idle transition clears the window-scoped
-          # marker at hash-change time (see the outer loop's hash-change
-          # branch), so a fresh stale hash arriving after recovery still
-          # escalates normally.
-          if ! date +%s > "$STATE/.wedge-permanent-$(window_key "$win")" 2>/dev/null; then
-            triage_log "wedge window-scoped marker write FAILED: $STATE/.wedge-permanent-$(window_key "$win") - per-hash marker still written, cap fires but window-churn loop may persist until next hash change"
+          # Wake is now durable. Write the per-hash marker (v2 contract);
+          # the wedge itself did not survive fm_wake_append, so this is
+          # the only marker that can fail without breaking the cap.
+          if ! date +%s > "$permanent_marker" 2>/dev/null; then
+            triage_log "wedge per-hash marker write FAILED after wake queued: $permanent_marker - cap fires but a future hash-churn rebuild of the escalation counter is possible; operator must intervene (rm $permanent_marker or wait for FM_CAP_HORIZON_SECS)"
+            exit 1
           fi
-          if ! fm_wake_append stale "$win" "$reason"; then
+          # Write the window-scoped marker (v12 contract). On failure
+          # roll back the per-hash marker (which we just wrote) so the cap
+          # state is consistent: no partial cap. The durable wake row from
+          # step 2 stays as a transient operator-visible artifact.
+          #
+          # The redirect can fail when the path is a non-empty directory
+          # (bash refuses `date > <dir>`); `command date ...` doesn't help
+          # because the redirect is evaluated by bash, not the command.
+          # Redirecting the wrapper's stderr catches bash's "Is a directory"
+          # diagnostic so the operator only sees our triage_log line.
+          if ! { date +%s > "$STATE/.wedge-permanent-$(window_key "$win")"; } 2>/dev/null; then
             rm -f "$permanent_marker"
-            triage_log "wedge fm_wake_append FAILED after marker write, rolled back $permanent_marker"
+            triage_log "wedge window-scoped marker write FAILED: $STATE/.wedge-permanent-$(window_key "$win") - rolled back per-hash marker, no cap state visible to next poll; operator must intervene"
             exit 1
           fi
           rm -f "$since_file"

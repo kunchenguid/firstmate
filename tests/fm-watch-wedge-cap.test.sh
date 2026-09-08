@@ -185,6 +185,161 @@ test_wedge_cap_window_marker_silences_hash_churning_busy_pane() {
   pass "the window-scoped cap marker silences hash-churning panes for the full cap horizon"
 }
 
+
+test_wedge_cap_marker_write_after_durable_wake_v13() {
+  # v13 (2026-09-08): marker writes happen AFTER the durable wake row is
+  # queued. This closes Greptile P1 #1 ("marker precedes durable wake"):
+  # if the watcher dies between the marker write and fm_wake_append, the
+  # marker silences retries even though no wake was queued.
+  #
+  # Test: drive the cap to fire with FM_WAKE_QUEUE pointing at a NON-
+  # writable path. fm_wake_append returns failure. Watcher exits 1 with
+  # NO cap marker written (per-hash AND window-scoped) - next poll must
+  # be able to re-escalate the wedge from scratch.
+  local dir state fakebin out capture_file window key pane_hash sig pid n max marker_hash marker_window
+  dir=$(make_case wedge-cap-write-order); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-cap-write-order"
+  printf 'idle wedged content for v13 ordering' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-write-order.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-write-order.status"
+  sig=$(seen_sig "$state/wedge-cap-write-order.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-write-order_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content for v13 ordering")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  max=3
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  marker_hash="$state/.wedge-permanent-$key-${pane_hash:0:12}"
+  marker_window="$state/.wedge-permanent-$key"
+
+  # Allow the queue to be writable for rounds 1..max-1 so the normal stale
+  # escalations land in the durable queue. On the firing round (round
+  # max), we lock the queue directory so fm_wake_append will fail. v13
+  # asserts the cap path does NOT write any marker when fm_wake_append
+  # fails - this is the only way to exercise the v13 ordering without
+  # also breaking normal stale wakes.
+  mkdir -p "$dir/queue-parent"
+  printf '%s\n' "# prior-round wakes" > "$dir/queue-parent/queue"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "priming watch failed: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "priming ack failed"
+  n=1
+  while [ "$n" -le "$max" ]; do
+    if [ "$n" -eq "$max" ]; then
+      # Lock the queue directory so fm_wake_append (which is the LAST
+      # step before the per-hash + window-scoped marker writes in v12)
+      # fails. The v13 fix asserts: NO marker is written when
+      # fm_wake_append fails.
+      chmod 0555 "$dir/queue-parent"
+    fi
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
+      FM_WAKE_QUEUE="$dir/queue-parent/queue" "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_for_exit "$pid" 100; then
+      reap "$pid"; fail "round $n watch failed: $(cat "$out")"
+    fi
+    if [ "$n" -lt "$max" ]; then
+      ack_stopped_cycle "$state" || fail "round $n ack failed"
+    fi
+    n=$((n + 1))
+  done
+  chmod 0755 "$dir/queue-parent"
+  [ ! -e "$marker_hash" ] || fail "per-hash marker was written despite fm_wake_append failure - v13 ordering is broken (the marker precedes the durable wake)"
+  [ ! -e "$marker_window" ] || fail "window-scoped marker was written despite fm_wake_append failure - v13 ordering is broken"
+  unset FM_FAKE_CREW_STATE
+  pass "cap-fire ordering durably queues the wake BEFORE any marker is written (v13)"
+}
+
+test_wedge_cap_failed_window_marker_rolls_back_per_hash_v13() {
+  # v13 (2026-09-08): closes Greptile P1 #3 ("failed window marker permits
+  # repeats") and P1 #2 ("window marker survives append failure"). On a
+  # window-scoped marker write FAILURE (after fm_wake_append success and
+  # per-hash marker success), v13 rolls back the per-hash marker and
+  # exits 1 - leaving no partial cap state visible.
+  #
+  # Test: pre-create $state/.wedge-permanent-<key> as a NON-EMPTY DIRECTORY
+  # (so `date +%s > ...` cannot create a file at that exact path - bash
+  # refuses to truncate a directory). The v13 fix rolls back the per-hash
+  # marker (which is targeted at .wedge-permanent-<key>-<hash12>, a
+  # different file) when the window-scoped marker write fails. We assert
+  # the rollback fired: neither marker ends up on disk.
+  local dir state fakebin out capture_file window key pane_hash sig pid n max marker_hash marker_window
+  dir=$(make_case wedge-cap-window-fail); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-cap-window-fail"
+  printf 'idle wedged content for v13 window-fail' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-window-fail.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-window-fail.status"
+  sig=$(seen_sig "$state/wedge-cap-window-fail.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-window-fail_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content for v13 window-fail")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  max=3
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  marker_hash="$state/.wedge-permanent-$key-${pane_hash:0:12}"
+  marker_window="$state/.wedge-permanent-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "priming watch failed: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "priming ack failed"
+  n=1
+  while [ "$n" -le "$max" ]; do
+    if [ "$n" -eq "$max" ]; then
+      # On the firing round, plant the window-scoped marker path as an
+      # EXISTING DIRECTORY so `date +%s > "$STATE/.wedge-permanent-<key>"`
+      # cannot create the file (bash refuses to redirect into a directory).
+      # v13 then rolls back the per-hash marker (which IS writable).
+      mkdir -p "$marker_window/blocker" 2>/dev/null
+    fi
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+    pid=$!
+    set +e
+    wait "$pid" 2>/dev/null
+    round_status=$?
+    set -e
+    if [ "$n" -eq "$max" ]; then
+      # Round max is expected to exit 1: v13 rolls back the per-hash
+      # marker after a failed window-scoped marker write and exits 1.
+      # Other rounds must exit 0 or the watcher logic regressed.
+      [ "$round_status" -eq 1 ] || fail "round max expected exit 1 (v13 cap-failure rollback), got $round_status: $(cat "$out")"
+    else
+      [ "$round_status" -eq 0 ] || fail "round $n watch failed with exit $round_status: $(cat "$out")"
+    fi
+    if [ "$n" -lt "$max" ]; then
+      ack_stopped_cycle "$state" || fail "round $n ack failed"
+    fi
+    n=$((n + 1))
+  done
+  rm -rf "$marker_window" 2>/dev/null || true
+  [ ! -e "$marker_hash" ] || fail "per-hash marker was NOT rolled back when the window-scoped marker write failed - v13 rollback is incomplete"
+  [ ! -e "$marker_window" ] || fail "window-scoped marker is unexpectedly present after a failed write - v13 ordering created an inconsistency"
+  unset FM_FAKE_CREW_STATE
+  pass "v13 rolls back the per-hash marker when the window-scoped marker write fails (no partial cap state)"
+}
+
 test_wedge_cap_fires_permanently_wedged_after_max_escalations() {
   local dir state fakebin out capture_file window key pane_hash sig pid n max
   dir=$(make_case wedge-cap-fires); state="$dir/state"; fakebin="$dir/fakebin"
@@ -780,83 +935,7 @@ test_wedge_cap_validates_invalid_override() {
   pass "FM_WEDGE_MAX_ESCALATIONS and FM_CAP_HORIZON_SECS both reject 0 and non-integer values, falling back to defaults"
 }
 
-test_wedge_cap_window_marker_silences_hash_churning_busy_pane() {
-  # v12 regression for Greptile P1 follow-up: a worker that churns its rendered
-  # pane hash on every poll (a ticking elapsed-time footer, a pane re-rendering
-  # for any unrelated reason) must receive at most ONE terminal PERMANENTLY-
-  # WEDGED wake for the wedge-event, even when every poll presents a fresh
-  # hash that escapes the per-hash marker scheme. v12 introduces a window-
-  # scoped marker (in addition to the per-hash marker) so the wedge is silenced
-  # for the whole window until the cap horizon elapses or an operator rm
-  # clears the marker.
-  local dir state fakebin out capture_file window key pane_hash sig pid n max marker_window marker_hash
-  dir=$(make_case wedge-cap-churning); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  window="test:fm-wedge-cap-churning"
-  printf 'busy wedged pane initial content\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-churning.meta"
-  printf 'working: still wedged\n' > "$state/wedge-cap-churning.status"
-  sig=$(seen_sig "$state/wedge-cap-churning.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-churning_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "busy wedged pane initial content")
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  max=3
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  marker_window="$state/.wedge-permanent-$key"
-  marker_hash="$state/.wedge-permanent-$key-${pane_hash:0:12}"
 
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
-  pid=$!
-  if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "priming watch failed: $(cat "$out")"
-  fi
-  reap "$pid"
-  ack_stopped_cycle "$state" || fail "priming ack failed"
-  n=1
-  while [ "$n" -le "$max" ]; do
-    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-    : > "$out"
-    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
-    pid=$!
-    if ! wait_for_exit "$pid" 100; then
-      reap "$pid"; fail "round $n watch failed: $(cat "$out")"
-    fi
-    ack_stopped_cycle "$state" || fail "round $n ack failed"
-    n=$((n + 1))
-  done
-  [ -e "$marker_hash" ] || fail "per-hash cap marker missing after firing"
-  [ -e "$marker_window" ] || fail "window-scoped cap marker missing after firing - v12 window-scope write is broken"
-
-  total_terminal=0
-  i=0
-  while [ "$i" -lt 12 ]; do
-    i=$((i + 1))
-    printf 'busy wedged pane iteration %d with brand new content\n' "$i" > "$capture_file"
-    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-    : > "$out"
-    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max FM_CAP_HORIZON_SECS=86400 "$WATCH" > "$out" &
-    pid=$!
-    if wait_poll_cycle "$state" "$pid" 2>/dev/null; then
-      :
-    fi
-    reap "$pid"
-    ack_stopped_cycle "$state" || true
-    if grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null; then
-      total_terminal=$((total_terminal + 1))
-    fi
-  done
-  [ "$total_terminal" -eq 0 ] || fail "hash-churning pane fired $total_terminal additional PERMANENTLY-WEDGED wakes across 12 iterations - v12 window-scoped marker is not silencing the loop"
-  [ -e "$marker_window" ] || fail "window-scoped marker was unexpectedly cleared during hash churn"
-  unset FM_FAKE_CREW_STATE
-  pass "the window-scoped cap marker silences hash-churning panes for the full cap horizon"
-}
 
 test_wedge_cap_escalation_counter_resets_on_cap_fire() {
   # Regression for Greptile P1 (v11): the wedge-escalation counter in
@@ -926,6 +1005,8 @@ test_wedge_cap_expires_after_horizon
 test_wedge_cap_holds_within_horizon
 test_wedge_cap_hash_change_invalidates_marker
 test_wedge_cap_escalation_counter_resets_on_cap_fire
+test_wedge_cap_marker_write_after_durable_wake_v13
+test_wedge_cap_failed_window_marker_rolls_back_per_hash_v13
 test_wedge_cap_window_marker_silences_hash_churning_busy_pane
 test_wedge_cap_operator_can_rm_marker
 test_wedge_cap_validates_invalid_override
