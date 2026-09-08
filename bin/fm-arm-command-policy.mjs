@@ -726,12 +726,6 @@ function sourcedScript(position) {
   return position.words[position.index + 1] || null;
 }
 
-function sourcedProcessPayload(position) {
-  const script = sourcedScript(position);
-  if (!script || script.value !== "" || script.subs.length !== 1 || script.subs[0].kind !== "process") return null;
-  return staticSubstitutionOutput(script.subs[0]);
-}
-
 function wordReferencesAny(word, names) {
   if (!word || names.size === 0) return false;
   for (const match of word.value.matchAll(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g)) {
@@ -741,7 +735,7 @@ function wordReferencesAny(word, names) {
 }
 
 function staticSubstitutionOutput(substitution) {
-  if (!["command", "process"].includes(substitution.kind)) return null;
+  if (substitution.kind !== "command") return null;
   const lexed = new Lexer(substitution.content).tokenize();
   if (lexed.error) return null;
   const program = splitProgram(lexed.tokens);
@@ -754,7 +748,6 @@ function staticSubstitutionOutput(substitution) {
   const format = values[1];
   if (!format.includes("%")) return format;
   if (format === "%s") return values.slice(2).join("");
-  if (format === "%s\\n") return `${values.slice(2).join("\n")}\n`;
   return null;
 }
 
@@ -1128,7 +1121,6 @@ function analyzeProgram(command, context, depth = 0) {
     const shellPayload = shell?.kind === "command" ? shell.payload : null;
     const shellScript = shell?.kind === "script" ? shell.payload : null;
     const sourceScript = sourcedScript(position);
-    const sourceProcessPayload = sourcedProcessPayload(position);
     const resolvedEvalPayload = evalPayload(position, nodeContext);
     const heredocPayloads = shellHeredocPayloads(tokens, position, nodeContext);
     const hereStringPayloads = shellHereStringPayloads(tokens, position, nodeContext);
@@ -1137,6 +1129,7 @@ function analyzeProgram(command, context, depth = 0) {
       nodeNestedProtected ||= Boolean(protectedIdentity(script.value, context.root)) || wordReferencesAny(script, nodeContext.protectedVariables);
       unclassifiableProtected ||= hasUnclassifiableProtectedExpansion(script, context.root);
     }
+    if (sourceScript?.subs.some((substitution) => substitution.kind === "process")) pipelineDrive = true;
     if (shellPayload) {
       const resolvedShellPayload = resolveKnownWord(shellPayload, nodeContext.knownVariables);
       if (resolvedShellPayload === null) {
@@ -1161,7 +1154,7 @@ function analyzeProgram(command, context, depth = 0) {
         unresolvedExecutionPayloadMentionsPipelineDrive(position.words.slice(position.index + 1))) {
       pipelineDrive = true;
     }
-    for (const payload of [resolvedEvalPayload, sourceProcessPayload, ...heredocPayloads, ...hereStringPayloads]) {
+    for (const payload of [resolvedEvalPayload, ...heredocPayloads, ...hereStringPayloads]) {
       if (payload === null) continue;
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;

@@ -376,6 +376,7 @@ EOF
   heredoc_payload=$(printf "source /dev/stdin <<'EOF'\\nno-mistakes axi respond --action fix\\nEOF\\n")
   alternate_heredoc_payload=$(printf "source /dev/fd/3 3<<'EOF'\\nno-mistakes axi respond --action fix\\nEOF\\n")
   process_source_payload="source <(printf '%s\\n' 'no-mistakes axi respond --action fix')"
+  echo_process_source_payload="source <(echo 'no-mistakes axi respond --action fix')"
   for payload in \
     'no-mistakes axi respond --action fix' \
     'nice no-mistakes axi respond --action fix' \
@@ -425,7 +426,8 @@ EOF
     'for x in 1; do no-mistakes axi respond --action fix; done' \
     "$heredoc_payload" \
     "$alternate_heredoc_payload" \
-    "$process_source_payload"; do
+    "$process_source_payload" \
+    "$echo_process_source_payload"; do
     FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
       --command "$payload" >"$dir/worker.out" 2>"$dir/worker.err"
     rc=$?
@@ -482,7 +484,8 @@ EOF
     'for x in 1; do no-mistakes axi respond --action fix; done' \
     "$heredoc_payload" \
     "$alternate_heredoc_payload" \
-    "$process_source_payload"; do
+    "$process_source_payload" \
+    "$echo_process_source_payload"; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
     rc=$?
     [ "$rc" -eq 2 ] || fail "the primary pipeline drive must deny through recognized execution wrappers, got $rc for: $payload"
