@@ -1215,6 +1215,8 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 
 ### Launch, lifecycle, and skills
 
+The launch observations below cover the recorded `--yolo` run; [`bin/fm-spawn.sh`](../../bin/fm-spawn.sh)'s `launch_template` owns the current launch posture.
+
 | Fact | Observed |
 | --- | --- |
 | Workspace trust | `--trust` suppressed the prompt; `--yolo` alone did NOT, and the prompt blocks a fresh worktree |

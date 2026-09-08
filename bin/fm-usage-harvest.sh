@@ -8,7 +8,8 @@
 # window field) plus the task's state/<task-id>.status timestamps for the task
 # window, then sums the worker's own session-log usage into exactly one JSON
 # line appended to data/usage-ledger.jsonl. data/usage-ledger.jsonl is
-# gitignored runtime data.
+# gitignored runtime data. fm-teardown.sh invokes this before removing task
+# metadata; a harvest failure warns but does not prevent teardown.
 #
 # Ledger line schema (this file is the single owner of that schema; the
 # report script is a consumer):
@@ -21,8 +22,8 @@
 #
 # Wall clock: status-file birth epoch -> status-file mtime epoch; the meta
 # file's mtime is the fallback end when the status file is absent, and a
-# missing birth timestamp falls back to the meta-file mtime (the spawn-time
-# marker, portable where birth time is unavailable) and then the status mtime
+# missing birth timestamp falls back to the current meta-file mtime
+# (which later metadata updates can change) and then the status mtime
 # as the start.
 # Turn estimate: count of "^working:" lines in the status file.
 #
@@ -47,7 +48,8 @@
 #     another machine, so its logs are not on this filesystem), an absent log
 #     tree, or no in-window match: token fields are null with source
 #     "unavailable".
-# A corrupt log line is skipped best-effort by the parser.
+# The task window filters whole files by mtime, not individual event timestamps.
+# A parse failure skips that file's totals; valid lines in it are not salvaged.
 #
 # Idempotent: if the ledger already contains a line whose "task" is
 # <task-id>, the command exits 0 without appending.
@@ -58,8 +60,7 @@
 #   FM_USAGE_CODEX_DIR    default $HOME/.codex/sessions
 #
 # Exit status: 0 on a successful or already-present harvest, 1 on a missing
-# task record, missing jq, or an unwritable ledger. Callers that must not
-# block (teardown) own their own guard.
+# task record, missing jq, an unwritable ledger, or ledger-lock wait expiry.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
