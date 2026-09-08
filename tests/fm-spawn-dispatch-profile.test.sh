@@ -685,12 +685,13 @@ test_astra_qualified_and_raw_models_cannot_bypass_evidence() {
 }
 
 test_raw_codex_provider_models_require_inspectable_non_astra_launches() {
-  local rec opencode_astra_id omp_astra_id option_terminator_id opencode_safe_id out status
+  local rec opencode_astra_id omp_astra_id option_terminator_id opencode_safe_id absolute_codex_safe_id out status
   opencode_astra_id=profile-raw-opencode-astra-z3fga
   omp_astra_id=profile-raw-omp-astra-z3fgb
   option_terminator_id=profile-raw-option-terminator-z3fgc
   opencode_safe_id=profile-raw-opencode-safe-z3fgd
-  rec=$(make_spawn_case profile-raw-codex-provider codex "$opencode_astra_id" "$omp_astra_id" "$option_terminator_id" "$opencode_safe_id")
+  absolute_codex_safe_id=profile-raw-absolute-codex-safe-z3fge
+  rec=$(make_spawn_case profile-raw-codex-provider codex "$opencode_astra_id" "$omp_astra_id" "$option_terminator_id" "$opencode_safe_id" "$absolute_codex_safe_id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$opencode_astra_id" "$PROJ_DIR" \
@@ -722,6 +723,12 @@ test_raw_codex_provider_models_require_inspectable_non_astra_launches() {
   status=$?
   expect_code 0 "$status" "a canonical raw OpenCode non-Astra command should remain launchable: $out"
   assert_meta_profile "$HOME_DIR/state/$opencode_safe_id.meta" opencode default default
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$absolute_codex_safe_id" "$PROJ_DIR" \
+    "$FAKEBIN_DIR/codex --model gpt-5")
+  status=$?
+  expect_code 0 "$status" "a direct raw Codex executable path with an explicit non-Astra model should remain launchable: $out"
+  assert_meta_profile "$HOME_DIR/state/$absolute_codex_safe_id.meta" codex default default
   pass "raw Codex-provider launches reject Astra while preserving explicit non-Astra OpenCode"
 }
 
