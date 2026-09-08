@@ -209,90 +209,6 @@ No Herdr lifecycle command was run because the adapter brief did not enable the 
 
 ## Regression commands
 
-### Baseline validation exceptions
-
-#### Scheduler refill timing
-
-The branch's first two `tests/fm-test-run.test.sh` runs failed the existing `jobs=2 must refill the first completed slot` timing assertion.
-The initiating trigger was the scheduler starting the replacement fixture after the nominally fast fixture completed.
-The masking condition was host CPU contention that consumed the test's 450 millisecond timing margin.
-The visible symptom was the replacement fixture observing the slow fixture's `slow-done` marker before its first command ran.
-
-The exact clean `HEAD` source was copied with `git archive HEAD`, initialized as an isolated repository inside the task worktree, and tested without any Agy branch changes.
-Its first unloaded run passed:
-
-```text
-ok - jobs scheduler runs proven scripts; failure propagates; non-proven refused
-FM_TEST_END ... exit=0 duration_ms=15203 gate_skip=false
-```
-
-The same unchanged baseline was then run once with six bounded `yes` workers on the three-CPU host.
-The workers were children of the foreground diagnostic shell and were killed and waited by its cleanup trap.
-That baseline run reproduced the exact branch failure:
-
-```text
-FM_TEST_BEGIN ... tests/fm-brief.test.sh ...
-FM_TEST_BEGIN ... tests/fm-composer-lib.test.sh ...
-ok - fast fixture
-FM_TEST_END ... tests/fm-composer-lib.test.sh exit=0 duration_ms=925 gate_skip=false
-FM_TEST_BEGIN ... tests/fm-lint.test.sh ...
-ok - slow fixture
-FM_TEST_END ... tests/fm-brief.test.sh exit=0 duration_ms=1260 gate_skip=false
-not ok - scheduler waited for oldest worker
-FM_TEST_END ... tests/fm-lint.test.sh exit=1 duration_ms=570 gate_skip=false
-not ok - jobs=2 must refill the first completed slot
-```
-
-```sh
-nproc
-baseline_dir=$(mktemp -d "$PWD/.baseline-scheduler.XXXXXXXX")
-git archive HEAD | tar -x -C "$baseline_dir"
-git -C "$baseline_dir" init -q
-git -C "$baseline_dir" add .
-git -C "$baseline_dir" -c user.name=baseline -c user.email=baseline@example.invalid commit -qm baseline
-load_pids=()
-cleanup_load() {
-  for load_pid in "${load_pids[@]}"; do
-    kill "$load_pid" 2>/dev/null || true
-  done
-  for load_pid in "${load_pids[@]}"; do
-    wait "$load_pid" 2>/dev/null || true
-  done
-}
-trap cleanup_load EXIT INT TERM
-for _ in 1 2 3 4 5 6; do
-  yes >/dev/null &
-  load_pids+=("$!")
-done
-"$baseline_dir/bin/fm-test-run.sh" "$baseline_dir/tests/fm-test-run.test.sh"
-```
-
-`git diff -U0 HEAD -- bin/fm-test-run.sh` showed only Agy family registration and changed-path mappings for `.agents/hooks.json` and `tests/fixtures/*`.
-No scheduler control-flow line changed.
-The baseline counterfactual therefore classifies this as a pre-existing load-sensitive assertion rather than an Agy adapter regression.
-The remaining scoped tests are still required and are not waived by this exception.
-
-#### Session-start tool masking
-
-The branch and the clean isolated `HEAD` baseline both failed `tests/fm-session-start.test.sh` at the exact existing assertion `MISSING diagnostic did not appear at all`.
-That fixture removes `$fakebin/node` but invokes session start with `$fakebin:$BASE_PATH`.
-This host supplies Node through the appended base path, so bootstrap correctly emits no `MISSING: node` line.
-The Agy change to this test only unsets `ANTIGRAVITY_AGENT` beside the existing harness markers and does not alter the fake toolchain or base path.
-
-```text
-ok - concurrent session-lock acquisition admits exactly one live harness
-not ok - MISSING diagnostic did not appear at all
-FM_TEST_END ... tests/fm-session-start.test.sh exit=1 duration_ms=120562 gate_skip=false
-```
-
-The exact clean-baseline command was:
-
-```sh
-"$baseline_dir/bin/fm-test-run.sh" "$baseline_dir/tests/fm-session-start.test.sh"
-```
-
-This is a pre-existing host-path-sensitive assertion and is unrelated to the Agy marker isolation change.
-
 ```sh
 tests/fm-agy-harness.test.sh
 tests/fm-arm-pretool-check.test.sh
@@ -337,7 +253,7 @@ bin/fm-test-run.sh tests/fm-agy-harness.test.sh tests/fm-documentation-audiences
 ```
 
 The Kimi, secondmate, tmux, watcher, documentation, bootstrap, supervision, composer, arm, and cd regression scripts completed with exit zero.
-`tests/fm-session-start.test.sh` is the documented clean-baseline exception.
+`tests/fm-session-start.test.sh` failed the same pre-existing host-path assertion on a clean baseline checkout, so that failure is not attributed to the adapter; the baseline chronology stays in the PR evidence.
 No real Herdr lifecycle command was run.
 
 The canonical lint owner and final changed-root lint both used the repository's pinned ShellCheck entry point:
