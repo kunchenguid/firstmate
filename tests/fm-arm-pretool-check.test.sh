@@ -377,6 +377,7 @@ EOF
   alternate_heredoc_payload=$(printf "source /dev/fd/3 3<<'EOF'\\nno-mistakes axi respond --action fix\\nEOF\\n")
   process_source_payload="source <(printf '%s\\n' 'no-mistakes axi respond --action fix')"
   echo_process_source_payload="source <(echo 'no-mistakes axi respond --action fix')"
+  cat_process_source_payload=$(printf "source <(cat <<'EOF'\\nno-mistakes axi respond --action fix\\nEOF\\n)")
   for payload in \
     'no-mistakes axi respond --action fix' \
     'nice no-mistakes axi respond --action fix' \
@@ -428,7 +429,8 @@ EOF
     "$heredoc_payload" \
     "$alternate_heredoc_payload" \
     "$process_source_payload" \
-    "$echo_process_source_payload"; do
+    "$echo_process_source_payload" \
+    "$cat_process_source_payload"; do
     FM_HOME="$primary" "$worker/bin/fm-arm-pretool-check.sh" \
       --command "$payload" >"$dir/worker.out" 2>"$dir/worker.err"
     rc=$?
@@ -487,7 +489,8 @@ EOF
     "$heredoc_payload" \
     "$alternate_heredoc_payload" \
     "$process_source_payload" \
-    "$echo_process_source_payload"; do
+    "$echo_process_source_payload" \
+    "$cat_process_source_payload"; do
     FM_HOME="$primary" "$check" --command "$payload" >"$dir/run.out" 2>"$dir/run.err"
     rc=$?
     [ "$rc" -eq 2 ] || fail "the primary pipeline drive must deny through recognized execution wrappers, got $rc for: $payload"
@@ -523,6 +526,8 @@ EOF
     || fail "the primary must retain read-only pipeline status"
   FM_HOME="$primary" "$check" --command "source <(echo 'no-mistakes axi status')" >/dev/null 2>&1 \
     || fail "sourced process output must retain read-only pipeline status"
+  FM_HOME="$primary" "$check" --command "source <(echo 'no-mistakes axi respond' >&2)" >/dev/null 2>&1 \
+    || fail "sourced empty stdout must remain allowed"
   FM_HOME="$primary" "$check" --command "bash -c -- 'no-mistakes axi status'" >/dev/null 2>&1 \
     || fail "the primary must retain nested read-only pipeline status"
   FM_HOME="$primary" "$check" --command 'ACTION=$(printf status); no-mistakes axi "$ACTION"' >/dev/null 2>&1 \
