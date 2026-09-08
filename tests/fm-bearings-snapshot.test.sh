@@ -36,6 +36,7 @@ exit 0
 SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
+case " $* " in *" -t unreadable:"*|*" -t unreadable "*) printf 'no current client\n' >&2; exit 1 ;; esac
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   capture-pane)
@@ -3321,19 +3322,21 @@ case "${PWD##*/}" in
   run-failed) status=failed ;;
   run-parked) status=fix_review ;;
   run-done) status=completed ;;
-  run-unknown) status=completed; printf 'outcome: unverified\n' ;;
+  run-unknown|run-unknown-exited) status=completed; printf 'outcome: unverified\n' ;;
   *) exit 0 ;;
 esac
 printf 'branch: %s\nhead: %s\nstatus: %s\n' \
   "$(git symbolic-ref --quiet --short HEAD)" "$(git rev-parse HEAD)" "$status"
 SH
   printf '## In flight\n' > "$home/data/backlog.md"
-  for id in declared-live declared-exited undeclared-done event-failed event-blocked live-working run-failed run-parked run-done run-unknown; do
+  for id in declared-live declared-exited undeclared-done event-failed event-blocked live-working run-failed run-parked run-done run-unknown run-unknown-exited probe-unreadable; do
     printf -- '- [ ] %s - Delivery state case (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" \
       >> "$home/data/backlog.md"
     mkdir -p "$home/projects/$id"
     window="firstmate:fm-$id"
     [ "$id" != declared-exited ] || window=firstmate:dead-declared-exited
+    [ "$id" != run-unknown-exited ] || window=firstmate:dead-run-unknown-exited
+    [ "$id" != probe-unreadable ] || window=unreadable:fm-probe-unreadable
     fm_write_meta "$home/state/$id.meta" \
       "window=$window" "worktree=$home/projects/$id" "project=firstmate" \
       "harness=claude" "kind=ship" "mode=no-mistakes" \
@@ -3364,8 +3367,21 @@ SH
       and (.in_flight | any(.id == "run-failed" and .state == "failed" and .doing == "run failed"))
       and (.in_flight | any(.id == "run-parked" and .state == "parked" and .doing == "parked at fix_review"))
       and (.in_flight | any(.id == "run-unknown" and .state == "unknown" and .doing == "outcome: unverified"))
+      and (.in_flight | any(.id == "run-unknown-exited" and .state == "unknown" and .doing == "outcome: unverified"))
+      and (.in_flight | any(.id == "probe-unreadable" and .state == "unknown"
+        and .doing == "backend unreachable (tmux endpoint state: unreadable)"))
       and (.unhealthy_endpoints | any(.id == "declared-exited" and .exists == false))
   ' >/dev/null || fail "main delivery classification hid an undeclared or superseded wait: $out"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "endpoint evidence snapshot failed"
+  printf '%s' "$canonical" | jq -e '
+    (.tasks | any(.id == "declared-exited" and .current_state.state == "unknown"
+      and .current_state.source == "endpoint-gone" and .endpoint.exists == false))
+      and (.tasks | any(.id == "run-unknown-exited" and .current_state.state == "unknown"
+        and .current_state.source == "run-step" and .endpoint.exists == false))
+      and (.tasks | any(.id == "probe-unreadable" and .current_state.state == "unknown"
+        and .current_state.source == "none" and .endpoint.exists == false))
+  ' >/dev/null || fail "fixture did not separate confirmed death, unverified runs, and failed probes: $canonical"
 
   ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "delivery ledger failed"
@@ -3410,7 +3426,46 @@ SH
   pass "both homes require a declared wait, retain exited deliveries, and preserve superseding states and diagnostics"
 }
 
+test_a_parked_delivery_does_not_make_its_secondmate_home_working() {
+  local parent mate fakebin ledger out
+  parent=$(make_home parked-delivery-parent)
+  mate=$(make_home parked-delivery-mate)
+  fakebin=$(make_fakebin "$parent")
+  make_valid_secondmate_home parked-mate "$mate"
+  append_secondmate_registry "$parent" parked-mate "$mate"
+  fm_write_secondmate_meta "$parent/state/parked-mate.meta" "$mate" "firstmate:fm-parked-mate" firstmate
+  printf '## In flight\n- [ ] parked-delivery - Review gate (repo: firstmate) (kind: ship) (since 2026-07-01)\n\n## Queued\n\n## Done\n' \
+    > "$mate/data/backlog.md"
+  fm_write_meta "$mate/state/parked-delivery.meta" \
+    "window=firstmate:fm-parked-delivery" "worktree=$mate/projects" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "pr=https://github.com/acme/repo/pull/2"
+  record_claude_state "$mate/state" parked-delivery idle
+  printf 'needs-decision [key=review]: resolve the review gate\n' > "$mate/state/parked-delivery.status"
+  arm_merge_poll "$mate" parked-delivery https://github.com/acme/repo/pull/2 "$BEARINGS_FIXTURE_EPOCH"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "parked delivery ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    .state == "captain_decision" and .counts.active_children == 1
+      and [.active_children[].state] == ["parked"] and .awaiting_merge == []
+      and (.decisions_open | any(.key == "review" and .source == "status"))
+      and (.queued | any(.hold_kind == "captain") | not)
+  ' >/dev/null || fail "parked fixture did not reach the status-only decision fallback: $ledger"
+  out=$(run "$parent" "$fakebin" --json) || fail "parked delivery projection failed"
+  printf '%s' "$out" | jq -e '
+    [.secondmates[].state] == ["unknown"] and .awaiting == []
+      and [.in_flight[] | {id,state,doing}] == [{id:"parked-mate/parked-delivery",state:"parked",doing:"resolve the review gate"}]
+  ' >/dev/null || fail "a parked delivery made its home appear to be working: $out"
+  record_claude_state "$mate/state" parked-delivery busy
+  out=$(run "$parent" "$fakebin" --json) || fail "resumed delivery projection failed"
+  printf '%s' "$out" | jq -e '
+    [.secondmates[].state] == ["active_child_work"]
+      and [.in_flight[].state] == ["working"]
+  ' >/dev/null || fail "a genuinely working child did not activate its home: $out"
+  pass "a parked delivery stays visible without activating its home until work resumes"
+}
+
 test_delivery_requires_a_declaration_and_eligible_current_state_in_both_homes
+test_a_parked_delivery_does_not_make_its_secondmate_home_working
 test_a_secondmate_delivery_reaches_the_parent_as_a_delivered_row
 test_a_request_waiting_on_the_captain_never_lands_in_the_waiting_state
 test_a_delivery_that_resumed_and_failed_keeps_its_own_state

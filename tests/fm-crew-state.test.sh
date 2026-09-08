@@ -1338,6 +1338,7 @@ test_no_run_herdr_husk_dead_still_reads_gone() {
   assert_contains "$out" "state: unknown" "a husk pane has no live current state"
   assert_contains "$out" "backend target gone" "a husk pane keeps its gone-class death evidence"
   assert_contains "$out" "agent gone, pane shell remains" "the husk verdict names what actually died"
+  assert_contains "$out" "source: endpoint-gone" "a confirmed herdr husk exposes authoritative death"
   assert_not_contains "$out" "backend unreachable" "a husk pane is not an unreachable backend"
   pass "a husk pane (agent gone) still reads gone for reclaim"
 }
@@ -1519,7 +1520,7 @@ test_dead_window_ignores_stale_status_log() {
   FM_FAKE_TMUX_MISSING=1
   local out; out=$(run_crew_state "$d" feat-dead)
   assert_contains "$out" "state: unknown" "dead window -> unknown"
-  assert_contains "$out" "source: none" "dead window -> none source"
+  assert_contains "$out" "source: endpoint-gone" "confirmed death has a distinct current-state source"
   assert_not_contains "$out" "source: status-log" "dead window does not reuse stale log"
   assert_contains "$out" "backend target gone" "an inventory that omits the window is positive death evidence"
   pass "dead window ignores stale status log"

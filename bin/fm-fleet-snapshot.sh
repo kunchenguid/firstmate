@@ -958,7 +958,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
       and .paths.status_log.last_event.state == "paused"
       and (.current_state.state == "paused" or .current_state.state == "done"
            or (.current_state.state == "unknown"
-               and (.endpoint.exists == false or .endpoint.agent_alive == "dead")));
+               and .current_state.source == "endpoint-gone"));
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight

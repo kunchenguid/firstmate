@@ -55,7 +55,8 @@
 # delivery must be recorded (pr.merge_poll armed with a URL, which firstmate
 # writes only after a PR-ready signal), and the latest recorded event must be
 # paused, the bounded external wait from AGENTS.md section 8. Eligible current
-# states are paused, done, or unknown with an endpoint confirmed gone. A done
+# states are paused, done, or unknown with source endpoint-gone from the
+# current-state reader's authoritative death classification. A done
 # event alone never declares an external wait. A later event supersedes the
 # declaration, and working, failed, blocked, or parked state is never eligible.
 #
@@ -203,9 +204,12 @@ For every registered secondmate, readable structured facts from its own home are
   evidence and never become current work. The provenance and freshness fields
   distinguish live and cached ledgers; a home without either is explicitly unreadable.
 awaiting holds work that shipped and now waits on a merge we do not control: the
-  delivery is recorded, the last event declares done or paused, the live state is not
-  working/blocked/parked, and no captain action is outstanding - so it is neither
-  in_flight nor a gate. age_days is that wait in whole days, preserved when the same
+  delivery is recorded by an armed merge watch with a URL, the latest event must
+  declare paused, and the current state must be paused, done, or unknown with source
+  endpoint-gone from an authoritative death classification. Unknown run state or
+  an unreadable endpoint never qualifies. No captain action may be outstanding,
+  so a qualifying row is neither in_flight nor a gate.
+  age_days is that wait in whole days, preserved when the same
   PR is re-recorded, and nudge marks a row at or past awaiting_nudge_days
   (FM_BEARINGS_AWAITING_NUDGE_DAYS), which belongs in Captain's Call instead.
   Overdue then oldest rows sort first so the bound never drops one.
@@ -468,7 +472,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
     .paths.status_log.last_event.state == "paused"
     and (.current_state.state == "paused" or .current_state.state == "done"
          or (.current_state.state == "unknown"
-             and (.endpoint.exists == false or .endpoint.agent_alive == "dead")));
+             and .current_state.source == "endpoint-gone"));
   # NOTHING THE CAPTAIN OWES IS EVER RE-LABELLED. A task he still owes an answer
   # on is his call, whatever else is true of it, so it never reaches this bucket.
   # The test is the structured captain-hold classification and nothing else.
@@ -520,7 +524,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
            bearings_state:(
              if .current.state == "captain_decision" then
                if ($captain_holds | length) > 0 then "captain_decision"
-               elif (.active_children | length) > 0 then "active_child_work"
+               elif any(.active_children[]; .state == "working") then "active_child_work"
                elif ($backlog_holds | length) > 0 then "externally_held"
                else "unknown" end
              else .current.state end)

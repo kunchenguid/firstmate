@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|endpoint-gone|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -76,12 +76,13 @@
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
-#      attributed to this crew, a dead endpoint also reports unknown · none rather
+#      attributed to this crew, a dead endpoint also reports unknown rather
 #      than trusting a stale status log. On tmux and herdr, which own a
 #      recovery-grade classifier, only its positive death evidence reads as gone
 #      (the endpoint is authoritatively absent, or its pane holds no agent); an
 #      endpoint that merely failed to answer reports unknown · none as
-#      unreachable, and an alive endpoint whose scrollback read failed is still
+#      unreachable. Confirmed tmux/herdr death carries source endpoint-gone;
+#      an alive endpoint whose scrollback read failed is still
 #      classified by step 4. Backends with no classifier keep reading a failed
 #      capture as gone. The fallback's own comment owns the per-verdict rules.
 #
@@ -788,10 +789,10 @@ if ! pane_readable "$BACKEND_TARGET"; then
     tmux:alive|herdr:alive)
       ;;
     tmux:missing|herdr:missing)
-      emit unknown none "backend target gone: $BACKEND_TARGET"
+      emit unknown endpoint-gone "backend target gone: $BACKEND_TARGET"
       ;;
     tmux:dead|herdr:dead)
-      emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
+      emit unknown endpoint-gone "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
       ;;
     tmux:*|herdr:*)
       emit unknown none "backend unreachable ($TASK_BACKEND endpoint state: $AGENT_STATE)"
