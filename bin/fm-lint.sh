@@ -371,10 +371,16 @@ fm_lint_run_one_file() {  # <mem-kb> <timeout-s> <output-file> <path> -- <shellc
     rm -f "$fallback_current"
   fi
 
+  local fallback_note='' fallback_note_comma=''
+  if [ "$has_external" -eq 1 ]; then
+    fallback_note=' even after the --external-sources fallback'
+    fallback_note_comma=', even after the --external-sources fallback'
+  fi
+
   if [ "$timed_out" -eq 1 ]; then
     rc=124
-    printf 'fm-lint.sh: %s exceeded the %ss per-file lint timeout (FM_LINT_FILE_TIMEOUT) even after the --external-sources fallback; reported as a lint failure, continuing with the next file.\n' \
-      "$path" "$timeout_s" >> "$current"
+    printf 'fm-lint.sh: %s exceeded the %ss per-file lint timeout (FM_LINT_FILE_TIMEOUT)%s; reported as a lint failure, continuing with the next file.\n' \
+      "$path" "$timeout_s" "$fallback_note" >> "$current"
   else
     case "$rc" in
       137|139)
@@ -383,14 +389,14 @@ fm_lint_run_one_file() {  # <mem-kb> <timeout-s> <output-file> <path> -- <shellc
         # was killed by something else entirely, and mislabeling it here
         # would blame a ceiling that never applied.
         if [ "$FM_LINT_MEM_MECHANISM" = systemd ]; then
-          printf 'fm-lint.sh: %s hit the %s KiB per-file memory ceiling (FM_LINT_FILE_MEM_KB) and was killed, even after the --external-sources fallback; reported as a lint failure, continuing with the next file.\n' \
-            "$path" "$mem_kb" >> "$current"
+          printf 'fm-lint.sh: %s hit the %s KiB per-file memory ceiling (FM_LINT_FILE_MEM_KB) and was killed%s; reported as a lint failure, continuing with the next file.\n' \
+            "$path" "$mem_kb" "$fallback_note_comma" >> "$current"
         fi
         ;;
       *)
         if [ "$rc" -gt 1 ] && grep -qi 'out of memory' "$current" 2>/dev/null; then
-          printf 'fm-lint.sh: %s hit the %s KiB per-file memory ceiling (FM_LINT_FILE_MEM_KB), even after the --external-sources fallback; reported as a lint failure, continuing with the next file.\n' \
-            "$path" "$mem_kb" >> "$current"
+          printf 'fm-lint.sh: %s hit the %s KiB per-file memory ceiling (FM_LINT_FILE_MEM_KB)%s; reported as a lint failure, continuing with the next file.\n' \
+            "$path" "$mem_kb" "$fallback_note_comma" >> "$current"
         fi
         ;;
     esac
