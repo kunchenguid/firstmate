@@ -4,17 +4,41 @@
 # Put this directory before the upstream no-mistakes executable on PATH.
 # Ship and scout workers receive FM_TASK_ID from fm-spawn.sh and run in a linked
 # task worktree. Invocations whose first two arguments are `axi run` or
-# `axi respond` are refused unless both facts hold. A marker alone cannot turn a
-# primary checkout or secondmate home into a worker. Every other invocation is
+# `axi respond` are refused unless the marker and current worktree match that
+# task's durable metadata. A marker alone cannot turn any other checkout into a
+# worker. Every other invocation is
 # forwarded unchanged to the first other executable on PATH; absence of an
 # upstream executable is an error.
 set -u
 
+SELF_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 127
+FIRSTMATE_ROOT=$(CDPATH='' cd -- "$SELF_DIR/.." 2>/dev/null && pwd -P) || exit 127
+
+meta_value() {
+  local key=$1 line value=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) value=${line#*=} ;;
+    esac
+  done < "$2" 2>/dev/null || return 1
+  printf '%s' "$value"
+}
+
 is_task_worker_checkout() {
-  local top git_dir common_dir
-  [ -n "${FM_TASK_ID:-}" ] || return 1
+  local top git_dir common_dir meta recorded_top kind
+  case "${FM_TASK_ID:-}" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  meta=$FIRSTMATE_ROOT/state/$FM_TASK_ID.meta
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ "$(meta_value endpoint_task_id "$meta")" = "$FM_TASK_ID" ] || return 1
+  kind=$(meta_value kind "$meta") || return 1
+  case "$kind" in ship|scout) ;; *) return 1 ;; esac
   top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
-  [ ! -f "$top/.fm-secondmate-home" ] || return 1
+  top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+  recorded_top=$(meta_value worktree "$meta") || return 1
+  recorded_top=$(CDPATH='' cd -- "$recorded_top" 2>/dev/null && pwd -P) || return 1
+  [ "$top" = "$recorded_top" ] || return 1
   git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || return 1
   common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   [ "$git_dir" != "$common_dir" ]
@@ -31,7 +55,6 @@ if [ "${1:-}" = axi ]; then
   esac
 fi
 
-SELF_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 127
 TARGET=
 IFS=: read -r -a PATH_DIRS <<< "${PATH:-}"
 for dir in "${PATH_DIRS[@]}"; do

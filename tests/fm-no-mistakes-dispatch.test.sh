@@ -6,15 +6,25 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CASE_DIR=$(fm_test_tmproot fm-no-mistakes-dispatch)
+FIRSTMATE="$CASE_DIR/firstmate"
+BOUNDARY_BIN="$FIRSTMATE/bin"
 UPSTREAM="$CASE_DIR/upstream"
 PRIMARY="$CASE_DIR/primary"
 WORKER="$CASE_DIR/worker"
+OTHER="$CASE_DIR/other"
 SECONDMATE="$CASE_DIR/secondmate"
-mkdir -p "$UPSTREAM"
+mkdir -p "$BOUNDARY_BIN" "$FIRSTMATE/state" "$UPSTREAM"
+cp "$ROOT/bin/no-mistakes" "$BOUNDARY_BIN/no-mistakes"
 fm_git_init_commit "$PRIMARY"
 git -C "$PRIMARY" worktree add --quiet -b worker "$WORKER"
+git -C "$PRIMARY" worktree add --quiet -b other "$OTHER"
 git -C "$PRIMARY" worktree add --quiet -b secondmate "$SECONDMATE"
 printf 'mate-1\n' > "$SECONDMATE/.fm-secondmate-home"
+cat > "$FIRSTMATE/state/task-1.meta" <<EOF
+endpoint_task_id=task-1
+worktree=$WORKER
+kind=ship
+EOF
 cat > "$UPSTREAM/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 printf 'upstream:'
@@ -24,13 +34,13 @@ SH
 chmod +x "$UPSTREAM/no-mistakes"
 
 run_dispatch() {
-  PATH="$ROOT/bin:$UPSTREAM:/usr/bin:/bin" no-mistakes "$@"
+  PATH="$BOUNDARY_BIN:$UPSTREAM:/usr/bin:/bin" no-mistakes "$@"
 }
 
 run_dispatch_in() {
   local dir=$1
   shift
-  (cd "$dir" && PATH="$ROOT/bin:$UPSTREAM:/usr/bin:/bin" no-mistakes "$@")
+  (cd "$dir" && PATH="$BOUNDARY_BIN:$UPSTREAM:/usr/bin:/bin" no-mistakes "$@")
 }
 
 out=$(run_dispatch axi respond --action fix 2>"$CASE_DIR/respond.err")
@@ -58,6 +68,12 @@ rc=$?
 [ "$rc" -eq 2 ] || fail "a caller marker in a linked secondmate home must not authorize run, got $rc"
 [ -z "$out" ] || fail "spoofed secondmate marker invoked upstream: $out"
 pass "a caller-controlled marker does not authorize a secondmate home"
+
+out=$(FM_TASK_ID=task-1 run_dispatch_in "$OTHER" axi run --intent test 2>"$CASE_DIR/other.err")
+rc=$?
+[ "$rc" -eq 2 ] || fail "a task marker in an unrecorded linked worktree must not authorize run, got $rc"
+[ -z "$out" ] || fail "unrecorded linked worktree invoked upstream: $out"
+pass "a task marker authorizes only its recorded linked worktree"
 
 out=$(FM_TASK_ID=task-1 run_dispatch_in "$WORKER" axi respond --action fix)
 [ "$out" = 'upstream: <axi> <respond> <--action> <fix>' ] \
