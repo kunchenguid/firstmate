@@ -46,7 +46,11 @@
 #                          working, run-step, activity: recent) is deferred the
 #                          same way (wedge_defer_live_run); a working record
 #                          without that field, a quiet step, a terminal run, and
-#                          no run at all keep the unchanged schedule.
+#                          no run at all keep the unchanged schedule. That covers
+#                          a worker waiting on an active pipeline round only: a
+#                          worker waiting on the ci step is NOT covered, because
+#                          that phase has no live active_steps table, so it
+#                          still escalates on the existing schedule.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -894,8 +898,10 @@ wedge_defer_live_run() {  # <window> <since-file> <triage-label> <idle-age>
 # crew_run_activity_is_recent read, then at most one worktree walk, never per
 # poll. A live run with recent pipeline activity defers; a worktree still being
 # written defers; every other idle pane, including a working-looking record the
-# daemon no longer confirms, a quiet step, a terminal run, and no run at all,
-# keeps the existing escalation schedule.
+# daemon no longer confirms, a quiet step, a run waiting on the ci step (no live
+# active_steps table exists during that phase, so it is deliberately not
+# covered), a terminal run, and no run at all, keeps the existing escalation
+# schedule.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)

@@ -185,6 +185,12 @@ run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
 }
 
+# The watcher's wedge-timer read: the one caller that asks for the pipeline
+# recency field (crew_run_activity_is_recent in bin/fm-classify-lib.sh).
+run_crew_state_for_wedge_timer() {  # <case-dir> <id>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" FM_CREW_STATE_RUN_ACTIVITY=1 "$CREW_STATE" "$2"
+}
+
 new_case() {  # <name> -> echoes case dir with an empty state/
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
@@ -509,7 +515,7 @@ test_active_run_is_authoritative() {
   assert_contains "$out" "state: working" "active run -> working"
   assert_contains "$out" "source: run-step" "active run -> run-step source"
   assert_contains "$out" "validating (running)" "active run reports the step"
-  assert_contains "$out" "activity: quiet" "a running record without active_steps is not recent"
+  assert_not_contains "$out" "activity:" "the default line carries no watcher activity token"
   pass "active run-step is authoritative"
 }
 
@@ -563,15 +569,18 @@ test_daemon_claim_over_live_run_reads_run_alive() {
   assert_contains "$out" "source: run-step" "live run -> run-step source"
   assert_contains "$out" "run alive" "daemon claim over a live run is named as run alive"
   assert_contains "$out" "reattach" "the reading names the reattach steer"
-  assert_contains "$out" "activity: recent" "a live active_steps table is reported as recent"
+  assert_not_contains "$out" "activity:" "the default line carries no watcher activity token"
   assert_not_contains "$out" "superseded by active run" \
     "the daemon claim gets the sharper reading, not the generic one"
   pass "daemon/timeout blocked claim over a live fixing run reads as run alive"
 }
 
-# The wedge timer's one freshness condition is this field. A live active_steps
-# table with no quiet prefix is recent; a quiet prefix, a missing table, and a
-# terminal run are not.
+# The wedge timer's one freshness condition is the activity: recent field, and
+# it exists only for that caller: the default line (what the fleet and bearings
+# snapshots render as the doing column) never carries an activity token, and
+# even the wedge-timer read has no negative spelling. A live active_steps table
+# with no quiet prefix is recent; a quiet prefix, a missing table (including the
+# ci step, which is deliberately not covered), and a terminal run omit the field.
 test_working_run_reports_pipeline_activity_recency() {
   reset_fakes
   local d out
@@ -584,26 +593,32 @@ test_working_run_reports_pipeline_activity_recency() {
   out=$(run_crew_state "$d" feat-act)
   assert_contains "$out" "state: working" "recent active_steps -> working"
   assert_contains "$out" "source: run-step" "recent active_steps -> run-step"
-  assert_contains "$out" "activity: recent" "a live active_steps table is recent"
-  assert_not_contains "$out" "activity: quiet" "a live table is not also quiet"
+  assert_contains "$out" "validating (fixing)" "the default line reads as the human step"
+  assert_not_contains "$out" "activity:" "the default line carries no watcher activity token"
+  out=$(run_crew_state_for_wedge_timer "$d" feat-act)
+  assert_contains "$out" "source: run-step · activity: recent · validating (fixing)" \
+    "the wedge-timer read leads the detail with activity: recent on a live table"
 
   FM_FAKE_AXI_STATUS="$(run_fixing_active_quiet fm/feat-act)"
-  out=$(run_crew_state "$d" feat-act)
+  out=$(run_crew_state_for_wedge_timer "$d" feat-act)
   assert_contains "$out" "state: working" "quiet active_steps still working"
-  assert_contains "$out" "activity: quiet" "a quiet-prefixed last_activity is quiet"
-  assert_not_contains "$out" "activity: recent" "a quiet-prefixed last_activity is not recent"
+  assert_not_contains "$out" "activity:" "a quiet-prefixed last_activity omits the field, no negative spelling"
 
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-act)"
-  out=$(run_crew_state "$d" feat-act)
+  out=$(run_crew_state_for_wedge_timer "$d" feat-act)
   assert_contains "$out" "state: working" "running without a table still working"
-  assert_contains "$out" "activity: quiet" "a missing active_steps table is quiet"
+  assert_not_contains "$out" "activity:" "a missing active_steps table omits the field"
+
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-act)"
+  out=$(run_crew_state_for_wedge_timer "$d" feat-act)
+  assert_contains "$out" "state: working" "ci step still working"
+  assert_not_contains "$out" "activity:" "a ci wait has no live table and is not covered"
 
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-act)"
-  out=$(run_crew_state "$d" feat-act)
+  out=$(run_crew_state_for_wedge_timer "$d" feat-act)
   assert_contains "$out" "state: done" "passed run -> done"
-  assert_not_contains "$out" "activity: recent" "a terminal run does not carry activity: recent"
-  assert_not_contains "$out" "activity: quiet" "a terminal run does not carry an activity field"
-  pass "working run-step lines carry the pipeline recency field; terminal runs omit it"
+  assert_not_contains "$out" "activity:" "a terminal run does not carry an activity field"
+  pass "activity: recent appears only on the wedge-timer read of a live table; the default line and every other run omit it"
 }
 
 # A genuine refused socket outranks the persisted fixing record, which can

@@ -1789,19 +1789,23 @@ crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
 
-# 0 iff crew <id>'s current-state line is a working run-step whose first detail
-# field is activity: recent. That is the single checkable condition the wedge
-# timer may use to treat pane idleness as accounted for by a live pipeline:
-# the daemon currently confirms this attributed run, and the pipeline's own
-# recency verdict (an active_steps table with no quiet prefix) is fresh.
-# Fail closed on every other line: a working record without the field, activity:
-# quiet, a pane or status-log source, a terminal or parked run, an unreadable
-# verdict, and an empty id are not this evidence. Reads fm-crew-state.sh once,
-# the same owner crew_absorb_class uses; FM_CREW_STATE_BIN stubs the verdict.
+# 0 iff crew <id>'s current-state line, read with FM_CREW_STATE_RUN_ACTIVITY=1,
+# is a working run-step whose first detail field is activity: recent. That is
+# the single checkable condition the wedge timer may use to treat pane idleness
+# as accounted for by a live pipeline round: the daemon currently confirms this
+# attributed run, and the pipeline's own recency verdict (an active_steps table
+# with no quiet prefix) is fresh. fm-crew-state.sh emits that field only when
+# asked, so the default supervisor-facing line never carries it.
+# Fail closed on every other line: a working record without the field (which is
+# what a coarse, quiet, or ci-step run reads as - a worker waiting on the ci
+# step is deliberately NOT covered and keeps the existing wedge schedule), a
+# pane or status-log source, a terminal or parked run, an unreadable verdict,
+# and an empty id are not this evidence. Reads fm-crew-state.sh once, the same
+# owner crew_absorb_class uses; FM_CREW_STATE_BIN stubs the verdict.
 crew_run_activity_is_recent() {  # <id>
   local id=$1 line state src rest
   [ -n "$id" ] || return 1
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  line=$(FM_CREW_STATE_RUN_ACTIVITY=1 "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) return 1 ;; esac
   state=${line#state: }; state=${state%% *}
   [ "$state" = working ] || return 1

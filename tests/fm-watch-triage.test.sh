@@ -483,6 +483,7 @@ test_crew_run_activity_is_recent_classifier() {
   export FM_FAKE_CREW_STATE
   FM_FAKE_CREW_STATE='state: working · source: run-step · activity: recent · validating (running)'
   crew_run_activity_is_recent a || fail "working run-step with activity: recent was not recent"
+  [ "$(crew_absorb_class a)" = working ] || fail "the same live line does not still classify as working"
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   ! crew_run_activity_is_recent a || fail "working run-step without the activity field counted as recent"
   FM_FAKE_CREW_STATE='state: working · source: run-step · activity: quiet · validating (running)'
@@ -3821,9 +3822,10 @@ test_wedge_escalation_still_fires_when_run_activity_is_quiet() {
   local dir state fakebin out drain_out capture_file window key pane_hash pid back
   _prime_at_threshold_idle_pane wedge-quiet-run quiet
   # A working run-step record without the pipeline's own recency verdict is a
-  # stale word, not evidence the worker is working. activity: quiet is the shape
-  # axi status emits after its quiet warning; omitting the field is the same.
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · activity: quiet · validating (running)'
+  # stale word, not evidence the worker is working. This is the exact shape
+  # fm-crew-state.sh emits for a quiet-prefixed step, a missing active_steps
+  # table (the ci wait), or a coarse status word: the field is simply absent.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \

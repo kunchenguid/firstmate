@@ -113,6 +113,9 @@ SH
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.
+# Mirrors the real script's opt-in contract: the activity: recent field is
+# emitted only when the caller sets FM_CREW_STATE_RUN_ACTIVITY=1, so a canned
+# line that carries it is stripped of it for every other reader.
 make_fake_crew_state() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
@@ -122,6 +125,10 @@ id=${1:-}
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
+if [ "${FM_CREW_STATE_RUN_ACTIVITY:-}" != 1 ]; then
+  val=${val/ · activity: recent · / · }
+  val=${val% · activity: recent}
+fi
 printf '%s\n' "${val:-state: unknown · source: none · fake default}"
 exit 0
 SH

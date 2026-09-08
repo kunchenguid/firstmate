@@ -15,14 +15,21 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · [activity: recent|quiet · ]<detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
-# When state is working and source is run-step, the first detail field is the
-# pipeline's own recency verdict: activity: recent when the live axi-status
-# active_steps table is present with no quiet prefix, otherwise activity: quiet.
-# That field is the one checkable condition the watcher may use to slow a
-# pane-idleness wedge; a working record without it is not evidence the run is
-# alive. Other states omit the field.
+# The detail is supervisor-facing prose (fm-fleet-snapshot.sh and
+# fm-bearings-snapshot.sh render it as the doing column), so it never carries a
+# watcher token by default. One caller may ask for one: with
+# FM_CREW_STATE_RUN_ACTIVITY=1, a working run-step line whose live axi-status
+# active_steps table is present with no quiet prefix gets `activity: recent` as
+# its first detail field. That is the single checkable condition the watcher's
+# wedge timer (crew_run_activity_is_recent in fm-classify-lib.sh) uses to treat
+# pane idleness as accounted for by a live pipeline round. There is no negative
+# spelling: a coarse status word, a missing table, a quiet-prefixed step, and
+# every non-working state simply omit the field, and the consumer fails closed.
+# A worker waiting on the `ci` step is NOT covered: that phase reports no
+# active_steps table, so its line omits the field and the watcher keeps the
+# existing wedge schedule for it.
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -751,21 +758,18 @@ if [ "$HAVE_RUN" = 1 ]; then
   esac
 
   # A working run-step is not by itself evidence the pipeline is still executing.
-  # The watcher wedge timer needs the pipeline's own recency verdict, so a working
-  # line always carries activity: recent or activity: quiet as the first detail
-  # field. recent is only the live axi-status active_steps table with no quiet
-  # prefix on a full (not coarse) attribution; everything else is quiet, including
-  # a coarse runs-list status word, a missing table, and a quiet-prefixed row.
-  if [ "$RUN_STATE" = working ]; then
-    if [ "$RUN_SOURCE" = full ] && nm_run_activity_is_recent; then
-      act="activity: recent"
-    else
-      act="activity: quiet"
-    fi
+  # Only on request (FM_CREW_STATE_RUN_ACTIVITY=1, the watcher wedge timer), and
+  # only when the live axi-status active_steps table is present with no quiet
+  # prefix on a full (not coarse) attribution, the line leads its detail with the
+  # pipeline's own recency verdict. Everything else (a coarse runs-list status
+  # word, a missing table as during the ci step, a quiet-prefixed row) omits the
+  # field rather than spelling a negative the consumer would ignore anyway.
+  if [ "$RUN_STATE" = working ] && [ "${FM_CREW_STATE_RUN_ACTIVITY:-}" = 1 ] \
+    && [ "$RUN_SOURCE" = full ] && nm_run_activity_is_recent; then
     if [ -n "$RUN_DETAIL" ]; then
-      RUN_DETAIL="${act}${SEP}${RUN_DETAIL}"
+      RUN_DETAIL="activity: recent${SEP}${RUN_DETAIL}"
     else
-      RUN_DETAIL="$act"
+      RUN_DETAIL="activity: recent"
     fi
   fi
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
