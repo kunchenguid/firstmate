@@ -54,6 +54,28 @@ test_fresh_head_silent_and_records_marker() {
   fi
 }
 
+# Regression for the age-never-advances bug: the FIRST sighting must persist
+# an epoch alongside the sha, not just the sha. A marker holding only the sha
+# makes every later poll's `${seen#* }` extraction fall through to "now",
+# pinning the computed age at zero forever regardless of real elapsed time.
+test_fresh_marker_persists_epoch() {
+  local dir marker fields
+  dir=$(new_case epoch)
+  run_check "$dir/state" task6 "$dir/wt" >/dev/null 2>&1
+  marker=$(cat "$dir/state/.worker-stall-task6")
+  fields=$(printf '%s' "$marker" | wc -w | tr -d ' ')
+  case "$marker" in
+    *' '[0-9]*)
+      if [ "$fields" = 2 ]; then
+        pass "first-sighting marker persists sha and a numeric epoch"
+      else
+        fail "expected exactly sha+epoch, got: $marker"
+      fi
+      ;;
+    *) fail "first-sighting marker missing a numeric epoch field, got: $marker" ;;
+  esac
+}
+
 test_frozen_under_threshold_silent() {
   local dir
   dir=$(new_case underthresh)
@@ -95,6 +117,7 @@ test_frozen_past_threshold_no_staged_silent() {
 test_missing_args_silent
 test_non_worktree_silent
 test_fresh_head_silent_and_records_marker
+test_fresh_marker_persists_epoch
 test_frozen_under_threshold_silent
 test_frozen_past_threshold_with_staged_reports
 test_frozen_past_threshold_no_staged_silent

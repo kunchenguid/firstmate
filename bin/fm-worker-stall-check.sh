@@ -28,18 +28,20 @@ TASK=${1-}
 [ -e "$WORKTREE/.git" ] || exit 0   # git worktrees carry a .git FILE (gitdir pointer), not a dir
 
 # Fresh HEAD? Record first-seen and exit silently; only a HEAD that stays
-# frozen across polls can stall.
+# frozen across polls can stall. The marker holds "sha epoch-first-seen", and
+# that epoch must be written on the FIRST sighting too, not just later ones -
+# a marker holding only the sha can never yield a nonzero age on a later poll.
 head=$(git -C "$WORKTREE" rev-parse --short HEAD 2>/dev/null) || exit 0
 marker="$STATE/.worker-stall-$TASK"
 seen=""
 [ -f "$marker" ] && [ ! -L "$marker" ] && seen=$(cat "$marker" 2>/dev/null || true)
+now=$(date +%s)
 case "$seen" in
-  "$head"|"$head"*) ;;          # same HEAD as before — measure the freeze
-  *) printf '%s' "$head" > "$marker" 2>/dev/null || exit 0; exit 0 ;;
+  "$head "*) ;;          # same HEAD as before — measure the freeze
+  *) printf '%s %s' "$head" "$now" > "$marker" 2>/dev/null || exit 0; exit 0 ;;
 esac
 
-# Frozen: how long? Marker holds "sha <epoch>" on repeat sightings.
-now=$(date +%s)
+# Frozen: how long, measured against the epoch persisted on first sighting.
 first_seen=${seen#* }
 case "$first_seen" in
   ''|*[!0-9]*) first_seen=$now ;;

@@ -10,8 +10,10 @@
 #
 # The PR list lives in the .prs sidecar, so editing it later needs no
 # re-registration; editing the shim itself (this template) does. The watcher
-# executes a hash-verified snapshot of the shim from the state dir, so the id
-# is baked in and paths resolve relative to the snapshot's location.
+# executes a hash-verified snapshot of the shim, possibly from a different
+# location than where it was armed, so the id and the sidecar's arm-time path
+# are both baked into the shim literally rather than recomputed relative to
+# the snapshot's own location.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,14 +40,17 @@ SIDECAR="$STATE/$ID.prs"
 cat > "$SHIM" <<EOF
 #!/usr/bin/env bash
 # Per-task shim for the generic PR readiness check (bin/fm-pr-ready-check.sh).
-# Reads the PR list from state/$ID.prs; the watcher executes a hash-verified
-# snapshot of this file, so the id is baked in and paths resolve from the
-# snapshot's state-dir location. Change the PR list in the .prs sidecar only;
-# changing this shim requires re-registering the trust binding.
+# Reads the PR list from $SIDECAR, its arm-time path baked in literally (like
+# the id below) so an FM_STATE_OVERRIDE used at arm time is not lost: the
+# watcher executes a hash-verified snapshot of this file, possibly from a
+# different location, so a path recomputed from the snapshot's own location
+# would silently miss a sidecar that was written outside FM_HOME/state.
+# Change the PR list in the .prs sidecar only; changing this shim requires
+# re-registering the trust binding.
 set -u
 ID=$ID
 FM_HOME="\$(cd "\$(dirname "\$0")/.." && pwd)"
-SIDECAR="\$FM_HOME/state/\$ID.prs"
+SIDECAR="$SIDECAR"
 [ -f "\$SIDECAR" ] && [ ! -L "\$SIDECAR" ] || exit 0
 mapfile -t prs < "\$SIDECAR"
 [ "\${#prs[@]}" -ge 1 ] || exit 0

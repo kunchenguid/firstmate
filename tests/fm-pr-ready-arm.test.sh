@@ -85,6 +85,35 @@ SH
   esac
 }
 
+# Regression for the state-override-loses-sidecar bug: when FM_STATE_OVERRIDE
+# points somewhere other than FM_HOME/state, the shim must still find the
+# sidecar it was actually written next to, not recompute a $FM_HOME/state
+# path that was never written to.
+test_state_override_sidecar_resolves() {
+  local home altstate
+  home=$(new_home "$TMP_ROOT/override")
+  altstate="$home/altstate"
+  mkdir -p "$home/bin" "$altstate"
+  cat > "$home/bin/fm-pr-ready-check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'called-with: %s\n' "$*"
+SH
+  chmod +x "$home/bin/fm-pr-ready-check.sh"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$altstate" "$ARM" watch4 "acme/widgets#5" >/dev/null 2>&1 \
+    || fail "arm with a state override failed"
+
+  [ -f "$altstate/watch4.check.sh" ] || fail "shim was not written under the state override"
+  [ -f "$altstate/watch4.prs" ] || fail "sidecar was not written under the state override"
+  [ ! -e "$home/state/watch4.prs" ] || fail "sidecar should not land under FM_HOME/state when overridden"
+
+  out=$("$altstate/watch4.check.sh" 2>&1)
+  case "$out" in
+    *"called-with: acme/widgets#5"*)
+      pass "shim under a state override still finds and forwards its own sidecar" ;;
+    *) fail "expected shim to forward the overridden sidecar's PRs, got: $out" ;;
+  esac
+}
+
 test_rearm_replaces_sidecar() {
   local home
   home=$(new_home "$TMP_ROOT/rearm")
@@ -110,4 +139,5 @@ test_rejects_too_few_args
 test_rejects_invalid_id
 test_arms_shim_and_sidecar
 test_shim_execs_check_with_sidecar_prs
+test_state_override_sidecar_resolves
 test_rearm_replaces_sidecar
