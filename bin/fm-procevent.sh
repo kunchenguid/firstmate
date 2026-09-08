@@ -168,13 +168,8 @@
 # generation, never a script or process name, so a live source in
 # another home is untouched. See bin/fm-procevent-lib.sh for the lease itself.
 #
-# Ownership is machine-wide per canonical source, because separate Firstmate
-# homes can share one underlying source store. A live owner is never displaced;
-# only a claim whose stale owner and independently absent process group prove
-# its whole generation gone is reclaimed. A crashed leader or reused pid whose
-# process group still has members cannot relax ownership cleanup. Reconcile
-# signals only a live identity-matched runner group and otherwise keeps the
-# claim without starting a replacement.
+# For machine-wide source ownership, claim reclamation, and verified stop
+# authority, see docs/configuration.md (Process-to-event sources).
 #
 # Durability boundary: see bin/fm-procevent-lib.sh. This runner proves capture
 # before publication and bounded re-announcement until handled, and nothing
