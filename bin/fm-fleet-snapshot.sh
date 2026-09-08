@@ -26,9 +26,12 @@
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     runtime.started_epoch and runtime.running_seconds come from the meta's
-#     spawn_gen incarnation token written by bin/fm-spawn.sh. Both are null when
-#     no start is recorded or the recorded start is later than the observation
-#     time, so a consumer never renders a fabricated elapsed time.
+#     spawn_gen incarnation token written by bin/fm-spawn.sh, always read as base
+#     10. Both are null when no start is recorded, when the token is unreadable or
+#     out of range, or when the recorded start is later than the observation time,
+#     so a consumer never renders a fabricated elapsed time.
+#     On a kind=secondmate row this is how long that second mate itself has been
+#     running, never the age of the child work it supervises in its own home.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -207,7 +210,8 @@ spawn_started_epoch() {  # <spawn-gen>
   # Keep the value inside signed 64-bit range so the elapsed subtraction below
   # cannot overflow on a corrupt token.
   [ "${#token}" -le 18 ] || return 1
-  printf '%s\n' "$token"
+  # The digits are always base 10; a zero-padded token is never an octal literal.
+  printf '%s\n' "$((10#$token))"
 }
 
 last_nonempty_line() {  # <file>
@@ -452,6 +456,8 @@ task_json_lines() {
     running_seconds=""
     if [ -n "$started_epoch" ] && [ "$started_epoch" -le "$SNAPSHOT_EPOCH" ]; then
       running_seconds=$((SNAPSHOT_EPOCH - started_epoch))
+    else
+      started_epoch=""
     fi
     status_log="$STATE/$id.status"
     report_path="$DATA/$id/report.md"

@@ -192,6 +192,14 @@ run() {  # <home> <fakebin> <args...>
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW="$FIXTURE_NOW" NET_LOG="$home/net.log" "$BEARINGS" "$@"
 }
 
+# The canonical snapshot the projection above wraps, observed on the same clock,
+# so a test can assert the canonical runtime fields the projection renders from.
+run_fleet() {  # <home> <fakebin> <args...>
+  local home=$1 fakebin=$2; shift 2
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW="$FIXTURE_NOW" NET_LOG="$home/net.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" "$@"
+}
+
 # One in-flight ship task whose recorded start is exactly the given spawn_gen
 # token; an empty token writes a meta with no recorded start at all.
 write_running_task() {  # <home> <id> <spawn-gen-or-empty>
@@ -927,7 +935,7 @@ test_default_is_bounded_and_local_only() {
 }
 
 test_running_elapsed_is_rendered_or_explicitly_unknown() {
-  local home fakebin toon json
+  local home fakebin toon json canonical
   home=$(make_home running-elapsed)
   mkdir -p "$home/projects/ship-wt"
   printf '## In flight\n' > "$home/data/backlog.md"
@@ -938,10 +946,18 @@ test_running_elapsed_is_rendered_or_explicitly_unknown() {
   write_running_task "$home" no-start ""
   write_running_task "$home" legacy-token "legacy-9f3c"
   write_running_task "$home" future-start "s$((FIXTURE_NOW_EPOCH + 600)).111.5"
+  # A zero-padded epoch is still an ordinary base-10 start. This one's digits make
+  # an invalid octal literal, so reading it as octal would abort the whole snapshot.
+  write_running_task "$home" zero-padded "s0$((FIXTURE_NOW_EPOCH - 840)).111.6"
+  # This one IS a valid octal literal (1777777777 -> 268435455), so reading it as
+  # octal would silently render a wildly wrong elapsed time instead of failing.
+  write_running_task "$home" zero-padded-octal-shaped "s01777777777.111.7"
+  write_running_task "$home" overlong-token "s1234567890123456789.111.8"
   printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
   json=$(run "$home" "$fakebin" --json)
   toon=$(run "$home" "$fakebin")
+  canonical=$(run_fleet "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.in_flight | map({key:.id, value:.running}) | from_entries) as $r
     | $r["recent"] == "45s"
@@ -951,14 +967,91 @@ test_running_elapsed_is_rendered_or_explicitly_unknown() {
   ' >/dev/null || fail "a recorded start must render as elapsed running time: $json"
   printf '%s' "$json" | jq -e '
     (.in_flight | map({key:.id, value:.running}) | from_entries) as $r
+    | $r["zero-padded"] == "14m"
+      and $r["zero-padded-octal-shaped"] == "69d 14h"
+  ' >/dev/null || fail "a zero-padded start must read as base 10, never as octal: $json"
+  printf '%s' "$json" | jq -e '
+    (.in_flight | map({key:.id, value:.running}) | from_entries) as $r
     | $r["no-start"] == "unknown"
       and $r["legacy-token"] == "unknown"
       and $r["future-start"] == "unknown"
+      and $r["overlong-token"] == "unknown"
   ' >/dev/null || fail "an unreadable start must say unknown, never a number or a blank: $json"
-  assert_contains "$toon" 'in_flight[7]{id,kind,state,running,doing}' \
+  # The canonical contract: no start is recorded at all, so a consumer that reads
+  # started_epoch directly cannot compute an elapsed time from a start it must not use.
+  printf '%s' "$canonical" | jq -e '
+    (.tasks | map({key:.id, value:.runtime}) | from_entries) as $rt
+    | $rt["recent"].started_epoch == '"$((FIXTURE_NOW_EPOCH - 45))"'
+      and $rt["recent"].running_seconds == 45
+      and $rt["zero-padded"].started_epoch == '"$((FIXTURE_NOW_EPOCH - 840))"'
+      and $rt["future-start"] == {started_epoch:null,running_seconds:null}
+      and $rt["no-start"] == {started_epoch:null,running_seconds:null}
+      and $rt["legacy-token"] == {started_epoch:null,running_seconds:null}
+      and $rt["overlong-token"] == {started_epoch:null,running_seconds:null}
+  ' >/dev/null || fail "canonical runtime must null BOTH fields when there is no usable start: $canonical"
+  assert_contains "$toon" 'in_flight[10]{id,kind,state,running,doing}' \
     "TOON in_flight rows must carry the running column"
   assert_contains "$toon" ',1h 14m,' "the rendered elapsed time must reach the TOON rows"
   pass "in_flight reports elapsed running time and names an unreadable start"
+}
+
+# A registered secondmate whose OWN home has one working child, so its bearings row
+# is an active_child_work in_flight row. The parent-side task meta is left to the
+# caller, which is what decides whether this mate has a recorded start of its own.
+write_working_secondmate() {  # <parent-home> <id>
+  local parent=$1 id=$2 mate
+  mate="$TMP_ROOT/$(basename "$parent")-$id-home"
+  make_valid_secondmate_home "$id" "$mate"
+  append_secondmate_registry "$parent" "$id" "$mate"
+  mkdir -p "$mate/projects/worker"
+  cat > "$mate/data/backlog.md" <<EOF
+## In flight
+- [ ] $id-child - Child work (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/$id-child.meta" \
+    "window=firstmate:fm-$id-child" "worktree=$mate/projects/worker" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" "$id-child" busy
+  printf 'working: child work in progress\n' > "$mate/state/$id-child.status"
+  printf '%s\n' "$mate"
+}
+
+test_secondmate_running_is_its_own_uptime_or_unknown() {
+  local home fakebin json mate_started mate_no_gen
+  home=$(make_home secondmate-running)
+  : > "$home/data/secondmates.md"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  # Spawned from this home 1h 14m ago, so its own task record carries the start.
+  mate_started=$(write_working_secondmate "$home" mate-started)
+  fm_write_secondmate_meta "$home/state/mate-started.meta" "$mate_started" \
+    "firstmate:fm-mate-started" firstmate
+  printf 'spawn_gen=s%s.222.1\n' "$((FIXTURE_NOW_EPOCH - 4440))" >> "$home/state/mate-started.meta"
+  # Present locally but from a meta that predates spawn_gen, so no start is recorded.
+  mate_no_gen=$(write_working_secondmate "$home" mate-no-gen)
+  fm_write_secondmate_meta "$home/state/mate-no-gen.meta" "$mate_no_gen" \
+    "firstmate:fm-mate-no-gen" firstmate
+  # Registered only: no task record in this home at all.
+  write_working_secondmate "$home" mate-registry-only >/dev/null
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | map(select(.kind == "secondmate")) | map({key:.id, value:.running}) | from_entries) as $r
+    | ($r | keys) == ["mate-no-gen", "mate-registry-only", "mate-started"]
+      and $r["mate-started"] == "1h 14m"
+      and $r["mate-no-gen"] == "unknown"
+      and $r["mate-registry-only"] == "unknown"
+  ' >/dev/null || fail "a secondmate row must report its own uptime or say unknown: $json"
+  # The child work is much younger than the mate supervising it; the row must show
+  # the mate's uptime, never the child's.
+  printf '%s' "$json" | jq -e '
+    (.in_flight[] | select(.id == "mate-started"))
+    | .running == "1h 14m" and (.doing | startswith("mate-started-child:"))
+  ' >/dev/null || fail "a secondmate row must not report the age of the child work: $json"
+  pass "a secondmate row reports its own running time, or unknown when none is recorded"
 }
 
 test_toon_json_parity() {
@@ -1969,6 +2062,7 @@ test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_running_elapsed_is_rendered_or_explicitly_unknown
+test_secondmate_running_is_its_own_uptime_or_unknown
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_default_balances_dominant_and_sparse_homes

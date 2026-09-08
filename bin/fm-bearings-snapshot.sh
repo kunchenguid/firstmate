@@ -20,10 +20,12 @@
 # absence is never ambiguous.
 #
 # Each in_flight row carries a rendered `running` elapsed time ("45s", "14m",
-# "1h 14m", "2d 3h") so no reader repeats that arithmetic. It comes from the
-# canonical snapshot's runtime.running_seconds and reads `unknown` whenever that
-# start is absent, including for a secondmate row, whose active child work started
-# in another home and has no start recorded here.
+# "1h 14m", "2d 3h") so no reader repeats that arithmetic. It is the canonical
+# snapshot's runtime.running_seconds for that row's OWN id, and reads `unknown`
+# whenever no start is recorded for it. On a secondmate row the figure is how long
+# that second mate itself has been running, NOT how long the child work it is
+# supervising has been going; a secondmate with no local task record, such as a
+# registry-only or remote one, therefore reads `unknown`.
 #
 # This wrapper consumes canonical status decisions plus canonically normalized
 # backlog roles, unresolved blockers, and captain actionability. It never infers
@@ -116,6 +118,10 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,running,do
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
+in_flight.running is the elapsed time that row's own worker has been running
+  ("45s", "14m", "1h 14m", "2d 3h"), or "unknown" when no start is recorded for it.
+  On a secondmate row it is that second mate's OWN uptime, not the age of the child
+  work it is supervising; a secondmate with no local task record reads "unknown".
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -366,6 +372,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                else "unknown" end
              else .current.state end)
          } ]) as $secondmate_views
+  | ([ .tasks[] | {key:.id, value:.runtime.running_seconds} ] | from_entries) as $task_running
   | ([ if .secondmate_current.registry.available == false then
          {id:"(registry)",state:"unknown",doing:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
           provenance:(.secondmate_current.registry.provenance // "registered-table"),
@@ -398,7 +405,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
          | {id,kind:"secondmate",state:.bearings_state,
-            running:"unknown",
+            running:($task_running[.id] | running_label),
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)
