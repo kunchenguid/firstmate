@@ -791,7 +791,7 @@ cmd_start() {
   # accidentally refreshing the owner lease. A source that deliberately strips
   # it is outside this confused-agent-grade boundary.
   export FM_PROCEVENT_IN_RUNNER=1
-  start_owner_guard "$id" || die "cannot bind the runner to its owning session: $id"
+  start_owner_guard "$id" || die "cannot start the runner's owner guard: $id"
   local launch_floor runner inbox reservation_dir staging launch_ready launch_reply launch_pid
   launch_floor=$(fm_procevent_launch_floor_seconds) \
     || die "FM_PROCEVENT_LAUNCH_FLOOR_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_FLOOR_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_FLOOR_MAX_SECONDS"

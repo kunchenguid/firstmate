@@ -2165,7 +2165,7 @@ guard_fail_status=0
 guard_fail_out=$(FM_PROCEVENT_OWNER_LEASE_SECONDS=invalid \
   pe "$HGUARDFAIL" start guard-fail-src 2>&1) || guard_fail_status=$?
 [ "$guard_fail_status" -ne 0 ] || fail "a runner continued after its owner guard failed to initialize"
-assert_contains "$guard_fail_out" "cannot bind the runner to its owning session" \
+assert_contains "$guard_fail_out" "cannot start the runner's owner guard" \
   "guard initialization failure is reported at the runner boundary"
 assert_absent "$TMP_ROOT/unguarded-launches" \
   "a source command ran without a successfully initialized owner guard"
