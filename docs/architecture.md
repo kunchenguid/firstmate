@@ -243,7 +243,11 @@ Enforcement that binds a determined author has to live somewhere the branch cann
 Reading this check as a security control exceeds its stated scope.
 
 It runs before the first push rather than before merge, because on a repository firstmate does not own a maintainer can merge at any moment.
-The enforcement point is `bin/fm-lint.sh`'s default path: `.no-mistakes.yaml` pins `commands.lint` to that script and the gate runs lint after its review, test, and document steps, so it is the last firstmate-owned code to see every commit the branch would contribute, including the ones the gate's own agents wrote.
+The enforcement point is `bin/fm-lint.sh`'s default path: `.no-mistakes.yaml` pins `commands.lint` to that script and the gate runs lint after its review, test, and document steps, so it reads back the commits those steps wrote before the branch is first pushed.
+Lint is the last step before the first push, which is not the same as the last step that can write a commit, and the difference is a declared gap rather than a rounding error.
+The gate's CI step runs after the push and its fix agent commits on top of the pushed branch, so this guard never reads a message that agent writes; a subject opening `Captain, ` reached a public branch by exactly that route on 2026-09-08.
+Nothing else covers it either, because the pull request workflow below scans only the title and description and never commit messages.
+Closing that gap is the separate item filed as `fm-ci-fixer-bypasses-voice-guard` and is outside this check's scope.
 The default pre-push range requires `origin/main` as its authoritative publication ref.
 When `origin/main` is missing, the guard reports the range as unestablished and refuses with exit 3 rather than scanning.
 A local `main` is not an implicit fallback because it can carry the unpublished commit the scan must refuse.

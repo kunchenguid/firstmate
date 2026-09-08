@@ -31,10 +31,10 @@ document:
 #
 # This pin is also what puts `bin/fm-prepush-voice-guard.sh` in front of the first push.
 # Lint runs after the review, test, and document steps have made their own
-# commits, so it is the last step that can read every message about to leave -
-# including the ones this pipeline's own fix agents wrote, which is where the
-# leaked internal-voice messages came from. See docs/architecture.md
-# "Internal-voice refusal before the first push".
+# commits, so it reads their messages before the branch is first pushed. It is
+# the last step before that push, not the last step that can write a commit: the
+# CI step commits afterwards and is not covered. See docs/architecture.md
+# "Internal-voice refusal before the first push" for that declared gap.
 #
 # Keep commands.test absent; the firstmate-coding-guidelines skill owns this policy.
 commands:

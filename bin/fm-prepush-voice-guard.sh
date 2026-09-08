@@ -19,10 +19,13 @@
 # own, a maintainer can merge at any moment, so a correction that waits for the
 # merge window is a correction that may never happen. bin/fm-lint.sh invokes this
 # owner on its default (no explicit-path) path, which is both what CI runs and
-# what .no-mistakes.yaml pins as commands.lint. The gate's pipeline order puts
-# lint last before push, after the review, test, and document steps have made
-# their own commits, so this check reads back every commit the branch would
-# contribute - including the ones the gate's own agents wrote.
+# what .no-mistakes.yaml pins as commands.lint. The gate runs lint after its
+# review, test, and document steps, so this check reads back the commits those
+# steps wrote before the branch is first pushed. Lint is the last step before
+# that first push, NOT the last step that can write a commit: the gate's CI step
+# commits after the push and this guard never reads those messages. That gap is
+# declared in the architecture section named above and is tracked separately as
+# fm-ci-fixer-bypasses-voice-guard.
 #
 # WHAT THE DEFAULT RANGE ACTUALLY IS, stated precisely because the obvious
 # shorthand for it is wrong. It is every commit reachable from HEAD but not from
