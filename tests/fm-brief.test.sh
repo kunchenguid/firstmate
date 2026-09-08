@@ -868,7 +868,70 @@ test_worker_role_scope() {
   pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
-test_worker_role_scope
+# Optional --branch renames the ship branch in Setup and the delivery-mode Rule 1
+# lines (and local-only Definition of done via fm-dod-lib). Absent keeps fm/<id>.
+test_optional_ship_branch_name() {
+  local home id brief out status help
+  home="$TMP_ROOT/branch-name-home"
+  mkdir -p "$home/data"
+
+  id='brief-branch-default'
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "default direct-PR brief should scaffold"
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b fm/$id" "$brief" "default Setup lost fm/<task-id> branch create"
+  assert_grep "push only your \`fm/$id\` branch" "$brief" "default direct-PR Rule 1 lost fm/<task-id>"
+  assert_no_grep "git checkout -b feat/" "$brief" "default brief unexpectedly used a conventional branch"
+
+  id='brief-branch-named'
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR \
+    --branch feat/named-branch >/dev/null 2>&1 \
+    || fail "direct-PR brief with --branch should scaffold"
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b feat/named-branch" "$brief" \
+    "named --branch missing from Setup create step"
+  assert_grep "push only your \`feat/named-branch\` branch" "$brief" \
+    "named --branch missing from direct-PR Rule 1"
+  assert_no_grep "git checkout -b fm/$id" "$brief" \
+    "named --branch left the default fm/<task-id> Setup command"
+
+  id='brief-branch-local'
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only \
+    --branch fix/local-named >/dev/null 2>&1 \
+    || fail "local-only brief with --branch should scaffold"
+  brief="$home/data/$id/brief.md"
+  assert_grep "git checkout -b fix/local-named" "$brief" \
+    "named --branch missing from local-only Setup"
+  assert_grep "Work only on your \`fix/local-named\` branch" "$brief" \
+    "named --branch missing from local-only Rule 1"
+  assert_grep "ready in branch fix/local-named" "$brief" \
+    "named --branch missing from local-only Definition of done"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-branch-empty some-proj \
+    --mode direct-PR --branch= 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "empty --branch should refuse"
+  assert_contains "$out" "non-empty" "empty --branch refusal did not name the empty-value rule"
+  assert_absent "$home/data/brief-branch-empty/brief.md" "empty --branch still wrote a brief"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-branch-bad some-proj \
+    --mode direct-PR --branch 'bad branch' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "invalid --branch should refuse"
+  assert_contains "$out" "not a valid git branch name" "invalid --branch refusal did not name the ref rule"
+  assert_absent "$home/data/brief-branch-bad/brief.md" "invalid --branch still wrote a brief"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-branch-scout some-proj \
+    --scout --branch feat/nope 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "scout --branch should refuse"
+  assert_contains "$out" "applies only to ship briefs" "scout --branch refusal lost its scope message"
+
+  help=$("$ROOT/bin/fm-brief.sh" --help)
+  assert_contains "$help" "--branch" "fm-brief.sh --help omitted --branch"
+  pass "fm-brief.sh: optional --branch defaults, renders, and rejects invalid values"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -891,3 +954,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_worker_role_scope
+test_optional_ship_branch_name
