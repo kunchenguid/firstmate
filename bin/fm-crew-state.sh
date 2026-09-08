@@ -826,12 +826,21 @@ if ! pane_readable "$BACKEND_TARGET"; then
   esac
 fi
 
+LOG_STATE=$(map_log_state "$LOG_LINE")
+AGENT_GONE=0
+if { [ "$KIND" != secondmate ] || [ "$LOG_STATE" = working ]; } && crew_agent_gone; then
+  AGENT_GONE=1
+  if [ "$LOG_STATE" = working ] || [ "$LOG_STATE" = unknown ]; then
+    emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
+  fi
+fi
+
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.
 # Only an exact busy verdict reports working here, and only an exact idle
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
 # unverified semantic state remains unknown.
-if [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ] && [ "$AGENT_GONE" = 0 ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
@@ -850,23 +859,7 @@ fi
 # `unknown` with the resolution note as `doing`. map_log_state is the single owner of
 # the verb->state mapping (including the configurable paused verb), so reusing its
 # `unknown` verdict as the "not a state" test needs no second verb list here.
-#
-# `working` is the one status-log state that claims the crew is producing work
-# RIGHT NOW, and an agent that has exited contradicts it. The branch above only
-# consults the recovery-grade classifier when the cheap probe FAILS, so a pane
-# the agent left behind as a bare login shell - readable, and answering every
-# cheap probe - skipped it entirely and resurrected whatever the worker last
-# wrote, reporting an empty terminal as an actively working crew. Ask the same
-# classifier fm-bootstrap and fm-session-start already trust for recovery, and
-# only for this one claim: it is the sole status-log state a departed agent can
-# falsify, and it is asked for lazily so no other reading pays for the probe.
-# Every other status-log state - done, failed, blocked, needs-decision, paused -
-# describes work that is not in progress and stays true after the agent exits.
 if [ -n "$LOG_VERB" ]; then
-  LOG_STATE=$(map_log_state "$LOG_LINE")
-  if [ "$LOG_STATE" = working ] && crew_agent_gone; then
-    emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
-  fi
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi

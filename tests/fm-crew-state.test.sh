@@ -2350,6 +2350,42 @@ test_readable_pane_without_an_agent_refuses_a_stale_working_log() {
   pass "a readable pane whose agent has exited refuses a stale working: log"
 }
 
+test_busy_record_requires_an_agent() {
+  reset_fakes
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (busy agent liveness)"; return 0; }
+  local d out gen mode
+  make_live_agent_bin || fail "sleep not found"
+  for mode in dead alive; do
+    if [ "$mode" = dead ]; then
+      d=$(make_live_tmux_case busy-dead shell /bin/sh) || fail "could not start shell pane"
+    else
+      d=$(make_live_tmux_case busy-alive shell "$LIVE_AGENT_BIN/claude" 900) || fail "could not start agent pane"
+    fi
+    fm_write_meta "$d/state/crew.meta" "window=live:shell" "worktree=$d/wt" "kind=ship" "harness=claude"
+    printf 'working: implementing the fix\n' > "$d/state/crew.status"
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" crew)
+    "$ROOT/bin/fm-busy-event.sh" apply "$d/state" crew busy --gen "$gen" \
+      --source claude-hook --event user-prompt-submit
+    wait_agent_state "$d" live:shell "$mode" || fail "unexpected agent state"
+    PATH="$d/fakebin:$PATH" tmux display-message -p -t live:shell '#{pane_id}' >/dev/null 2>&1 \
+      || fail "pane must remain readable"
+    out=$(run_crew_state "$d" crew)
+    if [ "$mode" = dead ]; then
+      assert_contains "$out" "state: unknown" "a departed agent cannot retain busy state"
+      assert_contains "$out" "pane shell remains" "positive death overrides the busy record"
+      printf 'done: completed\n' > "$d/state/crew.status"
+      out=$(run_crew_state "$d" crew)
+      assert_contains "$out" "state: done" "completion survives a stale busy record"
+      assert_contains "$out" "source: status-log" "completion comes from the log"
+    else
+      assert_contains "$out" "state: working" "a live agent retains busy state"
+      assert_contains "$out" "source: pane" "the busy record remains authoritative"
+    fi
+  done
+  live_tmux_cleanup
+  pass "busy lifecycle residue cannot outlive its agent"
+}
+
 # The other half, and the one that decides whether the refusal was safe: a pane
 # the classifier cannot prove agent-free keeps its log reading. `ambiguous` is
 # the harder case of the two - a process the classifier cannot attribute at all -
@@ -2533,6 +2569,7 @@ test_unanchored_unfetched_active_row_does_not_match
 test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
 test_readable_pane_without_an_agent_refuses_a_stale_working_log
+test_busy_record_requires_an_agent
 test_a_live_pane_keeps_its_working_log
 test_an_agent_free_pane_still_reports_every_other_log_state
 test_readable_herdr_husk_refuses_a_stale_working_log
