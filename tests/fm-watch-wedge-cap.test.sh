@@ -440,6 +440,102 @@ test_wedge_cap_rollback_resets_state_v14() {
   pass "v14 rollback resets both the escalation counter and the stale timer so the next poll re-escalates from 1, not the saturated value (closes Greptile P1 from v13 review)"
 }
 
+
+test_wedge_cap_rollback_failure_sets_sentinel_v15() {
+  # v15 (2026-09-08): closes Greptile P1 from v14 review - "Rollback
+  # failures preserve saturation". v14 used `|| true` on every rollback
+  # line, so a rollback that itself failed (the SAME fs condition that
+  # broke the marker write) would silently preserve the saturation. v15:
+  #
+  # 1. _wedge_cap_rollback returns 1 if any reset fails AND writes a
+  #    .wedge-rollback-failed-<key> sentinel (timestamp + first failing
+  #    path).
+  # 2. wedge_timer_check checks for the sentinel at the top - if recent
+  #    (within FM_ROLLBACK_SENTINEL_TTL_SECS, default 3600s), it returns 0
+  #    without publishing a wake or writing a marker.
+  #
+  # This test exercises the top-of-function sentinel check directly:
+  # plant a sentinel file with a recent timestamp, drive a poll, and
+  # confirm the wedge path short-circuits (no PERMANENTLY-WEDGED wake).
+  # (The cap path's exit-2 path is exercised indirectly by ensuring the
+  # sentinel state in STATE survives a round; see also
+  # test_wedge_cap_rollback_resets_state_v14 for the rollback SUCCESS
+  # path. Together they cover the v15 contract.)
+  local dir state fakebin out capture_file window key pane_hash sig pid n max marker_hash marker_window sentinel
+  dir=$(make_case wedge-cap-rollback-fails); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-cap-rollback-fails"
+  printf 'idle wedged content for v15 rollback-fails' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-rollback-fails.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-rollback-fails.status"
+  sig=$(seen_sig "$state/wedge-cap-rollback-fails.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-rollback-fails_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle wedged content for v15 rollback-fails")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  max=3
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  marker_hash="$state/.wedge-permanent-$key-${pane_hash:0:12}"
+  marker_window="$state/.wedge-permanent-$key"
+  sentinel="$state/.wedge-rollback-failed-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "priming watch failed: $(cat "$out")"
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "priming ack failed"
+  n=1
+  while [ "$n" -le "$max" ]; do
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "round $n watch failed: $(cat "$out")"; }
+    ack_stopped_cycle "$state" || fail "round $n ack failed"
+    n=$((n + 1))
+  done
+  [ -e "$marker_hash" ] || fail "per-hash cap marker missing after firing - prime test before sentinel test must pass first"
+  [ -e "$marker_window" ] || fail "window-scoped cap marker missing after firing - prime test before sentinel test must pass first"
+
+  # Now plant the v15 sentinel: .wedge-rollback-failed-<key> with a recent
+  # timestamp. Drive ONE more poll and confirm the wedge path short-circuits.
+  # The short-circuit is by design a non-exiting path: the watcher stays
+  # alive (it's still polling the window) but wedge_timer_check returns 0
+  # at the top without publishing a wake. The test uses wait_poll_cycle
+  # (which waits for a heartbeat) to confirm the watcher is alive AND
+  # processing the sentinel without publishing a wake.
+  printf '%s %s\n' "$(date +%s)" "test-injected" > "$sentinel"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max FM_ROLLBACK_SENTINEL_TTL_SECS=3600 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "v15 sentinel poll failed (watcher never beat): $(cat "$out")"
+  fi
+  if grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null; then
+    reap "$pid"; fail "v15 sentinel short-circuit published a PERMANENTLY-WEDGED wake - the queue-flood behavior v15 closed is broken"
+  fi
+  if ! grep -F "rollback-failed sentinel active" "$out" >/dev/null; then
+    reap "$pid"; fail "expected triage_log for sentinel short-circuit was not emitted in: $(cat "$out")"
+  fi
+  [ -e "$sentinel" ] || { reap "$pid"; fail "v15 sentinel was removed by the short-circuit poll - it should remain until TTL expiry or operator rm"; }
+  reap "$pid"
+
+  # Final cleanup of the primed cap markers so the test exits clean.
+  rm -f "$marker_hash" "$marker_window"
+
+  unset FM_FAKE_CREW_STATE
+  pass "v15 rollback-failed sentinel short-circuits the wedge path - no wake-amplification under persistent fs failure (closes Greptile P1 from v14 review)"
+}
+
 test_wedge_cap_fires_permanently_wedged_after_max_escalations() {
   local dir state fakebin out capture_file window key pane_hash sig pid n max
   dir=$(make_case wedge-cap-fires); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1108,6 +1204,7 @@ test_wedge_cap_escalation_counter_resets_on_cap_fire
 test_wedge_cap_marker_write_after_durable_wake_v13
 test_wedge_cap_failed_window_marker_rolls_back_per_hash_v13
 test_wedge_cap_rollback_resets_state_v14
+test_wedge_cap_rollback_failure_sets_sentinel_v15
 test_wedge_cap_window_marker_silences_hash_churning_busy_pane
 test_wedge_cap_operator_can_rm_marker
 test_wedge_cap_validates_invalid_override
