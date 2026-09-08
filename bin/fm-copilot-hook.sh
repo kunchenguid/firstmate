@@ -28,9 +28,13 @@ copilot_notification_has_named_watcher_completion() {
   local payload=${1:-} title message
   [ -n "$payload" ] || return 1
   title=$(printf '%s' "$payload" | jq -r '.title // empty' 2>/dev/null) || return 1
-  [ "$title" = 'Arm Firstmate watcher' ] || return 1
+  case "$title" in
+    'Arm Firstmate watcher'|'Arm the Firstmate watcher') ;;
+    *) return 1 ;;
+  esac
   message=$(printf '%s' "$payload" | jq -r '.message // empty' 2>/dev/null) || return 1
-  printf '%s\n' "$message" | grep -Eq '^Shell command "Arm Firstmate watcher" \(shellId: [0-9]+\) has completed successfully\. Use read_bash with shellId "[0-9]+" to retrieve the output\.$'
+  printf '%s\n' "$message" | grep -Fq "Shell command \"$title\" (shellId: " || return 1
+  printf '%s\n' "$message" | grep -Eq '^Shell command "Arm( the)? Firstmate watcher" \(shellId: [0-9]+\) has completed successfully\. Use read_bash with shellId "[0-9]+" to retrieve the output\.$'
 }
 
 copilot_notification_has_watcher_completion() {

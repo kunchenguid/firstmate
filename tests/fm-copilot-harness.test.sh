@@ -495,6 +495,13 @@ test_notification_injects_watcher_followup_only_for_watcher_arm_completion() {
     *) fail "Copilot live-shape watcher notification lost the required recovery protocol: $body" ;;
   esac
 
+  printf '%s' '{"notification_type":"shell_completed","hook_event_name":"Notification","title":"Arm the Firstmate watcher","message":"Shell command \"Arm the Firstmate watcher\" (shellId: 1) has completed successfully. Use read_bash with shellId \"1\" to retrieve the output.","command":null,"commandLine":null,"command_line":null}' > "$dir/live-shape-the.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/live-shape-the.json")
+  message=$(printf '%s' "$out" | jq -r '.additionalContext')
+  kind=$(printf '%s' "$message" | "$OPINPUT" kind)
+  [ "$kind" = watcher ] || fail "Copilot alternate live watcher title must inject watcher operational context, got '$kind' from: $out"
+
   mkdir -p "$TMP_ROOT/notification-watcher-sibling/config"
   : > "$TMP_ROOT/notification-watcher-sibling/config/x-mode.env"
   printf '%s' '{"notification_type":"shell_completed","command":"cd ../notification-watcher-sibling && [ -f config/x-mode.env ] && . config/x-mode.env; exec bin/fm-watch-arm.sh"}' > "$dir/sibling.json"
