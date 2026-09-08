@@ -7,29 +7,6 @@
 # shellcheck source=bin/fm-harness-process-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-harness-process-lib.sh"
 
-# Preserve the shared owner and extend only the primary/session-lock surface it
-# does not yet name: omp (Oh My Pi). omp is anchored exactly like pi: its live
-# process name is the bare word `omp` (verified, omp 18.1.11), and a substring
-# match would claim unrelated commands such as ompd or comp.
-eval "$(declare -f fm_harness_process_matches | sed '1s/fm_harness_process_matches/fm_harness_process_matches_base/')"
-fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0
-  FM_HARNESS_IS_CLAUDE=0
-  FM_HARNESS_MATCH_NAME=
-  base=$(basename -- "$comm")
-  case "$base" in
-    omp) FM_HARNESS_MATCH_NAME=omp; return 0 ;;
-  esac
-  argv0=${args%% *}
-  case "/$comm/" in
-    */omp/*) FM_HARNESS_MATCH_NAME=omp; return 0 ;;
-  esac
-  case "/$argv0/" in
-    */omp/*) FM_HARNESS_MATCH_NAME=omp; return 0 ;;
-  esac
-  fm_harness_process_matches_base "$comm" "$args"
-}
-
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
 # of the current process: this script runs inside the session that owns the
 # home's fleet lock. Membership is the honest test of that question, because the
