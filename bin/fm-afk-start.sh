@@ -90,6 +90,8 @@ daemon_pid_matches() {
     return
   fi
   command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  # MSYS ps rejects -o entirely; the Cygwin procfs cmdline answers for MSYS pids.
+  [ -n "$command" ] || command=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
   case "$command" in
     *"$FM_AFK_DAEMON"*|*"fm-supervise-daemon.sh"*) return 0 ;;
   esac

@@ -77,7 +77,13 @@ if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then
   case "$*" in
     *comm=*) printf '/usr/local/bin/claude\n' ;;
     *args=*) printf 'claude\n' ;;
-    *ppid=*) /bin/ps -o ppid= -p "$pid" ;;
+    *ppid=*)
+      # This shim IS `ps` on PATH; MSYS ps rejects -o, so fall back to procfs
+      # here rather than recursing into this same script.
+      out=$(/bin/ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+      [ -n "$out" ] || out=$(tr -d '[:space:]' 2>/dev/null < "/proc/$pid/ppid")
+      printf '%s\n' "$out"
+      ;;
   esac
 else
   /bin/ps "$@"
@@ -565,7 +571,7 @@ EOF
     run_stage "$home" "$root" start --locked 1 --harvest-pid $$
   generation_one=$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")
 
-  next_owner=$(/bin/ps -o ppid= -p $$ | tr -d ' ')
+  next_owner=$(fm_test_ppid $$ /bin/ps)
   printf '%s\n' "$next_owner" > "$home/state/.lock"
   FM_FAKE_HARNESS_PID_OVERRIDE="$next_owner" FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=1 \
     run_stage "$home" "$root" start --locked 1 --harvest-pid $$
@@ -591,7 +597,7 @@ EOF
   done
   [ -s "$log" ] || fail "the mutating sweep never started"
 
-  next_owner=$(/bin/ps -o ppid= -p $$ | tr -d ' ')
+  next_owner=$(fm_test_ppid $$ /bin/ps)
   started=$(date +%s)
   rc=0
   out=$(PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="$next_owner" \

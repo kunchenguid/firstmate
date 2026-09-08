@@ -668,11 +668,18 @@ isolate_runner() {  # <wait|detach> <source-id>
   isolate_process "$1" "$SCRIPT_DIR/fm-procevent.sh" _start "$2"
 }
 
+# perl instead of `ps -o pgid=`: MSYS ps rejects -o entirely, and perl is
+# already a hard dependency of this file (isolate_runner). Empty output on
+# failure or a dead pid, so callers keep their existing emptiness checks.
+proc_pgid() {  # <pid>: print the pid's process group id
+  perl -e 'my $g = eval { getpgrp($ARGV[0]) }; print $g if defined $g && $g > 0' "$1" 2>/dev/null
+}
+
 require_isolated_group() {  # <role>
   local role=$1 pgid
   [ "${FM_PROCEVENT_RUNNER_GROUP:-}" = "$$" ] \
     || die "$role process group was not isolated"
-  pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]') \
+  pgid=$(proc_pgid "$$") \
     || die "cannot inspect $role process group"
   [ -n "$pgid" ] || die "cannot inspect $role process group"
   [ "$pgid" = "$$" ] || die "$role does not lead its process group"
@@ -1570,7 +1577,7 @@ runner_group_signal() {  # <signal> <pid> <identity> [proved]
       1) fm_procevent_group_alive "$pid" && return 2; return 1 ;;
       *) return 2 ;;
     esac
-    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
+    pgid=$(proc_pgid "$pid") || return 2
     [ "$pgid" = "$pid" ] || return 2
   fi
   # KNOWN LIMIT: portable shell cannot make this verification and signal atomic,
