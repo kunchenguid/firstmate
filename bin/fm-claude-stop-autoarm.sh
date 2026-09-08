@@ -188,10 +188,13 @@ fi
 # bounded confirmation, and the state/.watch-cycle-exits.log lifecycle ledger,
 # so a primed cycle that cannot start still records why and which lock holder
 # blocked it there. Start that arm as a handling successor so a leftover
-# downtime marker is not re-announced into a one-poll resurface. Nothing reads
-# the detached cycle's stdout after this hook exits, so it goes to /dev/null and
-# the ledger stays the single record of the cycle. This path never holds a
-# generation claim: the registered asyncRewake hook attaches.
+# downtime marker is not re-announced into a one-poll resurface. Hand it the
+# same derived $GRACE the retry loop below passes: the arm's own default is a
+# flat 300s, so a primed cycle on a long-poll home would otherwise reject the
+# healthy watcher it just found as stale. Nothing reads the detached cycle's
+# stdout after this hook exits, so it goes to /dev/null and the ledger stays the
+# single record of the cycle. This path never holds a generation claim: the
+# registered asyncRewake hook attaches.
 if [ "$ENSURE_WATCHER" -eq 1 ]; then
   WATCH="$SCRIPT_DIR/fm-watch.sh"
   ARM="$SCRIPT_DIR/fm-watch-arm.sh"
@@ -210,7 +213,7 @@ if [ "$ENSURE_WATCHER" -eq 1 ]; then
     ''|*[!0-9]*) predecessor=primed ;;
   esac
   if command -v python3 >/dev/null 2>&1 \
-    && FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" python3 -c '
+    && FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" FM_GUARD_GRACE="$GRACE" python3 -c '
 import os, sys
 if len(sys.argv) < 2:
     os._exit(1)

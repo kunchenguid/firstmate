@@ -1336,6 +1336,27 @@ test_ensure_watcher_records_a_refused_primed_cycle() {
   pass "auto-arm --ensure-watcher: a refused primed cycle is recorded in the lifecycle ledger"
 }
 
+test_ensure_watcher_primes_arm_with_derived_grace() {
+  local dir out status i grace
+  command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach the primed watcher"
+  dir=$(make_primary_dir "$TMP_ROOT/ensure-watcher-grace")
+  : > "$dir/state/task.meta"
+  write_ensure_watch_fixture "$dir"
+  write_arm_fixture "$dir" records-grace
+  out=$(unset FM_GUARD_GRACE; FM_POLL=900 run_autoarm_ensure_watcher "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "--ensure-watcher must report the fork that detached the primed cycle"
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ -e "$dir/state/arm-received-grace" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/state/arm-received-grace" ] || fail "primed cycle never reached the arm wrapper"
+  grace=$(cat "$dir/state/arm-received-grace")
+  [ "$grace" = 960 ] || fail "primed arm must see the poll-derived grace (900+60), got: $grace"
+  pass "auto-arm --ensure-watcher: the primed cycle reaches fm-watch-arm.sh with the poll-derived grace"
+}
+
 test_ensure_watcher_inert_when_afk() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/ensure-watcher-afk")
@@ -1399,4 +1420,5 @@ test_ensure_watcher_starts_detached_watcher_without_claim
 test_ensure_watcher_records_a_refused_primed_cycle
 test_ensure_watcher_inert_without_session_lock
 test_ensure_watcher_inert_when_afk
+test_ensure_watcher_primes_arm_with_derived_grace
 test_fm_lock_status_still_works_with_shared_lib
