@@ -1027,12 +1027,14 @@ clear_pause_tracking() {  # <window-key>
   clear_stale_hash_tracking "$key"
 }
 
-# Reconcile a declared pause or captain-held status with authoritative crew state.
-# After fm-crew-state has fallen back to stopped or unknown, paused classification is
-# recovered only for a confidently dead ordinary crew, or for a secondmate, whose
-# endpoint liveness this function deliberately never reads.
+# Reconcile a declared pause or captain-held status with the liveness and crew-state
+# evidence each kind of worker can supply. A live ordinary crew still fails open on
+# its first sight so no live decision gate is silenced; every other declared wait
+# takes the bounded pause cadence, except a crew whose agent the backend confidently
+# reports dead while a run step is still attributed to its code, which keeps the
+# ordinary wedge ladder. A secondmate's endpoint liveness is deliberately never read.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive kind
+  local win=$1 task=$2 key last recheck_file agent_alive kind
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
@@ -1057,12 +1059,13 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
-  class=$(crew_absorb_class "$task")
-  if [ "$class" = working ]; then
-    rm -f "$recheck_file"
-    printf 'working'
-    return
-  fi
+  # The crew_absorb_class read is deliberately NOT taken here. Past the
+  # declared-wait gate the only question left for an ordinary crew is liveness,
+  # and for a live one the answer no longer depends on authoritative crew state
+  # at all, so paying for it would be pure waste: the gate below drops the
+  # recheck marker on every pass, so a declared wait re-enters this path once
+  # per poll for its whole duration, and fm-crew-state.sh shells out to
+  # no-mistakes. The read is taken only on the one path below that consults it.
   if [ "$kind" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
@@ -1070,21 +1073,60 @@ pause_state_class() {  # <window> <task>
       printf 'none'
       return
     fi
+    # The backend confidently reports no agent behind this declaration, so there
+    # is nobody left to answer a recheck that asks whether the wait still holds.
+    # An active run step attributed to a crew whose agent is gone is the orphaned
+    # runner shape, not a wait, so it keeps the ordinary wedge ladder and its
+    # STALE_ESCALATE_SECS cadence rather than being absorbed for an hour under
+    # wording addressed to a crew that no longer exists. This is the only path
+    # that still consults authoritative crew state, and unlike the live-crew
+    # window above it does pay that read every poll: both `working` arms drop the
+    # .paused-<key> flag the cheap freshness gate needs, so this classification
+    # cannot be cached. That is deliberate rather than merely tolerated - the
+    # read is the only thing that can notice the orphaned run ENDING, which is
+    # what moves the pane off the ladder and onto the recheck cadence - and it is
+    # bounded to a pane the watcher is already escalating as a wedge, so it lasts
+    # only as long as the degraded window itself.
+    if [ "$(crew_absorb_class "$task")" = working ]; then
+      rm -f "$recheck_file"
+      printf 'working'
+      return
+    fi
   fi
-  # Recover paused classification for a declared wait that authoritative crew state
-  # could not name. Reaching here already proves the only two admissible cases: an
-  # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
-  # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
-  # read and so cannot supply that confirmation. Without the mate case a mate's
-  # status-declared `captain-held` transfer - which has no current-state mapping
-  # and so arrives as `none` - would be silenced by every caller rather than taking
-  # the bounded re-surface cadence, and a forgotten declaration would rot invisibly.
-  [ "$class" = none ] && class=paused
-  case "$class" in
-    paused) date +%s > "$recheck_file" ;;
-    *) rm -f "$recheck_file" ;;
-  esac
-  printf '%s' "$class"
+  # Every declared wait that gets here takes the bounded pause cadence, whatever
+  # authoritative crew state would have said, for two independent reasons.
+  #
+  # An authoritative active run does NOT retire a current declaration. The two
+  # records agree far more often than they disagree: the commonest healthy shape
+  # on a supervised fleet is a crew that declares `paused: waiting on the
+  # no-mistakes review fix round` and then sits on an idle composer while that
+  # very run is still attributed to its code, so crew_absorb_class reports
+  # `working` for the same idleness the crew just declared. Answering `working`
+  # here handed that pane to the wedge timer, which alarmed
+  # "possible wedge, escalation N" once per STALE_ESCALATE_SECS for the whole
+  # wait - the non-busy twin of the busy-path exception busy_turn_bound_check
+  # already makes, and the same call the away-mode daemon's enriched-wedge
+  # override already refuses to make (issue #3149). A declaration is
+  # categorically stronger evidence than the run-step or pane state a wedge is
+  # inferred from: it is the crew's own statement that this pane waits by design,
+  # which is the one question the wedge timer cannot answer for itself. A live
+  # ordinary crew never reaches this line at all - the gate above fails it open
+  # on `none` - and handle_paused_stale still re-surfaces the wait once per
+  # PAUSE_RESURFACE_SECS, so no declared wait can rot invisibly. Undeclared panes
+  # never reach here (the declared-wait gate above returns crew_absorb_class
+  # untouched), so wedge detection for a silent idle crew is unchanged.
+  #
+  # It also recovers paused classification for a declared wait authoritative crew
+  # state could not name at all. Reaching here proves the only two admissible
+  # cases: an ordinary crew whose agent the gate above confirmed dead, so no live
+  # decision gate is being silenced, or a secondmate, whose endpoint liveness is
+  # deliberately never read and so cannot supply that confirmation. Without the
+  # mate case a mate's status-declared `captain-held` transfer - which has no
+  # current-state mapping - would be silenced by every caller rather than taking
+  # the bounded re-surface cadence, and a forgotten declaration would rot
+  # invisibly.
+  date +%s > "$recheck_file"
+  printf 'paused'
 }
 
 # The two records of one ordinary crew wait, and why its stale alarm reads both.
@@ -2087,6 +2129,14 @@ EOF
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
+          # A mate under a declared wait whose own run is still attributed to its
+          # code now takes the bounded recheck rather than the silent arm below,
+          # and that is CHOSEN, not overlooked. clear_pause_tracking dropped the
+          # very suppressor the cadence depends on, so every later poll was a
+          # fresh first sight that cleared it again and the mate's declared wait
+          # could rot permanently unnoticed - nothing else re-reads a quiet mate.
+          # One awaiting-external recheck per PAUSE_RESURFACE_SECS is the accepted
+          # cost of a wait that cannot rot. Do not restore the silent route.
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
@@ -2158,11 +2208,14 @@ EOF
           # unmodified terminal-status behavior).
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
-          # Decided once per distinct stale hash (the costly state reads run only
-          # on first sight, never every poll) via pause_state_class, which returns:
+          # Decided once per distinct stale hash via pause_state_class, which
+          # returns:
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
-          #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
+          #     genuinely frozen run still escalates past STALE_ESCALATE_SECS. Only
+          #     an UNDECLARED pane, or one whose agent the backend confidently
+          #     reports dead, arrives this way; pause_state_class's header owns why
+          #     a live crew's run under a declared wait takes the pause cadence;
           #   - paused: a declared wait pause_state_class admits (its header owns which
           #     liveness evidence each kind of crew must supply), so absorb on the long
           #     PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
@@ -2171,6 +2224,10 @@ EOF
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to
           #     wait out the timer.
+          # The costly crew-state read runs on first sight of an undeclared pane and
+          # on a dead-agent declaration only. A live crew's declared wait re-enters
+          # this call every poll for its whole wait, and pause_state_class answers it
+          # from liveness alone precisely so that window costs no no-mistakes call.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
@@ -2192,6 +2249,14 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
+                # An active run the pause cadence must not absorb, under a
+                # declaration that is still standing: the agent behind it is
+                # backend-confirmed dead, so this is an orphaned runner rather than
+                # a wait, and it is wedge-tracked again. A WITHDRAWN declaration
+                # cannot arrive here - the loop-top reconciliation clears
+                # .stale-<key> along with the flag, which routes that pane to the
+                # first-sight arm above - so the only other way in is a status
+                # rewrite landing between the guard's read and pause_state_class's.
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
