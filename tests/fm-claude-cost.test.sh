@@ -162,7 +162,7 @@ test_json_mode_prints_the_raw_response() {
   pass "--json prints the exact pretty-printed usage response"
 }
 
-test_extra_usage_fallback_when_spend_is_absent() {
+test_extra_usage_fallback_when_spend_is_absent_or_disabled() {
   local dir out body
   dir=$(make_case extra-usage-fallback)
   body='{"spend":null,"extra_usage":{"is_enabled":true,"monthly_limit":50000,"used_credits":12345,"utilization":24.69,"currency":"USD","decimal_places":2}}'
@@ -170,7 +170,16 @@ test_extra_usage_fallback_when_spend_is_absent() {
     || fail "extra_usage fallback exited non-zero: $(cat "$dir/stderr")"
   [ "$out" = 'Claude Code extra usage: USD 123.45 of USD 500.00 (24%) - n/a' ] \
     || fail "extra_usage fallback summary did not match: $out"
-  pass "spend falls back to extra_usage when the spend object is absent"
+
+  # spend.enabled explicitly false, not merely absent. jq's // operator
+  # treats both null and false as absent, so a naive "spend.enabled // true"
+  # would misread this as enabled; this pins the != false fix that avoids that.
+  body='{"spend":{"enabled":false,"used":{"amount_minor":1,"currency":"USD","exponent":2},"limit":{"amount_minor":50000,"currency":"USD","exponent":2},"percent":0,"severity":"normal"},"extra_usage":{"is_enabled":true,"monthly_limit":50000,"used_credits":12345,"utilization":24.69,"currency":"USD","decimal_places":2}}'
+  out=$(FAKE_CURL_HTTP_CODE=200 FAKE_CURL_BODY="$body" run_script "$dir" 2>"$dir/stderr") \
+    || fail "extra_usage fallback with explicit spend.enabled=false exited non-zero: $(cat "$dir/stderr")"
+  [ "$out" = 'Claude Code extra usage: USD 123.45 of USD 500.00 (24%) - n/a' ] \
+    || fail "explicit spend.enabled=false did not fall back to extra_usage: $out"
+  pass "spend falls back to extra_usage when the spend object is absent, or present with enabled explicitly false"
 }
 
 test_disabled_extra_usage_is_reported_plainly() {
@@ -272,7 +281,7 @@ test_help_and_usage_errors_touch_nothing
 test_missing_or_malformed_credentials_are_refused
 test_successful_spend_report_and_token_never_leaks
 test_json_mode_prints_the_raw_response
-test_extra_usage_fallback_when_spend_is_absent
+test_extra_usage_fallback_when_spend_is_absent_or_disabled
 test_disabled_extra_usage_is_reported_plainly
 test_http_error_statuses_are_reported_distinctly
 test_malformed_response_and_network_failure_are_refused
