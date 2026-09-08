@@ -31,7 +31,7 @@ EOF
 # fm-spawn.sh actually writes for the task, so assertions observe behavior
 # rather than fm-spawn.sh's own source text.
 run_tool_surface_spawn() {
-  local id=$1 tools=$2 case_dir home proj wt fakebin launchlog
+  local id=$1 tools_line=$2 case_dir home proj wt fakebin launchlog
   case_dir="$TMP_ROOT/$id"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -40,7 +40,7 @@ run_tool_surface_spawn() {
   fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake")
   fm_test_spawn_home "$home" claude
   fm_git_worktree "$proj" "$wt" "wt-$id"
-  write_brief "$home" "$id" "$tools"
+  write_brief "$home" "$id" "$tools_line"
   : > "$launchlog"
   SPAWN_OUT=$(CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$launchlog" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" --mode no-mistakes --yolo off)

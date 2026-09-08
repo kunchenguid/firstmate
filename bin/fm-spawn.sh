@@ -3911,25 +3911,33 @@ fi
 
 # D6: build this task's MCP config from the brief's declared extras. Default
 # is the empty set; an unknown extra was already dropped by fm_brief_tools.
+# Scoped to non-secondmate claude launches, the only ones whose launch
+# template references __MCPCONFIG__ or --strict-mcp-config: a secondmate
+# keeps the full pre-D6 surface (comment above launch_template's claude case)
+# and a non-claude harness has no MCP-config flag at all, so parsing tools:
+# and reporting a "tool surface: minimal" verdict for either would describe a
+# capability set that launch never actually applies.
 MCP_CONFIG="$TASK_TMP/mcp.json"
-TOOLS_EXTRAS=$(fm_brief_tools "$BRIEF")
-{
-    printf '{"mcpServers":{'
-    sep=''
-    for extra in $TOOLS_EXTRAS; do
-        case "$extra" in
-            context7)
-                printf '%s"context7":{"command":"npx","args":["-y","@upstash/context7-mcp"]}' "$sep"
-                sep=',' ;;
-        esac
-    done
-    printf '}}'
-} > "$MCP_CONFIG"
-chmod 0600 "$MCP_CONFIG"
-if [ -n "$TOOLS_EXTRAS" ]; then
-    echo "tool surface: minimal + $TOOLS_EXTRAS"
-else
-    echo "tool surface: minimal (no MCP servers, no plugin skills)"
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+  TOOLS_EXTRAS=$(fm_brief_tools "$BRIEF")
+  {
+      printf '{"mcpServers":{'
+      sep=''
+      for extra in $TOOLS_EXTRAS; do
+          case "$extra" in
+              context7)
+                  printf '%s"context7":{"command":"npx","args":["-y","@upstash/context7-mcp"]}' "$sep"
+                  sep=',' ;;
+          esac
+      done
+      printf '}}'
+  } > "$MCP_CONFIG"
+  chmod 0600 "$MCP_CONFIG"
+  if [ -n "$TOOLS_EXTRAS" ]; then
+      echo "tool surface: minimal + $TOOLS_EXTRAS"
+  else
+      echo "tool surface: minimal (no MCP servers, no plugin skills)"
+  fi
 fi
 
 sq_brief=$(shell_quote "$BRIEF")
