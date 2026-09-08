@@ -28,7 +28,8 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 
 # Print the exact harness name carried by executable path $1 - its own basename
-# or any directory component - or return 1.
+# or any directory component - or return 1. With $2 given, only THAT harness is
+# considered, so a path carrying some other harness's name cannot answer for it.
 #
 # This exists because Claude Code's native installer names the per-session
 # executable by its version (~/.local/share/claude/versions/2.1.220), so the
@@ -36,14 +37,62 @@ FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 # whole path components only is what keeps that widening safe: an ordinary path
 # such as bin/fm-claude-stop-autoarm.sh or ~/.claude/hooks/notify.sh has no
 # "claude" component and is correctly not a harness process.
-fm_harness_path_name() {  # <path>
-  local path=$1 name
+fm_harness_path_name() {  # <path> [only-this-harness]
+  local path=$1 wanted=${2:-} name
   [ -n "$path" ] || return 1
   for name in "${FM_HARNESS_NAMES[@]}"; do
+    [ -z "$wanted" ] || [ "$name" = "$wanted" ] || continue
     case "/$path/" in
       */"$name"/*) printf '%s' "$name"; return 0 ;;
     esac
   done
+  return 1
+}
+
+# Print the FM_HARNESS_RE alternative that names harness $1 - anchors included -
+# or return 1 when the tables above cannot name that harness at all. Derived
+# from FM_HARNESS_RE itself rather than restating it, so the per-name and
+# whole-table views can never disagree, and it doubles as the fleet's answer to
+# "is this a harness whose processes can be identified?".
+fm_harness_name_pattern() {  # <harness>
+  local harness=${1:-} alt stripped
+  [ -n "$harness" ] || return 1
+  local IFS='|'
+  for alt in $FM_HARNESS_RE; do
+    stripped=${alt#^}
+    stripped=${stripped%$}
+    [ "$stripped" = "$harness" ] || continue
+    printf '%s' "$alt"
+    return 0
+  done
+  return 1
+}
+
+# True when the process described by command name <comm> and full argument
+# string <args> is the NAMED harness. Same evidence and same tables as
+# fm_harness_process_matches, which stays the "is this ANY harness" owner:
+#   1. the basename of the reported command name,
+#   2. an exact harness component in that command path or in argv[0],
+#   3. a bare interpreter (node, python) running that harness's script path -
+#      how an npm-installed Claude Code (`node .../@anthropic-ai/claude-code/
+#      cli.js`) is identified, since neither its comm nor its argv[0] carries a
+#      `claude` path component.
+# Every witness is asked about the harness in question, so a witness naming some
+# OTHER harness can never short-circuit the rest.
+fm_harness_process_is() {  # <harness> <comm> <args>
+  local harness=${1:-} comm=${2:-} args=${3:-} re argv0
+  re=$(fm_harness_name_pattern "$harness") || return 1
+  if printf '%s' "$(basename -- "$comm")" | grep -qE "$re"; then
+    return 0
+  fi
+  argv0=${args%% *}
+  fm_harness_path_name "$comm" "$harness" >/dev/null && return 0
+  fm_harness_path_name "$argv0" "$harness" >/dev/null && return 0
+  case "$comm" in
+    *node*|*python*)
+      printf '%s' "$args" | grep -qE "$re" && return 0
+      ;;
+  esac
   return 1
 }
 

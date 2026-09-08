@@ -30,7 +30,9 @@
 #      before any endpoint read or terminal input, so an exit/relaunch cannot
 #      expose its nested shell to a concurrent ring - and that deferral spends
 #      no re-ring budget, so a bounded lifecycle action cannot escalate a
-#      healthy steer into recovery.
+#      healthy steer into recovery. A holder that outlives the bounded deferral
+#      horizon surfaces the steer once as a stale wake while keeping it
+#      deliverable, so an unreleasable lock cannot suppress it forever.
 #   8. An idempotent enqueue that dedups onto an already acknowledged record
 #      rings as delivered rather than as a transport failure.
 set -u
@@ -749,9 +751,12 @@ test_watcher_lifecycle_deferral_spends_no_ring_budget() {
   holder=$!
   mkdir -p "$state/.control-t1.lock"
   printf '%s\n' "$holder" > "$state/.control-t1.lock/pid"
+  # A horizon far beyond this hold: the bounded lifecycle action under test is
+  # exactly the case the deferral must absorb silently. The unbounded holder has
+  # its own case below.
   watch_bg "$state" "$dir/fakebin" "$out" \
     FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
-    FM_TASK_INBOX_RING_MAX=1
+    FM_TASK_INBOX_RING_MAX=1 FM_TASK_INBOX_DEFER_HORIZON_SECS=600
   pid=$!
   sleep 5
   kill -0 "$pid" 2>/dev/null || {
@@ -788,6 +793,74 @@ test_watcher_lifecycle_deferral_spends_no_ring_budget() {
   [ ! -s "$state/.wake-queue" ] \
     || fail "the released re-ring queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
   pass "watcher: a lifecycle-held control lock defers the doorbell without spending its re-ring budget"
+}
+
+# The holder is not always bounded: a leaked control lock whose recorded pid was
+# recycled onto an unrelated live process is never stolen, so deferrals would
+# otherwise repeat forever and the steer would never be delivered NOR surfaced.
+# Past the horizon the watcher surfaces it exactly once - without spending ring
+# budget and without marking the record escalated - so recovery sees it and the
+# ordinary doorbell still rings if the lock is ever released.
+test_watcher_lifecycle_deferral_horizon_surfaces_once_and_keeps_the_steer() {
+  local dir state out log pid rec holder wakes action
+  dir=$(setup_watch_case lifecycle-horizon)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  # A live pid that will never release the lock, exactly as a recycled pid on an
+  # unrelated long-lived process behaves for fm_lock_try_acquire.
+  sleep 120 &
+  holder=$!
+  mkdir -p "$state/.control-t1.lock"
+  printf '%s\n' "$holder" > "$state/.control-t1.lock/pid"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_TASK_INBOX_RING_MAX=1 FM_TASK_INBOX_DEFER_HORIZON_SECS=2
+  pid=$!
+  wait_watcher_gone "$pid" 200 || {
+    kill "$pid" "$holder" 2>/dev/null
+    fail "an unreleasable lifecycle lock suppressed the steer forever:"$'\n'"$(cat "$out")"
+  }
+  [ ! -s "$log" ] || {
+    kill "$holder" 2>/dev/null
+    fail "a lifecycle-owned task was typed into:"$'\n'"$(cat "$log")"
+  }
+  wakes=$(grep -cF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null || true)
+  [ "$wakes" = 1 ] || {
+    kill "$holder" 2>/dev/null
+    fail "the spent horizon should queue exactly one stale wake, got $wakes:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  }
+  grep -qF 'lifecycle action has owned task t1' "$state/.wake-queue" || {
+    kill "$holder" 2>/dev/null
+    fail "the stale wake should name the stuck lifecycle action:"$'\n'"$(cat "$state/.wake-queue")"
+  }
+  grep -qF "$rec" "$state/.wake-queue" || {
+    kill "$holder" 2>/dev/null
+    fail "the stale wake should name the record path:"$'\n'"$(cat "$state/.wake-queue")"
+  }
+  [ ! -e "$state/t1.inbox/.ring-state" ] || {
+    kill "$holder" 2>/dev/null
+    fail "surfacing a lifecycle deferral consumed re-ring budget:"$'\n'"$(cat "$state/t1.inbox/.ring-state")"
+  }
+  [ ! -e "$state/t1.inbox/.escalated" ] || {
+    kill "$holder" 2>/dev/null
+    fail "surfacing a lifecycle deferral must not silence the still-pending steer"
+  }
+  [ -f "$rec" ] || { kill "$holder" 2>/dev/null; fail "the durable record must survive for delivery and recovery"; }
+  # Still deliverable: with the lock released the ladder is due to ring, and the
+  # doorbell is typed exactly as it would have been before the horizon.
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  rm -rf "$state/.control-t1.lock"
+  action=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "ring $rec" ] \
+    || fail "a surfaced lifecycle deferral silenced the still-pending steer: due action is '$action'"
+  : > "$log"
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 \
+    || fail "the released doorbell did not ring after its deferral was surfaced"
+  grep -qF 'Firstmate instruction waiting' "$log" \
+    || fail "the released steer was never typed:"$'\n'"$(cat "$log")"
+  pass "watcher: an unreleasable lifecycle lock surfaces the steer once and still delivers it when released"
 }
 
 test_watcher_dead_pane_ignores_stale_busy_state() {
@@ -835,3 +908,4 @@ test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state
 test_watcher_lifecycle_deferral_spends_no_ring_budget
+test_watcher_lifecycle_deferral_horizon_surfaces_once_and_keeps_the_steer

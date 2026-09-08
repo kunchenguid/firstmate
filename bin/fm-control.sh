@@ -1021,28 +1021,29 @@ wait_new_herdr_pi_authority() {  # <prior-session-ref>
   return 1
 }
 
-# True when the fleet's exact harness-name owner (bin/fm-session-lock-lib.sh)
-# can recognize <harness> in a process path, which is what the non-Pi
-# replacement proof below reads. Asking that owner rather than growing a second
-# harness-name table here is what keeps the two from disagreeing; an adapter it
-# cannot name positively is ambiguity, and the caller refuses.
+# True when the fleet's harness-process identity owner
+# (bin/fm-session-lock-lib.sh) can name <harness> at all, which is the exact
+# precondition for the non-Pi replacement proof below being able to answer.
+# Asking that owner rather than growing a second harness-name table here is what
+# keeps the two from disagreeing, and asking it for the SAME capability the
+# proof uses is what keeps this pre-launch gate from admitting a target the
+# post-launch proof could never read; an adapter it cannot name positively is
+# ambiguity, and the caller refuses.
 control_herdr_target_engine_nameable() {  # <harness>
-  local harness=${1:-} name
+  local harness=${1:-}
   [ -n "$harness" ] || return 1
-  name=$(fm_harness_path_name "$harness" 2>/dev/null) || return 1
-  [ "$name" = "$harness" ]
+  fm_harness_name_pattern "$harness" >/dev/null 2>&1
 }
 
-# True when the process described by <comm>/<argv0> is the named harness,
-# asking the same single owner control_herdr_target_engine_nameable asks. Pi
-# is not routed through here: it keeps its own vocabulary above, because the
-# launcher and the signed wrapper both name a running Pi.
-control_herdr_process_names_harness() {  # <harness> <comm> <argv0>
-  local harness=${1:-} comm=${2:-} argv0=${3:-} name
-  name=$(fm_harness_path_name "$comm" 2>/dev/null) \
-    || name=$(fm_harness_path_name "$argv0" 2>/dev/null) \
-    || return 1
-  [ "$name" = "$harness" ]
+# True when the process described by <comm> and its full <args> is the named
+# harness, decided by the fleet's single owner of that question so this proof
+# recognizes exactly what the rest of the fleet does - a version-named native
+# install, a macOS-truncated comm answered by argv[0], and an npm-installed
+# Claude Code running under a bare `node`. Pi is not routed through here: it
+# keeps its own vocabulary above, because the launcher and the signed wrapper
+# both name a running Pi.
+control_herdr_process_names_harness() {  # <harness> <comm> <args>
+  fm_harness_process_is "${1:-}" "${2:-}" "${3:-}"
 }
 
 # One sample of a NON-Pi replacement running in the task's own endpoint after a
@@ -1054,7 +1055,7 @@ control_herdr_process_names_harness() {  # <harness> <comm> <argv0>
 # engine left anywhere under it. Prints a stable fingerprint on success.
 control_herdr_target_engine_snapshot() {  # <target-harness>
   local harness=${1:-} session workspace tab pane wt_real pane_json pane_cwd process_json shell_pid
-  local ps_bin rows descendants pid ppid comm argv0 target_pids=' ' target_rows='' root_pid='' roots=0
+  local ps_bin rows descendants pid ppid comm argv0 args target_pids=' ' target_rows='' root_pid='' roots=0
   [ -n "$harness" ] || return 1
   control_herdr_target_engine_nameable "$harness" || return 1
   session=$(fm_backend_meta_exact_value "$META" herdr_session) || return 1
@@ -1097,6 +1098,11 @@ control_herdr_target_engine_snapshot() {  # <target-harness>
       state[$1] = $4
       command[$1] = $5
       argv0[$1] = (NF >= 6 ? $6 : "")
+      # The whole argument string, rejoined, so the identity owner can read the
+      # script path of a bare interpreter the way it does everywhere else.
+      full = ""
+      for (i = 6; i <= NF; i++) full = (full == "" ? $i : full " " $i)
+      args[$1] = full
       present[$1] = 1
     }
     END {
@@ -1111,18 +1117,18 @@ control_herdr_target_engine_snapshot() {  # <target-harness>
       } while (changed)
       for (pid in owned) {
         if (owned[pid] != 1 || pid == shell || state[pid] ~ /^Z/) continue
-        printf "%s\t%s\t%s\t%s\n", pid, parent[pid], command[pid], argv0[pid]
+        printf "%s\t%s\t%s\t%s\t%s\n", pid, parent[pid], command[pid], argv0[pid], args[pid]
       }
     }
   ') || return 1
 
-  while IFS=$'\t' read -r pid ppid comm argv0; do
+  while IFS=$'\t' read -r pid ppid comm argv0 args; do
     [ -n "$pid" ] || continue
     if control_herdr_pi_engine_process_name "$comm" \
        || { [ -n "$argv0" ] && control_herdr_pi_engine_process_name "$argv0"; }; then
       return 1
     fi
-    if control_herdr_process_names_harness "$harness" "$comm" "$argv0"; then
+    if control_herdr_process_names_harness "$harness" "$comm" "$args"; then
       target_pids="$target_pids$pid "
       target_rows="$target_rows$pid $ppid"$'\n'
     fi

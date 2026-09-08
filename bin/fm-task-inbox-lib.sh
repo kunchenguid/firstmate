@@ -27,7 +27,10 @@
 # lifecycle action already holding that lock defers the ring WITHOUT consuming
 # re-ring budget: nothing was typed and nothing about the worker was observed,
 # so a bounded exit or relaunch can never spend a healthy steer's ladder and
-# hand it to recovery.
+# hand it to recovery. That deferral is itself BOUNDED by its own durable
+# horizon, because the holder is not always bounded - a leaked lock directory
+# whose recorded pid was recycled onto an unrelated live process is never
+# stolen - and a steer that can never be delivered must still reach recovery.
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
@@ -35,6 +38,8 @@
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
 #   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
+#   <task>.inbox/.defer-state  lifecycle-deferral horizon, held OUTSIDE the
+#                              ladder: "<msg>\t<first-defer-epoch>\t<escalated|>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
 #
@@ -65,6 +70,15 @@
 # crash or marker failure may produce a rare duplicate rather than silently lose
 # a wake.
 #
+# Lifecycle-deferral horizon (fm_task_inbox_defer_action): a ring the task's
+# lifecycle lock deferred spends no ladder budget, so it needs its own bound.
+# The first deferral of a message records an epoch, and once deferrals have
+# spanned FM_TASK_INBOX_DEFER_HORIZON_SECS the caller surfaces the record as an
+# ordinary stale wake exactly once, under the same wake-before-marker ordering.
+# That escalation deliberately writes no `.escalated` marker: unlike a dead
+# endpoint, this worker was never read at all, so the steer stays pending and is
+# rung normally on the first poll after the lifecycle lock is released.
+#
 # Inbox paths containing bytes outside printable ASCII are unsupported. The
 # doorbell refuses them rather than sending terminal control bytes to a pane.
 #
@@ -75,6 +89,8 @@
 # Tunables (env):
 #   FM_TASK_INBOX_GRACE_SECS   default 90; delivery-attempt grace and spacing
 #   FM_TASK_INBOX_RING_MAX     default 3; delivery attempts before escalation
+#   FM_TASK_INBOX_DEFER_HORIZON_SECS  default grace * (ring max + 2); how long
+#                              lifecycle deferrals may span before one stale wake
 
 _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Both dependencies are canonical lint roots in their own right. Keep them as
@@ -100,6 +116,18 @@ fm_task_inbox_ring_max() {
   local m=${FM_TASK_INBOX_RING_MAX:-$FM_TASK_INBOX_RING_MAX_DEFAULT}
   case "$m" in ''|*[!0-9]*) m=$FM_TASK_INBOX_RING_MAX_DEFAULT ;; esac
   printf '%s' "$m"
+}
+
+# How long lifecycle deferrals may span before the caller surfaces the steer.
+# Derived from the ordinary ladder - one full ladder plus a grace - so a home
+# that retunes the ladder retunes this with it, and so the horizon always sits
+# beyond the longest bounded exit or relaunch the ladder itself would tolerate.
+fm_task_inbox_defer_horizon_secs() {
+  local h=${FM_TASK_INBOX_DEFER_HORIZON_SECS:-}
+  case "$h" in
+    ''|*[!0-9]*) h=$(( $(fm_task_inbox_grace_secs) * ($(fm_task_inbox_ring_max) + 2) )) ;;
+  esac
+  printf '%s' "$h"
 }
 
 fm_task_inbox_dir() {  # <state-dir> <task-id>
@@ -397,7 +425,7 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   local dir oldest base now grace max ladder rec_base count last
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
-    rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
+    rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.defer-state" 2>/dev/null || true
     printf 'quiet'
     return 0
   fi
@@ -420,7 +448,7 @@ EOF
     # a marker naming some other message).
     count=0
     last=0
-    rm -f "$dir/.escalated" 2>/dev/null || true
+    rm -f "$dir/.escalated" "$dir/.defer-state" 2>/dev/null || true
   fi
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
@@ -461,6 +489,66 @@ EOF
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   [ -d "$dir" ] || return 0
   if ! { printf '%s\t%s\t%s\n' "$base" "$((count + 1))" "$(date +%s)" > "$dir/.ring-state"; } 2>/dev/null; then
+    [ -d "$dir" ] || return 0
+    return 1
+  fi
+  # An attempt reached the endpoint, so no lifecycle deferral is outstanding.
+  rm -f "$dir/.defer-state" 2>/dev/null || true
+}
+
+# Record one lifecycle deferral (a ring the task's control lock refused) and
+# report whether its bounded horizon is now spent. Prints exactly one of:
+#   wait       inside the horizon, or already surfaced once for this message
+#   escalate   the horizon is spent and this is the first poll to see that
+# Failure means the horizon itself could not be persisted while the record
+# stays unhandled - the deferral cannot be bounded - and the caller surfaces
+# that instead of deferring silently forever; a concurrently removed inbox is a
+# quiet no-op. This never touches the re-ring ladder: nothing was typed and
+# nothing about the worker was read.
+fm_task_inbox_defer_action() {  # <state-dir> <task-id> <record-path>
+  local dir base line rec_base first flag now horizon
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  base=${3##*/}
+  now=$(date +%s)
+  line=$(cat "$dir/.defer-state" 2>/dev/null || true)
+  IFS=$(printf '\t') read -r rec_base first flag <<EOF
+$line
+EOF
+  case "$first" in ''|*[!0-9]*) first=0 ;; esac
+  if [ "$rec_base" != "$base" ] || [ "$first" -eq 0 ]; then
+    first=$now
+    flag=
+    [ -d "$dir" ] || { printf 'wait'; return 0; }
+    if ! { printf '%s\t%s\t%s\n' "$base" "$first" "" > "$dir/.defer-state"; } 2>/dev/null; then
+      [ -d "$dir" ] || { printf 'wait'; return 0; }
+      return 1
+    fi
+  fi
+  horizon=$(fm_task_inbox_defer_horizon_secs)
+  if [ "$flag" != escalated ] && [ "$((now - first))" -ge "$horizon" ]; then
+    printf 'escalate'
+    return 0
+  fi
+  printf 'wait'
+}
+
+# Mark this message's lifecycle deferral as surfaced, after its stale wake is
+# durably queued, so later deferrals of the same message stay quiet. The
+# message itself is deliberately NOT marked escalated: it was never delivered
+# and never read, so the ordinary ladder must still ring it once control
+# releases.
+fm_task_inbox_record_defer_escalated() {  # <state-dir> <task-id> <record-path>
+  local dir base line rec_base first _
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  base=${3##*/}
+  line=$(cat "$dir/.defer-state" 2>/dev/null || true)
+  IFS=$(printf '\t') read -r rec_base first _ <<EOF
+$line
+EOF
+  case "$first" in ''|*[!0-9]*) first=0 ;; esac
+  [ "$rec_base" = "$base" ] && [ "$first" -gt 0 ] || first=$(date +%s)
+  [ -d "$dir" ] || return 0
+  if ! { printf '%s\t%s\t%s\n' "$base" "$first" escalated > "$dir/.defer-state"; } 2>/dev/null; then
     [ -d "$dir" ] || return 0
     return 1
   fi

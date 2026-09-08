@@ -134,6 +134,44 @@ SH
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
 }
 
+# The named-harness question ("is THIS process that harness?") is answered from
+# the same evidence and the same tables as the boolean one, so a caller that has
+# to prove a specific runtime started - fm-control's replacement proof - can
+# never recognize less than the fleet does.
+test_named_harness_identity_reads_every_witness() {
+  local dir fakebin case_line expect harness comm args
+  dir="$TMP_ROOT/named-identity"
+  fakebin=$(fm_fakebin "$dir")
+  # An npm-installed Claude Code is a bare `node`: its comm and argv[0] are the
+  # interpreter and `claude-code` is not a `claude` path component, so only the
+  # interpreter witness can name it.
+  while IFS='|' read -r expect harness comm args; do
+    [ -n "$expect" ] || continue
+    if lib_eval "$fakebin" "fm_harness_process_is '$harness' '$comm' '$args'"; then
+      [ "$expect" = yes ] || fail "'$comm' ($args) must not be identified as $harness"
+    else
+      [ "$expect" = no ] || fail "$harness was not identified from comm '$comm' args '$args'"
+    fi
+  done <<'EOF'
+yes|claude|node|/usr/local/bin/node /home/u/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
+no|codex|node|/usr/local/bin/node /home/u/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
+yes|claude|/opt/homebrew/bi|/opt/homebrew/bin/claude --resume
+yes|claude|2.1.220|/home/u/.local/share/claude/versions/2.1.220 --resume
+yes|codex|codex|/usr/local/bin/codex
+yes|pi|pi|pi
+no|pi|pi-signed|pi-signed
+no|claude|node|/usr/bin/node /srv/app/index.js
+no|claude|bash|/home/u/.claude/hooks/notify.sh --quiet
+no|muse|muse|/usr/local/bin/muse
+EOF
+  # A witness that resolves to some OTHER harness must not short-circuit the
+  # rest: here the reported command path names one harness while argv[0] - the
+  # witness Linux leaves out of `comm` entirely - names the one being proved.
+  lib_eval "$fakebin" "fm_harness_process_is codex /opt/opencode/libexec/launcher '/usr/local/bin/codex --resume'" \
+    || fail "a comm naming a different harness suppressed the argv[0] witness"
+  pass "session-lock: the named-harness identity reads command, path, argv[0], and interpreter witnesses"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -358,6 +396,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
+test_named_harness_identity_reads_every_witness
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home

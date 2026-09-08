@@ -357,6 +357,27 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
   wake "$reason"
 }
 
+# A lifecycle action has owned the task past the bounded deferral horizon, so
+# the steer has never been typed and never will be until that action releases.
+# Surface it once for stuck-crewmate-recovery, keeping the record deliverable:
+# the doorbell was never attempted, so the re-ring ladder and the `.escalated`
+# marker both stay untouched and the ordinary ring resumes on the first poll
+# after the lock is released.
+inbox_steer_escalate_deferred() {  # <window> <task> <record>
+  local w=$1 task=$2 rec=$3 reason
+  reason="stale: $w (unread firstmate instruction: $rec is unhandled and a lifecycle action has owned task $task for more than $(fm_task_inbox_defer_horizon_secs)s, so the doorbell has never been typed; release or clear the stuck lifecycle action - $STATE/.control-$task.lock names its owner)"
+  if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
+    fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+    return 0
+  fi
+  fm_wake_append stale "$w" "$reason" || exit 1
+  if ! fm_task_inbox_record_defer_escalated "$STATE" "$task" "$rec"; then
+    echo "error: a stale wake was queued for $task but its lifecycle-deferral marker could not be written" >&2
+    exit 1
+  fi
+  wake "$reason"
+}
+
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
 # Quiet when healthy: an absent, empty, or handled inbox costs one directory
 # glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
@@ -374,7 +395,7 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
+  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state defer_action
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -410,8 +431,23 @@ inbox_steer_check() {  # <window> <task>
       # about the worker was read. Leave the ladder untouched - an exit or
       # relaunch holding the control lock across several polls must not spend
       # a healthy steer's budget and escalate it into recovery - and re-ring on
-      # the next poll after that action releases.
+      # the next poll after that action releases. The deferral has its own
+      # durable horizon (the policy owner is bin/fm-task-inbox-lib.sh) because
+      # the holder need not be bounded: a lock nothing will ever release would
+      # otherwise suppress a healthy steer forever with no wake at all.
       if [ "$ring_rc" -eq 4 ]; then
+        if ! defer_action=$(fm_task_inbox_defer_action "$STATE" "$task" "$rec"); then
+          if [ -f "$rec" ] && [ -d "${rec%/*}" ]; then
+            reason="stale: $w (steering-inbox lifecycle-deferral bookkeeping unwritable: ${rec%/*}/.defer-state cannot be written while $rec stays unhandled and a lifecycle action owns the task, so the deferral cannot be bounded - inspect the inbox directory)"
+            fm_wake_append stale "$w" "$reason" || exit 1
+            wake "$reason"
+          fi
+          return 0
+        fi
+        if [ "$defer_action" = escalate ]; then
+          inbox_steer_escalate_deferred "$w" "$task" "$rec"
+          return 0
+        fi
         triage_log "steer-inbox delivery deferred (lifecycle control owns the task): $task ${rec##*/}"
         return 0
       fi

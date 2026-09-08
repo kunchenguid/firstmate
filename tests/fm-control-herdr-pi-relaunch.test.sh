@@ -269,6 +269,16 @@ EOF
 303 202 303 S zsh /bin/zsh
 404 303 404 S codex /usr/local/bin/codex
 EOF
+  elif [ "$phase" = new ] && [ "$scenario" = cross-target-npm ]; then
+    # An npm-installed Claude Code: the engine is a bare `node` whose only
+    # harness evidence is the script path in its arguments, and `claude-code`
+    # is not a `claude` path component.
+    cat <<'EOF'
+101 1 101 S zsh -zsh
+202 101 202 S treehouse treehouse get
+303 202 303 S zsh /bin/zsh
+404 303 404 S node /usr/local/bin/node /home/fixture/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js
+EOF
   elif [ "$phase" = new ] && [ "$scenario" = cross-target-nested ]; then
     cat <<'EOF'
 101 1 101 S zsh -zsh
@@ -412,7 +422,14 @@ node --input-type=module - "$ext" <<'JS' || exit 2
 import { pathToFileURL } from "node:url";
 const extensionPath = process.argv[2];
 const extension = await import(pathToFileURL(extensionPath).href);
-await extension.default({ on() {} });
+const handlers = {};
+// Pi's extension host registers the handlers and starts the run; it does not
+// await the module's default export. Firing the launch prompt's own first
+// lifecycle event immediately, then awaiting only that event, is what measures
+// whether a replacement's startup events are DEFERRED by the stale-authority
+// settle or dropped by it.
+extension.default({ on: (name, fn) => { handlers[name] = fn; } });
+await handlers.agent_start({}, {});
 JS
 python3 - "$started" "$FM_FAKE_PI_ELAPSED" "$FM_FAKE_PI_SETTLED" <<'PY'
 from pathlib import Path
@@ -428,6 +445,11 @@ SH
   cp "$fb/pi" "$fb/pi-signed"
   cp "$fb/pi" "$fb/codex"
   cp "$fb/pi" "$fb/muse"
+  cat > "$fb/claude" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fb/claude"
 }
 
 new_case() {  # <name> <scenario> [harness]
@@ -613,7 +635,12 @@ rc=$?
 expect_code 0 "$rc" "replacement lifecycle reports should wait for process detection"$'\n'"$out"
 [ -s "$dir/pi-settled" ] || fail "the generated Pi extension emitted lifecycle events before the replacement process generation could settle"
 [ "$(cat "$dir/herdr-state")" = new ] || fail "the process-generation fixture never accepted the replacement authority"
-pass "fm-control Herdr/Pi: replacement process detection precedes lifecycle reports after stale authority release"
+# Held, not dropped: the launch prompt's agent_start was fired at startup by a
+# host that never awaited the extension module, and it still reached the real
+# busy-state writer (state/<id>.busy-state is that writer's serialized record).
+grep -q 'source=pi-ext' "$dir/home/state/rp1.busy-state" \
+  || fail "the replacement's first lifecycle event never reached the busy-state writer:"$'\n'"$(cat "$dir/home/state/rp1.busy-state" 2>/dev/null)"
+pass "fm-control Herdr/Pi: replacement process detection precedes lifecycle reports after stale authority release, which are deferred rather than dropped"
 
 # pi-signed retains its wrapper while the Pi engine runs below it. The same
 # recovery accepts exactly one wrapper plus exactly one engine, not one of each
@@ -663,6 +690,20 @@ rc=$?
 expect_code 0 "$rc" "a target runtime's own nested worker chain is one replacement"$'\n'"$out"
 assert_contains "$out" 'relaunched rp1 harness=codex from=pi' "the nested-chain replacement was not accepted"
 pass "fm-control Herdr/Pi: a cross-runtime replacement is proved from the target runtime's own processes, nested chain included"
+
+# The target runtime need not be its own executable: an npm-installed Claude
+# Code runs as a bare `node` whose script path is the only harness evidence, and
+# `claude-code` is not a `claude` path component. The proof reads the fleet's
+# own process identity, so this replacement is verifiable - and the pre-launch
+# gate admits exactly what that proof can read, never more.
+dir=$(new_case cross-runtime-npm-interpreter cross-target-npm pi)
+out=$(run_control "$dir" rp1 relaunch --harness claude --note 'resume on an npm-installed runtime')
+rc=$?
+expect_code 0 "$rc" "an interpreter-hosted target runtime should relaunch"$'\n'"$out"
+assert_contains "$out" 'relaunched rp1 harness=claude from=pi' "the interpreter-hosted relaunch did not retarget the adapter"
+assert_contains "$(cat "$dir/home/state/rp1.control-relaunch")" 'herdr_pi_authority=released-target-engine' \
+  "the completed transaction did not record which proof accepted the replacement"
+pass "fm-control Herdr/Pi: a replacement the fleet identifies only by its interpreter script path is proved, not refused after launch"
 
 # The regression this proof exists for: nothing started, but Herdr still
 # reports the released Pi label as `alive`. Reporting that as a relaunch would

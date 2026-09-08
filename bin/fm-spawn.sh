@@ -3474,17 +3474,25 @@ import { execFile } from "node:child_process";
 // and healthy relaunches stay unchanged. The final control postcondition still
 // requires a distinct stable authority and exactly one Pi engine.
 const herdrPiReplacementSettleMs = $((RELAUNCH_RELEASED_HERDR_PI * 1000));
+// The settle gates the EVENT BODY, never registration: the handlers below are
+// installed synchronously, so a host that does not await this module's default
+// export still delivers the replacement's first events - the launch prompt's
+// own agent_start included - deferred until the settle, never dropped.
+const herdrPiReplacementSettled: Promise<void> =
+  herdrPiReplacementSettleMs > 0
+    ? new Promise<void>((resolve) => setTimeout(resolve, herdrPiReplacementSettleMs))
+    : Promise.resolve();
 const busyEvent = (state: string, event: string) =>
-  new Promise<void>((resolve) => {
-    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
-      "apply", "$STATE_REAL", "$ID", state,
-      "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
-    ], () => resolve());
-  });
-export default async function (pi: any) {
-  if (herdrPiReplacementSettleMs > 0) {
-    await new Promise((resolve) => setTimeout(resolve, herdrPiReplacementSettleMs));
-  }
+  herdrPiReplacementSettled.then(
+    () =>
+      new Promise<void>((resolve) => {
+        execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+          "apply", "$STATE_REAL", "$ID", state,
+          "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
+        ], () => resolve());
+      }),
+  );
+export default function (pi: any) {
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
