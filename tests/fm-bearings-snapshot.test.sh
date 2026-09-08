@@ -3480,6 +3480,107 @@ SH
   pass "both homes require a declared wait, retain exited deliveries, and preserve superseding states and diagnostics"
 }
 
+test_failed_lookup_preserves_unresolved_decisions() {
+  local home parent fakebin out ledger
+  home=$(make_home lookup-decision)
+  make_valid_secondmate_home lookup-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/projects/lookup-task"
+  fm_git_init_commit "$home/projects/lookup-task"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = 'axi status' ] || exit 0
+[ "${FM_TEST_RUN_RECOVERED:-0}" = 1 ] || exit 1
+printf 'branch: %s\nhead: %s\nstatus: running\n' \
+  "$(git symbolic-ref --quiet --short HEAD)" "$(git rev-parse HEAD)"
+SH
+  printf '## In flight\n- [ ] lookup-task - Review decision (repo: firstmate) (kind: ship) (since 2026-07-01)\n\n## Queued\n\n## Done\n' \
+    > "$home/data/backlog.md"
+  fm_write_meta "$home/state/lookup-task.meta" "window=firstmate:dead-lookup-task" \
+    "worktree=$home/projects/lookup-task" "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+  printf 'needs-decision [key=review]: resolve the review gate\n' > "$home/state/lookup-task.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "lookup decision snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "lookup-task")
+    | .current_state.state == "unknown" and .current_state.source == "run-step"
+      and .hints.pending_decision == true
+      and [.hints.open_decisions[].key] == ["review"]
+  ' >/dev/null || fail "a failed lookup cleared the unresolved decision: $out"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "lookup decision ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    .counts.decisions_open == 1
+      and [.decisions_open[] | {id,key,verb}] == [{id:"lookup-task",key:"review",verb:"needs-decision"}]
+  ' >/dev/null || fail "the home ledger lost the decision during a lookup failure: $ledger"
+  parent=$(make_home lookup-decision-parent)
+  append_secondmate_registry "$parent" lookup-mate "$home"
+  fm_write_secondmate_meta "$parent/state/lookup-mate.meta" "$home" "firstmate:fm-lookup-mate" firstmate
+  printf 'needs-decision [key=review]: resolve the review gate\n' > "$parent/state/lookup-mate.status"
+  PATH="$fakebin:$PATH" refresh_local_secondmate_ledgers "$parent"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$parent" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "parent decision snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.records[] | select(.id == "lookup-mate")
+    | .parent_event.reconciliation.decisions
+    | any(.key == "review" and .verdict == "corroborates")
+  ' >/dev/null || fail "a failed lookup contradicted the parent decision notification: $out"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_TEST_RUN_RECOVERED=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "recovered run snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "lookup-task")
+    | .current_state.state == "working" and .hints.open_decisions == []
+  ' >/dev/null || fail "verified resumed work did not clear the superseded decision: $out"
+  pass "lookup failures preserve keyed decisions and parent evidence until verified work resumes"
+}
+
+test_overdue_deliveries_exceed_both_presentation_bounds() {
+  local home parent fakebin id age out ledger threshold
+  home=$(make_home overdue-overflow)
+  make_valid_secondmate_home overdue-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in overdue-1 overdue-2 overdue-3 overdue-4 young-1 young-2; do
+    age=8
+    case "$id" in young-*) age=1 ;; esac
+    printf -- '- [ ] %s - Delivered work (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes" "pr=https://github.com/acme/repo/pull/2"
+    record_claude_state "$home/state" "$id" idle
+    printf 'paused: waiting on maintainer\n' > "$home/state/$id.status"
+    arm_merge_poll "$home" "$id" https://github.com/acme/repo/pull/2 \
+      $((BEARINGS_FIXTURE_EPOCH - age * 86400))
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  out=$(FM_BEARINGS_AWAITING=2 run "$home" "$fakebin" --json) || fail "overdue main snapshot failed"
+  printf '%s' "$out" | jq -e '
+    [.awaiting[].id] == ["overdue-1", "overdue-2", "overdue-3", "overdue-4"]
+      and all(.awaiting[]; .nudge and .age_days == 8)
+      and (.omitted | any(.surface == "awaiting showing 4 of 6"))
+  ' >/dev/null || fail "the main bound hid an overdue delivery or misreported truncation: $out"
+  parent=$(make_home overdue-overflow-parent)
+  append_secondmate_registry "$parent" overdue-mate "$home"
+  fm_write_secondmate_meta "$parent/state/overdue-mate.meta" "$home" "firstmate:fm-overdue-mate" firstmate
+  for threshold in 7 30; do
+    ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+      FM_BEARINGS_AWAITING_NUDGE_DAYS=$threshold FM_SNAPSHOT_SECONDMATE_CHILDREN=2 \
+      "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "overdue ledger failed"
+    printf '%s' "$ledger" | jq -e --argjson threshold "$threshold" '
+      (if $threshold == 7 then 4 else 2 end) as $shown
+      | (.awaiting_merge | length) == $shown and .counts.awaiting_merge == 6
+        and (.omitted | any(.surface == "awaiting_merge" and .count == (6 - $shown)))
+    ' >/dev/null || fail "the home bound did not preserve overdue deliveries at its configured threshold: $ledger"
+    out=$(FM_BEARINGS_AWAITING_NUDGE_DAYS=$threshold FM_SNAPSHOT_SECONDMATE_CHILDREN=2 \
+      FM_BEARINGS_AWAITING=2 run "$parent" "$fakebin" --json) || fail "overdue parent snapshot failed"
+    printf '%s' "$out" | jq -e --argjson threshold "$threshold" '
+      (if $threshold == 7 then 4 else 2 end) as $shown
+      | (.awaiting | length) == $shown and all(.awaiting[]; .nudge == ($threshold == 7))
+        and (.omitted | any(.surface == ("secondmate overdue-mate delivered rows omitted by snapshot bound: " + ((6 - $shown) | tostring))))
+        and (.omitted | any(.surface | startswith("awaiting showing")) | not)
+    ' >/dev/null || fail "the parent bound lost nudges or misreported snapshot truncation: $out"
+  done
+  pass "both delivery bounds retain every overdue row and disclose only younger omissions"
+}
+
 test_a_parked_delivery_does_not_make_its_secondmate_home_working() {
   local parent mate fakebin ledger out
   parent=$(make_home parked-delivery-parent)
@@ -3515,12 +3616,33 @@ test_a_parked_delivery_does_not_make_its_secondmate_home_working() {
     [.secondmates[].state] == ["active_child_work"]
       and [.in_flight[].state] == ["working"]
   ' >/dev/null || fail "a genuinely working child did not activate its home: $out"
+  record_claude_state "$mate/state" parked-delivery idle
+  printf '## In flight\n- [ ] parked-delivery - Review gate (repo: firstmate) (kind: ship) (since 2026-07-01)\n- [ ] z-working - Active work (repo: firstmate) (kind: ship) (since 2026-07-01)\n\n## Queued\n\n## Done\n' \
+    > "$mate/data/backlog.md"
+  fm_write_meta "$mate/state/z-working.meta" "window=firstmate:fm-z-working" "worktree=$mate/projects" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" z-working busy
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_SNAPSHOT_SECONDMATE_CHILDREN=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "bounded working ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    .state == "captain_decision" and .counts.active_children == 2
+      and [.active_children[] | {id,state}] == [{id:"z-working",state:"working"}]
+      and (.omitted | any(.surface == "active_children" and .count == 1))
+  ' >/dev/null || fail "a parked delivery crowded working evidence out of the child bound: $ledger"
+  out=$(FM_SNAPSHOT_SECONDMATE_CHILDREN=1 run "$parent" "$fakebin" --json) || fail "bounded working projection failed"
+  printf '%s' "$out" | jq -e '
+    [.secondmates[].state] == ["active_child_work"]
+      and [.in_flight[].id] == ["parked-mate/z-working"]
+      and (.omitted | any(.surface == "secondmate parked-mate active children omitted by snapshot bound: 1"))
+  ' >/dev/null || fail "the child bound hid a working home: $out"
   pass "a parked delivery stays visible without activating its home until work resumes"
 }
 
 test_delivery_requires_a_declaration_and_eligible_current_state_in_both_homes
 test_configured_wait_declarations_reach_both_delivery_projections
 test_a_parked_delivery_does_not_make_its_secondmate_home_working
+test_failed_lookup_preserves_unresolved_decisions
+test_overdue_deliveries_exceed_both_presentation_bounds
 test_a_secondmate_delivery_reaches_the_parent_as_a_delivered_row
 test_a_request_waiting_on_the_captain_never_lands_in_the_waiting_state
 test_a_delivery_that_resumed_and_failed_keeps_its_own_state

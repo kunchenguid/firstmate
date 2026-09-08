@@ -57,6 +57,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
    The snapshot removes a qualifying row from `in_flight` and from `gates`, so the same work is counted once.
    `age_days` is how long this delivery has been waiting, measured from its own durable record and preserved when the same PR is re-recorded; `nudge` is the snapshot's own exit rule at `awaiting_nudge_days`: a row at or past it stops being a delivered row and becomes a Captain's Call nudge instead.
    Age only grows, so a row that crosses never crosses back; only the merge retires it.
+   Both the home-summary and Bearings delivery bounds retain every overdue row, exceeding the normal limit when necessary; only younger deliveries may be omitted, with their truncation disclosed in `omitted[]`.
    Every `in_flight`, `awaiting`, `landed`, and `gates` row carries a structured `owner`, and `pr_url` carries the recorded request link.
    Never read ownership, delivery, or a link out of a title, a status sentence, or any other prose.
    A `live` hold appears in Captain's Call; `blocked`, `dated`, and `aged` holds appear as disclosed Charted Next gates stating their structured reason.

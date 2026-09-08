@@ -108,10 +108,14 @@ trap 'exit 1' HUP INT TERM
 # bound to them are produced by the transactional publication and left alone.
 if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
   pr_check_mtime() { /usr/bin/stat -f '%m' "$1" 2>/dev/null || true; }
-  pr_check_set_mtime() { touch -t "$(date -r "$2" +%Y%m%d%H%M.%S)" "$1" 2>/dev/null || true; }
+  pr_check_set_mtime() {
+    local stamp
+    stamp=$(date -r "$2" +%Y%m%d%H%M.%S) || return 1
+    touch -t "$stamp" "$1"
+  }
 else
   pr_check_mtime() { stat -c '%Y' "$1" 2>/dev/null || true; }
-  pr_check_set_mtime() { touch -d "@$2" "$1" 2>/dev/null || true; }
+  pr_check_set_mtime() { touch -d "@$2" "$1"; }
 fi
 DELIVERED_SINCE=
 if fm_pr_poll_registration_parse "$STATE/$ID.pr-poll-registration" \
@@ -127,6 +131,12 @@ fi
 
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
+if [ -n "$DELIVERED_SINCE" ] && \
+   ! { pr_check_set_mtime "$FM_PR_POLL_REG_TMP" "$DELIVERED_SINCE" \
+       && [ "$(pr_check_mtime "$FM_PR_POLL_REG_TMP")" = "$DELIVERED_SINCE" ]; }; then
+  echo "error: could not preserve PR delivery time" >&2
+  exit 1
+fi
 
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
@@ -166,8 +176,6 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
-[ -z "$DELIVERED_SINCE" ] \
-  || pr_check_set_mtime "$STATE/$ID.pr-poll-registration" "$DELIVERED_SINCE"
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything

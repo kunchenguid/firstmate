@@ -73,7 +73,7 @@
 # exit rule at FM_BEARINGS_AWAITING_NUDGE_DAYS: past it the row stops being a
 # delivered row and becomes the captain's to nudge. Age only grows, so the exit
 # is one-way and no row can oscillate between the two. Overdue and oldest rows
-# sort first, so the bound can never be what drops one.
+# sort first and remain visible even when their count exceeds the bound.
 #
 # The state was first specified too loosely, with prose standing in for
 # structure. It was narrowed once to what structure proves, then corrected
@@ -141,7 +141,7 @@ FM_BEARINGS_UNHEALTHY=${FM_BEARINGS_UNHEALTHY:-20}
 FM_BEARINGS_PR_REPOS=${FM_BEARINGS_PR_REPOS:-10}
 FM_BEARINGS_PR_LIMIT=${FM_BEARINGS_PR_LIMIT:-20}
 FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
-# The single exit-rule constant: how many whole days a delivered PR may wait on
+# The single exit-rule constant in fm-classify-lib.sh: how many days a PR may wait on
 # its maintainer before the row stops being "still normal" and becomes the
 # captain's to nudge. 7 is measured, not guessed: across the last 200 merged
 # pull requests in this fleet's own upstream repository the merge latency was
@@ -152,7 +152,6 @@ FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
 # our own deliveries, so a few dozen of ours would refine it.
 # Age only grows, so nudge is monotone: a row that crosses never crosses back,
 # and it leaves the awaiting bucket for good until the PR merges.
-FM_BEARINGS_AWAITING_NUDGE_DAYS=${FM_BEARINGS_AWAITING_NUDGE_DAYS:-7}
 case "$FM_BEARINGS_PR_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_PR_TIMEOUT=20 ;; esac
 validate_bound() {  # <name> <value>
   case "$2" in ''|*[!0-9]*|0) echo "fm-bearings-snapshot: $1 must be a positive integer" >&2; exit 2 ;; esac
@@ -213,7 +212,7 @@ awaiting holds work that shipped and now waits on a merge we do not control: the
   age_days is that wait in whole days, preserved when the same
   PR is re-recorded, and nudge marks a row at or past awaiting_nudge_days
   (FM_BEARINGS_AWAITING_NUDGE_DAYS), which belongs in Captain's Call instead.
-  Overdue then oldest rows sort first so the bound never drops one.
+  Overdue then oldest rows sort first; overdue rows are exempt from both delivery bounds.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight, --all-awaiting,
   --all-decisions (all open decisions and captain holds in the bounded snapshot),
   --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
@@ -575,6 +574,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      # Overdue first, then longest wait: the cap must never be what drops the
      # one row that has aged out of this bucket and into the captain call.
      | sort_by([(if .nudge then 0 else 1 end), -(.age_days // 0), .id])) as $awaiting_all
+  | (if $all_awaiting == 1 then $awaiting_all
+     else $awaiting_all[:([$awaiting_n, ([$awaiting_all[] | select(.nudge)] | length)] | max)]
+     end) as $awaiting_visible
   | ([ $awaiting_all[] | .id ]) as $awaiting_ids
   | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta")
        | {key:.id, value:.pr.url} ] | from_entries) as $recorded_pr_by_id
@@ -667,7 +669,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       prs: $prs,
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       awaiting_nudge_days: $nudge_days,
-      awaiting: (if $all_awaiting == 1 then $awaiting_all else $awaiting_all[:$awaiting_n] end),
+      awaiting: $awaiting_visible,
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
         | select(.reconcile_inventory != null)
@@ -702,7 +704,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         ((($snap.main_inventory.unstructured_current_count // 0)) as $n
          | if $n > 0 then {surface:("main unstructured current backlog row(s): \($n)"), reveal:"inspect main data/backlog.md In flight and Queued free-form rows"} else empty end),
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
-        (if $all_awaiting == 0 and ($awaiting_all | length) > $awaiting_n then {surface:("awaiting showing \($awaiting_n) of \($awaiting_all | length)"), reveal:"--all-awaiting"} else empty end),
+        (if ($awaiting_all | length) > ($awaiting_visible | length) then {surface:("awaiting showing \($awaiting_visible | length) of \($awaiting_all | length)"), reveal:"--all-awaiting"} else empty end),
         (($snap.secondmate_current.records // [])[] as $m
          | ([($m.omitted // [])[] | select(.surface == "awaiting_merge") | .count] | add // 0) as $n
          | if $n > 0 then {surface:("secondmate " + $m.id + " delivered rows omitted by snapshot bound: \($n)"), reveal:"raise FM_SNAPSHOT_SECONDMATE_CHILDREN"} else empty end),

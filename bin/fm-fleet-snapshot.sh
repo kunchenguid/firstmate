@@ -90,8 +90,8 @@
 #     awaiting_merge is that home's DELIVERED work under the declared-wait
 #     eligibility contract in bin/fm-bearings-snapshot.sh. Only such a child is a recognized
 #     terminal-facing state rather than an inventory fault; one that resumed and
-#     failed keeps its diagnostic. Oldest first, so the child bound never drops
-#     the longest wait. The field is additive: a ledger written before it simply
+#     failed keeps its diagnostic. Oldest first, with every overdue delivery
+#     retained beyond the child bound. The field is additive: a ledger written before it simply
 #     omits it, and every reader must tolerate its absence. provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
@@ -215,6 +215,7 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+validate_positive_bound FM_BEARINGS_AWAITING_NUDGE_DAYS "$FM_BEARINGS_AWAITING_NUDGE_DAYS"
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
@@ -785,7 +786,7 @@ task_json_lines() {
     open_decisions_tsv=$(status_open_decisions "$status_log")
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
-           && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
+           && [ "$current_state" = working ]; } \
          || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
       open_decisions_tsv=""
     fi
@@ -938,6 +939,7 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
 secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
   jq -n \
     --arg paused_verb "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" \
+    --argjson nudge_days "$FM_BEARINGS_AWAITING_NUDGE_DAYS" \
     --arg generated "$SNAPSHOT_NOW" \
     --argjson generated_epoch "$SNAPSHOT_EPOCH" \
     --arg home "$FM_HOME" \
@@ -1028,7 +1030,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             source:.current_state.source,
             pr_url:(((.pr.url // $work.pr_url) // null) | if . == null then null else trunc(500) end),
-            doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
+            doing:((.current_state.detail // "") | trunc(120))} ]
+       | sort_by(if .state == "working" then 0 else 1 end)) as $active_all
     | ([ $owned_in_flight[] as $work
          | select($work.current_role != "program")
          | $tasks[] as $task
@@ -1039,8 +1042,10 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             title:(($work.title // $task.id) | trunc(120)),
             pr_url:($task.pr.url | trunc(500)),
             delivered_epoch:($task.pr.merge_poll.armed_epoch)} ]
-       # Longest wait first: the child bound must never drop the oldest delivery.
-       | sort_by([-(.delivered_epoch // 0)]) | reverse) as $awaiting_all
+       | sort_by([(.delivered_epoch == null), .delivered_epoch, .id])) as $awaiting_all
+    | ([$awaiting_all[] | select(.delivered_epoch != null
+         and ($generated_epoch - .delivered_epoch) >= ($nudge_days * 86400))] | length) as $overdue_n
+    | $awaiting_all[:([$child_n, $overdue_n] | max)] as $awaiting_visible
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
@@ -1091,7 +1096,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         invalidity:$invalidity,
         state:$state,
         active_children:$active_all[:$child_n],
-        awaiting_merge:$awaiting_all[:$child_n],
+        awaiting_merge:$awaiting_visible,
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
         queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
@@ -1125,7 +1130,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         },
         omitted:[
           (if ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
-          (if ($awaiting_all | length) > $child_n then {surface:"awaiting_merge",count:(($awaiting_all | length) - $child_n)} else empty end),
+          (if ($awaiting_all | length) > ($awaiting_visible | length) then {surface:"awaiting_merge",count:(($awaiting_all | length) - ($awaiting_visible | length))} else empty end),
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
           (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),

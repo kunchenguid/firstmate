@@ -525,6 +525,75 @@ test_rerecording_the_same_pr_preserves_the_delivery_clock() {
   pass "re-recording one PR keeps its delivery clock while a different PR starts its own"
 }
 
+test_delivery_clock_is_preserved_at_publication_and_interruption() {
+  local dir reg old rc interrupted
+  dir=$(make_case delivery-clock-publication)
+  write_task_meta "$dir"
+  reg="$dir/home/state/task-a.pr-poll-registration"
+  run_check_entry "$dir" task-a https://github.com/my-org/repo/pull/7 >/dev/null 2>/dev/null \
+    || fail "initial recording failed"
+  old=$(( $(file_mtime_epoch "$reg") - 23 * 86400 ))
+  set_mtime_epoch "$reg" "$old"
+  cat > "$dir/fakebin/mv" <<SH
+#!/usr/bin/env bash
+'$REAL_MV' "\$@" || exit 1
+for destination in "\$@"; do :; done
+case "\$destination" in
+  *.pr-poll-registration)
+    if [ "\$(uname)" = Darwin ]; then
+      /usr/bin/stat -f '%m' "\$destination" > '$dir/published-mtime'
+    else
+      '$REAL_STAT' -c '%Y' "\$destination" > '$dir/published-mtime'
+    fi
+    [ "\${FM_TEST_INTERRUPT_PUBLICATION:-0}" = 0 ] || kill -TERM "\$PPID"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/mv"
+  for interrupted in 0 1; do
+    rc=0
+    FM_TEST_INTERRUPT_PUBLICATION=$interrupted run_check_entry "$dir" task-a \
+      https://github.com/my-org/repo/pull/7 > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    if [ "$interrupted" = 0 ]; then
+      [ "$rc" = 0 ] || fail "re-recording failed"
+    else
+      [ "$rc" != 0 ] || fail "the publication interruption did not fire"
+    fi
+    [ "$(cat "$dir/published-mtime")" = "$old" ] || fail "publication exposed a reset delivery clock"
+    [ "$(file_mtime_epoch "$reg")" = "$old" ] || fail "interruption reset the published clock"
+  done
+  pass "the preserved delivery clock is visible at publication and survives interruption"
+}
+
+test_delivery_clock_failure_does_not_publish() {
+  local dir reg old before rc touch_rc
+  dir=$(make_case delivery-clock-failure)
+  write_task_meta "$dir"
+  reg="$dir/home/state/task-a.pr-poll-registration"
+  run_check_entry "$dir" task-a https://github.com/my-org/repo/pull/7 >/dev/null 2>/dev/null \
+    || fail "initial recording failed"
+  old=$(( $(file_mtime_epoch "$reg") - 23 * 86400 ))
+  set_mtime_epoch "$reg" "$old"
+  before=$(state_snapshot "$dir/home/state")
+  cat > "$dir/fakebin/touch" <<'SH'
+#!/usr/bin/env bash
+exit "${FM_TEST_TOUCH_RC:?}"
+SH
+  chmod +x "$dir/fakebin/touch"
+  for touch_rc in 1 0; do
+    rc=0
+    FM_TEST_TOUCH_RC=$touch_rc run_check_entry "$dir" task-a https://github.com/my-org/repo/pull/7 \
+      > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    [ "$rc" != 0 ] || fail "a failed or ineffective timestamp update was accepted"
+    assert_contains "$(cat "$dir/stderr")" "could not preserve PR delivery time" "timestamp failure is reported"
+    [ "$(state_snapshot "$dir/home/state")" = "$before" ] || fail "timestamp failure published replacement artifacts"
+    [ "$(file_mtime_epoch "$reg")" = "$old" ] || fail "timestamp failure changed the delivery clock"
+    fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" || fail "timestamp failure damaged the existing poll"
+  done
+  pass "failed and ineffective timestamp updates preserve the original registration and return failure"
+}
+
 test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
@@ -2186,6 +2255,8 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_rerecording_the_same_pr_preserves_the_delivery_clock
+test_delivery_clock_is_preserved_at_publication_and_interruption
+test_delivery_clock_failure_does_not_publish
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
