@@ -65,7 +65,7 @@ class BenchmarkReviewTests(unittest.TestCase):
         (root / "preflight.receipt").write_text(json.dumps({"schema": gate.RECEIPT_SCHEMA, "verdict": "pass",
                                                          "evaluator_sha256": gate.evaluator_identity(hashes)}))
 
-    def replay(self, mode="score", package=None, tamper=None):
+    def replay(self, mode="score", package=None, tamper=None, verify=False):
         sample = self.root / "archive/sample"
         sample.mkdir(parents=True)
         tree = self.root / "tree"
@@ -118,6 +118,35 @@ else:
             (sample / "capture.json").write_text(json.dumps(capture) + "\n")
             record["files"]["capture.json"] = hashlib.sha256((sample / "capture.json").read_bytes()).hexdigest()
             record["evaluator_rerun"]["result_hash"] = record["files"]["capture.json"]
+        if verify:
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(tree), *args], stderr=subprocess.DEVNULL).decode().strip()
+            git("init", "--quiet")
+            git("add", "work.json")
+            git("-c", "user.name=test", "-c", "user.email=test@example.org", "commit", "-qm", "candidate")
+            head, tree_id = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+            git("bundle", "create", str(sample / "candidate.bundle"), "HEAD")
+            record["tree_binding"] = {"original_sha": head, "original_tree": tree_id}
+            capture["tree"] = tree_id
+            program.write_text(program.read_text().replace('"a" * 40', repr(tree_id)))
+            record["files"]["score.py"] = hashlib.sha256(program.read_bytes()).hexdigest()
+            record["groups"]["candidate_bundle_and_projection"] = ["candidate.bundle"]
+            record["files"]["candidate.bundle"] = hashlib.sha256((sample / "candidate.bundle").read_bytes()).hexdigest()
+            record["evaluator_rerun"]["package_files"] = ["score.py"]
+            self.freeze_scoring(sample, record)
+            wrapper = self.executable(self.root / "execute.py", f'#!{sys.executable}\nimport os, sys\nos.chdir(sys.argv[1])\nos.execv(sys.argv[2], sys.argv[2:])\n')
+            with mock.patch.object(gate, "restore_confinement", return_value=([str(wrapper), "{root}"], "test")):
+                for score in (4, 7):
+                    capture["deterministic"] = score
+                    (sample / "capture.json").write_text(json.dumps(capture) + "\n")
+                    digest = hashlib.sha256((sample / "capture.json").read_bytes()).hexdigest()
+                    record["files"]["capture.json"] = record["evaluator_rerun"]["result_hash"] = digest
+                    if score == 4:
+                        self.assertEqual(gate.load_archived_measurements(sample, record)["deterministic"], 4)
+                    else:
+                        with self.assertRaisesRegex(gate.GateError, "differ from genuine evaluator output"):
+                            gate.load_archived_measurements(sample, record)
+            return
         declaration, detail = gate.validate_archived_evaluator_declaration(sample, record, tree)
         if declaration is None:
             return False, detail, {}
@@ -132,6 +161,9 @@ os.execv(sys.argv[2], sys.argv[2:])
         passed, detail, inputs = self.replay()
         self.assertTrue(passed, detail)
         self.assertEqual(inputs, {"work.json": "proven"})
+
+    def test_every_consumed_measurement_requires_genuine_output(self):
+        self.replay(verify=True)
 
     def test_metadata_change_does_not_prove_measurement(self):
         passed, detail, _ = self.replay("metadata")
@@ -404,16 +436,17 @@ while not message.exists():
     time.sleep(0.02)
 assert message.read_text() == "task instruction\\n"
 message.rename(message.parent / "handled" / message.name)
-(root / "{task}.status").write_text("working: first\\npartial")
+(root / "{task}.status").write_bytes("working: first\\npartial é".encode()[:-1])
+(root / "{task}.report.md").write_bytes("scout résult".encode()[:8])
 time.sleep(0.3)
-with (root / "{task}.status").open("a") as stream:
-    stream.write(" line\\n")
+with (root / "{task}.status").open("ab") as stream:
+    stream.write("é".encode()[1:] + b" line\\n")
 (root / "{task}.report.md").write_text("scout result\\n")
 ''')
         subprocess.run([sys.executable, str(ROOT / "bin/fm-bench-lifecycle.py"), str(private), str(host), task,
                         str(ROOT / "bin/fm-busy-event.sh"), "--report", str(data / "report.md"), "--", str(child)],
                        check=True, timeout=10)
-        self.assertEqual((host / f"{task}.status").read_text(), "working: first\npartial line\n")
+        self.assertEqual((host / f"{task}.status").read_text(), "working: first\npartial é line\n")
         self.assertEqual((data / "report.md").read_text(), "scout result\n")
         self.assertEqual((host / "sibling.status").read_text(), "untouched\n")
         self.assertFalse((inbox / "0001.msg").exists())

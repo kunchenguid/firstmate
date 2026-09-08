@@ -82,7 +82,14 @@ def main(argv):
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
                 return None, None
-            return os.read(fd, limit).decode("utf-8"), (info.st_ino, info.st_mtime_ns)
+            content = os.read(fd, limit)
+            if suffix == "status":
+                content = content[:content.rfind(b"\n") + 1]
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError:
+                return None, None
+            return text, (info.st_ino, info.st_mtime_ns)
         finally:
             os.close(fd)
 

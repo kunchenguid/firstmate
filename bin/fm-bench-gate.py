@@ -2963,7 +2963,7 @@ def validate_archived_scoring(sample: Path, manifest: dict[str, Any]) -> None:
             raise GateError("archived scoring code or configuration differs from its frozen identity")
 
 
-def load_archived_measurements(sample: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+def read_archived_measurements(sample: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     files = as_object(manifest.get("files"))
     rerun = manifest.get("evaluator_rerun")
     if not isinstance(rerun, dict):
@@ -2982,6 +2982,56 @@ def load_archived_measurements(sample: Path, manifest: dict[str, Any]) -> dict[s
         raise GateError("archived capture hash must be a SHA256 digest")
     if capture.get("tree") != as_object(manifest.get("tree_binding")).get("original_tree"):
         raise GateError("archived measurement result names a different candidate tree")
+    return capture
+
+
+def load_archived_measurements(sample: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    capture = read_archived_measurements(sample, manifest)
+    wrapper, detail = restore_confinement(sample.parent.parent)
+    if wrapper is None:
+        raise GateError(detail)
+    bundles = [name for name in as_object(manifest.get("groups")).get("candidate_bundle_and_projection", [])
+               if isinstance(name, str) and name.endswith(".bundle")]
+    if not bundles:
+        raise GateError("genuine evaluator verification requires an archived candidate bundle")
+    binding = as_object(manifest.get("tree_binding"))
+    try:
+        with tempfile.TemporaryDirectory(prefix="fm-bench-measurement-") as directory:
+            work = Path(directory)
+            repo, tree = work / "repo", work / "tree"
+            def git(args, cwd=None):
+                result = run_git(args, cwd=cwd)
+                if result.returncode:
+                    raise GateError("could not restore candidate for genuine evaluator verification")
+                return result.stdout.decode().strip()
+            git(["init", "--quiet", "--bare", str(repo)])
+            for name in bundles:
+                bundle = sample / name
+                if (not is_within(bundle.resolve(), sample.resolve())
+                        or not stat.S_ISREG(bundle.lstat().st_mode)
+                        or sha256_file(bundle) != as_object(manifest.get("files")).get(name)):
+                    raise GateError("candidate bundle does not match its content address")
+                git(["fetch", "--quiet", str(bundle.resolve()), "*:refs/restored/*"], repo)
+            head = binding.get("original_sha")
+            if not isinstance(head, str) or re.fullmatch(r"[0-9a-f]{40,64}", head) is None:
+                raise GateError("candidate commit identity is invalid")
+            if git(["rev-parse", head + "^{tree}"], repo) != binding.get("original_tree"):
+                raise GateError("genuine evaluator candidate tree differs from its binding")
+            tree.mkdir()
+            git(["--work-tree", str(tree), "checkout", "--quiet", "--force", head, "--", "."], repo)
+            declaration, detail = validate_archived_evaluator_declaration(sample, manifest, tree)
+            if declaration is None:
+                raise GateError(detail)
+            scratch = work / "execution"
+            run_tree = materialize_evaluator_root(sample,
+                {name: manifest["files"][name] for name in declaration["package_files"]},
+                tree, scratch, uuid.uuid4().hex, {})
+            result = subprocess.run(confined_evaluator_command(wrapper, scratch, scratch / declaration["argv"], run_tree),
+                                    capture_output=True, timeout=60, env=confinement_env())
+            if result.returncode or sha256_bytes(result.stdout) != declaration["expected"]:
+                raise GateError("archived measurements differ from genuine evaluator output")
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise GateError(f"genuine evaluator verification failed: {exc}") from exc
     return capture
 
 
@@ -3422,7 +3472,7 @@ def validate_archived_evaluator_declaration(
     restored_tree: Path,
 ) -> tuple[dict[str, Any] | None, str]:
     try:
-        load_archived_measurements(sample, record)
+        read_archived_measurements(sample, record)
     except (GateError, OSError) as exc:
         return None, str(exc)
     rerun = record.get("evaluator_rerun")
