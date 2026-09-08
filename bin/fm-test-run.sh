@@ -1605,7 +1605,13 @@ families_for_changed_path() {
       printf '%s\n' live-harness-optin
       ;;
     .agents/skills/graph-board/assets/graph-server-page.html)
+      # The page the graph server serves is part of that server's behavior: its
+      # suite asserts on what a browser actually receives, so a page change has
+      # to re-run it rather than resolve to nothing.
       printf '%s\n' __script__:fm-graph-server.test.sh
+      ;;
+    .agents/skills/*/assets/*)
+      printf '%s\n' pure-contract-unit
       ;;
     .agents/skills/*/SKILL.md|.agents/skills/war-room/templates/*)
       printf '%s\n' pure-contract-unit

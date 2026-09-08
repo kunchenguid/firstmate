@@ -290,16 +290,17 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   append_wake "$state" check startup-network 'check: startup-network'
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
-  sleep 0.25
-  if is_live_non_zombie "$ARM_PID"; then
-    # End the fixture through an ordinary actionable status transition so this
-    # failing pre-fix path leaves no child behind.
-    printf 'done: fixture cleanup\n' > "$state/cleanup.status"
-    wait_for_exit "$ARM_PID" 80 || true
+  # Staying live is what fails here, so wait for the exit rather than budget a
+  # wall-clock interval for one: the check interval and heartbeat are parked and
+  # no further status change arrives, so a re-arm that did not surface the
+  # durable wakes settles into a cycle nothing ends and reaches this timeout,
+  # while a correct one still has to fork a real watcher, let it observe the
+  # queue, exit, and be reaped before it can report.
+  wait_for_exit "$ARM_PID" 300
+  status=$?
+  if [ "$status" -eq 124 ]; then
     fail "re-arm stayed live instead of surfacing durable wakes and the still-open remote decision"$'\n'"--- arm ---"$'\n'"$(cat "$armout" 2>/dev/null || true)"$'\n'"--- marker ---"$'\n'"$(cat "$state/.watcher-down" 2>/dev/null || true)"$'\n'"--- queue ---"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null || true)"
   fi
-  wait "$ARM_PID"
-  status=$?
   expect_code 0 "$status" "re-arm re-surface wake must close successfully"
   grep -F 'check: rearm-resurface' "$armout" >/dev/null \
     || fail "re-arm did not report the durable recovery wake: $(cat "$armout")"

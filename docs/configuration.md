@@ -1071,6 +1071,23 @@ Each account, model and voice file above is read as its first line that is not b
 The two read files are parsed differently: `config/voice-read-scope` must hold the bare word and nothing but blank space around it, so a comment header there refuses instead of being skipped, while every line of `config/voice-read-deny` that is not blank and not a `#` comment is one more substring.
 `FM_VOICE_RELAY` and `FM_VOICE_PYTHON` belong to the laptop rather than to a home, so they have no config file: `bin/fm-voice-client.py` requires the relay path as a flag or that variable and carries no default path.
 
+## Live flow board (bin/fm-graph-server.mjs)
+
+`bin/fm-graph-server.mjs` serves this home's flows as live graphs on `127.0.0.1` and nothing else.
+Start it with `bun bin/fm-graph-server.mjs` (or `node`), then open the printed URL; `--port <n>` picks the port and `--ready-line` prints the bound URL on stdout for a supervisor.
+
+It is a read-side projection, not a second record store.
+Everything it shows comes from an existing owner - `bin/fm-pipeline.sh board-json` for the graph, `bin/fm-fleet-snapshot.sh --json` for what each agent is doing, and `state/<id>.status` and `state/<id>.busy-state` read directly - and everything it does goes back through `bin/fm-control.sh`, `bin/fm-send.sh`, `bin/fm-search.sh`, and `bin/fm-inbox.sh note`.
+It writes nothing into `state/` itself and calls no model anywhere: the only judgement in the picture is firstmate answering a question the board delivered through the captain's note path.
+
+The whole board is projected once at startup because that scan is slow; after that a filesystem watch reprojects exactly the one lane whose records changed and pushes it to open pages over Server-Sent Events.
+Nothing in it runs on a timer.
+The fleet-wide agent read is expensive, so it happens only when a reader asks for the board and that same watch has seen a record that read actually depends on move since the last one.
+That set is deliberately smaller than the set that reprojects a lane: a pipeline record moves the graph and is handled by the single-lane reprojection alone, and everything else under `state/` invalidates nothing.
+A server nobody is looking at does no work, and neither does one whose home is only writing records the fleet read is not a function of.
+A node with no durable log says so in words rather than opening an empty panel, and a step no writer records anywhere renders as uninstrumented rather than as a step merely waiting its turn.
+The script header and `--help` own its routes, its action allowlist, and its environment.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
@@ -1085,6 +1102,8 @@ FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/cmux support ship, writer-scout, and reader-scout spawns, Orca supports ship and writer-scout spawns, and codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
+FM_GRAPH_PORT=7777       # default port for bin/fm-graph-server.mjs; --port overrides it
+FM_GRAPH_PAGE=           # alternate page for bin/fm-graph-server.mjs, mainly for tests
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline

@@ -7,7 +7,7 @@
 #   fm-pipeline.sh reconcile <task-id>
 #   fm-pipeline.sh retire <task-id>
 #   fm-pipeline.sh effect <claim|verify|deliver|ambiguous|abandon> ...
-#   fm-pipeline.sh board-json
+#   fm-pipeline.sh board-json [--task <id>]
 #   fm-pipeline.sh steps <kind>
 #   fm-pipeline.sh probe [--task <id>]
 #   fm-pipeline.sh arm [--force]
@@ -1748,7 +1748,12 @@ EOF
   fi
 }
 
-pipeline_board_json() {
+# Optional <id> projects that one lane only. The single-lane path exists so a
+# live consumer can invalidate one task without paying the whole-board scan,
+# and it must stay a filter over the same row builder rather than a second
+# projection: divergence between the two would be invisible on the board.
+pipeline_board_json() {  # [<id>]
+  local only=${1-}
   local inventory tasks_file task_file file id first generated_epoch check_interval
   local tmp rc
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die 'state directory is unavailable'
@@ -1758,6 +1763,9 @@ pipeline_board_json() {
     rm -f -- "$inventory" "$tasks_file"; return 1;
   }
   : > "$inventory"; : > "$task_file"
+  if [ -n "$only" ]; then
+    printf '%s\n' "$only" >> "$inventory"
+  else
   for file in "$STATE"/*.meta; do
     pipeline_state_file_valid "$file" || continue
     id=${file##*/}; id=${id%.meta}
@@ -1770,6 +1778,7 @@ pipeline_board_json() {
     id=${first%%$'\t'*}
     fm_task_id_path_safe "$id" && printf '%s\n' "$id" >> "$inventory"
   done
+  fi
   sort -u "$inventory" > "$tasks_file"
   # shellcheck disable=SC2094
   while IFS= read -r id; do
@@ -2077,8 +2086,21 @@ case "$command" in
     pipeline_effect_dispatch "$@"
     ;;
   board-json)
-    [ "$#" -eq 0 ] || die 'board-json takes no arguments'
-    pipeline_board_json
+    board_only=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --task)
+          [ "$#" -ge 2 ] || die 'board-json --task requires a task id'
+          board_only=$2
+          shift 2
+          ;;
+        *) die 'board-json accepts only --task <id>' ;;
+      esac
+    done
+    if [ -n "$board_only" ]; then
+      fm_task_id_path_safe "$board_only" || die "board-json --task needs a safe task id: $board_only"
+    fi
+    pipeline_board_json "$board_only"
     ;;
   steps)
     [ "$#" -eq 1 ] || die 'steps requires a kind'

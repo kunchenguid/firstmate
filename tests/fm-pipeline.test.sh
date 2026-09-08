@@ -2518,3 +2518,37 @@ test_effect_owner_competing_claims_and_abandonment() {
 
 test_effect_owner_competing_claims_and_abandonment
  test_effect_owner_rejects_invalid_receipts_and_stock_bash_retire
+
+test_board_json_single_task_matches_full_board_row() {
+  local root full one rc=0
+  root=$(new_state board-single-task)
+  fm_write_meta "$root/state/one.meta" "kind=ship" "spawn_gen=gen-1"
+  fm_write_meta "$root/state/two.meta" "kind=scout" "spawn_gen=gen-2"
+  full=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" board-json)
+  one=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" board-json --task one) || rc=$?
+  expect_code 0 "$rc" "board-json --task must succeed for a known task"
+  printf '%s' "$one" | jq -e '.schema == "fm-pipeline-board.v1" and (.tasks | length) == 1' >/dev/null \
+    || fail "board-json --task did not project exactly one lane"
+  printf '%s' "$one" | jq --argjson full "$full" -e \
+    '.tasks[0] == ($full.tasks[] | select(.id == "one"))' >/dev/null \
+    || fail "board-json --task row diverged from the full board row"
+  pass "fm-pipeline.sh: board-json --task projects one lane identical to the full board"
+}
+
+test_board_json_single_task_refuses_unsafe_and_reports_unknown() {
+  local root out rc=0
+  root=$(new_state board-single-task-guard)
+  fm_write_meta "$root/state/one.meta" "kind=ship" "spawn_gen=gen-1"
+  out=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" board-json --task ../escape 2>&1) || rc=$?
+  expect_code 1 "$rc" "board-json --task must refuse an unsafe task id"
+  assert_contains "$out" 'task id' "unsafe --task refusal must name the task id"
+  rc=0
+  out=$(FM_HOME="$root" FM_STATE_OVERRIDE="$root/state" "$SCRIPT" board-json --task absent) || rc=$?
+  expect_code 0 "$rc" "board-json --task must succeed for an unknown task"
+  printf '%s' "$out" | jq -e '(.tasks | length) == 0' >/dev/null \
+    || fail "board-json --task on an unknown task must project no lane"
+  pass "fm-pipeline.sh: board-json --task refuses unsafe ids and reports an unknown task as empty"
+}
+
+test_board_json_single_task_matches_full_board_row
+test_board_json_single_task_refuses_unsafe_and_reports_unknown
