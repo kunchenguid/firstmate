@@ -1275,6 +1275,12 @@ cmd_reconcile() {
 # blocking child - signalling only the runner would leave that child alive and
 # reparented, which is exactly how a source that never completes leaks.
 # docs/configuration.md owns the operating contract and unproved-group limits.
+# A leaderless group nobody in this call ever proved remains refused for every
+# caller, and that untouched refusal is what makes a crashed leader's group
+# permanent. Relaxing it is a SEPARATE OPEN QUESTION, not something this path
+# assumes: an unresolved question has to be marked unresolved where the decision
+# is made, because a reader who does not know it is open will read a bare refusal
+# as settled design and eventually relax it.
 runner_group_signal() {  # <signal> <pid> <identity> [proved]
   local signal=$1 pid=$2 identity=$3 proved=${4-} state pgid
   if [ -n "$proved" ]; then
