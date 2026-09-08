@@ -204,12 +204,15 @@ credential_label_cases=(
   'client_secret: privatevalue visible suffix'
   'deployment-private-key: privatevalue visible suffix'
   'MiXeD-aUtH_ToKeN: privatevalue visible suffix'
+  'azure_ad_client_secret: privatevalue visible suffix'
+  'platform-prod_service_AcCeSs-kEy: privatevalue visible suffix'
+  'one_two-THREE_PaSsPhRaSe: privatevalue visible suffix'
 )
 for credential_label_case in "${credential_label_cases[@]}"; do
-  primary_args "pi:credential-label-$after" "Prefix $credential_label_case"
+  primary_args "pi:credential-label-$after" "Prefix; $credential_label_case"
   FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "credential label case $after append failed"
   credential_label_row=$(FM_HOME="$home" "$OUTBOX" read --after "$after" --limit 1)
-  printf '%s\n' "$credential_label_row" | jq -e '.summary == "Prefix [REDACTED]"' >/dev/null \
+  printf '%s\n' "$credential_label_row" | jq -e '.summary == "Prefix; [REDACTED]"' >/dev/null \
     || fail "credential label case $after retained its value or tail"
   after=$((after + 1))
 done
@@ -512,10 +515,13 @@ await emit("Ordinary prose postgres://bareuser:barepass@db.example/prod remains 
 await emit("Prefix AuThOrIzAtIoN: Basic dXNlcjpwYXNz visible suffix", "basic");
 await emit("Prefix pRoXy-AuThOrIzAtIoN: Bearer ordinarybearertoken visible suffix", "bearer");
 await emit('Prefix AUTHORIZATION: Digest username="captain", response="private" visible suffix', "digest");
-await emit("Prefix AWS Secret Access Key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY visible suffix", "aws-secret-access-key");
-await emit("Prefix client_secret: privatevalue visible suffix", "client-secret");
-await emit("Prefix deployment-private-key: privatevalue visible suffix", "private-key");
-await emit("Prefix MiXeD-aUtH_ToKeN: privatevalue visible suffix", "mixed-auth-token");
+await emit("Prefix; AWS Secret Access Key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY visible suffix", "aws-secret-access-key");
+await emit("Prefix; client_secret: privatevalue visible suffix", "client-secret");
+await emit("Prefix; deployment-private-key: privatevalue visible suffix", "private-key");
+await emit("Prefix; MiXeD-aUtH_ToKeN: privatevalue visible suffix", "mixed-auth-token");
+await emit("Prefix; azure_ad_client_secret: privatevalue visible suffix", "azure-client-secret");
+await emit("Prefix; platform-prod_service_AcCeSs-kEy: privatevalue visible suffix", "mixed-access-key");
+await emit("Prefix; one_two-THREE_PaSsPhRaSe: privatevalue visible suffix", "mixed-passphrase");
 await emit('Prefix {"client_secret":"privatevalue"} visible suffix', "quoted-client-secret");
 await emit('Prefix {"MiXeD-aPi-Key":"privatevalue"} visible suffix', "quoted-api-key");
 await emit("Prefix eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sgnVsbG9uZ3NpZ25hdHVyZQ remains", "compact-jwt");
@@ -531,10 +537,13 @@ assert summaries == [
     "Prefix [REDACTED]",
     "Prefix [REDACTED]",
     "Prefix [REDACTED]",
-    "Prefix [REDACTED]",
-    "Prefix [REDACTED]",
-    "Prefix [REDACTED]",
-    "Prefix [REDACTED]",
+    "Prefix; [REDACTED]",
+    "Prefix; [REDACTED]",
+    "Prefix; [REDACTED]",
+    "Prefix; [REDACTED]",
+    "Prefix; [REDACTED]",
+    "Prefix; [REDACTED]",
+    "Prefix; [REDACTED]",
     "Prefix {[REDACTED]",
     "Prefix {[REDACTED]",
     "Prefix [REDACTED] remains",

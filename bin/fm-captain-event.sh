@@ -141,12 +141,12 @@ GITLAB_MR_RE = re.compile(r"^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/me
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 ENV_ASSIGNMENT_START_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*(?:\+\s*)?=\s*")
 AUTHORIZATION_HEADER_START_RE = re.compile(r"\b(?:Proxy-)?Authorization\s*:\s*", re.I)
-CREDENTIAL_LABEL_START_RE = re.compile(
-    r'(?<![A-Za-z0-9_-])"?(?:[A-Za-z0-9]{1,32}[ _-]+)?'
-    r"(?:secret|password|passwd|passphrase|token|authorization|auth|(?:access|private|api)[ _-]+key)"
-    r'(?=[A-Za-z0-9 _-]{0,127}"?\s*:\s*)',
-    re.I,
+CREDENTIAL_LABEL_CANDIDATE_RE = re.compile(
+    r'(?:(?:"([A-Za-z0-9](?:[A-Za-z0-9 _-]{0,126}[A-Za-z0-9])?)")|'
+    r'(?:(?<![A-Za-z0-9_-])([A-Za-z0-9](?:[A-Za-z0-9 _-]{0,126}[A-Za-z0-9])?)))\s*:\s*'
 )
+CREDENTIAL_LABEL_TERMS = {"secret", "password", "passwd", "passphrase", "token", "authorization", "auth"}
+CREDENTIAL_KEY_PREFIXES = {"access", "private", "api"}
 SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)", re.I),
     re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s/@\"']+@[^\s,;\"']+", re.I),
@@ -303,10 +303,17 @@ def redact_authorization_headers(value):
 
 
 def redact_credential_labels(value):
-    match = CREDENTIAL_LABEL_START_RE.search(value)
-    if match is None:
-        return value
-    return value[:match.start()] + "[REDACTED]"
+    for match in CREDENTIAL_LABEL_CANDIDATE_RE.finditer(value):
+        label = match.group(1) or match.group(2)
+        segments = [segment for segment in re.split(r"[ _-]+", label.lower()) if segment]
+        has_term = any(segment in CREDENTIAL_LABEL_TERMS for segment in segments)
+        has_key_term = any(
+            segment in CREDENTIAL_KEY_PREFIXES and index + 1 < len(segments) and segments[index + 1] == "key"
+            for index, segment in enumerate(segments)
+        )
+        if has_term or has_key_term:
+            return value[:match.start()] + "[REDACTED]"
+    return value
 
 
 def clean_summary(value):
