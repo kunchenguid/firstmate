@@ -3022,15 +3022,16 @@ def load_archived_measurements(sample: Path, manifest: dict[str, Any]) -> dict[s
             declaration, detail = validate_archived_evaluator_declaration(sample, manifest, tree)
             if declaration is None:
                 raise GateError(detail)
+            prepared = prepare_archived_inputs(tree, declaration)
             scratch = work / "execution"
             run_tree = materialize_evaluator_root(sample,
                 {name: manifest["files"][name] for name in declaration["package_files"]},
-                tree, scratch, uuid.uuid4().hex, {})
+                tree, scratch, uuid.uuid4().hex, {name: values[0] for name, values in prepared.items()})
             result = subprocess.run(confined_evaluator_command(wrapper, scratch, scratch / declaration["argv"], run_tree),
                                     capture_output=True, timeout=60, env=confinement_env())
             if result.returncode or sha256_bytes(result.stdout) != declaration["expected"]:
                 raise GateError("archived measurements differ from genuine evaluator output")
-    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+    except (OSError, ValueError, zlib.error, subprocess.TimeoutExpired) as exc:
         raise GateError(f"genuine evaluator verification failed: {exc}") from exc
     return capture
 
@@ -4009,6 +4010,21 @@ def verify_prepared_roots(
         raise content_error
 
 
+def prepare_archived_inputs(
+    restored_tree: Path, declaration: dict[str, Any]
+) -> dict[str, tuple[bytes, bytes, dict[str, Any]]]:
+    prepared = {}
+    for relative in declaration["perturbable_paths"]:
+        source = (restored_tree / relative).resolve()
+        perturbation = declaration["perturbations"].get(relative)
+        if perturbation is None:
+            raise ValueError(f"archived evaluator lost the normalized perturbation for scored input: {relative}")
+        prepared[relative] = build_input_differential(
+            source.read_bytes(), source.suffix.lower(), perturbation, os.urandom(32)
+        )
+    return prepared
+
+
 def rerun_archived_evaluator(
     sample: Path,
     record: dict[str, Any],
@@ -4024,18 +4040,7 @@ def rerun_archived_evaluator(
     input_statuses = dict(declaration["input_statuses"])
     try:
         with tempfile.TemporaryDirectory(prefix="fm-bench-evaluator-") as workspace:
-            prepared: dict[str, tuple[bytes, bytes, dict[str, Any]]] = {}
-            for relative in perturbable_paths:
-                source = (restored_tree / relative).resolve()
-                perturbation = perturbations.get(relative)
-                if perturbation is None:
-                    return False, f"archived evaluator lost the normalized perturbation for scored input: {relative}", {}
-                prepared[relative] = build_input_differential(
-                    source.read_bytes(),
-                    source.suffix.lower(),
-                    perturbation,
-                    os.urandom(32),
-                )
+            prepared = prepare_archived_inputs(restored_tree, declaration)
             genuine_overrides = {relative: values[0] for relative, values in prepared.items()}
             candidate_name = uuid.uuid4().hex
             run_roots: list[tuple[Path, Path]] = []

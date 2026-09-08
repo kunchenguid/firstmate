@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import struct
+import zlib
 import unittest
 from unittest import mock
 import contextlib
@@ -99,6 +101,26 @@ else:
                                       "package_files": package or [program.name],
                                       "scored_inputs": ["work.json"],
                                       "input_perturbations": {"work.json": {"kind": "json-value", "pointer": "/value"}}}}
+        if mode == "png":
+            def chunk(kind, data):
+                return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+            raw = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+                   + chunk(b"IDAT", zlib.compress(b"\x00\x04", level=9)) + chunk(b"IEND", b""))
+            (tree / "image.png").write_bytes(raw)
+            perturbation = {"kind": "png-pixel", "x": 0, "y": 0, "channel": 0}
+            canonical = gate.prepare_png_differential(raw, perturbation)[0]
+            self.assertNotEqual(raw, canonical)
+            capture["capture_hash"] = hashlib.sha256(canonical).hexdigest()
+            (sample / "capture.json").write_text(json.dumps(capture) + "\n")
+            record["files"]["capture.json"] = hashlib.sha256((sample / "capture.json").read_bytes()).hexdigest()
+            record["evaluator_rerun"]["result_hash"] = record["files"]["capture.json"]
+            record["evaluator_rerun"]["scored_inputs"] = ["image.png"]
+            record["evaluator_rerun"]["input_perturbations"] = {"image.png": perturbation}
+            program.write_text(program.read_text().replace("import hashlib, json, sys", "import hashlib, json, sys, zlib")
+                               .replace('"work.json"', '"image.png"')
+                               .replace('value = json.loads(data)["value"]',
+                                        'value = zlib.decompress(data[41:41 + int.from_bytes(data[33:37], "big")])[1]'))
+            record["files"]["score.py"] = hashlib.sha256(program.read_bytes()).hexdigest()
         self.freeze_scoring(sample, record)
         if tamper == "layout":
             mapping = record["evaluator_rerun"]["frozen_package"]
@@ -122,7 +144,7 @@ else:
             def git(*args):
                 return subprocess.check_output(["git", "-C", str(tree), *args], stderr=subprocess.DEVNULL).decode().strip()
             git("init", "--quiet")
-            git("add", "work.json")
+            git("add", ".")
             git("-c", "user.name=test", "-c", "user.email=test@example.org", "commit", "-qm", "candidate")
             head, tree_id = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
             git("bundle", "create", str(sample / "candidate.bundle"), "HEAD")
@@ -143,6 +165,13 @@ else:
                     record["files"]["capture.json"] = record["evaluator_rerun"]["result_hash"] = digest
                     if score == 4:
                         self.assertEqual(gate.load_archived_measurements(sample, record)["deterministic"], 4)
+                        if mode == "png":
+                            declaration, detail = gate.validate_archived_evaluator_declaration(sample, record, tree)
+                            self.assertIsNotNone(declaration, detail)
+                            passed, detail, inputs = gate.rerun_archived_evaluator(
+                                sample, record, tree, [str(wrapper), "{root}"], declaration)
+                            self.assertTrue(passed, detail)
+                            self.assertEqual(inputs, {"image.png": "proven"})
                     else:
                         with self.assertRaisesRegex(gate.GateError, "differ from genuine evaluator output"):
                             gate.load_archived_measurements(sample, record)
@@ -164,6 +193,9 @@ os.execv(sys.argv[2], sys.argv[2:])
 
     def test_every_consumed_measurement_requires_genuine_output(self):
         self.replay(verify=True)
+
+    def test_png_measurement_and_differential_use_identical_genuine_bytes(self):
+        self.replay(mode="png", verify=True)
 
     def test_metadata_change_does_not_prove_measurement(self):
         passed, detail, _ = self.replay("metadata")
