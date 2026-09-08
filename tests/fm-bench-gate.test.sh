@@ -2354,7 +2354,7 @@ for track_name, role, candidate, packet in work:
 
     put("packet.md", f"packet {packet}\n")
     put("ground-truth.md", "sealed truth\n")
-    put("projection.diff", f"neutral projection for {slug}\n")
+    put("projection.diff", git("diff", "--binary", base_tree, tree) + "\n")
     put("transcript.md", "redacted transcript\n")
     capture_hash = hashlib.sha256((slug + "-capture").encode()).hexdigest()
     put("capture.json", json.dumps({"deterministic": 8.0, "tree": tree,
@@ -2388,7 +2388,7 @@ printf '%s\n' "$value"
     put("verdict.md", "label K7 -> candidate\n")
     binding = {"original_sha": sha, "original_tree": tree, "neutral_sha": sha,
                "neutral_tree": tree, "base_tree": base_tree,
-               "patch_hash": hashlib.sha256(slug.encode()).hexdigest()}
+               "patch_hash": files["projection.diff"]}
     put("tree-binding.json", json.dumps(binding, indent=2, sort_keys=True) + "\n")
     files["candidate.bundle"] = hashlib.sha256((out / "candidate.bundle").read_bytes()).hexdigest()
     (out / "manifest.json").write_text(json.dumps({
@@ -3740,7 +3740,7 @@ fi
 write_results() {  # <bench-dir> <mode>
   local bench=$1 mode=$2
   python3 - "$bench" "$mode" <<'PY'
-import json, sys
+import hashlib, json, subprocess, sys
 from pathlib import Path
 
 bench, mode = Path(sys.argv[1]), sys.argv[2]
@@ -3755,6 +3755,15 @@ if archive.is_dir():
     import shutil
     shutil.rmtree(archive)
 archive.mkdir()
+repo = bench / "result-repo"
+repo.mkdir(exist_ok=True)
+def git(*args):
+    return subprocess.check_output(["git", "-C", str(repo), *args]).decode().strip()
+git("init", "-q")
+git("config", "user.name", "fixture")
+git("config", "user.email", "fixture@example.invalid")
+git("commit", "--allow-empty", "-qm", "base")
+base_tree = git("rev-parse", "HEAD^{tree}")
 winners = {"A": "Fable 5 High", "B": "Terra 5.6 High", "C": "GPT 5.6 Sol High"}
 
 def write(
@@ -3781,7 +3790,17 @@ def write(
         }, "failure": {"status": status, "blocker_class": blocker,
                         "class": ("sibling_access" if blocker else "none") if status == "scored" else "provider_outage"}},
     }
+    binding = {}
     if status == "scored":
+        (repo / "candidate.txt").write_text(slug)
+        git("add", "candidate.txt")
+        git("commit", "--allow-empty", "-qm", slug)
+        sha, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+        git("bundle", "create", str(sample / "candidate.bundle"), "HEAD")
+        (sample / "projection.diff").write_text(git("diff", "--binary", base_tree, tree) + "\n")
+        binding = {"original_sha": sha, "neutral_sha": sha, "original_tree": tree, "neutral_tree": tree,
+                   "base_tree": base_tree, "patch_hash": hashlib.sha256((sample / "projection.diff").read_bytes()).hexdigest()}
+        evidence["tree-binding.json"] = binding
         evidence.update({
             "judging.json": {"panel": judges, "scores": [composite for _ in judges]},
             "capture.json": {
@@ -3795,15 +3814,18 @@ def write(
         payload = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode()
         (sample / name).write_bytes(payload)
         files[name] = __import__("hashlib").sha256(payload).hexdigest()
+    if status == "scored":
+        for name in ("candidate.bundle", "projection.diff"):
+            files[name] = hashlib.sha256((sample / name).read_bytes()).hexdigest()
     (sample / "manifest.json").write_text(json.dumps({
         "schema": "fm-bench-archive.v1", "sample": slug,
         "identity": {"track": track, "packet": packet, "candidate": candidate, "role": role},
         "attempt": {"id": attempt_id or ("attempt-void" if status == "void" else "attempt-1"),
                     "status": status, "supersedes": supersedes},
-        "groups": {"failure_and_timing": ["timing.json"]} if status == "void" else {},
+        "groups": {"failure_and_timing": ["timing.json"]} if status == "void" else {"candidate_bundle_and_projection": ["candidate.bundle", "projection.diff"]},
         "files": files,
         "evaluator_rerun": {"result_hash": files.get("capture.json")},
-        "tree_binding": {"original_tree": tree} if status == "scored" else {},
+        "tree_binding": binding,
     }, indent=2, sort_keys=True) + "\n")
     (out / f"{slug}.json").write_text(json.dumps({
         "schema": "fm-bench-result.v1", "archive_sample": slug,

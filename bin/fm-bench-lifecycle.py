@@ -10,12 +10,64 @@ import tempfile
 from pathlib import Path
 
 
+def process_start(pid):
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, timeout=2)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def container_agent_state(state, pids):
+    state = Path(state)
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            path = state / f".bench-container-{pid}.json"
+            if not stat.S_ISREG(path.lstat().st_mode):
+                continue
+            record = json.loads(path.read_text())
+            task = record["task"]
+            if not re.fullmatch(r"bench-[A-Za-z0-9._-]+", task):
+                continue
+            meta = state / f"{task}.meta"
+            owner = next((line for line in meta.read_text().splitlines() if line.startswith("spawn_gen=")), "") if meta.exists() else ""
+            generation_path = state / f"{task}.busy-gen"
+            generation = generation_path.read_text().strip() if generation_path.exists() else ""
+            if (record["pid"] != int(pid) or record["owner"] != owner or record["generation"] != generation
+                    or not record["start"] or process_start(pid) != record["start"]):
+                continue
+            cidfile = Path(record["cidfile"])
+            if not cidfile.resolve().is_relative_to(state.resolve()):
+                continue
+            cid = cidfile.read_text().strip()
+            if re.fullmatch(r"[0-9a-f]{64}", cid) is None:
+                continue
+            result = subprocess.run(["docker", "inspect", cid], capture_output=True, text=True, timeout=2)
+            if result.returncode:
+                continue
+            container = json.loads(result.stdout)[0]
+            labels = container.get("Config", {}).get("Labels") or {}
+            if (container.get("Id") == cid and container.get("State", {}).get("Running") is True
+                    and labels.get("fm.bench.task") == task and labels.get("fm.bench.launch") == record["token"]):
+                print("alive", end="")
+                return 0
+        except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.TimeoutExpired):
+            continue
+    return 1
+
+
 def main(argv):
     private, host, task, writer = argv[:4]
     report = None
-    if argv[4] == "--report":
-        report = Path(argv[5])
-        argv = argv[:4] + argv[6:]
+    container = False
+    while argv[4] != "--":
+        if argv[4] == "--report":
+            report = Path(argv[5])
+            argv = argv[:4] + argv[6:]
+        elif argv[4] == "--container":
+            container = True
+            argv = argv[:4] + argv[5:]
+        else:
+            raise ValueError("invalid lifecycle option")
     if argv[4] != "--" or not re.fullmatch(r"[A-Za-z0-9._-]+", task):
         raise ValueError("invalid benchmark lifecycle binding")
     host = Path(host)
@@ -113,7 +165,18 @@ def main(argv):
     _, marker = private_file("turn-ended")
     status_sent = ""
     report_seen = None
-    child = subprocess.Popen(argv[5:])
+    runtime = None
+    runtime_record = host / f".bench-container-{os.getpid()}.json"
+    environment = dict(os.environ)
+    if container:
+        runtime = tempfile.TemporaryDirectory(prefix=".bench-container-", dir=host)
+        token = os.urandom(24).hex()
+        cidfile = str(Path(runtime.name) / "container.cid")
+        environment.update(BENCH_CONTAINER_CIDFILE=cidfile, BENCH_CONTAINER_TOKEN=token, BENCH_CONTAINER_TASK=task)
+        runtime_record.write_text(json.dumps({"pid": os.getpid(), "start": process_start(os.getpid()),
+                                            "owner": owner, "generation": generation, "task": task,
+                                            "cidfile": cidfile, "token": token}))
+    child = subprocess.Popen(argv[5:], env=environment)
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, lambda sig, _frame: child.send_signal(sig) if child.poll() is None else None)
 
@@ -165,6 +228,9 @@ def main(argv):
             except subprocess.TimeoutExpired:
                 pass
     finally:
+        if runtime is not None:
+            runtime_record.unlink(missing_ok=True)
+            runtime.cleanup()
         binding = host / f"{task}.inbox/.worker-path"
         try:
             record = json.loads(binding.read_text())
@@ -185,4 +251,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(container_agent_state(sys.argv[2], sys.argv[3:]) if sys.argv[1:2] == ["--agent-state"] else main(sys.argv[1:]))

@@ -143,6 +143,10 @@ case "$MECHANISM" in
       [ "$topology" = "true $PROVIDER_PROXY_CONTAINER " ] \
         || { echo "error: provider-only network must be internal and contain only $PROVIDER_PROXY_CONTAINER" >&2; exit 2; }
       args=(run --rm --interactive --network "$PROVIDER_NETWORK")
+      if [ -n "${BENCH_CONTAINER_CIDFILE:-}" ]; then
+        [ -n "${BENCH_CONTAINER_TOKEN:-}" ] && [ -n "${BENCH_CONTAINER_TASK:-}" ] || exit 2
+        args+=(--cidfile "$BENCH_CONTAINER_CIDFILE" --label "fm.bench.task=$BENCH_CONTAINER_TASK" --label "fm.bench.launch=$BENCH_CONTAINER_TOKEN")
+      fi
       if [ -t 0 ] && [ -t 1 ]; then
         args+=(--tty)
       fi

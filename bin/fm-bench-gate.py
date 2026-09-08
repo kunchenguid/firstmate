@@ -2532,7 +2532,7 @@ def check_evaluator_mutations(base: Path, weights: dict[str, Any] | None, report
         check = f"evaluator.mutation.{path.stem}"
         try:
             record = load_json(path)
-        except GateError as exc:
+        except (GateError, OSError) as exc:
             report.fail(check, str(exc))
             continue
         dimension = record.get("dimension")
@@ -2597,7 +2597,7 @@ def check_evaluator_captures(base: Path, report: Report) -> None:
         check = f"evaluator.capture.{path.stem}"
         try:
             record = load_json(path)
-        except GateError as exc:
+        except (GateError, OSError) as exc:
             report.fail(check, str(exc))
             continue
         missing = [
@@ -2815,6 +2815,54 @@ def check_result_plan_binding(root: Path, plan: dict[str, Any], report: Report) 
         report.fail("results.plan_binding", str(exc))
 
 
+def validate_archived_projection(sample: Path, record: dict[str, Any]) -> None:
+    binding = as_object(record.get("tree_binding"))
+    if load_json(sample / "tree-binding.json") != binding:
+        raise GateError("tree-binding.json differs from the archive tree binding")
+    for key in ("original_sha", "original_tree", "neutral_sha", "neutral_tree", "base_tree"):
+        if not isinstance(binding.get(key), str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", binding[key]) is None:
+            raise GateError("projection has an invalid Git object binding")
+    group = as_object(record.get("groups")).get("candidate_bundle_and_projection", [])
+    if not isinstance(group, list) or any(not isinstance(name, str) for name in group):
+        raise GateError("projection has no candidate evidence group")
+    patches = [name for name in group if name.endswith(".diff")]
+    bundles = [name for name in group if name.endswith(".bundle")]
+    if len(patches) != 1 or not bundles:
+        raise GateError("projection requires one diff and its candidate bundles")
+    files = as_object(record.get("files"))
+    for name in ["tree-binding.json", *patches, *bundles]:
+        path = sample / name
+        if (not is_within(path.resolve(), sample.resolve()) or not stat.S_ISREG(path.lstat().st_mode)
+                or files.get(name) != sha256_file(path)):
+            raise GateError("projection evidence is not contained and content-addressed")
+    patch = sample / patches[0]
+    if binding.get("patch_hash") != sha256_file(patch):
+        raise GateError("projection bytes differ from the bound patch hash")
+    with tempfile.TemporaryDirectory(prefix="fm-bench-projection-") as temporary:
+        repo = Path(temporary)
+        def git(*args):
+            result = run_git(list(args), cwd=repo)
+            if result.returncode:
+                raise GateError("projection cannot be reconstructed from its archived Git objects")
+            return result.stdout.decode().strip()
+        git("init", "--quiet")
+        for index, name in enumerate(bundles):
+            git("fetch", "--quiet", str((sample / name).resolve()), f"*:refs/projection/{index}/*")
+        if any(git("cat-file", "-t", binding[key]) != "commit" for key in ("original_sha", "neutral_sha")):
+            raise GateError("projection identities must name commits")
+        original = git("rev-parse", binding["original_sha"] + "^{tree}")
+        neutral = git("rev-parse", binding["neutral_sha"] + "^{tree}")
+        if original != binding["original_tree"] or neutral != binding["neutral_tree"] or original != neutral:
+            raise GateError("projection commit identities do not preserve the candidate tree")
+        if git("cat-file", "-t", binding["base_tree"]) != "tree":
+            raise GateError("projection base is not a tree")
+        git("read-tree", binding["base_tree"])
+        if patch.stat().st_size:
+            git("apply", "--cached", "--binary", str(patch.resolve()))
+        if git("write-tree") != original:
+            raise GateError("neutral projection does not reconstruct the candidate tree")
+
+
 def load_archived_measurements(sample: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     files = as_object(manifest.get("files"))
     rerun = manifest.get("evaluator_rerun")
@@ -2969,7 +3017,7 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
         check = f"archive.{sample.name}"
         try:
             record = load_json(sample / "manifest.json", ARCHIVE_SCHEMA)
-        except GateError as exc:
+        except (GateError, OSError) as exc:
             report.fail(check, str(exc))
             ok = False
             continue
@@ -3177,10 +3225,11 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             continue
         failure = timing.get("failure")
         try:
+            validate_archived_projection(sample, record)
             capture = load_archived_measurements(sample, record)
             judging = load_json(sample / "judging.json")
             validate_attempt_failure(plan, failure, "scored", capture.get("deterministic"), judging.get("scores"))
-        except GateError as exc:
+        except (GateError, OSError) as exc:
             report.fail(check, str(exc))
             ok = False
             continue
@@ -4337,6 +4386,7 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
             continue
         judging = evidence_parts["judging.json"]
         try:
+            validate_archived_projection(sample, manifest)
             evaluator = load_archived_measurements(sample, manifest)
         except (GateError, OSError) as exc:
             report.fail("promote.evidence", f"{path.name}: {exc}")

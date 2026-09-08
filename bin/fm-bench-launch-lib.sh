@@ -288,7 +288,9 @@ launch = ["env", *env, *argv, "/bin/sh", "-lc", command]
 if brief:
     launch = ["python3", str(Path(library) / "fm-bench-lifecycle.py"), str(staged_state),
               str(Path(state).resolve()), entrant_id, str(Path(library) / "fm-busy-event.sh"), "--report",
-              str(Path(brief).parent / "report.md"), "--", *launch]
+              str(Path(brief).parent / "report.md"),
+              *(["--container"] if "--mechanism" in argv and argv[argv.index("--mechanism") + 1] == "container" else []),
+              "--", *launch]
 print(" ".join(shlex.quote(item) for item in launch))
 PY
 ) || {

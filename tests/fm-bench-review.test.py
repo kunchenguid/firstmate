@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,6 +110,134 @@ os.execv(sys.argv[2], sys.argv[2:])
         failure["status"] = "scored"
         with self.assertRaises(gate.GateError):
             gate.validate_attempt_failure(plan, failure, "scored", 10, [10])
+
+    def test_neutral_projection_reconstructs_archived_tree(self):
+        repo, sample = self.root / "repo", self.root / "archive"
+        repo.mkdir(); sample.mkdir()
+        def git(*args):
+            return subprocess.check_output(["git", "-C", str(repo), *args]).decode().strip()
+        git("init", "-q")
+        git("config", "user.name", "test")
+        git("config", "user.email", "test@example.invalid")
+        git("commit", "--allow-empty", "-qm", "base")
+        base = git("rev-parse", "HEAD^{tree}")
+        (repo / "answer").write_text("candidate\n")
+        git("add", "answer"); git("commit", "-qm", "candidate")
+        sha, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+        patch = (git("diff", "--binary", base, tree) + "\n").encode()
+        (repo / "answer").write_text("different\n")
+        git("commit", "-qam", "different")
+        other = git("rev-parse", "HEAD")
+        git("bundle", "create", str(sample / "candidate.bundle"), "HEAD")
+        binding = {"original_sha": sha, "neutral_sha": sha, "original_tree": tree,
+                   "neutral_tree": tree, "base_tree": base, "patch_hash": hashlib.sha256(patch).hexdigest()}
+        record = {"tree_binding": binding, "groups": {"candidate_bundle_and_projection": ["candidate.bundle", "projection.diff"]}}
+        def publish(content, binding_document=None):
+            (sample / "projection.diff").write_bytes(content)
+            (sample / "tree-binding.json").write_text(json.dumps(binding if binding_document is None else binding_document))
+            record["files"] = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in sample.iterdir()}
+        publish(patch)
+        gate.validate_archived_projection(sample, record)
+        publish(b"unrelated prose\n")
+        with self.assertRaisesRegex(gate.GateError, "patch hash"):
+            gate.validate_archived_projection(sample, record)
+        binding["patch_hash"] = hashlib.sha256(b"unrelated prose\n").hexdigest()
+        publish(b"unrelated prose\n")
+        with self.assertRaises(gate.GateError):
+            gate.validate_archived_projection(sample, record)
+        binding["patch_hash"] = hashlib.sha256(patch).hexdigest()
+        binding["neutral_sha"] = other
+        publish(patch)
+        with self.assertRaisesRegex(gate.GateError, "commit identities"):
+            gate.validate_archived_projection(sample, record)
+        binding["neutral_sha"] = sha
+        publish(patch, {**binding, "base_tree": tree})
+        with self.assertRaisesRegex(gate.GateError, "tree-binding.json differs"):
+            gate.validate_archived_projection(sample, record)
+
+    def test_container_liveness_is_bound_to_task_generation(self):
+        host, private, runtime = [self.root / name for name in ("host", "private", "runtime")]
+        for path in (host, private, runtime):
+            path.mkdir()
+        task = "bench-worker"
+        meta = host / f"{task}.meta"
+        meta.write_text("spawn_gen=one\n")
+        info, stop = self.root / "docker.json", self.root / "stop"
+        self.executable(runtime / "docker", f'''#!{sys.executable}
+import json, subprocess, sys
+from pathlib import Path
+args = sys.argv[1:]
+info = Path({str(info)!r})
+if args[0] == "info":
+    raise SystemExit(0)
+if args[:2] == ["network", "inspect"]:
+    print("true proxy ")
+elif args[0] == "inspect":
+    print(info.read_text())
+elif args[0] == "run":
+    cid = "f" * 64
+    Path(args[args.index("--cidfile") + 1]).write_text(cid)
+    labels = dict(args[index + 1].split("=", 1) for index, arg in enumerate(args) if arg == "--label")
+    info.write_text(json.dumps([{{"Id": cid, "State": {{"Running": True}}, "Config": {{"Labels": labels}}}}]))
+    raise SystemExit(subprocess.call(args[args.index("runtime:test") + 1:]))
+''')
+        child = self.executable(private / "worker.py", f'''#!{sys.executable}
+from pathlib import Path
+import time
+while not Path({str(stop)!r}).exists():
+    time.sleep(0.02)
+''')
+        env = {**os.environ, "PATH": str(runtime) + os.pathsep + os.environ["PATH"]}
+        command = [sys.executable, str(ROOT / "bin/fm-bench-lifecycle.py"), str(private), str(host), task,
+                   str(ROOT / "bin/fm-busy-event.sh"), "--container", "--", str(ROOT / "bin/fm-bench-confine.sh"),
+                   "--purpose", "entrant", "--mechanism", "container", "--image", "runtime:test",
+                   "--provider-network", "test", "--provider-proxy", "http://proxy:8080",
+                   "--provider-proxy-container", "proxy", "--allow", str(private), "--", str(child)]
+        process = subprocess.Popen(command, env=env)
+        try:
+            deadline = time.monotonic() + 5
+            while not info.exists():
+                self.assertIsNone(process.poll())
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.02)
+            script = '''FM_BACKEND_LIB_DIR=$1/bin
+STATE=$2
+. "$FM_BACKEND_LIB_DIR/backends/tmux.sh"
+tmux() { printf 'worker\n'; }
+fm_backend_tmux_foreground_comms() { printf python3; }
+fm_backend_tmux_foreground_argv0s() { printf python3; }
+fm_backend_tmux_foreground_pids() { printf '%s\n' "$TEST_RELAY_PID"; }
+fm_backend_tmux_foreground_args() { printf python3; }
+fm_backend_tmux_current_command() { printf python3; }
+fm_gemini_pid_is_gemini() { return 1; }
+fm_gemini_args_are_gemini() { return 1; }
+fm_backend_tmux_agent_state session:worker
+'''
+            def classify():
+                return subprocess.check_output(["bash", "-c", script, "_", str(ROOT), str(host)],
+                                               env={**env, "TEST_RELAY_PID": str(process.pid)}, text=True)
+            self.assertEqual(classify(), "alive")
+            meta.write_text("spawn_gen=two\n")
+            self.assertEqual(classify(), "ambiguous")
+            meta.write_text("spawn_gen=one\n")
+            container = json.loads(info.read_text())
+            container[0]["State"]["Running"] = False
+            info.write_text(json.dumps(container))
+            self.assertEqual(classify(), "ambiguous")
+            container[0]["State"]["Running"] = True
+            container[0]["Config"]["Labels"]["fm.bench.launch"] = "another-launch"
+            info.write_text(json.dumps(container))
+            self.assertEqual(classify(), "ambiguous")
+        finally:
+            stop.touch()
+            process.wait(timeout=5)
+        self.assertEqual(process.returncode, 0)
+        self.assertFalse((host / f".bench-container-{process.pid}.json").exists())
+
+    def test_review_entrypoint_is_in_benchmark_family(self):
+        listed = subprocess.check_output([str(ROOT / "bin/fm-test-run.sh"), "--list", "--family", "benchmark-gate"],
+                                         cwd=ROOT, text=True).splitlines()
+        self.assertIn("tests/fm-bench-review.test.sh", listed)
 
     def test_void_timing_tracks_available_endpoints(self):
         for failure_class in ("provider_outage", "quota_exhaustion", "evaluator_infrastructure"):

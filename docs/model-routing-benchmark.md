@@ -143,3 +143,8 @@ Inbox doorbells use the task’s private inbox binding, and the relay removes it
 Void attempts may provide `observations` with `dispatch_accepted_at`, `first_assistant_event_at`, `first_valid_final_commit_at`, and `observed_at` from the shared clock.
 Unavailable assistant or commit endpoints are `null`; `intervals` must contain exactly the durations whose endpoints exist, so failures before a final commit carry an empty object.
 Observations must be finite and ordered, and any supplied durations must match them; existing complete interval records remain readable.
+
+Archive and promotion checks reconstruct the neutral projection in a fresh Git repository: its patch digest must match, applying it to `base_tree` must produce `original_tree`, and both original and neutral commits must resolve to that tree.
+The serialized `tree-binding.json` must agree with the manifest binding.
+Tmux identifies a confined entrant through a host-owned relay record tied to its process start, task generation, and Docker launch labels; stopped containers or stale bindings cannot establish agent liveness.
+The benchmark family includes `tests/fm-bench-review.test.sh`, which runs the Python regression cases.

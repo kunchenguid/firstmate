@@ -382,7 +382,7 @@ family_for_basename() {
       printf '%s\n' standalone
       ;;
 
-    fm-bench-gate.test.sh|fm-bench-isolation-e2e.test.sh)
+    fm-bench-gate.test.sh|fm-bench-review.test.sh|fm-bench-isolation-e2e.test.sh)
       printf '%s\n' benchmark-gate
       ;;
     *)
