@@ -217,6 +217,22 @@ test_a_truncated_tile_says_its_breakdown_covers_only_the_shown_rows() {
   pass "a truncated tile counts every row but says its breakdown covers the shown ones"
 }
 
+test_owner_labels_do_not_collide_with_inherited_properties() {
+  local home out
+  home=$(make_home owner-inherited-keys)
+  out=$(render_payload "$home" '{"underway":[
+    {"id":"a","repo":"firstmate","owner":"(main)","kind":"ship","state":"working","doing":"One"},
+    {"id":"b","repo":"firstmate","owner":"constructor","kind":"ship","state":"working","doing":"Two"},
+    {"id":"c","repo":"firstmate","owner":"constructor","kind":"ship","state":"working","doing":"Three"},
+    {"id":"d","repo":"firstmate","owner":"__proto__","kind":"ship","state":"working","doing":"Four"}
+  ]}')
+  [ "$(owners_of "$out" underway)" = "2 constructor · 1 main · 1 __proto__" ] \
+    || fail "valid owner labels disappeared from the breakdown: $out"
+  printf '%s' "$out" | jq -e '.stats[] | select(.label == "underway") | .n == 4' >/dev/null \
+    || fail "the ownership breakdown disagrees with the underway total: $out"
+  pass "all valid owner labels count even when they name inherited properties"
+}
+
 test_the_tiles_break_down_by_owner_without_a_tile_of_their_own() {
   local home out
   home=$(make_home owner-breakdown)
@@ -342,6 +358,7 @@ test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
 test_underway_rows_name_their_home_when_the_repo_cannot
 test_the_tiles_break_down_by_owner_without_a_tile_of_their_own
+test_owner_labels_do_not_collide_with_inherited_properties
 test_a_tile_owned_by_one_home_still_names_it
 test_a_truncated_tile_says_its_breakdown_covers_only_the_shown_rows
 test_the_needs_you_tile_is_never_split_or_filtered_by_owner

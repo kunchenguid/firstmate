@@ -481,10 +481,9 @@ __FM_BEARINGS_BOARD_DATA__
      this sub-line exists to correct. `omitted` says the counts describe only
      the rows on screen, so a truncated section cannot imply a false total. */
   function ownerBreakdown(rows, omitted) {
-    var order = [], counts = {};
-    (rows || []).forEach(function (r) {
-      var o = ownerLabel(r && r.owner);
-      if (!o) return;
+    var order = [], counts = Object.create(null);
+    rows.forEach(function (r) {
+      var o = ownerLabel(r.owner);
       if (!(o in counts)) { counts[o] = 0; order.push(o); }
       counts[o] += 1;
     });

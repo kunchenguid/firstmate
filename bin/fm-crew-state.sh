@@ -259,7 +259,7 @@ crew_busy_verdict() {  # <target>
 trim() { fm_nm_trim "$@"; }
 strip_quotes() { fm_nm_strip_quotes "$@"; }
 nm_run() {  # <args...>
-  fm_nm_run "$WT" "$NM_TIMEOUT" "$@"
+  fm_nm_run_checked "$WT" "$NM_TIMEOUT" "$@"
 }
 
 # Scalar value of a TOON key in the captured run output ($RUN_OUT).
@@ -563,7 +563,7 @@ COARSE_STATUS=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  RUN_OUT=$(nm_run axi status)
+  RUN_OUT=$(nm_run axi status) || emit unknown run-step "no-mistakes run lookup failed"
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     # Head equality, or the pipeline-owned-active exemption: while the
@@ -576,11 +576,9 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     else
       # The active-or-most-recent run is for another branch, or it names this
       # branch with a head this copy cannot verify (a pipeline-advanced fix
-      # round, or a rewritten tip). Deliberately nested inside
-      # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
-      # itself did not respond, so retrying it immediately with a second
-      # bounded call would just double the wait for no better answer.
-      COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+      # round, or a rewritten tip).
+      RUNS_OUT=$(nm_runs_list) || emit unknown run-step "no-mistakes run lookup failed"
+      COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_OUT")
       if [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         # A branch-matching answer the strict rule rejected is this branch's

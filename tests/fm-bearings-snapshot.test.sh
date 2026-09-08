@@ -3310,6 +3310,54 @@ EOF
   pass "a second mate's delivery reaches the parent as a delivered row with its owner and link"
 }
 
+test_configured_wait_declarations_reach_both_delivery_projections() {
+  local home parent fakebin id window out ledger
+  home=$(make_home configured-wait)
+  make_valid_secondmate_home configured-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in configured-live configured-exited old-literal; do
+    printf -- '- [ ] %s - Waiting delivery (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" \
+      >> "$home/data/backlog.md"
+    window="firstmate:dead-$id"
+    [ "$id" != configured-live ] || window=firstmate:fm-configured-live
+    fm_write_meta "$home/state/$id.meta" "window=$window" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes" \
+      "pr=https://github.com/acme/repo/pull/2"
+    record_claude_state "$home/state" "$id" idle
+    printf 'awaiting: waiting on the outside maintainer\n' > "$home/state/$id.status"
+    arm_merge_poll "$home" "$id" https://github.com/acme/repo/pull/2 \
+      $((BEARINGS_FIXTURE_EPOCH - 8 * 86400))
+  done
+  printf 'paused: obsolete declaration\n' > "$home/state/old-literal.status"
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  out=$(FM_CLASSIFY_PAUSED_VERB=awaiting run "$home" "$fakebin" --json) || fail "configured wait snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.awaiting[].id] | sort) == ["configured-exited", "configured-live"]
+      and all(.awaiting[]; .age_days == 8 and .nudge == true)
+      and [.in_flight[].id] == ["old-literal"]
+  ' >/dev/null || fail "the main projection did not honor the configured declaration or its nudge: $out"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "configured wait ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    ([.awaiting_merge[].id] | sort) == ["configured-exited", "configured-live"]
+      and (.awaiting_merge | any(.id == "configured-live" and .state == "paused"))
+      and (.awaiting_merge | any(.id == "configured-exited" and .state == "unknown"))
+      and [.active_children[].id] == ["old-literal"]
+  ' >/dev/null || fail "the home summary did not honor the configured declaration: $ledger"
+  parent=$(make_home configured-wait-parent)
+  append_secondmate_registry "$parent" configured-mate "$home"
+  fm_write_secondmate_meta "$parent/state/configured-mate.meta" "$home" "firstmate:fm-configured-mate" firstmate
+  out=$(FM_CLASSIFY_PAUSED_VERB=awaiting run "$parent" "$fakebin" --json) || fail "configured parent projection failed"
+  printf '%s' "$out" | jq -e '
+    ([.awaiting[].id] | sort) == ["configured-mate/configured-exited", "configured-mate/configured-live"]
+      and all(.awaiting[]; .age_days == 8 and .nudge == true)
+      and [.in_flight[].id] == ["configured-mate/old-literal"]
+  ' >/dev/null || fail "configured declarations lost their delivery or nudge in the parent: $out"
+  pass "the configured external-wait verb preserves live and exited deliveries and their nudges in both homes"
+}
+
 test_delivery_requires_a_declaration_and_eligible_current_state_in_both_homes() {
   local home parent fakebin id window out ledger projected canonical meta
   home=$(make_home delivery-state-matrix)
@@ -3322,6 +3370,7 @@ case "${PWD##*/}" in
   run-failed) status=failed ;;
   run-parked) status=fix_review ;;
   run-done) status=completed ;;
+  run-lookup-failed) exit 1 ;;
   run-unknown|run-unknown-exited) status=completed; printf 'outcome: unverified\n' ;;
   *) exit 0 ;;
 esac
@@ -3329,13 +3378,14 @@ printf 'branch: %s\nhead: %s\nstatus: %s\n' \
   "$(git symbolic-ref --quiet --short HEAD)" "$(git rev-parse HEAD)" "$status"
 SH
   printf '## In flight\n' > "$home/data/backlog.md"
-  for id in declared-live declared-exited undeclared-done event-failed event-blocked live-working run-failed run-parked run-done run-unknown run-unknown-exited probe-unreadable; do
+  for id in declared-live declared-exited undeclared-done event-failed event-blocked live-working run-failed run-parked run-done run-unknown run-unknown-exited run-lookup-failed probe-unreadable; do
     printf -- '- [ ] %s - Delivery state case (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" \
       >> "$home/data/backlog.md"
     mkdir -p "$home/projects/$id"
     window="firstmate:fm-$id"
     [ "$id" != declared-exited ] || window=firstmate:dead-declared-exited
     [ "$id" != run-unknown-exited ] || window=firstmate:dead-run-unknown-exited
+    [ "$id" != run-lookup-failed ] || window=firstmate:dead-run-lookup-failed
     [ "$id" != probe-unreadable ] || window=unreadable:fm-probe-unreadable
     fm_write_meta "$home/state/$id.meta" \
       "window=$window" "worktree=$home/projects/$id" "project=firstmate" \
@@ -3368,6 +3418,8 @@ SH
       and (.in_flight | any(.id == "run-parked" and .state == "parked" and .doing == "parked at fix_review"))
       and (.in_flight | any(.id == "run-unknown" and .state == "unknown" and .doing == "outcome: unverified"))
       and (.in_flight | any(.id == "run-unknown-exited" and .state == "unknown" and .doing == "outcome: unverified"))
+      and (.in_flight | any(.id == "run-lookup-failed" and .state == "unknown"
+        and .doing == "no-mistakes run lookup failed"))
       and (.in_flight | any(.id == "probe-unreadable" and .state == "unknown"
         and .doing == "backend unreachable (tmux endpoint state: unreadable)"))
       and (.unhealthy_endpoints | any(.id == "declared-exited" and .exists == false))
@@ -3378,6 +3430,8 @@ SH
     (.tasks | any(.id == "declared-exited" and .current_state.state == "unknown"
       and .current_state.source == "endpoint-gone" and .endpoint.exists == false))
       and (.tasks | any(.id == "run-unknown-exited" and .current_state.state == "unknown"
+        and .current_state.source == "run-step" and .endpoint.exists == false))
+      and (.tasks | any(.id == "run-lookup-failed" and .current_state.state == "unknown"
         and .current_state.source == "run-step" and .endpoint.exists == false))
       and (.tasks | any(.id == "probe-unreadable" and .current_state.state == "unknown"
         and .current_state.source == "none" and .endpoint.exists == false))
@@ -3465,6 +3519,7 @@ test_a_parked_delivery_does_not_make_its_secondmate_home_working() {
 }
 
 test_delivery_requires_a_declaration_and_eligible_current_state_in_both_homes
+test_configured_wait_declarations_reach_both_delivery_projections
 test_a_parked_delivery_does_not_make_its_secondmate_home_working
 test_a_secondmate_delivery_reaches_the_parent_as_a_delivered_row
 test_a_request_waiting_on_the_captain_never_lands_in_the_waiting_state

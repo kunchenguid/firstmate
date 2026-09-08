@@ -54,8 +54,8 @@
 # Complete on our side is affirmative, never "any state except working". The
 # delivery must be recorded (pr.merge_poll armed with a URL, which firstmate
 # writes only after a PR-ready signal), and the latest recorded event must be
-# paused, the bounded external wait from AGENTS.md section 8. Eligible current
-# states are paused, done, or unknown with source endpoint-gone from the
+# the configured pause verb (default paused) from AGENTS.md section 8. Eligible
+# current states are paused, done, or unknown with source endpoint-gone from the
 # current-state reader's authoritative death classification. A done
 # event alone never declares an external wait. A later event supersedes the
 # declaration, and working, failed, blocked, or parked state is never eligible.
@@ -123,9 +123,9 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
-# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
-. "$SCRIPT_DIR/fm-timeout-lib.sh"
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -205,10 +205,11 @@ For every registered secondmate, readable structured facts from its own home are
   distinguish live and cached ledgers; a home without either is explicitly unreadable.
 awaiting holds work that shipped and now waits on a merge we do not control: the
   delivery is recorded by an armed merge watch with a URL, the latest event must
-  declare paused, and the current state must be paused, done, or unknown with source
-  endpoint-gone from an authoritative death classification. Unknown run state or
-  an unreadable endpoint never qualifies. No captain action may be outstanding,
-  so a qualifying row is neither in_flight nor a gate.
+  declare the configured external-wait verb (FM_CLASSIFY_PAUSED_VERB, default paused),
+  and the current state must be paused, done, or unknown with source endpoint-gone
+  from an authoritative death classification. Unknown run state, a failed run
+  lookup, or an unreadable endpoint never qualifies. No captain action may be
+  outstanding, so a qualifying row is neither in_flight nor a gate.
   age_days is that wait in whole days, preserved when the same
   PR is re-recorded, and nudge marks a row at or past awaiting_nudge_days
   (FM_BEARINGS_AWAITING_NUDGE_DAYS), which belongs in Captain's Call instead.
@@ -383,6 +384,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --arg today "$BEARINGS_TODAY" \
   --arg prs "$PR_STATUS" \
   --arg fields "$FIELDS" \
+  --arg paused_verb "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" \
   --argjson landed_n "$FM_BEARINGS_LANDED" \
   --argjson landed_per_home_n "$FM_BEARINGS_LANDED_PER_HOME" \
   --argjson in_flight_n "$FM_BEARINGS_IN_FLIGHT" \
@@ -469,7 +471,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   def delivery_recorded:
     .pr.merge_poll.armed == true and .pr.url != null;
   def complete_on_our_side:
-    .paths.status_log.last_event.state == "paused"
+    .paths.status_log.last_event.state == $paused_verb
     and (.current_state.state == "paused" or .current_state.state == "done"
          or (.current_state.state == "unknown"
              and .current_state.source == "endpoint-gone"));

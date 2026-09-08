@@ -937,6 +937,7 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
 # nested secondmates.
 secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
   jq -n \
+    --arg paused_verb "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" \
     --arg generated "$SNAPSHOT_NOW" \
     --argjson generated_epoch "$SNAPSHOT_EPOCH" \
     --arg home "$FM_HOME" \
@@ -955,7 +956,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
       $work.hold_kind != "captain" and $work.hold_bucket == null
       and $work.captain_actionable != true
       and .pr.merge_poll.armed == true and .pr.url != null
-      and .paths.status_log.last_event.state == "paused"
+      and .paths.status_log.last_event.state == $paused_verb
       and (.current_state.state == "paused" or .current_state.state == "done"
            or (.current_state.state == "unknown"
                and .current_state.source == "endpoint-gone"));

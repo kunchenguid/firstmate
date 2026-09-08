@@ -47,8 +47,8 @@ Board answers are acted on later under the normal authority rules; this skill's 
    Never use hold-reason or body prose to classify or place a decision.
    The same structural-only rule governs the delivered bucket and ownership.
    The snapshot's `awaiting` rows are the whole of the Delivered section, and a row qualifies only when BOTH halves hold: the worker declared a bounded external wait, and no captain action is outstanding on that task.
-   The delivery needs an armed merge watch with a URL, the latest recorded event must be `paused` as defined by AGENTS.md section 8, and the current state must be `paused`, `done`, or `unknown` with source `endpoint-gone` from the current-state reader's authoritative death classification.
-   An unverified run state or an unreadable endpoint never qualifies.
+   The delivery needs an armed merge watch with a URL, the latest recorded event must declare the external-wait verb owned by `fm-classify-lib.sh` (`FM_CLASSIFY_PAUSED_VERB`, default `paused`) as defined by AGENTS.md section 8, and the current state must be `paused`, `done`, or `unknown` with source `endpoint-gone` from the current-state reader's authoritative death classification.
+   An unverified run state, a failed run lookup, or an unreadable endpoint never qualifies.
    A later event supersedes the declaration, and a current working, failed, blocked, or parked state is never eligible.
    The declared wait must also pass the structured captain-hold classification; absence of a hold alone never establishes outside ownership.
    The state was first specified too loosely, with prose standing in for structure, then narrowed once to what structure proves, and corrected AGAIN during review when that narrowing still left the captain window open: the normal PR-ready flow arms a merge watch after `done` before asking for the captain's approval in chat, without creating a hold.
