@@ -383,7 +383,7 @@ test_cli_caches_the_selected_client_within_a_process() {
 }
 
 # shellcheck disable=SC2016
-test_cli_reselects_path_default_for_a_different_session() {
+test_cli_scopes_the_selected_client_to_its_session() {
   local dir out
   dir="$TMP_ROOT/client-pair-cross-session"
   mkdir -p "$dir/stale" "$dir/current" "$dir/tools"
@@ -393,12 +393,16 @@ test_cli_reselects_path_default_for_a_different_session() {
 session=${!#}
 printf '%s\n' "$*" >> "${FM_HERDR_PAIR_DIR:?}/stale.log"
 if [ "${1:-} ${2:-}" = "status --json" ]; then
-  if [ "$session" = modern ]; then
-    printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true,"protocol":22,"compatible":false}}\n'
-  else
+  if [ "$session" = fresh ]; then
+    printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":false}}\n'
+  elif [ -e "$FM_HERDR_PAIR_DIR/switched" ]; then
     printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true,"protocol":20,"compatible":true}}\n'
+  else
+    printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true,"protocol":22,"compatible":false}}\n'
   fi
-elif [ "$session" = legacy ]; then
+elif [ "$session" = fresh ] && [ "${1:-}" = server ]; then
+  printf 'path-default-server\n'
+elif [ "$session" = modern ] && [ -e "$FM_HERDR_PAIR_DIR/switched" ]; then
   printf 'legacy\n'
 else
   printf '{"error":{"code":"protocol_mismatch"}}\n' >&2
@@ -410,12 +414,16 @@ SH
 session=${!#}
 printf '%s\n' "$*" >> "${FM_HERDR_PAIR_DIR:?}/current.log"
 if [ "${1:-} ${2:-}" = "status --json" ]; then
-  if [ "$session" = modern ]; then
-    printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true,"protocol":22,"compatible":true}}\n'
-  else
+  if [ "$session" = fresh ]; then
+    printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":false}}\n'
+  elif [ -e "$FM_HERDR_PAIR_DIR/switched" ]; then
     printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true,"protocol":20,"compatible":false}}\n'
+  else
+    printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true,"protocol":22,"compatible":true}}\n'
   fi
-elif [ "$session" = modern ]; then
+elif [ "$session" = fresh ] && [ "${1:-}" = server ]; then
+  printf 'selected-server\n'
+elif [ "$session" = modern ] && [ ! -e "$FM_HERDR_PAIR_DIR/switched" ]; then
   printf 'modern\n'
 else
   printf '{"error":{"code":"protocol_mismatch"}}\n' >&2
@@ -425,13 +433,19 @@ SH
   chmod +x "$dir/stale/herdr" "$dir/current/herdr"
   out=$(run_with_clients "$dir" "$dir/stale:$dir/current" \
     'fm_backend_herdr_cli modern pane get w1:p1 > "$FM_HERDR_PAIR_DIR/modern.out" || exit 1
-     fm_backend_herdr_cli legacy pane get w2:p2 > "$FM_HERDR_PAIR_DIR/legacy.out" || exit 1
-     printf "%s|%s|%s" "$(cat "$FM_HERDR_PAIR_DIR/modern.out")" "$(cat "$FM_HERDR_PAIR_DIR/legacy.out")" "${FM_BACKEND_HERDR_BIN:-PATH-default}"')
-  [ "$out" = 'modern|legacy|PATH-default' ] \
-    || fail "a protocol mismatch in another session should reselect the PATH-default compatible client, got: $out"
-  assert_contains "$(cat "$dir/current.log")" 'pane get w2:p2' "the previously selected client should be tried against the second session"
-  assert_contains "$(cat "$dir/stale.log")" 'pane get w2:p2' "the second-session call should be retried on the compatible PATH-default client"
-  pass "herdr client selection: a protocol mismatch reselects for each requested session"
+     fm_backend_herdr_cli fresh status --json > "$FM_HERDR_PAIR_DIR/fresh-status.out" || exit 1
+     fm_backend_herdr_cli fresh server > "$FM_HERDR_PAIR_DIR/server.out" || exit 1
+     touch "$FM_HERDR_PAIR_DIR/switched"
+     fm_backend_herdr_cli modern pane get w1:p1 > "$FM_HERDR_PAIR_DIR/legacy.out" || exit 1
+     printf "%s|%s|%s|%s|%s" "$(cat "$FM_HERDR_PAIR_DIR/modern.out")" "$(jq -r .server.running "$FM_HERDR_PAIR_DIR/fresh-status.out")" "$(cat "$FM_HERDR_PAIR_DIR/server.out")" "$(cat "$FM_HERDR_PAIR_DIR/legacy.out")" "${FM_BACKEND_HERDR_BIN:-PATH-default}"')
+  [ "$out" = 'modern|false|path-default-server|legacy|PATH-default' ] \
+    || fail "a selected client should stay scoped to its session while forced reselection still returns to the PATH default, got: $out"
+  assert_contains "$(cat "$dir/stale.log")" 'server --session fresh' "a stopped second session should start with the PATH-default client"
+  assert_not_contains "$(cat "$dir/current.log")" 'server --session fresh' "another session's selected client must not start the stopped session"
+  [ "$(grep -c 'pane get w1:p1' "$dir/current.log")" -eq 2 ] \
+    || fail "the selected client should be retried after its own server compatibility changes: $(cat "$dir/current.log")"
+  assert_contains "$(cat "$dir/stale.log")" 'pane get w1:p1' "the changed session call should retry on the newly compatible PATH-default client"
+  pass "herdr client selection: selected clients remain scoped to their session"
 }
 
 # shellcheck disable=SC2016
@@ -4654,7 +4668,7 @@ test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_cli_caches_the_selected_client_within_a_process
-test_cli_reselects_path_default_for_a_different_session
+test_cli_scopes_the_selected_client_to_its_session
 test_cli_unrelated_failure_never_triggers_reselection
 test_cli_single_client_pays_no_selection_read
 test_client_status_reads_both_status_shapes
