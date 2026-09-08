@@ -368,16 +368,24 @@ This guard is the refresh command after any harness upgrade; it spends a small n
 
 The same guard also proves the recovery half: a doorbell whose Enter is lost leaves firstmate's own line sitting in the composer, which reads `pending` - the exact verdict the ring defers on to protect a human's half-typed text.
 Identifying that line as firstmate's own is what keeps the deferral recoverable, because a ring that cannot tell its own undelivered doorbell from foreign text defers again on the text the previous ring left behind and the steer waits for a human keypress.
-Verified on 2026-09-08 against Herdr 0.9.0 (protocol 22) and Herdr 0.8.2 (protocol 20), each in its own isolated named-session lab with its own `XDG_CONFIG_HOME`, driving `fm_task_inbox_ring` against real Claude Code 2.1.236.
-Both versions behaved identically: before the change every re-ring returned the deferral status and left the composer `pending`; after it the first re-ring committed the line and the composer returned to `empty` with the turn started.
-A composer holding text firstmate did not type is still deferred untouched on both versions, with no key sent.
+Verified on 2026-09-08 against Herdr 0.9.0 (protocol 22) and Herdr 0.8.2 (protocol 20), each in its own isolated named-session lab with its own short `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and `XDG_DATA_HOME`, driving `fm_task_inbox_ring` against real Claude Code 2.1.236.
+Both versions behaved identically: before the change every re-ring returned the deferral status and left the composer `pending`; after it the first re-ring committed the line, the worker acted, and the worker acknowledged the durable record by moving it into `handled/`.
+A composer holding text firstmate did not type was deferred untouched and visibly remained unsent on both versions, while its durable record remained in place.
 
-The guard itself was run on 2026-09-08 on tmux 3.6a, macOS arm64, and both halves passed for the installed harness:
+The self-contained guard downloads checksum-pinned official release binaries when needed, uses only non-default `fm-lab-` sessions, and tears down each isolated universe on exit. It is the command that refreshes this cross-version record:
+
+```sh
+FM_SEND_INBOX_HERDR_LIVE_E2E=1 tests/fm-send-inbox-doorbell-herdr-live-e2e.test.sh
+```
+
+Observed output on 2026-09-08, macOS arm64:
 
 ```text
-ok - claude (2.1.236 (Claude Code)): the doorbell reached a real worker, which acted and acked with the mv
-ok - claude (2.1.236 (Claude Code)): a swallowed doorbell was committed by one re-ring, and the worker acted and acked
-ok - live steering-inbox doorbell guard: 2 check(s) honored the doorbell contract
+ok - Herdr 0.8.2: swallowed doorbell recovered through real fm_task_inbox_ring
+ok - Herdr 0.8.2: foreign draft stayed unchanged and unsubmitted
+ok - Herdr 0.9.0: swallowed doorbell recovered through real fm_task_inbox_ring
+ok - Herdr 0.9.0: foreign draft stayed unchanged and unsubmitted
+ok - cross-version Herdr doorbell guard: 2 version(s) passed, 0 unavailable
 ```
 
 The same run recorded why the transport itself is not the variable: with a raw-mode reader in the pane, `pane send-text` followed by `pane send-keys enter` delivers byte-identical input on both releases (the literal text, then the Enter encoding the application asked for - `\r`, or `\e[13u` under the Kitty keyboard protocol), in the same order, at the caller's settle interval.
