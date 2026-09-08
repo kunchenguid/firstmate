@@ -686,14 +686,21 @@ function shellInvocation(position, context) {
   return { kind: "stdin", payload: null };
 }
 
+function readsStdinAsScript(position, context) {
+  if (shellInvocation(position, context)?.kind === "stdin") return true;
+  const script = sourcedScript(position);
+  const resolved = resolveKnownWord(script, context.knownVariables);
+  return resolved === "/dev/stdin" || resolved === "/dev/fd/0";
+}
+
 function shellHeredocPayloads(tokens, position, context) {
-  if (shellInvocation(position, context)?.kind !== "stdin") return [];
+  if (!readsStdinAsScript(position, context)) return [];
   const heredocs = tokens.filter((token) => token.type === "redir" && token.fd === 0 && typeof token.heredoc === "string");
   return heredocs.length === 0 ? [] : [heredocs.at(-1).heredoc];
 }
 
 function shellHereStringPayloads(tokens, position, context) {
-  if (shellInvocation(position, context)?.kind !== "stdin") return [];
+  if (!readsStdinAsScript(position, context)) return [];
   const payloads = [];
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
