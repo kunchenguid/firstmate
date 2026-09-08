@@ -143,7 +143,7 @@ test_event_age_uses_only_emission_time() {
     > "$home/secondmate-home/.fm-secondmate-parent"
   before=$(date +%s)
   FM_HOME="$home/secondmate-home" "$ROOT/bin/fm-secondmate-report.sh" \
-    done 0123456789abcdef 'audit complete' || fail "parent report failed"
+    'done' 0123456789abcdef 'audit complete' || fail "parent report failed"
   after=$(date +%s)
   emitted=$(tail -1 "$home/state/secondmate-task.status")
   # shellcheck source=bin/fm-classify-lib.sh
