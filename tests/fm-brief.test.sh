@@ -340,7 +340,7 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must sequence starting the pipeline as a numbered step, not a condition"
   assert_grep "never append \`done:\` on a status line that does not carry that PR URL" "$brief" \
     "no-mistakes DOD must forbid a done: line with no PR URL"
-  assert_grep "the correct word is \`working:\` (for example \`working: implemented, starting /no-mistakes\`), and the exact next action is step 2 above" "$brief" \
+  assert_grep "you have not started /no-mistakes yet, the correct word is \`working:\` (for example \`working: implemented, starting /no-mistakes\`), and the exact next action is step 2 above" "$brief" \
     "no-mistakes DOD must name working: plus the exact next command in place of a premature done:"
   assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
     "no-mistakes DOD must not leave the old wait-for-firstmate-to-tell-you-to handshake behind"

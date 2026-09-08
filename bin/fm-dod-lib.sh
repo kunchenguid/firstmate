@@ -14,12 +14,14 @@
 # pipeline or PR step as a numbered action to perform, not a condition that
 # is already satisfied, and it states outright that `done:` requires that
 # mode's PR URL: a worker that finished implementing and committing is told
-# to report `working:` and go do the next numbered step, never `done:`. This
-# closes the finish-line ambiguity by construction instead of by a louder
-# reminder, because emphasis alone did not stop repeated premature `done:`
-# lines describing a finished implementation with no PR (see PR history for
-# the evidence). local-only and scout keep their own `done:` semantics with
-# no PR, unaffected by that rule.
+# to report `working:` and go do the next numbered step, never `done:`. The
+# wording is restructured so the pipeline run, or opening the PR, reads as a
+# numbered action still owed inside the work sequence rather than a condition
+# tacked on at the end; nothing in the code rejects a premature `done:`, so
+# this is a clearer contract, not a guarantee. Emphasis alone did not stop
+# repeated premature `done:` lines describing a finished implementation with
+# no PR (see PR history for the evidence). local-only and scout keep their
+# own `done:` semantics with no PR, unaffected by that rule.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -239,7 +241,7 @@ Work through these steps in order; do not stop after step 1 believing the task i
 4. After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 
 \`done:\` on this task means exactly step 4, never anything earlier: never append \`done:\` on a status line that does not carry that PR URL.
-If the implementation is finished but you have not yet driven /no-mistakes to a green CI, the correct word is \`working:\` (for example \`working: implemented, starting /no-mistakes\`), and the exact next action is step 2 above.
+If the implementation is finished but you have not started /no-mistakes yet, the correct word is \`working:\` (for example \`working: implemented, starting /no-mistakes\`), and the exact next action is step 2 above.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
