@@ -42,10 +42,13 @@
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
 #   worktree, and clears the previous harness's per-task wiring before arming
 #   the new incarnation. The single exception is herdr's released stale
-#   `herdr:pi` cache, where that classifier still reports a Pi that already
-#   exited: only a verified fm-control parent's transaction-bound proof crosses
-#   it, rechecked here immediately before launch (see
-#   fm_spawn_released_herdr_pi_proof_valid below).
+#   `herdr:pi` release, where that classifier may report either dead or a cached
+#   Pi that already exited: only a verified fm-control parent's transaction-bound
+#   proof marks that path, rechecked here immediately before launch (see
+#   fm_spawn_released_herdr_pi_proof_valid below). A replacement Pi also holds
+#   its lifecycle events briefly after the process starts, giving Herdr's
+#   process detector time to publish the replacement generation before the
+#   installed integration reports the new full-lifecycle session.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -1406,14 +1409,22 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # proof describes the harness that was released, not the one being launched.
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  if [ "$RELAUNCH_STATE" != dead ]; then
-    if [ "$RELAUNCH_STATE" = alive ] \
-       && fm_spawn_released_herdr_pi_proof_valid "$RELAUNCH_META" "$RELAUNCH_TARGET"; then
+  # A successful authority clear can project either `dead` or Herdr's cached
+  # process-detected Pi label. Consume and revalidate the control capability in
+  # BOTH cases: besides admitting the cached-alive state, it marks the generated
+  # Pi extension so reports cannot outrun replacement-process detection.
+  if [ -n "${FM_CONTROL_HERDR_PI_RELEASE_PROOF:-}" ]; then
+    if fm_spawn_released_herdr_pi_proof_valid "$RELAUNCH_META" "$RELAUNCH_TARGET"; then
       RELAUNCH_RELEASED_HERDR_PI=1
     else
-      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      echo "error: task $ID's released Herdr Pi proof is no longer valid; refusing to launch a replacement" >&2
       exit 1
     fi
+  fi
+  if [ "$RELAUNCH_STATE" != dead ] \
+     && { [ "$RELAUNCH_STATE" != alive ] || [ "$RELAUNCH_RELEASED_HERDR_PI" != 1 ]; }; then
+    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+    exit 1
   fi
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -3456,6 +3467,13 @@ EOF
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
 // current-state truth.
 import { execFile } from "node:child_process";
+// Herdr 0.8.2 can acknowledge a replacement session report before its process
+// detector publishes the replacement generation, then leave that report
+// suppressed after pane.clear_agent_authority. Only the transaction-bound stale
+// authority recovery gets this bounded pre-event settle; ordinary Pi launches
+// and healthy relaunches stay unchanged. The final control postcondition still
+// requires a distinct stable authority and exactly one Pi engine.
+const herdrPiReplacementSettleMs = $((RELAUNCH_RELEASED_HERDR_PI * 1000));
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -3463,7 +3481,10 @@ const busyEvent = (state: string, event: string) =>
       "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
     ], () => resolve());
   });
-export default function (pi: any) {
+export default async function (pi: any) {
+  if (herdrPiReplacementSettleMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, herdrPiReplacementSettleMs));
+  }
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;

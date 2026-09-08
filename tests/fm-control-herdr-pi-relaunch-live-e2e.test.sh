@@ -7,9 +7,11 @@
 # named fm-herdr-lab session, enters a real Treehouse worktree through the same
 # interactive `treehouse get` topology as production, starts and exits real Pi,
 # proves Herdr still exposes the old non-working herdr:pi authority, and invokes
-# the public `fm-control relaunch` transaction. The result must reuse the exact
-# pane and worktree, rotate to a distinct real Pi authority, leave exactly one
-# accepted worker, and retain the ordinary duplicate-worker refusal.
+# the public `fm-control relaunch` transaction. The generated Pi extension holds
+# lifecycle events until Herdr can publish the replacement process generation;
+# the result must reuse the exact pane and worktree, rotate to a distinct real Pi
+# authority, leave exactly one accepted worker, and retain the ordinary
+# duplicate-worker refusal.
 set -u
 
 # shellcheck source=tests/lib.sh

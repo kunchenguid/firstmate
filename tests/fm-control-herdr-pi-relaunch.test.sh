@@ -128,7 +128,14 @@ case "${1:-} ${2:-}" in
   "agent get")
     case "$phase" in
       quit) printf '%s\n' '{"id":"cli:agent:get","error":{"code":"agent_not_found","message":"no agent in pane"}}' ;;
-      released) json_released_agent ;;
+      released)
+        if [ "$scenario" = report-before-detection-dead ] || [ "$scenario" = late-descendant-dead ]; then
+          printf '%s\n' '{"id":"cli:agent:get","error":{"code":"agent_not_found","message":"no agent in pane"}}'
+          exit 1
+        else
+          json_released_agent
+        fi
+        ;;
       stale)
         status=idle
         source=herdr:pi
@@ -202,7 +209,16 @@ case "${1:-} ${2:-}" in
     if [ "${4:-}" = enter ] && [ -s "$FM_FAKE_PENDING_LAUNCH" ]; then
       case "$(cat "$FM_FAKE_PENDING_LAUNCH")" in
         /quit*) printf '%s\n' quit > "$state" ;;
-        *) printf '%s\n' new > "$state" ;;
+        *)
+          case "$scenario" in
+            report-before-detection-dead|process-detected)
+              "$FM_FAKE_PI_BIN" -e "${FM_FAKE_META%.meta}.pi-ext.ts"
+              ;;
+          esac
+          if [ "$scenario" != report-before-detection-dead ] || [ -s "$FM_FAKE_PI_SETTLED" ]; then
+            printf '%s\n' new > "$state"
+          fi
+          ;;
       esac
     fi
     ;;
@@ -302,7 +318,7 @@ EOF
 404 303 404 S pi pi
 505 404 505 S git /usr/bin/git status
 EOF
-  elif [ "$scenario" = late-descendant ] && [ "$phase" = released ] \
+  elif [ "$scenario" = late-descendant-dead ] && [ "$phase" = released ] \
        && grep -q '^control_relaunch_tx=' "$FM_FAKE_META" 2>/dev/null; then
     # The replacement record is published, so this is the launch-boundary
     # recheck rather than the pre-launch admission read.
@@ -358,7 +374,34 @@ SH
 case "${1:-}" in
   --help) printf 'Usage: pi [options]\n'; exit 0 ;;
 esac
-exit 0
+ext=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -e|--extension)
+      [ "$#" -ge 2 ] || exit 2
+      ext=$2
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+[ -n "$ext" ] && [ -f "$ext" ] || exit 2
+started=$(python3 -c 'import time; print(time.time_ns())') || exit 2
+node --input-type=module - "$ext" <<'JS' || exit 2
+import { pathToFileURL } from "node:url";
+const extensionPath = process.argv[2];
+const extension = await import(pathToFileURL(extensionPath).href);
+await extension.default({ on() {} });
+JS
+python3 - "$started" "$FM_FAKE_PI_ELAPSED" "$FM_FAKE_PI_SETTLED" <<'PY'
+from pathlib import Path
+import sys
+import time
+elapsed = (time.time_ns() - int(sys.argv[1])) / 1_000_000_000
+Path(sys.argv[2]).write_text(f"{elapsed:.6f}\n")
+if elapsed >= 0.8:
+    Path(sys.argv[3]).write_text("settled\n")
+PY
 SH
   chmod +x "$fb/pi"
   cp "$fb/pi" "$fb/pi-signed"
@@ -388,6 +431,8 @@ new_case() {  # <name> <scenario> [harness]
   : > "$dir/ps-count"
   : > "$dir/pending-launch"
   : > "$dir/prior-read"
+  : > "$dir/pi-elapsed"
+  : > "$dir/pi-settled"
   : > "$dir/herdr.sock"
   printf '%s\n' '11111111-1111-7111-8111-111111111111' > "$dir/old-session-id"
   printf '%s\n' '22222222-2222-7222-8222-222222222222' > "$dir/new-session-id"
@@ -436,6 +481,8 @@ run_control() {  # <case-dir> <control args...>
     FM_FAKE_PS_COUNT="$dir/ps-count" \
     FM_FAKE_PENDING_LAUNCH="$dir/pending-launch" FM_FAKE_SOCKET="$dir/herdr.sock" \
     FM_FAKE_PRIOR_READ="$dir/prior-read" \
+    FM_FAKE_PI_BIN="$dir/fakebin/pi" FM_FAKE_PI_ELAPSED="$dir/pi-elapsed" \
+    FM_FAKE_PI_SETTLED="$dir/pi-settled" \
     FM_FAKE_PROJECT="$dir/project" FM_FAKE_WT="$dir/pool/1/repo" \
     FM_FAKE_META="$dir/home/state/rp1.meta" \
     FM_FAKE_OLD_SESSION="$(cat "$dir/old-session-id")" FM_FAKE_NEW_SESSION="$(cat "$dir/new-session-id")" \
@@ -478,6 +525,21 @@ assert_not_contains "$(cat "$dir/herdr.log")" '/quit' "an already-exited Pi caus
 [ "$(grep -c $'pane\x1fprocess-info' "$dir/herdr.log" || true)" -ge 4 ] \
   || fail "the old exit and new authority were not each sampled stably"
 pass "fm-control Herdr/Pi: two stable nested-shell samples release one stale authority and relaunch one Pi in the same endpoint and copy"
+
+# Herdr 0.8.2 can acknowledge lifecycle reports while its process detector is
+# still publishing the prior generation, then suppress the new authority. A
+# successful authority clear may meanwhile classify `dead`, not cached-alive;
+# the transaction proof must mark BOTH results as the same recovery. This
+# fixture accepts the replacement authority only when the real generated Pi
+# extension holds all lifecycle events long enough for the replacement process
+# generation to settle; it does not inspect the extension's source.
+dir=$(new_case positive-report-after-detection report-before-detection-dead)
+out=$(run_control "$dir" rp1 relaunch --note 'let Herdr observe the replacement before lifecycle reports')
+rc=$?
+expect_code 0 "$rc" "replacement lifecycle reports should wait for process detection"$'\n'"$out"
+[ -s "$dir/pi-settled" ] || fail "the generated Pi extension emitted lifecycle events before the replacement process generation could settle"
+[ "$(cat "$dir/herdr-state")" = new ] || fail "the process-generation fixture never accepted the replacement authority"
+pass "fm-control Herdr/Pi: replacement process detection precedes lifecycle reports after stale authority release"
 
 # pi-signed retains its wrapper while the Pi engine runs below it. The same
 # recovery accepts exactly one wrapper plus exactly one engine, not one of each
@@ -596,6 +658,9 @@ assert_not_contains "$(cat "$dir/herdr.log")" 'authority-clear' \
   "a live Pi's ordinary relaunch released Herdr authority"
 [ "$(grep -c 'encode launch-brief' "$dir/herdr.log" || true)" -eq 1 ] \
   || fail "the ordinary relaunch should start exactly one replacement"
+[ -s "$dir/pi-elapsed" ] || fail "the ordinary relaunch did not execute its generated Pi extension"
+[ ! -s "$dir/pi-settled" ] \
+  || fail "the stale-authority process settle was imposed on an ordinary healthy Pi relaunch"
 pass "fm-control Herdr/Pi: a healthy Pi relaunch on a process-detected fleet keeps its own dead-then-alive proof"
 
 # An unvalidatable Pi session generation is ambiguity inside the release proof
@@ -676,7 +741,7 @@ pass "fm-control Herdr/Pi: ownership is proved before release, not before ordina
 # The launch half re-runs the complete process proof after the release proof is
 # published. A descendant that appears in that final gap prevents terminal
 # submission even though the stale authority was already cleared.
-dir=$(new_case negative-late-descendant late-descendant)
+dir=$(new_case negative-late-descendant late-descendant-dead)
 out=$(run_control "$dir" rp1 relaunch --note 'exercise the pre-launch race')
 rc=$?
 [ "$rc" -ne 0 ] || fail "a descendant appearing before replacement launch should refuse: $out"
