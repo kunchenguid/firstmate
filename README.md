@@ -85,7 +85,13 @@ git clone https://github.com/kunchenguid/firstmate
 cd firstmate
 ```
 
-Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
+Put Firstmate's command boundary first on `PATH`, then launch one of the co-primary harnesses; AGENTS.md takes over from there:
+
+```sh
+export PATH="$PWD/bin:$PATH"
+```
+
+This routes `no-mistakes` through Firstmate's argv-level ownership check: primary sessions retain status and recovery access, while blocking `axi run` and `axi respond` calls stay with the task worker identified by `FM_TASK_ID`.
 
 **Claude Code**
 

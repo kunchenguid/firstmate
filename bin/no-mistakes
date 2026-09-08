@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Firstmate's argv-level no-mistakes dispatch boundary.
+#
+# Primary and secondmate sessions have no FM_TASK_ID. Ship and scout workers
+# receive that marker from fm-spawn.sh before their harness starts. Keep the
+# blocking run-driving operations with those workers while preserving every
+# read-only and recovery command for the primary.
+set -u
+
+if [ "${1:-}" = axi ]; then
+  case "${2:-}" in
+    run|respond)
+      if [ -z "${FM_TASK_ID:-}" ]; then
+        echo "REFUSED: no-mistakes axi $2 is worker-owned; send the request to the task worker" >&2
+        exit 2
+      fi
+      ;;
+  esac
+fi
+
+SELF_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 127
+TARGET=
+IFS=: read -r -a PATH_DIRS <<< "${PATH:-}"
+for dir in "${PATH_DIRS[@]}"; do
+  [ -n "$dir" ] || dir=.
+  candidate=$dir/no-mistakes
+  [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+  [ "$candidate" -ef "${BASH_SOURCE[0]}" ] && continue
+  candidate_dir=$(CDPATH='' cd -- "$(dirname -- "$candidate")" 2>/dev/null && pwd -P) || continue
+  [ "$candidate_dir" = "$SELF_DIR" ] && continue
+  TARGET=$candidate
+  break
+done
+
+if [ -z "$TARGET" ]; then
+  echo "error: no upstream no-mistakes executable found after $SELF_DIR on PATH" >&2
+  exit 127
+fi
+exec "$TARGET" "$@"
