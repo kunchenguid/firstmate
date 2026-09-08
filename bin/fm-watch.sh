@@ -1079,8 +1079,14 @@ pause_state_class() {  # <window> <task>
     # runner shape, not a wait, so it keeps the ordinary wedge ladder and its
     # STALE_ESCALATE_SECS cadence rather than being absorbed for an hour under
     # wording addressed to a crew that no longer exists. This is the only path
-    # that consults authoritative crew state, and it is reached at most once per
-    # dead-agent declaration rather than every poll.
+    # that still consults authoritative crew state, and unlike the live-crew
+    # window above it does pay that read every poll: both `working` arms drop the
+    # .paused-<key> flag the cheap freshness gate needs, so this classification
+    # cannot be cached. That is deliberate rather than merely tolerated - the
+    # read is the only thing that can notice the orphaned run ENDING, which is
+    # what moves the pane off the ladder and onto the recheck cadence - and it is
+    # bounded to a pane the watcher is already escalating as a wedge, so it lasts
+    # only as long as the degraded window itself.
     if [ "$(crew_absorb_class "$task")" = working ]; then
       rm -f "$recheck_file"
       printf 'working'
@@ -2243,14 +2249,14 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                # Two live cases, both an active run the pause cadence must not
-                # absorb: the .paused-<key> flag outliving the declaration that set
-                # it (the guard above admits the pane on the flag alone, and
-                # pause_state_class then returns crew_absorb_class untouched), and a
-                # standing declaration whose agent the backend confidently reports
-                # dead. Drops the flag and restarts the wedge timer, so a crew that
-                # resumed work under a withdrawn declaration, or an orphaned runner
-                # with no agent left to answer a recheck, is wedge-tracked again.
+                # An active run the pause cadence must not absorb, under a
+                # declaration that is still standing: the agent behind it is
+                # backend-confirmed dead, so this is an orphaned runner rather than
+                # a wait, and it is wedge-tracked again. A WITHDRAWN declaration
+                # cannot arrive here - the loop-top reconciliation clears
+                # .stale-<key> along with the flag, which routes that pane to the
+                # first-sight arm above - so the only other way in is a status
+                # rewrite landing between the guard's read and pause_state_class's.
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"

@@ -2861,7 +2861,7 @@ test_declared_wait_with_an_active_run_keeps_the_pause_cadence() {
 # the identical pane with NO declaration must still wedge exactly as it does
 # today, so the absorb can never be widened into "idle is fine".
 test_declared_wait_with_an_active_run_never_climbs_the_wedge_ladder() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig pid round back wakes wedged
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid round back wakes wedged bare
 
   dir=$(make_case declared-wait-active-run-ladder); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/nmwait.status"
@@ -2880,24 +2880,34 @@ test_declared_wait_with_an_active_run_never_climbs_the_wedge_ladder() {
   printf '1\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
-  # Phase A: five rounds across the escalation threshold. A live crew's FIRST
-  # sight of a declared wait still surfaces once, undecorated, so no decision
-  # gate is silenced. Every later round is armed the way fm-watch-arm.sh arms a
-  # successor after firstmate handled a wake, because that is the only arm that
-  # stays in the poll loop instead of re-announcing the previous round's
-  # downtime, and it must survive whole poll cycles: an exit there is the
-  # incident itself, the ladder waking firstmate again on a healthy worker.
+  # Phase A: five rounds across the escalation threshold. Round 1 is the fail-open
+  # guarantee, asserted rather than tolerated: the fixture carries no
+  # .stale-<key>, so the pane takes the first-sight branch, a LIVE agent under a
+  # declaration answers `none`, and firstmate is woken exactly once with a plain
+  # undecorated stale row - never a wedge, never a pause recheck - so a worker
+  # genuinely waiting on a decision is never silenced by this absorb. Every later
+  # round is armed the way fm-watch-arm.sh arms a successor after firstmate
+  # handled a wake, because that is the only arm that stays in the poll loop
+  # instead of re-announcing the previous round's downtime, and it must survive
+  # whole poll cycles: an exit there is the incident itself, the ladder waking
+  # firstmate again on a healthy worker.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=claude \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
     FM_PAUSE_RESURFACE_SECS=3600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  if wait_for_exit "$pid" 100; then
-    ack_stopped_cycle "$state" || fail "could not acknowledge the declared wait's first sight"
-  else
-    reap "$pid"
-  fi
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a live crew's first sight of a declared wait was absorbed instead of surfacing: $(cat "$out")"; }
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$bare" -eq 1 ] \
+    || fail "the first sight queued $bare plain stale rows instead of exactly one: $(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -F "possible wedge" "$state/.wake-queue" >/dev/null \
+    && fail "the first sight of a declared wait was decorated as a possible wedge: $(cat "$state/.wake-queue")"
+  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
+    && fail "the first sight of a declared wait was hidden behind the pause recheck: $(cat "$state/.wake-queue")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the declared wait's first sight"
   round=2
   while [ "$round" -le 5 ]; do
     # Age any wedge timer the previous round left behind past the threshold, so a
