@@ -965,7 +965,7 @@ FM_KIMI_DELIVERY_POLLS=40   # kimi-only: pane-capture polls confirming brief-poi
 FM_KIMI_POLL_INTERVAL=0.5   # kimi-only: seconds between readiness and delivery polls; also the default FM_KIMI_SUBMIT_SLEEP
 FM_KIMI_SUBMIT_RETRIES=3   # kimi-only: Enter-retry attempts for the brief-pointer submit after typing it once, never retyping
 FM_KIMI_SUBMIT_SLEEP=0.5   # kimi-only: seconds between submit checks; defaults to FM_KIMI_POLL_INTERVAL
-FM_KIMI_SUBMIT_SETTLE=0   # kimi-only: seconds to settle after a confirmed brief-pointer submit before delivery polling; 0 disables
+FM_KIMI_SUBMIT_SETTLE=0   # kimi-only: pre-Enter settle seconds after typing the brief pointer so completion popups clear before Enter; 0 disables
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after marked-request delivery before a completed turn without a correlated parent report is eligible for its one recovery repost
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
