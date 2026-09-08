@@ -921,8 +921,8 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
       }'
 }
 
-# Project one home's canonical structured inventory into the bounded shape a
-# validated parent read needs.
+# Project one home's canonical structured inventory for a validated parent
+# read; the header owns per-surface bounds and delivery retention.
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
 secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>

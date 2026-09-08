@@ -84,8 +84,11 @@
 # carries owner - "(main)" for this home, the registered secondmate id for a
 # child - because a fleet whose homes work the SAME repository cannot be told
 # apart by repo. Renderers must read that field and never a title's prose.
-# Every such row also carries pr_url wherever a PR is recorded in structured
-# backlog fields or task metadata; title and status prose never supply it.
+# For in_flight, awaiting, and gates, pr_url comes only from the task's captured
+# metadata, including through a secondmate's home summary; there is no prose
+# fallback when that link is absent. A backlog-reason or status-sentence URL is not
+# that task's request identity. tests/fm-bearings-snapshot.test.sh pins both
+# prose-rejection cases. Landed artifacts follow the Done projection below.
 #
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -

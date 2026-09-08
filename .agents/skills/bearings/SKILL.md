@@ -111,7 +111,7 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - Never author a `reconcile` option on any card. `build` gives every decision card the standard reconcile choice itself, and the payload validator reserves that value across all card types; recommendations must name an authored option.
 - Compose exactly one decision card per captain-held task id. When one task carries multiple questions, consolidate all of them and their options into that card; never emit duplicate cards with the same task-id key.
 - Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
-- Card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
+- For calls other than nudges, card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
 - When the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it), set the card's `close: "release"` so the answer lifts the hold instead of closing the task; question-shaped items omit it.
 - A Charted Next row's optional `kind` separates work from alarms: omit it (or set `"queued"`) for real queued work, and set `"warning"` on every action-free fleet-integrity notice - the `(main-inventory)` gate, an unavailable secondmate home, and an inventory-mismatch repair notice. The board badges a warning row `needs repair` instead of `waiting` and leaves it out of the Charted Next count, so those rows never read as dispatchable queued work.
 - `charted_more` counts omitted queued rows only, while `charted_warning_more` counts omitted warning rows only; keep both counts separate whenever the board payload truncates Charted Next.
@@ -126,7 +126,7 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 
 The task-shaped nudge-key scheme was a defect in the design this delivery proposed, found in its own review and fixed rather than argued down.
 Request identity and separate answer routing replace that scheme; the captain-hold answer contract remains unchanged.
-A fix round reversed this delivery's founding constraint by widening a single predicate so a status-line URL could stand in for a recorded one; it was caught by auditing against the stated constraint rather than against the diff, and it was removed.
+Validation reversed this delivery's founding constraint twice in different projections, first by accepting a status-line URL and then a backlog-reason URL as the task's recorded request; both erosions produced plausible working code that no existing test rejected, and both were caught by auditing against the stated intent rather than the code and removed.
 
 Run `build` once after composing the payload.
 Its serve-first sequence publishes the board, establishes and verifies its Lavish session with `lavish-axi`, reopens an ended session when necessary, and only then binds the answer source and proves a live polling listener; use the session URL it prints in the chat digest.
