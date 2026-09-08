@@ -291,6 +291,28 @@ test_agy_delivery_accepts_fast_completed_turn() {
   pass "Agy delivery accepts a turn that completed between polls"
 }
 
+test_agy_delivery_ignores_a_stale_turnend_marker() {
+  # A relaunched task keeps its previous incarnation's state/<id>.turn-ended
+  # marker, so delivery must only credit a marker written after this pointer
+  # was submitted. The fake accepts the pointer into an empty composer but
+  # never starts a turn, which must read as an unconfirmed delivery.
+  local id rec out rc marker
+  id="agy-stale-z8-$$"
+  rec=$(make_spawn_case stale "$id")
+  read_spawn_record "$rec"
+  marker="$HOME_DIR/state/$id.turn-ended"
+  mkdir -p "$HOME_DIR/state"
+  : > "$marker"
+  rc=0
+  out=$(FM_FAKE_AGY_TURN=ready \
+    run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "stale turn-ended marker was credited as Agy brief delivery"
+  assert_contains "$out" "Agy brief pointer delivery was not confirmed" \
+    "stale-marker spawn failed for a reason other than unconfirmed delivery"
+  assert_absent "$marker" "stale turn-ended marker survived the Agy pointer submit"
+  pass "Agy delivery ignores a turn-ended marker left by a previous incarnation"
+}
+
 test_agy_omits_unsupported_explicit_effort() {
   local id rec out rc launch
   id="agy-effort-z4-$$"
@@ -533,6 +555,7 @@ test_agy_spawn_delivers_after_trust_and_registers_hook
 test_agy_spawn_does_not_seed_the_container_environment
 test_agy_spawn_refuses_when_all_hook_roots_are_owned
 test_agy_delivery_accepts_fast_completed_turn
+test_agy_delivery_ignores_a_stale_turnend_marker
 test_agy_omits_unsupported_explicit_effort
 test_agy_teardown_removes_task_hook_and_auth
 test_agy_teardown_preserves_a_borrowed_project_root

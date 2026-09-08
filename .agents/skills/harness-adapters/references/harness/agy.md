@@ -30,6 +30,7 @@ On a fresh trusted-path decision, Agy starts with zero project hooks, shows the 
 An initial `--prompt-interactive` turn can therefore finish before the newly loaded Stop hook participates.
 Firstmate launches with no prompt, accepts only the exact verified trust dialog, waits for the complete empty composer, then sends `Read the brief at <absolute-path> and follow it exactly.`.
 Delivery is confirmed by the task turn-end marker, or by the echoed pointer text plus either the `esc to cancel` busy footer or a returned-to-idle empty composer.
+Spawn removes any `state/<id>.turn-ended` marker left by a previous incarnation right before the pointer is submitted, so a relaunch can only credit a marker written by this incarnation's hook.
 The idle-composer branch is load-bearing: secondmate spawns create no task-local turn-end hook, and a brief turn that starts and finishes between two polls leaves no busy footer to observe (`agy_wait_for_delivery` in `../../../bin/fm-spawn.sh`, regression `../../../tests/fm-agy-harness.test.sh`).
 Tmux, Herdr, Orca, and cmux route their composer decisions through the shared separated-composer structure.
 Zellij has no cursor or ANSI composer primitive and retains its existing pane-diff submission proof, so a named Agy composer branch is not applicable there.
