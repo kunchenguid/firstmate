@@ -562,6 +562,7 @@ test_optional_event_time() {
     [ "$(status_stamp_line 'done: clock unavailable')" = 'done: clock unavailable' ]
   ) || fail "clock failure lost the event"
   for line in 'done: legacy' 'done: [at=1700000000] prose' \
+    'done [at=]: empty' 'done [at=$(date +%s)]: literal substitution' \
     'done [at=bad]: malformed' 'done [at=-1]: negative' \
     'done [at=01700000000]: noncanonical' 'done [at=99999999999999999999]: overflow' \
     'done [at=1] [at=2]: ambiguous'; do
@@ -601,7 +602,10 @@ test_captain_override_ignores_event_time() {
   local FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'
   dir=$(make_case captain-override-time)
   for verb in 'done' needs-decision blocked failed; do
-    for line in "$verb: audit complete" "$verb [at=1700000000]: audit complete"; do
+    for line in "$verb: audit complete" "$verb [at=1700000000]: audit complete" \
+      "$verb [at=]: audit complete" "$verb [at=bad]: audit complete" \
+      "$verb [at=\$(date +%s)]: audit complete" \
+      "$verb [at=1] [at=2]: audit complete"; do
       status_is_captain_relevant "$line" || fail "override missed actionable event: $line"
       printf '%s\n' "$line" > "$dir/state/task.status"
       event=$(status_span_first_actionable "$dir/state/task.status" 0) \
