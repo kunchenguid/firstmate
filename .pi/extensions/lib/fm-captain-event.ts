@@ -13,7 +13,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 const SUMMARY_MAX = 600;
 const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
-const ENV_ASSIGNMENT_START = /\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*=\s*/g;
+const ENV_ASSIGNMENT_START = /\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*(?:\+\s*)?=\s*/g;
 const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)/gi,
   /\b[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s\/@"']+@[^\s,;"']+/gi,

@@ -173,6 +173,8 @@ assignment_cases=(
   'nested_name=$(outer $(inner nestedsecret)) visible suffix'
   'SAFE=$( (printf alpha); printf swordfish) visible suffix'
   'unproven_name=$(printf unresolvedsecret trailing suffix'
+  'SAFE+=privateappend visible suffix'
+  'MiXeD + = privateappend visible suffix'
 )
 after=1
 for assignment_case in "${assignment_cases[@]}"; do
@@ -440,7 +442,7 @@ installCaptainEventPublisher(pi, {
 });
 const message = {
   role: "assistant",
-  content: [{ type: "text", text: "Ordinary prose postgres://bareuser:barepass@db.example/prod remains SAFE=$( (printf alpha); printf swordfish) visible suffix" }],
+  content: [{ type: "text", text: "Ordinary prose postgres://bareuser:barepass@db.example/prod remains SaFe += privateappend visible suffix" }],
   stopReason: "stop",
   timestamp: 1,
 };

@@ -134,7 +134,7 @@ EVENT_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 GITHUB_PR_RE = re.compile(r"^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$")
 GITLAB_MR_RE = re.compile(r"^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$")
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-ENV_ASSIGNMENT_START_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*=\s*")
+ENV_ASSIGNMENT_START_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{0,127}\s*(?:\+\s*)?=\s*")
 SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z0-9 ]{0,48}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,48}PRIVATE KEY-----|$)", re.I),
     re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s/@\"']+@[^\s,;\"']+", re.I),
