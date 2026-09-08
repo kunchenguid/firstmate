@@ -417,11 +417,13 @@ test_matrix_opencode_leftbar_signals() {
   pass "matrix: opencode's left-bar composer reads empty everywhere and scans the full active run"
 }
 
-test_matrix_copilot_halfbox_identityless_backends() {
+test_matrix_copilot_halfbox_requires_identity_for_empty() {
   local screen typed
   screen=$'╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃\n╹▀▀▀▀▀▀▀▀▀▀▀▀'
-  assert_screen "copilot empty half-box on zellij" empty "$CAPS_STYLED_NOID" "$screen"
-  assert_screen "copilot empty half-box on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  assert_screen "copilot empty half-box on zellij" unknown "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "copilot empty half-box on cmux/orca" unknown "$CAPS_PLAIN" "$screen"
+  assert_screen "copilot empty half-box without live identity" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  assert_screen "copilot empty half-box with live identity" empty "$CAPS_STYLED" "$screen" '' $'copilot\tpresent'
   typed=$'╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n┃ Build · release checklist\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
   assert_screen "copilot typed half-box on zellij" pending "$CAPS_STYLED_NOID" "$typed"
   assert_screen "copilot typed half-box on cmux/orca" pending "$CAPS_PLAIN" "$typed"
@@ -438,7 +440,7 @@ test_matrix_copilot_halfbox_identityless_backends() {
   typed=$'╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃ fix login'
   assert_screen "copilot incomplete typed half-box on zellij" unknown "$CAPS_STYLED_NOID" "$typed"
   assert_screen "copilot incomplete typed half-box on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
-  pass "matrix: identityless backends accept only complete Copilot half-boxes while malformed shapes stay unknown"
+  pass "matrix: Copilot half-box emptiness requires live identity while typed content stays pending"
 }
 
 test_matrix_grok_titled_bottom_border() {
@@ -707,7 +709,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
-test_matrix_copilot_halfbox_identityless_backends
+test_matrix_copilot_halfbox_requires_identity_for_empty
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
