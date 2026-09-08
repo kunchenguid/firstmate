@@ -373,17 +373,13 @@ test_cli_caches_the_selected_client_within_a_process() {
   out=$(run_with_clients "$dir" "$dir/stale:$dir/current" \
     'fm_backend_herdr_cli fm-remote pane get wCY:p2 >/dev/null 2>&1
      fm_backend_herdr_cli fm-remote agent get wCY:p2 >/dev/null 2>&1
-     printf "%s|%s" "${FM_BACKEND_HERDR_BIN:-unset}" "${FM_BACKEND_HERDR_CLIENT_NOTE:-}"')
-  case "$out" in
-    "$dir/current/herdr|"*) ;;
-    *) fail "the compatible client should be selected and exported, got: $out" ;;
-  esac
-  assert_contains "$out" "$dir/stale/herdr (version 0.8.2, protocol 20)" "the note must name the bypassed client with its version and protocol"
-  assert_contains "$out" "remove or upgrade the shadowing client" "the note must say what fixes the host"
+     printf "%s" "${FM_BACKEND_HERDR_BIN:-unset}"')
+  [ "$out" = "$dir/current/herdr" ] \
+    || fail "the compatible client should be selected and exported, got: $out"
   [ "$(grep -c 'pane get\|agent get' "$dir/stale.log")" -eq 1 ] \
     || fail "after selection the stale client must not be retried in the same process, got: $(cat "$dir/stale.log")"
   assert_contains "$(cat "$dir/current.log")" "agent get wCY:p2" "the second call should go straight to the selected client"
-  pass "herdr client selection: one selection per process, exported with its reason"
+  pass "herdr client selection: one selected client is reused per process"
 }
 
 # shellcheck disable=SC2016
@@ -438,32 +434,6 @@ SH
   pass "herdr client selection: a protocol mismatch reselects for each requested session"
 }
 
-test_agent_state_unreadable_names_the_lone_incompatible_client() {
-  local dir out err
-  dir="$TMP_ROOT/client-lone-stale"; make_herdr_client_pair "$dir"
-  out=$(run_with_clients "$dir" "$dir/stale" 'fm_backend_herdr_agent_state fm-remote:wCY:p2' 2>"$dir/stderr")
-  err=$(cat "$dir/stderr")
-  [ "$out" = unreadable ] || fail "a lone incompatible client must still read unreadable, got: $out"
-  assert_contains "$err" "$dir/stale/herdr" "the unreadable reason must name the client binary"
-  assert_contains "$err" "protocol 20" "the unreadable reason must name the client protocol"
-  assert_contains "$err" "protocol 22" "the unreadable reason must name the server protocol"
-  assert_contains "$err" "upgrade the herdr client" "the unreadable reason must say what fixes it"
-  pass "herdr client selection: a lone incompatible client reads unreadable with the client, server, and fix named"
-}
-
-test_agent_state_unreadable_lists_every_incompatible_client() {
-  local dir out err
-  dir="$TMP_ROOT/client-two-stale"; make_herdr_client_pair "$dir"
-  mkdir -p "$dir/stale2"; cp "$dir/stale/herdr" "$dir/stale2/herdr"
-  out=$(run_with_clients "$dir" "$dir/stale:$dir/stale2" 'fm_backend_herdr_agent_state fm-remote:wCY:p2' 2>"$dir/stderr")
-  err=$(cat "$dir/stderr")
-  [ "$out" = unreadable ] || fail "two incompatible clients must read unreadable, got: $out"
-  assert_contains "$err" "no herdr client on PATH can talk to the running server" "no-compatible-client must be stated"
-  assert_contains "$err" "$dir/stale/herdr" "the first incompatible client must be listed"
-  assert_contains "$err" "$dir/stale2/herdr" "the second incompatible client must be listed"
-  pass "herdr client selection: with no compatible client the reason lists every candidate"
-}
-
 # shellcheck disable=SC2016
 test_cli_unrelated_failure_never_triggers_reselection() {
   local dir out rc
@@ -509,10 +479,10 @@ SH
     out=$(FM_HERDR_STATUS_SHAPE=$shape PATH="$dir/tools:/usr/bin:/bin" \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_client_status "$1" fm-remote' "$ROOT" "$dir/bin/herdr")
     case "$shape" in
-      legacy-equal) [ "$out" = $'true\ttrue\t16\t16\t0.7.5' ] || fail "legacy equal protocols should read compatible, got: $out" ;;
-      legacy-older) [ "$out" = $'true\tfalse\t16\t22\t0.7.5' ] || fail "legacy older client should read incompatible, got: $out" ;;
-      no-protocol)  [ "$out" = $'true\t\t\t\t0.7.1' ] || fail "a client reporting no protocol must read unknown, never false, got: $out" ;;
-      stopped)      [ "$out" = $'false\t\t22\t\t0.9.0' ] || fail "a stopped server must read not running, got: $out" ;;
+      legacy-equal) [ "$out" = 'true|true' ] || fail "legacy equal protocols should read compatible, got: $out" ;;
+      legacy-older) [ "$out" = 'true|false' ] || fail "legacy older client should read incompatible, got: $out" ;;
+      no-protocol)  [ "$out" = 'true|' ] || fail "a client reporting no protocol must read unknown, never false, got: $out" ;;
+      stopped)      [ "$out" = 'false|' ] || fail "a stopped server must read not running, got: $out" ;;
     esac
   done
   pass "herdr client status: .server.compatible, legacy protocol equality, unknown, and stopped shapes all normalize"
@@ -4685,8 +4655,6 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_cli_caches_the_selected_client_within_a_process
 test_cli_reselects_path_default_for_a_different_session
-test_agent_state_unreadable_names_the_lone_incompatible_client
-test_agent_state_unreadable_lists_every_incompatible_client
 test_cli_unrelated_failure_never_triggers_reselection
 test_cli_single_client_pays_no_selection_read
 test_client_status_reads_both_status_shapes

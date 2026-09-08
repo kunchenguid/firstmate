@@ -124,10 +124,7 @@ state_value() { # <id>; prints recovery-grade state
     printf 'unverified\n'
     return 0
   fi
-  # stderr stays open on purpose: an unreadable endpoint prints the reason the
-  # adapter established (for example a herdr client that cannot talk to the
-  # running server), and fm-on.sh relays stderr separately from the state.
-  fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" || printf 'unreadable\n'
+  fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
 }
 
 print_route() { # <id>
@@ -156,7 +153,7 @@ cmd_route() {
 
 cmd_launch() {
   local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
-  local current meta out herdr_session reason reason_file
+  local current meta out herdr_session
 
   validate_id "$id"
   validate_home "$id"
@@ -173,10 +170,7 @@ cmd_launch() {
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
     remote_endpoint_require "$id"
-    reason_file=$(mktemp "${TMPDIR:-/tmp}/fm-remote-state-read.XXXXXX") || die "cannot create a scratch file for the endpoint state read"
-    current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>"$reason_file" || printf 'unreadable\n')
-    reason=$(tail -n 1 "$reason_file" 2>/dev/null || true)
-    rm -f -- "$reason_file"
+    current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
     case "$current" in
       alive)
         print_route "$id"
@@ -187,7 +181,7 @@ cmd_launch() {
           || die "could not remove the confirmed agent-less endpoint"
         ;;
       missing) ;;
-      *) die "remote endpoint state is $current${reason:+ ($reason)}; refusing duplicate launch" ;;
+      *) die "remote endpoint state is $current; refusing duplicate launch" ;;
     esac
   fi
   # The parent owns both convergence legs before it asks for this launch: it

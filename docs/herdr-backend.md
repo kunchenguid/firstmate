@@ -39,7 +39,7 @@ Every session-scoped call runs the first `herdr` on `PATH` unless the running se
 A host can carry more than one client, such as a self-updated copy in `~/.local/bin` beside a package-managed one, and a client older than the running server is answered with error code `protocol_mismatch` on every command.
 On that refusal the adapter reads `status --json --session <name>` from each distinct `herdr` on `PATH` in order, adopts the first one the running server reports compatible, retries the command on it once, and keeps using it for the rest of the process.
 Nothing is read on the happy path, a client that reports no protocol is never judged incompatible, and no other failure triggers a reselection.
-An endpoint that still reads unreadable names the refused client, both protocols, and the fix on stderr, which `fm-crew-state.sh` and the remote state read carry through, while `fm-remote-doctor.sh` reports the selected client and rebinds the remote launch agent to it.
+`fm-remote-doctor.sh` reports the client selected for the remote session.
 Removing or upgrading the shadowing client is the durable fix; `bin/backends/herdr.sh` "client selection" owns the mechanics.
 
 ## Watching and task containers

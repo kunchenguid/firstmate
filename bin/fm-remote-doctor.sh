@@ -157,23 +157,6 @@ herdr_server_running() {
   [ "$running" = true ]
 }
 
-# herdr_selected_bin: the herdr client the adapter selected for the remote
-# session (bin/backends/herdr.sh "client selection"), so the launch agent
-# starts the server from the same binary every session-scoped call uses;
-# the plain PATH resolution stands in only when the adapter cannot load.
-herdr_selected_bin() {
-  local resolved
-  if herdr_adapter_load; then
-    fm_backend_herdr_client_select "$HERDR_SESSION_NAME"
-    resolved=$(fm_backend_herdr_bin)
-    if [ "$resolved" != herdr ]; then
-      printf '%s\n' "$resolved"
-      return 0
-    fi
-  fi
-  command -v herdr 2>/dev/null
-}
-
 launch_agent_is_aqua() {
   local stripped
   [ -f "$LAUNCH_AGENT_PLIST" ] && [ ! -L "$LAUNCH_AGENT_PLIST" ] || return 1
@@ -218,7 +201,7 @@ XML
 launch_agent_contract_matches() {
   local herdr_bin actual expected
   [ -f "$LAUNCH_AGENT_PLIST" ] && [ ! -L "$LAUNCH_AGENT_PLIST" ] || return 1
-  herdr_bin=$(herdr_selected_bin) || return 1
+  herdr_bin=$(command -v herdr 2>/dev/null) || return 1
   actual=$(tr -d ' \t\r\n' < "$LAUNCH_AGENT_PLIST" 2>/dev/null) || return 1
   expected=$(render_launch_agent "$herdr_bin" | tr -d ' \t\r\n') || return 1
   [ "$actual" = "$expected" ]
@@ -226,7 +209,7 @@ launch_agent_contract_matches() {
 
 launch_agent_loaded_contract_matches() {
   local loaded herdr_bin herdr_compact plist_compact log_compact args
-  herdr_bin=$(herdr_selected_bin) || return 1
+  herdr_bin=$(command -v herdr 2>/dev/null) || return 1
   loaded=$(launchctl print "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" 2>/dev/null) || return 1
   loaded=$(printf '%s' "$loaded" | tr -d ' \t\r\n') || return 1
   herdr_compact=$(printf '%s' "$herdr_bin" | tr -d ' \t\r\n') || return 1
@@ -468,23 +451,15 @@ fix_remote_job_worker() {
 # --- checks -----------------------------------------------------------------
 
 check_herdr() {
-  local resolved selected diagnosis
+  local resolved selected
   if resolved=$(command -v herdr 2>/dev/null) && [ -x "$resolved" ]; then
     if herdr_adapter_load; then
       fm_backend_herdr_client_select "$HERDR_SESSION_NAME"
       selected=$(fm_backend_herdr_bin)
       if [ "$selected" != herdr ] && [ "$selected" != "$resolved" ]; then
-        record herdr "ok: $selected (bypassing $resolved${FM_BACKEND_HERDR_CLIENT_NOTE:+: $FM_BACKEND_HERDR_CLIENT_NOTE})"
+        record herdr "ok: $selected (bypassing $resolved)"
         return 0
       fi
-      diagnosis=$(fm_backend_herdr_client_diagnose "$HERDR_SESSION_NAME")
-      case "$diagnosis" in
-        *"cannot talk to the running server"*|*"no herdr client on PATH can talk"*)
-          record herdr "human: ${diagnosis#herdr client selection: }" \
-            "upgrade the herdr client the remote runtime PATH resolves ($resolved) so it matches the running server, or remove the stale copy"
-          return 0
-          ;;
-      esac
     fi
     record herdr "ok: $resolved"
     return 0
@@ -627,7 +602,7 @@ fix_report() { # <check> applied|failed <text>
 
 write_launch_agent() {
   local herdr_bin tmp
-  if ! herdr_bin=$(herdr_selected_bin); then
+  if ! herdr_bin=$(command -v herdr 2>/dev/null); then
     fix_report launchagent failed "herdr does not resolve, so no launch agent was written"
     return 1
   fi

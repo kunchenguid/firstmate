@@ -72,16 +72,12 @@ pass "real herdr: container_ensure starts the isolated session's server, creates
 # server refuses by reading .server.running/.server.compatible per session; a
 # fixture can only restate that shape, so prove the installed binary against
 # its own running lab server normalizes to running and compatible with equal
-# protocols, and that the diagnosis has nothing to say about a healthy host.
+# protocols.
 CLIENT_STATUS=$(fm_backend_herdr_client_status "$(command -v herdr)" "$SESSION")
-IFS=$'\t' read -r CS_RUNNING CS_COMPATIBLE CS_CLIENT_PROTO CS_SERVER_PROTO CS_VERSION <<< "$CLIENT_STATUS"
-[ "$CS_RUNNING" = true ] || fail "real herdr $CS_VERSION: status for the running lab server normalized running=$CS_RUNNING (raw: $CLIENT_STATUS)"
-[ "$CS_COMPATIBLE" = true ] || fail "real herdr $CS_VERSION: the installed client normalized compatible=$CS_COMPATIBLE against its own server (raw: $CLIENT_STATUS)"
-[ -n "$CS_CLIENT_PROTO" ] && [ "$CS_CLIENT_PROTO" = "$CS_SERVER_PROTO" ] \
-  || fail "real herdr $CS_VERSION: client protocol $CS_CLIENT_PROTO and server protocol $CS_SERVER_PROTO should match on one install"
-CLIENT_DIAGNOSIS=$(fm_backend_herdr_client_diagnose "$SESSION")
-[ -z "$CLIENT_DIAGNOSIS" ] || fail "real herdr $CS_VERSION: a healthy single install must diagnose nothing, got: $CLIENT_DIAGNOSIS"
-pass "real herdr $CS_VERSION protocol $CS_CLIENT_PROTO: session status normalizes running/compatible, and a healthy install diagnoses nothing"
+IFS='|' read -r CS_RUNNING CS_COMPATIBLE <<< "$CLIENT_STATUS"
+[ "$CS_RUNNING" = true ] || fail "real herdr: status for the running lab server normalized running=$CS_RUNNING (raw: $CLIENT_STATUS)"
+[ "$CS_COMPATIBLE" = true ] || fail "real herdr: the installed client normalized compatible=$CS_COMPATIBLE against its own server (raw: $CLIENT_STATUS)"
+pass "real herdr: session status normalizes running and compatible"
 
 # A second container_ensure must reuse (ADOPT) the same workspace (idempotent)
 # and report an EMPTY seeded tab id - the created-vs-adopted gate that fixes
