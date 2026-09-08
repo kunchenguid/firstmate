@@ -123,6 +123,49 @@ SH
   esac
 }
 
+# Regression for the unquoted-heredoc-reparse bug: FM_HOME and the sidecar
+# path are baked into the generated shim through an unquoted heredoc, so a
+# raw interpolation would let a $, backtick, or double quote in either path
+# reparse as shell when the shim runs - at minimum breaking the path, at
+# worst executing an embedded command substitution. Give FM_HOME a name
+# containing those characters and prove both that the shim still runs
+# correctly and that nothing it names actually executed. (A literal
+# backslash is deliberately left out: GNU sha256sum escapes its output line
+# for a hashed path containing one, which trips fm-check-lib.sh's unrelated
+# hex-hash format check regardless of this fix - a pre-existing, out-of-scope
+# limitation of the shared custom-check hashing, not of this shim.)
+test_special_chars_in_paths_do_not_reparse() {
+  local home canary1 canary2 special
+  # shellcheck disable=SC2016  # single quotes are deliberate: this must stay
+  # a literal, unexpanded string to become a filesystem path component.
+  special='$(touch CANARY1)`touch CANARY2`"quote"'
+  home="$TMP_ROOT/weird_${special}"
+  mkdir -p "$home/bin" "$home/state"
+  cat > "$home/bin/fm-pr-ready-check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'called-with: %s\n' "$*"
+SH
+  chmod +x "$home/bin/fm-pr-ready-check.sh"
+  FM_HOME="$home" "$ARM" watch5 "acme/widgets#8" >/dev/null 2>&1 \
+    || fail "arm with a special-character FM_HOME failed"
+
+  out=$("$home/state/watch5.check.sh" 2>&1)
+  case "$out" in
+    *"called-with: acme/widgets#8"*)
+      pass "shim with special characters in FM_HOME still runs and forwards PRs" ;;
+    *) fail "expected shim to forward PRs despite special chars, got: $out" ;;
+  esac
+
+  canary1="$TMP_ROOT/CANARY1"
+  canary2="$TMP_ROOT/CANARY2"
+  if [ -e "$canary1" ] || [ -e "$canary2" ] || \
+     [ -e "$PWD/CANARY1" ] || [ -e "$PWD/CANARY2" ]; then
+    fail "a canary file was created: the shim reparsed an embedded command substitution"
+  else
+    pass "no embedded command substitution executed while arming or running the shim"
+  fi
+}
+
 test_rearm_replaces_sidecar() {
   local home
   home=$(new_home "$TMP_ROOT/rearm")
@@ -149,4 +192,5 @@ test_rejects_invalid_id
 test_arms_shim_and_sidecar
 test_shim_execs_check_with_sidecar_prs
 test_state_override_sidecar_resolves
+test_special_chars_in_paths_do_not_reparse
 test_rearm_replaces_sidecar

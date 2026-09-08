@@ -40,6 +40,13 @@ mkdir -p "$STATE" 2>/dev/null || { echo "error: state dir unavailable" >&2; exit
 SHIM="$STATE/$ID.check.sh"
 SIDECAR="$STATE/$ID.prs"
 
+# FM_HOME and SIDECAR are arbitrary paths (env- or override-supplied), so
+# %q-escape them before embedding: interpolating them raw into this unquoted
+# heredoc would let a $, backtick, backslash, or double quote in either path
+# reparse as shell when the generated shim runs.
+FM_HOME_Q=$(printf '%q' "$FM_HOME")
+SIDECAR_Q=$(printf '%q' "$SIDECAR")
+
 cat > "$SHIM" <<EOF
 #!/usr/bin/env bash
 # Per-task shim for the generic PR readiness check (bin/fm-pr-ready-check.sh).
@@ -53,8 +60,8 @@ cat > "$SHIM" <<EOF
 # re-registering the trust binding.
 set -u
 ID=$ID
-FM_HOME="$FM_HOME"
-SIDECAR="$SIDECAR"
+FM_HOME=$FM_HOME_Q
+SIDECAR=$SIDECAR_Q
 [ -f "\$SIDECAR" ] && [ ! -L "\$SIDECAR" ] || exit 0
 mapfile -t prs < "\$SIDECAR"
 [ "\${#prs[@]}" -ge 1 ] || exit 0
