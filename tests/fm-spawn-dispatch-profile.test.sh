@@ -699,18 +699,19 @@ test_astra_qualified_and_raw_models_cannot_bypass_evidence() {
 }
 
 test_raw_model_capable_harnesses_require_inspectable_non_astra_launches() {
-  local rec opencode_astra_id omp_astra_id omp_fuzzy_id pi_astra_id pi_signed_astra_id option_terminator_id opencode_safe_id pi_safe_id absolute_codex_safe_id unclassified_id out status
+  local rec opencode_astra_id omp_astra_id omp_fuzzy_id pi_astra_id pi_signed_astra_id newline_id option_terminator_id opencode_safe_id pi_safe_id absolute_codex_safe_id unclassified_id out status
   opencode_astra_id=profile-raw-opencode-astra-z3fga
   omp_astra_id=profile-raw-omp-astra-z3fgb
   omp_fuzzy_id=profile-raw-omp-fuzzy-z3fgg
   pi_astra_id=profile-raw-pi-astra-z3fgc
   pi_signed_astra_id=profile-raw-pi-signed-astra-z3fgd
+  newline_id=profile-raw-newline-z3fgh
   option_terminator_id=profile-raw-option-terminator-z3fgc
   opencode_safe_id=profile-raw-opencode-safe-z3fgd
   pi_safe_id=profile-raw-pi-safe-z3fge
   absolute_codex_safe_id=profile-raw-absolute-codex-safe-z3fge
   unclassified_id=profile-raw-unclassified-z3fgf
-  rec=$(make_spawn_case profile-raw-model-capable codex "$opencode_astra_id" "$omp_astra_id" "$omp_fuzzy_id" "$pi_astra_id" "$pi_signed_astra_id" "$option_terminator_id" "$opencode_safe_id" "$pi_safe_id" "$absolute_codex_safe_id" "$unclassified_id")
+  rec=$(make_spawn_case profile-raw-model-capable codex "$opencode_astra_id" "$omp_astra_id" "$omp_fuzzy_id" "$pi_astra_id" "$pi_signed_astra_id" "$newline_id" "$option_terminator_id" "$opencode_safe_id" "$pi_safe_id" "$absolute_codex_safe_id" "$unclassified_id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$opencode_astra_id" "$PROJ_DIR" \
@@ -752,6 +753,14 @@ test_raw_model_capable_harnesses_require_inspectable_non_astra_launches() {
   assert_contains "$out" "selecting Astra are not inspectable" "raw Pi-signed Astra refusal did not identify selection evidence"
   assert_absent "$HOME_DIR/state/$pi_signed_astra_id.meta" "raw Pi-signed Astra refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "raw Pi-signed Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$newline_id" "$PROJ_DIR" \
+    $'codex\ncodex --model gpt-5')
+  status=$?
+  expect_code 1 "$status" "a newline-separated raw command must refuse before its first command can use an Astra default"
+  assert_contains "$out" "must use shell-simple syntax" "raw newline refusal did not identify the uninspectable command"
+  assert_absent "$HOME_DIR/state/$newline_id.meta" "raw newline command wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw newline command typed a launch command"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$option_terminator_id" "$PROJ_DIR" \
     "codex -- --model gpt-5")
