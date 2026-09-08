@@ -562,7 +562,7 @@ test_optional_event_time() {
     [ "$(status_stamp_line 'done: clock unavailable')" = 'done: clock unavailable' ]
   ) || fail "clock failure lost the event"
   for line in 'done: legacy' 'done: [at=1700000000] prose' \
-    'done [at=]: empty' 'done [at=$(date +%s)]: literal substitution' \
+    'done [at=]: empty' "done [at=\$(date +%s)]: literal substitution" \
     'done [at=bad]: malformed' 'done [at=-1]: negative' \
     'done [at=01700000000]: noncanonical' 'done [at=99999999999999999999]: overflow' \
     'done [at=1] [at=2]: ambiguous'; do
