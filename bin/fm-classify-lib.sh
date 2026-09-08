@@ -257,10 +257,14 @@ status_done_without_pr() {  # <status-line> <status-file> [<meta-file>] -> mode
 # what it actually is. Firstmate-facing surfaces render every status line through
 # here, so the reclassification reaches the supervisor wherever the line is
 # printed rather than depending on which surface it arrived through.
+# The prefix is deliberately short and carries no semicolon and no bracketed
+# tag: a rendered line is spliced into the " ; "-joined actionable-event string
+# below and into the session digest's capped tails, and "[name=value]" is the
+# status metadata grammar the key parsers read.
 status_present_line() {  # <status-line> <status-file> [<meta-file>]
   local mode
   if mode=$(status_done_without_pr "$1" "$2" "${3:-}"); then
-    printf '%s\n' "not-landed (a $mode ship with no PR yet; the pipeline still owes one): $1"
+    printf '%s\n' "not-landed ($mode ship, no PR yet): $1"
   else
     printf '%s\n' "$1"
   fi
