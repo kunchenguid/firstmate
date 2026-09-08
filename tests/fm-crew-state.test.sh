@@ -165,6 +165,13 @@ esac
 exit 0
 SH
   chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  cat > "$fb/acpx" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --version ]; then printf '%s\n' 0.13.2; exit 0; fi
+printf '{"action":"status_snapshot","status":"%s"}\n' "${FM_FAKE_ACPX_STATUS:-idle}"
+SH
+  chmod +x "$fb/acpx"
   printf '%s\n' "$fb"
 }
 
@@ -216,9 +223,10 @@ reset_fakes() {
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   FM_FAKE_DAEMON_DOWN=0
+  FM_FAKE_ACPX_STATUS=idle
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_DAEMON_DOWN
+  export FM_FAKE_DAEMON_DOWN FM_FAKE_ACPX_STATUS
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -1192,6 +1200,24 @@ test_no_run_busy_pane() {
   assert_contains "$out" "source: pane" "busy record -> pane source"
   assert_contains "$out" "claude-hook" "the working verdict names its semantic source"
   pass "no run + a busy semantic record reads working, attributed to its source"
+}
+
+test_no_run_acp_status_is_authoritative() {
+  local d out
+  d=$(new_case acp-running)
+  make_repo_on_branch "$d/wt" fm/acp-state
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/acp-state.meta" "window=fm:fm-acp-state" "worktree=$d/wt" \
+    "kind=ship" "harness=codex" "transport=acp" "session_id=fm-acp-state"
+  reset_fakes
+  FM_FAKE_ACPX_STATUS=running
+  out=$(run_crew_state "$d" acp-state)
+  assert_contains "$out" 'state: working' "ACP running status should report working"
+  assert_contains "$out" 'source: acp' "ACP status should bypass pane scraping"
+  FM_FAKE_ACPX_STATUS=alive
+  out=$(run_crew_state "$d" acp-state)
+  assert_contains "$out" 'ACP session fm-acp-state idle' "ACPX alive status should map to the idle lifecycle state"
+  pass "ACP transport uses structured running status"
 }
 
 # A converted adapter must NOT read working from rendered footer text: the
@@ -2267,6 +2293,7 @@ test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_no_run_acp_status_is_authoritative
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture

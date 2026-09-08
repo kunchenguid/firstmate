@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--transport acp]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -444,6 +444,7 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+TRANSPORT=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
@@ -451,6 +452,7 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+TRANSPORT_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
@@ -467,6 +469,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      transport) TRANSPORT=$a; TRANSPORT_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
@@ -487,6 +490,8 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --transport) want_value=transport ;;
+    --transport=*) TRANSPORT=${a#--transport=}; TRANSPORT_SET=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
@@ -501,6 +506,7 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$TRANSPORT_SET" -eq 0 ] || [ -n "$TRANSPORT" ] || { echo "error: --transport requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
@@ -528,6 +534,7 @@ esac
 # refusal rather than a silently-ignored flag.
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "$BACKEND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded backend; --backend cannot override it" >&2; exit 1; }
+  [ "$TRANSPORT_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded transport; --transport cannot override it" >&2; exit 1; }
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
@@ -1279,6 +1286,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  TRANSPORT=$(fm_meta_get "$RELAUNCH_META" transport)
+  [ -n "$TRANSPORT" ] || TRANSPORT=native
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1615,6 +1624,27 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+# ACP is deliberately a per-spawn opt-in.  Missing transport= remains the
+# native path so existing command lines and their metadata stay byte-identical.
+if [ "$RELAUNCH" -eq 0 ]; then
+  if [ "$TRANSPORT_SET" -eq 0 ]; then
+    TRANSPORT=native
+  elif [ "$TRANSPORT" != acp ]; then
+    echo "error: --transport accepts only 'acp' (omit it for the native transport)" >&2
+    exit 1
+  fi
+fi
+if [ "$TRANSPORT" = acp ]; then
+  [ "$KIND" != secondmate ] || {
+    echo "error: --transport acp supports crewmates only, not --secondmate" >&2
+    exit 1
+  }
+  case "$HARNESS" in
+    claude|codex) ;;
+    *) echo "error: --transport acp supports only --harness claude or --harness codex (got '${HARNESS:-raw launch command}')" >&2; exit 1 ;;
+  esac
+fi
 
 # muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
@@ -3549,6 +3579,15 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+ACP_SESSION_ID=
+if [ "$TRANSPORT" = acp ]; then
+  ACP_SESSION_ID=$(fm_meta_get "${RELAUNCH_META:-/dev/null}" session_id)
+  [ -n "$ACP_SESSION_ID" ] || ACP_SESSION_ID="fm-acp-$ID"
+  "$FM_ROOT/bin/fm-acp-client.sh" ensure "$HARNESS" "$WT" "$ACP_SESSION_ID" || {
+    echo "error: ACP session could not be initialized for $ID" >&2
+    exit 1
+  }
+fi
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -3565,7 +3604,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen transport session_id traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3583,6 +3622,8 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ "$TRANSPORT" != acp ] || echo "transport=acp"
+  [ -z "$ACP_SESSION_ID" ] || echo "session_id=$ACP_SESSION_ID"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -3718,6 +3759,9 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+if [ "$TRANSPORT" = acp ]; then
+  LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-acp-client.sh") run $(shell_quote "$HARNESS") $(shell_quote "$WT") $(shell_quote "$ACP_SESSION_ID") $(shell_quote "$BRIEF") $(shell_quote "${MODEL:-default}") $(shell_quote "${EFFORT:-default}")"
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}

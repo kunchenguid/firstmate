@@ -141,6 +141,8 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
+TRANSPORT=$(meta_value transport)
+SESSION_ID=$(meta_value session_id)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
 
@@ -217,6 +219,25 @@ if [ -n "$REMOTE_HOST" ]; then
     *)
       emit unknown remote-endpoint "unknown-remote: endpoint state '$REMOTE_STATE' on $REMOTE_HOST (not proof of death)"
       ;;
+  esac
+fi
+
+# ACPX supplies the lifecycle fact directly, independent of the pane transport.
+# The no-mistakes run remains authoritative above; this is its no-run fallback.
+if [ "$TRANSPORT" = acp ]; then
+  [ -n "$SESSION_ID" ] || emit unknown acp "ACP transport has no session_id"
+  ACP_STATUS=$("$SCRIPT_DIR/fm-acp-client.sh" status "$HARNESS" "$WT" "$SESSION_ID" 2>/dev/null || true)
+  case "$(printf '%s\n' "$ACP_STATUS" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p' | tail -1)" in
+    running) emit working acp "ACP session $SESSION_ID running" ;;
+    alive|idle)
+      if [ -n "$LOG_VERB" ]; then
+        LOG_STATE=$(map_log_state "$LOG_LINE")
+        [ "$LOG_STATE" = unknown ] || emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}ACP session $SESSION_ID idle"
+      fi
+      emit unknown acp "ACP session $SESSION_ID idle"
+      ;;
+    dead) emit unknown acp "ACP session $SESSION_ID dead" ;;
+    *) emit unknown acp "ACP session state unavailable" ;;
   esac
 fi
 

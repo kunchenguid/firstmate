@@ -82,6 +82,13 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/acpx" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --version ]; then printf '%s\n' 0.13.2; exit 0; fi
+printf '%s\n' "$*" >> "$FM_ACPX_LOG"
+SH
+  chmod +x "$fb/acpx"
   printf '%s\n' "$fb"
 }
 
@@ -231,6 +238,30 @@ test_key_send_exit_status_follows_delivery() {
   pass "fm-send --key: exit status follows delivery, and an undelivered key never reports success"
 }
 
+test_acp_transport_uses_session_send_and_cancel() {
+  local dir fb home err log acpx_log rc got
+  dir="$TMP_ROOT/acp"; mkdir -p "$dir/worktree"
+  fb=$(make_stubs "$dir"); home=$(setup_home acp); err="$dir/send.err"; log="$dir/tmux.log"; acpx_log="$dir/acpx.log"
+  : > "$log"; : > "$acpx_log"
+  fm_write_meta "$home/state/acp-lane.meta" "window=sess:fm-acp-lane" "kind=ship" \
+    "harness=codex" "worktree=$dir/worktree" "transport=acp" "session_id=fm-acp-lane"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_ACPX_LOG="$acpx_log" \
+    "$SEND" acp-lane 'queue this' >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "ACP steer should succeed through ACPX"
+  got=$(cat "$acpx_log")
+  assert_contains "$got" '@agentclientprotocol/codex-acp@1.10.0' "ACP send must use the pinned codex adapter"
+  assert_contains "$got" 'prompt -s fm-acp-lane --no-wait --file' "ACP send must use the recorded session"
+  [ ! -s "$log" ] || fail "ACP steer must not inject terminal text"
+
+  : > "$acpx_log"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_ACPX_LOG="$acpx_log" \
+    "$SEND" acp-lane --key Escape >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "ACP hard cancel should succeed"
+  assert_contains "$(cat "$acpx_log")" 'cancel -s fm-acp-lane' "ACP interrupt must dispatch session cancel"
+  pass "fm-send dispatches ACP worker control without terminal injection"
+}
+
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
 test_unset_fm_home_fails
@@ -239,3 +270,4 @@ test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
+test_acp_transport_uses_session_send_and_cancel
