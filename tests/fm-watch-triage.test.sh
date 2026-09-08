@@ -2624,6 +2624,214 @@ test_reheld_captain_call_starts_its_own_resurface_window() {
 }
 
 
+# --- delivered work waiting on a merge -------------------------------------
+#
+# A ship task that pushed its pull request is finished and correctly waiting on a
+# merge, which AGENTS.md section 7 requires it to keep doing rather than be
+# cleaned up. Its agent is done but the pane keeps repainting, and every new hash
+# re-reported the same delivery, so the one state the lifecycle prescribes had no
+# quiet form. The armed merge poll already owns that task's next event, so the
+# delivery is bound to the same cadence an open captain call uses - never
+# silenced, and never at the cost of a blocker or an open decision.
+
+# Arm the real merge poll through its own owner, so this case is bound to the
+# artifacts bin/fm-pr-check.sh actually publishes rather than to a hand-rolled
+# imitation of them. The check cadence is then parked: whether the poll itself
+# runs is tests/fm-pr-check-security.test.sh's subject, and letting it fire here
+# would exit the cycle on a check wake instead of the stale one under test.
+arm_hold_merge_poll() {  # <dir> [url]
+  local dir=$1 url=${2:-https://github.com/example/repo/pull/1} publisher=${3:-$ROOT}
+  local state="$dir/state"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$publisher/bin/fm-pr-check.sh" held-merge "$url" \
+    >/dev/null 2>&1 || return 1
+  [ -f "$state/held-merge.pr-poll" ] && [ -f "$state/held-merge.check.sh" ] || return 1
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "$(cat "$FM_HOME/poll-response" 2>/dev/null)" in
+  fail) exit 1 ;;
+  merged) printf '%s\n' MERGED ;;
+  malformed) printf '%s\n' unknown ;;
+  *) printf '%s\n' OPEN ;;
+esac
+SH
+  chmod +x "$dir/fakebin/gh"
+  touch "$state/.last-check"
+}
+
+# Measured at base b84e0e3 this fixture alarms on every sighting, so the quiet
+# comes from the bound rather than from anything already suppressing it.
+test_delivered_work_with_an_armed_merge_poll_bounds_stale_churn() {
+  local dir state out capture throttle wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (delivered merge-poll bound)"; return 0; }
+  dir=$(make_hold_home delivered-poll 'done: PR https://github.com/example/repo/pull/1 checks green' nohold) \
+    || fail "could not build a delivered fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(hold_key)"
+  arm_hold_merge_poll "$dir" || fail "could not arm the merge poll"
+
+  # First sight still alarms: the bound limits repetition, never the delivery.
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of delivered work did not surface"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "first sight produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the delivery's surface"
+
+  # The pane repaints while the same delivery stands. Every one of these alarmed.
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
+    || fail "watcher exited during pane churn instead of supervising through it"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] \
+    || fail "pane churn re-reported the delivery $wakes time(s) inside the re-surface window"
+  grep -F 'armed merge poll owns the next event' "$state/.watch-triage.log" >/dev/null 2>&1 \
+    || fail "the absorb was not attributed to the armed merge poll"
+
+  # A merge that never arrives must not become silence: the cadence still elapses.
+  [ -e "$throttle" ] || fail "the absorbed churn recorded no re-surface cadence to elapse"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+    || fail "delivered work never re-surfaced once its re-surface window elapsed"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] \
+    || fail "elapsed re-surface window produced $wakes wakes instead of one"
+  pass "delivered work with an armed merge poll surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
+}
+
+# The half that decides whether the bound was safe. The SAME armed poll must not
+# buy quiet for anything the captain still owes an answer to, and must not buy it
+# for a delivery with no poll to report the merge.
+test_an_armed_merge_poll_never_bounds_an_unreported_event() {
+  local spec name line poll dir state out capture round wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (merge-poll bound safety)"; return 0; }
+  for spec in \
+    'poll-blocker|blocked: cannot reach the release host|poll' \
+    'poll-decision|needs-decision: squash or rebase the branch|poll' \
+    'poll-failure|failed: the release job will not run|poll' \
+    'delivery-no-poll|done: PR https://github.com/example/repo/pull/1 checks green|nopoll'
+  do
+    name=${spec%%|*}; line=${spec#*|}; poll=${line#*|}; line=${line%%|*}
+    dir=$(make_hold_home "$name" "$line" nohold) \
+      || fail "[$name] could not build a fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    [ "$poll" = nopoll ] || arm_hold_merge_poll "$dir" || fail "[$name] could not arm the merge poll"
+    round=1
+    while [ "$round" -le 2 ]; do
+      hold_watch_surface "$dir" "$out" "$capture" "idle, elapsed ${round}s" \
+        || fail "[$name] stopped alarming on round $round"
+      wakes=$(hold_stale_wakes "$state")
+      [ "$wakes" -eq 1 ] \
+        || fail "[$name] round $round produced $wakes wakes instead of one"
+      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge round $round"
+      round=$((round + 1))
+    done
+  done
+  pass "an armed merge poll bounds nothing but a delivery: blockers, open decisions, failures, and pollless deliveries keep alarming on every hash"
+}
+
+test_baseline_registered_poll_survives_update() {
+  local dir state out capture registration
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (baseline merge poll)"; return 0; }
+  dir=$(make_hold_home baseline-poll 'done: PR https://github.com/example/repo/pull/1 checks green' nohold) \
+    || fail "could not build baseline fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  mkdir -p "$dir/previous"
+  cp -R "$ROOT/bin" "$dir/previous/bin"
+  cp "$ROOT/tests/fixtures/fm-pr-poll-baseline.sh" "$dir/previous/bin/fm-pr-poll.sh"
+  arm_hold_merge_poll "$dir" https://github.com/example/repo/pull/1 "$dir/previous" \
+    || fail "could not register baseline poll"
+  registration=$(cat "$state/held-merge.pr-poll-registration")
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, baseline delivery' || fail "baseline delivery did not surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge baseline delivery"
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, updated watcher' 2 || fail "updated watcher rejected baseline poll"
+  [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail "baseline poll did not suppress churn"
+  [ "$(cat "$state/held-merge.pr-poll-registration")" = "$registration" ] || fail "baseline poll was re-registered"
+  printf 'merged\n' > "$dir/poll-response"
+  set_mtime 1 "$state/.last-check"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, merged' || fail "baseline poll did not detect merge"
+  grep -F 'held-merge.check.sh: merged' "$out" >/dev/null || fail "merge wake missing"
+  [ ! -e "$state/held-merge.check.sh" ] || fail "merged baseline poll was not retired"
+  pass "baseline registration survives updated watcher and detects merge without rearming"
+}
+
+test_broken_merge_poll_does_not_bound_delivery() {
+  local mode dir state out capture wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (broken merge poll)"; return 0; }
+  for mode in missing-registration invalid-registration fail malformed; do
+    dir=$(make_hold_home "broken-poll-$mode" 'done: PR https://github.com/example/repo/pull/1 checks green' nohold) \
+      || fail "could not build broken poll fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    arm_hold_merge_poll "$dir" || fail "could not arm merge poll"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, initial' || fail "first delivery did not surface"
+    ack_stopped_cycle "$state" || fail "could not acknowledge delivery"
+    hold_watch_churn "$dir" "$out" "$capture" 'idle, healthy' 2 || fail "healthy poll did not absorb churn"
+    [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail "healthy poll re-alarmed"
+    case "$mode" in
+      missing-registration) rm "$state/held-merge.pr-poll-registration" ;;
+      invalid-registration) printf 'invalid\n' > "$state/held-merge.pr-poll-registration" ;;
+      *) printf '%s\n' "$mode" > "$dir/poll-response" ;;
+    esac
+    [ -f "$state/held-merge.pr-poll" ] && [ -f "$state/held-merge.check.sh" ] || fail "poll files disappeared"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, broken' || fail "[$mode] broken poll silenced delivery"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] || fail "[$mode] expected one stale reminder, got $wakes"
+  done
+  pass "failed lookups and unauthenticated polls retain delivery reminders"
+}
+
+# The residue question this bound raises. Every per-window marker the watcher
+# keeps - including the re-surface throttle this bound writes - is named by the
+# WINDOW, and cleanup removes none of them, so a window really is reused with a
+# previous task's markers still on disk. That is safe only because what the
+# throttle stores is the declaration, not a flag: a cleaned-up task leaves no
+# record to poll at all, and a different task or a different pull request on the
+# same window reads as a different declaration and alarms on its first sight.
+test_merge_poll_residue_never_silences_the_next_task_on_that_window() {
+  local dir state out capture throttle wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (merge-poll residue)"; return 0; }
+  dir=$(make_hold_home poll-residue 'done: PR https://github.com/example/repo/pull/1 checks green' nohold) \
+    || fail "could not build a delivered fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(hold_key)"
+  arm_hold_merge_poll "$dir" || fail "could not arm the merge poll"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of delivered work did not surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the delivery's surface"
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 1 \
+    || fail "the delivery's churn was not absorbed"
+  [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail "the delivery re-alarmed inside its own window"
+  [ -e "$throttle" ] || fail "the absorbed churn recorded no throttle to leave behind"
+
+  # Cleanup takes the task record away and leaves every window marker on disk.
+  # With no record there is no window to poll, so nothing can re-alarm.
+  rm -f "$state/held-merge.meta" "$state/held-merge.status" \
+    "$state/held-merge.pr-poll" "$state/held-merge.check.sh"
+  [ -e "$throttle" ] || fail "the fixture removed the residue this case exists to keep"
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, after cleanup' 1 \
+    || fail "watcher exited after the task record was removed"
+  [ "$(hold_stale_wakes "$state")" -eq 0 ] \
+    || fail "a cleaned-up task still produced stale wakes from its leftover window markers"
+
+  # The window is reused. Same task id, a second delivery against a DIFFERENT pull
+  # request, with the first delivery's throttle still sitting on that window key.
+  printf 'window=test:fm-held-merge\nkind=ship\nharness=grok\nbackend=tmux\n' \
+    > "$state/held-merge.meta"
+  printf 'done: PR https://github.com/example/repo/pull/2 checks green\n' > "$state/held-merge.status"
+  printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+  arm_hold_merge_poll "$dir" https://github.com/example/repo/pull/2 \
+    || fail "could not arm the second merge poll"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, reused window' \
+    || fail "the next delivery on this window inherited the previous delivery's silence"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] \
+    || fail "the next delivery on this window produced $wakes first wakes instead of one"
+  pass "leftover window markers silence neither a cleaned-up task nor the next delivery on that window"
+}
+
+
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
@@ -4445,6 +4653,11 @@ test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
+test_baseline_registered_poll_survives_update
+test_broken_merge_poll_does_not_bound_delivery
+test_delivered_work_with_an_armed_merge_poll_bounds_stale_churn
+test_an_armed_merge_poll_never_bounds_an_unreported_event
+test_merge_poll_residue_never_silences_the_next_task_on_that_window
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

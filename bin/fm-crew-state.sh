@@ -74,7 +74,14 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. Before busy classification,
+#      positive agent death on tmux/herdr bypasses retained lifecycle state:
+#      recognized non-working log states survive, but working or unknown reports
+#      unknown. This prevents a departed agent's busy record from claiming work.
+#      Attributed runs never pay for this probe; secondmates, which skip busy
+#      classification, pay only for a working log. crew_agent_gone owns the exact
+#      qualifying verdicts; tests/fm-crew-state.test.sh covers busy residue and
+#      the live-agent control.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -234,6 +241,25 @@ pane_readable() {  # <target>
     tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
+}
+# 0 only on POSITIVE evidence that this endpoint outlived its agent, from the
+# same recovery-grade classifier the death branch below reads. Exactly one
+# verdict qualifies here: `dead` - the endpoint answered and its foreground holds
+# nothing but shells. `missing` deliberately does not, because this predicate is
+# consulted only where the cheap probe just READ the endpoint, so an inventory
+# claiming the endpoint is absent contradicts that read rather than confirming
+# it, and a contradiction between two probes is not evidence. Ambiguous,
+# unreadable, and unverified are never death here, exactly as they are never
+# death there, and a backend with no classifier (orca, zellij, and cmux all
+# answer `unverified`) never reaches a verdict at all. Called lazily by the one
+# reading a departed agent can falsify, so nothing else pays for the probe.
+crew_agent_gone() {
+  [ -n "$BACKEND_TARGET" ] || return 1
+  case "$TASK_BACKEND" in
+    tmux|herdr) ;;
+    *) return 1 ;;
+  esac
+  [ "$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET")" = dead ]
 }
 # crew_busy_verdict: the crew's semantic busy state from the one contract
 # owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
@@ -802,12 +828,21 @@ if ! pane_readable "$BACKEND_TARGET"; then
   esac
 fi
 
+LOG_STATE=$(map_log_state "$LOG_LINE")
+AGENT_GONE=0
+if { [ "$KIND" != secondmate ] || [ "$LOG_STATE" = working ]; } && crew_agent_gone; then
+  AGENT_GONE=1
+  if [ "$LOG_STATE" = working ] || [ "$LOG_STATE" = unknown ]; then
+    emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
+  fi
+fi
+
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.
-# Only an exact busy verdict reports working here, and only an exact idle
-# verdict permits the status-log fallback below. Missing, malformed, stale, or
+# Unless positive agent death bypassed this branch, only an exact busy verdict
+# reports working here, and only exact idle permits the status-log fallback. Missing, malformed, stale, or
 # unverified semantic state remains unknown.
-if [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ] && [ "$AGENT_GONE" = 0 ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
@@ -827,7 +862,6 @@ fi
 # the verb->state mapping (including the configurable paused verb), so reusing its
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
-  LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi

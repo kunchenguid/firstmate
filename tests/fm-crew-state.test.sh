@@ -2231,6 +2231,264 @@ EOF
   pass "runs-list continuation attribution works when axi answers another branch"
 }
 
+# --- (m) an endpoint that outlived its agent ---------------------------------
+#
+# The pane a departed agent leaves behind is a bare login shell that answers
+# every cheap probe, so the classifier consulted when a probe FAILS was never
+# reached and the log's last `working:` line became the reported state: an empty
+# terminal read as an actively working crew. These cases run REAL processes in a
+# REAL tmux server on a private socket, because the verdict comes from what the
+# kernel reports about the pane's processes and a fake could only echo back the
+# assumption already written into it. tmux is the classifier-backed backend that
+# needs no credentials; herdr's own classifier is pinned by the fake-backed cases
+# above and by tests/fm-secondmate-liveness.test.sh.
+# Every private server this file starts is recorded in a FILE rather than a shell
+# variable, because the builder below runs inside a command substitution and any
+# variable it set would die with that subshell (tests/lib.sh documents the same
+# pitfall for fm_test_tmproot). Cleanup runs at the end of each case and again on
+# EXIT, so a failing assertion leaves no tmux server behind either.
+LIVE_TMUX_REGISTRY="$TMP_ROOT/live-tmux-sockets"
+live_tmux_register() {  # <socket>
+  printf '%s\n' "$1" >> "$LIVE_TMUX_REGISTRY"
+}
+live_tmux_cleanup() {
+  local sock
+  [ -f "$LIVE_TMUX_REGISTRY" ] || return 0
+  while IFS= read -r sock; do
+    [ -n "$sock" ] || continue
+    tmux -L "$sock" kill-server >/dev/null 2>&1 || true
+  done < "$LIVE_TMUX_REGISTRY"
+  : > "$LIVE_TMUX_REGISTRY"
+}
+trap 'live_tmux_cleanup; fm_test_cleanup' EXIT
+trap 'live_tmux_cleanup; fm_test_cleanup; exit 130' INT
+trap 'live_tmux_cleanup; fm_test_cleanup; exit 143' TERM
+
+# Stand-in agent binaries, shared by every case here. Symlinks to a real
+# long-running system binary, never copies: a copied platform binary fails
+# code-signing validation and is killed on macOS arm64
+# (tests/fm-tmux-agent-liveness.test.sh). The symlink name is the executable
+# identity the classifier reads.
+LIVE_AGENT_BIN="$TMP_ROOT/live-agent-bin"
+make_live_agent_bin() {
+  local sleep_bin
+  [ -e "$LIVE_AGENT_BIN/claude" ] && return 0
+  sleep_bin=$(command -v sleep) || return 1
+  mkdir -p "$LIVE_AGENT_BIN"
+  ln -s "$sleep_bin" "$LIVE_AGENT_BIN/claude"
+  ln -s "$sleep_bin" "$LIVE_AGENT_BIN/notaharness"
+}
+
+# A case dir whose fakebin's `tmux` is a shim onto a private real server, so the
+# classifier does real process work and no host session can be touched. With no
+# command the window runs the default login shell and nothing else, which is the
+# shape a pane falls back to when its agent exits; a command is passed through
+# so a case can name the exact bare shell or agent process it needs.
+make_live_tmux_case() {  # <name> <window-name> [cmd...] -> echoes case dir
+  local name=$1 window=$2
+  shift 2
+  local d real
+  d=$(new_case "$name")
+  make_repo_on_branch "$d/wt" "fm/$name"
+  make_fakebin "$d" >/dev/null
+  local sock
+  real=$(command -v tmux) || return 1
+  sock="fm-crew-state-$$-$name"
+  live_tmux_register "$sock"
+  printf '#!/usr/bin/env bash\nexec %s -L %s "$@"\n' "$real" "$sock" > "$d/fakebin/tmux"
+  chmod +x "$d/fakebin/tmux"
+  if [ "$#" -gt 0 ]; then
+    "$real" -L "$sock" new-session -d -s live -n "$window" -c "$d/wt" -- "$@" || return 1
+  else
+    "$real" -L "$sock" new-session -d -s live -n "$window" -c "$d/wt" || return 1
+  fi
+  printf '%s\n' "$d"
+}
+
+# Wait for the classifier to settle on <expected> so a case never races the
+# pane's own startup, and report what it actually saw when it does not.
+wait_agent_state() {  # <case-dir> <target> <expected>
+  local d=$1 target=$2 expected=$3 got i=0
+  while [ "$i" -lt 100 ]; do
+    got=$(PATH="$d/fakebin:$PATH" bash -c \
+      ". '$ROOT/bin/fm-backend.sh'; fm_backend_agent_state tmux '$target'")
+    [ "$got" = "$expected" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  printf 'classifier settled on %s, expected %s\n' "${got:-<none>}" "$expected" >&2
+  return 1
+}
+
+test_readable_pane_without_an_agent_refuses_a_stale_working_log() {
+  reset_fakes
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (agent-free pane)"; return 0; }
+  local d out
+  # A bare shell is what a pane falls back to when its agent exits. /bin/sh is
+  # named explicitly rather than left to the default login shell, so no host's
+  # shell startup files can put a helper process in the foreground group and
+  # make the pane read as something other than the empty terminal under test.
+  d=$(make_live_tmux_case agent-free shell /bin/sh) \
+    || fail "could not start the private tmux server"
+  fm_write_meta "$d/state/agent-free.meta" "window=live:shell" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  printf 'working: implementing the fix\n' > "$d/state/agent-free.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  arm_idle_record "$d/state" agent-free
+  wait_agent_state "$d" live:shell dead \
+    || fail "the pane never classified as agent-free, so this case proves nothing"
+  # The cheap probe still reads this pane: that is exactly why the classifier had
+  # to be asked, and asserting it keeps the case from passing vacuously.
+  PATH="$d/fakebin:$PATH" tmux display-message -p -t live:shell '#{pane_id}' >/dev/null 2>&1 \
+    || fail "the pane was unreadable, so this case would pass through the old death branch"
+  out=$(run_crew_state "$d" agent-free)
+  assert_not_contains "$out" "state: working" "an agent-free pane must not report the crew as working"
+  assert_contains "$out" "state: unknown" "an agent-free pane reports unknown"
+  assert_contains "$out" "pane shell remains" "the reading names the endpoint that outlived its agent"
+  live_tmux_cleanup
+  pass "a readable pane whose agent has exited refuses a stale working: log"
+}
+
+test_busy_record_requires_an_agent() {
+  reset_fakes
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (busy agent liveness)"; return 0; }
+  local d out gen mode
+  make_live_agent_bin || fail "sleep not found"
+  for mode in dead alive; do
+    if [ "$mode" = dead ]; then
+      d=$(make_live_tmux_case busy-dead shell /bin/sh) || fail "could not start shell pane"
+    else
+      d=$(make_live_tmux_case busy-alive shell "$LIVE_AGENT_BIN/claude" 900) || fail "could not start agent pane"
+    fi
+    fm_write_meta "$d/state/crew.meta" "window=live:shell" "worktree=$d/wt" "kind=ship" "harness=claude"
+    printf 'working: implementing the fix\n' > "$d/state/crew.status"
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" crew)
+    "$ROOT/bin/fm-busy-event.sh" apply "$d/state" crew busy --gen "$gen" \
+      --source claude-hook --event user-prompt-submit
+    wait_agent_state "$d" live:shell "$mode" || fail "unexpected agent state"
+    PATH="$d/fakebin:$PATH" tmux display-message -p -t live:shell '#{pane_id}' >/dev/null 2>&1 \
+      || fail "pane must remain readable"
+    out=$(run_crew_state "$d" crew)
+    if [ "$mode" = dead ]; then
+      assert_contains "$out" "state: unknown" "a departed agent cannot retain busy state"
+      assert_contains "$out" "pane shell remains" "positive death overrides the busy record"
+      printf 'done: completed\n' > "$d/state/crew.status"
+      out=$(run_crew_state "$d" crew)
+      assert_contains "$out" "state: done" "completion survives a stale busy record"
+      assert_contains "$out" "source: status-log" "completion comes from the log"
+    else
+      assert_contains "$out" "state: working" "a live agent retains busy state"
+      assert_contains "$out" "source: pane" "the busy record remains authoritative"
+    fi
+  done
+  live_tmux_cleanup
+  pass "busy lifecycle residue cannot outlive its agent"
+}
+
+# The other half, and the one that decides whether the refusal was safe: a pane
+# the classifier cannot prove agent-free keeps its log reading. `ambiguous` is
+# the harder case of the two - a process the classifier cannot attribute at all -
+# and it must never be read as death.
+test_a_live_pane_keeps_its_working_log() {
+  reset_fakes
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (live pane)"; return 0; }
+  local d out
+  make_live_agent_bin || { echo "skip: sleep not found"; return 0; }
+  d=$(make_live_tmux_case live-pane agent "$LIVE_AGENT_BIN/claude" 900) \
+    || fail "could not start the private tmux server"
+  fm_write_meta "$d/state/live-pane.meta" "window=live:agent" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  printf 'working: implementing the fix\n' > "$d/state/live-pane.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  arm_idle_record "$d/state" live-pane
+  wait_agent_state "$d" live:agent alive \
+    || fail "the live agent pane never classified as alive"
+  out=$(run_crew_state "$d" live-pane)
+  assert_contains "$out" "state: working" "a live agent pane keeps its working: log"
+  assert_contains "$out" "source: status-log" "a live agent pane still reads from the log"
+
+  # A process the classifier cannot attribute at all: still not death.
+  d=$(make_live_tmux_case unattributable-pane agent "$LIVE_AGENT_BIN/notaharness" 900) \
+    || fail "could not start the second private tmux server"
+  fm_write_meta "$d/state/unattributable-pane.meta" "window=live:agent" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  printf 'working: implementing the fix\n' > "$d/state/unattributable-pane.status"
+  arm_idle_record "$d/state" unattributable-pane
+  wait_agent_state "$d" live:agent ambiguous \
+    || fail "the unattributable pane did not classify as ambiguous"
+  out=$(run_crew_state "$d" unattributable-pane)
+  assert_contains "$out" "state: working" "an unattributable pane is not death and keeps its log"
+  live_tmux_cleanup
+  pass "a live or unattributable pane keeps its working: log"
+}
+
+# The refusal is scoped to the one claim a departed agent can falsify. Everything
+# else the worker durably reported about work it already finished or stopped
+# stays true after its agent exits, and a delivery waiting on a merge is the
+# reading firstmate needs most.
+test_an_agent_free_pane_still_reports_every_other_log_state() {
+  reset_fakes
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (agent-free log states)"; return 0; }
+  local d out spec line want
+  d=$(make_live_tmux_case agent-free-states shell /bin/sh) \
+    || fail "could not start the private tmux server"
+  fm_write_meta "$d/state/agent-free-states.meta" "window=live:shell" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  arm_idle_record "$d/state" agent-free-states
+  wait_agent_state "$d" live:shell dead \
+    || fail "the pane never classified as agent-free, so this case proves nothing"
+  for spec in \
+    'done: PR https://github.com/o/r/pull/3 checks green|state: done' \
+    'blocked: cannot reach the release host|state: blocked' \
+    'needs-decision: squash or rebase|state: parked' \
+    'failed: the release job will not run|state: failed' \
+    'paused: holding for the upstream release|state: paused'
+  do
+    line=${spec%%|*}; want=${spec#*|}
+    printf '%s\n' "$line" > "$d/state/agent-free-states.status"
+    out=$(run_crew_state "$d" agent-free-states)
+    assert_contains "$out" "$want" "an agent-free pane still reports: $line"
+    assert_contains "$out" "source: status-log" "the reading still comes from the log: $line"
+  done
+  live_tmux_cleanup
+  pass "an agent-free pane still reports every log state but working"
+}
+
+# The same defect on the other classifier-backed backend, where it needs no real
+# processes: a herdr husk whose scrollback still READS never reached the death
+# branch either, because that branch is entered only when the read fails. The
+# case above (FM_FAKE_HERDR_READ_FAIL=1) covers the unreadable husk; this covers
+# the readable one, which is the ordinary shape - a pane outliving its agent
+# keeps answering.
+test_readable_herdr_husk_refuses_a_stale_working_log() {
+  command -v jq >/dev/null 2>&1 || { pass "readable herdr husk test skipped without jq"; return; }
+  reset_fakes
+  local d out; d=$(new_case herdr-husk-readable)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-readable
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-readable.meta" "window=default:w1:p2" "worktree=$d/wt" \
+    "kind=ship" "backend=herdr" "harness=claude"
+  printf 'working: implementing the fix\n' > "$d/state/feat-herdr-readable.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_HERDR_HUSK=1
+  arm_idle_record "$d/state" feat-herdr-readable
+  out=$(run_crew_state "$d" feat-herdr-readable)
+  assert_not_contains "$out" "state: working" "a readable husk must not report the crew as working"
+  assert_contains "$out" "pane shell remains" "the reading names the endpoint that outlived its agent"
+
+  # Control: the same readable pane with a registered agent keeps its log.
+  FM_FAKE_HERDR_HUSK=0
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  out=$(run_crew_state "$d" feat-herdr-readable)
+  assert_contains "$out" "state: working" "a pane whose agent is still registered keeps its working: log"
+  pass "a readable herdr husk refuses a stale working: log while a registered agent keeps it"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -2251,6 +2509,7 @@ test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
 test_ci_monitoring_green_then_new_issue_stays_working
 test_ci_ready_done_log_relapse_stays_working
+
 test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
@@ -2309,5 +2568,10 @@ test_active_fix_round_unfetched_pipeline_head_reports_current
 test_unanchored_unfetched_active_row_does_not_match
 test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
+test_readable_pane_without_an_agent_refuses_a_stale_working_log
+test_busy_record_requires_an_agent
+test_a_live_pane_keeps_its_working_log
+test_an_agent_free_pane_still_reports_every_other_log_state
+test_readable_herdr_husk_refuses_a_stale_working_log
 
 echo "all fm-crew-state tests passed"

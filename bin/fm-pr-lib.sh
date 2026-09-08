@@ -285,6 +285,36 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# 0 if a task-record line is an ordinary `<key>=<value>` field, where key is a
+# shell-style identifier. Written without a regular expression so stock macOS
+# Bash 3.2 evaluates it the same way as every other supported shell.
+fm_pr_metadata_field_line() {  # <line>
+  local line=$1 key
+  local LC_ALL=C
+  case "$line" in
+    *=*) key=${line%%=*} ;;
+    *) return 1 ;;
+  esac
+  case "$key" in
+    [A-Za-z_]*) ;;
+    *) return 1 ;;
+  esac
+  [ -z "${key//[A-Za-z0-9_]/}" ]
+}
+
+# The task record's PR identity is the single `pr=` URL, not its position in the
+# file. state/<id>.meta is an append-friendly key=value record with many writers -
+# bin/fm-spawn.sh's relaunch rewrite emits control_relaunch_tx= last,
+# bin/fm-captain-hold.sh appends decisions_reviewed=/decision_keys=, and
+# bin/fm-teardown.sh's legacy stamp appends spawn_gen= - so requiring the identity
+# to stay contiguous at the tail made every one of those writers silently
+# de-authenticate an armed merge poll: the watcher then refuses the check as
+# unauthenticated and the merge is never noticed, leaving delivered work reported
+# as waiting forever. An ordinary well-formed key after `pr=` carries no identity,
+# so it is accepted here. What identity actually depends on still refuses: a second
+# `pr=`, an unparseable `pr=`, an invalid `pr_head=` after `pr=`, and any line that
+# is not a well-formed key=value pair. Consumers still require the parsed identity
+# to reconstruct the sidecar's exact URL.
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=
@@ -315,10 +345,13 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
       *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+        # Only content AFTER the identity line is judged here, exactly as before.
+        # A well-formed key=value pair is an ordinary record field and carries no
+        # identity; anything else is content this parser cannot account for.
+        if [ "$seen_pr" -ne 0 ] && ! fm_pr_metadata_field_line "$line"; then
+          post_pr_invalid=1
+        fi
         ;;
     esac
   done < "$file"

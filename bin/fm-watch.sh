@@ -1180,6 +1180,25 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
+# docs/architecture.md owns the delivered-work stale-reminder bound.
+# Authenticate around the bounded health lookup: file presence and a silent
+# static poll are not evidence that the forge can actually report the next event.
+merge_poll_stale_bound() {  # <window-key> <task>
+  local key=$1 task=$2 url
+  # An open captain call already owns this sighting's cadence.
+  [ -z "$STALE_WAIT_DECLARATION" ] || return 1
+  [ "$(status_line_verb "$(last_status_line "$STATE/$task.status")")" = "done" ] || return 1
+  fm_pr_poll_snapshot_capture "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
+  url=$FM_PR_POLL_SNAPSHOT_URL
+  run_check_capture "$SCRIPT_DIR/fm-pr-poll-health.sh" \
+    "$FM_PR_POLL_SNAPSHOT_PROVIDER" "$url" "$FM_PR_POLL_SNAPSHOT_HOST" \
+    "$FM_PR_POLL_SNAPSHOT_PATH" "$FM_PR_POLL_SNAPSHOT_NUMBER" || return 1
+  [ "$FM_CHECK_RESULT" = healthy ] || return 1
+  fm_pr_poll_snapshot_matches "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
+  STALE_WAIT_DECLARATION="merge-poll:$url:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
+  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+}
+
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -2131,6 +2150,14 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+            elif merge_poll_stale_bound "$key" "$task"; then
+              # Delivered, and the armed merge poll owns the next event. Further
+              # NEW pane hashes with the same delivery have nothing to add until
+              # the merge lands or the cadence elapses.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (delivered, armed merge poll owns the next event): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"

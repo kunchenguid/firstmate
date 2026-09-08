@@ -1259,7 +1259,7 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: existing endpoint has ambiguous agent process (backend=tmux)" \
     "session start did not distinguish an existing Pi-shaped process from a missing window"
   [ ! -s "$log" ] || fail "session start touched an ambiguous existing Pi process: $(cat "$log")"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+  assert_contains "$out" "endpoint: present (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
     "the later fleet read should still see the ambiguous endpoint"
   pass "session start: an existing ambiguous Pi process prevents duplicate recovery"
 }
@@ -1278,7 +1278,7 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
     "session start did not distinguish transient unreadability from absence"
   [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+  assert_contains "$out" "endpoint: absent (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
     "the later cheap presence read should preserve the visible offline symptom"
   pass "session start: transient tmux unreadability never licenses a relaunch"
 }
@@ -1336,8 +1336,8 @@ EOF
   printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
+  assert_contains "$out" "endpoint: present (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported present"
+  assert_contains "$out" "endpoint: absent (backend=tmux window=fm-sess:dead-window)" "absent tmux endpoint not reported absent"
 
   pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
 }
@@ -1356,8 +1356,8 @@ EOF
   printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
+  assert_contains "$out" "endpoint: present (backend=herdr window=sess:p-live)" "live herdr endpoint not reported present"
+  assert_contains "$out" "endpoint: absent (backend=herdr window=sess:p-dead)" "absent herdr endpoint not reported absent"
 
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }

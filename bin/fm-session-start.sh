@@ -840,10 +840,16 @@ for meta in "$STATE"/*.meta; do
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
+    # present/absent, never alive/dead: this is fm_backend_target_exists, which
+    # proves only that the endpoint is still there. The pane an exited agent
+    # leaves behind is a bare shell that still exists, so calling this line
+    # `alive` reported an empty terminal as a working crew. Naming what was
+    # actually measured keeps the digest cheap and honest; `bin/fm-crew-state.sh`
+    # is still the one place that answers whether a crew is working.
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      printf 'endpoint: present (backend=%s window=%s)\n' "$backend" "$window"
     else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      printf 'endpoint: absent (backend=%s window=%s)\n' "$backend" "$window"
     fi
   else
     printf 'endpoint: unknown (no window recorded)\n'

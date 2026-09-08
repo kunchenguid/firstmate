@@ -1532,6 +1532,41 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# The task record is an append-friendly key=value file with many writers, but its
+# armed merge poll binds to the `pr=` identity inside it. A relaunch rewrites the
+# record and emits its own transaction key last, so the identity stopped being the
+# tail - and the poll that reports the merge was refused as unauthenticated from
+# then on. The merge still happened on the forge; firstmate simply stopped being
+# told, and a supervisor waiting for that pull request waited forever. This drives
+# the real writers end to end: arm the real poll, run a real relaunch, and require
+# the poll to still authenticate against the rewritten record.
+test_relaunch_keeps_an_armed_merge_poll_authenticated() {
+  local dir out rc url
+  url=https://github.com/example/repo/pull/41
+  dir=$(new_case pollarm rl40)
+  add_ship_task "$dir" rl40 claude
+  env FM_HOME="$dir/home" "$ROOT/bin/fm-pr-check.sh" rl40 "$url" >/dev/null 2>&1 \
+    || fail "could not arm the merge poll"
+  # shellcheck source=/dev/null
+  ( . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_metadata_identity_parse "$dir/home/state/rl40.meta" ) \
+    || fail "the freshly armed record did not authenticate, so this case proves nothing"
+
+  out=$(run_control "$dir" rl40 relaunch --note "replace the agent"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a task with an armed merge poll should succeed"$'\n'"$out"
+  [ -n "$(meta_field "$dir" rl40 control_relaunch_tx)" ] \
+    || fail "the relaunch did not stamp its transaction key, so this case proves nothing"
+  [ "$(meta_field "$dir" rl40 pr)" = "$url" ] \
+    || fail "the relaunch did not preserve the recorded pull request"
+
+  # shellcheck source=/dev/null
+  ( . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_metadata_identity_parse "$dir/home/state/rl40.meta" \
+      && [ "$FM_PR_META_URL" = "$url" ] ) \
+    || fail "the relaunched record no longer authenticates its armed merge poll"
+  pass "fm-control relaunch: an armed merge poll still authenticates after the record is rewritten"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
@@ -1584,3 +1619,4 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_relaunch_keeps_an_armed_merge_poll_authenticated
