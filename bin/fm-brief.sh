@@ -222,12 +222,17 @@ INBOX_SECTION=${INBOX_SECTION%$'\n'}
 # A worker needs the rule at the precise point a
 # third-party native child-agent facility may be available, while the complete
 # policy, schema, and enforcement boundary remain with the configuration doc.
-IFS= read -r -d '' NESTED_ROUTING_SECTION <<'EOF' || true
+ROUTING_CONFIG="\`$FM_HOME/config/crew-dispatch.json\`"
+QUOTA_ARRAY_SKILL="\`$FM_ROOT/.agents/skills/quota-array-dispatch/SKILL.md\`"
+IFS= read -r -d '' NESTED_ROUTING_SECTION <<EOF || true
 # Nested delegation and model routing
-`config/crew-dispatch.json` in the active firstmate home is the current authority for worker routing.
-Before creating a child through a native subagent or delegation facility, classify the child task under that same current policy and explicitly pass the matching configured harness, model, and effort.
-Never inherit or improvise a model or effort from your own session, or use the obsolete Fable/Opus/Sonnet/Haiku tiers.
-An omitted model or effort in the selected profile deliberately uses that selected harness's own default for the omitted axis.
+$ROUTING_CONFIG is the active firstmate home's current worker-routing authority when that file is present.
+Before creating a child through a native subagent or delegation facility, classify the child task under that current policy and explicitly apply the complete selected profile: its configured harness, model, and effort, with an omitted model or effort fixed to the selected harness's default rather than inherited from your session.
+If the matching rule or default is a profile array, load $QUOTA_ARRAY_SKILL and follow its selection procedure.
+Create the native child only when its facility can represent that complete selection.
+If the facility cannot represent every selected axis, do not create the child; report the mismatch to Firstmate so the child can be routed through the fleet lifecycle.
+Do not use legacy Fable/Opus/Sonnet/Haiku routing tiers to select a child profile.
+A model explicitly selected by $ROUTING_CONFIG remains authoritative even when its name contains one of those words.
 Firstmate cannot intercept every third-party native child facility, so this is a briefing requirement rather than claimed runtime enforcement for those tools.
 EOF
 NESTED_ROUTING_SECTION=${NESTED_ROUTING_SECTION%$'\n'}

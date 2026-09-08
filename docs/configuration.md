@@ -432,10 +432,10 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 ### Nested delegation
 
 When active, `config/crew-dispatch.json` is also the current authority for every worker's model and effort selection at every delegation depth.
-Before a crewmate creates a native child agent, it must classify the child task against the same rules or default and explicitly pass the selected profile's configured harness, model, and effort rather than inheriting or improvising either axis from its own session.
-An omitted model or effort remains an intentional selection of the chosen harness's default for that omitted axis.
+Before a crewmate creates a native child agent, it must classify the child task against the same rules or default and explicitly apply the complete selected profile: its configured harness, model, and effort, with an omitted model or effort fixed to the selected harness's default rather than inherited or improvised from the parent session.
 Profile arrays retain their normal `quota-array-dispatch` selection procedure at every depth.
-No legacy Fable/Opus/Sonnet/Haiku tier policy may choose a child profile.
+The worker may create the native child only when that facility can represent the complete selection; otherwise it must report the mismatch to Firstmate so the child can be routed through the fleet lifecycle.
+No legacy Fable/Opus/Sonnet/Haiku tier policy may choose a child profile, but a model explicitly selected by the active configuration remains authoritative even when its name contains one of those words.
 `fm-spawn.sh` enforces explicit resolved profiles only for fleet crewmate and scout spawns.
 Firstmate cannot intercept every third-party native child-agent tool, so ship and scout briefs carry this as an explicit worker requirement rather than claiming runtime enforcement outside the fleet lifecycle.
 

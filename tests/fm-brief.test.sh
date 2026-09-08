@@ -442,9 +442,11 @@ test_ship_project_memory_wording() {
 }
 
 test_nested_delegation_model_routing_contract() {
-  local home id brief kind
-  home="$TMP_ROOT/nested-routing-home"
+  local home id brief kind routing_config quota_skill
+  home="$TMP_ROOT/nested routing home"
   mkdir -p "$home/data"
+  routing_config="\`$home/config/crew-dispatch.json\`"
+  quota_skill="\`$ROOT/.agents/skills/quota-array-dispatch/SKILL.md\`"
 
   for kind in ship scout; do
     id="brief-nested-routing-$kind"
@@ -456,12 +458,24 @@ test_nested_delegation_model_routing_contract() {
     brief="$home/data/$id/brief.md"
     assert_grep '# Nested delegation and model routing' "$brief" \
       "$kind brief omitted the nested-delegation routing section"
-    assert_grep 'classify the child task under that same current policy' "$brief" \
+    assert_grep "$routing_config is the active firstmate home's current worker-routing authority" "$brief" \
+      "$kind brief did not identify the resolved active-home routing file"
+    assert_no_grep '`config/crew-dispatch.json` in the active firstmate home' "$brief" \
+      "$kind brief retained an unusable worktree-relative routing path"
+    assert_grep 'classify the child task under that current policy' "$brief" \
       "$kind brief omitted the same-policy child classification rule"
-    assert_grep 'explicitly pass the matching configured harness, model, and effort' "$brief" \
+    assert_grep 'explicitly apply the complete selected profile: its configured harness, model, and effort' "$brief" \
       "$kind brief omitted the explicit child profile rule"
-    assert_grep 'Never inherit or improvise a model or effort from your own session' "$brief" \
-      "$kind brief permits inherited or improvised child routing"
+    assert_grep "load $quota_skill and follow its selection procedure" "$brief" \
+      "$kind brief omitted the usable profile-array selection procedure"
+    assert_grep 'Create the native child only when its facility can represent that complete selection.' "$brief" \
+      "$kind brief did not fail closed on unrepresentable profiles"
+    assert_grep 'do not create the child; report the mismatch to Firstmate' "$brief" \
+      "$kind brief did not reroute an unrepresentable profile through Firstmate"
+    assert_grep 'Do not use legacy Fable/Opus/Sonnet/Haiku routing tiers to select a child profile.' "$brief" \
+      "$kind brief retained legacy tier-based selection"
+    assert_grep "A model explicitly selected by $routing_config remains authoritative" "$brief" \
+      "$kind brief rejects valid configured model names that resemble legacy tiers"
     assert_grep 'cannot intercept every third-party native child facility' "$brief" \
       "$kind brief overclaims Firstmate runtime enforcement"
   done
