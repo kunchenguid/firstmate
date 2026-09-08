@@ -51,7 +51,8 @@ SESSION="inboxlive"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-inbox-live.XXXXXX")
 LAB=$(cd "$LAB" && pwd)
 TIMEOUT=${FM_SEND_INBOX_LIVE_TIMEOUT:-240}
-CHECKED=0
+DELIVERY_CHECKED=0
+RECOVERY_CHECKED=0
 FAILED=0
 
 pass() { printf 'ok - %s\n' "$1"; }
@@ -182,7 +183,7 @@ check_harness_doorbell() {  # <name>
     i=$((i + 1))
   done
   if [ -f "$handled" ] && [ -e "$acted" ]; then
-    CHECKED=$((CHECKED + 1))
+    DELIVERY_CHECKED=$((DELIVERY_CHECKED + 1))
     pass "$name ($version): the doorbell reached a real worker, which acted and acked with the mv"
   else
     FAILED=1
@@ -217,7 +218,8 @@ check_harness_swallowed_recovery() {  # <name>
     || { FAILED=1; printf 'not ok - %s (%s): could not launch for the swallowed-doorbell check\n' "$name" "$version" >&2; return 0; }
   wait_ready "$win"; ready_rc=$?
   if [ "$ready_rc" -eq 1 ]; then
-    note "$name ($version): composer already pending before the swallow check; not verified here"
+    FAILED=1
+    printf 'not ok - %s (%s): composer already pending before the swallowed-doorbell check\n' "$name" "$version" >&2
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
     return 0
   fi
@@ -234,7 +236,8 @@ check_harness_swallowed_recovery() {  # <name>
   tmux -L "$SOCKET" send-keys -t "$SESSION:$win" -l "$line" 2>/dev/null || true
   sleep 2
   if [ "$(fm_tmux_composer_state "$SESSION:$win")" != pending ]; then
-    note "$name ($version): the typed doorbell did not read as pending text; swallow not reproduced, not verified here"
+    FAILED=1
+    printf 'not ok - %s (%s): typed doorbell did not read as pending; swallowed-doorbell recovery was not verified\n' "$name" "$version" >&2
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
     return 0
   fi
@@ -254,7 +257,7 @@ check_harness_swallowed_recovery() {  # <name>
     i=$((i + 1))
   done
   if [ -f "$handled" ] && [ -e "$acted" ]; then
-    CHECKED=$((CHECKED + 1))
+    RECOVERY_CHECKED=$((RECOVERY_CHECKED + 1))
     pass "$name ($version): a swallowed doorbell was committed by one re-ring, and the worker acted and acked"
   else
     FAILED=1
@@ -280,8 +283,12 @@ if [ "$FAILED" -ne 0 ]; then
   printf 'not ok - live steering-inbox doorbell guard found failures above\n' >&2
   exit 1
 fi
-if [ "$CHECKED" -eq 0 ]; then
-  printf 'not ok - live steering-inbox doorbell guard verified nothing (no harness installed?)\n' >&2
+if [ "$DELIVERY_CHECKED" -eq 0 ]; then
+  printf 'not ok - live steering-inbox doorbell guard verified no delivery checks (no harness installed?)\n' >&2
   exit 1
 fi
-pass "live steering-inbox doorbell guard: $CHECKED check(s) honored the doorbell contract"
+if [ "$RECOVERY_CHECKED" -eq 0 ]; then
+  printf 'not ok - live steering-inbox doorbell guard verified no swallowed-doorbell recovery checks\n' >&2
+  exit 1
+fi
+pass "live steering-inbox doorbell guard: $DELIVERY_CHECKED delivery check(s), $RECOVERY_CHECKED recovery check(s) passed"

@@ -335,6 +335,43 @@ test_ring_commits_its_own_swallowed_doorbell() {
   pass "inbox: the ring commits its own swallowed doorbell without retyping it"
 }
 
+test_ring_stops_enter_retries_when_composer_changes() {
+  local dir state rec doorbell log keylog rc
+  dir="$TMP_ROOT/ring-retry-draft"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  make_composer_capture "$dir/capture-doorbell.txt" "$doorbell"
+  make_composer_capture "$dir/capture-empty.txt" ""
+  make_composer_capture "$dir/capture-mixed.txt" "$doorbell finish the release notes"
+  cp "$dir/capture-doorbell.txt" "$dir/capture.txt"
+  log="$dir/send.log"; : > "$log"
+  keylog="$dir/key.log"; : > "$keylog"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-mixed.txt" FM_TASK_INBOX_COMMIT_SLEEP=0 \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "recovery should stop when human draft text appears, got $rc"
+  [ "$(grep -c '^Enter$' "$keylog")" = 1 ] || fail "recovery must not retry Enter after draft text appears:"$'\n'"$(cat "$keylog")"
+  [ ! -s "$log" ] || fail "recovery must not retype a swallowed doorbell:"$'\n'"$(cat "$log")"
+
+  cp "$dir/capture-empty.txt" "$dir/capture.txt"
+  : > "$log"
+  : > "$keylog"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keylog" \
+    FM_FAKE_TMUX_AGENT=claude FM_FAKE_TMUX_CAPTURE="$dir/capture.txt" \
+    FM_FAKE_TMUX_CAPTURE_AFTER_ENTER="$dir/capture-mixed.txt" FM_TASK_INBOX_COMMIT_SLEEP=0 \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "initial submission should stop when human draft text appears, got $rc"
+  [ "$(grep -c '^Enter$' "$keylog")" = 1 ] || fail "initial submission must not retry Enter after draft text appears:"$'\n'"$(cat "$keylog")"
+  [ "$(wc -l < "$log" | tr -d ' ')" = 1 ] || fail "initial submission must type the doorbell exactly once:"$'\n'"$(cat "$log")"
+  pass "inbox: Enter retries stop when the composer content changes"
+}
+
 # The other direction, and the one that must never regress: a composer holding
 # text firstmate did not type is someone's real half-typed content. It is
 # deferred untouched - no Enter, nothing typed - however long it sits there.
@@ -801,6 +838,7 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_commits_its_own_swallowed_doorbell
+test_ring_stops_enter_retries_when_composer_changes
 test_ring_never_submits_foreign_composer_text
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack

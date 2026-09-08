@@ -316,26 +316,27 @@ fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <record-path> [e
 # fm_task_inbox_commit_pending_doorbell: submit a doorbell already sitting in
 # the composer, with a bounded Enter-only retry. Retyping is never correct
 # here - the text is already there, and a second copy would be delivered as
-# well as the first - so this reuses the shared Enter-only ladder rather than
-# going back through the type-and-submit path.
-# True when the composer no longer holds pending text.
-_FM_TASK_INBOX_COMMIT_BACKEND=''
-_fm_task_inbox_commit_send_key() {  # <target> <key> [expected-label]
-  fm_backend_send_key "$_FM_TASK_INBOX_COMMIT_BACKEND" "$1" "$2" "${3:-}"
-}
-_fm_task_inbox_commit_state() {  # <target> [expected-label]
-  fm_backend_composer_state "$_FM_TASK_INBOX_COMMIT_BACKEND" "$1" "${2:-}" 2>/dev/null || printf 'unknown'
-}
-fm_task_inbox_commit_pending_doorbell() {  # <backend> <target> [expected-label]
-  local backend=$1 target=$2 label=${3:-} state
-  _FM_TASK_INBOX_COMMIT_BACKEND=$backend
-  state=$(fm_composer_submit_retry_core _fm_task_inbox_commit_send_key _fm_task_inbox_commit_state \
-    "$target" "$FM_TASK_INBOX_COMMIT_RETRIES" "$FM_TASK_INBOX_COMMIT_SLEEP" "$label")
-  _FM_TASK_INBOX_COMMIT_BACKEND=''
-  case "$state" in
-    pending|pending-unproven) return 1 ;;
-  esac
-  return 0
+# well as the first. True when the composer is proven empty.
+fm_task_inbox_commit_pending_doorbell() {  # <backend> <target> <record-path> [expected-label] [attempts]
+  local backend=$1 target=$2 rec=$3 label=${4:-} retries=${5:-$FM_TASK_INBOX_COMMIT_RETRIES} state i=0
+  case "$retries" in ''|*[!0-9]*|0) retries=3 ;; esac
+  while [ "$i" -lt "$retries" ]; do
+    if ! fm_task_inbox_composer_holds_doorbell "$backend" "$target" "$rec" "$label"; then
+      state=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || state=unknown
+      [ "$state" = empty ] && return 0
+      return 1
+    fi
+    fm_backend_send_key "$backend" "$target" Enter "$label" || return 1
+    sleep "$FM_TASK_INBOX_COMMIT_SLEEP"
+    state=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || state=unknown
+    case "$state" in
+      empty) return 0 ;;
+      pending|pending-unproven) ;;
+      *) return 1 ;;
+    esac
+    i=$((i + 1))
+  done
+  return 1
 }
 
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
@@ -358,7 +359,7 @@ fm_task_inbox_commit_pending_doorbell() {  # <backend> <target> [expected-label]
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict retries
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
@@ -373,7 +374,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
       # to a re-ring that would defer again on the same text. Anything we
       # cannot positively identify as this record's doorbell still defers.
       if fm_task_inbox_composer_holds_doorbell "$backend" "$target" "$rec" "$label"; then
-        fm_task_inbox_commit_pending_doorbell "$backend" "$target" "$label" || return 1
+        fm_task_inbox_commit_pending_doorbell "$backend" "$target" "$rec" "$label" || return 1
         return 0
       fi
       return 1
@@ -383,12 +384,18 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   # steps, so an agent exiting after the liveness check could leave a bare
   # shell only a suffix; the `: ` prefix protects complete lines only. Do not
   # add process-bound atomic delivery here unless an incident reopens this.
-  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 3 0.4 0.3 "$label" 2>/dev/null); then
+  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  # The verdict is read only to report a failed keystroke; every other value
-  # (empty, pending, unknown, ...) is deliberately ignored, never proof.
   [ "$verdict" != send-failed ] || return 2
+  case "$verdict" in
+    pending|pending-unproven)
+      retries=$FM_TASK_INBOX_COMMIT_RETRIES
+      case "$retries" in ''|*[!0-9]*|0) retries=3 ;; esac
+      [ "$retries" -gt 1 ] || return 1
+      fm_task_inbox_commit_pending_doorbell "$backend" "$target" "$rec" "$label" "$((retries - 1))" || return 1
+      ;;
+  esac
   return 0
 }
 
