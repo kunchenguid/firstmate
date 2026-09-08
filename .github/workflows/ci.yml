@@ -250,8 +250,8 @@ jobs:
           printf '%s\n' "$status"
           version=$(printf '%s' "$status" | jq -r '.client.version // empty')
           protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty')
-          [ "$version" = "0.7.4" ] || {
-            echo "::error::expected exact Herdr pin 0.7.4, got ${version:-<empty>}"
+          [ "$version" = "0.8.2" ] || {
+            echo "::error::expected exact Herdr pin 0.8.2, got ${version:-<empty>}"
             exit 1
           }
           case "$protocol" in
