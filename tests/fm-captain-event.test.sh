@@ -142,11 +142,11 @@ long=$(python3 - <<'PY'
 print("🧭" * 700)
 PY
 )
-primary_args pi:bounded $'\033[31mLine one\033[0m\nLine two token=supersecretvalue AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY ordinary prose '
+primary_args pi:bounded $'\033[31mLine one\033[0m\nLine two token=supersecretvalue AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DATABASE_URL=postgres://alice:hunter2@db.example/prod ordinary prose '
 PRIMARY_ARGS+=(--summary-truncated true --ref pr_url=https://example.test/pull/7 --ref report_id=soak-report --ref report_path=data/soak-report/report.md --ref branch_outcome_seq=9)
 # Replace the summary argument with a value that exercises both redaction and
 # the Unicode cap without risking shell byte slicing.
-PRIMARY_ARGS[15]=$'\033[31mLine one\033[0m\nLine two \u202etoken=supersecretvalue AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY ordinary prose '"$long"
+PRIMARY_ARGS[15]=$'\033[31mLine one\033[0m\nLine two \u202etoken=supersecretvalue AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DATABASE_URL=postgres://alice:hunter2@db.example/prod ordinary prose '"$long"
 FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null || fail "bounded append failed"
 row=$(FM_HOME="$home" "$OUTBOX" read --after 0)
 printf '%s\n' "$row" | jq -e '
@@ -155,6 +155,7 @@ printf '%s\n' "$row" | jq -e '
   and (.summary | contains("[REDACTED]"))
   and (.summary | contains("supersecretvalue") | not)
   and (.summary | contains("wJalrXUtnFEMI") | not)
+  and (.summary | contains("hunter2") | not)
   and (.summary | contains("ordinary prose"))
   and (.refs | keys) == ["branch_outcome_seq","pr_url","report_id","report_path"]
   and .refs.branch_outcome_seq == 9
@@ -181,7 +182,9 @@ FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null 2>&1 \
 for unsafe_url in \
   'https://user:password@example.test/pull/7' \
   'https://example.test/pull/7?access_token=supersecretvalue' \
-  'https://example.test/pull/7#access_token=supersecretvalue'; do
+  'https://example.test/pull/7#access_token=supersecretvalue' \
+  'https://example.test/pull/7?' \
+  'https://example.test/pull/7#'; do
   primary_args "pi:unsafe-url-$RANDOM" bad
   PRIMARY_ARGS+=(--ref "pr_url=$unsafe_url")
   FM_HOME="$home" "$OUTBOX" append "${PRIMARY_ARGS[@]}" >/dev/null 2>&1 \
@@ -383,7 +386,7 @@ installCaptainEventPublisher(pi, {
 });
 const message = {
   role: "assistant",
-  content: [{ type: "text", text: "Ordinary prose AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY remains" }],
+  content: [{ type: "text", text: "Ordinary prose AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY DATABASE_URL=postgres://alice:hunter2@db.example/prod remains" }],
   stopReason: "stop",
   timestamp: 1,
 };
@@ -395,7 +398,7 @@ import sys
 
 args = open(sys.argv[1], "rb").read().split(b"\0")[:-1]
 summary = args[args.index(b"--summary") + 1].decode()
-assert summary == "Ordinary prose [REDACTED] remains", summary
+assert summary == "Ordinary prose [REDACTED] [REDACTED] remains", summary
 PY
 
   home=$(new_home pi-producer-disabled)
@@ -517,15 +520,20 @@ if command -v node >/dev/null 2>&1 && node --experimental-strip-types -e '' >/de
   status=$?
   expect_code 0 "$status" "Pi worker spawn should succeed: $out"
   extension="$home/state/$task.pi-ext.ts"
+  mkdir -p "$worktree/.pi/extensions/lib"
+  cp "$ROOT/.pi/extensions/fm-captain-event.ts" "$worktree/.pi/extensions/fm-captain-event.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-captain-event.ts" "$worktree/.pi/extensions/lib/fm-captain-event.ts"
   spawn_gen=$(awk -F= '$1 == "spawn_gen" { print $2 }' "$home/state/$task.meta")
   rm -f "$home/state/$task.turn-ended"
-  EXTENSION="$extension" REPO_ROOT="$ROOT" NODE_NO_WARNINGS=1 node --experimental-strip-types --input-type=module <<'JS' \
+  EXTENSION="$extension" TRACKED_EXTENSION="$worktree/.pi/extensions/fm-captain-event.ts" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+    NODE_NO_WARNINGS=1 node --experimental-strip-types --input-type=module <<'JS' \
     || fail "generated Pi worker extension did not execute"
 import { pathToFileURL } from "node:url";
 const handlers = new Map();
 const pi = { on(name, handler) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); } };
 const extension = await import(`${pathToFileURL(process.env.EXTENSION).href}?fixture=${Date.now()}`);
-const primaryExtension = await import(`${pathToFileURL(`${process.env.REPO_ROOT}/.pi/extensions/fm-captain-event.ts`).href}?fixture=${Date.now()}`);
+const primaryExtension = await import(`${pathToFileURL(process.env.TRACKED_EXTENSION).href}?fixture=${Date.now()}`);
 primaryExtension.default(pi);
 extension.default(pi);
 const message = { role: "assistant", content: [{ type: "text", text: "Generated worker final" }], stopReason: "stop", timestamp: 303 };
