@@ -432,6 +432,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-platform-lib.sh
+. "$SCRIPT_DIR/fm-platform-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1987,6 +1989,10 @@ path_is_ancestor_of() {
   local ancestor=$1 path=$2
   [ -n "$ancestor" ] || return 1
   [ -n "$path" ] || return 1
+  # Normalize both operands so a Windows-native spelling of the same
+  # directory (C:/Users/x vs /c/Users/x) cannot slip past the prefix test.
+  ancestor=$(fm_path_posix "$ancestor")
+  path=$(fm_path_posix "$path")
   [ "$ancestor" != "$path" ] || return 1
   case "$path" in
     "$ancestor"/*) return 0 ;;
@@ -1999,10 +2005,12 @@ validate_firstmate_home_for_spawn() {
   abs_home=$(resolved_existing_dir "$home") || return 1
   abs_active_home=$(resolved_existing_dir "$FM_HOME")
   abs_root=$(resolved_existing_dir "$FM_ROOT")
-  if [ "$abs_home" = "/" ]; then
-    echo "error: secondmate home cannot be the filesystem root: $home" >&2
-    return 1
-  fi
+  case "$abs_home" in
+    /|/[a-z]|/[a-z]/)
+      echo "error: secondmate home cannot be a filesystem or drive root: $home" >&2
+      return 1
+      ;;
+  esac
   if [ "$abs_home" = "$abs_active_home" ]; then
     echo "error: secondmate home cannot be the active firstmate home: $home" >&2
     return 1
@@ -3812,10 +3820,24 @@ spawn_record_traceparent() {
   return "$status"
 }
 
+# A Windows (Git Bash) pane opens a NON-login shell, so /etc/profile never runs
+# and PATH is whatever the backend daemon inherited plus Git for Windows' `bin`,
+# which holds only bash, sh, and git. /usr/bin is absent there, so `env`, every
+# `#!/usr/bin/env bash` shebang, and the harness binary itself are unresolvable:
+# the launch line below dies at the prompt while the spawn still reports success.
+# Ship firstmate's own PATH in ahead of it, through the same pre-launch channel
+# GOTMPDIR uses, keeping the pane's own entries behind ours so nothing the
+# backend deliberately added is discarded. Same root cause as the
+# CLAUDE_CONFIG_DIR forward above: the daemon does not inherit our environment.
+if fm_platform_is_msys; then
+  spawn_send_text_line "$T" "export PATH=$(shell_quote "$PATH"):\"\$PATH\""
+fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Native go.exe cannot resolve an MSYS /tmp path, so the exported value is
+# converted to the native form; TASK_TMP records and teardown stay POSIX.
+spawn_send_text_line "$T" "export GOTMPDIR=$(fm_path_native "$TASK_TMP/gotmp")"
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
 # ones assigned an isolated worktree; a secondmate runs its own home instead.

@@ -127,6 +127,13 @@ case "${1:-}" in
         prev=$a
       done
     fi
+    # The launch log above records only the literal launch send. Pre-launch
+    # environment lines use the `-t <target> <text> Enter` form, so record those
+    # into a separate opt-in log: a suite asserting on launch lines alone keeps
+    # a launch log that holds launch lines and nothing else.
+    if [ -n "${FM_FAKE_PANE_LOG:-}" ] && [ "${2:-}" = -t ] && [ "${5:-}" = Enter ]; then
+      printf '%s\n' "${4:-}" >> "$FM_FAKE_PANE_LOG"
+    fi
     exit 0
     ;;
 esac
