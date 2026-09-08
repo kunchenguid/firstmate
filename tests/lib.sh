@@ -42,11 +42,11 @@ umask 022
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
-# Clear the task-worker marker bin/fm-spawn.sh exports into ship and scout
+# Clear the task-worker markers bin/fm-spawn.sh exports into ship and scout
 # panes. This suite builds git-init fixture repositories whose primary checkout
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
-# under the marker. A case that verifies the refusal sets FM_TASK_ID itself.
-unset FM_TASK_ID
+# under the task-id marker. Cases that verify ownership set the markers themselves.
+unset FM_TASK_ID FM_TASK_CAPABILITY
 
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.

@@ -4,9 +4,10 @@
 # Put this directory before the upstream no-mistakes executable on PATH.
 # Ship and scout workers receive FM_TASK_ID from fm-spawn.sh and run in a linked
 # task worktree. Invocations whose first two arguments are `axi run` or
-# `axi respond` are refused unless the marker and current worktree match that
-# task's durable metadata. A marker alone cannot turn any other checkout into a
-# worker. Every other invocation is
+# `axi respond` are refused unless the task marker, private launch capability,
+# and current worktree match that task's durable metadata. Only a hash of the
+# capability is recorded, so a caller that merely knows the task id and
+# worktree is not accepted. Every other invocation is
 # forwarded unchanged to the first other executable on PATH; absence of an
 # upstream executable is an error.
 set -u
@@ -25,13 +26,19 @@ meta_value() {
 }
 
 is_task_worker_checkout() {
-  local top git_dir common_dir meta recorded_top kind
+  local top git_dir common_dir meta recorded_top kind capability_hash
   case "${FM_TASK_ID:-}" in
     ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
+  case "${FM_TASK_CAPABILITY:-}" in
+    *[!0-9a-f]*|'') return 1 ;;
+  esac
+  [ "${#FM_TASK_CAPABILITY}" -eq 32 ] || return 1
   meta=$FIRSTMATE_ROOT/state/$FM_TASK_ID.meta
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(meta_value endpoint_task_id "$meta")" = "$FM_TASK_ID" ] || return 1
+  capability_hash=$(printf '%s' "$FM_TASK_CAPABILITY" | git -C / hash-object --stdin 2>/dev/null) || return 1
+  [ "$(meta_value worker_capability_hash "$meta")" = "$capability_hash" ] || return 1
   kind=$(meta_value kind "$meta") || return 1
   case "$kind" in ship|scout) ;; *) return 1 ;; esac
   top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
