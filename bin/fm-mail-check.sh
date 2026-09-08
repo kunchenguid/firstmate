@@ -172,6 +172,13 @@ action_check() {
       line="poll did not finish within the ${BUDGET_SECS}s budget"
     elif [ "${rc:-0}" -ne 0 ]; then
       line=$(poll_summary "$rc" "$out")
+    elif printf '%s\n' "$out" | grep -q '^fm-mail: woke for '; then
+      # A successful poll can still surface new mail: the poll itself already
+      # appended the durable mail wake rows, but the watcher only calls wake()
+      # when THIS check's output is non-empty. Emit one line naming the newest
+      # surfaced uid so the watcher wakes the agent to drain and act on the
+      # queued mail rows; without it, new mail sits queued and silent.
+      line=$(printf '%s\n' "$out" | sed -n '/^fm-mail: woke for /{s/^fm-mail: /new mail: /p;q}')
     else
       line=
     fi
