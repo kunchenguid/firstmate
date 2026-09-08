@@ -562,7 +562,7 @@ function consumeWrapperOptions(name, words, index) {
 const CONTROL_COMMAND_PREFIXES = new Set(["if", "then", "elif", "else", "while", "until", "do", "!"]);
 const COPROC_COMMAND_WORDS = new Set(["bash", "caffeinate", "command", "env", "exec", "gtimeout", "nice", "nohup", "no-mistakes", "sh", "sudo", "time", "timeout", "zsh"]);
 
-export function commandPosition(tokens) {
+export function commandPosition(tokens, knownVariables = new Map()) {
   const words = wordsInNode(tokens);
   let index = 0;
   let prefixAssignments = 0;
@@ -609,8 +609,10 @@ export function commandPosition(tokens) {
       index += 1;
       let coprocCommandIndex = index + 1;
       while (isAssignment(words[coprocCommandIndex]?.value || "")) coprocCommandIndex += 1;
+      const coprocCommand = words[coprocCommandIndex];
+      const coprocCommandName = basename(resolveKnownWord(coprocCommand, knownVariables) || coprocCommand?.value || "");
       if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(words[index]?.value || "") &&
-          COPROC_COMMAND_WORDS.has(basename(words[coprocCommandIndex]?.value || ""))) index += 1;
+          COPROC_COMMAND_WORDS.has(coprocCommandName)) index += 1;
       while (isAssignment(words[index]?.value || "")) {
         prefixAssignments += 1;
         index += 1;
@@ -987,7 +989,7 @@ function analyzeProgram(command, context, depth = 0) {
   for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
     const tokens = program.nodes[nodeIndex];
     const precedingSeparator = nodeIndex > 0 ? program.separators[nodeIndex - 1] : "";
-    const position = commandPosition(tokens);
+    const position = commandPosition(tokens, activeContext.knownVariables);
     const firstName = basename(position.words[0]?.value || "");
     if (precedingSeparator === ";;" && caseBindings.length > 0) {
       const branch = caseBindings.at(-1);

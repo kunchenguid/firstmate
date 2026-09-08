@@ -385,6 +385,7 @@ EOF
     'coproc no-mistakes axi respond --action fix' \
     'coproc JOB no-mistakes axi respond --action fix' \
     'coproc JOB MODE=fix no-mistakes axi respond --action fix' \
+    'NM=no-mistakes; coproc JOB "$NM" axi respond --action fix' \
     'coproc JOB env no-mistakes axi respond --action fix' \
     'coproc JOB { no-mistakes axi respond --action fix; }' \
     'no-mistakes axi respond --action fix & wait' \
@@ -441,6 +442,7 @@ EOF
     'coproc no-mistakes axi respond --action fix' \
     'coproc JOB no-mistakes axi respond --action fix' \
     'coproc JOB MODE=fix no-mistakes axi respond --action fix' \
+    'NM=no-mistakes; coproc JOB "$NM" axi respond --action fix' \
     'coproc JOB env no-mistakes axi respond --action fix' \
     'coproc JOB { no-mistakes axi respond --action fix; }' \
     'no-mistakes axi respond --action fix & wait' \
