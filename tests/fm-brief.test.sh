@@ -443,8 +443,8 @@ test_ship_project_memory_wording() {
 
 test_nested_delegation_model_routing_contract() {
   local home id brief kind routing_config quota_skill harness_policy crew_harness_config override_config override_routing_config override_crew_harness_config
-  local CLAUDECODE=1 CURSOR_AGENT= CURSOR_INVOKED_AS= GEMINI_CLI= ATLASSIAN_AGENT_TYPE= ROVODEV_CLI=
-  local FM_OMP_HARNESS= PI_CODING_AGENT= FM_PI_HARNESS= GROK_AGENT=
+  local CLAUDECODE=1 CURSOR_AGENT='' CURSOR_INVOKED_AS='' GEMINI_CLI='' ATLASSIAN_AGENT_TYPE='' ROVODEV_CLI=''
+  local FM_OMP_HARNESS='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT=''
   export CLAUDECODE CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE ROVODEV_CLI
   export FM_OMP_HARNESS PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
   home="$TMP_ROOT/nested routing home"
@@ -467,7 +467,7 @@ test_nested_delegation_model_routing_contract() {
       "$kind brief omitted the nested-delegation routing section"
     assert_grep "$routing_config is the active firstmate home's current worker-routing authority" "$brief" \
       "$kind brief did not identify the resolved active-home routing file"
-    assert_no_grep '`config/crew-dispatch.json` in the active firstmate home' "$brief" \
+    assert_no_grep "\`config/crew-dispatch.json\` in the active firstmate home" "$brief" \
       "$kind brief retained an unusable worktree-relative routing path"
     assert_grep 'classify the child task under that current policy' "$brief" \
       "$kind brief omitted the same-policy child classification rule"
@@ -485,7 +485,7 @@ test_nested_delegation_model_routing_contract() {
       "$kind brief omitted the current static-harness fallback"
     assert_grep "A current concrete adapter in that file may be used only if $harness_policy verifies it for crewmates or scouts" "$brief" \
       "$kind brief froze the concrete static-harness fallback"
-    assert_grep 'If the file is absent, empty, or `default`, use the captured Firstmate baseline `claude` with that harness' "$brief" \
+    assert_grep "If the file is absent, empty, or \`default\`, use the captured Firstmate baseline \`claude\` with that harness" "$brief" \
       "$kind brief omitted the captured baseline for an unset static harness"
     assert_grep 'If the current value is unverified, report that exact value to Firstmate and use the captured baseline instead.' "$brief" \
       "$kind brief did not report and replace an unverified static harness"
@@ -512,7 +512,7 @@ test_nested_delegation_model_routing_contract() {
   printf 'grok\n' > "$override_config/crew-harness"
   override_routing_config="\`$override_config/crew-dispatch.json\`"
   override_crew_harness_config="\`$override_config/crew-harness\`"
-  id=brief-nested-routing-override
+  id="brief-nested-routing-override"
   FM_HOME="$home" FM_CONFIG_OVERRIDE="$override_config" \
     "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
@@ -522,15 +522,15 @@ test_nested_delegation_model_routing_contract() {
     "ship brief ignored FM_CONFIG_OVERRIDE for nested routing"
   assert_grep "read $override_crew_harness_config at child intake" "$brief" \
     "ship brief did not read the overridden static fallback at child intake"
-  assert_grep 'use the captured Firstmate baseline `claude` with that harness' "$brief" \
+  assert_grep "use the captured Firstmate baseline \`claude\` with that harness" "$brief" \
     "ship brief omitted the Firstmate baseline from overridden routing"
-  assert_no_grep 'resolved selection is `codex`' "$brief" \
+  assert_no_grep "resolved selection is \`codex\`" "$brief" \
     "ship brief froze the original static harness at generation time"
-  assert_no_grep 'resolved selection is `grok`' "$brief" \
+  assert_no_grep "resolved selection is \`grok\`" "$brief" \
     "ship brief froze the overridden static harness at generation time"
 
   printf 'bogus\n' > "$override_config/crew-harness"
-  id=brief-nested-routing-unverified-static
+  id="brief-nested-routing-unverified-static"
   FM_HOME="$home" FM_CONFIG_OVERRIDE="$override_config" \
     "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
