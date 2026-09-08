@@ -90,6 +90,7 @@ import {
 import { Box, Container, fuzzyFilter, Input, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { runCommandAsync } from "./lib/fm-async-exec.ts";
+import { classifyFeishuMessage } from "./lib/fm-feishu-native-channel.ts";
 import {
   type CalmPresentationState,
   calmTranscriptClassIsVisible,
@@ -180,6 +181,7 @@ const PROCESSING_INSTRUCTION =
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
+type MainDialogItem = MirrorItem & { feishuKey?: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
 type LockOwnership = "owned" | "other" | "missing";
@@ -240,14 +242,15 @@ type PinnedBranchModel = { model: BranchModel; modelRuntime: ModelRuntime };
 type BranchModelResolution = { ok: true; selection: PinnedBranchModel } | { ok: false; reason: string };
 type CodexCompatResources = {
   extensionPath: string;
-  settingsManager: SettingsManager;
 };
 
-async function resolveCodexCompatResources(model: BranchModel | undefined): Promise<CodexCompatResources | null> {
+async function resolveCodexCompatResources(
+  model: BranchModel | undefined,
+  settingsManager: SettingsManager,
+): Promise<CodexCompatResources | null> {
   if (model?.provider !== "openai-codex") return null;
 
   const agentDir = getAgentDir();
-  const settingsManager = SettingsManager.inMemory({}, { projectTrusted: false });
   const packageManager = new DefaultPackageManager({ cwd: fmRoot, agentDir, settingsManager });
   const installedPath = packageManager.getInstalledPath(CODEX_COMPAT_SOURCE, "user");
   if (!installedPath) throw new Error(`${CODEX_COMPAT_PACKAGE} is not installed in Pi's user package store`);
@@ -292,7 +295,7 @@ async function resolveCodexCompatResources(model: BranchModel | undefined): Prom
   ) {
     throw new Error(`${CODEX_COMPAT_PACKAGE} did not resolve to its declared user-package extension`);
   }
-  return { extensionPath: expectedExtensionPath, settingsManager };
+  return { extensionPath: expectedExtensionPath };
 }
 
 // Pi owns the effort vocabulary. The picker's options and every clamp still
@@ -482,6 +485,25 @@ function isOperationalUserText(text: string): boolean {
   return classifyFirstmateOperationalText(text) !== undefined;
 }
 
+function feishuDialogItem(message: unknown): MainDialogItem | undefined {
+  // The native channel owns binding/generation and immutable content evidence.
+  // A customType or transport-looking text alone never establishes provenance.
+  const marker = classifyFeishuMessage(message);
+  if (!marker) return undefined;
+  const text = textOfContent((message as { content?: unknown }).content).trim();
+  return text ? { tag: "captain", text, feishuKey: `${marker.deliveryRef}:${marker.bindingGeneration}` } : undefined;
+}
+
+function mainDialogItem(entry: ReturnType<ReadonlyEntries["getEntries"]>[number]): MainDialogItem | undefined {
+  if (entry.type === "custom_message") return feishuDialogItem({ ...entry, role: "custom" });
+  if (entry.type !== "message") return undefined;
+  const message = (entry as { message?: { role?: string; content?: unknown } }).message;
+  if (!message || (message.role !== "user" && message.role !== "assistant")) return undefined;
+  const text = textOfContent(message.content).trim();
+  if (!text || (message.role === "user" && isOperationalUserText(text))) return undefined;
+  return { tag: message.role === "user" ? "captain" : "main", text };
+}
+
 function capMirrorText(text: string): string {
   if (text.length <= MIRROR_MESSAGE_CAP) return text;
   const headLength = Math.ceil(MIRROR_MESSAGE_CAP / 2);
@@ -552,6 +574,7 @@ type MirrorCollectionState = {
   // SessionManager. The prompt is mirrored from the event immediately, then
   // this marker suppresses the same persisted entry when turn_end collects it.
   stagedCaptain: { file: string; index: number; text: string } | null;
+  stagedFeishu: Map<string, { file: string; text: string }>;
   // Set at every main session start, where the branch conversation is
   // replaced too (createBranch). The durable cursor records what the PREVIOUS
   // branch conversation already received, so the first collection of a new
@@ -569,39 +592,35 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
   const anchor = collection.collectAnchor ?? readMirrorCursor();
   const start = collection.reanchor || anchor.file !== file ? 0 : Math.min(anchor.index, entries.length);
   collection.reanchor = false;
+  const dialog = entries.slice(start).map(mainDialogItem);
   let currentCaptainIndex = -1;
-  for (let index = entries.length - 1; index >= start; index -= 1) {
-    const entry = entries[index];
-    if (entry.type !== "message") continue;
-    const message = (entry as { message?: { role?: string; content?: unknown } }).message;
-    if (message?.role !== "user") continue;
-    const text = textOfContent(message.content).trim();
-    if (!text || isOperationalUserText(text)) continue;
+  for (let index = dialog.length - 1; index >= 0; index -= 1) {
+    if (dialog[index]?.tag !== "captain") continue;
     currentCaptainIndex = index;
     break;
   }
   const items: MirrorItem[] = [];
-  for (let index = start; index < entries.length; index += 1) {
-    const entry = entries[index];
-    if (entry.type !== "message") continue;
-    const message = (entry as { message?: { role?: string; content?: unknown } }).message;
-    if (!message) continue;
-    if (message.role !== "user" && message.role !== "assistant") continue;
-    const text = textOfContent(message.content).trim();
-    if (!text) continue;
-    if (message.role === "user" && isOperationalUserText(text)) continue;
+  for (let index = 0; index < dialog.length; index += 1) {
+    const item = dialog[index];
+    if (!item) continue;
+    const { text, feishuKey } = item;
+    const stagedFeishu = feishuKey ? collection.stagedFeishu.get(feishuKey) : undefined;
+    if (feishuKey && stagedFeishu?.file === file && stagedFeishu.text === text) {
+      collection.stagedFeishu.delete(feishuKey);
+      continue;
+    }
     const staged = collection.stagedCaptain;
     if (
-      message.role === "user" &&
+      item.tag === "captain" && !feishuKey &&
       staged?.file === file &&
-      staged.index === index &&
+      staged.index === start + index &&
       staged.text === text
     ) {
       collection.stagedCaptain = null;
       continue;
     }
     items.push({
-      tag: message.role === "user" ? "captain" : "main",
+      tag: item.tag,
       text: index === currentCaptainIndex ? text : capMirrorText(text),
     });
   }
@@ -674,6 +693,7 @@ export default function (pi: ExtensionAPI) {
     collectAnchor: null,
     pendingCursor: null,
     stagedCaptain: null,
+    stagedFeishu: new Map(),
     // The first branch conversation of a process is new (see
     // branchSessionGeneration), so its first collection re-anchors too, even
     // if this instance never sees a session_start of its own.
@@ -1200,7 +1220,19 @@ export default function (pi: ExtensionAPI) {
     const pinned = await branchModelSelection();
     const effectiveModel = await effectiveBranchModel(pinned?.model);
     const effort = branchEffortSelection(effectiveModel);
-    const codexCompat = await resolveCodexCompatResources(effectiveModel);
+    // Pi owns settings parsing and migrations. Keep a global-only snapshot so
+    // branch/plugin setters cannot persist into main's settings. Resource lists
+    // must also be empty: Pi resolves configured packages before no* filtering.
+    const globalSettings = SettingsManager.create(fmRoot, getAgentDir(), { projectTrusted: false });
+    const settingsErrors = globalSettings.drainErrors();
+    if (settingsErrors.length > 0) {
+      throw new Error(`Pi global settings could not be loaded: ${settingsErrors.map(({ error }) => error.message).join("; ")}`);
+    }
+    const settingsManager = SettingsManager.inMemory({
+      ...globalSettings.getGlobalSettings(),
+      packages: [], extensions: [], skills: [], prompts: [], themes: [],
+    }, { projectTrusted: false });
+    const codexCompat = await resolveCodexCompatResources(effectiveModel, settingsManager);
     const prompt = await runCommandAsync("bash", [promptScript], {
       cwd: fmRoot,
       env: scriptEnv,
@@ -1238,8 +1270,8 @@ export default function (pi: ExtensionAPI) {
     const loader = new DefaultResourceLoader({
       cwd: fmRoot,
       agentDir: getAgentDir(),
+      settingsManager,
       ...(codexCompat ? {
-        settingsManager: codexCompat.settingsManager,
         additionalExtensionPaths: [codexCompat.extensionPath],
       } : {}),
       noExtensions: true,
@@ -1314,7 +1346,7 @@ ${context.command}
       cwd: fmRoot,
       sessionManager,
       resourceLoader: loader,
-      ...(codexCompat ? { settingsManager: codexCompat.settingsManager } : {}),
+      settingsManager,
       tools: [...BRANCH_TOOL_NAMES],
       customTools: [
         bashTool as unknown as ToolDefinition,
@@ -1630,6 +1662,26 @@ ${context.command}
     mirrorCollection.stagedCaptain = { file, index, text: prompt };
   });
 
+  // Native Feishu uses Pi's custom-message queue, which bypasses
+  // before_agent_start. Stage only when Pi consumes the verified message;
+  // message_start precedes persistence on both idle and streaming turn paths.
+  pi.on?.("message_start", async (event, ctx) => {
+    const promptGeneration = generation;
+    if (!generationOwnsLockSync(promptGeneration)) return;
+    const item = feishuDialogItem(event.message);
+    if (!item?.feishuKey) return;
+    currentMainSession = ctx.sessionManager;
+    if (!(await enqueueDelivery(() => actingAsOwner(promptGeneration)))) return;
+    if (promptGeneration !== generation || !collectCurrentMainDialog()) return;
+    const entries = currentMainSession.getEntries();
+    const last = entries.length ? mainDialogItem(entries[entries.length - 1]) : undefined;
+    // Context-only custom delivery may already be persisted before its event.
+    if (last?.feishuKey === item.feishuKey && last.text === item.text) return;
+    if (mirrorCollection.stagedFeishu.has(item.feishuKey)) return;
+    pendingMirror.push({ tag: "captain", text: item.text });
+    mirrorCollection.stagedFeishu.set(item.feishuKey, { file: currentMainSession.getSessionFile() ?? "", text: item.text });
+  });
+
   pi.on?.("agent_start", () => {
     mainStreaming = true;
     // Pi delivers a queued nextTurn copy with the prompt that starts this run,
@@ -1710,6 +1762,7 @@ ${context.command}
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
     mirrorCollection.stagedCaptain = null;
+    mirrorCollection.stagedFeishu.clear();
     mirrorCollection.reanchor = true;
     const startedGeneration = generation;
     const failed = await enqueueDelivery(
@@ -1816,6 +1869,7 @@ ${context.command}
         mirrorCollection.collectAnchor = { file: mainFile, index: currentMainSession.getEntries().length };
         mirrorCollection.pendingCursor = null;
         mirrorCollection.stagedCaptain = null;
+        mirrorCollection.stagedFeishu.clear();
 
         await deactivateEligibleRowsOwner(state, wakeGrantScript, process.pid, String(resetGeneration));
         generation += 1;
@@ -1852,6 +1906,7 @@ ${context.command}
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
     mirrorCollection.stagedCaptain = null;
+    mirrorCollection.stagedFeishu.clear();
     if (branch) {
       try {
         branch.session.dispose();

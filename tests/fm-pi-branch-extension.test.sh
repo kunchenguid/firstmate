@@ -59,8 +59,10 @@ install_pi_branch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-feishu-native-channel.ts" "$repo/.pi/extensions/lib/fm-feishu-native-channel.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-feishu-state.mjs" "$repo/bin/fm-feishu-state.mjs"
   chmod +x "$repo/bin/fm-operational-input.sh"
   cat > "$repo/stub-agent-dir/npm/node_modules/pi-openai-codex-compat/package.json" <<'JSON'
 {
@@ -100,7 +102,7 @@ TS
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
 JSON
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/index.js" <<'JS'
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 export const VERSION = globalThis.__fmPiVersion ?? "0.84.4";
@@ -161,6 +163,15 @@ export class ModelRuntime {
   }
 }
 export class SettingsManager {
+  static create(cwd, agentDir, options = {}) {
+    (globalThis.__fmSettingsLoads ??= []).push({ cwd, agentDir, options });
+    let settings = {};
+    const errors = [];
+    try {
+      if (existsSync(`${agentDir}/settings.json`)) settings = JSON.parse(readFileSync(`${agentDir}/settings.json`, "utf8"));
+    } catch (error) { errors.push({ scope: "global", error }); }
+    return { getGlobalSettings: () => structuredClone(settings), drainErrors: () => errors };
+  }
   static inMemory(settings = {}, options = {}) {
     return { settings, options, isProjectTrusted: () => options.projectTrusted === true };
   }
@@ -2713,6 +2724,12 @@ if (mode === "missing-version-metadata") {
   [manifest.version, manifest.peerDependencies["@earendil-works/pi-coding-agent"]] = versions[mode];
 }
 writeFileSync(path, JSON.stringify(manifest));
+const globalSettings = {
+  transport: "sse", websocketConnectTimeoutMs: 7000, httpIdleTimeoutMs: 23000,
+  httpProxy: "http://127.0.0.1:9", defaultModel: "another-model", defaultThinkingLevel: "high",
+  packages: ["npm:unwanted"], extensions: ["unwanted"], skills: ["unwanted"], prompts: ["unwanted"], themes: ["unwanted"],
+};
+writeFileSync(`${process.env.FM_TEST_AGENT_DIR}/settings.json`, JSON.stringify(globalSettings));
 // The same observed startup state must restore the guarded bash independent
 // of release strings, while a package retaining it needs no adaptation.
 if (mode !== "stable") globalThis.__fmCompatActiveTools = ["read", "fm_branch_report"];
@@ -2745,6 +2762,16 @@ if (!session.bound || !globalThis.__fmCompatNativeCompactionReady || !globalThis
 if (session.options.settingsManager !== loader.options.settingsManager) {
   throw new Error("the Codex branch loader and AgentSession did not share the isolated settings manager");
 }
+const snapshot = session.options.settingsManager;
+for (const key of ["transport", "websocketConnectTimeoutMs", "httpIdleTimeoutMs", "httpProxy"]) {
+  if (snapshot.settings[key] !== globalSettings[key]) throw new Error(`branch lost global ${key}`);
+}
+for (const key of ["packages", "extensions", "skills", "prompts", "themes"]) {
+  if (JSON.stringify(snapshot.settings[key]) !== "[]") throw new Error(`branch retained configured ${key}`);
+}
+if (snapshot.isProjectTrusted() || globalThis.__fmSettingsLoads.some((load) => load.options.projectTrusted !== false)) {
+  throw new Error("branch settings trusted the project");
+}
 const lifecycle = globalThis.__fmLifecycle ?? [];
 if (lifecycle.indexOf("compat-session-start") < 0 || lifecycle.indexOf("compat-session-start") > lifecycle.indexOf("prompt")) {
   throw new Error(`the branch prompted before compatibility initialization: ${JSON.stringify(lifecycle)}`);
@@ -2772,6 +2799,9 @@ fire("session_start", {}, makeCtx());
 dispatch("signal: codex compat reopen");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "reopened Codex branch prompt");
 const reopened = globalThis.__fmSessions[1];
+if (reopened.options.settingsManager === snapshot || reopened.options.settingsManager.settings.transport !== "sse") {
+  throw new Error("branch rebuild did not read a fresh global snapshot");
+}
 if (!reopened.options.sessionManager.created || !reopened.bound) {
   throw new Error("the replacement Codex branch did not bind compatibility onto its fresh persistent session");
 }
@@ -2801,6 +2831,8 @@ globalThis.__fmCompatAbsent = true;
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, registryModels }; })()`);
 const { fire, dispatch, settle, makeCtx, registryModels } = globalThis.__t;
+import { writeFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_TEST_AGENT_DIR}/settings.json`, JSON.stringify({ transport: "sse", websocketConnectTimeoutMs: 7000 }));
 registryModels.push({ provider: "anthropic", id: "main-model", api: "anthropic-messages" });
 fire("session_start", {}, makeCtx());
 dispatch("signal: ordinary branch");
@@ -2809,6 +2841,11 @@ if ((globalThis.__fmPackageLookups ?? []).length !== 0 || (globalThis.__fmPackag
   throw new Error("a non-Codex branch attempted to resolve the optional compatibility package");
 }
 if (globalThis.__fmSessions[0].bound) throw new Error("non-Codex branch startup behavior changed");
+const settings = globalThis.__fmSessions[0].options.settingsManager;
+if (settings !== globalThis.__fmLoaders[0].options.settingsManager || settings.isProjectTrusted() ||
+    settings.settings.transport !== "sse" || settings.settings.websocketConnectTimeoutMs !== 7000) {
+  throw new Error("non-Codex branch did not share an isolated global snapshot");
+}
 process.exit(0);
 EOF
   status=$?
@@ -2819,7 +2856,7 @@ EOF
 
 test_codex_compat_package_failures_return_the_wake_to_main() {
   local mode repo home out status
-  for mode in absent malformed identity no-entry multiple-entries outside-entry resolve wrong-source wrong-scope wrong-origin wrong-path load startup unexpected-tools unrestorable-bash; do
+  for mode in settings absent malformed identity no-entry multiple-entries outside-entry resolve wrong-source wrong-scope wrong-origin wrong-path load startup unexpected-tools unrestorable-bash; do
     repo="$TMP_ROOT/codex-failure-$mode-root"
     home="$TMP_ROOT/codex-failure-$mode-home"
     mkdir -p "$home/state" "$home/config"
@@ -2833,6 +2870,7 @@ const { fire, dispatchThroughWatcher, settle, makeCtx, registryModels, mainUserM
 import { writeFileSync } from "node:fs";
 const manifest = `${process.env.FM_TEST_AGENT_DIR}/npm/node_modules/pi-openai-codex-compat/package.json`;
 if (mode === "absent") globalThis.__fmCompatAbsent = true;
+if (mode === "settings") writeFileSync(`${process.env.FM_TEST_AGENT_DIR}/settings.json`, "{not-json\n");
 if (mode === "malformed") writeFileSync(manifest, "{not-json\n");
 const metadata = {
   name: mode === "identity" ? "another-package" : "pi-openai-codex-compat",
@@ -4661,6 +4699,9 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-feishu-native-channel.ts" "$fixture/.pi/extensions/lib/fm-feishu-native-channel.ts"
+  mkdir -p "$fixture/bin"
+  cp "$ROOT/bin/fm-feishu-state.mjs" "$fixture/bin/fm-feishu-state.mjs"
   ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$package_dir/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
   ln -s "$package_dir/node_modules/@earendil-works/pi-ai" "$fixture/node_modules/@earendil-works/pi-ai"

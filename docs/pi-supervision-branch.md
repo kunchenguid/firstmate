@@ -33,6 +33,11 @@ The supervision branch itself is Pi-only by construction:
   A fleet-wide heartbeat keeps its own all-or-nothing rule (see "Heartbeat routing" below): it takes every branch-ownable unread row or none of them.
   A co-present main-owned check row no longer defers that review to main, because it is not fleet context the branch is missing and main is woken for it on its own triggering close.
 - The branch itself: `.pi/extensions/fm-branch-supervision.ts` creates the branch session, serializes wakes, mirrors dialog, and merges outcomes.
+  Each build reads global settings through Pi's `SettingsManager` with `projectTrusted: false`, then shares an in-memory snapshot between package resolution, the resource loader, and the session.
+  Runtime settings such as transport, connection timeouts, retry policy, and proxy configuration survive; branch and plugin setters cannot write back to user settings, and model/effort selection retains the explicit precedence described below.
+  The snapshot clears configured packages, extensions, skills, prompts, and themes because Pi resolves package sources before applying the loader's discovery flags.
+  Unreadable or malformed global settings fail the build and return the wake to main instead of silently using defaults.
+  Pi's CLI owns process-wide proxy environment and HTTP dispatcher initialization; the branch retains that process setup and does not reconfigure it.
   Before an `openai-codex` branch can prompt, it resolves the installed user package `npm:pi-openai-codex-compat` through Pi's package manager, validates package identity and the readable manifest, loads exactly its declared in-package extension entry from the installed user-package provenance, and binds the extension so its `session_start` provider override and native compaction hooks are active.
   Every other resource-discovery class remains disabled, and the post-start active-tool check must still equal `read`, guarded `bash`, and `fm_branch_report` in that order.
   If compatibility startup removes only `bash`, leaving exactly `read` and `fm_branch_report`, the branch restores the registered guarded override and verifies the full active-tool set again.
@@ -109,6 +114,9 @@ Only a genuine store fault keeps that backstop skipped.
 Main's captain and assistant text - never tool calls, tool results, operational injections, or the branch's own merged notes - is mirrored into the branch as read-only `fm-main-mirror` messages.
 The idle path mirrors at main's turn end.
 At `before_agent_start`, Pi's authoritative prompt is staged verbatim before SessionManager persists that user entry, so the complete current captain message precedes any branch wake accepted after that boundary; the later persisted copy is suppressed and older dialog entries remain bounded.
+Native Feishu input uses Pi's custom-message queue instead of that prompt event, so its text is staged at `message_start` when Pi consumes it, including while main is streaming.
+The native channel's `classifyFeishuMessage` remains the provenance owner: only a matching accepted delivery, binding generation, and immutable content digest qualifies as captain input; arbitrary custom messages and forged Feishu metadata do not.
+Persisted Feishu entries use the same validation during history collection, preserving user/assistant order and cold-start continuity, and a staged delivery is suppressed once its persisted entry catches up.
 The mirror cursor is durable (`state/.branch-mirror-cursor`), so within one main session only not-yet-mirrored dialog is replayed.
 Every main session start re-anchors the mirror to the current main session's start, because that start also opens a new branch conversation: the cursor records what the PREVIOUS branch conversation received, so without the reset a `/resume` or reload, which keeps main's own session file, would leave the new branch blind to dialog main itself still has.
 The reset is bounded by the current main session and costs only re-delivered read-only context, and the cursor keeps advancing incrementally from there.

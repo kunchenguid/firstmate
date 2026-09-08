@@ -1287,7 +1287,7 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 
 ## Pi supervision branch
 
-The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its persistent second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories` (plus, for an `openai-codex` branch, `DefaultPackageManager` and a shared in-memory `SettingsManager` resolving the installed `pi-openai-codex-compat` package entry through `additionalExtensionPaths`, `bindExtensions` before the first prompt, and the post-start `getActiveToolNames` allowlist check), `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
+The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its persistent second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories` and a shared `SettingsManager` snapshot that every branch build reads from `SettingsManager.create`'s `getGlobalSettings`/`drainErrors` and re-wraps with `SettingsManager.inMemory` for the loader and session (plus, for an `openai-codex` branch, `DefaultPackageManager` resolving the installed `pi-openai-codex-compat` package entry through that same manager and `additionalExtensionPaths`, `bindExtensions` before the first prompt, and the post-start `getActiveToolNames` allowlist check), `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
 In TUI mode, its `/supervision-model` model list is drawn with Pi's own `SelectList`, `Input`, `fuzzyFilter`, and `DynamicBorder` through the extension context's `ui.custom` surface, which is what bounds and searches a long catalog.
 Its `/supervision-reset` command drives the branch session's `abort` and `waitForIdle` lifecycle calls to settle an active turn before rotating the conversation.
 
@@ -1433,6 +1433,38 @@ The portable suite separately proves create and reopen ordering, the isolated lo
 Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh the SDK construction, picker, renderer, and type evidence after every Pi upgrade by rerunning the applicable live guard probes, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists).
 The live guard now drives both extensions through the watcher-owned settlement handshake, requires rejected branch settlement before main delivery, and verifies successor-delivery confirmation; rerun it against the matching importable Pi package to refresh end-to-end fallback evidence.
+
+### 2026-09-08 Pi branch settings and trusted Feishu mirroring
+
+On Linux x86_64 with Node v22.22.2, installed Pi 0.85.1 and `pi-openai-codex-compat` 0.0.10-alpha.7 passed the actual branch construction and provider-consumer regression.
+The isolated global settings file selects SSE, a 7000 ms WebSocket connection timeout, a 23000 ms HTTP idle timeout, and a provider retry limit; conflicting project settings are ignored.
+The real loader resolves no configured packages, exposes no discovered skills, prompts, themes or context, and retains the explicit compatibility extension and guarded tool allowlist.
+Persistence-capable model, effort, transport and compaction setters are flushed on the branch manager without changing either settings file or the proxy environment.
+The previous empty-manager construction fails this probe at the real provider consumer with `auto !== sse`.
+
+```sh
+bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh tests/fm-branch-supervision.test.sh tests/fm-pi-watch-extension.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh tests/fm-pi-primary-types.test.sh
+```
+
+```text
+ok - real Pi CLI 0.85.1 with pi-openai-codex-compat 0.0.10-alpha.7 inherits global SSE and connection settings without project resources or writes, preserving Luna/minimal, guarded tools, legacy outcomes and native compaction
+ok - real Pi SDK 0.85.1 mirrors only provenance-verified Feishu text before idle/streaming branch turns, once and in order across persistence and cold creation
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.85.1
+```
+
+Those repeatable guards use synthetic authentication and intercepted responses.
+The Feishu mirror probe publishes synthetic accepted input through the durable state owner and native encoder, then drives Pi's actual custom-message ingress while idle and streaming.
+It offers a dependent branch wake during `message_start`, before the custom entry is persisted, and checks the resulting branch context for the originating captain text, user/assistant ordering, once-only catch-up, ordinary TUI continuity, and a new branch rebuilt from persisted main history.
+Changed content, a mismatched binding generation, an unknown delivery reference, internal notifications, branch results, operational user envelopes, and tool results stay excluded.
+The prior mirror fails the idle pre-persistence assertion; the corrected mirror and the existing Feishu channel suite pass.
+This is a real-Pi ingress fixture, not a production Feishu transport roundtrip: no real Feishu message is sent and no live binding or configuration is changed.
+A separate authenticated candidate run used the installed CLI dispatcher bootstrap and existing controlled SOCKS5 proxy inside a guarded non-default Herdr lab: five branch calls returned HTTP 200, all five persisted transport diagnostics recorded configured and selected `sse`, and the WebSocket constructor observer recorded zero attempts.
+The real branch published one durable captain outcome and the real lab main acknowledged sequence 1; duplicate delivery produced no extra outcome and a separate captain-only decision remained unresolved.
+Protected host files and the copied lab settings were unchanged, and the lab helper passed its default-session teardown tripwire.
+The HTTP responses on this route had no content-type header; SSE evidence comes from the actual provider consumer and persisted compatibility transport diagnostics, not an inferred response MIME type.
+This verifies candidate SDK behavior, not activation or a TUI reload of the running primary, and does not establish that the old branch bypassed a proxy: Pi's CLI initializes the process-wide dispatcher before branch construction.
+Private task evidence retains the authenticated lab programs and transcripts; [the supervision owner](../pi-supervision-branch.md) defines settings ownership.
 
 ### 2026-09-07 lazy Codex branch creation after legacy outcome migration
 

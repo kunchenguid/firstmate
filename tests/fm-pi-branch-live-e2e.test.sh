@@ -24,6 +24,9 @@
 # The real Pi CLI uses intercepted SSE responses to prove lazy creation after
 # legacy outcome reconciliation, startup before prompting, and persistence of
 # the native remote-compaction checkpoint, regardless of version declarations.
+# A final real-SDK probe uses synthetic accepted Feishu records and the native
+# encoder with Pi's actual custom-message queue to verify trusted captain
+# mirroring before persistence, on idle/streaming paths and cold branch creation.
 #
 # No provider call leaves the machine. The first branch probe points
 # PI_CODING_AGENT_DIR at an empty directory, so it reads no credentials and
@@ -64,8 +67,10 @@ cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-asyn
 cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+cp "$ROOT/.pi/extensions/lib/fm-feishu-native-channel.ts" "$repo/.pi/extensions/lib/fm-feishu-native-channel.ts"
 mkdir -p "$repo/bin"
 cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+cp "$ROOT/bin/fm-feishu-state.mjs" "$repo/bin/fm-feishu-state.mjs"
 cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --handling-delivered ]; then
@@ -1002,7 +1007,7 @@ pass "real Pi SDK $PI_VERSION queues a streaming-time watcher wake without befor
 
 # Sixth probe: run the executable supervision extension with the REAL installed
 # pi-openai-codex-compat package copied into an otherwise isolated Pi home. The
-# provider transport is forced to SSE only inside this process and intercepted
+# provider transport is inherited from its isolated global settings and intercepted
 # before the network, so the real provider override, tool-call loop, threshold
 # compaction hook, and persisted native checkpoint all execute without using a
 # captain credential or contacting OpenAI.
@@ -1023,9 +1028,13 @@ for package_path in \
 done
 compat_version=$(jq -r '.version' "$compat_package_dir/package.json" 2>/dev/null || printf 'unknown')
 compathome="$TMP_ROOT/compat-home"
+compatroot="$TMP_ROOT/compat-root"
 compatagentdir="$TMP_ROOT/compat-agent-dir"
 compatmodules="$compatagentdir/npm/node_modules"
 mkdir -p "$compathome/state/branch-session" "$compathome/config" "$compatmodules"
+mkdir -p "$compatroot/.pi"
+ln -s "$ROOT/bin" "$compatroot/bin"
+ln -s "$ROOT/.agents" "$compatroot/.agents"
 # Copy the installed package's declared dependency closure, including locally
 # built native binaries. Different supported releases own different parsers;
 # the live guard must neither install packages nor assume the 0.0.9 WASM tree.
@@ -1057,7 +1066,8 @@ fi
 # in main. Both extensions below are explicit, loaded by the real CLI.
 printf '{"packages":["npm:pi-openai-codex-compat@%s"]}\n' "$compat_version" > "$compatagentdir/settings.json"
 cat > "$repo/compat-probe.ts" <<'EOF'
-import { ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { AgentSession, DefaultPackageManager, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
@@ -1087,21 +1097,79 @@ export default async function compatProbe(pi) {
   }
   if (probeModel.contextWindow <= 5000) throw new Error("the Codex probe model cannot support its test threshold");
 
-  // The production branch intentionally uses an in-memory manager. Narrow its
-  // values here so the real AgentSession takes deterministic SSE and crosses a
-  // small threshold after the synthetic final response. The extension under
-  // test still creates and shares the manager through its production path.
-  const originalInMemory = SettingsManager.inMemory.bind(SettingsManager);
-  SettingsManager.inMemory = (settings = {}, options = {}) => originalInMemory({
-    ...settings,
+  // These are files consumed by the actual branch constructor, not injected
+  // settings or transport overrides. Project defaults deliberately conflict.
+  const root = resolve(process.env.FM_ROOT_OVERRIDE);
+  const sentinel = `${agentDir}/unwanted`;
+  mkdirSync(sentinel, { recursive: true });
+  writeFileSync(`${sentinel}/package.json`, JSON.stringify({ name: "unwanted", pi: { extensions: ["index.ts"] } }));
+  writeFileSync(`${sentinel}/index.ts`, 'export default function () { throw new Error("unwanted extension loaded"); }');
+  writeFileSync(`${sentinel}/SKILL.md`, "---\nname: unwanted\ndescription: unwanted\n---\nUNWANTED_CONTEXT\n");
+  writeFileSync(`${sentinel}/prompt.md`, "UNWANTED_CONTEXT\n");
+  writeFileSync(`${agentDir}/AGENTS.md`, "UNWANTED_CONTEXT\n");
+  writeFileSync(`${root}/AGENTS.md`, "UNWANTED_CONTEXT\n");
+  const resourceSettings = {
+    packages: [sentinel], extensions: [`${sentinel}/index.ts`],
+    skills: [sentinel], prompts: [`${sentinel}/prompt.md`], themes: [sentinel],
+  };
+  const globalSettingsBytes = JSON.stringify({
+    ...resourceSettings,
+    defaultProvider: "openai-codex", defaultModel: "gpt-5.6-sol", defaultThinkingLevel: "high",
     transport: "sse",
+    websocketConnectTimeoutMs: 7000,
+    httpIdleTimeoutMs: 23000,
+    httpProxy: "http://127.0.0.1:9",
     compaction: {
       enabled: true,
       reserveTokens: probeModel.contextWindow - 5000,
       keepRecentTokens: 50,
     },
-    retry: { enabled: false },
-  }, options);
+    retry: { enabled: false, provider: { maxRetries: 0, maxRetryDelayMs: 1234 } },
+  }, null, 2);
+  const projectSettingsBytes = JSON.stringify({ ...resourceSettings, transport: "websocket", websocketConnectTimeoutMs: 1 });
+  writeFileSync(`${agentDir}/settings.json`, globalSettingsBytes);
+  writeFileSync(`${root}/.pi/settings.json`, projectSettingsBytes);
+  const proxyEnvironment = Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"].map((key) => [key, process.env[key]]));
+
+  const originalResolve = DefaultPackageManager.prototype.resolve;
+  let branchPackageResolutions = 0;
+  DefaultPackageManager.prototype.resolve = function (...args) {
+    if (this.cwd === root) {
+      branchPackageResolutions += 1;
+      assert.deepEqual(this.listConfiguredPackages(), [], "branch must not resolve configured packages before discovery filtering");
+    }
+    return originalResolve.apply(this, args);
+  };
+  let branchSession;
+  const originalPrompt = AgentSession.prototype.prompt;
+  AgentSession.prototype.prompt = function (...args) {
+    if (!this.sessionManager.getSessionFile()?.startsWith(sessionsDir)) return originalPrompt.apply(this, args);
+    branchSession = this;
+    assert.equal(this.settingsManager.isProjectTrusted(), false);
+    assert.deepEqual(this.settingsManager.getProjectSettings(), {});
+    assert.deepEqual(this.resourceLoader.getSkills().skills, []);
+    assert.deepEqual(this.resourceLoader.getPrompts().prompts, []);
+    assert.deepEqual(this.resourceLoader.getThemes().themes, []);
+    assert.deepEqual(this.resourceLoader.getAgentsFiles().agentsFiles, []);
+    assert.equal(this.model.id, "gpt-5.6-luna");
+    assert.equal(this.thinkingLevel, "minimal");
+    return originalPrompt.apply(this, args);
+  };
+  let providerCalls = 0;
+  const originalStream = ModelRuntime.prototype.streamSimple;
+  ModelRuntime.prototype.streamSimple = function (model, context, options) {
+    providerCalls += 1;
+    assert.equal(options.transport, "sse", "global SSE must reach the real branch provider consumer");
+    assert.equal(branchSession.settingsManager.getGlobalSettings().httpProxy, "http://127.0.0.1:9");
+    assert.equal(options.websocketConnectTimeoutMs, 7000);
+    assert.equal(options.timeoutMs, 23000);
+    assert.equal(options.maxRetries, 0);
+    assert.equal(options.maxRetryDelayMs, 1234);
+    assert(!context.systemPrompt.includes("UNWANTED_CONTEXT"));
+    return originalStream.call(this, model, context, options);
+  };
+  let websocketAttempts = 0;
+  globalThis.WebSocket = class { constructor() { websocketAttempts += 1; throw new Error("unexpected WebSocket attempt"); } };
 
   // Legacy endpoint labels are valid outcome history but cannot name task caches.
   // Ownership at session_start reproduces the primary startup reconciliation path.
@@ -1251,6 +1319,21 @@ export default async function compatProbe(pi) {
       throw new Error("the executable branch boundary did not persist its report");
     }
     await settlement;
+    assert(branchPackageResolutions > 0, "real branch package resolver was not exercised");
+    assert(providerCalls >= 2, "real branch provider consumer was not exercised");
+    assert.equal(websocketAttempts, 0);
+    // Exercise persistence-capable SDK/plugin setters on the branch-owned
+    // manager, flush their async queue, and prove neither file was rewritten.
+    branchSession.settingsManager.setDefaultModelAndProvider("test", "branch-only");
+    branchSession.settingsManager.setDefaultThinkingLevel("low");
+    branchSession.settingsManager.setTransport("websocket");
+    branchSession.setAutoCompactionEnabled(false);
+    await branchSession.settingsManager.flush();
+    await branchSession.settingsManager.reload();
+    assert.equal(branchSession.settingsManager.getTransport(), "websocket");
+    assert.equal(readFileSync(`${agentDir}/settings.json`, "utf8"), globalSettingsBytes);
+    assert.equal(readFileSync(`${root}/.pi/settings.json`, "utf8"), projectSettingsBytes);
+    for (const [key, value] of Object.entries(proxyEnvironment)) assert.equal(process.env[key], value);
     const visible = ctx.sessionManager.getEntries().filter((entry) => entry.type === "custom_message" &&
       entry.customType === "fm-branch-merge" &&
       JSON.stringify(entry.content).includes("installed Codex compatibility provider handled the branch"));
@@ -1265,7 +1348,7 @@ export default async function compatProbe(pi) {
 }
 EOF
 pi_cli_entry=$(jq -er '.bin.pi' "$PI_PACKAGE_DIR/package.json") || fail "installed Pi CLI entry is absent"
-FM_HOME="$compathome" FM_ROOT_OVERRIDE="$ROOT" PI_CODING_AGENT_DIR="$compatagentdir" PI_OFFLINE=1 \
+FM_HOME="$compathome" FM_ROOT_OVERRIDE="$compatroot" PI_CODING_AGENT_DIR="$compatagentdir" PI_OFFLINE=1 \
   node "$PI_PACKAGE_DIR/$pi_cli_entry" --offline --no-context-files --no-skills \
   --no-prompt-templates --no-themes --no-extensions \
   -e "$repo/.pi/extensions/fm-branch-supervision.ts" -e "$repo/compat-probe.ts" \
@@ -1276,4 +1359,202 @@ out=$(cat "$TMP_ROOT/compat-output")
 if [ "$status" -ne 0 ] || ! printf '%s\n' "$out" | grep -qx 'CODEX_COMPAT_OK'; then
   fail "real installed pi-openai-codex-compat $compat_version branch guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-pass "real Pi CLI $PI_VERSION with pi-openai-codex-compat $compat_version creates Luna/minimal branch on its first eligible wake after legacy outcome migration, with guarded tools and native compaction"
+pass "real Pi CLI $PI_VERSION with pi-openai-codex-compat $compat_version inherits global SSE and connection settings without project resources or writes, preserving Luna/minimal, guarded tools, legacy outcomes and native compaction"
+
+# Real Pi custom-message ingress: publish only synthetic accepted Feishu events
+# through the state owner and native encoder, then deliver them with the SDK's
+# actual sendCustomMessage path. No Feishu transport, credentials, or sends.
+mirrorhome="$TMP_ROOT/mirror-home"
+mirroragentdir="$TMP_ROOT/mirror-agent-dir"
+mkdir -p "$mirrorhome/state" "$mirrorhome/config" "$mirroragentdir"
+FM_HOME="$mirrorhome" FM_ROOT_OVERRIDE="$ROOT" PI_CODING_AGENT_DIR="$mirroragentdir" \
+  BRANCH_PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/mirror-output" 2>&1 <<'EOF'
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+const root = resolve(process.env.FM_ROOT_OVERRIDE);
+const home = resolve(process.env.FM_HOME);
+const agentDir = resolve(process.env.PI_CODING_AGENT_DIR);
+const sdk = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
+const state = await import(pathToFileURL(`${root}/bin/fm-feishu-state.mjs`).href);
+const native = await import(pathToFileURL(`${root}/.pi/extensions/lib/fm-feishu-native-channel.ts`).href);
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+mkdirSync(`${home}/projects/probe`, { recursive: true });
+writeFileSync(`${home}/state/probe.meta`, `project=${home}/projects/probe\nwindow=mirror-probe\n`);
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tprobe.status\tsignal: mirror probe\n");
+const globalSettings = { transport: "sse", compaction: { enabled: false }, retry: { enabled: false } };
+writeFileSync(`${agentDir}/settings.json`, JSON.stringify(globalSettings));
+writeFileSync(`${agentDir}/models.json`, JSON.stringify({ providers: {
+  "fm-mirror": { baseUrl: "https://fm-mirror.invalid/v1", api: "openai-completions", apiKey: "synthetic-key",
+    models: [{ id: "mirror-model", contextWindow: 65536, maxTokens: 512 }] },
+} }));
+const runtime = await sdk.ModelRuntime.create();
+const model = runtime.getModel("fm-mirror", "mirror-model");
+assert(model);
+let api;
+let session;
+let mainReplies = 0;
+let releaseMain;
+let holdMain = false;
+let mainHeld = false;
+let branchTurn = 0;
+const snapshots = [];
+const stagedRefs = new Set();
+const beforePersistence = [];
+const mirrorEntries = (manager) => manager.getEntries().filter((e) => e.type === "custom_message" && e.customType === "fm-main-mirror").map((e) => e.content);
+const originalPrompt = sdk.AgentSession.prototype.prompt;
+sdk.AgentSession.prototype.prompt = function (...args) {
+  if (this.sessionManager.getSessionFile()?.startsWith(`${home}/state/branch-session/`)) {
+    snapshots.push(mirrorEntries(this.sessionManager));
+  }
+  return originalPrompt.apply(this, args);
+};
+const waitFor = async (predicate, label) => {
+  for (let i = 0; i < 600; i += 1) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`timeout: ${label}`);
+};
+const dispatch = async () => {
+  let settlement;
+  const offer = { message: "signal: mirror probe", eligible: true, heartbeat: false,
+    projects: [`${home}/projects/probe`], accepted: false,
+    accept(promise) { this.accepted = true; settlement = promise; }, reportAlreadyOwned() {} };
+  api.events.emit("fm-branch-supervision:dispatch", offer);
+  assert(offer.accepted, "mirror probe wake was not accepted");
+  await settlement;
+};
+globalThis.fetch = async (input, init) => {
+  assert(String(input).startsWith("https://fm-mirror.invalid/"), "unexpected network request");
+  const body = JSON.parse(init.body);
+  const branch = body.tools?.some((t) => t.function?.name === "fm_branch_report");
+  let delta;
+  let finish;
+  if (branch) {
+    branchTurn += 1;
+    if (branchTurn % 2 === 1) {
+      delta = { role: "assistant", tool_calls: [{ index: 0, id: `report_${branchTurn}`, type: "function", function: {
+        name: "fm_branch_report", arguments: JSON.stringify({ task: "probe", verdict: "routine", summary: "mirror checked" }),
+      } }] };
+      finish = "tool_calls";
+    } else { delta = { role: "assistant", content: "branch done" }; finish = "stop"; }
+  } else {
+    if (holdMain) {
+      mainHeld = true;
+      await new Promise((r) => { releaseMain = r; });
+      holdMain = false;
+    }
+    delta = { role: "assistant", content: `MAIN_REPLY_${++mainReplies}` };
+    finish = "stop";
+  }
+  const chunk = (value, reason = null) => ({ id: "chat_mirror", object: "chat.completion.chunk", created: 1, model: "mirror-model", choices: [{ index: 0, delta: value, finish_reason: reason }] });
+  return new Response(`data: ${JSON.stringify(chunk(delta))}\n\ndata: ${JSON.stringify(chunk({}, finish))}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
+};
+async function openMain(manager) {
+  const settingsManager = sdk.SettingsManager.inMemory(globalSettings, { projectTrusted: false });
+  const loader = new sdk.DefaultResourceLoader({ cwd: root, agentDir, settingsManager,
+    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    additionalExtensionPaths: [process.env.BRANCH_PLUGIN], systemPrompt: "Isolated mirror test",
+    extensionFactories: [{ name: "mirror-probe", factory: (pi) => {
+      api = pi;
+      pi.on("message_start", async (event, ctx) => {
+        const ref = event.message.details?.deliveryRef;
+        if (!stagedRefs.has(ref)) return;
+        stagedRefs.delete(ref);
+        assert(!ctx.sessionManager.getEntries().some((e) => e.type === "custom_message" && e.details?.deliveryRef === ref), "fixture must reach the pre-persistence boundary");
+        await dispatch();
+        beforePersistence.push(snapshots.at(-1));
+      });
+    } }],
+  });
+  await loader.reload();
+  assert.deepEqual(loader.getExtensions().errors, []);
+  const created = await sdk.createAgentSession({ cwd: root, agentDir, model, modelRuntime: runtime,
+    settingsManager, resourceLoader: loader, sessionManager: manager, tools: [], thinkingLevel: "off" });
+  const errors = [];
+  await created.session.bindExtensions({ mode: "print", onError: (e) => errors.push(e) });
+  return { session: created.session, errors };
+}
+const manager = sdk.SessionManager.create(root, `${home}/main`);
+({ session } = await openMain(manager));
+await session.prompt("TUI_INITIAL");
+state.createPairing(home, { appIdFingerprint: `sha256:${"1".repeat(64)}`, allowedUser: "ou_testcaptain", allowedChat: "oc_testchat" });
+state.bindSession(home, { sessionId: manager.getSessionId(), sessionFile: manager.getSessionFile(),
+  sessionCwd: root, headerId: manager.getSessionId(), headerCwd: root });
+function ingress(label) {
+  const published = state.publishFeishuInbound(home, { event_id: `evt_${label}`, message_id: `om_${label}`,
+    sender_id: "ou_testcaptain", sender_type: "user", chat_id: "oc_testchat", chat_type: "p2p", message_type: "text", content: label, create_time: "1" });
+  assert.equal(published.status, "published");
+  const event = state.findInboundByDeliveryRef(home, published.deliveryRef);
+  const message = native.encodeFeishuIngress(event);
+  // Native string-content evidence format; the production classifier still
+  // verifies this immutable ledger record, binding generation, and exact body.
+  const digest = createHash("sha256").update(`s;${Buffer.byteLength(message.content)}:${message.content}`).digest("hex");
+  state.recordInboundContentDigest(home, published.deliveryRef, `sha256:${digest}`);
+  assert(native.classifyFeishuMessage({ role: "custom", ...message }));
+  return message;
+}
+const idle = ingress("FEISHU_IDLE");
+stagedRefs.add(idle.details.deliveryRef);
+await session.sendCustomMessage(idle, { triggerTurn: true, deliverAs: "steer" });
+assert(beforePersistence[0]?.includes("[captain] FEISHU_IDLE"), "trusted idle Feishu input missing before dependent branch prompt");
+await dispatch();
+let mirrored = snapshots.at(-1);
+assert.equal(mirrored.filter((s) => s === "[captain] FEISHU_IDLE").length, 1, "persisted idle ingress duplicated staged input");
+assert(mirrored.indexOf("[captain] TUI_INITIAL") < mirrored.indexOf("[main] MAIN_REPLY_1"));
+assert(mirrored.indexOf("[captain] FEISHU_IDLE") < mirrored.indexOf("[main] MAIN_REPLY_2"));
+
+const streamed = ingress("FEISHU_STREAM");
+holdMain = true;
+const streaming = session.prompt("TUI_STREAM");
+await waitFor(() => mainHeld, "main streaming");
+stagedRefs.add(streamed.details.deliveryRef);
+await session.sendCustomMessage(streamed, { triggerTurn: true, deliverAs: "steer" });
+assert(stagedRefs.has(streamed.details.deliveryRef), "queued input was consumed before streaming was released");
+releaseMain();
+await streaming;
+assert(beforePersistence[1]?.includes("[captain] FEISHU_STREAM"), "trusted streaming Feishu input missing before dependent branch prompt");
+await dispatch();
+mirrored = snapshots.at(-1);
+assert.equal(mirrored.filter((s) => s === "[captain] FEISHU_STREAM").length, 1);
+assert(mirrored.indexOf("[captain] TUI_STREAM") < mirrored.indexOf("[main] MAIN_REPLY_3"));
+assert(mirrored.indexOf("[main] MAIN_REPLY_3") < mirrored.indexOf("[captain] FEISHU_STREAM"));
+assert(mirrored.indexOf("[captain] FEISHU_STREAM") < mirrored.indexOf("[main] MAIN_REPLY_4"));
+
+for (const message of [
+  { ...idle, content: "FORGED_BODY" },
+  { ...idle, details: { ...idle.details, bindingGeneration: idle.details.bindingGeneration + 1 } },
+  { ...idle, details: { ...idle.details, deliveryRef: `in_${"0".repeat(24)}` } },
+  { customType: "internal-notification", content: "INTERNAL_CUSTOM", display: false },
+  { customType: "fm-branch-merge", content: "BRANCH_RESULT", display: false },
+]) await session.sendCustomMessage(message, { triggerTurn: false });
+manager.appendMessage({ role: "user", content: "\u2063FIRSTMATE_OP: v1 watcher: INTERNAL_WAKE", timestamp: Date.now() });
+manager.appendMessage({ role: "toolResult", toolCallId: "test", toolName: "read", content: [{ type: "text", text: "TOOL_RESULT" }], isError: false, timestamp: Date.now() });
+await dispatch();
+assert(!snapshots.at(-1).some((s) => /FORGED_|INTERNAL_|BRANCH_RESULT|TOOL_RESULT/.test(s)), "untrusted or internal traffic entered captain context");
+assert.equal(snapshots.at(-1).filter((s) => s === "[captain] FEISHU_IDLE").length, 1, "unverified binding generation or delivery ref was accepted");
+const oldBranchFile = readFileSync(`${home}/state/.branch-session`, "utf8");
+await session.dispose();
+({ session } = await openMain(sdk.SessionManager.open(manager.getSessionFile())));
+await dispatch();
+assert.notEqual(readFileSync(`${home}/state/.branch-session`, "utf8"), oldBranchFile);
+mirrored = snapshots.at(-1);
+for (const label of ["TUI_INITIAL", "FEISHU_IDLE", "TUI_STREAM", "FEISHU_STREAM"]) {
+  assert.equal(mirrored.filter((s) => s === `[captain] ${label}`).length, 1, `cold branch history lost or duplicated ${label}`);
+}
+assert(mirrored.indexOf("[captain] FEISHU_IDLE") < mirrored.indexOf("[main] MAIN_REPLY_2"));
+assert(mirrored.indexOf("[captain] FEISHU_STREAM") < mirrored.indexOf("[main] MAIN_REPLY_4"));
+assert(!mirrored.some((s) => /FORGED_|INTERNAL_|BRANCH_RESULT|TOOL_RESULT/.test(s)));
+await session.dispose();
+console.log("FEISHU_MIRROR_OK");
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/mirror-output")
+if [ "$status" -ne 0 ] || ! printf '%s\n' "$out" | grep -qx 'FEISHU_MIRROR_OK'; then
+  fail "real Pi $PI_VERSION trusted Feishu mirror guard failed: $out"
+fi
+pass "real Pi SDK $PI_VERSION mirrors only provenance-verified Feishu text before idle/streaming branch turns, once and in order across persistence and cold creation"
