@@ -16,6 +16,11 @@ REPLAY="$ROOT/bin/fm-crosscheck-azure-replay.py"
 TEMPLATE="$ROOT/docs/azure-crosscheck/compartment.json"
 DOC="$ROOT/docs/azure-crosscheck.md"
 EVIDENCE="$ROOT/docs/azure-crosscheck-evidence-2026-08-12.md"
+fm_test_tmproot_into FOUNDRY_TEST_HOME fm-crosscheck-foundry-tests
+mkdir -p "$FOUNDRY_TEST_HOME/config"
+printf '%s\n' '{"endpoint":"https://crosscheck-fixture.services.ai.azure.com/openai/v1"}' \
+  > "$FOUNDRY_TEST_HOME/config/crosscheck-foundry.json"
+export FM_HOME="$FOUNDRY_TEST_HOME"
 
 static_contract() {
   python3 - "$ADAPTER" "$CORE" "$MODEL_GUEST" "$BRIDGE" "$REPLAY" "$TEMPLATE" "$DOC" <<'PY' || fail "Azure Crosscheck static contract failed"
@@ -457,6 +462,7 @@ def run_guest(harness, model, credential_document, account_identity,
         "reviewer": {"harness": harness, "model": model, "effort": "xhigh"},
         "identity": {
             "review_generation": identity["review_generation"],
+            "provider_host": (core.cross_family_lane_for_model(model) or {}).get("host", "chatgpt.com"),
             "credential_archive_digest": adapter.digest_bytes(archive.read_bytes()),
             "credential_digest": material["credential_digest"],
             "reviewer_account_digest": adapter.digest_bytes(
@@ -543,32 +549,27 @@ for label, override in (
     ), (label, combined)
     print(f"GUEST REFUSED a manifest with a {label}")
 
-# The cross-family lane keeps its own non-secret identity and still lands.
-lane = next(iter(core.CROSS_FAMILY_LANES.values()))
-lane_document = {"providers": {lane["slot"]: {
-    "baseUrl": lane["base_url"], "api": lane["api"], "apiKey": "k",
-    "models": [{
-        "id": lane["model"],
-        "name": "n",
-        "compat": lane["compat"],
-        "cost": lane["cost"],
-    }],
-}}}
-result, landed = run_guest(
-    "pi", lane["model"], lane_document, core.cross_family_account_identity(lane)
-)
-assert result.returncode == 0, (result.stdout, result.stderr)
-assert landed.name == "models.json", landed
-print(f"GUEST ACCEPTED the {lane['slot']} lane credential")
+# Every cross-family lane keeps its own non-secret identity and still lands.
+for lane in core.CROSS_FAMILY_LANES.values():
+    lane_document = {"providers": {lane["slot"]: {
+        "baseUrl": lane["base_url"], "api": lane["api"], "apiKey": "k",
+        "models": [{"id": lane["model"], "name": "n",
+                    "compat": lane["compat"], "cost": lane["cost"]}],
+    }}}
+    result, landed = run_guest(
+        "pi", lane["model"], lane_document, core.cross_family_account_identity(lane)
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert landed.name == "models.json", landed
+    print(f"GUEST ACCEPTED the {lane['slot']} lane credential")
 
-# A foreign endpoint in the archived credential still refuses in the guest.
-foreign = json.loads(json.dumps(lane_document))
-foreign["providers"][lane["slot"]]["baseUrl"] = "https://evil.example/v1"
-result, _ = run_guest(
-    "pi", lane["model"], foreign, core.cross_family_account_identity(lane)
-)
-assert result.returncode != 0, result.stdout
-print("GUEST REFUSED a foreign endpoint in the archived credential")
+    foreign = json.loads(json.dumps(lane_document))
+    foreign["providers"][lane["slot"]]["baseUrl"] = "https://evil.example/v1"
+    result, _ = run_guest(
+        "pi", lane["model"], foreign, core.cross_family_account_identity(lane)
+    )
+    assert result.returncode != 0, result.stdout
+    print("GUEST REFUSED a foreign endpoint in the archived credential")
 
 # REGISTRATION COMPLETENESS: a lane in the registry with no `case "$MODEL"`
 # dispatch arm passes every substring assertion and dies at runtime with exit
@@ -1098,8 +1099,14 @@ assert module.cross_family_lane_for_model(
 assert module.recorded_cross_family_lane_for_model(
     "accounts/fireworks/routers/glm-5p2-fast"
 ) is module.CROSS_FAMILY_LANES["fireworks-glm"]
+assert module.CROSS_FAMILY_LANES["foundry-glm"]["model"] == "crosscheck-glm-5p2"
+assert module.CROSS_FAMILY_LANES["foundry-glm"]["base_url"] == (
+    "https://crosscheck-fixture.services.ai.azure.com/openai/v1"
+)
+assert module.CROSS_FAMILY_LANES["foundry-glm"]["cost"] == {
+    "input": 1.54, "cacheRead": 0.15, "cacheWrite": 1.54, "output": 4.84,
+}
 for lane in module.CROSS_FAMILY_LANES.values():
-    assert lane["model"].endswith("/models/glm-5p2"), lane
     # Per-lane consistency, NOT one hardcoded host. Asserting a single host for
     # every lane meant any genuinely new lane failed HERE first, so the
     # registration-completeness guard in the model-guest unit - the one this
@@ -5805,6 +5812,69 @@ PY
   pass "two fresh Pi stages reuse bounded exact source excerpts without sharing verdict authority"
 }
 
+foundry_credential_binding_unit() {
+  python3 - "$CORE" "$ADAPTER" "$PI_REVIEWER_RUNTIME" <<'PY' || fail "Foundry credential binding regression"
+import copy, importlib.util, json, os, pathlib, sys, tempfile
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module
+core, adapter = load("core", sys.argv[1]), load("adapter", sys.argv[2])
+runtime = load("runtime", sys.argv[3])
+tokens = {"input": 1000000, "output": 1000000, "cache_read": 1000000, "cache_write": 1000000}
+foundry = runtime.usage_telemetry(tokens, tokens_complete=True, pi_cost=0,
+    cost_complete=False, turns=1, provider="foundry-glm")
+direct = runtime.usage_telemetry(tokens, tokens_complete=True, pi_cost=0,
+    cost_complete=False, turns=1, provider="fireworks-glm")
+assert foundry["costs_usd"]["declared"] == 8.07, foundry
+assert direct["costs_usd"]["declared"] == 7.34, direct
+merged = runtime.merge_telemetry([foundry, foundry])
+assert merged["costs_usd"]["declared"] == 16.14, merged
+assert merged["costs_usd"]["declared_source"] == "azure-retail-foundry-regular-rates", merged
+lane = core.CROSS_FAMILY_LANES["foundry-glm"]
+with tempfile.TemporaryDirectory() as temporary:
+    home = pathlib.Path(temporary)
+    document = {"providers": {lane["slot"]: {
+        "baseUrl": lane["base_url"], "api": lane["api"], "apiKey": "fixture-key",
+        "models": [{"id": lane["model"], "name": "reviewer",
+                    "compat": lane["compat"], "cost": lane["cost"]}],
+    }}}
+    path = home / "models.json"
+    path.write_text(json.dumps(document))
+    config = {"harness": "pi", "model": lane["model"], "effort": "xhigh", "account_home": str(home)}
+    assert adapter.inspect_reviewer_credential(core, config)[3] == core.cross_family_account_identity(lane)
+    for label, mutate in (
+        ("foreign endpoint", lambda provider: provider.update(baseUrl="https://other.services.ai.azure.com/openai/v1")),
+        ("foreign selector", lambda provider: provider["models"][0].update(id="FW-GLM-5.2")),
+        ("unbound cost", lambda provider: provider["models"][0]["cost"].update(input=0)),
+        ("model endpoint override", lambda provider: provider["models"][0].update(baseUrl="https://evil.example/v1")),
+    ):
+        drifted = copy.deepcopy(document)
+        mutate(drifted["providers"][lane["slot"]])
+        path.write_text(json.dumps(drifted))
+        try:
+            adapter.inspect_reviewer_credential(core, config)
+        except (core.CrosscheckError, adapter.AzureCrosscheckError):
+            pass
+        else:
+            raise AssertionError("accepted " + label)
+    from fm_crosscheck_foundry import foundry_lanes
+    os.environ["FM_HOME"] = str(home)
+    assert foundry_lanes() == {}, "Foundry must require private coordinator configuration"
+    (home / "config").mkdir()
+    for endpoint in ("https://evil.example/openai/v1", "https://fixture.services.ai.azure.com.evil.example/openai/v1",
+                     "http://fixture.services.ai.azure.com/openai/v1"):
+        (home / "config/crosscheck-foundry.json").write_text(json.dumps({"endpoint": endpoint}))
+        try:
+            foundry_lanes()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("accepted foreign Foundry endpoint")
+PY
+  pass "Foundry credentials bind the configured endpoint, regular deployment selector, and declared costs"
+}
+
 admission_attempt_binding_unit() {
   python3 - "$ADAPTER" <<'PY' || fail "Crosscheck preflight did not bind a bounded operation attempt"
 import importlib.util, sys, types
@@ -5828,6 +5898,8 @@ PY
 
 python3 "$ROOT/tests/fm-crosscheck-pi-transport.py" "$ROOT" || fail "Pi inactivity transport or diagnostics regression"
 admission_attempt_binding_unit
+foundry_credential_binding_unit
+model_guest_executing_account_unit
 pi_review_handoff_unit
 shared_host_contract_unit
 parameter_contract_unit

@@ -197,6 +197,7 @@ python3 - "$CREDENTIAL" "$ACCOUNT" "$INPUT" <<'PY'
 import hashlib
 import json
 import pathlib
+import re
 import sys
 import tarfile
 
@@ -210,7 +211,23 @@ if "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest() != identity["cred
 # R6 cross-family lane registry, mirroring CROSS_FAMILY_LANES in
 # bin/fm-crosscheck.py: model -> (provider slot, pinned chat-completions
 # base URL, non-secret executing identity, pinned model-level compat).
+foundry_host = request["identity"].get("provider_host", "")
+if reviewer["model"] == "crosscheck-glm-5p2" and not re.fullmatch(
+    r"[a-z0-9][a-z0-9-]*\.services\.ai\.azure\.com", foundry_host
+):
+    raise SystemExit("model guest: Foundry provider host is invalid")
 CROSS_FAMILY_LANES = {
+    "crosscheck-glm-5p2": (
+        "foundry-glm",
+        "https://" + foundry_host + "/openai/v1",
+        "foundry-glm:" + foundry_host + "/crosscheck-glm-5p2",
+        {
+            "supportsStrictMode": True,
+            "sendSessionAffinityHeaders": True,
+            "sessionAffinityFormat": "openai",
+        },
+        {"input": 1.54, "cacheRead": 0.15, "cacheWrite": 1.54, "output": 4.84},
+    ),
     "accounts/fireworks/models/glm-5p2": (
         "fireworks-glm",
         "https://api.fireworks.ai/inference/v1",
@@ -548,6 +565,7 @@ case "$HARNESS" in
     # runs on its own provider slot, the gpt fallback family stays on
     # openai-codex, and an unmapped model refuses rather than guessing.
     case "$MODEL" in
+      crosscheck-glm-5p2) PI_PROVIDER=foundry-glm ;;
       accounts/fireworks/models/glm-5p2) PI_PROVIDER=fireworks-glm ;;
       gpt-5.6-sol) PI_PROVIDER=openai-codex ;;
       *) echo "model guest: no Pi provider mapping for model $MODEL" >&2; exit 125 ;;

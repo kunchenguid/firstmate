@@ -39,10 +39,14 @@ import secrets
 import select
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
 from typing import Any, Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fm_crosscheck_foundry import foundry_lanes
 
 
 SCHEMA = "fm.azure-crosscheck/v1"
@@ -1296,6 +1300,7 @@ def require_model_image_attests_harness(
 # its provider host are retired.
 CROSS_FAMILY_LANE_API = "openai-completions"
 CROSS_FAMILY_LANES = {
+    **foundry_lanes(),
     "fireworks-glm": {
         "slot": "fireworks-glm",
         "model": "accounts/fireworks/models/glm-5p2",

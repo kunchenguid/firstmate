@@ -36,6 +36,7 @@ if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
 from fm_bounded_io import BoundedIOError, read_bounded_json, run_bounded
+from fm_crosscheck_foundry import foundry_lanes
 
 
 SCHEMA = "firstmate.crosscheck-ledger.v2"
@@ -135,6 +136,7 @@ CROSS_FAMILY_LANE_API = "openai-completions"
 # declares the EXACT compat its credential may carry and the inspector refuses
 # anything else, the same treatment baseUrl and api already get.
 CROSS_FAMILY_LANES = {
+    **foundry_lanes(),
     # The direct Fireworks account. Reaching GLM-5.2 through Azure AI Foundry's
     # Fireworks partner lane is impossible on this subscription: partner models
     # are Marketplace SaaS offers and a credit-only "Microsoft Azure
@@ -3748,8 +3750,7 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
         current_regular_contract = (
             isinstance(reviewer, dict)
             and reviewer.get("harness") == "pi"
-            and reviewer.get("model")
-            == CROSS_FAMILY_LANES["fireworks-glm"]["model"]
+            and cross_family_lane_for_model(reviewer.get("model")) is not None
             and reviewer.get("review_family_mode")
             == REVIEW_FAMILY_CROSS_FAMILY_PRIMARY
             and reviewer.get("execution_mode") != "azure-compartment-v1"
@@ -3847,8 +3848,7 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
                         f"{label}.reviewer review depth contract is unknown",
                     )
                     require(
-                        reviewer.get("model")
-                        == CROSS_FAMILY_LANES["fireworks-glm"]["model"]
+                        cross_family_lane_for_model(reviewer.get("model")) is not None
                         and reviewer.get("review_family_mode")
                         == REVIEW_FAMILY_CROSS_FAMILY_PRIMARY,
                         f"{label}.reviewer review depth is bound only to the "
@@ -4847,8 +4847,7 @@ Bounded durable-finding lifecycle metadata:
 """
     if (
         config.get("harness") == "pi"
-        and config.get("model")
-        == CROSS_FAMILY_LANES["fireworks-glm"]["model"]
+        and cross_family_lane_for_model(config.get("model")) is not None
     ):
         prompt += """
 TWO-STAGE REVIEW DEPTH:
@@ -5203,6 +5202,8 @@ def pi_usage_telemetry(
             )
         )
         declared_source = "pinned-fireworks-regular-rates"
+        if lane["slot"] == "foundry-glm":
+            declared_source = "azure-retail-foundry-regular-rates"
     token_values = (
         token_totals if tokens_complete and turns else dict.fromkeys(token_totals)
     )
@@ -6258,7 +6259,7 @@ this provisional pass.
             ensure_ascii=False,
         ):
             tool_fail("Pi reviewer controller replay disagrees with guest result")
-        if config["model"] == CROSS_FAMILY_LANES["fireworks-glm"]["model"]:
+        if cross_family_lane_for_model(config["model"]) is not None:
             config["review_depth_passes"] = str(LOCAL_REGULAR_REVIEW_DEPTH_PASSES)
             config["review_depth_mode"] = LOCAL_REGULAR_REVIEW_DEPTH_MODE
         return normalize_pi_review(

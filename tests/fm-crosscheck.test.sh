@@ -21,12 +21,18 @@ CROSSCHECK_PY="${FM_TEST_CROSSCHECK_PY:-$ROOT/bin/fm-crosscheck.py}"
 CROSSCHECK_PYTHON="$(fm_crosscheck_resolve_python)" \
   || fail "no Python meeting the crosscheck safety floor is available"
 fm_test_tmproot_into TMP_ROOT fm-crosscheck-tests
+mkdir -p "$TMP_ROOT/foundry-config/config"
+printf '%s\n' '{"endpoint":"https://crosscheck-fixture.services.ai.azure.com/openai/v1"}' \
+  > "$TMP_ROOT/foundry-config/config/crosscheck-foundry.json"
+export FM_HOME="$TMP_ROOT/foundry-config"
 API_FIXTURE="$ROOT/tests/fixtures/gh-axi-v0.1.25-pr-api.toon"
 PR_URL=https://github.com/ruby-dlee/firstmate/pull/72
 
 make_case() {
   local name=$1 case_dir repo base head
   case_dir="$TMP_ROOT/$name"
+  mkdir -p "$case_dir/home/config"
+  cp "$TMP_ROOT/foundry-config/config/crosscheck-foundry.json" "$case_dir/home/config/"
   repo="$case_dir/repo"
   mkdir -p "$repo/tests" "$repo/apps/web-app/src" \
     "$case_dir/state" "$case_dir/data" \
@@ -1139,9 +1145,19 @@ EOF
 # never a codex auth.json.
 write_cross_family_models_json() {
   local destination=$1 slot=$2 model=$3 api_key=${4:-test-lane-key}
-  cat > "$destination" <<EOF
-{"providers":{"$slot":{"baseUrl":"https://api.fireworks.ai/inference/v1","api":"openai-completions","apiKey":"$api_key","models":[{"id":"$model","name":"cross-family reviewer","reasoning":true,"input":["text"],"cost":{"input":1.40,"output":4.40,"cacheRead":0.14,"cacheWrite":1.40},"contextWindow":1000000,"maxTokens":32000,"compat":{"supportsStrictMode":true,"sendSessionAffinityHeaders":true,"sessionAffinityFormat":"openai"}}]}}}
-EOF
+  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$slot" "$model" "$api_key" > "$destination" <<'PY'
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("core", sys.argv[1])
+core = importlib.util.module_from_spec(spec); spec.loader.exec_module(core)
+slot, model, key = sys.argv[2:]
+lane = core.CROSS_FAMILY_LANES[slot]
+print(json.dumps({"providers": {slot: {
+    "baseUrl": lane["base_url"], "api": lane["api"], "apiKey": key,
+    "models": [{"id": model, "name": "cross-family reviewer", "reasoning": True,
+                "input": ["text"], "cost": lane["cost"], "contextWindow": 1000000,
+                "maxTokens": 32000, "compat": lane["compat"]}],
+}}}))
+PY
 }
 
 select_cross_family_reviewer() {
@@ -2319,9 +2335,12 @@ PY
     assert_no_grep 'CROSSCHECK DEGRADED' "$case_dir/err" \
       "the $model primary lane announced a degraded fallback"
     python3 -c '
-import hashlib, json, sys
+import hashlib, importlib.util, json, sys
 value = json.load(open(sys.argv[1]))
 slot, model = sys.argv[3], sys.argv[4]
+spec = importlib.util.spec_from_file_location("core", sys.argv[5])
+core = importlib.util.module_from_spec(spec); spec.loader.exec_module(core)
+lane = core.CROSS_FAMILY_LANES[slot]
 reviewer = value["runs"][-1]["reviewer"]
 assert reviewer["harness"] == "pi"
 assert reviewer["model"] == model
@@ -2331,8 +2350,7 @@ assert reviewer["executing_account_home"] == sys.argv[2]
 assert reviewer["account_selector"] == "PI_CODING_AGENT_DIR"
 assert reviewer["credential_source"] == "pi-" + slot + "-models-file"
 binding = hashlib.sha256(
-    ("api.fireworks.ai/" + model + "\n"
-     "https://api.fireworks.ai/inference/v1").encode()
+    (lane["host"] + "/" + model + "\n" + lane["base_url"]).encode()
 ).hexdigest()
 assert reviewer["credential_identifier"] == "provider-binding:" + slot + ":" + binding
 assert reviewer["terminal_provider"] == slot
@@ -2343,7 +2361,11 @@ assert reviewer["reviewer_turn_count"] == "2"
 assert reviewer["evidence_policy"] == "conditional-v1"
 assert reviewer["evidence_mode"] == "identity-only-v1"
 assert "execution_proof" not in reviewer
-' "$case_dir/data/task-x1/crosscheck-ledger.json" "$case_dir/pi-home" "$slot" "$model" \
+process = value["runs"][-1]["telemetry"]["review_process"]
+assert process["mode"] == "two-stage-independent-synthesis-v1", process
+assert [stage["stage"] for stage in process["stage_metrics"]] == ["challenge", "synthesis"]
+core.validate_ledger(value, "task-x1", value["pull_request"])
+' "$case_dir/data/task-x1/crosscheck-ledger.json" "$case_dir/pi-home" "$slot" "$model" "$CROSSCHECK_PY" \
       || fail "$model review did not record its bound provider, terminal route, depth, and non-secret credential binding"
     [ "$(wc -l < "$case_dir/pi.log")" -eq 2 ] \
       || fail "$model did not execute both substantive review stages"
@@ -2848,6 +2870,8 @@ def ledger_with(model, family):
 # Honest pairings load; the field also remains optional for older ledgers,
 # and the legacy glm-primary value stays readable for durable records.
 for model, family in (
+    ("crosscheck-glm-5p2", "cross-family-primary"),
+    ("foundry-glm/crosscheck-glm-5p2", "cross-family-primary"),
     ("accounts/fireworks/models/glm-5p2", "cross-family-primary"),
     ("fireworks-glm/accounts/fireworks/models/glm-5p2", "cross-family-primary"),
     # Accepted reviews from before this reversal selected Fireworks' Fast path. They
@@ -2864,6 +2888,7 @@ for model, family in (
 # Forged pairings refuse, in both directions, and the legacy value cannot be
 # reused as a synonym for a different lane.
 for model, family in (
+    ("crosscheck-glm-5p2", "codex-fallback"),
     ("gpt-5.6-sol", "cross-family-primary"),
     ("gpt-5.6-sol", "glm-primary"),
     ("accounts/fireworks/models/glm-5p2", "codex-fallback"),
@@ -3895,7 +3920,7 @@ test_incomplete_proof_environment_fails_loudly() {
   IFS=$'\t' read -r case_dir base head <<< "$record"
   seed_open_ledger "$case_dir" "$head"
   mkdir -p "$case_dir/narrowed"
-  cp "$ROOT/bin/fm_bounded_io.py" "$case_dir/narrowed/"
+  cp "$ROOT/bin/fm_bounded_io.py" "$ROOT/bin/fm_crosscheck_foundry.py" "$case_dir/narrowed/"
   sed '/^    "PATH",/d' "$CROSSCHECK_PY" > "$case_dir/narrowed/fm-crosscheck.py"
   if grep -q '^    "PATH",' "$case_dir/narrowed/fm-crosscheck.py"; then
     fail "the narrowed copy still allowlists PATH"
@@ -3933,7 +3958,7 @@ test_evidence_capture_runs_on_older_interpreters() {
   # pathlib.Path. os.DirEntry.stat(follow_symlinks=...) elsewhere in bin/ is a
   # different API and is valid on every Python 3.
   offenders=$(grep -nE '\.stat\(follow_symlinks=' \
-    "$ROOT/bin/fm-crosscheck.py" "$ROOT/bin/fm_bounded_io.py" || true)
+    "$ROOT/bin/fm-crosscheck.py" "$ROOT/bin/fm_bounded_io.py" "$ROOT/bin/fm_crosscheck_foundry.py" || true)
   if [ -n "$offenders" ]; then
     fail "Path.stat(follow_symlinks=) is Python 3.10+ only: $offenders"
   fi

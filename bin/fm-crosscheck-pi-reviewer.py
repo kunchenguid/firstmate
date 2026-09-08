@@ -851,8 +851,13 @@ def usage_telemetry(
     pi_cost: float,
     cost_complete: bool,
     turns: int,
+    provider: str = "fireworks-glm",
 ) -> dict[str, Any]:
     rates = {"input": 1.40, "cache_read": 0.14, "cache_write": 1.40, "output": 4.40}
+    source = "pinned-fireworks-regular-rates"
+    if provider == "foundry-glm":
+        rates = {"input": 1.54, "cache_read": 0.15, "cache_write": 1.54, "output": 4.84}
+        source = "azure-retail-foundry-regular-rates"
     declared = (
         sum(tokens[name] * rates[name] / 1_000_000 for name in rates)
         if tokens_complete
@@ -872,7 +877,7 @@ def usage_telemetry(
             ),
             "declared": round(declared, 12) if declared is not None else None,
             "declared_source": (
-                "pinned-fireworks-regular-rates" if declared is not None else "unavailable"
+                source if declared is not None else "unavailable"
             ),
         },
         "turns": turns,
@@ -915,7 +920,8 @@ def merge_telemetry(attempts: list[dict[str, Any]]) -> dict[str, Any]:
             for value in values
         )
         costs[name] = round(sum(values), 12) if complete else None
-        costs[source_name] = source if complete else "unavailable"
+        sources = {attempt["costs_usd"].get(source_name) for attempt in attempts}
+        costs[source_name] = next(iter(sources)) if complete and len(sources) == 1 else "unavailable"
 
     merged = {
         "tokens": {
@@ -1381,6 +1387,7 @@ def parse_events(
         pi_cost=pi_cost,
         cost_complete=cost_complete,
         turns=turns,
+        provider=expected_provider,
     )
     if final_stop not in {"toolUse", "stop"}:
         message = (
