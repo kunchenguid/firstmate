@@ -315,6 +315,11 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
+      # Keys other firstmate producers append to a task's meta (relay links
+      # write x_*, fm-control's relaunch writes control_relaunch_tx) do not
+      # change the canonical PR identity, so they are tolerated; any other
+      # line after pr= invalidates the record. A new producer key must be
+      # added here and covered in tests/fm-pr-check-security.test.sh.
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*|control_relaunch_tx=*)
         ;;
       *)
