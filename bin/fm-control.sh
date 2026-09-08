@@ -1677,10 +1677,12 @@ do_relaunch() {
   fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
-  # The released authority's own generation is the only thing the replacement
-  # can be proved distinct from, so an unreadable prior identity refuses here -
-  # before any replacement is launched - rather than degrading that proof to
-  # "any valid generation".
+  # Both halves of the released-authority postcondition are decided here, before
+  # any replacement is launched: a Pi target can only be proved distinct from the
+  # generation that was released, and a non-Pi target can only be proved by its
+  # own process identity. Either answer is already known, so a target this
+  # transaction could never verify is refused while the prior record still
+  # stands and no replacement is running.
   if [ "$HERDR_PI_STALE_RELEASED" = 1 ]; then
     case "$TARGET_HARNESS" in
       pi|pi-signed)
@@ -1688,6 +1690,10 @@ do_relaunch() {
           0|2) ;;
           *) die "task $ID's stale Herdr Pi authority was released, but the herdr:pi session identity it held could not be read, so a replacement could not be proved to anchor a DISTINCT herdr:pi generation; refusing rather than accepting any session as new" ;;
         esac
+        ;;
+      *)
+        control_herdr_target_engine_nameable "$TARGET_HARNESS" \
+          || die "task $ID's stale Herdr Pi authority was released, so only $TARGET_HARNESS's own processes could prove a replacement started - and $TARGET_HARNESS has no process identity this proof can read; refusing before any replacement is launched rather than reporting one the cached Pi label alone would have proved"
         ;;
     esac
   fi
@@ -1727,8 +1733,6 @@ do_relaunch() {
         authority_line=herdr_pi_authority=new-session
         ;;
       *)
-        control_herdr_target_engine_nameable "$TARGET_HARNESS" \
-          || die "the replacement agent for $ID was launched on $TARGET_HARNESS, but the released stale Herdr Pi label is still the only thing its endpoint reports, and $TARGET_HARNESS has no process identity this proof can read; refusing to report a relaunch that cached label alone would have proved"
         wait_new_herdr_target_engine "$TARGET_HARNESS" || {
           die "the replacement agent for $ID could not be verified as exactly one stable $TARGET_HARNESS process, with no Pi engine left, on its recorded endpoint and worktree within ${LAUNCH_WAIT}s after its stale Herdr Pi authority was released"
         }

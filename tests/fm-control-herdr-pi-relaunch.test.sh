@@ -561,7 +561,9 @@ pass "fm-control Herdr/Pi: no replacement, a surviving Pi engine, and a duplicat
 FM_TEST_LAUNCH_WAIT=
 
 # An adapter whose process identity the proof cannot read is ambiguity, so the
-# relaunch refuses rather than accepting the cached Pi label as evidence.
+# relaunch refuses rather than accepting the cached Pi label as evidence. That
+# answer never depends on the launch, so it is given before one happens: no
+# replacement is typed into the pane and the prior record still stands.
 dir=$(new_case cross-runtime-unnameable cross-target pi)
 mkdir -p "$dir/user-home/.config/muse"
 printf '%s\n' '{"api_key":"fixture"}' > "$dir/user-home/.config/muse/auth.json"
@@ -571,7 +573,13 @@ rc=$?
 assert_contains "$out" 'no process identity this proof can read' \
   "the refusal did not name why the target runtime could not be proved"
 assert_not_contains "$out" 'relaunched rp1' "an unprovable target runtime was reported as relaunched"
-pass "fm-control Herdr/Pi: a target runtime with no readable process identity refuses instead of being reported as relaunched"
+[ "$(grep -c 'encode launch-brief' "$dir/herdr.log" || true)" -eq 0 ] \
+  || fail "an unprovable target runtime was launched into the pane before being refused"
+[ "$(grep '^harness=' "$dir/home/state/rp1.meta" | cut -d= -f2-)" = pi ] \
+  || fail "a refused unprovable target runtime replaced the prior record's harness"
+[ ! -e "$dir/home/state/rp1.herdr-pi-release-proof" ] \
+  || fail "a refused unprovable target runtime left its private release capability behind"
+pass "fm-control Herdr/Pi: a target runtime with no readable process identity refuses before any replacement is launched"
 
 # Not every Herdr fleet anchors an official herdr:pi session; some only ever
 # expose the conservative process-detected Pi label. An ordinary relaunch there
