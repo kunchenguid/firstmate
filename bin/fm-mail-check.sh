@@ -8,13 +8,10 @@
 #   fm-mail-check.sh --help
 #
 # `check` runs the mail poll from this home (sourcing the same .env and using
-# the same inbox state as fm-mail.sh itself) and prints one line when a
-# successful poll surfaces new mail, or when something is wrong, so it
-# composes with the existing watcher state-check contract instead of needing
-# a schedule of its own. A successful poll with no new mail prints nothing.
-# When the poll surfaces new mail, the check emits one wake line so the
-# watcher wakes firstmate to drain the durable `check: mail <uid>` rows the
-# poll already queued.
+# the same inbox state as fm-mail.sh itself). It composes with the existing
+# watcher state-check contract instead of needing a schedule of its own: a
+# printed line becomes a `check:` wake so firstmate can drain durable
+# `check: mail <uid>` rows the poll already queued.
 #
 # `arm` writes state/mail.check.sh and binds its bytes with
 # fm-check-register.sh, so the watcher dispatches it on its normal
@@ -34,8 +31,9 @@
 # key, or growth of state/.mail-woken. Same-line silence is only for a
 # proven no-op: successful poll with no new mail, or a repeated pre-wake
 # failure (missing env, connection refused before wake_for, missing
-# python3, missing fm-mail.sh) that cannot have queued mail. Fail-closed
-# after a queued wake and timeout always doorbell.
+# python3, missing fm-mail.sh, heal could not record a uid) that cannot
+# have queued mail. Fail-closed after a queued wake and timeout always
+# doorbell.
 #
 # The poll must finish inside the watcher's per-check bound
 # (FM_CHECK_TIMEOUT, default 30, read from this check's own environment
@@ -71,7 +69,7 @@ MAX_LINE=240
 usage() {
   cat <<'EOF'
 Usage:
-  fm-mail-check.sh [check]   run the received-mail poll; wake line on new mail or failure
+  fm-mail-check.sh [check]   run the received-mail poll; wake line unless the poll is a proven no-op
   fm-mail-check.sh arm       write and register state/mail.check.sh
   fm-mail-check.sh disarm    remove the check shim, its trust binding, and the record
   fm-mail-check.sh --help    print this help
