@@ -181,6 +181,8 @@ The [operating contract](../configuration.md#process-to-event-sources-stateproce
 Measured on 2026-09-08 on macOS (Darwin 25.5.0) against a stand-in poll child that traps TERM, INT, and HUP and keeps blocking: before the repair the guard signalled, lost the leader to that signal, and exited leaving the child running past 70 seconds.
 The guard caused the permanent leak by destroying the leader needed to prove ownership; a guard that causes that leak is worse than no guard.
 After the repair, the guard cleared that child in 7.7 seconds with a 5-second lease and 1-second check, and `retire` cleared the same shape in about 2.4 seconds.
+The bound is the lease plus two consecutive failed checks plus the stop's grace period, roughly 630 seconds at the shipped 600-second lease and 15-second check, with two checks required so a single unreadable read cannot kill a live runner.
+The figure and that reason belong together: a number recorded without why it is that number is the one a later reader shortens.
 On the same date and host, retiring a healthy runner fell from about 2.8 seconds with a forced group signal every time to about 0.6 seconds with the ordinary signal alone.
 The circular lock wait described at `release_start_claim` in [`bin/fm-procevent.sh`](../../bin/fm-procevent.sh) explains why healthy runners required the forced signal; the measured delay was the stop waiting for exit cleanup that could not acquire its lock.
 
