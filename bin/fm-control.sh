@@ -725,6 +725,9 @@ resolve_relaunch_profile() {
   fi
   TARGET_SELECTION_RECEIPT=
   if [ "$KIND" != secondmate ]; then
+    if ! fm_dispatch_launch_model_identity_proven "$TARGET_HARNESS" "$TARGET_MODEL"; then
+      die "$TARGET_HARNESS launch commands must identify an exact model before dispatch; refusing to stop $ID before bin/fm-spawn.sh applies its authoritative launch validation"
+    fi
     if fm_dispatch_selection_receipt_required "$CONFIG/crew-dispatch.json" "$TARGET_HARNESS" "$TARGET_MODEL"; then
       [ "$SELECTION_RECEIPT_SET" = 1 ] \
         || die "resolved dispatch profile requires a current --selection-receipt for $TARGET_HARNESS/$TARGET_MODEL/$TARGET_EFFORT; refusing to stop $ID before endpoint, worktree, or backlog mutation"

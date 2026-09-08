@@ -160,7 +160,7 @@ EOF
     echo "mode=no-mistakes"
     echo "yolo=off"
     echo "tasktmp=/tmp/fm-$id"
-    echo "model=default"
+    echo "model=sonnet"
     echo "effort=default"
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
@@ -231,7 +231,7 @@ journal_field() {  # <case-dir> <id> <key>
 make_control_selection_receipt() {  # <case-dir> <task-id>
   local dir=$1 id=$2 snapshot="$1/quota-axi.json" receipt="$1/selection-receipt.json" digest created_at
   created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  printf 'generatedAt: "%s"\nquota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:\n  codex,all_models,50,0,through_reset,established,weekly,"%s"\nexhaustion[0]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:\nattention[0]:\n' "$created_at" "$created_at" > "$snapshot"
+  printf 'bin: quota-axi\ngeneratedAt: "%s"\nquota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:\n  codex,all_models,50,0,through_reset,established,weekly,"%s"\nexhaustion[0]:\nattention[0]:\n' "$created_at" "$created_at" > "$snapshot"
   digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
   jq -n --arg id "$id" --arg created_at "$created_at" --arg snapshot "$snapshot" --arg digest "$digest" '
     {version: 4, createdAt: $created_at, task: $id, harness: "codex",
@@ -550,7 +550,7 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   mkdir -p "$dir/wt/.claude"
   printf '{"hooks":{}}\n' > "$dir/wt/.claude/settings.local.json"
   printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" rl4 relaunch --harness codex --note "switching runtime"); rc=$?
+  out=$(run_control "$dir" rl4 relaunch --harness codex --model gpt-5 --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
   assert_contains "$out" "harness=codex from=claude" "the outcome should name both harnesses"
   [ "$(meta_field "$dir" rl4 harness)" = codex ] || fail "the record should follow the switch"
@@ -566,17 +566,17 @@ test_harness_switch_does_not_carry_the_old_profile_axes() {
   local dir out rc
   dir=$(new_case profile rl5)
   add_ship_task "$dir" rl5 claude
-  sed 's/^model=default$/model=opus/; s/^effort=default$/effort=xhigh/' \
+  sed 's/^model=sonnet$/model=opus/; s/^effort=default$/effort=xhigh/' \
     "$dir/home/state/rl5.meta" > "$dir/home/state/rl5.meta.tmp"
   mv "$dir/home/state/rl5.meta.tmp" "$dir/home/state/rl5.meta"
   printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" rl5 relaunch --harness codex --note "switching runtime"); rc=$?
+  out=$(run_control "$dir" rl5 relaunch --harness codex --model gpt-5 --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
-  [ "$(meta_field "$dir" rl5 model)" = default ] \
+  [ "$(meta_field "$dir" rl5 model)" = gpt-5 ] \
     || fail "a model chosen for the old harness must not carry to a different one"
   [ "$(meta_field "$dir" rl5 effort)" = default ] \
     || fail "an effort chosen for the old harness must not carry to a different one"
-  pass "fm-control relaunch: a harness switch resets model and effort unless they are named too"
+  pass "fm-control relaunch: a harness switch accepts only an explicit replacement model"
 }
 
 test_harness_switch_resolves_a_prefixed_recorded_harness() {
@@ -590,7 +590,7 @@ test_harness_switch_resolves_a_prefixed_recorded_harness() {
   printf '%s\n' "$dir/home/state/rl32.turn-ended" > "$auth"
   printf 'token=fm.abcdefabcdef\n' > "$dir/wt/.fm-grok-turnend"
 
-  out=$(run_control "$dir" rl32 relaunch --harness claude --note "switching runtime"); rc=$?
+  out=$(run_control "$dir" rl32 relaunch --harness claude --model sonnet --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "relaunch should resolve a prefixed recorded harness"$'\n'"$out"
   [ "$(sed -n '1p' "$dir/fake/literal")" = /exit ] \
     || fail "relaunch should stop a grok-prefixed task with grok's exit command"
@@ -641,7 +641,7 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   local dir out rc
   dir=$(new_case keepprofile rl6)
   add_ship_task "$dir" rl6 claude
-  sed 's/^model=default$/model=opus/; s/^effort=default$/effort=high/' \
+  sed 's/^model=sonnet$/model=opus/; s/^effort=default$/effort=high/' \
     "$dir/home/state/rl6.meta" > "$dir/home/state/rl6.meta.tmp"
   mv "$dir/home/state/rl6.meta.tmp" "$dir/home/state/rl6.meta"
   out=$(run_control "$dir" rl6 relaunch --note "same runtime"); rc=$?
@@ -695,7 +695,7 @@ test_relaunch_keeps_the_codex_account_until_the_harness_changes() {
     "the replacement launch should run against the recorded Codex account"
 
   printf 'claude' > "$dir/fake/becomes"
-  out=$(run_control "$dir" rl6b relaunch --harness claude --note "switching runtime"); rc=$?
+  out=$(run_control "$dir" rl6b relaunch --harness claude --model sonnet --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl6b codex_home)" ] \
     || fail "a Codex account must not survive a switch to another harness"
@@ -749,6 +749,28 @@ test_control_byte_codex_home_refuses_before_stopping_anything() {
   [ ! -e "$dir/home/state/rl6d.control-relaunch" ] \
     || fail "an unsafe recorded Codex home must refuse before creating a durable journal"
   pass "fm-control relaunch: an unsafe Codex home refuses before the worker is touched"
+}
+
+test_relaunch_unproven_model_refuses_before_stopping_anything() {
+  local dir out rc
+  dir=$(new_case unprovenmodel rl6e)
+  add_ship_task "$dir" rl6e codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  sed 's/^model=sonnet$/model=default/' "$dir/home/state/rl6e.meta" > "$dir/home/state/rl6e.meta.tmp"
+  mv "$dir/home/state/rl6e.meta.tmp" "$dir/home/state/rl6e.meta"
+
+  out=$(run_control "$dir" rl6e relaunch --note "preserve current worker"); rc=$?
+  expect_code 1 "$rc" "a relaunch with an unproven default model should refuse"
+  assert_contains "$out" "codex launch commands must identify an exact model before dispatch" \
+    "the refusal should require a concrete model before replacing the worker"
+  [ "$(cat "$dir/fake/command")" = codex ] \
+    || fail "an unproven replacement model must not stop the running worker"
+  [ -z "$(cat "$dir/fake/literal")" ] && [ -z "$(cat "$dir/fake/keys")" ] \
+    || fail "an unproven replacement model must deliver no lifecycle input"
+  [ ! -e "$dir/home/state/rl6e.control-relaunch" ] \
+    || fail "an unproven replacement model must refuse before creating a durable journal"
+  pass "fm-control relaunch: an unproven model refuses before the worker is touched"
 }
 
 test_astra_relaunch_requires_and_revalidates_a_selection_receipt_before_stop() {
@@ -1241,7 +1263,7 @@ test_launch_failure_keeps_the_prior_record_and_reports_it() {
   # The endpoint's shell is not in the recorded worktree, so the launch owner
   # refuses AFTER the previous agent has already been stopped.
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
-  out=$(run_control "$dir" rl13 relaunch --harness codex --note "carry this forward"); rc=$?
+  out=$(run_control "$dir" rl13 relaunch --harness codex --model gpt-5 --note "carry this forward"); rc=$?
   expect_code 1 "$rc" "a failed launch should fail closed"$'\n'"$out"
   assert_contains "$out" "no agent is running" "the failure should say no agent is running"
   assert_contains "$out" "$dir/wt" "the failure should say where the work is preserved"
@@ -1262,7 +1284,7 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
   add_ship_task "$dir" rl30 claude
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
   FM_FAKE_CWD_RACE_READY="$dir/cwd-race-ready" \
-    run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
+    run_control "$dir" rl30 relaunch --harness codex --model gpt-5 --note "preserve concurrent metadata" \
       > "$dir/control.out" &
   control_pid=$!
   while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 200 ]; do
@@ -1295,7 +1317,7 @@ test_post_publication_launch_failure_keeps_the_new_record() {
   add_ship_task "$dir" rl24 claude
   printf 'codex' > "$dir/fake/becomes"
   out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
-    run_control "$dir" rl24 relaunch --harness codex --note "keep the published record"); rc=$?
+    run_control "$dir" rl24 relaunch --harness codex --model gpt-5 --note "keep the published record"); rc=$?
   expect_code 1 "$rc" "a post-publication launch failure should fail closed"$'\n'"$out"
   [ "$(meta_field "$dir" rl24 harness)" = codex ] \
     || fail "a published replacement record must not be rewritten to the prior harness"
@@ -1332,7 +1354,7 @@ test_complete_journal_failure_rolls_back_from_durable_phase() {
   real_mv=$(command -v mv)
   make_mv_failure_stub "$dir"
   out=$(FM_REAL_MV="$real_mv" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL=1 \
-    run_control "$dir" rl27 relaunch --harness codex --note "keep durable phase honest"); rc=$?
+    run_control "$dir" rl27 relaunch --harness codex --model gpt-5 --note "keep durable phase honest"); rc=$?
   expect_code 1 "$rc" "a failed complete journal replacement should fail closed"$'\n'"$out"
   [ "$(journal_field "$dir" rl27 phase)" = failed:launching ] \
     || fail "rollback should start from the last durable launching phase"
@@ -1771,6 +1793,7 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_relaunch_keeps_the_codex_account_until_the_harness_changes
 test_missing_codex_home_refuses_before_stopping_anything
 test_control_byte_codex_home_refuses_before_stopping_anything
+test_relaunch_unproven_model_refuses_before_stopping_anything
 test_astra_relaunch_requires_and_revalidates_a_selection_receipt_before_stop
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused

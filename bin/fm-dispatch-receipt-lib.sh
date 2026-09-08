@@ -42,6 +42,23 @@ fm_dispatch_model_is_astra() {
   esac
 }
 
+fm_dispatch_launch_model_identity_proven() {
+  local harness=$1 model=$2
+  [ -n "$model" ] && [ "$model" != default ] || return 1
+  case "$harness" in
+    omp)
+      case "$model" in
+        ?*/?*)
+          case "${model#*/}" in
+            */*) return 1 ;;
+          esac
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+}
+
 fm_dispatch_selection_receipt_required() {  # <crew-dispatch.json> <harness> <model>
   local config=$1 harness=$2 model=$3 rc
   fm_dispatch_model_is_astra "$model" && return 0
