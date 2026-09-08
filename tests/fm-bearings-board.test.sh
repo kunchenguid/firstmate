@@ -79,7 +79,12 @@ esac
 file=$1
 shift
 reopen=0
-for arg in "$@"; do [ "$arg" != --reopen ] || reopen=1; done
+no_open=0
+for arg in "$@"; do
+  [ "$arg" != --reopen ] || reopen=1
+  [ "$arg" != --no-open ] || no_open=1
+done
+[ "$no_open" = 1 ] || { printf 'automated artifact establishment must pass --no-open\n' >&2; exit 97; }
 real=$(cd "$(dirname "$file")" && pwd -P)/$(basename "$file")
 if [ -e "$state/user-ended" ] && [ "$reopen" = 0 ]; then
   emit "$real" user-ended
