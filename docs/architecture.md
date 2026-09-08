@@ -307,6 +307,8 @@ PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and an
 The helper requires a full canonical URL and rejects malformed URLs or repo override flags before recording merge state.
 A `https://github.com/<owner>/<repo>/pull/<n>` URL invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, and preserves explicit merge-method flags.
 A `https://<host>/<path>/-/merge_requests/<n>` URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) invokes `glab mr merge <n> -R https://<host>/<path>`, so the instance comes from the URL, and adds no merge-method flag because the project's own merge method applies.
+A `https://<host>/<owner>/<repo>/pulls/<n>` URL (see [docs/gitea-merge-watch.md](gitea-merge-watch.md)) is recognised as Gitea by that path segment rather than by any hostname, so a self-hosted instance on any host and any port is recorded and watched.
+Its merge state is read from the instance's own REST API with the credential git's helper chain already holds for that host, and merging one is refused before anything is recorded because no Gitea merge path is implemented.
 That path merges only after one live read of the merge request confirms it is open, mergeable, conflict-free, with blocking discussions resolved and a successful pipeline at the current head, and it binds the merge to that verified head; recorded metadata is never the authority for those conditions because a rebase leaves it stale.
 After either forge command returns, the script confirms the PR or MR actually landed, and only a confirmed landing records a landed outcome; a queued or unconfirmed request records none and leaves its poll armed.
 On GitLab an auto-merge-queued or unconfirmed request is reported without failing the run.
