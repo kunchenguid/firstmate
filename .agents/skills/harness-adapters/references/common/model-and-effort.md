@@ -18,7 +18,8 @@ If an adapter lacks `xhigh`, cap at its highest supported non-`max` level rather
 Never select `max` through this fallback; only an explicit per-task or standing captain preference permits it.
 
 If requested effort is outside the adapter's accepted set, the spawn records `effort=` in task metadata but emits no effort flag.
-This preserves launch success instead of passing a known-bad value.
+For an accepted value with a narrower runtime capability, follow the selected tool reference's compatibility rule instead of passing a known-bad value.
+This preserves launch success while keeping the requested profile auditable.
 A harness with no verified interactive effort flag follows the same record-and-omit contract.
 
 ## Harness and provider identity

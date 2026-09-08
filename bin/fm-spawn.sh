@@ -46,8 +46,9 @@
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   installed CLIs were verified to support that axis; adapter-specific compatibility
+#   logic may clamp an accepted request when runtime discovery cannot confirm it,
+#   while unsupported axes are omitted from that harness's launch rather than guessed.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -1824,8 +1825,61 @@ model_flag_for_harness() {
   esac
 }
 
+# codex_default_model: print the default Codex model from this fm-spawn
+# process's codex configuration. Reads $CODEX_HOME/config.toml, falling back to
+# $HOME/.codex/config.toml. It looks only at top-level keys before the first
+# table header, and only for an exact `model = "..."` assignment. Returns
+# non-zero when the config is missing, unreadable, or contains no top-level
+# model, so callers can fail closed instead of treating an unknown default as
+# max-capable.
+codex_default_model() {
+  local config
+  config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+  [ -f "$config" ] || return 1
+  awk -f - "$config" <<'AWK'
+/^[[:space:]]*[[]/ { in_table=1; next }
+in_table { next }
+/^[[:space:]]*model[[:space:]]*=/ {
+  val=$0
+  sub(/^[[:space:]]*model[[:space:]]*=[[:space:]]*/, "", val)
+  sub(/[[:space:]]*#.*$/, "", val)
+  gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+  if (val ~ /^".*"$/ || val ~ /^'.*'$/) {
+    gsub(/^["']|["']$/, "", val)
+    if (val != "") {
+      print val
+      exit 0
+    }
+  }
+}
+AWK
+}
+
+# codex_model_supports_max_effort: 0 when the selected Codex model (or, when
+# the caller passes an empty/default model, the default model from this
+# fm-spawn process's codex config) advertises a "max" reasoning level. Reads
+# the local catalog via `codex debug models` and queries it with jq. Returns
+# non-zero when codex is absent, jq is absent, the catalog is unreachable, the
+# model cannot be found, or the model's supported_reasoning_levels does not
+# contain max.
+# The fail-safe direction is the clamp, never an unsupported pass-through.
+codex_model_supports_max_effort() {
+  local model=$1 catalog
+  [ -n "$model" ] && [ "$model" != default ] || model=$(codex_default_model)
+  [ -n "$model" ] || return 1
+  command -v codex >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  catalog=$(codex debug models 2>/dev/null) || return 1
+  printf '%s' "$catalog" | jq -e --arg model "$model" '
+    .models[]?
+    | select(.slug == $model or .id == $model or .model == $model or .name == $model or .selector == $model or .display_name == $model)
+    | .supported_reasoning_levels[]?
+    | select((if type == "object" then .effort else . end) == "max")
+  ' >/dev/null 2>&1
+}
+
 effort_flag_for_harness() {
-  local harness=$1 effort=$2
+  local harness=$1 effort=$2 model=${3:-}
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
@@ -1834,11 +1888,18 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+      # The installed codex config schema uses model_reasoning_effort. The
+      # bundled catalog lists per-model supported reasoning levels, so a
+      # requested max is passed through only when the selected model (or the
+      # default from this fm-spawn process's codex config when none is selected)
+      # advertises it. Otherwise it clamps to xhigh rather than launching with
+      # an unsupported value.
+      local codex_effort=$effort
+      if [ "$effort" = max ] && ! codex_model_supports_max_effort "$model"; then
+        codex_effort=xhigh
+      fi
+      case "$codex_effort" in
+        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$codex_effort\"")" ;;
       esac
       ;;
     grok)
@@ -3719,7 +3780,7 @@ sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}"
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 if [ "$HARNESS" = rovo ]; then

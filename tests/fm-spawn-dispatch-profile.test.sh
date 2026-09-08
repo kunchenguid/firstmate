@@ -47,6 +47,18 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = debug ] && [ "${2:-}" = models ]; then
+  if [ "${FM_FAKE_CODEX_MAX:-1}" = 1 ]; then
+    printf '%s\n' '{"models":[{"slug":"gpt-5","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}]},{"slug":"gpt-5.5","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]}]}'
+  else
+    printf '%s\n' '{"models":[{"slug":"gpt-5","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]},{"slug":"gpt-5.5","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]}]}'
+  fi
+fi
+exit 0
+SH
+  chmod +x "$fakebin/codex"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -417,7 +429,7 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_omits_invalid_max_effort() {
+test_codex_threads_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
   rec=$(make_spawn_case profile-codex-max codex "$id")
@@ -425,13 +437,94 @@ test_codex_omits_invalid_max_effort() {
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
   status=$?
-  expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
+  expect_code 0 "$status" "codex spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
-  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
-  pass "codex omits unsupported max effort instead of passing a bad config value"
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not pass a supported max effort through"
+  pass "codex passes a requested max effort through when the CLI supports it"
+}
+
+test_codex_clamps_max_effort_when_unsupported() {
+  local rec id out status launch
+  id=profile-codex-maxclamp-z4b
+  rec=$(make_spawn_case profile-codex-maxclamp codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_CODEX_MAX=0 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
+  status=$?
+  expect_code 0 "$status" "codex spawn with max effort on an xhigh-only CLI should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"xhigh\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not clamp an unsupported max effort to xhigh"
+  assert_not_contains "$launch" 'model_reasoning_effort="max"' "codex launch must not emit an unsupported max effort"
+  pass "codex clamps a requested max effort to xhigh when the CLI lacks max"
+}
+
+test_codex_clamps_max_for_model_that_lacks_max() {
+  local rec id out status launch
+  id=profile-codex-model-maxclamp-z4c
+  rec=$(make_spawn_case profile-codex-model-maxclamp codex "$id")
+  read_case_record "$rec"
+
+  # The capability check is model-aware: gpt-5.5's own catalog entry stops at
+  # xhigh, so a requested max clamps to xhigh even though gpt-5 in the same
+  # catalog advertises max.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.5 --effort max)
+  status=$?
+  expect_code 0 "$status" "codex spawn with max effort on a model that lacks max should clamp"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.5 max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5.5' -c 'model_reasoning_effort=\"xhigh\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not clamp max to xhigh for a model that lacks max"
+  assert_not_contains "$launch" 'model_reasoning_effort="max"' "codex launch must not emit an unsupported max effort for gpt-5.5"
+  pass "codex clamps max to xhigh for a selected model that does not support it"
+}
+
+test_codex_passes_max_for_default_model_with_max() {
+  local rec id out status launch fake_codex_home
+  id=profile-codex-default-max-z4d
+  rec=$(make_spawn_case profile-codex-default-max codex "$id")
+  read_case_record "$rec"
+
+  # The active default model in codex config is gpt-5, which the catalog says
+  # supports max, so an omitted --model with effort=max passes through.
+  fake_codex_home="$HOME_DIR/fake-codex"
+  mkdir -p "$fake_codex_home"
+  printf 'model = "gpt-5"\n' > "$fake_codex_home/config.toml"
+  out=$(FM_TEST_CODEX_HOME="$fake_codex_home" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort max)
+  status=$?
+  expect_code 0 "$status" "codex spawn with max effort and a max-capable default model should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not pass a supported max effort through for the default model"
+  assert_not_contains "$launch" "--model" "codex launch must not add a --model flag when none was requested"
+  pass "codex passes max through for the active default model when it supports max"
+}
+
+test_codex_clamps_max_for_default_model_without_max() {
+  local rec id out status launch fake_codex_home
+  id=profile-codex-default-xhigh-z4e
+  rec=$(make_spawn_case profile-codex-default-xhigh codex "$id")
+  read_case_record "$rec"
+
+  # The active default model in codex config is gpt-5.5, which the catalog says
+  # only supports up to xhigh, so an omitted --model with effort=max clamps.
+  fake_codex_home="$HOME_DIR/fake-codex"
+  mkdir -p "$fake_codex_home"
+  printf 'model = "gpt-5.5"\n' > "$fake_codex_home/config.toml"
+  out=$(FM_TEST_CODEX_HOME="$fake_codex_home" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort max)
+  status=$?
+  expect_code 0 "$status" "codex spawn with max effort and a default model that lacks max should clamp"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex -c 'model_reasoning_effort=\"xhigh\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not clamp max to xhigh for the active default model"
+  assert_not_contains "$launch" "--model" "codex launch must not add a --model flag when none was requested"
+  assert_not_contains "$launch" 'model_reasoning_effort="max"' "codex launch must not emit an unsupported max effort for the default model"
+  pass "codex clamps max to xhigh for the active default model when it does not support max"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -1149,7 +1242,11 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_omits_invalid_max_effort
+test_codex_threads_max_effort
+test_codex_clamps_max_effort_when_unsupported
+test_codex_clamps_max_for_model_that_lacks_max
+test_codex_passes_max_for_default_model_with_max
+test_codex_clamps_max_for_default_model_without_max
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
