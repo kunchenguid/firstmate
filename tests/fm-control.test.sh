@@ -278,7 +278,7 @@ test_harness_family_resolution() {
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
-      pi-signed:pi-signed omp:omp agy:agy agy-1.1.8:agy; do
+      pi-signed:pi-signed omp:omp agy:agy; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \
@@ -297,6 +297,10 @@ test_harness_family_resolution() {
     && fail "ompd must not be guessed into the omp adapter"
   fm_control_harness_family comp \
     && fail "comp must not be guessed into the omp adapter"
+  # agy is exact for the same reason: an agy* prefix would claim any command
+  # that merely starts with those letters.
+  fm_control_harness_family agyx \
+    && fail "agyx must not be guessed into the agy adapter"
   pass "fm-control-lib: a recorded harness resolves to its verified adapter without guessing"
 }
 
@@ -306,7 +310,7 @@ test_harness_family_resolution() {
 # slash command's completion popup makes load-bearing stops after one press.
 test_control_declares_the_targets_composer_harness() {
   local dir out rc pair
-  for pair in agy:agy agy-1.1.8:agy claude:claude cursor-agent:cursor; do
+  for pair in agy:agy claude:claude cursor-agent:cursor; do
     dir=$(new_case "composerharness-${pair%%:*}")
     add_task "$dir" t1 "${pair%%:*}"
     alive_as "$dir" "${pair%%:*}"
@@ -325,7 +329,7 @@ test_control_declares_the_targets_composer_harness() {
 # composer proof on a steer exactly as it does on a lifecycle verb.
 test_send_declares_the_targets_composer_harness() {
   local dir out rc pair
-  for pair in agy:agy agy-1.1.8:agy claude:claude; do
+  for pair in agy:agy claude:claude; do
     dir=$(new_case "sendharness-${pair%%:*}")
     add_task "$dir" t1 "${pair%%:*}"
     alive_as "$dir" "${pair%%:*}"

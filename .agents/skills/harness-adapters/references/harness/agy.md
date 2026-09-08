@@ -38,7 +38,7 @@ Zellij has no cursor or ANSI composer primitive and retains its existing pane-di
 
 `../../../bin/fm-harness.sh` tests `ANTIGRAVITY_AGENT=1` before every other marker, so a worker launched from an Agy primary would inherit its parent's identity.
 Every other verified adapter's launch therefore clears the marker at its own boundary through `env -u ANTIGRAVITY_AGENT` in `../../../bin/fm-spawn.sh`, while raw unverified launch commands pass through untouched.
-`../../../bin/fm-session-lock-lib.sh` and `../../../bin/backends/tmux.sh` match the exact process name `agy`, or a version-suffixed `agy-<version>` raw launch name, anchored like omp so an unrelated command such as `strategy` is never claimed as a live agent.
+`../../../bin/fm-session-lock-lib.sh` and `../../../bin/backends/tmux.sh` match the exact process name `agy`, anchored like omp so an unrelated command such as `strategy` is never claimed as a live agent.
 
 ## Task turn-end hook
 

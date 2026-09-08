@@ -27,8 +27,8 @@ esac
 [ -d "$AUTH_DIR" ] && [ ! -L "$AUTH_DIR" ] || exit 0
 [ -d "$EXPECTED_WORKSPACE" ] && [ ! -L "$EXPECTED_WORKSPACE" ] || exit 0
 
-PAYLOAD=
-IFS= read -r PAYLOAD || [ -n "$PAYLOAD" ] || exit 0
+PAYLOAD=$(cat 2>/dev/null || true)
+[ -n "$PAYLOAD" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 WORKSPACE=$(printf '%s' "$PAYLOAD" | jq -er '
   select(type == "object")

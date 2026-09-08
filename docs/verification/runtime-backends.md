@@ -128,8 +128,8 @@ Running the guard with `FM_HARNESS_LIVENESS_DRIFT=1` on Linux 6.8 x86_64 with tm
 # checked 4 installed harness(es)
 ```
 
-Agy is a single native executable whose live process name is the bare word `agy`, attributed by both name sources, so `bin/backends/tmux.sh` and `bin/fm-session-lock-lib.sh` anchor it exactly like omp, allowing only a digit-led `agy-<version>` suffix for a raw launch name, rather than globbing the `agy` fragment of ordinary words.
-`tests/fm-tmux-agent-liveness.test.sh` pins that anchoring with real processes, the `agy-1.1.8` form, and the `strategy` and `pedagogy` decoys.
+Agy is a single native executable whose live process name is the bare word `agy`, attributed by both name sources, so `bin/backends/tmux.sh` and `bin/fm-session-lock-lib.sh` anchor it exactly like omp rather than globbing the `agy` fragment of ordinary words.
+`tests/fm-tmux-agent-liveness.test.sh` pins that anchoring with real processes and the `strategy` and `pedagogy` decoys.
 
 Bounded output from the 2026-08-03 run that produced the first table above:
 

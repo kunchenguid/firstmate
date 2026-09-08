@@ -234,6 +234,11 @@ test_agy_spawn_delivers_after_trust_and_registers_hook() {
   [ "$out" = '{}' ] || fail "registered Agy hook did not emit its neutral result: $out"
   assert_present "$target" "registered Agy Stop payload did not touch the marker"
   rm "$target"
+  out=$(printf '%s\n' "$payload" | jq . \
+    | "$AGY_HOOK" "$HOME_DIR/state/agy-turn-end.d" "$token" "$WT_DIR")
+  [ "$out" = '{}' ] || fail "pretty-printed Agy hook payload did not emit its neutral result: $out"
+  assert_present "$target" "pretty-printed multi-line Agy Stop payload did not touch the marker"
+  rm "$target"
   out=$(printf '{"conversationId":"other","executionNum":0,"workspacePaths":["%s"]}\n' "$CASE_DIR/other" \
     | "$AGY_HOOK" "$HOME_DIR/state/agy-turn-end.d" "$token" "$WT_DIR")
   [ "$out" = '{}' ] || fail "foreign Agy hook did not emit its neutral result: $out"

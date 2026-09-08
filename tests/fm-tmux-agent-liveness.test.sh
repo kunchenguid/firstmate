@@ -60,10 +60,8 @@ ln -s "$SLEEP_BIN" "$LAB/bin/omp"
 ln -s "$SLEEP_BIN" "$LAB/bin/ompd"
 ln -s "$SLEEP_BIN" "$LAB/bin/comp"
 # agy (Anti-Gravity CLI) is a single ELF whose live process name is the bare
-# word `agy`, or a version-suffixed agy-<version> under a raw launch command;
-# the two decoys are ordinary words an unanchored glob would claim.
+# word `agy`; the two decoys are ordinary words an unanchored glob would claim.
 ln -s "$SLEEP_BIN" "$LAB/bin/agy"
-ln -s "$SLEEP_BIN" "$LAB/bin/agy-1.1.8"
 ln -s "$SLEEP_BIN" "$LAB/bin/strategy"
 ln -s "$SLEEP_BIN" "$LAB/bin/pedagogy"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
@@ -210,11 +208,6 @@ new_window agy "$LAB/bin/agy" 900
 wait_for_state "$SESSION:agy" alive \
   || fail "agy's bare binary name must classify alive"
 pass "tmux liveness: agy's bare binary name classifies alive"
-
-new_window agy-versioned "$LAB/bin/agy-1.1.8" 900
-wait_for_state "$SESSION:agy-versioned" alive \
-  || fail "a version-suffixed agy-<version> launch name must classify alive"
-pass "tmux liveness: a version-suffixed agy-<version> name classifies alive"
 
 for decoy in strategy pedagogy; do
   new_window "decoy-$decoy" "$LAB/bin/$decoy" 900

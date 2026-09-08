@@ -1198,7 +1198,6 @@ remove_agy_turnend_auth() {
   path=$(fm_control_harness_turnend_auth_path agy "$token" "$state_dir") || return 1
   [ -n "$path" ] || return 0
   rm -f -- "$path"
-  rmdir "${path%/*}" 2>/dev/null || true
 }
 
 # Only the worktree-resident half of Agy's wiring is retired here: the state

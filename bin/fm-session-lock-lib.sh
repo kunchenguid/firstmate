@@ -20,9 +20,8 @@
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
 # omp 18.1.11), and a substring match would claim ompd or comp. agy is anchored
 # for the same reason: its process name is the bare word `agy` (verified, agy
-# 1.1.27) or a version-suffixed agy-<version> raw launch name, and a substring
-# match would claim strategy or pedagogy.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy(-[0-9].*)?$'
+# 1.1.27), and a substring match would claim strategy or pedagogy.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
