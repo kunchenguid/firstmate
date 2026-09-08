@@ -3657,9 +3657,8 @@ EOF
 
 # A scout teardown finalizes the report, then bin/fm-teardown.sh rebuilds the
 # scout report index (bin/fm-report-index.sh) so the next session's digest can
-# surface it. The hook is non-fatal and gated on the report existing; this
-# proves it fires end to end and that the report survives (it is the
-# deliverable).
+# surface it. The hook is non-fatal; this proves it fires end to end and that
+# the report survives (it is the deliverable).
 test_scout_teardown_rebuilds_report_index() {
   local case_dir rc index
   case_dir=$(make_case scout-report-index)
@@ -3693,8 +3692,95 @@ test_scout_teardown_rebuilds_report_index() {
   pass "scout teardown rebuilds the report index and preserves the report"
 }
 
+test_forced_scout_teardown_indexes_missing_report() {
+  local case_dir rc skipped
+  case_dir=$(make_case forced-scout-missing-report)
+  write_meta "$case_dir" no-mistakes scout
+  seed_backlog_in_flight "$case_dir" scout
+  printf 'fm-branch-outcome-index-v1\t5\t0\t-\n' > "$case_dir/state/.task-x1.branch-outcome-index"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forced-scout-missing-report: teardown should succeed"
+  skipped="$case_dir/data/report-index.skipped"
+  assert_present "$skipped" "forced scout teardown did not refresh the skipped index"
+  assert_grep 'task-x1 | missing' "$skipped" "forced scout teardown did not catalog the missing report"
+  pass "forced scout teardown refreshes the missing-report index"
+}
+
+test_scout_teardown_refuses_symlinked_report() {
+  local case_dir rc
+  case_dir=$(make_case scout-symlinked-report)
+  write_meta "$case_dir" no-mistakes scout
+  seed_backlog_in_flight "$case_dir" scout
+  mkdir -p "$case_dir/data/task-x1"
+  printf '# External report\n' > "$case_dir/report-target.md"
+  ln -s "$case_dir/report-target.md" "$case_dir/data/task-x1/report.md"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "scout-symlinked-report: teardown accepted a symlinked report"
+  assert_grep 'has no regular report' "$case_dir/stderr" "symlinked scout report refusal was diagnosable"
+  assert_present "$case_dir/state/task-x1.meta" "symlinked scout report refusal removed the task record"
+  assert_present "$case_dir/wt" "symlinked scout report refusal removed the worktree"
+  pass "scout teardown refuses a symlinked report"
+}
+
+test_scout_teardown_does_not_wait_for_report_index_lock() {
+  local case_dir held release holder_pid teardown_pid rc still_running=1
+  case_dir=$(make_case scout-report-index-lock)
+  write_meta "$case_dir" no-mistakes scout
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir" scout
+  mkdir -p "$case_dir/data/task-x1"
+  printf '# Scout report\n\n## Summary (TL;DR)\n\nDone.\n' > "$case_dir/data/task-x1/report.md"
+  printf 'done: report at data/task-x1/report.md\n' > "$case_dir/state/task-x1.status"
+  printf 'fm-branch-outcome-index-v1\t5\t0\t-\n' > "$case_dir/state/.task-x1.branch-outcome-index"
+  held="$case_dir/lock-held"
+  release="$case_dir/release-lock"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 1
+    : > "$3"
+    while [ ! -f "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$case_dir/state/.report-index.lock" "$held" "$release" &
+  holder_pid=$!
+  for _ in $(seq 1 100); do
+    [ -f "$held" ] && break
+    sleep 0.02
+  done
+  [ -f "$held" ] || { : > "$release"; wait "$holder_pid" 2>/dev/null; fail "report index lock holder did not start"; }
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" &
+  teardown_pid=$!
+  for _ in $(seq 1 250); do
+    if ! kill -0 "$teardown_pid" 2>/dev/null; then
+      still_running=0
+      break
+    fi
+    sleep 0.02
+  done
+  : > "$release"
+  wait "$holder_pid" || fail "report index lock holder failed"
+  wait "$teardown_pid"; rc=$?
+  [ "$still_running" -eq 0 ] || fail "scout teardown waited for a live report index lock"
+  expect_code 0 "$rc" "scout-report-index-lock: teardown should succeed"
+  pass "scout teardown skips a contended report index refresh"
+}
+
 test_local_only_fork_remote_allows
 test_scout_teardown_rebuilds_report_index
+test_forced_scout_teardown_indexes_missing_report
+test_scout_teardown_refuses_symlinked_report
+test_scout_teardown_does_not_wait_for_report_index_lock
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses

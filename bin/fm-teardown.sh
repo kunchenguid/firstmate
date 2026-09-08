@@ -3003,8 +3003,8 @@ fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   REPORT="$DATA/$ID/report.md"
-  if [ ! -f "$REPORT" ]; then
-    echo "REFUSED: scout task $ID has no report at $REPORT." >&2
+  if [ ! -f "$REPORT" ] || [ -L "$REPORT" ]; then
+    echo "REFUSED: scout task $ID has no regular report at $REPORT." >&2
     echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
     exit 1
   fi
@@ -3394,10 +3394,11 @@ fi
 # surface this report. A scout report survives teardown (it is the deliverable),
 # so it is present and stable here. Non-fatal: an index rebuild never blocks
 # task cleanup, and bin/fm-report-index.sh skips unreadable/malformed/oversized
-# reports itself rather than failing. Gated on the report existing so a ship or
-# secondmate teardown pays nothing.
-if [ -f "$DATA/$ID/report.md" ]; then
-  "$SCRIPT_DIR/fm-report-index.sh" rebuild >/dev/null 2>&1 || true
+# reports itself rather than failing. Every scout teardown refreshes, including
+# an explicitly forced discard without a report; other task kinds refresh only
+# when they produced a report.
+if [ "$KIND" = scout ] || [ -f "$DATA/$ID/report.md" ]; then
+  "$SCRIPT_DIR/fm-report-index.sh" rebuild --no-wait >/dev/null 2>&1 || true
 fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window $T, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"

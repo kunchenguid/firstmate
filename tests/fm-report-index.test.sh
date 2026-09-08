@@ -187,6 +187,24 @@ EOF
   pass "show prints a bounded tail and an ABSENT marker"
 }
 
+test_show_rejects_unsafe_indexes() {
+  local home out
+  home=$(make_home show-unsafe)
+  printf '# Scout report index. Schema owner: bin/fm-report-index.sh.\nSHOW-LEAK-MARKER\n' \
+    > "$home/target.md"
+  ln -s "$home/target.md" "$home/data/report-index.md"
+  out=$(FM_HOME="$home" "$SCRIPT" show --tail 2)
+  assert_contains "$out" "ABSENT" "show rejects a symlinked index"
+  ! grep -q 'SHOW-LEAK-MARKER' <<<"$out" || fail "show streamed a symlink target"
+
+  home=$(make_home show-non-schema)
+  printf '# Not the schema owner\nSHOW-NON-SCHEMA-MARKER\n' > "$home/data/report-index.md"
+  out=$(FM_HOME="$home" "$SCRIPT" show --tail 2)
+  assert_contains "$out" "ABSENT" "show rejects a non-schema index"
+  ! grep -q 'SHOW-NON-SCHEMA-MARKER' <<<"$out" || fail "show streamed a non-schema index"
+  pass "show rejects symlinked and non-schema indexes"
+}
+
 test_session_start_digest_surfaces_bounded_index_tail() {
   local home out
   home=$(make_home digest)
@@ -277,6 +295,43 @@ EOF
   [ "$published" -eq 0 ] || fail "rebuild published while another rebuild held the lock"
   assert_grep 'serialized-report | ' "$home/data/report-index.md" "serialized rebuild published after lock release"
   pass "rebuild serializes scan through publication"
+}
+
+test_rebuild_no_wait_refuses_live_lock() {
+  local home held release holder_pid rebuild_pid rc still_running=1
+  home=$(make_home no-wait-lock)
+  held="$home/lock-held"
+  release="$home/release-lock"
+  FM_HOME="$home" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 1
+    : > "$3"
+    while [ ! -f "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/.report-index.lock" "$held" "$release" &
+  holder_pid=$!
+  for _ in $(seq 1 100); do
+    [ -f "$held" ] && break
+    sleep 0.02
+  done
+  [ -f "$held" ] || { : > "$release"; wait "$holder_pid" 2>/dev/null; fail "lock holder did not start"; }
+
+  FM_HOME="$home" "$SCRIPT" rebuild --no-wait > "$home/rebuild.out" 2>&1 &
+  rebuild_pid=$!
+  for _ in $(seq 1 50); do
+    if ! kill -0 "$rebuild_pid" 2>/dev/null; then
+      still_running=0
+      break
+    fi
+    sleep 0.02
+  done
+  : > "$release"
+  wait "$holder_pid" || fail "lock holder failed"
+  wait "$rebuild_pid"; rc=$?
+  [ "$still_running" -eq 0 ] || fail "--no-wait rebuild blocked on a live lock"
+  [ "$rc" -ne 0 ] || fail "--no-wait rebuild succeeded while a live lock was held"
+  [ ! -e "$home/data/report-index.md" ] || fail "--no-wait rebuild published without the lock"
+  pass "rebuild can refuse a live lock without waiting"
 }
 
 test_rebuild_reports_publication_failure_and_cleans_staging() {
@@ -391,6 +446,37 @@ EOF
   pass "rebuild rejects find and sort candidate failures"
 }
 
+test_rebuild_rejects_entry_sort_failure() {
+  local home real_sort rc
+  home=$(make_home entry-sort-failure)
+  write_report "$home" sortable firstmate <<'EOF'
+# Sortable
+
+## TL;DR
+
+sortable summary.
+EOF
+  real_sort=$(command -v sort)
+  mkdir -p "$home/fake-bin"
+  cat > "$home/fake-bin/sort" <<'EOF'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_SORT_COUNT" ] || count=$(cat "$FM_SORT_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_SORT_COUNT"
+"$FM_REAL_SORT" "$@"
+[ "$count" -lt 2 ]
+EOF
+  chmod +x "$home/fake-bin/sort"
+  FM_SORT_COUNT="$home/sort-count" FM_REAL_SORT="$real_sort" PATH="$home/fake-bin:$PATH" \
+    FM_HOME="$home" "$SCRIPT" rebuild > "$home/rebuild.out" 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "failed entry sorting was reported as success"
+  [ ! -e "$home/data/report-index.md" ] || fail "failed entry sorting published an index"
+  assert_grep 'could not sort report index entries' "$home/rebuild.out" "entry sort failure was diagnosable"
+  pass "rebuild rejects entry sort failures before publication"
+}
+
 test_rebuild_rejects_invalid_size_cap() {
   local home value rc
   for value in invalid 0; do
@@ -496,13 +582,48 @@ EOF
 - [x] ghost-scout - a completed scout whose report was removed data/ghost-scout/report.md (repo: firstmate) (kind: scout) (reported 2026-09-06)
 - [x] present-scout - an indexed completed scout data/present-scout/report.md (repo: firstmate) (kind: scout) (reported 2026-09-07)
 EOF
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+
+- [ ] active-scout - an active scout data/active-scout/report.md (repo: firstmate) (kind: scout)
+
+## Queued
+
+- [ ] queued-scout - a queued scout data/queued-scout/report.md (repo: firstmate) (kind: scout)
+
+## Done
+
+- [x] backlog-done-scout - a completed scout data/backlog-done-scout/report.md (repo: firstmate) (kind: scout)
+EOF
   FM_HOME="$home" "$SCRIPT" rebuild >/dev/null
   assert_grep "present-scout | " "$home/data/report-index.md" "the present scout was indexed"
   skipped=$(cat "$home/data/report-index.skipped" 2>/dev/null)
   assert_contains "$skipped" "ghost-scout | missing" "the missing completed scout was flagged with a reason"
+  assert_contains "$skipped" "backlog-done-scout | missing" "the backlog Done scout was flagged with a reason"
   ! grep -q 'present-scout' "$home/data/report-index.skipped" 2>/dev/null \
     || fail "the present scout was wrongly flagged as missing"
+  ! grep -q 'active-scout' "$home/data/report-index.skipped" \
+    || fail "an in-flight scout was wrongly flagged as missing"
+  ! grep -q 'queued-scout' "$home/data/report-index.skipped" \
+    || fail "a queued scout was wrongly flagged as missing"
   pass "rebuild flags missing completed-scout reports from the authoritative backlog"
+}
+
+test_rebuild_rejects_unsafe_report_paths() {
+  local home skipped
+  home=$(make_home unsafe-reports)
+  mkdir -p "$home/data/symlink-report" "$home/data/nonregular-report/report.md"
+  printf '# External title\n\n## TL;DR\n\nREPORT-SYMLINK-LEAK-MARKER\n' > "$home/target.md"
+  ln -s "$home/target.md" "$home/data/symlink-report/report.md"
+  FM_HOME="$home" "$SCRIPT" rebuild >/dev/null
+  ! grep -q 'REPORT-SYMLINK-LEAK-MARKER' "$home/data/report-index.md" \
+    || fail "a symlinked report target entered the index"
+  skipped=$(cat "$home/data/report-index.skipped")
+  assert_contains "$skipped" "symlink-report | unreadable" "a symlinked report was rejected"
+  assert_contains "$skipped" "nonregular-report | unreadable" "a non-regular report was rejected"
+  pass "rebuild rejects symlinked and non-regular reports"
 }
 
 # r2: entries are ordered by date then id (recency), not lexical task id, so the
@@ -569,11 +690,14 @@ test_report_body_marker_never_enters_index_or_skipped
 test_rebuild_is_idempotent
 test_skip_cases_record_reasons_without_body
 test_show_bounded_tail_and_absent
+test_show_rejects_unsafe_indexes
 test_rebuild_output_is_deterministic
 test_rebuild_serializes_scan_through_publication
+test_rebuild_no_wait_refuses_live_lock
 test_rebuild_reports_publication_failure_and_cleans_staging
 test_rebuild_rejects_directory_destinations
 test_rebuild_rejects_candidate_enumeration_failures
+test_rebuild_rejects_entry_sort_failure
 test_rebuild_rejects_invalid_size_cap
 test_rebuild_handles_empty_home
 test_rebuild_resolves_home_via_FM_HOME
@@ -581,6 +705,7 @@ test_rebuild_project_falls_back_when_no_brief
 test_rebuild_parses_cleanly
 test_rebuild_parses_session_start_and_teardown
 test_rebuild_flags_missing_completed_scout_reports
+test_rebuild_rejects_unsafe_report_paths
 test_rebuild_orders_entries_by_date_then_id
 test_digest_rejects_symlinked_and_non_schema_index
 test_session_start_digest_surfaces_bounded_index_tail

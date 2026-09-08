@@ -56,8 +56,8 @@
 #     skipped with a diagnostic and the rest are indexed.
 #
 # Who calls this:
-#   - bin/fm-teardown.sh rebuilds after a scout's report is finalized (a scout
-#     report survives teardown, so it is present and stable at that point).
+#   - bin/fm-teardown.sh rebuilds after every scout teardown, including an
+#     explicitly forced discard where the report is missing.
 #   - An operator or firstmate runs `rebuild` once to resync a home with reports
 #     that predate this script.
 #   - bin/fm-session-start.sh does NOT rebuild; it reads the prebuilt index file
@@ -65,8 +65,10 @@
 #     any unbounded scan.
 #
 # Usage:
-#   fm-report-index.sh rebuild        scan data/*/report.md and rebuild the index
-#                                     (default action when no subcommand is given)
+#   fm-report-index.sh rebuild [--no-wait]
+#                                     scan data/*/report.md and rebuild the index
+#                                     (default action when no subcommand is given;
+#                                     --no-wait exits when another rebuild holds the lock)
 #   fm-report-index.sh show [--tail N]  print the current index to stdout, one
 #                                     capped line per entry (manual inspection)
 #   fm-report-index.sh --help | -h    print this header's usage section
@@ -93,6 +95,7 @@ REBUILD_TMP_SKIPPED=
 REBUILD_TMP_CANDIDATES_RAW=
 REBUILD_TMP_CANDIDATES=
 REBUILD_TMP_ENTRIES=
+REBUILD_TMP_SORTED_ENTRIES=
 
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
@@ -217,7 +220,14 @@ index_entry() {
   SKIP_REASON=
   INDEX_ENTRY_LINE=
   INDEX_ENTRY_DATE=
-  [ -f "$report" ] || { SKIP_REASON=missing; return 1; }
+  if [ ! -e "$report" ] && [ ! -L "$report" ]; then
+    SKIP_REASON=missing
+    return 1
+  fi
+  if [ ! -f "$report" ] || [ -L "$report" ]; then
+    SKIP_REASON=unreadable
+    return 1
+  fi
   # stat reports size without opening the file, so an unreadable report's
   # permission error never leaks here; the head gate below owns readability.
   if ! size=$(stat -f%z "$report" 2>/dev/null || stat -c%s "$report" 2>/dev/null); then
@@ -256,20 +266,26 @@ index_entry() {
 # the pointer's directory. Format drift silently yields no ids (no missing
 # entries) rather than failing the rebuild, so this couples loosely.
 enumerate_backlog_scout_ids() {
-  local file line id
-  for file in "$DATA/done-archive.md" "$DATA/backlog.md"; do
-    [ -f "$file" ] || continue
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      case "$line" in
-        *'(kind: scout)'*)
-          id=$(printf '%s\n' "$line" | grep -oE 'data/[^/[:space:]]+/report\.md' | head -n1)
-          id=${id#data/}
-          id=${id%/report.md}
-          [ -n "$id" ] && printf '%s\n' "$id"
-          ;;
-      esac
-    done < "$file"
+  local line id
+  {
+    [ ! -f "$DATA/done-archive.md" ] || cat "$DATA/done-archive.md"
+    if [ -f "$DATA/backlog.md" ]; then
+      awk '
+        /^## Done[[:space:]]*$/ { in_done=1; next }
+        /^## / { in_done=0 }
+        in_done { print }
+      ' "$DATA/backlog.md"
+    fi
+  } | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *'(kind: scout)'*)
+        id=$(printf '%s\n' "$line" | grep -oE 'data/[^/[:space:]]+/report\.md' | head -n1)
+        id=${id#data/}
+        id=${id%/report.md}
+        [ -n "$id" ] && printf '%s\n' "$id"
+        ;;
+    esac
   done | LC_ALL=C sort -u
 }
 
@@ -295,6 +311,10 @@ rebuild_cleanup() {
     rm -f -- "$REBUILD_TMP_ENTRIES" 2>/dev/null || status=1
     REBUILD_TMP_ENTRIES=
   fi
+  if [ -n "$REBUILD_TMP_SORTED_ENTRIES" ]; then
+    rm -f -- "$REBUILD_TMP_SORTED_ENTRIES" 2>/dev/null || status=1
+    REBUILD_TMP_SORTED_ENTRIES=
+  fi
   if [ "$REBUILD_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$REBUILD_LOCK" || status=1
     REBUILD_LOCK_HELD=0
@@ -304,7 +324,14 @@ rebuild_cleanup() {
 
 # rebuild: scan data/*/report.md, write the index and skipped files atomically.
 rebuild() {
-  local report id entry_count=0 skipped_count=0 missing_count=0 sort_date scout_id
+  local report id entry_count=0 skipped_count=0 missing_count=0 sort_date scout_id lock_mode=wait
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-wait) lock_mode=no-wait ;;
+      *) echo "unknown rebuild argument: $1" >&2; return 2 ;;
+    esac
+    shift
+  done
   [ -d "$DATA" ] || { echo "error: data directory not found: $DATA" >&2; return 1; }
   case "$MAX_REPORT_BYTES" in
     ''|*[!0-9]*)
@@ -323,7 +350,12 @@ rebuild() {
   # shellcheck source=bin/fm-wake-lib.sh
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  if ! fm_lock_acquire_wait "$REBUILD_LOCK"; then
+  if [ "$lock_mode" = no-wait ]; then
+    if ! fm_lock_try_acquire "$REBUILD_LOCK"; then
+      echo "error: could not acquire report index lock: $REBUILD_LOCK" >&2
+      return 1
+    fi
+  elif ! fm_lock_acquire_wait "$REBUILD_LOCK"; then
     echo "error: could not acquire report index lock: $REBUILD_LOCK" >&2
     return 1
   fi
@@ -352,6 +384,10 @@ rebuild() {
     echo "error: could not stage sorted report index entries in $DATA" >&2
     return 1
   }
+  REBUILD_TMP_SORTED_ENTRIES=$(umask 077; mktemp "$DATA/.report-index.entries-sorted.XXXXXX" 2>/dev/null) || {
+    echo "error: could not stage sorted report index entries in $DATA" >&2
+    return 1
+  }
   if ! {
     printf '# Scout report index. Schema owner: bin/fm-report-index.sh.\n'
     printf '# One line per report: id | date | project | title | summary | path.\n'
@@ -376,7 +412,6 @@ rebuild() {
   # Deterministic lexical scan order; the published index is ordered by date
   # then id below (r2), so re-runs reproduce the same bytes regardless.
   while IFS= read -r report; do
-    [ -f "$report" ] || continue
     id=$(basename "$(dirname "$report")") || continue
     if index_entry "$id" "$report"; then
       # r2: sort by date (recency) then id; "unknown" dates sort oldest so the
@@ -407,7 +442,7 @@ rebuild() {
   # removed is surfaced here as `id | missing` rather than silently dropped.
   while IFS= read -r scout_id; do
     [ -n "$scout_id" ] || continue
-    if [ ! -f "$DATA/$scout_id/report.md" ]; then
+    if [ ! -e "$DATA/$scout_id/report.md" ] && [ ! -L "$DATA/$scout_id/report.md" ]; then
       if ! printf '%s | missing\n' "$scout_id" >> "$REBUILD_TMP_SKIPPED"; then
         echo "error: could not write staged skipped report index" >&2
         return 1
@@ -418,8 +453,12 @@ rebuild() {
   done < <(enumerate_backlog_scout_ids)
   # r2: publish entries ordered by date then id after the schema-owner header.
   if ! LC_ALL=C sort -t$'\t' -k1,1 -k2,2 "$REBUILD_TMP_ENTRIES" \
-    | cut -f3- >> "$REBUILD_TMP_INDEX"; then
-    echo "error: could not sort and stage report index entries" >&2
+      > "$REBUILD_TMP_SORTED_ENTRIES"; then
+    echo "error: could not sort report index entries" >&2
+    return 1
+  fi
+  if ! cut -f3- "$REBUILD_TMP_SORTED_ENTRIES" >> "$REBUILD_TMP_INDEX"; then
+    echo "error: could not stage report index entries" >&2
     return 1
   fi
   if [ -d "$INDEX_FILE" ] || [ -d "$SKIPPED_FILE" ]; then
@@ -469,7 +508,7 @@ rebuild() {
 # show [--tail N]: print the current index, one capped line per entry, newest
 # entries last. Manual inspection path; the digest renders its own bounded tail.
 show() {
-  local tail_n=${FM_REPORT_INDEX_TAIL:-8}
+  local tail_n=${FM_REPORT_INDEX_TAIL:-8} first
   while [ $# -gt 0 ]; do
     case "$1" in
       --tail) shift; tail_n=${1:-$tail_n};;
@@ -478,7 +517,15 @@ show() {
     shift || true
   done
   case "$tail_n" in ''|*[!0-9]*) tail_n=8 ;; esac
-  [ -f "$INDEX_FILE" ] || { echo "ABSENT: $INDEX_FILE (run bin/fm-report-index.sh rebuild)"; return 0; }
+  if [ ! -f "$INDEX_FILE" ] || [ -L "$INDEX_FILE" ]; then
+    echo "ABSENT: $INDEX_FILE (unsafe or missing; run bin/fm-report-index.sh rebuild)"
+    return 0
+  fi
+  first=$(head -n 1 "$INDEX_FILE" 2>/dev/null) || first=
+  if [ "$first" != '# Scout report index. Schema owner: bin/fm-report-index.sh.' ]; then
+    echo "ABSENT: $INDEX_FILE (rejected: not the schema-owner index)"
+    return 0
+  fi
   grep -v '^#' "$INDEX_FILE" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n "$tail_n"
 }
 
