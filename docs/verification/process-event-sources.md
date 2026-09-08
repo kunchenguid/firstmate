@@ -186,7 +186,7 @@ Three paths stop a runner generation through its verified process group:
 - `reconcile` stops a runner this home owns whose source registration has been removed, and reports it as `stopped=N`.
 
 The owner guard and explicit cleanup paths reach the blocking source and its descendants through the runner's group.
-The launch floor independently bounds an immediately returning source while an owner-loss lease is still valid.
+The registration launch floor independently bounds repeated runner launches while an owner-loss lease is still valid. The Lavish adapter's start-to-start poll governor separately bounds its internal retry loop under shipped defaults without delaying a normally blocking poll.
 An attached public `start` maintains the lease for its caller's lifetime.
 At the accepted confused-agent/accidental grade, the inherited `FM_PROCEVENT_IN_RUNNER` marker prevents detached runners and their ordinary children from refreshing it; adversarial unforgeability against a source that deliberately strips that marker is out of scope.
 

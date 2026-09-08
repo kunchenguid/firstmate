@@ -831,8 +831,12 @@ cmd_start() {
   # Built-in adapters do not run the extension capture helper, so keep this
   # sentinel defined while sharing the no-result branch below under `set -u`.
   local truncated=0 capture_state='' durable='' reservation_terminal='' reservation_silent=''
-  fm_procevent_launch_floor_wait "$STATE" "$id" "$CLAIM_REG_IDENTITY" "$launch_floor" \
-    || die "cannot enforce the source launch floor: $id"
+  fm_procevent_launch_floor_wait "$STATE" "$id" "$CLAIM_REG_IDENTITY" "$launch_floor"
+  case "$?" in
+    0) ;;
+    2) exit 0 ;;
+    *) die "cannot enforce the source launch floor: $id" ;;
+  esac
   exec 7<&-
   if [ "$extension_owner" -eq 1 ]; then
     capture_state=$(perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \

@@ -268,8 +268,8 @@ fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-ide
   registration="$reg/$id.source"
   current_identity=$(fm_pr_file_identity "$registration" 2>/dev/null) || current_identity=
   if [ "$current_identity" != "$expected" ]; then
-    fm_procevent_source_lock_release "$id"
-    return 0
+    fm_procevent_source_lock_release "$id" || return 1
+    return 2
   fi
   [ ! -L "$stamp" ] && { [ ! -e "$stamp" ] || [ -f "$stamp" ]; } || status=1
   if [ "$status" -eq 0 ]; then

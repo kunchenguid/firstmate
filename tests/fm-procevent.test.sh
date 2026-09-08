@@ -506,10 +506,20 @@ pass "a source stays armed unless its own adapter classifies the result terminal
 HREPLACE="$TMP_ROOT/hreplace"; new_home "$HREPLACE"
 fm_test_track_procevent_home "$HREPLACE"
 OLD_TRIGGER="$TMP_ROOT/replace-old-trigger"
-pe_adapter "$HREPLACE" register endnow replace-src -- "$BLOCKER" "$OLD_TRIGGER" "old terminal payload" >/dev/null
+OLD_STARTED="$TMP_ROOT/replace-old-started"
+REPLACE_BLOCKER="$TMP_ROOT/replace-blocker.sh"
+cat > "$REPLACE_BLOCKER" <<'SH'
+#!/usr/bin/env bash
+printf 'started\n' > "$1"
+shift
+exec "$@"
+SH
+chmod +x "$REPLACE_BLOCKER"
+pe_adapter "$HREPLACE" register endnow replace-src -- \
+  "$REPLACE_BLOCKER" "$OLD_STARTED" "$BLOCKER" "$OLD_TRIGGER" "old terminal payload" >/dev/null
 pe_adapter "$HREPLACE" start replace-src > "$TMP_ROOT/replace-old.out" 2>&1 &
 replace_old_pid=$!
-wait_for "$FM_PROCEVENT_CLAIM_ROOT/replace-src.claim" || fail "the old registration was never claimed"
+wait_for "$OLD_STARTED" || fail "the old registration never started"
 pe_adapter "$HREPLACE" register openended replace-src -- /bin/echo "replacement payload" >/dev/null
 touch "$OLD_TRIGGER"
 wait "$replace_old_pid" || fail "the old terminal runner failed"
@@ -726,6 +736,24 @@ esac
 SH
 chmod +x "$LAVISH_SCRIPTED_BIN/lavish-axi"
 export LAVISH_COUNT LAVISH_SCRIPT
+
+DEFAULT_RATE_ART="$TMP_ROOT/default-rate-board.html"
+printf '<h1>default rate</h1>\n' > "$DEFAULT_RATE_ART"
+DEFAULT_RATE_COUNT="$TMP_ROOT/default-rate-count"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$DEFAULT_RATE_COUNT" LAVISH_SCRIPT=interrupt \
+  FM_LAVISH_POLL_RETRY_DELAY= \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$DEFAULT_RATE_ART" >/dev/null 2>&1 &
+DEFAULT_RATE_PID=$!
+perl -MTime::HiRes=sleep -e 'sleep 6.2'
+kill -TERM "$DEFAULT_RATE_PID" 2>/dev/null || true
+wait "$DEFAULT_RATE_PID" 2>/dev/null || true
+default_rate_count=$(cat "$DEFAULT_RATE_COUNT" 2>/dev/null || echo 0)
+[ "$default_rate_count" -ge 2 ] \
+  || fail "the default poll governor stopped an instantly returning source from making progress"
+[ "$default_rate_count" -le 2 ] \
+  || fail "the shipped poll governor allowed $default_rate_count iterations in 6.2 seconds"
+pass "the shipped poll governor bounds an instantly returning source"
+
 # A bounded test override keeps the retry policy's real bound under test without
 # making the suite wait out the production delay.
 export FM_LAVISH_POLL_RETRY_DELAY=1
@@ -2029,6 +2057,8 @@ wait_for "$FM_PROCEVENT_CLAIM_ROOT/pace-race-src.claim" \
   || fail "the superseded pacing fixture was not waiting on its launch floor"
 pe_register "$HPACE_RACE" lavish pace-race-src -- "$FAST_SOURCE" "$PACE_RACE_LOG" >/dev/null
 wait "$PACE_RACE_PID" || fail "the superseded paced runner failed"
+[ "$(wc -l < "$PACE_RACE_LOG" | tr -d ' ')" = 1 ] \
+  || fail "the superseded paced runner invoked its stale command"
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3 pe "$HPACE_RACE" start pace-race-src >/dev/null
 PACE_RACE_STAMPS=$(find "$HPACE_RACE/state/procevent" -maxdepth 1 -type f \
   -name 'pace-race-src.*.last-launch' | wc -l | tr -d ' ')
