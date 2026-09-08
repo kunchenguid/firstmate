@@ -321,6 +321,23 @@ fm_procevent_source_lock_acquire() {
   fm_lock_acquire_wait "$(fm_procevent_source_lock_path "$id")"
 }
 
+# fm_procevent_source_lock_try_acquire <source-id>
+# The refusing mode of the acquire above, for the one caller that must never wait
+# on this lock: a runner's own exit cleanup. Every stop holds this lock across
+# the wait it spends on that runner, so waiting there is a circular wait whose
+# only exit is the stop's forced kill - which is how the ordinary stop signal
+# stopped being what actually stops a runner. Refusing costs nothing: the only
+# holder a stopped runner ever contends with is the stopper, and it reclaims the
+# claim itself.
+fm_procevent_source_lock_try_acquire() {
+  local id=$1 root
+  fm_procevent_source_id_valid "$id" || return 1
+  root=$(fm_procevent_claim_root)
+  (umask 077; mkdir -p "$root") || return 1
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  fm_lock_try_acquire "$(fm_procevent_source_lock_path "$id")"
+}
+
 fm_procevent_source_lock_release() {
   fm_lock_release "$(fm_procevent_source_lock_path "$1")"
 }

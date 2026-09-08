@@ -771,10 +771,15 @@ cmd_start() {
   CLAIM_STATE_DEVICE=$FM_PROCEVENT_CLAIM_STATE_DEVICE
   CLAIM_STATE_INODE=$FM_PROCEVENT_CLAIM_STATE_INODE
   STAGED_OUTPUT=
+  # Non-blocking on purpose, and the `return 0` below is the whole point: a stop
+  # holds this source lock for as long as it waits on this very runner, so waiting
+  # for it here made the runner outlive the ordinary stop signal every time and
+  # left the forced kill carrying the normal path. The contended holder is the
+  # stopper, which reclaims this claim itself.
   release_start_claim() {
     extension_lifecycle_lock_release 2>/dev/null || true
     [ -z "$STAGED_OUTPUT" ] || rm -f -- "$STAGED_OUTPUT"
-    fm_procevent_source_lock_acquire "$CLAIM_ID" 2>/dev/null || return 0
+    fm_procevent_source_lock_try_acquire "$CLAIM_ID" 2>/dev/null || return 0
     if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
       && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
       && [ "$FM_PROCEVENT_CLAIM_PID" = "$CLAIM_PID" ] \
@@ -1270,8 +1275,18 @@ cmd_reconcile() {
 # its own process group leader, so the group signal is what actually reaches the
 # blocking child - signalling only the runner would leave that child alive and
 # reparented, which is exactly how a source that never completes leaks.
-runner_group_signal() {  # <signal> <pid> <identity>
-  local signal=$1 pid=$2 identity=$3 state pgid
+# `proved` is passed only by this call's own escalation below, never by a caller
+# that merely encountered a leaderless group. It accepts exactly one extra state:
+# the leader gone with its group still populated, which is the ORDINARY outcome of
+# the TERM this same call just sent after proving the generation. Without it the
+# stop reads its own success as fresh ambiguity, abandons whatever survived the
+# ordinary signal, and leaves it unreachable forever. A reused pid is still alive
+# with a mismatched identity, so it reads stale here and is still refused; a
+# leaderless group nobody in this call ever proved remains refused too, for every
+# caller. That untouched refusal is what makes a crashed leader's group permanent,
+# and relaxing it is a separate open question, not something this path assumes.
+runner_group_signal() {  # <signal> <pid> <identity> [proved]
+  local signal=$1 pid=$2 identity=$3 proved=${4-} state pgid
   # KNOWN LIMIT: only an alive identity-matched leader proves group ownership.
   # Detected reused PIDs and absent leaders are refused before signalling;
   # launch pacing, leases, and reconcile cleanup are the backstop.
@@ -1280,10 +1295,15 @@ runner_group_signal() {  # <signal> <pid> <identity>
   case "$state" in
     0) ;;
     1) fm_procevent_group_alive "$pid" && return 2; return 1 ;;
+    3) [ -n "$proved" ] || return 2 ;;
     *) return 2 ;;
   esac
-  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
-  [ "$pgid" = "$pid" ] || return 2
+  # A proved escalation has no leader left to re-read a pgid from; state 3 already
+  # established that this exact numeric group still has members.
+  if [ "$state" -eq 0 ]; then
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
+    [ "$pgid" = "$pid" ] || return 2
+  fi
   # KNOWN LIMIT: portable shell cannot make this verification and signal atomic,
   # so the PID and group could be reused in the interval between them.
   kill -"$signal" -"$pid" 2>/dev/null || return 2
@@ -1301,7 +1321,7 @@ stop_runner_pid() {  # <pid> <identity>
     sleep 0.1
     i=$((i + 1))
   done
-  runner_group_signal KILL "$pid" "$identity"
+  runner_group_signal KILL "$pid" "$identity" proved
   signal_state=$?
   [ "$signal_state" -eq 0 ] || return "$signal_state"
   i=0

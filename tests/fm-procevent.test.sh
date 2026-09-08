@@ -2500,4 +2500,181 @@ wait_gone "$RETRY_DESCENDANT" \
   || fail "the guard stopped retrying before the expired runner's descendant was reaped"
 pass "a stop the guard cannot prove is retried until the expired runner is reaped"
 
+# --- a stop reaches a child that does not die on the ordinary signal ---------
+#
+# Every reaper here sends the ordinary stop signal to the runner's process group
+# and escalates only if the group outlives it. Both halves of that escalation
+# were broken, in ways that hid each other:
+#
+#   - The stop held the per-source lock across its wait while the runner's own
+#     exit cleanup waited for that same lock, so the runner outlived the ordinary
+#     signal every time and the forced kill silently became the normal path.
+#   - The escalation re-derived ownership from the leader, so once the leader did
+#     die to the stop's own signal it read that success as a leaderless group and
+#     refused to escalate at all.
+#
+# With only the first repaired, the second turned every stop of a signal-proof
+# child into a refusal that left it running. They are asserted together because
+# they only hold together.
+#
+# Every stub above dies on the ordinary signal, which is why neither half was
+# caught: escalation was never reached, or never needed.
+
+# Millisecond clock, for the one assertion below whose subject is a duration.
+now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
+
+SIGNAL_PROOF_STUB="$TMP_ROOT/signal-proof-stub.sh"
+cat > "$SIGNAL_PROOF_STUB" <<'SH'
+#!/usr/bin/env bash
+# A blocking source whose child handles the ordinary stop signal and keeps
+# waiting - the shape a poll client with its own shutdown handler presents while
+# a request is still outstanding. Reaching it requires a real escalation. The
+# signal log is what proves the child was signalled and survived, rather than
+# never having been signalled at all. The wait stays bounded so an escaped stub
+# cannot outlive the suite.
+marker=$1
+trap 'printf "signalled\n" >> "$marker.signals"' TERM INT HUP
+printf '%s\n' "$$" > "$marker.child"
+while [ ! -e "$marker.trigger" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+  sleep 0.1 &
+  wait $!
+done
+printf 'signal-proof payload\n'
+SH
+chmod +x "$SIGNAL_PROOF_STUB"
+
+HPROOF="$TMP_ROOT/signal-proof-retire"; new_home "$HPROOF"
+pe_register "$HPROOF" lavish proof-src -- "$SIGNAL_PROOF_STUB" "$TMP_ROOT/proof-retire" >/dev/null
+pe "$HPROOF" reconcile >/dev/null
+wait_for "$HPROOF/state/procevent/proof-src.runner" \
+  || fail "the signal-proof listener never recorded its runner"
+PROOF_PID=$(cat "$HPROOF/state/procevent/proof-src.runner")
+wait_for "$TMP_ROOT/proof-retire.child" || fail "the signal-proof child never started"
+PROOF_CHILD=$(cat "$TMP_ROOT/proof-retire.child")
+
+pe "$HPROOF" retire proof-src >/dev/null || fail "retiring a signal-proof listener reported failure"
+wait_gone "-$PROOF_PID" \
+  || fail "retirement left the signal-proof listener's process group running"
+wait_gone "$PROOF_CHILD" \
+  || fail "retirement left a child that survived the ordinary stop signal running"
+[ -s "$TMP_ROOT/proof-retire.signals" ] \
+  || fail "the child under test was never signalled, so nothing about escalation was exercised"
+pass "retirement escalates past a child that survives the ordinary stop signal"
+
+# --- the owner guard reaps a signal-proof child too --------------------------
+#
+# The guard is where the time bound on a leaked listener lives, so it is the half
+# that matters most: a guard that signals, loses its leader to its own signal and
+# then walks away leaves the survivor unreachable by anything at all - worse than
+# no guard, because the leader it destroyed was the only proof of ownership left.
+
+HPGUARD="$TMP_ROOT/signal-proof-guard"; new_home "$HPGUARD"
+fm_test_track_procevent_home "$HPGUARD"
+orphan_pe "$HPGUARD" register lavish proof-guard-src \
+  -- "$SIGNAL_PROOF_STUB" "$TMP_ROOT/proof-guard" >/dev/null
+orphan_pe "$HPGUARD" reconcile >/dev/null
+# The owner is kept present until the fixture is fully up, because the input
+# under test is an owner that GOES AWAY, not a runner that never finished
+# starting: on a loaded host the short lease here can otherwise expire while the
+# runner is still between fork and its first recorded state.
+deadline=$((SECONDS + 60))
+until [ -s "$HPGUARD/state/procevent/proof-guard-src.runner" ] \
+  && [ -s "$TMP_ROOT/proof-guard.child" ]; do
+  [ "$SECONDS" -lt "$deadline" ] || fail "the guarded signal-proof listener never started"
+  orphan_pe "$HPGUARD" reconcile >/dev/null 2>&1 || true
+  sleep 0.25
+done
+GUARD_PID=$(cat "$HPGUARD/state/procevent/proof-guard-src.runner")
+GUARD_CHILD=$(cat "$TMP_ROOT/proof-guard.child")
+
+# Nothing refreshes this home's lease from here on, which is the whole input.
+deadline=$((SECONDS + 60))
+while kill -0 -"$GUARD_PID" 2>/dev/null; do
+  [ "$SECONDS" -lt "$deadline" ] \
+    || fail "the guard left a signal-proof listener's process group running"
+  sleep 0.5
+done
+wait_gone "$GUARD_CHILD" \
+  || fail "the guard stopped at the leader and left the signal-proof child running"
+[ -s "$TMP_ROOT/proof-guard.signals" ] \
+  || fail "the guarded child was never signalled, so nothing about escalation was exercised"
+pass "an expired runner's guard escalates past a signal-proof child"
+
+# --- the ordinary stop signal is what stops a runner ------------------------
+#
+# The forced kill is the backstop, not the normal path. When it carries every
+# stop, it stops being able to report that anything went wrong - which is exactly
+# how a listener that could not be stopped looked identical to one that could.
+# The stop's ordinary window is two seconds, so a stop that has to exhaust it
+# cannot finish inside that bound and one that does not is well under it.
+
+HPROMPT="$TMP_ROOT/prompt-stop"; new_home "$HPROMPT"
+pe_register "$HPROMPT" lavish prompt-src -- "$QUIET_STUB" "$TMP_ROOT/prompt-stop" >/dev/null
+pe "$HPROMPT" reconcile >/dev/null
+wait_for "$HPROMPT/state/procevent/prompt-src.runner" \
+  || fail "the promptly-stopping listener never recorded its runner"
+PROMPT_PID=$(cat "$HPROMPT/state/procevent/prompt-src.runner")
+wait_for "$TMP_ROOT/prompt-stop.descendant" \
+  || fail "the promptly-stopping listener's child never spawned its own descendant"
+# Calibrated against this host rather than a wall-clock constant: the bound
+# under test IS the stop's own window - twenty tenth-of-a-second polls - and a
+# loaded host stretches that window and this retirement by the same factor, so
+# an absolute bound would measure the host instead of the behavior. The window
+# is sampled on both sides so a load spike during the retirement is caught by
+# the sample that follows it.
+stop_window_ms() {
+  local from to
+  from=$(now_ms)
+  for _ in $(seq 1 20); do sleep 0.1; done
+  to=$(now_ms)
+  printf '%s\n' "$((to - from))"
+}
+window_before=$(stop_window_ms)
+start=$(now_ms)
+pe "$HPROMPT" retire prompt-src >/dev/null || fail "retiring a healthy listener reported failure"
+elapsed=$(( $(now_ms) - start ))
+window_after=$(stop_window_ms)
+window=$window_before
+[ "$window_after" -le "$window" ] || window=$window_after
+wait_gone "-$PROMPT_PID" || fail "retiring a healthy listener left its process group running"
+[ "$elapsed" -lt "$window" ] \
+  || fail "the stop had to exhaust its ordinary signal window before the runner exited (${elapsed}ms against a ${window}ms window)"
+pass "a runner exits on the ordinary stop signal instead of outliving it"
+
+# --- a crashed leader's group is still refused -------------------------------
+#
+# The escalation above accepts a leaderless group in exactly one place: inside
+# the stop that just proved and signalled that generation itself. Whether a group
+# whose leader died to something ELSE may ever be signalled is a separate open
+# question, and this pins that it stays refused - so the escalation cannot widen
+# into an answer to it by accident.
+
+HCRASH="$TMP_ROOT/crashed-leader"; new_home "$HCRASH"
+pe_register "$HCRASH" lavish crash-src -- "$QUIET_STUB" "$TMP_ROOT/crash-leader" >/dev/null
+pe "$HCRASH" reconcile >/dev/null
+wait_for "$HCRASH/state/procevent/crash-src.runner" \
+  || fail "the crash-fixture listener never recorded its runner"
+CRASH_PID=$(cat "$HCRASH/state/procevent/crash-src.runner")
+wait_for "$TMP_ROOT/crash-leader.descendant" \
+  || fail "the crash-fixture listener's child never spawned its own descendant"
+kill -KILL "$CRASH_PID" 2>/dev/null || fail "the crash fixture could not stop its own leader"
+deadline=$((SECONDS + 10))
+while kill -0 "$CRASH_PID" 2>/dev/null; do
+  [ "$SECONDS" -lt "$deadline" ] || fail "the crash fixture's leader never died"
+  sleep 0.1
+done
+kill -0 -"$CRASH_PID" 2>/dev/null \
+  || fail "the crash fixture left no surviving group, so nothing was refused"
+
+out=$(pe "$HCRASH" retire crash-src 2>&1) && fail "retirement claimed success on a crashed leader's group"
+assert_contains "$out" "cannot confirm runner identity" \
+  "a crashed leader's group is refused with its own diagnostic"
+assert_present "$HCRASH/state/procevent/crash-src.source" \
+  "a refused retirement leaves the source registered"
+kill -0 -"$CRASH_PID" 2>/dev/null \
+  || fail "a refused retirement signalled the leaderless group anyway"
+pass "a group whose leader died to something else is still refused, not signalled"
+kill -KILL -"$CRASH_PID" 2>/dev/null || true
+
 printf '\nall procevent tests passed\n'
