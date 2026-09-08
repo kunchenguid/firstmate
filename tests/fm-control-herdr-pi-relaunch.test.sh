@@ -45,6 +45,19 @@ state=$FM_FAKE_HERDR_STATE
 log=$FM_FAKE_HERDR_LOG
 scenario=$(cat "$FM_FAKE_SCENARIO")
 phase=$(cat "$state")
+
+# The release proof is fm-control's private, transaction-bound capability file
+# (bin/fm-control.sh control_write_herdr_pi_release_proof) that fm-spawn
+# consumes and then deletes, so capture it - together with the pid recorded in
+# the lifecycle lock fm-spawn verifies it against - the first time any Herdr
+# call observes it on disk.
+if [ -n "${FM_FAKE_PROOF_SNAPSHOT:-}" ] && [ ! -s "$FM_FAKE_PROOF_SNAPSHOT" ] \
+   && [ -f "${FM_FAKE_PROOF:-}" ]; then
+  {
+    cat "$FM_FAKE_PROOF"
+    printf 'lock_pid=%s\n' "$(cat "$FM_FAKE_CONTROL_LOCK/pid" 2>/dev/null || true)"
+  } > "$FM_FAKE_PROOF_SNAPSHOT" 2>/dev/null || true
+fi
 {
   for arg in "$@"; do printf '%s\x1f' "$arg"; done
   printf '\n'
@@ -351,12 +364,20 @@ EOF
   fi
 }
 
+# FM_FAKE_PS_COMM_PREFIX reproduces the macOS process table: `comm` reports the
+# executable PATH, and the column is truncated to 16 characters whenever it is
+# NOT the last requested column, so only the untruncated `args` column still
+# names the binary. Unset, the rows keep the Linux shape (a short basename).
+prefix=${FM_FAKE_PS_COMM_PREFIX:-}
 if printf '%s\n' "$*" | grep -Fq 'args='; then
-  rows
+  rows | awk -v prefix="$prefix" '{
+    if (prefix != "") $5 = substr(prefix "/" $5, 1, 16)
+    print
+  }'
 elif printf '%s\n' "$*" | grep -Fq 'stat=,comm='; then
-  rows | awk '{ print $1, $2, $4, $5 }'
+  rows | awk -v prefix="$prefix" '{ print $1, $2, $4, (prefix == "" ? $5 : prefix "/" $5) }'
 else
-  rows | awk '{ print $1, $2, $5 }'
+  rows | awk -v prefix="$prefix" '{ print $1, $2, (prefix == "" ? $5 : prefix "/" $5) }'
 fi
 SH
   chmod +x "$fb/ps-fixture"
@@ -433,6 +454,7 @@ new_case() {  # <name> <scenario> [harness]
   : > "$dir/prior-read"
   : > "$dir/pi-elapsed"
   : > "$dir/pi-settled"
+  : > "$dir/proof-snapshot"
   : > "$dir/herdr.sock"
   printf '%s\n' '11111111-1111-7111-8111-111111111111' > "$dir/old-session-id"
   printf '%s\n' '22222222-2222-7222-8222-222222222222' > "$dir/new-session-id"
@@ -483,6 +505,10 @@ run_control() {  # <case-dir> <control args...>
     FM_FAKE_PRIOR_READ="$dir/prior-read" \
     FM_FAKE_PI_BIN="$dir/fakebin/pi" FM_FAKE_PI_ELAPSED="$dir/pi-elapsed" \
     FM_FAKE_PI_SETTLED="$dir/pi-settled" \
+    FM_FAKE_PROOF="$dir/home/state/rp1.herdr-pi-release-proof" \
+    FM_FAKE_PROOF_SNAPSHOT="$dir/proof-snapshot" \
+    FM_FAKE_CONTROL_LOCK="$dir/home/state/.control-rp1.lock" \
+    FM_FAKE_PS_COMM_PREFIX="${FM_FAKE_PS_COMM_PREFIX:-}" \
     FM_FAKE_PROJECT="$dir/project" FM_FAKE_WT="$dir/pool/1/repo" \
     FM_FAKE_META="$dir/home/state/rp1.meta" \
     FM_FAKE_OLD_SESSION="$(cat "$dir/old-session-id")" FM_FAKE_NEW_SESSION="$(cat "$dir/new-session-id")" \
@@ -524,7 +550,55 @@ launch_count=$(grep -c 'encode launch-brief' "$dir/herdr.log" || true)
 assert_not_contains "$(cat "$dir/herdr.log")" '/quit' "an already-exited Pi caused /quit to be typed into the nested shell"
 [ "$(grep -c $'pane\x1fprocess-info' "$dir/herdr.log" || true)" -ge 4 ] \
   || fail "the old exit and new authority were not each sampled stably"
+# fm-spawn admits the release proof only when its `control_pid` field equals the
+# pid holding the lifecycle lock, which is also fm-spawn's own $PPID
+# (bin/fm-spawn.sh fm_spawn_released_herdr_pi_proof_valid). A pid captured
+# inside one of fm-control's command substitutions names a short-lived subshell
+# instead, which fails that check on every bash that implements BASHPID.
+proof_pid=$(grep '^control_pid=' "$dir/proof-snapshot" | cut -d= -f2-)
+lock_pid=$(grep '^lock_pid=' "$dir/proof-snapshot" | cut -d= -f2-)
+[ -n "$proof_pid" ] || fail "the release proof recorded no control pid:"$'\n'"$(cat "$dir/proof-snapshot")"
+[ -n "$lock_pid" ] || fail "the lifecycle lock recorded no owner pid while the proof was live"
+[ "$proof_pid" = "$lock_pid" ] \
+  || fail "the release proof named pid $proof_pid, but the lifecycle lock fm-spawn verifies it against is held by $lock_pid"
 pass "fm-control Herdr/Pi: two stable nested-shell samples release one stale authority and relaunch one Pi in the same endpoint and copy"
+
+# The same complete path against a macOS-shaped process table: `comm` carries
+# the executable PATH and is truncated to 16 characters because it is not the
+# last requested column, so every proof here has to read identity from the
+# untruncated argv0 instead. Without that, the nested-shell fingerprint and the
+# replacement Pi count both read `/opt/homebrew/bi` and the recovery never
+# engages on the platform the fleet runs on.
+dir=$(new_case positive-truncated-comm stable)
+gen_before=$(grep '^busy_gen=' "$dir/home/state/rp1.meta" | cut -d= -f2-)
+out=$(FM_FAKE_PS_COMM_PREFIX=/opt/homebrew/bin run_control "$dir" rp1 relaunch --note 'continue after the real Pi exit')
+rc=$?
+expect_code 0 "$rc" "a truncated macOS comm column should not block the stable nested-shell relaunch"$'\n'"$out"
+assert_contains "$out" 'relaunched rp1 harness=pi from=pi' "the relaunch did not report the replacement"
+[ "$(grep '^window=' "$dir/home/state/rp1.meta" | cut -d= -f2-)" = 'lab:w1:p2' ] \
+  || fail "the relaunch changed the exact endpoint"
+gen_after=$(grep '^busy_gen=' "$dir/home/state/rp1.meta" | cut -d= -f2-)
+[ -n "$gen_after" ] && [ "$gen_after" != "$gen_before" ] || fail "the relaunch did not rotate the busy generation"
+[ "$(grep -c '^authority-clear' "$dir/herdr.log" || true)" -eq 1 ] \
+  || fail "the truncated-comm relaunch should release exactly one stale authority"
+[ "$(grep -c 'encode launch-brief' "$dir/herdr.log" || true)" -eq 1 ] \
+  || fail "the truncated-comm relaunch should start exactly one replacement Pi"
+pass "fm-control Herdr/Pi: a macOS-truncated comm column still proves the nested shell and exactly one replacement Pi"
+
+# The same truncation must never turn ambiguity into an accepted shell chain:
+# refusal still comes from the process table, not from a name the platform
+# happened to shorten.
+for scenario in unknown-descendant changing-process; do
+  dir=$(new_case "truncated-comm-$scenario" "$scenario")
+  out=$(FM_FAKE_PS_COMM_PREFIX=/opt/homebrew/bin run_control "$dir" rp1 exit)
+  rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "$scenario should still refuse under a truncated comm column: $out"
+  assert_contains "$out" 'could not be proved stable' \
+    "the truncated-comm $scenario refusal did not name the conservative proof"
+  assert_no_terminal_or_release "$dir" "the truncated-comm $scenario"
+done
+pass "fm-control Herdr/Pi: a truncated comm column still refuses an unrecognized descendant and process churn"
 
 # Herdr 0.8.2 can acknowledge lifecycle reports while its process detector is
 # still publishing the prior generation, then suppress the new authority. A

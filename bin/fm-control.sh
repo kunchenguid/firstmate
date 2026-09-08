@@ -310,6 +310,15 @@ trap control_cleanup EXIT
 fm_lock_acquire_task_control "$CONTROL_LOCK" \
   || die "another lifecycle action is already running for task $ID"
 CONTROL_LOCK_HELD=1
+# The identity fm-spawn verifies this process by: the pid recorded in the
+# control lock, which is also fm-spawn's $PPID when this script launches it.
+# Captured once at top level because every later reader may run inside a
+# command substitution, where a subshell-aware pid would name the wrong
+# process (bin/fm-spawn.sh fm_spawn_released_herdr_pi_proof_valid).
+CONTROL_PID=$(cat "$CONTROL_LOCK/pid" 2>/dev/null || true)
+case "$CONTROL_PID" in
+  ''|*[!0-9]*|0) die "task $ID's lifecycle lock did not record a readable owner pid" ;;
+esac
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then
   case "$RAW_ID" in
@@ -821,7 +830,7 @@ EOF
   if {
     printf '%s\n' 'v=1'
     printf 'task=%s\n' "$ID"
-    printf 'control_pid=%s\n' "${BASHPID:-$$}"
+    printf 'control_pid=%s\n' "$CONTROL_PID"
     printf 'tx=%s\n' "$RELAUNCH_TX"
     printf 'endpoint=%s\n' "$T"
     printf 'worktree=%s\n' "$wt_real"
@@ -908,6 +917,7 @@ EOF
       if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || NF < 5 || seen[$1]++) { bad = 1; next }
       parent[$1] = $2
       command[$1] = $5
+      argv0[$1] = (NF >= 6 ? $6 : "")
       present[$1] = 1
       rows++
     }
@@ -917,10 +927,18 @@ EOF
       for (pass = 0; pass <= rows; pass++) {
         for (pid in present) if (owned[parent[pid]]) owned[pid] = 1
       }
+      # `comm` is not the last column here, so the platform truncates it (16
+      # characters of the executable path on macOS, 15 of its basename on
+      # Linux) and a Pi installed under a longer path reads as a name it does
+      # not have. Count an engine when EITHER witness names it, exactly as
+      # control_herdr_target_engine_snapshot below does: the untruncated argv0
+      # is authoritative, and a spurious second match can only make the
+      # exactly-one postcondition refuse.
       for (pid in owned) if (owned[pid]) {
         name = base(command[pid])
-        if (name == "pi") { pi++; pi_pid = pid }
-        else if (name == "pi-signed") { signed++; signed_pid = pid }
+        argname = base(argv0[pid])
+        if (name == "pi" || argname == "pi") { pi++; pi_pid = pid }
+        else if (name == "pi-signed" || argname == "pi-signed") { signed++; signed_pid = pid }
       }
       printf "%d %d %d %d %d", pi, signed, pi_pid, signed_pid, parent[pi_pid]
     }

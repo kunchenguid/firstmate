@@ -43,6 +43,23 @@ fm_herdr_pi_nested_shell_process_fingerprint() {  # <pane-shell-pid> <foreground
       value = base(value)
       return value == "sh" || value == "bash" || value == "zsh" || value == "dash" || value == "ksh" || value == "fish"
     }
+    # `comm` is NOT the last ps column here, so both macOS (16 chars of the
+    # executable PATH) and Linux (15 chars of its basename) truncate it, and a
+    # binary installed anywhere deeper than that reads as a name it does not
+    # have. argv0 - the first word of the untruncated `args` column - is the
+    # authoritative identity; comm remains a second, independent witness for
+    # the short paths where it survives. Same OR contract as
+    # control_herdr_target_engine_snapshot in bin/fm-control.sh.
+    function argv0(pid,   count, words) {
+      count = split(arguments[pid], words, /[[:space:]]+/)
+      return count >= 1 ? words[1] : ""
+    }
+    function names(pid, want) {
+      return base(command[pid]) == want || base(argv0(pid)) == want
+    }
+    function is_shell_process(pid) {
+      return is_shell(command[pid]) || is_shell(argv0(pid))
+    }
     {
       if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || NF < 5 || seen[$1]++) {
         bad = 1
@@ -59,15 +76,15 @@ fm_herdr_pi_nested_shell_process_fingerprint() {  # <pane-shell-pid> <foreground
       present[pid] = 1
     }
     END {
-      if (bad || !present[shell] || !is_shell(command[shell]) || state[shell] !~ /^[SI]/) exit 1
+      if (bad || !present[shell] || !is_shell_process(shell) || state[shell] !~ /^[SI]/) exit 1
       outer_children = 0
       for (pid in present) if (parent[pid] == shell) { tree = pid; outer_children++ }
-      if (outer_children != 1 || base(command[tree]) != "treehouse" || state[tree] !~ /^[SI]/) exit 1
+      if (outer_children != 1 || !names(tree, "treehouse") || state[tree] !~ /^[SI]/) exit 1
       count = split(arguments[tree], words, /[[:space:]]+/)
       if (count < 2 || base(words[1]) != "treehouse" || words[2] != "get") exit 1
       tree_children = 0
       for (pid in present) if (parent[pid] == tree) { nested = pid; tree_children++ }
-      if (tree_children != 1 || !is_shell(command[nested]) || state[nested] !~ /^[SI]/) exit 1
+      if (tree_children != 1 || !is_shell_process(nested) || state[nested] !~ /^[SI]/) exit 1
       count = split(arguments[nested], nested_words, /[[:space:]]+/)
       if (count < 1 || !is_shell(nested_words[1])) exit 1
       nested_children = 0
@@ -83,7 +100,9 @@ fm_herdr_pi_nested_shell_process_fingerprint() {  # <pane-shell-pid> <foreground
 # proof: the fingerprint above refuses on any descendant it cannot name, while
 # this names them so a caller can recognize a still-running engine instead of
 # reading an unrecognized descendant as ambiguity. The ps format keeps `comm`
-# last so a process name containing spaces survives as one whole value.
+# last so a process name containing spaces survives as one whole value - and,
+# on macOS, so the column is not truncated to 16 characters the way a non-final
+# `comm` is.
 fm_herdr_pi_descendant_commands() {  # <pane-shell-pid>
   local shell_pid=${1:-} ps_bin rows
   case "$shell_pid" in ''|*[!0-9]*) return 1 ;; esac

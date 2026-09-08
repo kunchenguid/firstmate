@@ -28,7 +28,11 @@
 #      watcher surfaces such a record exactly once instead of re-ringing.
 #   7. Lifecycle serialization: a held task control lock defers a doorbell
 #      before any endpoint read or terminal input, so an exit/relaunch cannot
-#      expose its nested shell to a concurrent ring.
+#      expose its nested shell to a concurrent ring - and that deferral spends
+#      no re-ring budget, so a bounded lifecycle action cannot escalate a
+#      healthy steer into recovery.
+#   8. An idempotent enqueue that dedups onto an already acknowledged record
+#      rings as delivered rather than as a transport failure.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -295,11 +299,49 @@ test_ring_defers_while_lifecycle_control_owns_task() {
   rc=0
   PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
-  [ "$rc" = 1 ] || fail "a lifecycle-owned task should defer its doorbell with status 1, got $rc"
+  # 4, not the composer skip's 1: no delivery was attempted and nothing about
+  # the worker was observed, so the caller must not spend re-ring budget.
+  [ "$rc" = 4 ] || fail "a lifecycle-owned task should defer its doorbell with status 4, got $rc"
   [ ! -s "$log" ] || fail "a lifecycle-owned task received terminal input:"$'\n'"$(cat "$log")"
   [ -f "$rec" ] || fail "deferring a lifecycle-overlapping ring removed its durable record"
   rm -rf "$state/.control-t1.lock"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "the doorbell should ring once lifecycle control releases, got $rc"
+  grep -qF 'Firstmate instruction waiting' "$log" \
+    || fail "the released task never received the deferred doorbell"
   pass "inbox: lifecycle control serializes the liveness read and doorbell delivery"
+}
+
+# An idempotent enqueue may dedup onto a record the worker already acknowledged
+# (fm_task_inbox_write_idempotent returns the handled/ path). Ringing that path
+# is a no-op, not a transport failure: nothing is typed and callers must not
+# announce a delivery problem or promise a re-ring that will never happen.
+test_ring_treats_an_acknowledged_record_as_delivered() {
+  local dir state rec handled log rc
+  dir="$TMP_ROOT/ring-handled"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  mkdir -p "$state/t1.inbox/handled"
+  mv "$rec" "$state/t1.inbox/handled/"
+  handled="$state/t1.inbox/handled/${rec##*/}"
+  [ "$(inbox_lib "$state" fm_task_inbox_write_idempotent "$state" t1 "please continue")" = "$handled" ] \
+    || fail "the idempotent write should dedup onto the acknowledged record"
+  log="$dir/send.log"; : > "$log"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$handled" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "an already acknowledged record should report delivered, got $rc"
+  [ ! -s "$log" ] || fail "an acknowledged record was re-typed into the pane:"$'\n'"$(cat "$log")"
+  [ -f "$handled" ] || fail "ringing an acknowledged record disturbed it"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$state/elsewhere/001.msg" fm-t1 || rc=$?
+  [ "$rc" = 2 ] || fail "a record outside any task inbox should still fail the ring, got $rc"
+  pass "inbox: an acknowledged record rings as already delivered while a foreign path still fails"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -693,6 +735,61 @@ test_watcher_dead_pane_escalates_once_without_ringing() {
   pass "watcher: a positively dead pane is never typed into and surfaces exactly one stale wake"
 }
 
+# A relaunch can hold the task's lifecycle lock across many watcher polls
+# (exit wait + spawn + launch waits). None of those polls typed anything or
+# read the worker, so none may spend re-ring budget: a healthy steer must still
+# be rung once control releases, never escalated into stuck-crewmate-recovery.
+test_watcher_lifecycle_deferral_spends_no_ring_budget() {
+  local dir state out log pid rec holder i=0
+  dir=$(setup_watch_case lifecycle-deferral)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  sleep 30 &
+  holder=$!
+  mkdir -p "$state/.control-t1.lock"
+  printf '%s\n' "$holder" > "$state/.control-t1.lock/pid"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_TASK_INBOX_RING_MAX=1
+  pid=$!
+  sleep 5
+  kill -0 "$pid" 2>/dev/null || {
+    kill "$holder" 2>/dev/null
+    fail "the watcher escalated a steer a lifecycle action was holding:"$'\n'"$(cat "$out")"
+  }
+  [ ! -s "$log" ] || {
+    kill "$pid" "$holder" 2>/dev/null
+    fail "a lifecycle-owned task was typed into:"$'\n'"$(cat "$log")"
+  }
+  [ ! -e "$state/t1.inbox/.ring-state" ] || {
+    kill "$pid" "$holder" 2>/dev/null
+    fail "a lifecycle deferral consumed re-ring budget:"$'\n'"$(cat "$state/t1.inbox/.ring-state")"
+  }
+  [ ! -e "$state/t1.inbox/.escalated" ] || {
+    kill "$pid" "$holder" 2>/dev/null
+    fail "a lifecycle deferral escalated a healthy steer"
+  }
+  [ ! -s "$state/.wake-queue" ] || {
+    kill "$pid" "$holder" 2>/dev/null
+    fail "a lifecycle deferral queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
+  }
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  rm -rf "$state/.control-t1.lock"
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'Firstmate instruction waiting' "$log" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'Firstmate instruction waiting' "$log" \
+    || { kill "$pid" 2>/dev/null; fail "the deferred doorbell never rang after control released:"$'\n'"$(cat "$out")"; }
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "the released re-ring queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: a lifecycle-held control lock defers the doorbell without spending its re-ring budget"
+}
+
 test_watcher_dead_pane_ignores_stale_busy_state() {
   local dir state out log pid rec
   dir=$(setup_watch_case dead-pane-busy)
@@ -720,6 +817,7 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_defers_while_lifecycle_control_owns_task
+test_ring_treats_an_acknowledged_record_as_delivered
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
@@ -736,3 +834,4 @@ test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state
+test_watcher_lifecycle_deferral_spends_no_ring_budget

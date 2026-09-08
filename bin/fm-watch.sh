@@ -406,6 +406,15 @@ inbox_steer_check() {  # <window> <task>
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
       fi
+      # A lifecycle action owns the task, so nothing was typed and nothing
+      # about the worker was read. Leave the ladder untouched - an exit or
+      # relaunch holding the control lock across several polls must not spend
+      # a healthy steer's budget and escalate it into recovery - and re-ring on
+      # the next poll after that action releases.
+      if [ "$ring_rc" -eq 4 ]; then
+        triage_log "steer-inbox delivery deferred (lifecycle control owns the task): $task ${rec##*/}"
+        return 0
+      fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true

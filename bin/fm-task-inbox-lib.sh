@@ -23,7 +23,11 @@
 # into stuck-crewmate-recovery.
 # Ring delivery also holds the task's lifecycle lock from the liveness read
 # through terminal submission, so it cannot overlap an exit or relaunch and be
-# interpreted by the nested shell exposed while that lifecycle changes.
+# interpreted by the nested shell exposed while that lifecycle changes. A
+# lifecycle action already holding that lock defers the ring WITHOUT consuming
+# re-ring budget: nothing was typed and nothing about the worker was observed,
+# so a bounded exit or relaunch can never spend a healthy steer's ladder and
+# hand it to recovery.
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
@@ -274,11 +278,17 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
 # composer pre-check, then the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text or
-# lifecycle control owns the task (the watcher re-rings later), 2 the backend
-# send failed, 3 skipped because the endpoint is positively dead or missing
-# (nothing typed; recovery owns the record). No return value is delivery proof;
-# the acknowledgement move is the only delivery signal.
+# Returns 0 rang - or the record is already acknowledged, so there is nothing
+# left to ring - 1 skipped because the composer PROVENLY holds pending text
+# (the watcher re-rings later), 2 the backend send failed, 3 skipped because
+# the endpoint is positively dead or missing (nothing typed; recovery owns the
+# record), 4 deferred because a lifecycle action currently owns the task.
+# No return value is delivery proof; the acknowledgement move is the only
+# delivery signal.
+# 4 is deliberately NOT 1: no delivery was attempted and nothing about the
+# worker was learned, so it must not consume re-ring budget (bin/fm-watch.sh
+# skips the ladder for it and retries once control releases), while 1 says the
+# endpoint itself was read and deliberately left alone.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
@@ -287,9 +297,18 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # positively identify (that classifier is advisory here by design).
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
-  local inbox_dir inbox_name id state control_lock='' result=0
+  local inbox_dir inbox_name id state control_lock='' result=0 acknowledged=0
   inbox_dir=${rec%/*}
   inbox_name=${inbox_dir##*/}
+  # An idempotent enqueue may dedup onto an already acknowledged record under
+  # <id>.inbox/handled/ (bin/fm-task-inbox-lib.sh fm_task_inbox_write_idempotent),
+  # so resolve that one level up to the owning inbox rather than reading it as
+  # a foreign path.
+  if [ "$inbox_name" = handled ]; then
+    acknowledged=1
+    inbox_dir=${inbox_dir%/*}
+    inbox_name=${inbox_dir##*/}
+  fi
   case "$inbox_name" in
     *.inbox)
       id=${inbox_name%.inbox}
@@ -298,8 +317,11 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
         ''|*[!A-Za-z0-9._-]*) return 2 ;;
       esac
       [ "$(fm_task_inbox_dir "$state" "$id")" = "$inbox_dir" ] || return 2
+      # The steer was already delivered and acted on: there is nothing to ring
+      # and no lifecycle overlap to serialize against.
+      [ "$acknowledged" -eq 0 ] || return 0
       control_lock="$state/.control-$id.lock"
-      fm_lock_try_acquire "$control_lock" || return 1
+      fm_lock_try_acquire "$control_lock" || return 4
       ;;
     *) return 2 ;;
   esac
