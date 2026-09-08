@@ -27,6 +27,7 @@ Tool references record empirical knowledge for those executable owners.
 
 For an approved new adapter check, use the spawn owner's raw-launch escape hatch only for a trivial supervised task.
 Verify detection in `../../../bin/fm-harness.sh`, launch in `../../../bin/fm-spawn.sh`, busy state in `../../../bin/fm-busy-lib.sh`, shared composer behavior in `../../../bin/fm-composer-lib.sh`, lifecycle in `../../../bin/fm-control-lib.sh`, and tmux liveness in `../../../bin/backends/tmux.sh` when secondmate use is supported.
+Also observe, in a real child of a real session of that harness, whether it exports a launch marker naming its own session pid: `FM_SESSION_LAUNCH_MARKERS` in `../../../bin/fm-session-lock-lib.sh` has a verified row for Claude alone, and every other harness decides session-lock ownership by process ancestry until a row is verified for it, which `../../../docs/verification/runtime-backends.md#session-lock-identity-and-the-suspended-holder` owns.
 Also verify primary integration through `references/common/primary-hooks.md`, model discovery through `references/common/model-and-effort.md`, and one tool record.
 A value remains unreachable until its executable owner, portable regression, applicable credentialed live guard, and verification record land together.
 `../firstmate-coding-guidelines/SKILL.md` owns harness-dependent proof.

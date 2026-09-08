@@ -3,6 +3,15 @@
 # Writes the harness (agent) process PID found by walking the shell's ancestry,
 # which lives as long as the firstmate session - unlike the transient subshell
 # PID of any one tool call, which is dead moments after it is written.
+#
+# Acquisition yields ONLY to a genuinely competing session, decided by
+# fm_session_lock_holder_competes in bin/fm-session-lock-lib.sh: a recorded
+# holder that is this same session in another process tree, or a durably
+# suspended one, does not block. Every acquisition then converges the lock onto
+# the acquiring session's own pid, so repeated runs are idempotent, and any live
+# holder it converged onto, took over from, or could not identify is named on
+# stdout rather than being silent.
+#
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -29,7 +38,13 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  if ! fm_harness_pid_alive "$old"; then
+    echo "lock: stale (pid $old dead or not a harness)"
+  elif fm_harness_pid_suspended "$old"; then
+    echo "lock: held by SUSPENDED harness pid $old (reclaimable: a stopped session is not holding this home)"
+  else
+    echo "lock: held by live harness pid $old"
+  fi
   exit 0
 fi
 
@@ -55,13 +70,17 @@ release_claim_lock() {
 trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
 
+# Why the yield reason is captured rather than printed here: the fast path
+# below is only a pre-check, and the authoritative decision is retaken under the
+# claim lock. Printing it once, at the end, keeps one acquisition to one line.
+YIELDED=
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
   if [ "$old" = "$me" ]; then
     echo "lock acquired: harness pid $me"
     exit 0
   fi
-  if fm_harness_pid_alive "$old"; then
+  if fm_session_lock_holder_competes "$old"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
@@ -86,9 +105,22 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
-    exit 1
+  if [ "$old" != "$me" ]; then
+    if fm_session_lock_holder_competes "$old"; then
+      echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+      exit 1
+    fi
+    # Reclaiming an owner that is gone has always been silent and stays that
+    # way. The three holders that are alive and still yield are the ones worth
+    # naming - this session's own holder in another tree, a durably suspended
+    # session, and a live process the identity rules cannot type as a harness -
+    # so name them rather than moving the lock out from under a visible process
+    # quietly. None of the three is exceptional; the last is the ordinary
+    # reading of a stale lock whose pid an unrelated process now occupies.
+    # The predicate supplies the whole clause and leaves it empty for the silent
+    # case, so this is one assignment rather than a second liveness question that
+    # could disagree with the classification that just ran.
+    YIELDED=$FM_SESSION_HOLDER_YIELD_REASON
   fi
 fi
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
@@ -104,4 +136,8 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   exit 1
 fi
 release_claim_lock
-echo "lock acquired: harness pid $me"
+if [ -n "$YIELDED" ]; then
+  echo "lock acquired: harness pid $me ($YIELDED)"
+else
+  echo "lock acquired: harness pid $me"
+fi
