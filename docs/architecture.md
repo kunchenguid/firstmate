@@ -51,7 +51,8 @@ A `kind=secondmate` task's status signal is the parent-directed reply stream and
 A crew that declares `paused:` for a known external wait, or carries a verified `captain-held` transfer, is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint; the pause classification itself is recovered only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, so a worker genuinely waiting on a decision is never silenced.
-Its later sights are still held to that same bounded cadence rather than re-alarming on every pane-hash change, because the throttle is keyed to the declaration and not to the pane an idle parked worker keeps ticking.
+Its later sights are still held to that same bounded cadence rather than re-alarming on every pane-hash change or busy blip, because the throttle is keyed to the declaration and not to the pane a parked worker keeps ticking and briefly renders busy while its declared wait stands.
+Only the status line that ends the wait retires that throttle.
 A secondmate's endpoint liveness is still never read at all; a mate is admitted to that same cadence only to serve a status-declared wait's bounded re-surface, so a forgotten `paused:` or `captain-held` declaration on a mate cannot rot invisibly.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.

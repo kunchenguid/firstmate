@@ -2215,12 +2215,25 @@ EOF
           rm -f "$ssf" "$ewf"
           clear_write_tracking "$key"
         fi
-        # A busy pane normally means real work resumed, so stale pause bookkeeping
-        # is cleared - but not in the same poll the declared-pause cadence just
-        # recorded it, or the re-surface throttle it depends on would be erased and
-        # the pause would re-surface every poll instead of once per long cadence.
-        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
-          clear_pause_tracking "$key"
+        # A busy pane normally means real work resumed, so the per-hash stale
+        # bookkeeping is cleared. The DECLARATION-scoped pause state is not the
+        # pane's to clear, by the same rule the hash-change branch below states:
+        # the throttle bounds the DECLARATION, and pane busy state is not a
+        # record of the wait. A worker parked on a declared wait still renders
+        # its harness busy signature whenever it does anything at all - taking a
+        # steer, reacting to its background job - and clearing the throttle on
+        # one such poll hands the unchanged declaration a fresh window, so the
+        # next idle sighting alarms again far inside PAUSE_RESURFACE_SECS. Only
+        # the status line ending the wait retires the throttle, which the
+        # loop-top reconciliation above already owns.
+        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
+          if ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; then
+            clear_pause_tracking "$key"
+          elif [ "$n" -ge 2 ]; then
+            # Never in the same poll the declared-pause cadence recorded it, or
+            # the marker it depends on would be erased before it is ever read.
+            clear_stale_hash_tracking "$key"
+          fi
         fi
       fi
     else
@@ -2249,9 +2262,14 @@ EOF
           *)      clear_pause_tracking "$key" ;;
         esac
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
-        # Same rule as the stable-hash branch: never clear pause bookkeeping the
-        # declared-pause cadence recorded on this very poll.
-        clear_pause_tracking "$key"
+        # Same rule as the stable-hash branch: a busy pane resets the per-hash
+        # bookkeeping, but a declaration the worker has not withdrawn keeps its
+        # own re-surface throttle.
+        if status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+          clear_stale_hash_tracking "$key"
+        else
+          clear_pause_tracking "$key"
+        fi
       fi
     fi
   done < <(recorded_windows)
