@@ -60,9 +60,14 @@
 # requested-key batch; an unrelated handoff to that mate refuses until the
 # original batch is retried, so it cannot discard wake intent for work that
 # already moved. No two-phase journal exists.
-# Every newly durable backlog delivery also sends one marked wake to the
-# receiving endpoint. A missing endpoint or a live endpoint that rejects the
-# wake makes the handoff fail with the delivered backlog intact.
+# Every newly durable backlog delivery attempts one marked wake to the receiving
+# endpoint. A local route moves directly into the destination backlog, and a
+# missing or rejected local wake makes that command fail with the move intact so
+# rerunning the same handoff retries its prepared wake intent. After a durable
+# remote receipt, the outbox is released and the handoff succeeds regardless of
+# the best-effort wake outcome; an undelivered remote wake remains separately
+# tracked in wake-pending state and is retried under the same correlation by
+# later resumes and handoffs.
 # Usage: fm-backlog-handoff.sh <secondmate-id> <item-key>...
 #        fm-backlog-handoff.sh --resume-pending
 set -eu
