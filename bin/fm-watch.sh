@@ -2175,7 +2175,17 @@ EOF
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
               working)
-                clear_pause_tracking "$key"
+                # Same split as the unchanged-hash arm below: an authoritative
+                # active run ends pause MODE, but the declaration's re-surface
+                # throttle survives it, because a racing fm-crew-state.sh capture
+                # of a parked worker mid-blip reaches this arm as the very same
+                # `working` verdict.
+                if status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+                  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
+                  clear_stale_hash_tracking "$key"
+                else
+                  clear_pause_tracking "$key"
+                fi
                 printf '%s' "$h" > "$sf"
                 date +%s > "$ssf"
                 triage_log "absorbed non-terminal stale (provably working): $w"
@@ -2192,7 +2202,22 @@ EOF
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
-                working) clear_pause_state "$key"
+                # An authoritative active run still ends pause MODE here, exactly
+                # as it always has - it is real evidence the crew is not idle.
+                # What it must not take with it is the declaration's re-surface
+                # throttle, because this same verdict is also what a racing
+                # capture produces: fm-crew-state.sh reads its own pane a moment
+                # after this loop read it idle, so a parked worker caught
+                # mid-blip arrives here indistinguishable from a running one.
+                # Keeping just that marker is the same split
+                # surface_nonterminal_stale already makes for the same reason.
+                # The per-hash wedge timer is deliberately left alone either way,
+                # so a genuinely frozen run keeps its running count.
+                working) if status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+                           rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
+                         else
+                           clear_pause_state "$key"
+                         fi
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
@@ -2217,23 +2242,19 @@ EOF
         fi
         # A busy pane normally means real work resumed, so the per-hash stale
         # bookkeeping is cleared. The DECLARATION-scoped pause state is not the
-        # pane's to clear, by the same rule the hash-change branch below states:
-        # the throttle bounds the DECLARATION, and pane busy state is not a
-        # record of the wait. A worker parked on a declared wait still renders
-        # its harness busy signature whenever it does anything at all - taking a
-        # steer, reacting to its background job - and clearing the throttle on
-        # one such poll hands the unchanged declaration a fresh window, so the
-        # next idle sighting alarms again far inside PAUSE_RESURFACE_SECS. Only
-        # the status line ending the wait retires the throttle, which the
-        # loop-top reconciliation above already owns.
-        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
-          if ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; then
-            clear_pause_tracking "$key"
-          elif [ "$n" -ge 2 ]; then
-            # Never in the same poll the declared-pause cadence recorded it, or
-            # the marker it depends on would be erased before it is ever read.
-            clear_stale_hash_tracking "$key"
-          fi
+        # pane's to clear: the throttle bounds the DECLARATION, and pane busy
+        # state is not a record of the wait. A worker parked on a declared wait
+        # still renders its harness busy signature whenever it does anything at
+        # all - taking a steer, reacting to its background job - and clearing the
+        # throttle on one such poll hands the unchanged declaration a fresh
+        # window, so the next idle sighting alarms again far inside
+        # PAUSE_RESURFACE_SECS. Withdrawing a declaration has exactly one owner,
+        # the loop-top reconciliation above, so this branch never does it: `pf`
+        # only survives to here while that reconciliation still reads a standing
+        # wait. The n>=2 guard keeps this off the poll the declared-pause cadence
+        # recorded the marker on, or it would be erased before it is ever read.
+        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && [ "$n" -ge 2 ]; then
+          clear_stale_hash_tracking "$key"
         fi
       fi
     else
@@ -2259,17 +2280,16 @@ EOF
           # hash reaches surface_nonterminal_stale below, so the whole declared
           # wait would re-alarm far inside PAUSE_RESURFACE_SECS.
           none)   clear_stale_hash_tracking "$key" ;;
-          *)      clear_pause_tracking "$key" ;;
+          # A `working` read ends pause mode, but not the throttle: this branch's
+          # guard just read the declaration off the status log, and the verdict
+          # itself may be a racing capture of a parked worker mid-blip.
+          *)      rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
+                  clear_stale_hash_tracking "$key" ;;
         esac
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
         # Same rule as the stable-hash branch: a busy pane resets the per-hash
-        # bookkeeping, but a declaration the worker has not withdrawn keeps its
-        # own re-surface throttle.
-        if status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
-          clear_stale_hash_tracking "$key"
-        else
-          clear_pause_tracking "$key"
-        fi
+        # bookkeeping, and withdrawal stays with the loop-top reconciliation.
+        clear_stale_hash_tracking "$key"
       fi
     fi
   done < <(recorded_windows)

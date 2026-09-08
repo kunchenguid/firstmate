@@ -2371,12 +2371,18 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
 # on such a poll, throttle included. The next idle sighting then read an absent
 # throttle as a first sight and alarmed again, so each blip cost one more wake and
 # the operator was told the work was paused while being paged that it was stuck.
-# The contract pinned here: busy is a fact about the PANE, while the re-surface
-# throttle is scoped to the DECLARATION, so only the status line ending the wait
-# retires it. The first sight still surfaces, a busy poll changes nothing, the
-# window's end still re-surfaces once, and a crew that declared nothing keeps
-# alarming exactly as before - a bound that swallowed a genuinely stopped crew
-# would be worse than the alarms it removes.
+# A provably-working verdict reaches the same throttle by a narrower route: the
+# staleness loop reads the pane idle, then fm-crew-state.sh takes its OWN capture
+# a moment later, so a parked worker caught mid-blip returns `working source:
+# pane` and routes to the `working` arms instead. That verdict is a pane read,
+# not proof the wait ended, so it must not retire the declaration either.
+# The contract pinned here: busy state and a racing working verdict are both
+# facts about the PANE, while the re-surface throttle is scoped to the
+# DECLARATION, which the status line that ends the wait retires. The first sight
+# still surfaces, neither pane event changes anything, the window's end still
+# re-surfaces once, and a crew that declared nothing keeps alarming exactly as
+# before - a bound that swallowed a genuinely stopped crew would be worse than
+# the alarms it removes.
 test_declared_wait_survives_a_busy_pane_blip() {
   local spec name status_line dir state fakebin out capture_file statusf window key
   local sig wakes bare throttle
@@ -2436,6 +2442,64 @@ test_declared_wait_survives_a_busy_pane_blip() {
     ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the elapsed re-surface"
   done
 
+  # The racing-capture half of the same invariant. The watcher reads the pane
+  # idle, then pause_state_class asks fm-crew-state.sh, which takes its OWN
+  # capture a moment later; a parked worker caught mid-blip there reports
+  # `working source: pane`, which routes to the `working` arms instead of the
+  # busy branches above. That verdict is about a pane read, not about the wait,
+  # so it must not retire the declaration's throttle either - otherwise the
+  # reported alarm returns by a narrower race.
+  for spec in \
+    'paused-working-race|paused: waiting on the bhavcopy download to finish (pid 41221)' \
+    'captain-held-working-race|captain-held [key=route]: awaiting the captain on the routing call'
+  do
+    name=${spec%%|*}; status_line=${spec#*|}
+    dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
+    window="test:fm-parked"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+    printf '%s\n' "$status_line" > "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    throttle="$state/.paused-resurfaced-$key"
+
+    printf 'parked, elapsed 1s' > "$capture_file"
+    printf '%s' "$(hash_text 'parked, elapsed 1s')" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+      || fail "[$name] first sight of a parked live worker did not surface"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first surface"
+    [ -e "$throttle" ] || fail "[$name] the first surface recorded no re-surface throttle"
+
+    # The pane still reads idle to the watcher, but fm-crew-state.sh's own
+    # capture lands on the blip and returns a provably-working verdict.
+    printf 'parked, elapsed 2s' > "$capture_file"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+      'state: working · source: pane · mid-blip' \
+      || fail "[$name] watcher exited on a racing working verdict under a standing declared wait"
+    [ -e "$throttle" ] \
+      || fail "[$name] a racing working verdict retired the declared wait's re-surface throttle"
+
+    # Back to an ordinary idle read on the unchanged declaration: still absorbed.
+    printf 'parked, elapsed 3s' > "$capture_file"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+      || fail "[$name] a racing working verdict re-armed the alarm for an unchanged declared wait"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 0 ] \
+      || fail "[$name] a racing working verdict cost $wakes extra wake(s) inside the re-surface window"
+
+    # Bounded escalation still survives this path too.
+    set_mtime "$(( $(date +%s) - 2000 ))" "$throttle"
+    printf 'parked, elapsed 4s' > "$capture_file"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+      || fail "[$name] a declared wait stopped re-surfacing after a racing working verdict"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 1 ] || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the elapsed re-surface"
+  done
+
   # The disconfirming half, on the identical fixture: a crew that declared NO
   # wait must keep alarming on each new stale hash across the same busy poll.
   # Without this the bound could be swallowing every silent crew rather than the
@@ -2468,7 +2532,7 @@ test_declared_wait_survives_a_busy_pane_blip() {
     "$state/.wake-queue" 2>/dev/null || echo 0)
   [ "$wakes" -eq 1 ] || fail "[undeclared] a silent crew produced $wakes wakes instead of one"
   ack_stopped_cycle "$state" || fail "[undeclared] could not acknowledge the second surface"
-  pass "a busy poll never retires a standing declared wait's re-surface throttle, while an undeclared silent crew keeps alarming"
+  pass "neither a busy poll nor a racing working verdict retires a standing declared wait's re-surface throttle, while an undeclared silent crew keeps alarming"
 }
 
 # --- work the captain is already holding: pane churn must not re-alarm -------
