@@ -144,6 +144,7 @@ spec_file()  { printf '%s/%s.spec\n' "$WHEN_DIR" "$1"; }
 trust_file() { printf '%s/%s.trust\n' "$WHEN_DIR" "$1"; }
 fired_file() { printf '%s/%s.fired\n' "$WHEN_DIR" "$1"; }
 fires_file() { printf '%s/%s.fires\n' "$WHEN_DIR" "$1"; }
+edge_file()  { printf '%s/%s.needs-edge\n' "$WHEN_DIR" "$1"; }
 
 # A repeat watch keeps only the most recent fires; the journal is evidence for
 # the handler, not an audit log, and it must not grow without bound on a source
@@ -241,7 +242,7 @@ cmd_arm() {
   trap 'fm_procevent_source_lock_release "$sid"' EXIT
   local leftover
   for leftover in "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")" \
-    "$(fires_file "$sid")" "$(fm_procevent_registry_dir "$STATE")/$sid.source"; do
+    "$(fires_file "$sid")" "$(edge_file "$sid")" "$(fm_procevent_registry_dir "$STATE")/$sid.source"; do
     if [ -e "$leftover" ] || [ -L "$leftover" ]; then
       die "watch already exists or left state behind: $leftover (retire it first)"
     fi
@@ -461,6 +462,7 @@ journal_fire() {  # <source-id> <epoch> <polls>
 
 cmd_run() {
   local sid=${1-} fired out rc polls=0 consecutive_true=0 consecutive_err=0 now base base_label
+  local needs_edge=0
   fm_procevent_source_id_valid "$sid" || die "source id must be path-safe: $sid"
   fired=$(fired_file "$sid")
 
@@ -477,6 +479,12 @@ cmd_run() {
     emit_doc "$sid" rejected "refused without executing anything: $SPEC_ERROR" 0 '' ''
     exit 0
   fi
+
+  # A repeat watch that already fired must see the condition go false before
+  # another stable-true run is allowed to fire again - otherwise a condition
+  # that never flaps would just refire on every reconcile of a level that
+  # never changed, which is not "ring X every time Y changes".
+  [ "$SPEC_REPEAT" = 1 ] && [ -e "$(edge_file "$sid")" ] && needs_edge=1
 
   # A fired marker with this runner not mid-action means an earlier run claimed
   # the fire and died before its outcome was durably captured. For a one-shot
@@ -523,13 +531,21 @@ cmd_run() {
     fi
     case "$rc" in
       0)
-        consecutive_true=$((consecutive_true + 1))
         consecutive_err=0
-        [ "$consecutive_true" -ge "$SPEC_STABLE" ] && break
+        if [ "$needs_edge" = 1 ]; then
+          consecutive_true=0
+        else
+          consecutive_true=$((consecutive_true + 1))
+          [ "$consecutive_true" -ge "$SPEC_STABLE" ] && break
+        fi
         ;;
       1)
         consecutive_true=0
         consecutive_err=0
+        if [ "$needs_edge" = 1 ]; then
+          needs_edge=0
+          rm -f -- "$(edge_file "$sid")"
+        fi
         ;;
       *)
         consecutive_true=0
@@ -584,6 +600,10 @@ cmd_run() {
     exit 0
   fi
   if [ "$SPEC_REPEAT" = 1 ]; then
+    # Mark that the next run must see the condition go false before it may
+    # fire again: a still-true level on the next reconcile is not a new
+    # change, and refiring on it would be a duplicate ring.
+    (umask 077; : > "$(edge_file "$sid")") 2>/dev/null || true
     # Journal first, then release the claim: a crash between the two costs one
     # duplicate ring on restart, while the reverse order could lose the fire's
     # only record and reset the deadline base.
@@ -669,7 +689,8 @@ cmd_retire() {
     fi
   fi
   "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" || die "cannot retire the watch source: $sid"
-  rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")" "$(fires_file "$sid")"
+  rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")" \
+    "$(fires_file "$sid")" "$(edge_file "$sid")"
   printf 'retired: %s\n' "$sid"
 }
 

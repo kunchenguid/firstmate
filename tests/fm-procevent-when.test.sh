@@ -462,12 +462,18 @@ assert_not_contains "$(wake_payloads "$H")" "procevent when when-repeat" \
 SEQ=$(basename "$RESULT" | sed 's/^when-repeat\.//; s/\.result$//')
 assert_contains "$(pe "$H" handled when-repeat "$SEQ")" "already-handled" \
   "the runner recorded the silent repeat fire as handled itself"
-# A second change must ring again, which only a re-armed watch can do.
+# A second change must ring again, which only a re-armed watch can do. The
+# prior fire's runner already exited, so a fresh reconcile must start a new
+# one and that runner must actually observe the trigger absent at least once
+# before it reappears - otherwise this would only prove the still-true-level
+# refire bug, not a real edge.
 rm -f -- "$REPEAT_TRIG"
 for _ in $(seq 1 150); do
   [ "$(count_lines "$REPEATLOG")" -ge 1 ] && break
   sleep 0.1
 done
+pe "$H" reconcile >/dev/null 2>&1
+sleep 0.3
 : > "$REPEAT_TRIG"
 for _ in $(seq 1 150); do
   [ "$(count_lines "$REPEATLOG")" -ge 2 ] && break
@@ -478,6 +484,42 @@ done
 assert_not_contains "$(wake_payloads "$H")" "procevent when when-repeat" \
   "no repeat fire wakes firstmate"
 pass "a repeat watch rings again after each fire without waking firstmate"
+
+# --- a repeat watch never refires on a level that never went false -----------
+# After a fire, the prior runner has already exited; a later reconcile starts
+# a fresh one. If the condition is still (not newly) true, that is not "Y
+# changed" and must not ring the action again - only an actual false poll in
+# between may re-arm the watch for its next fire.
+H="$TMP_ROOT/h-repeat-level"; new_home "$H"
+LEVEL_TRIG="$TMP_ROOT/repeat-level-trigger"
+LEVEL_LOG="$TMP_ROOT/repeat-level-act"
+: > "$LEVEL_TRIG"
+when "$H" arm level --interval 0.1 --stable 1 --repeat \
+  --condition "$COND" "$LEVEL_TRIG" "$TMP_ROOT/repeat-level-count" \
+  --action "$ACT" "$LEVEL_LOG" >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-level || fail "the still-true repeat watch captured no first outcome"
+[ "$(count_lines "$LEVEL_LOG")" -eq 1 ] || fail "the first fire must run the action exactly once"
+# The trigger is left in place (never removed), so every later reconcile sees
+# the same continuously-true level, not a new change.
+for _ in $(seq 1 15); do
+  pe "$H" reconcile >/dev/null 2>&1
+  sleep 0.1
+done
+[ "$(count_lines "$LEVEL_LOG")" -eq 1 ] || \
+  fail "a condition that never went false must not refire the action a second time"
+# The watch is not stuck: a genuine false-then-true edge still rings it again.
+rm -f -- "$LEVEL_TRIG"
+pe "$H" reconcile >/dev/null 2>&1
+sleep 0.3
+: > "$LEVEL_TRIG"
+for _ in $(seq 1 150); do
+  [ "$(count_lines "$LEVEL_LOG")" -ge 2 ] && break
+  pe "$H" reconcile >/dev/null 2>&1
+  sleep 0.1
+done
+[ "$(count_lines "$LEVEL_LOG")" -ge 2 ] || fail "a real edge after the level must still ring the watch again"
+pass "a repeat watch never refires on a level that never went false"
 
 # --- retire stops a repeat watch ---------------------------------------------
 STOPPED=$(count_lines "$REPEATLOG")
