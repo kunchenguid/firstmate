@@ -1618,7 +1618,7 @@ record_note() {
 
 do_relaunch() {
   local exit_result state note_line prior_herdr_pi_session='' authority_line='' release_capability=''
-  local prior_session_rc=0
+  local prior_session_rc=1
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -1657,19 +1657,17 @@ do_relaunch() {
 
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
-  # Read the identity the postcondition will have to differ from, under exactly
-  # the condition that runs that postcondition, and before do_exit can retire
-  # it. An unreadable answer refuses here rather than degrading the proof to
-  # "any valid generation".
-  if [ "$BACKEND" = herdr ]; then
+  # Read the identity the stale-authority postcondition will have to differ
+  # from before do_exit can retire it, under every condition that can still
+  # reach a release. Whether an unreadable answer is fatal is decided once that
+  # release is known, because only a released authority runs that postcondition
+  # - an ordinary relaunch proves its replacement by the endpoint's own
+  # dead-then-alive transition and never consults this.
+  if control_herdr_pi_recovery_applicable; then
     case "$TARGET_HARNESS" in
       pi|pi-signed)
         prior_session_rc=0
         prior_herdr_pi_session=$(control_current_herdr_pi_session_ref) || prior_session_rc=$?
-        case "$prior_session_rc" in
-          0|2) ;;
-          *) die "task $ID's current Herdr Pi session identity could not be read, so a relaunch could not prove the replacement anchors a DISTINCT herdr:pi generation; refusing rather than accepting any session as new" ;;
-        esac
         ;;
     esac
   fi
@@ -1679,6 +1677,21 @@ do_relaunch() {
     HERDR_PI_STALE_RELEASED=1
   fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+
+  # The released authority's own generation is the only thing the replacement
+  # can be proved distinct from, so an unreadable prior identity refuses here -
+  # before any replacement is launched - rather than degrading that proof to
+  # "any valid generation".
+  if [ "$HERDR_PI_STALE_RELEASED" = 1 ]; then
+    case "$TARGET_HARNESS" in
+      pi|pi-signed)
+        case "$prior_session_rc" in
+          0|2) ;;
+          *) die "task $ID's stale Herdr Pi authority was released, but the herdr:pi session identity it held could not be read, so a replacement could not be proved to anchor a DISTINCT herdr:pi generation; refusing rather than accepting any session as new" ;;
+        esac
+        ;;
+    esac
+  fi
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
@@ -1700,7 +1713,13 @@ do_relaunch() {
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
-  if [ "$BACKEND" = herdr ]; then
+  # A released stale Pi authority leaves Herdr exposing its cached
+  # process-detected `pi` label, so wait_agent_state's `alive` verdict above
+  # describes the agent that already exited. This is the only state where that
+  # gap exists - an ordinary relaunch positively read `dead` before launching,
+  # so its `alive` is already proof of the replacement - and here the runtime
+  # that actually started proves itself or the relaunch refuses.
+  if [ "$HERDR_PI_STALE_RELEASED" = 1 ]; then
     case "$TARGET_HARNESS" in
       pi|pi-signed)
         wait_new_herdr_pi_authority "$prior_herdr_pi_session" || {
@@ -1709,20 +1728,12 @@ do_relaunch() {
         authority_line=herdr_pi_authority=new-session
         ;;
       *)
-        # A released stale Pi authority leaves Herdr exposing its cached
-        # process-detected `pi` label, so wait_agent_state's `alive` verdict
-        # above describes the agent that already exited. It can never prove a
-        # non-Pi target started, and this is the only state where that gap
-        # exists - so the target runtime proves itself here or the relaunch
-        # refuses.
-        if [ "$HERDR_PI_STALE_RELEASED" = 1 ]; then
-          control_herdr_target_engine_nameable "$TARGET_HARNESS" \
-            || die "the replacement agent for $ID was launched on $TARGET_HARNESS, but the released stale Herdr Pi label is still the only thing its endpoint reports, and $TARGET_HARNESS has no process identity this proof can read; refusing to report a relaunch that cached label alone would have proved"
-          wait_new_herdr_target_engine "$TARGET_HARNESS" || {
-            die "the replacement agent for $ID could not be verified as exactly one stable $TARGET_HARNESS process, with no Pi engine left, on its recorded endpoint and worktree within ${LAUNCH_WAIT}s after its stale Herdr Pi authority was released"
-          }
-          authority_line=herdr_pi_authority=released-target-engine
-        fi
+        control_herdr_target_engine_nameable "$TARGET_HARNESS" \
+          || die "the replacement agent for $ID was launched on $TARGET_HARNESS, but the released stale Herdr Pi label is still the only thing its endpoint reports, and $TARGET_HARNESS has no process identity this proof can read; refusing to report a relaunch that cached label alone would have proved"
+        wait_new_herdr_target_engine "$TARGET_HARNESS" || {
+          die "the replacement agent for $ID could not be verified as exactly one stable $TARGET_HARNESS process, with no Pi engine left, on its recorded endpoint and worktree within ${LAUNCH_WAIT}s after its stale Herdr Pi authority was released"
+        }
+        authority_line=herdr_pi_authority=released-target-engine
         ;;
     esac
   fi

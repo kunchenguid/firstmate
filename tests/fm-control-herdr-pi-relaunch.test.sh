@@ -10,7 +10,9 @@
 # verifies a distinct authority. Liveness cases prove a Pi that is positively
 # running keeps the ORDINARY exit path - even when a tool child owns the pane's
 # foreground process group, the engine presents as `pi-launcher`, the reported
-# cwd is below the worktree, or the Treehouse copy cannot be proved. Negative
+# cwd is below the worktree, or the Treehouse copy cannot be proved - and that
+# an ordinary relaunch on a fleet that only reports a process-detected Pi label
+# still completes on its own dead-then-alive proof. Negative
 # cases prove changing process evidence, an unknown descendant, a working
 # authority, a different cwd, and endpoint/session identity mismatches all
 # refuse before release or terminal input. Cross-runtime cases prove the
@@ -99,7 +101,11 @@ case "${1:-} ${2:-}" in
         [ "$scenario" != working ] || status=working
         [ "$scenario" != identity-source ] || source=synthetic:pi
         ;;
-      new) status=idle; session=$FM_FAKE_NEW_SESSION ;;
+      new)
+        status=idle
+        session=$FM_FAKE_NEW_SESSION
+        [ "$scenario" != process-detected ] || session=
+        ;;
     esac
     jq -cn \
       --arg cwd "$cwd" --arg status "$status" --arg session "$session" --arg source "$source" '
@@ -126,11 +132,31 @@ case "${1:-} ${2:-}" in
       stale)
         status=idle
         source=herdr:pi
+        session=$FM_FAKE_OLD_SESSION
         [ "$scenario" != working ] || status=working
         [ "$scenario" != identity-source ] || source=synthetic:pi
-        json_agent "$status" "$FM_FAKE_OLD_SESSION" "$source"
+        # The relaunch reads the identity it must prove the replacement
+        # distinct from once, as the first agent read after the transaction
+        # reaches its `stopping` phase. Serving only that read an unvalidatable
+        # generation leaves the release proof below intact, so the refusal it
+        # produces is the identity gap alone.
+        if [ "$scenario" = transient-unreadable-prior ] \
+           && grep -q '^phase=stopping$' "${FM_FAKE_META%.meta}.control-relaunch" 2>/dev/null \
+           && [ ! -s "$FM_FAKE_PRIOR_READ" ]; then
+          printf '%s\n' read > "$FM_FAKE_PRIOR_READ"
+          session=not-a-valid-generation
+        fi
+        json_agent "$status" "$session" "$source"
         ;;
-      new) json_agent idle "$FM_FAKE_NEW_SESSION" ;;
+      new)
+        # A fleet that never anchors an official herdr:pi session reports only
+        # its conservative process-detected Pi label.
+        if [ "$scenario" = process-detected ]; then
+          json_released_agent
+        else
+          json_agent idle "$FM_FAKE_NEW_SESSION"
+        fi
+        ;;
     esac
     ;;
   "pane process-info")
@@ -152,6 +178,7 @@ case "${1:-} ${2:-}" in
         live-child) foreground=505; name=bash; argv0=/bin/bash ;;
         live-launcher) foreground=404; name=pi-launcher; argv0=pi-launcher ;;
         live-subdir-cwd) foreground=505; name=git; argv0=/usr/bin/git ;;
+        process-detected) foreground=404; name=pi; argv0=pi ;;
       esac
     fi
     jq -cn \
@@ -347,6 +374,7 @@ new_case() {  # <name> <scenario> [harness]
   : > "$dir/process-count"
   : > "$dir/ps-count"
   : > "$dir/pending-launch"
+  : > "$dir/prior-read"
   : > "$dir/herdr.sock"
   printf '%s\n' '11111111-1111-7111-8111-111111111111' > "$dir/old-session-id"
   printf '%s\n' '22222222-2222-7222-8222-222222222222' > "$dir/new-session-id"
@@ -394,6 +422,7 @@ run_control() {  # <case-dir> <control args...>
     FM_FAKE_SCENARIO="$dir/scenario" FM_FAKE_PROCESS_COUNT="$dir/process-count" \
     FM_FAKE_PS_COUNT="$dir/ps-count" \
     FM_FAKE_PENDING_LAUNCH="$dir/pending-launch" FM_FAKE_SOCKET="$dir/herdr.sock" \
+    FM_FAKE_PRIOR_READ="$dir/prior-read" \
     FM_FAKE_PROJECT="$dir/project" FM_FAKE_WT="$dir/pool/1/repo" \
     FM_FAKE_META="$dir/home/state/rp1.meta" \
     FM_FAKE_OLD_SESSION="$(cat "$dir/old-session-id")" FM_FAKE_NEW_SESSION="$(cat "$dir/new-session-id")" \
@@ -531,17 +560,54 @@ assert_contains "$out" 'no process identity this proof can read' \
 assert_not_contains "$out" 'relaunched rp1' "an unprovable target runtime was reported as relaunched"
 pass "fm-control Herdr/Pi: a target runtime with no readable process identity refuses instead of being reported as relaunched"
 
-# The relaunch postcondition is "a DISTINCT valid herdr:pi generation". An
-# unreadable or invalid prior identity makes that test vacuous, so it refuses
-# before the endpoint is touched rather than accepting any session as new.
-dir=$(new_case negative-unreadable-prior-session stable)
+# Not every Herdr fleet anchors an official herdr:pi session; some only ever
+# expose the conservative process-detected Pi label. An ordinary relaunch there
+# reads its endpoint `dead` before launching, so the following `alive` is its
+# own proof, and the stale-authority identity postcondition must not be imposed
+# on a replacement that is demonstrably running.
+dir=$(new_case healthy-process-detected process-detected)
+out=$(run_control "$dir" rp1 relaunch --note 'ordinary relaunch of a live Pi')
+rc=$?
+expect_code 0 "$rc" "an ordinary relaunch must not require an official herdr:pi session"$'\n'"$out"
+assert_contains "$out" 'relaunched rp1 harness=pi from=pi' "the ordinary relaunch did not report the replacement"
+assert_contains "$(cat "$dir/herdr.log")" '/quit' "the live worker never received the ordinary harness exit command"
+assert_not_contains "$(cat "$dir/herdr.log")" 'authority-clear' \
+  "a live Pi's ordinary relaunch released Herdr authority"
+[ "$(grep -c 'encode launch-brief' "$dir/herdr.log" || true)" -eq 1 ] \
+  || fail "the ordinary relaunch should start exactly one replacement"
+pass "fm-control Herdr/Pi: a healthy Pi relaunch on a process-detected fleet keeps its own dead-then-alive proof"
+
+# An unvalidatable Pi session generation is ambiguity inside the release proof
+# itself, so the relaunch refuses before any authority is cleared or any
+# lifecycle text is typed.
+dir=$(new_case negative-invalid-session-generation stable)
 printf '%s\n' 'not-a-valid-generation' > "$dir/old-session-id"
+out=$(run_control "$dir" rp1 relaunch --note 'exercise the unvalidatable generation')
+rc=$?
+[ "$rc" -ne 0 ] || fail "an unvalidatable Pi session generation should refuse: $out"
+assert_contains "$out" 'could not be proved stable' \
+  "the refusal did not name the conservative proof"
+assert_no_terminal_or_release "$dir" "invalid-session-generation"
+pass "fm-control Herdr/Pi: an unvalidatable Pi session generation refuses before release or terminal input"
+
+# The postcondition for a RELEASED authority is "a DISTINCT valid herdr:pi
+# generation". If the identity that was released could not be read, that test
+# is vacuous, so no replacement is launched rather than any session being
+# accepted as new.
+dir=$(new_case negative-unreadable-prior-session transient-unreadable-prior)
 out=$(run_control "$dir" rp1 relaunch --note 'exercise the ambiguous prior identity')
 rc=$?
 [ "$rc" -ne 0 ] || fail "an unreadable prior Pi session identity should refuse: $out"
 assert_contains "$out" 'DISTINCT herdr:pi generation' \
   "the refusal did not name the postcondition it could not have proved"
-assert_no_terminal_or_release "$dir" "unreadable-prior-session"
+[ "$(grep -c '^authority-clear' "$dir/herdr.log" || true)" -eq 1 ] \
+  || fail "the fixture should have released exactly the stale authority before the identity gap refused"
+[ "$(grep -c 'encode launch-brief' "$dir/herdr.log" || true)" -eq 0 ] \
+  || fail "a replacement was launched with no readable prior identity to prove it distinct from"
+assert_not_contains "$(cat "$dir/herdr.log")" '/quit' \
+  "the ambiguous prior identity path typed /quit into the nested shell"
+[ ! -e "$dir/home/state/rp1.herdr-pi-release-proof" ] \
+  || fail "a refused replacement left its private release capability behind"
 pass "fm-control Herdr/Pi: an unreadable prior Pi session identity refuses instead of weakening the distinctness proof"
 
 for scenario in changing-process unknown-descendant working wrong-cwd identity-source identity-tab identity-workspace; do
