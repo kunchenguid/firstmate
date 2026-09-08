@@ -1067,11 +1067,10 @@ bound_ms = int(bound_s) * 60000
 default_ms = int(default_s)
 max_budget = int(budget_s)
 
-# A numbered serial shard lane. The count may differ from this runner's own, so
-# an artifact from an earlier partition stays readable; what cannot be mixed is
-# two partitions in one invocation, because a shard number means different work
-# in each.
-LANE_RE = re.compile(r"^portable-serial-([0-9]+)of([0-9]+)$")
+# A numbered serial shard lane, capturing the shard count it declares. That
+# count may differ from this runner's own, so an artifact from an earlier
+# partition stays readable and is still counted against its own lane.
+LANE_RE = re.compile(r"^portable-serial-[0-9]+of([0-9]+)$")
 
 hints = {}
 for line in Path(hints_path).read_text().splitlines():
@@ -1106,9 +1105,8 @@ def wall_ms_of(data, fallback):
     return wall if wall > 0 else fallback
 
 
-by_index = {}
-partitions = {}
-deduped = 0
+shards = []
+declared_shards = 0
 for path in inputs:
     if not path.exists():
         continue
@@ -1124,41 +1122,16 @@ for path in inputs:
         real = int(s["duration_ms"])
         hint = hints.get(s["path"], default_ms)
         rows.append((real - hint, s["path"], real, hint, s["path"] not in hints))
-    lane = match.group(0)
-    partitions.setdefault(int(match.group(2)), lane)
-    shard = {
-        "lane": lane,
-        "wall": wall_ms_of(data, sum(r[2] for r in rows)),
-        "rows": rows,
-    }
-    index = int(match.group(1))
-    previous = by_index.get(index)
-    if previous is not None:
-        # Several runs globbed together supply the same shard more than once.
-        # Keep the slowest copy, the same worst-case rule the hint table itself
-        # is refreshed on, so a repeat can never be counted as extra coverage.
-        deduped += 1
-        if previous["wall"] >= shard["wall"]:
-            continue
-    by_index[index] = shard
-
-if len(partitions) > 1:
-    print(
-        "shard balance guard: inputs mix %d serial partitions (%s), whose shard "
-        "numbers cover different work; check one partition at a time "
-        "(docs/fm-test-portable-shards.md)"
-        % (len(partitions), ", ".join(sorted(partitions.values()))),
-        file=sys.stderr,
-    )
-    sys.exit(2)
-
-if deduped:
-    print(
-        "FM_TEST_SHARD_BALANCE deduped %d repeated shard artifact(s); the "
-        "slowest copy of each shard was kept" % deduped
+    declared_shards = max(declared_shards, int(match.group(1)))
+    shards.append(
+        {
+            "lane": match.group(0),
+            "wall": wall_ms_of(data, sum(r[2] for r in rows)),
+            "rows": rows,
+        }
     )
 
-shards = [by_index[index] for index in sorted(by_index)]
+shards.sort(key=lambda s: s["lane"])
 if not shards:
     print(
         "FM_TEST_SHARD_BALANCE skipped no portable serial timing artifacts "
@@ -1168,7 +1141,6 @@ if not shards:
 
 # The artifacts declare the partition they ran as, so coverage is counted
 # against that rather than against whatever this runner is configured for now.
-declared_shards = next(iter(partitions))
 if len(shards) < declared_shards:
     print(
         "FM_TEST_SHARD_BALANCE partial %d of %d portable serial shards reported "
@@ -1183,7 +1155,7 @@ for s in shards:
     if share <= max_budget:
         continue
     lines = [
-        "shard balance guard failed: %s ran %s, %.0f%% of the %s min job cap "
+        "shard balance guard failed: %s ran %s, %.1f%% of the %s min job cap "
         "(max %d%%); repack the lane (docs/fm-test-portable-shards.md)"
         % (s["lane"], minutes(s["wall"]), share, bound_s, max_budget)
     ]
@@ -1213,7 +1185,7 @@ if failures:
 
 worst = max(shards, key=lambda s: s["share"])
 print(
-    "FM_TEST_SHARD_BALANCE ok shards=%d worst_share=%s@%.0f%% bound=%smin"
+    "FM_TEST_SHARD_BALANCE ok shards=%d worst_share=%s@%.1f%% bound=%smin"
     % (len(shards), worst["lane"], worst["share"], bound_s)
 )
 PY

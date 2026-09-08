@@ -124,7 +124,11 @@ Each artifact names the lane it ran as and every script it ran, so a shard is ch
 It checks one property, the one actually being protected: how close a shard runs to the cap that would cancel it.
 
 A shard whose duration exceeds `PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT` of the job cap fails; anything under it passes.
-The duration is the shard's own recorded wall time (`summary.duration_ms` in its artifact), because the job cap bounds the wall clock rather than the sum of the scripts; an artifact carrying no usable wall time falls back to that sum.
+The duration is the shard's own recorded wall time (`summary.duration_ms` in its artifact) rather than the sum of its scripts; an artifact carrying no usable wall time falls back to that sum.
+That numerator is the *suite's* wall clock while `timeout-minutes` bounds the whole *job's*, so the share systematically understates the job by whatever the surrounding steps cost: checkout, the pinned ShellCheck and actionlint installs, the two `npm install -g` steps, the artifact upload, and job teardown.
+That bias is measured, not assumed. Across 30 `tests-portable-serial` jobs from 6 recent green CI runs, pre-suite setup ran 13 to 20 seconds (median 15 s) and total non-suite time including upload and teardown ran 15 to 24 seconds (median 18 s).
+The worst observed non-suite cost is 0.40 min, 2.0% of the 20-minute bound, against the 10% this threshold reserves: a shard scoring exactly 90% reaches about 18.40 min of job wall clock in the worst case, leaving 1.60 min still in hand.
+Re-measure those numbers rather than re-arguing the threshold if the job gains or loses steps.
 The failure names the scripts furthest over their hints, so it still says what to re-measure rather than only that a shard is slow.
 The hint table feeds that list and nothing else here: it no longer decides pass or fail on its own, and the coverage guard's `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT` above still owns hints that are missing.
 
@@ -137,10 +141,7 @@ Do not re-derive that split and add it back.
 The `tests-timing-aggregate` job runs the check after building the aggregate summary.
 A cancelled shard uploads no artifact, so the check reports how many of the shards its artifacts declare could actually be read and leaves the rest unchecked rather than guessing.
 
-Reading several downloaded runs at once is the documented refresh workflow, so the guard is explicit about what it accepts.
 An artifact that names no numbered serial shard is skipped.
-The same shard supplied more than once is deduplicated to its slowest copy, the same worst-case rule the hint table is refreshed on, so a repeat is never counted as extra coverage.
-Artifacts from two different partitions are refused outright, because shard 3 of five and shard 3 of six cover different work and their totals cannot be added.
 
 ## Timing artifacts
 

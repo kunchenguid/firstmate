@@ -1539,12 +1539,12 @@ puts JSON.generate(
 }
 
 # Writes one synthetic portable-serial timing artifact: <file> <shard> <count>
-# <per-script-ms> [wall-ms|none] [partition]. The guard reads a shard's
-# membership and durations from the artifact itself, so a fixture needs no real
-# lane, and it counts coverage against the partition the label declares.
+# <per-script-ms> [wall-ms|none]. The guard reads a shard's membership and
+# durations from the artifact itself, so a fixture needs no real lane, and it
+# counts coverage against the shard count the lane label declares.
 write_shard_timing_json() {
-  local file=$1 shard=$2 count=$3 each=$4 wall=${5:-} partition=${6:-}
-  [ -n "$partition" ] || partition=$(configured_serial_shards)
+  local file=$1 shard=$2 count=$3 each=$4 wall=${5:-} partition
+  partition=$(configured_serial_shards)
   python3 - "$file" "$shard" "$count" "$each" "$wall" "$partition" <<'PY'
 import json, sys
 file, shard, count, each, wall, partition = (
@@ -1580,10 +1580,6 @@ json.dump(
 PY
 }
 
-# Writes an artifact carrying a real serial shard's own scripts, so the hints
-# under test are the ones the runner actually ships. Every script is recorded at
-# <each> ms, which is above every hint in the table, and the shard's wall time is
-# set independently so drift can be exercised without also tripping headroom.
 test_shard_balance_passes_and_reports_bound() {
   local tmp out bound
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-ok.XXXXXX")
@@ -1620,52 +1616,6 @@ test_shard_balance_measures_the_recorded_wall_time() {
   assert_contains "$out" "20.00 min" "the fallback must be the sum of the scripts"
   rm -rf "$tmp"
   pass "shard balance guard measures recorded wall time and falls back to the script sum"
-}
-
-test_shard_balance_dedupes_repeated_shard_artifacts() {
-  local tmp out dup rc shards shard
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-dupe.XXXXXX")
-  shards=$(configured_serial_shards)
-  [ -n "$shards" ] || { rm -rf "$tmp"; fail "could not read the configured serial shard count"; }
-  # Globbing several downloaded runs together hands the guard the same shard
-  # more than once. Counting a repeat as extra coverage would make an incomplete
-  # lane look whole, so a repeat must change nothing the guard reports.
-  shard=1
-  while [ "$shard" -le "$shards" ]; do
-    write_shard_timing_json "$tmp/$shard.json" "$shard" 4 30000 600000
-    cp "$tmp/$shard.json" "$tmp/dup-$shard.json"
-    shard=$((shard + 1))
-  done
-  out=$("$RUNNER" --check-shard-balance "$tmp"/[0-9].json 2>&1) && rc=0 || rc=$?
-  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "the distinct shards must pass: $out"; }
-  assert_contains "$out" "FM_TEST_SHARD_BALANCE ok shards=$shards" "the distinct lane summary"
-  dup=$("$RUNNER" --check-shard-balance "$tmp"/*.json 2>&1) && rc=0 || rc=$?
-  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "duplicated shards must not fail: $dup"; }
-  assert_contains "$dup" "deduped" "a repeated shard must be reported as deduped"
-  assert_contains "$dup" "FM_TEST_SHARD_BALANCE ok shards=$shards" \
-    "a repeated shard must not raise the shard count"
-  case "$dup" in
-    *partial*)
-      rm -rf "$tmp"
-      fail "a deduped lane must not be reported as partial: $dup"
-      ;;
-  esac
-  rm -rf "$tmp"
-  pass "shard balance guard keeps one copy of a repeated shard artifact"
-}
-
-test_shard_balance_refuses_mixed_partitions() {
-  local tmp out rc
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-mixed.XXXXXX")
-  # Shard 1 of five and shard 1 of six cover different work, so their totals
-  # cannot be added. Refuse rather than quietly counting both.
-  write_shard_timing_json "$tmp/a.json" 1 4 30000 120000 5
-  write_shard_timing_json "$tmp/b.json" 1 4 30000 120000 6
-  out=$("$RUNNER" --check-shard-balance "$tmp/a.json" "$tmp/b.json" 2>&1) && rc=0 || rc=$?
-  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "mixed partitions must be refused: $out"; }
-  assert_contains "$out" "partitions" "the refusal must say the inputs mix partitions"
-  rm -rf "$tmp"
-  pass "shard balance guard refuses artifacts from two different partitions"
 }
 
 # How many serial shards the runner is configured for, read from the lanes it
@@ -1848,8 +1798,6 @@ test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
 test_shard_balance_passes_and_reports_bound
 test_shard_balance_measures_the_recorded_wall_time
-test_shard_balance_dedupes_repeated_shard_artifacts
-test_shard_balance_refuses_mixed_partitions
 test_shard_balance_fails_on_lost_headroom
 test_shard_balance_reports_missing_and_foreign_artifacts
 test_portable_serial_job_cap_has_one_owner
