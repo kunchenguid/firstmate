@@ -2844,7 +2844,23 @@ def validate_attempt_failure(
     failure_class = failure.get("class")
     if not isinstance(failure_class, str):
         raise GateError("attempt has no valid failure class")
-    if failure_class == "none":
+    if failure_class == "no_commit_timeout":
+        timing_policy = as_object(plan.get("timing"))
+        timeout = timing_policy.get("no_commit_timeout_s")
+        evidence = failure.get("no_commit_timeout")
+        if (not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0
+                or timing_policy.get("no_commit_disposition") != "void_and_rerun"
+                or not isinstance(evidence, dict)
+                or set(evidence) != {"dispatch_accepted_at", "observed_at", "first_valid_final_commit_at"}
+                or evidence["first_valid_final_commit_at"] is not None):
+            raise GateError("no-commit timeout lacks frozen policy or no-commit evidence")
+        start, end = evidence["dispatch_accepted_at"], evidence["observed_at"]
+        if (any(isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0 for value in (start, end))
+                or end - start < timeout):
+            raise GateError("no-commit timeout has not reached the frozen deadline")
+        disposition = "void_and_rerun"
+    elif failure_class == "none":
         disposition = "scored"
     else:
         disposition = as_object(plan.get("failure_policy")).get(failure_class)
@@ -2861,6 +2877,17 @@ def validate_attempt_failure(
         or any(isinstance(value, bool) or not isinstance(value, (int, float)) or value != 0 for value in scores)
     ):
         raise GateError("candidate-caused failure must have zero deterministic and panel scores")
+
+
+def valid_attempt_intervals(timing: dict[str, Any]) -> bool:
+    intervals = timing.get("intervals")
+    if as_object(timing.get("failure")).get("class") == "no_commit_timeout":
+        return intervals == {}
+    return isinstance(intervals, dict) and all(
+        isinstance(intervals.get(name), (int, float)) and not isinstance(intervals.get(name), bool)
+        and math.isfinite(intervals[name]) and intervals[name] >= 0
+        for name in REQUIRED_TIMING_INTERVALS
+    )
 
 
 def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[bool, str]:
@@ -2971,13 +2998,7 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
                 continue
             intervals = timing.get("intervals")
             failure = timing.get("failure")
-            valid_intervals = isinstance(intervals, dict) and all(
-                isinstance(intervals.get(name), (int, float))
-                and not isinstance(intervals.get(name), bool)
-                and math.isfinite(float(intervals[name]))
-                and float(intervals[name]) >= 0
-                for name in REQUIRED_TIMING_INTERVALS
-            )
+            valid_intervals = valid_attempt_intervals(timing)
             try:
                 validate_attempt_failure(plan, failure, "void")
                 valid_failure = True
@@ -3262,6 +3283,18 @@ def validate_archived_evaluator_declaration(
         return None, "archived evaluator file is not content-addressed in its sample manifest"
     if not isinstance(groups, dict) or argv[0] not in (groups.get("capture_and_scoring") or []):
         return None, "archived evaluator must be declared in the capture_and_scoring evidence group"
+    package = rerun.get("package_files", [argv[0]])
+    allowed = set(groups.get("capture_and_scoring") or []) - {"capture.json"}
+    if (not isinstance(package, list) or not package or any(not isinstance(name, str) for name in package)
+            or len(set(package)) != len(package) or argv[0] not in package
+            or any(name not in allowed or name not in files for name in package)):
+        return None, "evaluator package must contain only addressed scoring code and measurement inputs"
+    try:
+        for name in package:
+            if normalized_relative_path(name) != name or name.endswith(".bundle"):
+                raise ValueError("invalid package path")
+    except ValueError:
+        return None, "evaluator package cannot include candidate bundles or unsafe paths"
     evaluator = (sample / argv[0]).resolve()
     if not is_within(evaluator, sample.resolve()) or not evaluator.is_file():
         return None, "archived evaluator file escapes or is absent from its sample archive"
@@ -3290,6 +3323,7 @@ def validate_archived_evaluator_declaration(
         return None, "archived evaluator must declare at least one supported form-preserving scored-input perturbation"
     return {
         "argv": argv[0],
+        "package_files": package,
         "expected": expected,
         "perturbable_paths": perturbable_paths,
         "perturbations": normalized_perturbations,
@@ -3745,7 +3779,7 @@ def rerun_archived_evaluator(
     wrapper: list[str],
     declaration: dict[str, Any],
 ) -> tuple[bool, str, dict[str, str]]:
-    files = record["files"]
+    files = {name: record["files"][name] for name in declaration["package_files"]}
     evaluator_name = declaration["argv"]
     expected = declaration["expected"]
     perturbable_paths = declaration["perturbable_paths"]
@@ -3830,6 +3864,17 @@ def rerun_archived_evaluator(
     actual = sha256_bytes(genuine.stdout)
     if actual != expected:
         return False, f"archived evaluator result hash {actual[:12]} does not match {expected[:12]}", {}
+    def score(output):
+        result = json.loads(output)
+        value = result.get("deterministic") if isinstance(result, dict) else None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("evaluator output must contain a finite deterministic measurement")
+        return value
+
+    try:
+        genuine_score = score(genuine.stdout)
+    except (ValueError, UnicodeError) as exc:
+        return False, str(exc), {}
     for relative, perturbed in perturbed_runs:
         if perturbed.returncode != 0:
             suffix = confinement_stderr(perturbed.stderr)
@@ -3837,9 +3882,13 @@ def rerun_archived_evaluator(
                 f"perturbed evaluator run for {relative} was inconclusive because the declared "
                 f"form-preserving input exited {perturbed.returncode}{suffix}"
             ), {}
-        if perturbed.stdout == genuine.stdout:
+        try:
+            perturbed_score = score(perturbed.stdout)
+        except (ValueError, UnicodeError) as exc:
+            return False, f"perturbed evaluator measurement for {relative} is invalid: {exc}", {}
+        if perturbed_score == genuine_score:
             return False, (
-                f"archived evaluator ignored declared scored input {relative}; its perturbation did not change output"
+                f"archived evaluator ignored declared scored input {relative}; its perturbation did not change the deterministic measurement"
             ), {}
         input_statuses[relative] = "proven"
     return True, actual, input_statuses
@@ -4215,13 +4264,7 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
         timing = evidence_parts["timing.json"]
         failure = timing.get("failure") if isinstance(timing, dict) else None
         intervals = timing.get("intervals") if isinstance(timing, dict) else None
-        timing_ok = isinstance(intervals, dict) and all(
-            isinstance(intervals.get(name), (int, float))
-            and not isinstance(intervals.get(name), bool)
-            and math.isfinite(float(intervals.get(name)))
-            and float(intervals.get(name)) >= 0
-            for name in REQUIRED_TIMING_INTERVALS
-        )
+        timing_ok = valid_attempt_intervals(timing)
         if not timing_ok or not isinstance(failure, dict) or failure.get("status") != status:
             report.fail("promote.evidence", f"{path.name} has no valid centrally recorded attempt status and timing")
             continue

@@ -32,6 +32,8 @@ Every track emits a spec-seat verdict, while a specification-required track must
 
 Both archive validation and promotion require the current plan to match its freeze and passing preflight receipt before interpreting results.
 The deterministic score, candidate tree, and capture digest in `capture.json` are the archived evaluator’s complete JSON output; the replay declaration binds those exact bytes, and genuine replay must reproduce them.
+A `no_commit_timeout` failure uses the frozen timing disposition and carries `no_commit_timeout` evidence with numeric `dispatch_accepted_at` and `observed_at` timestamps from the shared clock, plus `first_valid_final_commit_at: null`.
+Its elapsed time must reach `timing.no_commit_timeout_s`; its `intervals` object is empty because no final-commit endpoint exists.
 They share one failure-policy validator: voids must match their frozen disposition, sibling access must carry a blocker, and candidate-caused failures must carry zero deterministic and panel scores.
 
 ## Where the refusal actually bites
@@ -99,13 +101,15 @@ The restore drill treats archived evaluator bytes as untrusted candidate output.
 It restores, rebinds, and statically validates each sample in a short-lived workspace, then releases that repository and worktree immediately while retaining only the bounded selection's copied tree for later execution.
 Only differential execution is bounded: the drill selects the first sample in the archive's stable lexical order and records that selection in the receipt.
 Both evaluator executions use the same preflight-proven `bin/fm-bench-confine.sh` mechanism with networking disabled, a scrubbed environment, and one independently generated opaque run root as the only writable candidate-data bind.
+The replay declaration's `package_files` lists only content-addressed code and measurement inputs from `capture_and_scoring`; when omitted, it defaults to the executable alone.
+The package excludes `capture.json` and candidate bundles, so neither the expected result nor an untouched candidate copy reaches replay.
 The archive and repository are not mounted for the evaluator, and the genuine and perturbed runs expose the same internal layout without a role-bearing path, environment value, or recognizable perturbation marker.
 The gate supports pure-data JSON-value, source text-token, and PNG-pixel declarations for JSON, TypeScript, JavaScript, CSS, HTML, and non-interlaced 8-bit PNG inputs.
 Every opaque run root is materialised in the same stable path order, then matching ownership, permissions, normalized access and modification times, directory order, byte length, and bytes are compared before execution so only the declared perturbation can differ.
 Every gate-owned perturbation preserves byte length, and a declaration such as a JSON boolean that cannot change at equal serialized width is refused rather than exempted from the prepared-tree comparison.
 JSON and source inputs retain their archived bytes in the genuine run, while PNG inputs are decoded within a 128 MiB raster limit and both copies pass through the same deterministic equal-length encoder before one filtered pixel byte changes.
 The recorded result hash therefore covers archived bytes for JSON and source inputs, and the gate-prepared genuine encoding for a declared PNG input.
-Only a successful genuine run and a successful single-input perturbation with identical output prove that an evaluator ignored that declared perturbable input.
+A successful perturbation must change the finite `deterministic` measurement; changing only a capture digest, tree identity, or other metadata cannot prove scoring dependence.
 Every evaluator must prove dependence on at least one scored input, while another input without a declared supported perturbation remains visibly unproven per input in the gate output and drill receipt.
 A restore-drill attempt revokes its earlier receipt before any check runs, so every refusal leaves cleanup held even when a required restore dependency has disappeared.
 
@@ -120,7 +124,7 @@ Everything else is either a pass or an ordinary refusal naming the correction th
 
 Promotion treats each result file as an archive-attempt locator, not a score authority.
 For scored attempts it recomputes the composite and blocker state from content-addressed sample evidence after matching the planned neutral panel, candidate tree, evaluator output, capture hash, timing intervals, and failure status.
-For void attempts it requires only the approved central failure class and both timing intervals, and every archived void attempt must carry its own result record.
+For void attempts it requires the approved central failure class and timing evidence, using deadline observations instead of final-commit intervals for a no-commit timeout, and every archived void attempt must carry its own result record.
 Each sample identity must then form one finite supersession chain: a single root attempt, one successor per void, no fork, no cycle, no dangling link, and exactly one terminal scored attempt, so an arbitrarily long void-to-void-to-scored chain resolves while an unlinked or branching one is refused.
 For that reason `archive-verify` precedes `promote-evaluate` in the post-run gate order.
 Cost arithmetic likewise requires every referenced run and auxiliary class to carry finite, nonnegative ordered bounds, and the approved class itself must be finite and positive.
@@ -129,3 +133,7 @@ Cost arithmetic likewise requires every referenced run and auxiliary class to ca
 
 A new correction becomes a new check inside `bin/fm-bench-gate.py`, with its refusal message naming the property it protects, plus a case in `tests/fm-bench-gate.test.sh` that proves the check bites.
 A check that cannot be made to fail in a test is not enforcement; add the failing fixture first.
+
+Confined briefs refer to staged source helpers, skills, and task-local file paths.
+The host relay appends complete status lines, publishes the scout report, and carries only that task’s inbox messages and acknowledgements while its launch generation remains current.
+Cursor’s supervisor binding reads transcripts from the entrant’s private home and excludes conversations that existed before launch.

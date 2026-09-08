@@ -2245,19 +2245,24 @@ for sample in samples:
     raw.write_bytes(program.read_bytes())
     raw.chmod(0o755)
     capture = json.loads((sample / "capture.json").read_text())
-    capture["capture_hash"] = rerun["result_hash"]
+    expected_digest = rerun["result_hash"]
+    capture["capture_hash"] = expected_digest
+    capture["deterministic"] = 1
     output = json.dumps(capture, sort_keys=True, indent=2) + "\n"
     (sample / "capture.json").write_text(output)
     capture["capture_hash"] = "%s"
-    template = json.dumps(capture, sort_keys=True, indent=2) + "\n"
+    capture["deterministic"] = "__SCORE__"
+    template = json.dumps(capture, sort_keys=True, indent=2).replace('"__SCORE__"', "%s") + "\n"
     program.write_text('#!/bin/bash\nset -eo pipefail\n' +
                       'digest=$("$(dirname "$0")/raw-evaluator.sh" "$@" | sha256sum)\n' +
-                      'printf ' + shlex.quote(template) + ' "${digest%% *}"\n')
+                      'score=0\n[ "${digest%% *}" != ' + shlex.quote(expected_digest) + ' ] || score=1\n' +
+                      'printf ' + shlex.quote(template) + ' "${digest%% *}" "$score"\n')
     program.chmod(0o755)
     for name in ("capture.json", "raw-evaluator.sh", rerun["argv"][0]):
         record["files"][name] = hashlib.sha256((sample / name).read_bytes()).hexdigest()
     if "raw-evaluator.sh" not in record["groups"]["capture_and_scoring"]:
         record["groups"]["capture_and_scoring"].append("raw-evaluator.sh")
+    rerun["package_files"] = [name for name in record["groups"]["capture_and_scoring"] if name != "capture.json"]
     rerun["result_hash"] = record["files"]["capture.json"]
     manifest_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PYBIND
@@ -2898,8 +2903,8 @@ manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "an archived-file echo cannot stand in for a restored-tree evaluator"
-assert_contains "$out" "ignored declared scored input work.json" \
-  "the rerun contract proves evaluator dependence on restored content"
+assert_contains "$out" "evaluator confinement or execution exited" \
+  "the replay package withholds the archived answer from the evaluator"
 assert_absent "$BENCH/archive/restore-drill.json" "a no-op evaluator writes no cleanup receipt"
 pass "the restore drill refuses an executable evaluator that ignores restored content"
 

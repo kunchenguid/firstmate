@@ -104,6 +104,7 @@ fm_refuse_unconfined_remote_benchmark_entrant() {  # <task-id>
 fm_bench_wrap_entrant_launch() {  # <task-id> <worktree> <shell-command>
   local id=${1-} worktree=${2-} command=${3-} root wrapped isolation_hash receipt_hash
   local harness=${4-} model=${5-} effort=${6-} raw=${7:-0} kind=${8:-ship}
+  local library_dir=${BASH_SOURCE[0]%/*}
   case "$id" in
     bench-*) ;;
     *) printf '%s' "$command"; return 0 ;;
@@ -117,10 +118,12 @@ fm_bench_wrap_entrant_launch() {  # <task-id> <worktree> <shell-command>
     echo "error: benchmark entrant $id preflight does not cover the current isolation layout; launch refused" >&2
     return 1
   fi
+  library_dir=$(cd -- "$library_dir" && pwd) || return 1
   wrapped=$(python3 - "$root/isolation.json" "$id" "$worktree" "$command" \
-    "$harness" "$model" "$effort" "$raw" "$kind" "${9-}" "${10-}" "${11-}" "${12-}" "${13-}" "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" <<'PY'
+    "$harness" "$model" "$effort" "$raw" "$kind" "${9-}" "${10-}" "${11-}" "${12-}" "${13-}" "$library_dir" <<'PY'
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -195,23 +198,43 @@ if brief:
     staged_state.mkdir()
     staged_bin = stage / "bin"
     staged_bin.mkdir()
+    staged_code = stage / "firstmate"
+    staged_code.mkdir()
+    staged_data = stage / "data"
+    staged_data.mkdir()
     def quote(value):
         return "'" + str(value).replace("'", "'\\''") + "'"
     rewrites = {
         brief: str(stage / "brief.md"),
+        str(Path(brief).parent / "report.md"): str(staged_state / f"{entrant_id}.report.md"),
+        str(Path(brief).parent): str(staged_data),
+        code_root: str(staged_code),
         str(Path(code_root) / "bin" / "fm-operational-input.sh"): str(staged_bin / "fm-operational-input.sh"),
         str(Path(code_root) / "bin" / "fm-busy-event.sh"): str(staged_bin / "fm-busy-event.sh"),
         state: str(staged_state),
         str(Path(state).resolve()): str(staged_state),
         turnend: str(staged_state / Path(turnend).name),
     }
+    substitutions = {key: value for old, new in rewrites.items() if old
+                     for key, value in ((quote(old), quote(new)), (old, new))}
+    pattern = re.compile("|".join(re.escape(key) for key in sorted(substitutions, key=len, reverse=True)))
     def rewrite(text):
-        for old, new in sorted(rewrites.items(), key=lambda pair: -len(pair[0])):
-            if old:
-                text = text.replace(quote(old), quote(new)).replace(old, new)
-        return text
+        return pattern.sub(lambda match: substitutions[match[0]], text)
     try:
-        shutil.copyfile(brief, stage / "brief.md")
+        for relative in ("bin", ".agents/skills", "docs", "AGENTS.md", "CLAUDE.md"):
+            source = Path(code_root) / relative
+            if not source.exists():
+                continue
+            sources = [source, *source.rglob("*")] if source.is_dir() else [source]
+            if any(item.is_symlink() for item in sources):
+                raise SystemExit("brief dependencies must be regular source files")
+            destination = staged_code / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, destination)
+            else:
+                shutil.copyfile(source, destination)
+        (stage / "brief.md").write_text(rewrite(Path(brief).read_text(encoding="utf-8")), encoding="utf-8")
         for name in ("fm-operational-input.sh", "fm-busy-event.sh", "fm-busy-lib.sh"):
             shutil.copyfile(Path(code_root) / "bin" / name, staged_bin / name)
             (staged_bin / name).chmod(0o700)
@@ -231,6 +254,13 @@ if brief:
             runtime_extension = f"/tmp/fm-bench-{stage.name}.ts"
             command = command.replace(quote(extension), quote(runtime_extension))
             command = f"cp {quote(extension)} {quote(runtime_extension)} && " + command
+        if harness.startswith("cursor"):
+            projects = Path(private["private_home"]) / ".cursor/projects"
+            prior = sorted({entry.name for transcripts in projects.glob("*/agent-transcripts")
+                            for entry in transcripts.iterdir() if entry.is_dir()})
+            (Path(state) / f"{entrant_id}.cursor-session").write_text(
+                f"projects_root={projects}\nworkspace_root={declared_root}\n"
+                + "".join(f"prior_conversation={name}\n" for name in prior), encoding="utf-8")
         if binary:
             command = command.replace(quote(binary), shlex.quote(Path(binary).name))
     except (OSError, UnicodeError):
@@ -240,7 +270,8 @@ env = [f"BENCH_PRIVATE_ROOT={declared_root}", f"BENCH_PRIVATE_OBJECT_STORE={priv
 launch = ["env", *env, *argv, "/bin/sh", "-lc", command]
 if brief:
     launch = ["python3", str(Path(library) / "fm-bench-lifecycle.py"), str(staged_state),
-              str(Path(state).resolve()), entrant_id, str(Path(library) / "fm-busy-event.sh"), "--", *launch]
+              str(Path(state).resolve()), entrant_id, str(Path(library) / "fm-busy-event.sh"), "--report",
+              str(Path(brief).parent / "report.md"), "--", *launch]
 print(" ".join(shlex.quote(item) for item in launch))
 PY
 ) || {
