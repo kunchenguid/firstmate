@@ -161,8 +161,12 @@ run_remote_notify() {  # <home> <fakebin> <snapshot>
 }
 
 # Age the home's cooldown record so the next run sees the window as elapsed.
-age_cooldown() {  # <state-dir> <mate-id> <seconds-ago>
-  printf '%s\n' "$(( $(date +%s) - $3 ))" > "$1/$2.reconcile-nudged"
+# The optional 4th arg pins the "now" anchor (pass the same value to the next
+# run_notify via FM_RECONCILE_NOW) so a boundary check reads the exact instant
+# it wrote, instead of racing two independent real-clock reads.
+age_cooldown() {  # <state-dir> <mate-id> <seconds-ago> [now]
+  local now=${4:-$(date +%s)}
+  printf '%s\n' "$((now - $3))" > "$1/$2.reconcile-nudged"
 }
 
 run_notify() {  # <home> <fakebin> <name> <snapshot> [extra args...]
@@ -287,22 +291,16 @@ test_the_window_is_four_hours() {
   snap="$home/snapshot.json"
   write_snapshot "$snap" mate '{"kind":"terminal_in_flight","ids":["done-row"]}'
   run_notify "$home" "$fakebin" fourhours "$snap" >/dev/null || fail "the first ask failed"
-  now=$(date +%s)
-  cat > "$fakebin/date" <<'SH'
-#!/usr/bin/env bash
-if [ -n "${FM_TEST_DATE_NOW:-}" ] && [ "${1:-}" = +%s ]; then
-  printf '%s\n' "$FM_TEST_DATE_NOW"
-  exit 0
-fi
-exec /bin/date "$@"
-SH
-  chmod +x "$fakebin/date"
   # One second short of four hours is still inside; one second past is not.
-  printf '%s\n' "$((now - 14399))" > "$home/state/mate.reconcile-nudged"
-  out=$(FM_TEST_DATE_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
+  # Pin the clock fm-secondmate-reconcile.sh reads so both boundary checks
+  # compare against the exact instant the nudge record was aged to, instead of
+  # racing a second real-clock read under load.
+  now=$(date +%s)
+  age_cooldown "$home/state" mate 14399 "$now"
+  out=$(FM_RECONCILE_NOW="$now" run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "cooldown: mate" "the window was shorter than four hours: $out"
-  printf '%s\n' "$((now - 14401))" > "$home/state/mate.reconcile-nudged"
-  out=$(FM_TEST_DATE_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
+  age_cooldown "$home/state" mate 14401 "$now"
+  out=$(FM_RECONCILE_NOW="$now" run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "sent: mate" "the window was longer than four hours: $out"
   pass "the cooldown window is four hours"
 }

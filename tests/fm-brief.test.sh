@@ -260,7 +260,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "You drive no-mistakes by responding to its gates" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -444,6 +444,60 @@ test_ship_project_memory_wording() {
     "project-memory contract no longer defers to the ensure helper"
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
+
+# Quota-efficiency worker rules belong only in the no-mistakes DOD: a
+# direct-PR or local-only brief never runs no-mistakes, and a scout brief
+# carries no delivery contract at all.
+test_no_mistakes_dod_carries_quota_efficiency_rules() {
+  local home id brief
+  home="$TMP_ROOT/quota-efficiency-home"
+  mkdir -p "$home/data"
+  id="brief-quota-nm1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  assert_grep "paused: awaiting compaction before validation" "$brief" \
+    "no-mistakes DOD must tell the worker the exact declared-state phrase to append after its implementation commit"
+  assert_grep "do NOT run \`no-mistakes axi run\` yet" "$brief" \
+    "no-mistakes DOD must tell the worker to stop before starting no-mistakes, not run it immediately"
+  assert_grep "rings you with a durable inbox message telling you to start the validation run" "$brief" \
+    "no-mistakes DOD must describe firstmate's compact-then-ring handoff"
+
+  assert_grep "Default convergence after the second review round" "$brief" \
+    "no-mistakes DOD must state the default convergence rule"
+  assert_grep "Deferred findings" "$brief" \
+    "no-mistakes DOD must name the PR-body section for findings not auto-applied"
+  assert_grep "This brief's own \`# Task\` section may override that default" "$brief" \
+    "no-mistakes DOD must let the task text override the convergence default"
+
+  assert_grep "Pass an absolute path as the PATH argument of \`grep\`, \`sed\`, \`find\`, and \`cat\`" "$brief" \
+    "no-mistakes DOD must require absolute paths for grep/sed/find/cat"
+  assert_grep "never \`cd\` before reading or writing a relative path" "$brief" \
+    "no-mistakes DOD must ban cd-then-relative-path shapes"
+
+  for id_mode in "brief-quota-dp1:direct-PR" "brief-quota-lo1:local-only"; do
+    id=${id_mode%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "${id_mode##*:}" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_no_grep "paused: awaiting compaction before validation" "$brief" \
+      "$id: the declared-state compaction rule is no-mistakes-only"
+    assert_no_grep "Default convergence after the second review round" "$brief" \
+      "$id: the convergence-default rule is no-mistakes-only"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-quota-scout1 some-proj --scout >/dev/null 2>&1
+  brief="$home/data/brief-quota-scout1/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_no_grep "paused: awaiting compaction before validation" "$brief" \
+    "scout brief must not carry the ship-only declared-state compaction rule"
+  assert_no_grep "Default convergence after the second review round" "$brief" \
+    "scout brief must not carry the ship-only convergence-default rule"
+
+  pass "fm-brief.sh: no-mistakes DOD carries the quota-efficiency worker rules, absent from direct-PR/local-only/scout"
+}
+
 
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
@@ -985,6 +1039,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_no_mistakes_dod_carries_quota_efficiency_rules
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
