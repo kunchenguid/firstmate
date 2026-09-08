@@ -679,6 +679,38 @@ test_astra_qualified_and_raw_models_cannot_bypass_evidence() {
   pass "qualified and raw Astra launch paths cannot bypass primary evidence"
 }
 
+test_raw_codex_provider_models_require_inspectable_non_astra_launches() {
+  local rec opencode_astra_id omp_astra_id opencode_safe_id out status
+  opencode_astra_id=profile-raw-opencode-astra-z3fga
+  omp_astra_id=profile-raw-omp-astra-z3fgb
+  opencode_safe_id=profile-raw-opencode-safe-z3fgc
+  rec=$(make_spawn_case profile-raw-codex-provider codex "$opencode_astra_id" "$omp_astra_id" "$opencode_safe_id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$opencode_astra_id" "$PROJ_DIR" \
+    "opencode --model gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "a raw OpenCode Astra command should refuse before launch"
+  assert_contains "$out" "selecting Astra are not inspectable" "raw OpenCode Astra refusal did not identify selection evidence"
+  assert_absent "$HOME_DIR/state/$opencode_astra_id.meta" "raw OpenCode Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw OpenCode Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$omp_astra_id" "$PROJ_DIR" \
+    "omp --model openai-codex/gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "a raw omp Astra command should refuse before launch"
+  assert_contains "$out" "selecting Astra are not inspectable" "raw omp Astra refusal did not identify selection evidence"
+  assert_absent "$HOME_DIR/state/$omp_astra_id.meta" "raw omp Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw omp Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$opencode_safe_id" "$PROJ_DIR" \
+    "opencode --model gpt-5")
+  status=$?
+  expect_code 0 "$status" "a canonical raw OpenCode non-Astra command should remain launchable: $out"
+  assert_meta_profile "$HOME_DIR/state/$opencode_safe_id.meta" opencode default default
+  pass "raw Codex-provider launches reject Astra while preserving explicit non-Astra OpenCode"
+}
+
 test_raw_codex_home_override_is_refused() {
   local rec id out status codex_home launch
   id=profile-raw-codex-home-z3fh
@@ -1760,6 +1792,7 @@ test_codex_home_refuses_control_bytes_before_launch
 test_codex_home_is_refused_for_other_harnesses
 test_astra_without_a_profile_requires_primary_evidence
 test_astra_qualified_and_raw_models_cannot_bypass_evidence
+test_raw_codex_provider_models_require_inspectable_non_astra_launches
 test_raw_codex_home_override_is_refused
 test_astra_receipt_binds_the_selected_codex_home
 test_astra_receipt_requires_selected_provider_availability
