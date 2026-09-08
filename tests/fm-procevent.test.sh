@@ -1530,58 +1530,88 @@ kill -0 "$noisy_child" 2>/dev/null && fail "TERM-resistant source child survived
 assert_absent "$staged" "retirement removes the tracked partial staging file"
 pass "live output stays bounded and retirement reaps the whole source group"
 
-HPOST_TERM="$TMP_ROOT/post-term-reuse"; new_home "$HPOST_TERM"
-POST_TERM_SOURCE="$TMP_ROOT/post-term-reuse-source.sh"
-POST_TERM_PID="$TMP_ROOT/post-term-reuse.pid"
-POST_TERM_SIGNALS="$TMP_ROOT/post-term-reuse.signals"
-cat > "$POST_TERM_SOURCE" <<'SH'
+for post_term_case in mismatch unreadable unreadable-pgid nonleader; do
+  HPOST_TERM="$TMP_ROOT/post-term-$post_term_case"; new_home "$HPOST_TERM"
+  POST_TERM_SOURCE="$HPOST_TERM/source.sh"
+  POST_TERM_PID="$HPOST_TERM/child.pid"
+  POST_TERM_SIGNALS="$HPOST_TERM/child.signals"
+  POST_TERM_UNREADABLE="$HPOST_TERM/identity-unreadable"
+  cat > "$POST_TERM_SOURCE" <<'SH'
 #!/usr/bin/env bash
 trap 'printf "signalled\n" >> "$2"' TERM
 printf '%s\n' "$$" > "$1"
 while [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 1; done
 SH
-chmod +x "$POST_TERM_SOURCE"
-POST_TERM_BIN=$(fm_fakebin "$TMP_ROOT/post-term-reuse-bin")
-REAL_PS=$(command -v ps) || fail "the post-TERM reuse fixture requires ps"
-pe_register "$HPOST_TERM" lavish post-term-src -- \
-  "$POST_TERM_SOURCE" "$POST_TERM_PID" "$POST_TERM_SIGNALS" >/dev/null
-FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
-  FM_PROCEVENT_OWNER_CHECK_SECONDS=5 pe "$HPOST_TERM" reconcile >/dev/null
-wait_for "$POST_TERM_PID" || fail "the post-TERM reuse fixture did not start"
-wait_for "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
-  || fail "the post-TERM reuse fixture did not claim its source"
-POST_TERM_RUNNER=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim")
-kill -STOP "$POST_TERM_RUNNER" || fail "the post-TERM fixture could not keep its leader alive"
-cat > "$POST_TERM_BIN/ps" <<SH
+  chmod +x "$POST_TERM_SOURCE"
+  POST_TERM_BIN=$(fm_fakebin "$HPOST_TERM/tools")
+  REAL_PS=$(command -v ps) || fail "the post-TERM reuse fixture requires ps"
+  pe_register "$HPOST_TERM" lavish post-term-src -- \
+    "$POST_TERM_SOURCE" "$POST_TERM_PID" "$POST_TERM_SIGNALS" >/dev/null
+  FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
+    FM_PROCEVENT_OWNER_CHECK_SECONDS=5 pe "$HPOST_TERM" reconcile >/dev/null
+  wait_for "$POST_TERM_PID" || fail "the post-TERM reuse fixture did not start"
+  wait_for "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
+    || fail "the post-TERM reuse fixture did not claim its source"
+  POST_TERM_RUNNER=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim")
+  kill -STOP "$POST_TERM_RUNNER" || fail "the post-TERM fixture could not keep its leader alive"
+  cat > "$POST_TERM_BIN/ps" <<SH
 #!/usr/bin/env bash
 if [ -s "$POST_TERM_SIGNALS" ] && [ "\${1-}" = -p ] && [ "\${2-}" = "$POST_TERM_RUNNER" ] \
   && [ "\${3-}" = -o ] && [ "\${4-}" = lstart= ]; then
-  printf 'post-TERM reused identity\n'
-  exit 0
+  if [ "$post_term_case" = mismatch ]; then
+    printf 'post-TERM reused identity\n'
+    exit 0
+  fi
+  kill -0 "$POST_TERM_RUNNER" 2>/dev/null || exit 75
+  printf 'unreadable\n' > "$POST_TERM_UNREADABLE"
+  exit 1
+fi
+if [ -s "$POST_TERM_SIGNALS" ] && [ "\${1-}" = -o ] && [ "\${2-}" = pgid= ] \
+  && [ "\${3-}" = -p ] && [ "\${4-}" = "$POST_TERM_RUNNER" ]; then
+  case "$post_term_case" in
+    unreadable-pgid) exit 1 ;;
+    nonleader) printf '0\n'; exit 0 ;;
+  esac
 fi
 exec "$REAL_PS" "\$@"
 SH
-chmod +x "$POST_TERM_BIN/ps"
-post_term_status=0
-post_term_out=$(PATH="$POST_TERM_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
-  pe "$HPOST_TERM" retire post-term-src 2>&1) || post_term_status=$?
-[ "$post_term_status" -ne 0 ] || fail "retirement escalated after runner identity became ambiguous"
-assert_contains "$post_term_out" "cannot confirm runner identity" \
-  "post-TERM identity mismatch refuses retirement"
-[ -s "$POST_TERM_SIGNALS" ] || fail "the post-TERM fixture never received TERM"
-kill -0 "$POST_TERM_RUNNER" 2>/dev/null \
-  || fail "the post-TERM fixture lost its leader instead of exercising a live identity mismatch"
-kill -0 -"$POST_TERM_RUNNER" 2>/dev/null \
-  || fail "an ambiguous reused-PID group was killed during escalation"
-assert_present "$HPOST_TERM/state/procevent/post-term-src.source" \
-  "a live identity mismatch preserves registration"
-assert_present "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
-  "a live identity mismatch preserves its claim"
-kill -KILL -"$POST_TERM_RUNNER" 2>/dev/null || true
-for _ in $(seq 1 50); do kill -0 -"$POST_TERM_RUNNER" 2>/dev/null || break; sleep 0.1; done
-kill -0 -"$POST_TERM_RUNNER" 2>/dev/null && fail "could not clean up the post-TERM fixture group"
-pe "$HPOST_TERM" retire post-term-src >/dev/null
-pass "cleanup aborts escalation after runner identity becomes ambiguous"
+  chmod +x "$POST_TERM_BIN/ps"
+  post_term_status=0
+  post_term_out=$(PATH="$POST_TERM_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
+    pe "$HPOST_TERM" retire post-term-src 2>&1) || post_term_status=$?
+  [ -s "$POST_TERM_SIGNALS" ] || fail "the post-TERM fixture never received TERM"
+  if [ "$post_term_case" != mismatch ]; then
+    [ -s "$POST_TERM_UNREADABLE" ] || fail "escalation never encountered an unreadable live identity"
+  fi
+  case "$post_term_case" in
+    mismatch|nonleader)
+      [ "$post_term_status" -ne 0 ] || fail "retirement escalated despite $post_term_case evidence"
+      assert_contains "$post_term_out" "cannot confirm runner identity" \
+        "post-TERM $post_term_case evidence refuses retirement"
+      kill -0 "$POST_TERM_RUNNER" 2>/dev/null \
+        || fail "the post-TERM fixture lost its leader instead of exercising $post_term_case evidence"
+      kill -0 -"$POST_TERM_RUNNER" 2>/dev/null \
+        || fail "a $post_term_case group was killed during escalation"
+      assert_present "$HPOST_TERM/state/procevent/post-term-src.source" \
+        "post-TERM $post_term_case evidence preserves registration"
+      assert_present "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
+        "post-TERM $post_term_case evidence preserves its claim"
+      kill -KILL -"$POST_TERM_RUNNER" 2>/dev/null || true
+      ;;
+    *)
+      [ "$post_term_status" -eq 0 ] \
+        || fail "retirement abandoned a proved stop after $post_term_case identity: $post_term_out"
+      assert_absent "$HPOST_TERM/state/procevent/post-term-src.source" \
+        "proved escalation retires the source after $post_term_case identity"
+      assert_absent "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
+        "proved escalation releases its claim after $post_term_case identity"
+      ;;
+  esac
+  for _ in $(seq 1 50); do kill -0 -"$POST_TERM_RUNNER" 2>/dev/null || break; sleep 0.1; done
+  kill -0 -"$POST_TERM_RUNNER" 2>/dev/null && fail "the post-TERM fixture group survived: $post_term_case"
+  pe "$HPOST_TERM" retire post-term-src >/dev/null
+  pass "post-TERM $post_term_case evidence preserves the proved-stop boundary"
+done
 
 HBAD="$TMP_ROOT/hbad"; new_home "$HBAD"
 pe_register "$HBAD" lavish bad-limit -- /bin/true >/dev/null

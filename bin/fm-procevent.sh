@@ -1276,9 +1276,7 @@ cmd_reconcile() {
 # blocking child - signalling only the runner would leave that child alive and
 # reparented, which is exactly how a source that never completes leaks.
 # `proved` is passed only by this call's own escalation below, never by a caller
-# that merely encountered a leaderless group. It accepts exactly one extra state:
-# the leader gone with its group still populated, which is the ORDINARY outcome of
-# the TERM this same call just sent after proving the generation. Without it the
+# that merely encountered a leaderless group. Without it the
 # stop reads its own success as fresh ambiguity, abandons whatever survived the
 # ordinary signal, and leaves it unreachable forever. A reused pid is still alive
 # with a mismatched identity, so it reads stale here and is still refused; a
@@ -1287,23 +1285,20 @@ cmd_reconcile() {
 # and relaxing it is a separate open question, not something this path assumes.
 runner_group_signal() {  # <signal> <pid> <identity> [proved]
   local signal=$1 pid=$2 identity=$3 proved=${4-} state pgid
-  # KNOWN LIMIT: only an alive identity-matched leader proves group ownership.
-  # Detected reused PIDs and absent leaders are refused before signalling;
-  # launch pacing, leases, and reconcile cleanup are the backstop.
   fm_procevent_pid_state "$pid" "$identity"
   state=$?
   case "$state" in
     0) ;;
     1) fm_procevent_group_alive "$pid" && return 2; return 1 ;;
-    3) [ -n "$proved" ] || return 2 ;;
+    2|3) [ -n "$proved" ] || return 2 ;;
     *) return 2 ;;
   esac
   # A proved escalation has no leader left to re-read a pgid from; state 3 already
   # established that this exact numeric group still has members.
-  if [ "$state" -eq 0 ]; then
+  if [ "$state" -ne 3 ]; then
     pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || pgid=
     if [ "$pgid" != "$pid" ]; then
-      [ -n "$proved" ] && [ -z "$pgid" ] && ! fm_pid_alive "$pid" || return 2
+      [ -n "$proved" ] && [ -z "$pgid" ] || return 2
       fm_procevent_group_alive "$pid" || return 1
     fi
   fi
