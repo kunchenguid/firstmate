@@ -16,7 +16,13 @@ That Enter recipe applies only to this directory dialog.
 
 ### New or changed hooks
 
-On the first launch after the runtime switch on 2026-09-08, a separate dialog appeared before instructions were processed: four hooks were new or changed, with an offer to let them run outside the sandbox.
+**Hook trust is content-bound, not a once-per-machine gate like directory trust: any tool changing the shared `~/.codex/hooks.json` can reopen review, including tools unrelated to Firstmate.**
+The [official hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks), checked on 2026-09-08, describes recorded trust for the exact hook definition's hash and renewed review when hooks change.
+Firstmate's inspection that day found trust recorded per hook by file path, event, and index, with a content hash.
+The reported inventory contained fifteen trust entries for the shared file plus two bundled browser entries, and none for any project hooks file.
+The observed trigger was Orca rewriting the shared hooks file to install its hooks, not Firstmate's spawn or the worker-runtime switch.
+
+In the observed launches on 2026-09-08, a separate dialog appeared before instructions were processed: four hooks were new or changed, with an offer to let them run outside the sandbox.
 It presented three choices with the cursor on review, not either trust choice.
 Firstmate's key plane can confirm, escape, or interrupt but cannot move the selection.
 **Escape is the only safe key for this dialog through that plane**, because it offers going back without granting anything.
@@ -25,8 +31,7 @@ Do not automate an answer or guess a selection.
 The dialog swallowed the ordinary stop command in the observed launch: delivery succeeded but stopping did not take effect, so Escape had to clear the dialog before recovery could proceed.
 
 Escape cleared the dialog and instructions proceeded in two observed launches on that machine.
-The dialog recurred on the second launch after the first had been escaped, so Escape did not persist a trust decision that satisfied subsequent launches.
-It is not a once-per-machine clearance through Escape.
+The dialog recurred on the second launch after the first had been escaped: the changed hook definitions still required review under the hash-bound trust gate, and Escape granted nothing.
 Both launches nevertheless produced turn-end notifications: the first after one minute forty seconds, with a confirmed supervision wake, and the second after sixty-three seconds.
 This establishes that dismissal was survivable for those two workers; it does not establish that all four hooks ran or that the hooks were trusted rather than merely dismissed.
 **Trusted versus merely dismissed remains unresolved**, including why the notifications worked; do not turn those successful observations into a trust guarantee for future launches or versions.
@@ -41,12 +46,11 @@ The first observed worker's signal at launch plus one minute forty seconds and r
 
 ### Operator acceptance persistence
 
-Whether proper operator acceptance persists across launches on this machine is **not established by observation**: neither observed dialog was accepted.
-The [official hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks), checked on 2026-09-08, describes recorded trust for the exact hook definition's hash and renewed review when hooks change, not blanket trust for a machine.
-It also says untrusted non-managed hooks are skipped; this does not settle the trust state of the observed workers or explain their notifications.
-To settle the local questions safely, an operator would need an isolated, non-fleet session with the same runtime version and hook definitions, inspect the recorded trust state before and after Escape, then explicitly accept and inspect that state across a fresh launch with unchanged hooks.
-Record the version, approval scope, dialog recurrence, and real hook execution separately; a changed-definition comparison would establish the invalidation boundary.
-Do not trigger this experiment on live workers or their validation pipelines.
+Acceptance records trust for the reviewed content under the hash-bound gate above; it does not permanently clear future changes to the shared file.
+The operator is resolving the observed dialog manually, with knowledge of what is being granted; no completed acceptance or later-launch result has yet been reported.
+That operator's confirmed acceptance and matching recorded trust for the current definitions would settle their approval state; the two existing turn-end observations do not.
+The official documentation says untrusted non-managed hooks are skipped, but does not establish the approval state of those observed workers.
+Do not automate an answer, substitute another resolution path, or trigger trust experiments on live workers or their validation pipelines.
 
 ## Operating facts
 
