@@ -1769,6 +1769,141 @@ EOF
   pass "Pi closes behind a queued wake ride it as one delivered follow-up"
 }
 
+test_pi_carried_reasons_survive_replacement_and_cleanup_failure() {
+  local repo home plugin log handled stops out status
+  repo="$TMP_ROOT/pi-carry-replacement-root"
+  home="$TMP_ROOT/pi-carry-replacement-home"
+  log="$TMP_ROOT/pi-carry-replacement.log"
+  handled="$TMP_ROOT/pi-carry-replacement.handled"
+  stops="$TMP_ROOT/pi-carry-replacement-stops"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$stops"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  # Every cycle reports ready, then closes with its own signal once the test
+  # releases it, so the test controls exactly when each actionable close lands.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'handled\n' >> "${FM_HANDLED_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_DIR/stop.$count" ]; do sleep 0.02; done
+if [ -e "$FM_STOP_DIR/failure.$count" ]; then
+  printf 'watcher: FAILED - synthetic hostless failure\n'
+  touch "$FM_STOP_DIR/failed.$count"
+  exit 1
+fi
+printf 'signal: synthetic close %s\n' "$count"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_HANDLED_LOG="$handled" FM_STOP_DIR="$stops" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const handlers = new Map();
+const pi = {
+  on(event, handler) {
+    handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  // A busy Pi queues the follow-up; nothing consumes it until the test says so.
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const lines = (file) => existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean) : [];
+const rows = () => lines(process.env.FM_ARM_LOG);
+const handledCount = () => lines(process.env.FM_HANDLED_LOG).length;
+async function waitFor(predicate, message) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+async function fire(event, payload, ctx) {
+  let result;
+  for (const handler of handlers.get(event) ?? []) result = (await handler(payload, ctx)) ?? result;
+  return result;
+}
+// Release cycle n; its successor must be armed and its handling confirmed before
+// the extension decides whether to queue a host or attach a rider.
+async function closeCycle(n) {
+  const expectedHandled = handledCount() + 1;
+  writeFileSync(`${process.env.FM_STOP_DIR}/stop.${n}`, "stop\n");
+  await waitFor(() => rows().length >= n + 1, `cycle ${n} did not restore a successor: ${rows().join(" | ")}`);
+  await waitFor(() => handledCount() >= expectedHandled, `cycle ${n} handling was not confirmed`);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-coalesce", {}, undefined, undefined, {});
+await waitFor(() => rows().length >= 1, "first arm did not start");
+
+await closeCycle(1);
+await waitFor(() => prompts.length === 1, "first host");
+await closeCycle(2);
+await fire("agent_settled", {}, { hasPendingMessages: () => false });
+if (prompts.length !== 1) throw new Error("abort sent a follow-up");
+async function replace(label) {
+  await fire("session_shutdown", { reason: "new" }, {});
+  handlers.clear();
+  const replacement = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=${label}`);
+  replacement.default(pi);
+  await fire("session_start", { reason: "new" }, {});
+}
+await replace("dropped");
+await waitFor(() => rows().length === 4, "replacement arm");
+if (prompts.length !== 1) throw new Error("replacement sent deferred reasons without a host");
+await closeCycle(4);
+await waitFor(() => prompts.length === 2, "host after replacement");
+function once(text, needle) {
+  if (text.split(needle).length !== 2) throw new Error(`expected exactly one ${needle}: ${text}`);
+}
+once(prompts[1], "signal: synthetic close 1");
+once(prompts[1], "signal: synthetic close 2");
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, "99999999\n");
+writeFileSync(`${process.env.FM_STOP_DIR}/failure.5`, "fail\n");
+writeFileSync(`${process.env.FM_STOP_DIR}/stop.5`, "stop\n");
+await waitFor(() => existsSync(`${process.env.FM_STOP_DIR}/failed.5`), "failure close");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 2) throw new Error("hostless failure did not ride host");
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await replace("hostless-rider");
+await waitFor(() => prompts.length === 3, "replayed host");
+once(prompts[2], "signal: synthetic close 4");
+once(prompts[2], "watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock");
+once(prompts[2], "signal: synthetic close 1");
+once(prompts[2], "signal: synthetic close 2");
+const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+const handoff = readFileSync(handoffPath, "utf8");
+writeFileSync(handoffPath, "malformed");
+await fire("agent_settled", {}, { hasPendingMessages: () => false });
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 3) throw new Error("abort cleanup failure sent a follow-up");
+writeFileSync(handoffPath, handoff);
+await closeCycle(6);
+await waitFor(() => prompts.length === 4, "next host after cleanup failure");
+once(prompts[3], "watcher: FAILED - Pi extension could not clear a delivered replacement-session actionable wake");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement must retain carried reasons and defer abort cleanup failures: $out"
+  [ -z "$out" ] || fail "Pi replacement carry test printed output: $out"
+  pass "Pi replacement retains carried reasons and defers abort cleanup failures"
+}
+
 test_pi_empty_close_retries_instead_of_disappearing() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-empty-close-root"
@@ -4134,6 +4269,7 @@ test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
 test_pi_queued_wakes_coalesce_into_one_follow_up
+test_pi_carried_reasons_survive_replacement_and_cleanup_failure
 test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock

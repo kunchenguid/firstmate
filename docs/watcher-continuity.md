@@ -36,6 +36,7 @@ Main holds at most one unconsumed host follow-up at a time.
 A later actionable close, a typed restoration failure included, rides that host instead of queueing another follow-up: it counts as delivered with the host, and when Pi finalizes the host's user message (`message_end`) the extension rewrites that one message in place to list the original reason plus every rider, which is where a rider is consumed.
 A rider whose host was consumed but never rewritten therefore still rides the replacement handoff, exactly as an unconsumed host does.
 A host Pi settles without consuming and with nothing left queued (`agent_settled`, the queue cleared by an abort) is dropped by Pi; the extension carries its reasons into the next host rather than re-sending on its own, so an abort never starts a turn by itself and no reason vanishes.
+Carried reasons and unconsumed hostless failure wakes survive in-process session replacement in memory only; they are not persisted across process exit.
 The durable queue still holds the actionable rows; coalescing only stops one drain's worth of closes from arriving as several follow-up turns.
 
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi, omp, and OpenCode do.

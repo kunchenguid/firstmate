@@ -30,7 +30,8 @@
 // consumed at that rewrite, so an unrewritten rider still rides the
 // replacement handoff. A host Pi settles without consuming and with nothing
 // queued was dropped (queue cleared); its reasons carry into the next host
-// instead of vanishing, and nothing is re-sent on its own.
+// instead of vanishing, and nothing is re-sent on its own. Carried reasons and
+// hostless wakes survive in-process replacement in memory only.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -119,8 +120,6 @@ type SessionGeneration = {
   // replacement began reads it to tell a main-queued wake (replayed) from a
   // branch-handled one (finished).
   unconsumedWakes: Map<string, UnconsumedWake>;
-  // Reasons of wakes Pi dropped before consuming; the next host lists them.
-  carriedReasons: string[];
   // A verified successor's failure close that arrived while the pipeline was
   // still delivering the wake it was started for; its bounded retry runs once
   // that delivery settles instead of being skipped by the single-flight guard.
@@ -186,6 +185,7 @@ type ReplacementCoordinator = {
   pending: PendingActionableClose[];
   nextTokenId: number;
   deliveries: Map<string, ActionableDeliveryClaim>;
+  carriedReasons: string[];
 };
 type ReplacementCoordinatorGlobal = typeof globalThis & {
   __firstmatePiWatchReplacements?: Map<string, ReplacementCoordinator>;
@@ -200,11 +200,13 @@ function replacementCoordinatorFor(handoff: string): ReplacementCoordinator {
     pending: [],
     nextTokenId: 0,
     deliveries: new Map(),
+    carriedReasons: [],
   };
   replacementCoordinators.set(handoff, created);
   return created;
 }
 const replacementCoordinator = replacementCoordinatorFor(actionableHandoff);
+const carriedReasons = replacementCoordinator.carriedReasons;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 // Children the extension itself asked to exit; their close is not a failure
@@ -443,7 +445,6 @@ function createGeneration(): SessionGeneration {
     pendingActionables: [],
     cleanupFailure: "",
     unconsumedWakes: new Map(),
-    carriedReasons: [],
     deferredClose: null,
   };
 }
@@ -499,6 +500,12 @@ async function waitForGenerationChildClose(armChild: ChildProcess | null): Promi
 
 async function stopSessionGeneration(generation: SessionGeneration, replacement: boolean): Promise<void> {
   generation.replacement = replacement;
+  if (replacement) {
+    for (const wake of generation.unconsumedWakes.values()) {
+      carriedReasons.push(...wake.carried);
+      if (!wake.pending) carriedReasons.push(wake.reason);
+    }
+  }
   let persistedTokens = "";
   try {
     if (replacement && generation.pendingActionables.length > 0) {
@@ -564,14 +571,14 @@ export default function (pi: ExtensionAPI) {
       owner.unconsumedWakes.set(token, { role: "rider", content: host.content, reason: message, carried: [], pending });
       return true;
     }
-    const carried = owner.carriedReasons.splice(0);
+    const carried = carriedReasons.splice(0);
     const content = wakeText(message, carried);
     owner.unconsumedWakes.set(token, { role: "host", content, reason: message, carried, pending });
     try {
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch (error) {
       owner.unconsumedWakes.delete(token);
-      owner.carriedReasons.unshift(...carried);
+      carriedReasons.unshift(...carried);
       throw error;
     }
     // Accepted by Pi. A generation replaced while Pi was accepting it may
@@ -630,8 +637,19 @@ export default function (pi: ExtensionAPI) {
     for (const [token, wake] of owner.unconsumedWakes) {
       owner.unconsumedWakes.delete(token);
       awaitingRewrite.delete(wake.content);
-      owner.carriedReasons.push(...wake.carried, wake.reason);
-      finishConsumedWake(owner, wake);
+      carriedReasons.push(...wake.carried, wake.reason);
+      if (!wake.pending) continue;
+      wake.pending.delivered = true;
+      try {
+        finishPendingActionable(owner, wake.pending);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (owner.cleanupFailure !== detail) {
+          owner.cleanupFailure = detail;
+          carriedReasons.push(`watcher: FAILED - Pi extension could not clear a delivered replacement-session actionable wake\n${detail}`);
+        }
+        schedulePendingCleanup(owner);
+      }
     }
   }
 
