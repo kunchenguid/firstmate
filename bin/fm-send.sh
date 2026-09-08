@@ -9,7 +9,11 @@
 #   worse than a loud failure.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
-# Orca currently supports Enter and C-c only, and rejects Escape.
+# Orca currently supports Enter and C-c only, and rejects Escape. A task
+# recorded with transport=acp (bin/fm-acp-client.sh) overrides all of that:
+# it has only hard cancellation, so Escape and C-c send ACP session/cancel
+# and every other key is refused; ordinary text still queues as a follow-up
+# turn through fm-acp-client.sh send instead of the inbox.
 #
 # Two data planes:
 #

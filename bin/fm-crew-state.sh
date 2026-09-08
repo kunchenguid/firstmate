@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|acp|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -84,6 +84,13 @@
 #      unreachable, and an alive endpoint whose scrollback read failed is still
 #      classified by step 4. Backends with no classifier keep reading a failed
 #      capture as gone. The fallback's own comment owns the per-verdict rules.
+#   6. transport=acp (meta): after a recorded backend target exists, ACPX's own
+#      status supplies the lifecycle fact directly, independent of the pane -
+#      but only as a no-run fallback, since step 2's run-step stays
+#      authoritative when a run is attributed. running -> working; alive/idle
+#      folds in the status log's mapped state when present, else unknown;
+#      dead or an unreadable ACPX status -> unknown. A missing session_id also
+#      reads unknown rather than probing ACPX with an empty selector.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
