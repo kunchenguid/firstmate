@@ -29,6 +29,28 @@ set -u
 
 LIB="$ROOT/tests/lib.sh"
 
+# The interrupted-run case below holds a live child test process while it waits.
+# That child owns an armed listener, so teardown has to stop it BEFORE the
+# fixture roots go: signalled while its own home still exists, it retires the
+# listener through its own traps. Only this exact pid is ever signalled, and it
+# is cleared the moment the case has waited for it, so a pid the OS has since
+# recycled onto an unrelated process can never be reached from here.
+HELD_LISTENER_CHILD=
+
+cleanup() {
+  if [ -n "$HELD_LISTENER_CHILD" ]; then
+    kill -TERM "$HELD_LISTENER_CHILD" 2>/dev/null || true
+    wait "$HELD_LISTENER_CHILD" 2>/dev/null || true
+    HELD_LISTENER_CHILD=
+  fi
+  fm_test_cleanup
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
+trap 'cleanup; exit 131' QUIT
+
 wait_for_file() {  # <path> [tries]
   local tries=${2:-200}
   while [ "$tries" -gt 0 ]; do
@@ -134,19 +156,20 @@ test_armed_listener_retired_after_failing_exit() {
 }
 
 test_armed_listener_retired_after_sigterm() {
-  local harness pid child_pid child_root
+  local harness pid child_root
   harness=$(fm_test_tmproot fm-test-cleanup-listener-term-harness)
   write_listener_child "$harness"
   run_listener_child "$harness" hold >/dev/null 2>&1 &
-  child_pid=$!
+  HELD_LISTENER_CHILD=$!
   wait_for_file "$harness/child-root" \
     || fail "the child never armed its listener before the wait timed out"
   pid=$(cat "$harness/listener.pid")
   child_root=$(cat "$harness/child-root")
   listener_alive "$pid" "$harness/blocker.sh" \
     || fail "the child's listener was not running before it was interrupted"
-  kill -TERM "$child_pid"
-  wait "$child_pid" 2>/dev/null
+  kill -TERM "$HELD_LISTENER_CHILD"
+  wait "$HELD_LISTENER_CHILD" 2>/dev/null
+  HELD_LISTENER_CHILD=
   assert_absent "$child_root" "an interrupted run left its fixture root behind"
   wait_for_listener_exit "$pid" "$harness/blocker.sh" \
     || fail "an interrupted run left its listener polling a target it had already removed"
