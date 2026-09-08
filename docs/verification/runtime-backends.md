@@ -304,6 +304,30 @@ This change does not address that warning and does not claim to.
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Claude permission mode (root approval-prompt blocking)
+
+Verified 2026-09-08 on Claude Code 2.1.263, container root (`uid=0`), `IS_SANDBOX` unset - this fleet's actual launch posture for every claude crewmate and secondmate.
+`--dangerously-skip-permissions` alone does not grant a claude worker real autonomy in that posture: the installed binary refuses `bypassPermissions` for root outside a declared sandbox and silently downgrades to manual mode, printing `Bypass permissions mode was disabled by settings`, so the worker still parks on the first interactive approval prompt for a file write, shell command, or network call.
+A project `.claude/settings.local.json` or `.claude/settings.json` `defaultMode` of `"auto"` or `"bypassPermissions"` is ignored by the same binary by design, because a project settings file can come from an untrusted clone; only user/managed settings or the `--permission-mode` CLI flag may grant it.
+`--permission-mode auto` passed as a CLI flag is a separate, always-honored source that hits neither guard: the root guard checks only for `bypassPermissions`, and the project-settings-ignore rule applies only to `defaultMode` read from a project file.
+`bin/fm-spawn.sh`'s claude launch template now passes both flags together (`--dangerously-skip-permissions --permission-mode auto`); the two coexist with no conflict or warning.
+
+```sh
+FM_CLAUDE_PERMISSION_MODE_LIVE_E2E=1 tests/fm-claude-permission-mode-live-e2e.test.sh
+```
+
+```text
+ok - before (claude 2.1.263 (Claude Code)): --dangerously-skip-permissions alone still parks on the Write approval prompt as root
+ok - after (claude 2.1.263 (Claude Code)): --dangerously-skip-permissions --permission-mode auto writes the file and runs the shell command with no approval prompt
+ok - claude 2.1.263 (Claude Code) live E2E: --permission-mode auto is the flag that stops a claude crewmate blocking on an approval prompt as root
+```
+
+The guard launches the exact pre-fix and post-fix flag sets side by side in fresh, never-seen project directories and asserts the divergence itself: the pre-fix flags must still hit the interactive `Do you want to create...` prompt (killed unanswered), while the post-fix flags must complete the requested write and shell command with no prompt ever appearing, so a future claude release that stopped blocking the pre-fix case too would not make the guard silently vacuous.
+`auto` is not zero verification - a reviewer model screens each action instead of a human - but every write, shell, and network action tested in the source investigation was approved with no manual intervention.
+The folder-trust dialog documented above still appears once per fresh worktree under either flag set; that is expected and outside this fix's scope.
+`tests/fm-spawn-dispatch-profile.test.sh` pins the launch-construction logic against a fake claude for every harness (the flag appears only on claude's own launch, never on another harness's), while the live guard above is what establishes that the flag actually changes real-binary behavior.
+This guard is the refresh command after a claude upgrade; rerun it and update the version and dated evidence above rather than trusting this record across releases.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
