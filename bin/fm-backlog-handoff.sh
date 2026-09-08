@@ -67,7 +67,9 @@
 # remote receipt, the outbox is released and the handoff succeeds regardless of
 # the best-effort wake outcome; an undelivered remote wake remains separately
 # tracked in wake-pending state and is retried under the same correlation by
-# later resumes and handoffs.
+# later resumes and handoffs. If wake-pending state cannot be recorded, its
+# artifacts are removed and the wake is reported as DROPPED while the mate still
+# owns reconciliation from its durable backlog.
 # Usage: fm-backlog-handoff.sh <secondmate-id> <item-key>...
 #        fm-backlog-handoff.sh --resume-pending
 set -eu
@@ -527,7 +529,7 @@ outbox_item_count() { # <path>
 }
 
 remote_deliver_outbox() { # <secondmate-id> <outbox-path>
-  local id=$1 outbox=$2 remote_rel receive_out snapshot bytes hash generation counter counter_tmp current marker wake_rc=0
+  local id=$1 outbox=$2 remote_rel receive_out snapshot bytes hash generation counter counter_tmp current marker wake_rc=0 wake_state=pending
   [ -f "$outbox" ] && [ ! -L "$outbox" ] || {
     echo "error: pending outbox is unavailable or unsafe: $outbox" >&2
     return 1
@@ -574,7 +576,7 @@ remote_deliver_outbox() { # <secondmate-id> <outbox-path>
   case "$(cat "$marker" 2>/dev/null || true)" in
     pending:*|confirmed|confirmed:*) ;;
     *) receiver_wake_mark_pending "$id" || {
-      echo "error: remote backlog is durable at $id, but receiver wake state could not be recorded" >&2
+      wake_state=dropped
       wake_rc=1
     } ;;
   esac
@@ -590,6 +592,10 @@ remote_deliver_outbox() { # <secondmate-id> <outbox-path>
       echo "error: remote outbox cleanup succeeded but confirmed receiver wake state could not be cleared: $marker" >&2
       return 1
     }
+  elif [ "$wake_state" = dropped ]; then
+    rm -f -- "$marker"
+    printf 'receiver wake state: DROPPED\n'
+    echo "warning: remote backlog is durable at $id and its outbox was released; the best-effort receiver wake was dropped because wake-pending state could not be recorded" >&2
   else
     echo "warning: remote backlog is durable at $id and its outbox was released; the best-effort receiver wake remains pending for a later resume or handoff" >&2
   fi

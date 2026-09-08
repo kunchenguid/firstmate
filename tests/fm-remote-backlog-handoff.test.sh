@@ -494,6 +494,54 @@ assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \
   "fresh handoff left confirmed wake state behind"
 pass "fresh remote work gets a new wake after confirmed cleanup recovery"
 
+MV_FAKEBIN="$TMP_ROOT/mv-fakebin"
+mkdir -p "$MV_FAKEBIN"
+REAL_MV=$(command -v mv)
+cat > "$MV_FAKEBIN/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "$FM_FAIL_MV_PATH" ]; then
+  exit 1
+fi
+exec "$FM_REAL_MV" "$@"
+SH
+chmod +x "$MV_FAKEBIN/mv"
+write_backlog '- [ ] wake-state-drop - durable work survives lost wake state (repo: alpha)'
+pending_records_before=$(find "$PARENT/state/pending-replies" -maxdepth 1 -type f | wc -l | tr -d ' ')
+wakes_before=$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")
+PATH="$MV_FAKEBIN:$PATH" FM_REAL_MV="$REAL_MV" \
+  FM_FAIL_MV_PATH="$PARENT/state/.backlog-handoff-ios.wake-pending" \
+  handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios wake-state-drop \
+  > "$TMP_ROOT/wake-state-drop.out" 2>&1 \
+  || fail "wake-state write failure held the durable outbox hostage"
+assert_contains "$(cat "$TMP_ROOT/wake-state-drop.out")" 'receiver wake state: DROPPED' \
+  "wake-state write failure did not report an honest dropped state"
+assert_contains "$(cat "$TMP_ROOT/wake-state-drop.out")" 'best-effort receiver wake was dropped' \
+  "wake-state write failure did not log the dropped wake"
+assert_absent "$PARENT/data/handoff/ios.outbox.md" \
+  "wake-state write failure retained the durably received outbox"
+assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \
+  "wake-state write failure left a marker claiming the wake was pending"
+pending_records_after=$(find "$PARENT/state/pending-replies" -maxdepth 1 -type f | wc -l | tr -d ' ')
+[ "$pending_records_after" -eq "$pending_records_before" ] \
+  || fail "wake-state write failure left an unreferenced pending-reply record"
+[ "$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")" -eq "$wakes_before" ] \
+  || fail "wake-state write failure attempted an untracked wake"
+handoff_env "$ROOT/bin/fm-backlog-handoff.sh" --resume-pending >/dev/null \
+  || fail "resume treated the dropped wake as pending"
+[ "$(grep -cF fm-remote-secondmate-control.sh "$WAKE_LOG")" -eq "$wakes_before" ] \
+  || fail "resume retried a wake whose state was dropped"
+write_backlog '- [ ] after-wake-state-drop - later handoff after dropped wake state (repo: alpha)'
+handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios after-wake-state-drop >/dev/null \
+  || fail "later handoff was blocked by dropped wake state"
+[ "$(grep -cF -- '- [ ] wake-state-drop -' "$REMOTE/data/backlog.md")" -eq 1 ] \
+  || fail "wake-state failure lost or duplicated its durably received item"
+[ "$(grep -cF -- '- [ ] after-wake-state-drop -' "$REMOTE/data/backlog.md")" -eq 1 ] \
+  || fail "later handoff after dropped wake state was lost or duplicated"
+assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \
+  "later successful handoff left stale wake state"
+pass "unrecordable best-effort wake state drops without blocking later handoffs"
+
 write_backlog '- [ ] route-race - remains dispatchable through retirement (repo: alpha)'
 registry_lock="$PARENT/state/.secondmate-registry.lock"
 handoff_lock="$PARENT/state/.backlog-handoff-ios.lock"
