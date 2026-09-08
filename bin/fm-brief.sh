@@ -234,6 +234,7 @@ if [ "$KIND" != secondmate ]; then
   FIRSTMATE_HARNESS=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-harness.sh")
   FIRSTMATE_ROUTING_BASELINE="\`$FIRSTMATE_HARNESS\` with that harness's default model and effort"
   ROUTING_SCHEMA="\`$FM_ROOT/docs/configuration.md\` under Crew dispatch profiles"
+  HARNESS_POLICY="\`$FM_ROOT/AGENTS.md\` section 4"
   QUOTA_ARRAY_SKILL="\`$FM_ROOT/.agents/skills/quota-array-dispatch/SKILL.md\`"
 IFS= read -r -d '' NESTED_ROUTING_SECTION <<EOF || true
 # Nested delegation and model routing
@@ -242,7 +243,10 @@ Before classification, if that file is present but unreadable, malformed JSON, o
 Before creating a child through a native subagent or delegation facility, classify the child task under that current policy and explicitly apply the complete selected profile: its configured harness, model, and effort, with an omitted model or effort fixed to the selected harness's default rather than inherited from your session.
 If the matching rule or default is a profile array, do not choose among its candidates; report the array to Firstmate, which alone loads $QUOTA_ARRAY_SKILL and returns the concrete selection.
 If no rule matches and the policy has no default, read $CREW_HARNESS_CONFIG at child intake.
-A current concrete verified adapter in that file selects that harness with its default model and effort; if the file is absent, empty, or \`default\`, use the captured Firstmate baseline $FIRSTMATE_ROUTING_BASELINE.
+A current concrete adapter in that file may be used only if $HARNESS_POLICY verifies it for crewmates or scouts, selecting that harness with its default model and effort.
+If the file is absent, empty, or \`default\`, use the captured Firstmate baseline $FIRSTMATE_ROUTING_BASELINE.
+If the current value is unverified, report that exact value to Firstmate and use the captured baseline instead.
+Use the captured baseline only if $HARNESS_POLICY verifies it for a primary session; otherwise do not create a child and report the unverified baseline to Firstmate.
 Include this entire Nested delegation and model routing section unchanged in every native child's instructions so the requirement repeats at every delegation depth.
 Create the native child only when its facility can represent that complete selection and receive this section.
 If the facility cannot represent every selected axis or deliver this section, do not create the child; report the mismatch to Firstmate so the child can be routed through the fleet lifecycle.
