@@ -78,9 +78,9 @@
 #     the captain can restate it before saying go.
 #   fm-afk-contract.sh confirm
 #     Promote the proposal into the record with the confirmed timestamp and
-#     print the entry announcement. With no proposal: write the default record
-#     (no words, no clauses) when none exists, or refresh nothing when one does.
-#     A proposal confirmed over an existing record archives the old record first.
+#     print the entry announcement. A proposal is required when no confirmed
+#     record exists; an existing record with no proposal is a no-op refresh.
+#     A replacement is staged before the prior record is archived and replaced.
 #   fm-afk-contract.sh discard-proposal
 #   fm-afk-contract.sh present              exit 0 when the record exists
 #   fm-afk-contract.sh announce             print the entry announcement
@@ -170,19 +170,29 @@ fm_afk_contract_object_is_named() {  # <action> <object>
 }
 
 fm_afk_contract_condition_is_verifiable() {  # <condition>
-  local condition lower timestamp
+  local condition lower timestamp named
   condition=$(fm_afk_contract_oneline "$1")
   lower=$(fm_afk_contract_lower "$condition")
   case "$lower" in
     "checks green"|"checks are green") return 0 ;;
-    "red on "?*) return 0 ;;
+    "red on "*)
+      named=${lower#red on }
+      [ -n "$named" ] && return 0 ;;
+    "even if "*" is red")
+      named=${lower#even if }
+      case "$named" in
+        *" is red") named=${named% is red} ;;
+        *) named= ;;
+      esac
+      [ -n "$named" ] && return 0 ;;
+    *" is red")
+      named=${lower% is red}
+      [ -n "$named" ] && [ "$named" != "even if" ] && return 0 ;;
     "after clause "[0-9]*)
       case "${lower#after clause }" in *[!0-9]*) ;; *) return 0 ;; esac ;;
     "at "*)
       timestamp=${condition#???}
       fm_afk_contract_validate_iso "$timestamp" && return 0 ;;
-    *" is red")
-      [ -n "${lower% is red}" ] && return 0 ;;
   esac
   [[ "$lower" =~ ^.+[[:space:]](deadlocks|fails|failed|succeeds|succeeded|completes|completed|lands|landed|ships|shipped|finishes|finished|exits|exited|returns|returned|starts|started|stops|stopped)([[:space:]].+)?$ ]]
 }
@@ -192,23 +202,19 @@ fm_afk_contract_condition_is_verifiable() {  # <condition>
 # <accepted-ids> is a space-separated list of earlier accepted ordinals, for
 # "after clause N" references.
 fm_afk_contract_clause_compile() {  # <ordinal> <text> <accepted-ids>
-  local ordinal=$1 text accepted=$3 lower head rest rest_lower head_lower cond_lower word ref
+  local ordinal=$1 text accepted=$3 lower normalized head rest rest_lower head_lower cond_lower word ref
   C_ACTION=; C_OBJECT=; C_WHEN=; C_STOP=-; C_MISSING=
   text=$(fm_afk_contract_oneline "$2")
   lower=$(fm_afk_contract_lower "$text")
   # The never-set outranks the grammar: no actor may hold these, in either posture.
-  for word in credential credentials password passwords passcode login "log in" "sign in" sign-in 2fa otp mfa legal financial payment invoice; do
-    case " $lower " in
-      *" $word "*|*" $word's "*|*" ${word}s "*)
+  normalized=$(printf '%s' "$lower" | sed 's/[^[:alnum:]]/ /g; s/  */ /g')
+  for word in credential credentials password passwords passcode login "log in" "sign in" 2fa otp mfa legal financial payment invoice "attended prompt"; do
+    case " $normalized " in
+      *" $word "*)
         C_MISSING="object - the never-set refuses it: credentials, logins, legal or financial acceptance, and attended prompts are the captain's ('$word')"
         return 1 ;;
     esac
   done
-  case " $lower " in
-    *" attended prompt"*)
-      C_MISSING="object - the never-set refuses it: an attended prompt is the captain's"
-      return 1 ;;
-  esac
   case " $lower " in
     *" when "*)
       head_lower=${lower%% when *}
@@ -294,12 +300,8 @@ fm_afk_contract_clause_compile() {  # <ordinal> <text> <accepted-ids>
     esac
   done
   if ! fm_afk_contract_condition_is_verifiable "$C_WHEN"; then
-    case "$C_ACTION:$cond_lower" in
-      merge:*red*|merge:*fail*|land:*red*|land:*fail*) ;;
-      *)
-        C_MISSING="when - no verifiable condition: name the check, event, clause, or UTC time"
-        return 1 ;;
-    esac
+    C_MISSING="when - no verifiable condition: name the check, event, clause, or UTC time"
+    return 1
   fi
   case "$cond_lower" in
     "after clause "*|*" after clause "*)
@@ -319,22 +321,6 @@ fm_afk_contract_clause_compile() {  # <ordinal> <text> <accepted-ids>
         *)
           C_MISSING="when - 'after clause $ref' names a refused clause"
           return 1 ;;
-      esac
-      ;;
-  esac
-  case "$C_ACTION" in
-    merge|land)
-      case " $cond_lower " in
-        *red*|*fail*)
-          # The failing check must be named: strip the filler and require a name.
-          word=$(printf ' %s ' "$cond_lower" \
-            | sed -E 's/ (red|failing|fails|failed|fail|failure|check|checks|ci|is|are|even|if|on|the|when|despite|with|while|still|although|though|a|an|or|and|its) / /g; s/ (red|failing|fails|failed|fail|failure|check|checks|ci|is|are|even|if|on|the|when|despite|with|while|still|although|though|a|an|or|and|its) / /g' \
-            | sed 's/^ *//; s/ *$//')
-          if [ -z "$word" ]; then
-            C_MISSING='when - the failing check is not named: a red merge needs "red on <check>"'
-            return 1
-          fi
-          ;;
       esac
       ;;
   esac
@@ -615,44 +601,8 @@ fm_afk_contract_cmd_compile() {  # <write-proposal 0|1> <args...>
   return "$rc"
 }
 
-fm_afk_contract_cmd_confirm() {
-  local record proposal body confirmed confirmed_epoch archived
-  record=$(fm_afk_contract_path)
-  proposal=$(fm_afk_contract_proposal_path)
-  confirmed=$(fm_afk_contract_now_iso)
-  confirmed_epoch=$(date +%s)
-  if [ -f "$proposal" ]; then
-    fm_afk_contract_validate "$proposal" 0 || return 1
-    if [ -f "$record" ]; then
-      archived=$(fm_afk_contract_cmd_archive) || return 1
-      fm_afk_contract_log "replaced the earlier away posture; its record is archived at $archived"
-    fi
-    body=$(cat "$proposal")
-  elif [ -f "$record" ]; then
-    fm_afk_contract_validate "$record" 1 || return 1
-    fm_afk_contract_log "away posture already recorded at $(fm_afk_contract_read_field "$record" entered); nothing to confirm"
-    fm_afk_contract_render_announcement "$record"
-    return 0
-  else
-    WORDS=; CLAUSES=; EXPECTED_RETURN=-; SPEND=$FM_AFK_CONTRACT_SPEND_DEFAULT
-    body=$(fm_afk_contract_render_body "$confirmed" "$confirmed_epoch")
-  fi
-  {
-    printf '%s\n' "$body" | awk '/^words: /{exit} {print}'
-    printf 'confirmed: %s\nconfirmed_epoch: %s\n' "$confirmed" "$confirmed_epoch"
-    printf '%s\n' "$body" | awk 'p{print} /^words: /{p=1; print}'
-  } | fm_afk_contract_write_atomic "$record" || {
-    fm_afk_contract_log "failed to write the away-posture record at $record"
-    return 1
-  }
-  rm -f "$proposal"
-  fm_afk_contract_render_announcement "$record"
-}
-
-fm_afk_contract_cmd_archive() {
-  local record dir entered_epoch target
-  record=$(fm_afk_contract_path)
-  [ -f "$record" ] || return 0
+fm_afk_contract_archive_target() {  # <record>
+  local record=$1 dir entered_epoch target
   dir=$(fm_afk_contract_archive_dir)
   mkdir -p "$dir" || return 1
   entered_epoch=$(fm_afk_contract_read_field "$record" entered_epoch)
@@ -661,6 +611,51 @@ fm_afk_contract_cmd_archive() {
   if [ -e "$target" ]; then
     target="$dir/$entered_epoch-$(date +%s)-$$.afk-contract"
   fi
+  printf '%s\n' "$target"
+}
+
+fm_afk_contract_cmd_confirm() {
+  local record proposal body confirmed confirmed_epoch archived staged
+  record=$(fm_afk_contract_path)
+  proposal=$(fm_afk_contract_proposal_path)
+  confirmed=$(fm_afk_contract_now_iso)
+  confirmed_epoch=$(date +%s)
+  if [ -f "$proposal" ]; then
+    fm_afk_contract_validate "$proposal" 0 || return 1
+    body=$(cat "$proposal")
+  elif [ -f "$record" ]; then
+    fm_afk_contract_validate "$record" 1 || return 1
+    fm_afk_contract_log "away posture already recorded at $(fm_afk_contract_read_field "$record" entered); nothing to confirm"
+    fm_afk_contract_render_announcement "$record"
+    return 0
+  else
+    fm_afk_contract_log "no away-posture proposal exists; run propose before confirm"
+    return 1
+  fi
+  staged=$(mktemp "$(dirname "$record")/.afk-contract.confirming.XXXXXX") || return 1
+  {
+    printf '%s\n' "$body" | awk '/^words: /{exit} {print}'
+    printf 'confirmed: %s\nconfirmed_epoch: %s\n' "$confirmed" "$confirmed_epoch"
+    printf '%s\n' "$body" | awk 'p{print} /^words: /{p=1; print}'
+  } > "$staged" || { rm -f "$staged"; return 1; }
+  fm_afk_contract_validate "$staged" 1 || { rm -f "$staged"; return 1; }
+  if [ -f "$record" ]; then
+    archived=$(fm_afk_contract_archive_target "$record") || { rm -f "$staged"; return 1; }
+    cp -p "$record" "$archived" || { rm -f "$staged"; return 1; }
+  fi
+  mv "$staged" "$record" || { rm -f "$staged"; return 1; }
+  if [ -n "${archived:-}" ]; then
+    fm_afk_contract_log "replaced the earlier away posture; its record is archived at $archived"
+  fi
+  rm -f "$proposal"
+  fm_afk_contract_render_announcement "$record"
+}
+
+fm_afk_contract_cmd_archive() {
+  local record target
+  record=$(fm_afk_contract_path)
+  [ -f "$record" ] || return 0
+  target=$(fm_afk_contract_archive_target "$record") || return 1
   mv "$record" "$target" || return 1
   printf '%s\n' "$target"
 }

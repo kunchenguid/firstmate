@@ -396,6 +396,7 @@ test_return_guard_refuses_while_the_record_exists() {
   local dir out rc
   dir="$TMP_ROOT/guard-record"
   install_runner "$dir"
+  contract_in "$dir" propose >/dev/null 2>&1 || fail "could not propose the away-posture record"
   contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not write the away-posture record"
   set +e
   out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" guard 2>&1)
@@ -411,6 +412,7 @@ test_return_brief_health_leads_with_a_gap() {
   local dir out gap_line clean_line
   dir="$TMP_ROOT/brief-gap"
   install_runner "$dir"
+  contract_in "$dir" propose >/dev/null 2>&1 || fail "could not propose the away-posture record"
   contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not write the away-posture record"
   : > "$dir/home/state/.watcher-down"
   # A beacon older than the grace, on either date flavor.

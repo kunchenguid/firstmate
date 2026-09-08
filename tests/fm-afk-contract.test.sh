@@ -57,8 +57,9 @@ test_grammar_refuses_each_missing_part_by_name() {
   compile_refusal 'merge task x PR' 'when - no verifiable condition' 'no when'
   compile_refusal 'merge task x PR when' 'when - no verifiable condition' 'empty when'
   compile_refusal 'merge task x PR when regardless of checks' "when - not verifiable ('regardless')" 'unconditional when'
-  compile_refusal 'merge task x PR when red' 'when - the failing check is not named' 'red merge without a named check'
-  compile_refusal 'land task x branch when checks fail' 'when - the failing check is not named' 'red landing without a named check'
+  compile_refusal 'merge task x PR when red' 'when - no verifiable condition' 'red merge without a named check'
+  compile_refusal 'land task x branch when checks fail' 'when - no verifiable condition' 'red landing without a named check'
+  compile_refusal 'merge task x PR when looks red enough' 'when - no verifiable condition' 'red wording outside the approved forms'
   compile_refusal 'rerun task z when after clause 7' "when - 'after clause 7' names this clause or a later one" 'forward clause reference'
   compile_refusal 'merge task x PR when checks green stop' 'stop - "stop" was given with no condition after it' 'empty stop'
   compile_refusal 'merge PR when checks green' 'object - no named task, PR role, repo, machine, or run' 'unnamed PR'
@@ -66,6 +67,9 @@ test_grammar_refuses_each_missing_part_by_name() {
   compile_refusal 'answer the credential prompt on task q when asked' 'object - the never-set refuses it' 'never-set: credentials'
   compile_refusal 'answer the legal acceptance on task q when asked' 'object - the never-set refuses it' 'never-set: legal'
   compile_refusal 'answer the attended prompt on task q when asked' 'object - the never-set refuses it' 'never-set: attended prompt'
+  compile_refusal 'answer task q credential-prompt when prompt starts' 'object - the never-set refuses it' 'never-set: credential compound'
+  compile_refusal 'answer task q credentials/keys when prompt starts' 'object - the never-set refuses it' 'never-set: credential punctuation'
+  compile_refusal 'answer task q attended-prompt when prompt starts' 'object - the never-set refuses it' 'never-set: attended compound'
   pass "every malformed clause is refused with its missing part named"
 }
 
@@ -76,6 +80,8 @@ test_grammar_accepts_the_legal_shapes() {
     "1. merge task x's PR when checks green" 'possessive PR role'
   compile_accept 'Merge task y PR when red on nm-ci-windows' \
     '1. merge task y PR when red on nm-ci-windows' 'red merge with the failing check named'
+  compile_accept 'merge task y PR when nm-ci-windows is red' \
+    '1. merge task y PR when nm-ci-windows is red' 'named check is red'
   compile_accept 'merge task y PR when even if nm-ci-windows is red stop the captain returns' \
     '1. merge task y PR when even if nm-ci-windows is red stop the captain returns' 'red merge with a stop condition'
   compile_accept 'abort-run no-mistakes run for task nm-ci-windows-git-shard-split-r1 when install deadlocks' \
@@ -177,25 +183,32 @@ test_propose_confirm_writes_the_record_and_announces_hold_for_return() {
   pass "propose then confirm writes the record, announces hold-for-return only, and every read subcommand reflects it"
 }
 
-test_plain_confirm_writes_the_default_record_and_refresh_is_a_no_op() {
-  local home out first
+test_confirm_requires_readback_and_refresh_is_a_no_op() {
+  local home out first rc
   home=$(make_home defaults)
-  out=$(contract "$home" confirm 2>&1) || fail "default confirm failed: $out"
-  assert_contains "$out" 'No mandate clauses recorded.' 'default announcement'
-  assert_contains "$out" 'hold-for-return only.' 'default announcement says hold-for-return'
-  [ -z "$(contract "$home" words)" ] || fail "a plain confirm recorded words"
-  [ -z "$(contract "$home" clauses)" ] || fail "a plain confirm recorded clauses"
+  set +e
+  out=$(contract "$home" confirm 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "confirm without a proposal wrote a record"
+  assert_contains "$out" 'run propose before confirm' 'confirm refusal names the required read-back step'
+  [ ! -e "$home/state/.afk-contract" ] || fail "confirm without a proposal created posture state"
+  contract "$home" propose >/dev/null || fail "plain proposal failed"
+  out=$(contract "$home" confirm 2>&1) || fail "plain confirmation failed: $out"
+  assert_contains "$out" 'No mandate clauses recorded.' 'plain announcement'
+  assert_contains "$out" 'hold-for-return only.' 'plain announcement says hold-for-return'
   first=$(cat "$home/state/.afk-contract")
   sleep 1
   out=$(contract "$home" confirm 2>&1) || fail "refresh confirm failed: $out"
   assert_contains "$out" 'already recorded at' 'refresh names the standing record'
   [ "$(cat "$home/state/.afk-contract")" = "$first" ] || fail "a refresh rewrote the standing record"
-  pass "a plain /afk records the defaults, and a refresh leaves the standing record untouched"
+  pass "confirmation requires a read-back, and refresh leaves the standing record untouched"
 }
 
 test_confirming_a_new_proposal_archives_the_standing_record() {
   local home first_epoch archived
   home=$(make_home replace)
+  contract "$home" propose >/dev/null 2>&1 || fail "first propose failed"
   contract "$home" confirm >/dev/null 2>&1 || fail "first confirm failed"
   first_epoch=$(contract "$home" field entered_epoch)
   sleep 1
@@ -207,9 +220,28 @@ test_confirming_a_new_proposal_archives_the_standing_record() {
   pass "a proposal confirmed over a standing record archives the old record first"
 }
 
+test_failed_replacement_keeps_the_standing_record() {
+  local home before out rc
+  home=$(make_home replace-failure)
+  contract "$home" propose --words 'original posture' >/dev/null || fail "first propose failed"
+  contract "$home" confirm >/dev/null || fail "first confirm failed"
+  before=$(cat "$home/state/.afk-contract")
+  contract "$home" propose --words 'replacement posture' >/dev/null || fail "replacement propose failed"
+  printf 'not a directory\n' > "$home/state/afk-contracts"
+  set +e
+  out=$(contract "$home" confirm 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "replacement succeeded without an archive destination"
+  [ "$(cat "$home/state/.afk-contract")" = "$before" ] || fail "failed replacement removed or changed the standing posture"
+  [ -f "$home/state/.afk-contract.proposed" ] || fail "failed replacement discarded the pending proposal"
+  pass "a failed replacement keeps the standing posture live"
+}
+
 test_archive_moves_the_record_aside_and_is_idempotent() {
   local home epoch path
   home=$(make_home archive)
+  contract "$home" propose >/dev/null 2>&1 || fail "propose failed"
   contract "$home" confirm >/dev/null 2>&1 || fail "confirm failed"
   epoch=$(contract "$home" field entered_epoch)
   path=$(contract "$home" archive) || fail "archive failed"
@@ -264,7 +296,8 @@ test_grammar_accepts_dependent_legal_shapes
 test_clause_ids_are_input_ordinals_and_references_bind_to_accepted_clauses
 test_readback_renders_words_verbatim_and_both_lists
 test_propose_confirm_writes_the_record_and_announces_hold_for_return
-test_plain_confirm_writes_the_default_record_and_refresh_is_a_no_op
+test_confirm_requires_readback_and_refresh_is_a_no_op
 test_confirming_a_new_proposal_archives_the_standing_record
+test_failed_replacement_keeps_the_standing_record
 test_archive_moves_the_record_aside_and_is_idempotent
 test_inputs_are_validated

@@ -1264,12 +1264,30 @@ captain_call_stale_bound() {  # <window-key> <task>
 # above): the status line the worker declared, and the backlog hold firstmate
 # recorded once the captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1
+  local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1 until now mtime age
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
   STALE_WAIT_DECLARATION=
-  if status_is_paused_or_captain_held "$last"; then
+  if status_is_paused "$last"; then
+    declared=0
+    bounded=0
+    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
+    if until=$(status_paused_until "$last"); then
+      now=$(date +%s)
+      mtime=$(stat_mtime "$STATE/$task.status")
+      case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
+      age=$(( now - mtime ))
+      if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_UNTIL_MAX_SECS" ]; then
+        throttled=0
+      else
+        [ "$now" -lt "$until" ] || STALE_WAIT_DECLARATION="$STALE_WAIT_DECLARATION:due"
+        stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
+      fi
+    else
+      stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
+    fi
+  elif status_is_captain_held "$last"; then
     declared=0
     bounded=0
     STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")

@@ -45,9 +45,8 @@
 #                              Exit 3 when a clause was refused (its missing part
 #                              is named in the read-back); the proposal still
 #                              records it as refused.
-#   fm-afk-launch.sh confirm   Promote the proposal (or write the default record)
-#                              and print the entry announcement. On Pi this is
-#                              the whole entry.
+#   fm-afk-launch.sh confirm   Promote the required proposal and print the entry
+#                              announcement. On Pi this is the whole entry.
 #   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
 #                              is already running) launch the daemon in a fresh
 #                              non-visible terminal for the detected backend and
