@@ -27,13 +27,15 @@
 # for the missing value until the .env is fixed, which makes a partially
 # configured channel a wake instead of a silent gap.
 #
-# Reporting is by difference against the last reported state stored in
-# state/.mail-check: a poll that keeps reporting the same finding reports
-# its line once, and a poll that changes the story reports the change. A
-# repeated finding still prints when that poll queued new mail, and a
-# timeout always prints, so a kill between wake_for and its woke-for line
-# cannot leave queued mail silent. A successful poll with no new mail
-# clears the record, so the next new-mail or failure line is news again.
+# Reporting keeps state/.mail-check as the news key, but prints whenever
+# the poll is not a proven no-op. A proven no-op is a repeated identical
+# line, not a timeout, with no publication evidence. Publication evidence
+# is a timeout, fail-closed-after-queue diagnostics, a queued mail: check
+# key, or growth of state/.mail-woken. Same-line silence is only for a
+# proven no-op: successful poll with no new mail, or a repeated pre-wake
+# failure (missing env, connection refused before wake_for, missing
+# python3, missing fm-mail.sh) that cannot have queued mail. Fail-closed
+# after a queued wake and timeout always doorbell.
 #
 # The poll must finish inside the watcher's per-check bound
 # (FM_CHECK_TIMEOUT, default 30, read from this check's own environment
@@ -166,9 +168,42 @@ record_write() {
   return 0
 }
 
+# True when this poll has publication evidence, so a repeated diagnostic is
+# not a proven no-op. Stdout is a side channel; the durable ledger (queued
+# mail: check keys, or growth of .mail-woken) is the same record the poll
+# trusts. Fail-closed statuses 2 and 4 queue a wake without printing
+# "woke for".
+poll_has_publication_evidence() {
+  local rc=${1:-0} out=$2 woken_before=$3
+  [ "$rc" -eq 124 ] && return 0
+  if [ -n "$out" ] && printf '%s\n' "$out" | grep -qE \
+    '^fm-mail: woke for |the wake stays queued|could not clear retry for recovered|heal could not record a uid'
+  then
+    return 0
+  fi
+  if [ -s "$STATE/.wake-queue" ] && grep -q $'\tcheck\tmail:' "$STATE/.wake-queue"; then
+    return 0
+  fi
+  if [ -f "$STATE/.mail-woken" ]; then
+    if [ -z "$woken_before" ] || [ ! -f "$woken_before" ] \
+      || ! cmp -s "$woken_before" "$STATE/.mail-woken"; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
 action_check() {
-  local out rc line
+  local out rc line woken_before queued=0
   mkdir -p "$STATE" || return 1
+  woken_before=$(mktemp) || woken_before=
+  if [ -n "$woken_before" ]; then
+    if [ -f "$STATE/.mail-woken" ]; then
+      cp "$STATE/.mail-woken" "$woken_before" 2>/dev/null || : > "$woken_before"
+    else
+      : > "$woken_before"
+    fi
+  fi
   if [ ! -x "$MAIL_BIN" ]; then
     line="fm-mail.sh is missing next to this check ($MAIL_BIN)"
   else
@@ -180,10 +215,10 @@ action_check() {
     elif printf '%s\n' "$out" | grep -q '^fm-mail: woke for '; then
       # A successful poll can still surface new mail: the poll itself already
       # appended the durable mail wake rows, but the watcher only calls wake()
-      # when THIS check's output is non-empty. Emit one line naming the newest
-      # surfaced uid so the watcher wakes the agent to drain and act on the
-      # queued mail rows; without it, new mail sits queued and silent.
-      line=$(printf '%s\n' "$out" | sed -n '/^fm-mail: woke for /{s/^fm-mail: /new mail: /p;q}')
+      # when THIS check's output is non-empty. Emit one line naming a surfaced
+      # uid (the last woke-for in this poll) so the watcher wakes the agent to
+      # drain the queued mail rows; without it, new mail sits queued and silent.
+      line=$(printf '%s\n' "$out" | grep '^fm-mail: woke for ' | tail -n 1 | sed 's/^fm-mail: /new mail: /')
     else
       line=
     fi
@@ -191,15 +226,14 @@ action_check() {
   record_read
   # Report before recording, so a record that cannot be written costs a
   # repeated report rather than a lost one. The record keeps the whole line so
-  # the news key and the printed report never diverge. A repeated failure still
-  # prints when this poll queued new mail. A timeout always prints: the poll
-  # may have appended a durable mail wake after wake_for and before the
-  # woke-for line, so stdout is not proof that nothing was queued.
-  if [ -n "$line" ] && {
-    [ "$line" != "$RECORD_REPORTED" ] \
-      || [ "${rc:-0}" -eq 124 ] \
-      || { [ -n "${out:-}" ] && printf '%s\n' "$out" | grep -q '^fm-mail: woke for '; }
-  }; then
+  # the news key and the printed report never diverge. Invert the print gate:
+  # emit unless this poll is a proven no-op (same line, not a timeout, and no
+  # publication evidence).
+  if poll_has_publication_evidence "${rc:-0}" "${out:-}" "$woken_before"; then
+    queued=1
+  fi
+  [ -n "$woken_before" ] && rm -f -- "$woken_before"
+  if [ -n "$line" ] && { [ "$line" != "$RECORD_REPORTED" ] || [ "$queued" -eq 1 ]; }; then
     fm_cap_line_var "mail: $line" "$MAX_LINE"
     printf '%s\n' "$FM_LINE_CAP_LINE"
   fi

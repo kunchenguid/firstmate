@@ -10,8 +10,8 @@
 #     scratch home whose .env and fake python3 decide the outcome. The cases
 #     that matter are the reporting contract: a successful poll that surfaces
 #     new mail emits one wake line (the poll still also surfaces new mail as
-#     durable wakes), a failing poll reports one line, and the same story is
-#     reported once until it changes.
+#     durable wakes), a failing poll reports one line, a proven no-op stays
+#     silent, and fail-closed-after-queue or timeout still doorbells.
 #
 # No case ever contacts a real IMAP or SMTP server.
 set -u
@@ -304,6 +304,67 @@ printf "77\\t2026-09-05T00:00:00Z\\tfrom@x\\tHello\\tok\\n"'
   pass "fm-mail-check: a fail-closed poll after a wake reports the failure, not the wake"
 }
 
+test_repeated_status4_fail_closed_still_wakes() {
+  # Status 4: wake_for published the row, then retry-clear failed, so the poll
+  # returns 1 without printing woke-for. A second identical poll must still
+  # print so the watcher drains the queued check: mail <uid> row.
+  local home out wakeq
+  home=$(make_home repeat-status4)
+  write_env "$home"
+  enter_mailbox "$home" \
+    'printf "uidvalidity\\t90009\\n"
+printf "77\\t2026-09-05T00:00:00Z\\tfrom@x\\tHello\\tretry\\n"'
+  printf 'uidvalidity=90009\n77\n' > "$home/state/.mail-seen"
+  printf '77\n' > "$home/state/.mail-retry"
+  chmod 0000 "$home/state/.mail-retry"
+
+  out="$home/out1.txt"
+  run_check "$home" "$out" "$CHECK"
+  assert_contains "$(cat "$out")" "mail: could not clear retry for recovered 77 after publish" "the first status-4 poll reports the failure"
+  assert_not_contains "$(cat "$out")" "woke for 77" "status 4 does not print woke-for"
+  wakeq="$home/state/.wake-queue"
+  assert_contains "$(cat "$wakeq" 2>/dev/null)" "check: mail 77" "status 4 leaves the recovery wake queued"
+
+  out="$home/out2.txt"
+  run_check "$home" "$out" "$CHECK"
+  assert_contains "$(cat "$out")" "mail: could not clear retry for recovered 77 after publish" "a repeated status-4 poll still prints so the queued mail is not stranded"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "the repeat report is exactly one line: $(cat "$out")"
+  assert_contains "$(cat "$wakeq" 2>/dev/null)" "check: mail 77" "the queued recovery wake is still present"
+  chmod 0600 "$home/state/.mail-retry"
+  pass "fm-mail-check: a repeated status-4 fail-closed poll still wakes"
+}
+
+test_repeated_status2_stays_queued_still_wakes() {
+  # Status 2: the wake stays queued with no durable record and no woke-for line.
+  # A second identical diagnostic must still print.
+  local tmpbin home out check_bin
+  tmpbin="$TMP_ROOT/repeat-status2/bin"
+  home="$TMP_ROOT/repeat-status2/home"
+  mkdir -p "$tmpbin" "$home/state"
+  check_bin="$tmpbin/fm-mail-check.sh"
+  cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+    [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
+  done
+  cat > "$tmpbin/fm-mail.sh" <<EOF
+#!/usr/bin/env bash
+printf '1\t1\tcheck\tmail:9\tcheck: mail 9 - stays queued\\n' >> "\$FM_HOME/state/.wake-queue"
+echo "fm-mail: wake for 9 could not be rolled back or durably recorded; the wake stays queued and the next poll heals it - a possible duplicate, never a lost mail" >&2
+exit 1
+EOF
+  chmod +x "$tmpbin/fm-mail.sh"
+
+  out="$home/out1.txt"
+  run_check "$home" "$out" "$check_bin"
+  assert_contains "$(cat "$out")" "the wake stays queued" "the first status-2 poll reports that the wake stays queued"
+
+  out="$home/out2.txt"
+  run_check "$home" "$out" "$check_bin"
+  assert_contains "$(cat "$out")" "the wake stays queued" "a repeated status-2 poll still prints so the queued mail is not stranded"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "the repeat report is exactly one line: $(cat "$out")"
+  pass "fm-mail-check: a repeated status-2 stays-queued poll still wakes"
+}
+
 test_missing_mail_plane_is_reported() {
   local tmpbin home out check_bin
   tmpbin="$TMP_ROOT/plane2/bin"
@@ -330,6 +391,8 @@ test_failure_is_reported_once_until_it_changes
 test_unconfigured_home_is_reported_once
 test_slow_poll_times_out_and_is_reported
 test_fail_closed_poll_after_wake_reports_the_failure
+test_repeated_status4_fail_closed_still_wakes
+test_repeated_status2_stays_queued_still_wakes
 test_repeated_failure_that_queued_new_mail_still_wakes
 test_repeated_timeout_still_wakes
 test_missing_mail_plane_is_reported
