@@ -235,7 +235,7 @@ test_no_temporary_files_are_left_behind() {
   dir=$(make_case cleanup)
   mkdir -p "$dir/tmphome"
   before=$(find "$dir/tmphome" -mindepth 1 | LC_ALL=C sort)
-  TMPDIR="$dir/tmphome" run_script "$dir" >/dev/null 2>"$dir/stderr" \
+  TMPDIR="$dir/tmphome" FAKE_CURL_HTTP_CODE=200 FAKE_CURL_BODY="$SPEND_BODY" run_script "$dir" >/dev/null 2>"$dir/stderr" \
     || fail "successful run failed unexpectedly: $(cat "$dir/stderr")"
   after=$(find "$dir/tmphome" -mindepth 1 | LC_ALL=C sort)
   [ "$before" = "$after" ] || fail "a temporary curl config or response file was left behind"
