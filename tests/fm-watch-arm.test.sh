@@ -502,8 +502,21 @@ test_interrupted_handling_is_redrained_on_rearm() {
 
   kill -TERM "$ARM_PID" 2>/dev/null || fail "could not interrupt the handling successor"
   wait "$ARM_PID" 2>/dev/null || true
+  # Interrupting the arm is not watcher downtime: its watcher is detached and
+  # outlives it, so the episode stays on its own generation and its wake stays
+  # durable without any recovery republication.
   case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
-    pending:downtime:*|announced:downtime:*) ;;
+    pending:handling:"$handling_generation"|announced:handling:"$handling_generation") ;;
+    *) fail "interrupting the arm alone moved the handling episode off its generation" ;;
+  esac
+  grep "$(printf '\tsignal\tinterrupted.status\t')" "$state/.wake-queue" >/dev/null \
+    || fail "interrupting the arm dropped the unacknowledged durable wake"
+  # A watcher close is the documented downtime publisher, so closing the survivor
+  # must revert the interrupted handling episode onto the SAME generation, keeping
+  # the acknowledgement already printed to that handling turn usable.
+  retire_detached_watcher "$state"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    pending:downtime:"$handling_generation"|announced:downtime:"$handling_generation") ;;
     *) fail "interrupted pre-handling successor did not persist downtime recovery" ;;
   esac
 

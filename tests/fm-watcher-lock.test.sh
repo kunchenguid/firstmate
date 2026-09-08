@@ -194,32 +194,62 @@ test_guard_warnings() {
   pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh"
 }
 
-test_lock_single_winner_under_concurrency() {
-  local dir state lockdir marker i pids pid wins
-  dir=$(make_case lock-concurrency)
-  state="$dir/state"
-  lockdir="$state/.contend.lock"
-  marker="$dir/wins"
-  : > "$marker"
+# Run <count> concurrent fm_lock_try_acquire attempts against <lockdir> and echo
+# how many of them won. Every winner HOLDS the lock until the last contender has
+# finished attempting, so the hold covers the whole contention window by
+# construction. A fixed sleep cannot: the window is as long as it takes to fork
+# <count> shells that each source the library, which on a loaded machine exceeds
+# any constant, and a winner that exits mid-window leaves a lock naming a dead
+# pid that a late contender may legitimately reclaim - a second winner that is
+# correct lock behavior mis-read as a race.
+count_concurrent_lock_winners() {  # <work-dir> <state> <lockdir> <count>
+  local work=$1 state=$2 lockdir=$3 count=$4
+  local wins attempts release i pids pid attempted
+  wins="$work/wins"
+  attempts="$work/attempts"
+  release="$work/release"
+  : > "$wins"
+  : > "$attempts"
+  rm -f "$release"
   pids=
   i=1
-  while [ "$i" -le 40 ]; do
+  while [ "$i" -le "$count" ]; do
     FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
       if fm_lock_try_acquire "$2"; then
-        printf "%s\n" "$$" >> "$3"
-        # Stay alive so the held lock names a live pid for the whole window;
-        # otherwise a late contender could legitimately reclaim a dead-pid lock.
-        sleep 1
+        printf "%s\n" "${BASHPID:-$$}" >> "$3"
+        printf "attempted\n" >> "$4"
+        while [ ! -e "$5" ]; do
+          sleep 0.05
+        done
+        exit 0
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+      printf "attempted\n" >> "$4"
+    ' _ "$LIB" "$lockdir" "$wins" "$attempts" "$release" &
     pids="$pids $!"
     i=$((i + 1))
   done
+  attempted=0
+  i=0
+  while [ "$i" -lt 900 ]; do
+    attempted=$(awk 'NF { c++ } END { print c + 0 }' "$attempts")
+    [ "$attempted" -ge "$count" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  touch "$release"
   for pid in $pids; do
     wait "$pid" 2>/dev/null || true
   done
-  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  [ "$attempted" -ge "$count" ] \
+    || fail "only $attempted of $count lock contenders finished attempting"
+  awk 'NF { c++ } END { print c + 0 }' "$wins"
+}
+
+test_lock_single_winner_under_concurrency() {
+  local dir wins
+  dir=$(make_case lock-concurrency)
+  wins=$(count_concurrent_lock_winners "$dir" "$dir/state" "$dir/state/.contend.lock" 40)
   [ "$wins" -eq 1 ] || fail "expected exactly one lock winner under concurrency, got $wins"
   pass "concurrent fm_lock_try_acquire yields exactly one winner"
 }
@@ -244,32 +274,14 @@ test_lock_steals_dead_pid_lock() {
 }
 
 test_lock_stale_steal_single_winner_under_concurrency() {
-  local dir state lockdir dead marker i pids pid wins
+  local dir state lockdir dead wins
   dir=$(make_case lock-stale-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
-  marker="$dir/wins"
   dead=$(dead_pid)
   mkdir "$lockdir"
   printf '%s\n' "$dead" > "$lockdir/pid"
-  : > "$marker"
-  pids=
-  i=1
-  while [ "$i" -le 40 ]; do
-    FM_STATE_OVERRIDE="$state" bash -c '
-      . "$1"
-      if fm_lock_try_acquire "$2"; then
-        printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        sleep 1
-      fi
-    ' _ "$LIB" "$lockdir" "$marker" &
-    pids="$pids $!"
-    i=$((i + 1))
-  done
-  for pid in $pids; do
-    wait "$pid" 2>/dev/null || true
-  done
-  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  wins=$(count_concurrent_lock_winners "$dir" "$state" "$lockdir" 40)
   [ "$wins" -eq 1 ] || fail "expected exactly one stale-lock stealer, got $wins"
   pass "concurrent stale-lock steal yields exactly one winner"
 }
@@ -701,13 +713,37 @@ test_arm_starts_and_self_heals() {
   pass "arm starts cleanly and resurfaces recovery after a dead-pid lock"
 }
 
-test_arm_hup_cleans_child_and_temp_output() {
+# Assert a watcher is still beating with no arm attached to it. A torn-down
+# watcher never refreshes its beacon again, so a marker dropped after the arm
+# died plus one poll interval of idling discriminates the two outcomes.
+assert_watcher_still_beating() {  # <state> <watcher-pid> <context>
+  local state=$1 pid=$2 context=$3 i
+  is_live_non_zombie "$pid" || fail "$context tore the detached watcher down with its arm"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    || fail "$context left the detached watcher without its lock"
+  touch "$state/.beat-ref"
+  i=0
+  while [ "$i" -lt 60 ]; do
+    [ "$state/.last-watcher-beat" -nt "$state/.beat-ref" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "$context left the detached watcher alive but no longer beating"
+}
+
+test_arm_hup_survives_watcher_and_cleans_temp_output() {
+  # The watcher is launched DETACHED, so it must OUTLIVE its arm: when the arm is
+  # signaled (HUP here, the same shape as the harness reaping the tracked task
+  # with TERM), the watcher keeps beating and holding the lock so the next arm can
+  # attach. The arm still removes its own temp output on the way out.
   local dir state fakebin armout i armpid lock_pid status
   dir=$(make_case arm-hup-cleanup)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  # A fast poll refreshes the beacon often, so a short idle wait after the arm
+  # dies discriminates a still-beating watcher from a torn-down one.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -715,20 +751,74 @@ test_arm_hup_cleans_child_and_temp_output() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP cleanup check"
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP survival check"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$lock_pid" ] || fail "watcher took no lock before HUP"
   kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
+  assert_watcher_still_beating "$state" "$lock_pid" "HUP to the arm"
+  # Both captured streams are the arm's own temp state, so neither may be left
+  # behind - even though the detached watcher still holds them open.
+  ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP left temp output behind"
+  ! ls "$state"/.watch-arm-stderr.* >/dev/null 2>&1 || fail "HUP left temp stderr behind"
+  kill -TERM "$lock_pid" 2>/dev/null || true
+  wait_for_exit "$lock_pid" 40 >/dev/null 2>&1 || true
+  pass "detached watcher survives its arm's HUP and keeps its lock while the arm cleans its temp output"
+}
+
+test_watcher_survives_arm_term_reap_and_next_arm_reattaches() {
+  # Regression for the reaping bug: the harness reaps the tracked arm task with
+  # SIGTERM routinely. The watcher is launched detached, so that reap must NOT
+  # drop supervision - the watcher keeps beating and holding its lock, and the
+  # NEXT arm attaches to that very same live watcher. This is the full continuity
+  # contract, not just single-signal survival.
+  local dir state fakebin armout1 armout2 i armpid1 armpid2 status lock_pid
+  dir=$(make_case arm-term-reap-continuity)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout1="$dir/arm1.out"
+  armout2="$dir/arm2.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout1" &
+  armpid1=$!
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout1" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
-  ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
-  ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
-  pass "arm cleans child watcher and temp output on HUP"
+  grep -qF 'watcher: started pid=' "$armout1" || fail "first arm did not start a watcher"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$lock_pid" ] || fail "watcher took no lock before the reap"
+
+  # Reap the arm exactly as the harness does: SIGTERM the tracked task only.
+  kill -TERM "$armpid1" 2>/dev/null || fail "could not TERM the first arm"
+  wait_for_exit "$armpid1" 80
+  status=$?
+  [ "$status" -eq 143 ] || fail "reaped arm did not exit with TERM status (got $status)"
+  assert_watcher_still_beating "$state" "$lock_pid" "reaping the arm with SIGTERM"
+
+  # Continuity: the next arm must ATTACH to the surviving watcher, never start a
+  # second one, so supervision is unbroken across the reap.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout2" &
+  armpid2=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$lock_pid" "$armout2" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$lock_pid" "$armout2" \
+    || fail "next arm did not re-attach to the surviving watcher: $(cat "$armout2")"
+  ! grep -qF 'watcher: started' "$armout2" || fail "next arm started a second watcher instead of attaching to the survivor"
+  ! grep -qF 'watcher: FAILED' "$armout2" || fail "next arm reported FAILED against the surviving watcher"
+
+  kill -TERM "$armpid2" 2>/dev/null || true
+  wait_for_exit "$armpid2" 80
+  kill -TERM "$lock_pid" 2>/dev/null || true
+  wait_for_exit "$lock_pid" 40 >/dev/null 2>&1 || true
+  pass "watcher survives its arm being reaped with SIGTERM and the next arm re-attaches to the same live watcher"
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
@@ -880,6 +970,7 @@ SH
     || fail "predecessor ledger record was not linked to its verified successor"
   kill -HUP "$successor_arm" 2>/dev/null || true
   wait "$successor_arm" 2>/dev/null || true
+  retire_detached_watcher "$state"
   # The forced interruption is a watcher-down interval. Consume the prior
   # delivered wake before beginning independent ledger cycles, just as the
   # recovery handling turn does, so this fixture does not intentionally carry a
@@ -902,6 +993,7 @@ SH
     grep -qF 'watcher: started pid=' "$armout" || fail "bounded ledger cycle $iteration did not start"
     kill -HUP "$successor_arm" 2>/dev/null || true
     wait "$successor_arm" 2>/dev/null || true
+    retire_detached_watcher "$state"
     drain_and_ack "$state" \
       || fail "recovery drain after bounded ledger cycle $iteration failed"
     iteration=$((iteration + 1))
@@ -1131,7 +1223,8 @@ test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
-test_arm_hup_cleans_child_and_temp_output
+test_arm_hup_survives_watcher_and_cleans_temp_output
+test_watcher_survives_arm_term_reap_and_next_arm_reattaches
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable

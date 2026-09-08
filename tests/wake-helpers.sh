@@ -321,6 +321,25 @@ is_live_non_zombie() {
   return 0
 }
 
+# Retire the watcher that outlived a deliberately interrupted arm. A watcher
+# armed through bin/fm-watch-arm.sh is detached and survives its arm by design,
+# so a fixture that forces the arm down and then wants a watcher CLOSE - a fresh
+# next cycle, or the downtime republication a close owns - has to stop the
+# survivor itself.
+retire_detached_watcher() {  # <state>
+  local state=$1 pid i
+  pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$pid" ] || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 100 ]; do
+    is_live_non_zombie "$pid" || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "detached watcher $pid did not exit for the next fixture cycle"
+}
+
 hash_text() {
   if command -v md5 >/dev/null 2>&1; then
     printf '%s' "$1" | md5 -q
