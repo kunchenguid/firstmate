@@ -58,14 +58,15 @@ A file named both by `-e` and by auto-discovery loads twice (two factory calls, 
 ### Run-tier source vocabulary and context-reset injection
 
 The run tier depends on three facts only the vendor can supply: the session-open source it reports, whether hook stdout reaches model context on a context-RESET open rather than only a cold one, and whether a worker the hook detaches survives the hook returning.
-The first two were measured on 2026-08-05 against a throwaway Firstmate-shaped lab carrying each harness's own tracked registration with a recorder standing in for `bin/fm-sessionstart-run.sh`.
-Each open printed a source-stamped token, and the model was asked to quote that token back, so producing hook stdout could never be mistaken for delivering it.
+For Claude, Codex, and Pi, the first two were measured on 2026-08-05 against a throwaway Firstmate-shaped lab carrying each harness's own tracked registration with a recorder standing in for `bin/fm-sessionstart-run.sh`.
+GitHub Copilot CLI was added later through its own native primary live guard on 2026-09-02, which verified `additionalContext` delivery against Copilot CLI 1.0.83-3 instead of the lab recorder.
+Each measured open printed a source-stamped token, and the model was asked to quote that token back, so producing hook stdout could never be mistaken for delivering it.
 The third is recorded below.
 
 | Harness | Version verified | Cold open | Context reset | Context-preserving reopen |
 | --- | --- | --- | --- | --- |
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
-| GitHub Copilot CLI | 1.0.82 | `source=new` under `copilot -p`, with `additionalContext` quoted back by the model | Not exercised; `preCompact` remains notification-only | Not exercised; native `sessionStart` documents `resume` and the portable adapter routes it through the shared owner |
+| GitHub Copilot CLI | 1.0.83-3 | `source=new` under `copilot -p`, with `additionalContext` quoted back by the model | Not exercised; `preCompact` remains notification-only | Not exercised; native `sessionStart` documents `resume` and the portable adapter routes it through the shared owner |
 | Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
 | Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
 
@@ -249,7 +250,7 @@ The blocking and bounded-follow-up mechanisms were validated across eight harnes
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
 | Claude | 2.1.219 | Cooperative blocking `Stop` guard plus `asyncRewake` auto-arm | A fresh unsupervised session ran session start first, reclaimed a stale dead-owner lock, completed two tokenless rewake cycles with no model arm command or guard continuation, and left a competing live owner unchanged. |
-| GitHub Copilot CLI | 1.0.82 | Native `agentStop` block decision | The first stop returned `decision=block`, the model ran one genuine continuation, and the final payload reported `stop_hook_active=true` before allowing the turn to finish. |
+| GitHub Copilot CLI | 1.0.83-3 | Native `agentStop` block decision | The first stop returned `decision=block`, the model ran one genuine continuation, and the final payload reported `stop_hook_active=true` before allowing the turn to finish. |
 | Codex | 0.142.1 | Blocking `Stop` hook | Hook process root stayed anchored to the trusted checkout and one continuation ran. |
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
