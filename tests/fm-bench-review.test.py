@@ -197,6 +197,51 @@ os.execv(sys.argv[2], sys.argv[2:])
     def test_png_measurement_and_differential_use_identical_genuine_bytes(self):
         self.replay(mode="png", verify=True)
 
+    def test_archived_packet_bytes_match_frozen_sources(self):
+        sample = self.root / "archive/sample"
+        sample.mkdir(parents=True)
+        (self.root / "benchmark.json").write_text(json.dumps({"tracks": {"A": {"packets": [{"id": "A1"}]}}}))
+        hashes = {}
+        record = {"sample": {"track": "A", "packet": "A1"}, "files": {},
+                  "groups": {"packet_and_ground_truth": ["packet.md", "ground-truth.md"]}}
+        for kind, name in (("packets", "packet.md"), ("ground-truth", "ground-truth.md")):
+            content = (kind + " original").encode()
+            (sample / name).write_bytes(content)
+            hashes[kind + "/A1.md"] = record["files"][name] = hashlib.sha256(content).hexdigest()
+        (self.root / "freeze.json").write_text(json.dumps({"schema": gate.FREEZE_SCHEMA, "hashes": hashes}))
+        gate.validate_archived_packet(sample, record)
+        for name in ("packet.md", "ground-truth.md"):
+            original = (sample / name).read_bytes()
+            (sample / name).write_text("substitute")
+            record["files"][name] = hashlib.sha256((sample / name).read_bytes()).hexdigest()
+            with self.assertRaisesRegex(gate.GateError, "differs from its frozen source"):
+                gate.validate_archived_packet(sample, record)
+            (sample / name).write_bytes(original)
+            record["files"][name] = hashlib.sha256(original).hexdigest()
+
+    def test_benchmark_start_guard_preserves_historical_checkout(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL).decode().strip()
+        git("init", "-q")
+        git("-c", "user.name=test", "-c", "user.email=t@x", "commit", "--allow-empty", "-qm", "historical")
+        historical = git("rev-parse", "HEAD")
+        git("-c", "user.name=test", "-c", "user.email=t@x", "commit", "--allow-empty", "-qm", "latest")
+        latest = git("rev-parse", "HEAD")
+        git("remote", "add", "origin", str(repo))
+        git("checkout", "-q", "--detach", historical)
+        (self.root / "isolation.json").write_text(json.dumps({"entrants": [
+            {"id": "bench-task", "root": str(repo), "starting_commit": historical}]}))
+        shell = '. "$1/bin/fm-bench-launch-lib.sh"; fm_refuse_ungated_benchmark_entrant() { return 0; }; fm_bench_verify_start bench-task "$2"'
+        env = dict(os.environ, FM_BENCH_ROOT=str(self.root))
+        args = ["bash", "-c", shell, "_", str(ROOT), str(repo)]
+        self.assertEqual(subprocess.run(args, env=env, capture_output=True).returncode, 0)
+        self.assertEqual(git("rev-parse", "HEAD"), historical)
+        git("checkout", "-q", "--detach", latest)
+        self.assertNotEqual(subprocess.run(args, env=env, capture_output=True).returncode, 0)
+        self.assertEqual(git("rev-parse", "HEAD"), latest)
+
     def test_metadata_change_does_not_prove_measurement(self):
         passed, detail, _ = self.replay("metadata")
         self.assertFalse(passed)
@@ -246,6 +291,7 @@ os.execv(sys.argv[2], sys.argv[2:])
         identity = ("A", "entrant", "candidate", "A1")
         with mock.patch.object(gate, "check_result_plan_binding"), \
              mock.patch.object(gate, "planned_sample_identities", return_value={identity}), \
+             mock.patch.object(gate, "validate_archived_packet"), \
              mock.patch.object(gate, "validate_archived_projection"), \
              mock.patch.object(gate, "load_archived_measurements", return_value={"deterministic": 4}):
             for intervals, expected in ((dict.fromkeys(gate.REQUIRED_TIMING_INTERVALS, 10), True), ({}, False)):

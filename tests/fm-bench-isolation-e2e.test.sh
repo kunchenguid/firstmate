@@ -88,6 +88,7 @@ bench.mkdir(parents=True, exist_ok=True)
     "protected_paths": [f"{iso}/sealed"],
     "entrants": [
         {"id": f"bench-b1-{label}", "root": f"{iso}/{name}",
+         "starting_commit": __import__("subprocess").check_output(["git", "-C", f"{iso}/{name}", "rev-parse", "HEAD"], text=True).strip(),
          "track": "A", "role": "entrant", "candidate": name,
          "private_object_store": f"{iso}/{name}/objects",
          "private_tmp": f"{iso}/{name}/tmp",

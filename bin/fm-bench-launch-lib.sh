@@ -101,6 +101,25 @@ fm_refuse_unconfined_remote_benchmark_entrant() {  # <task-id>
   return 1
 }
 
+fm_bench_verify_start() {
+  local id=$1 worktree=$2
+  fm_refuse_ungated_benchmark_entrant "$id" || return 1
+  python3 - "${FM_BENCH_ROOT}/isolation.json" "$id" "$worktree" <<'PYSTART'
+import json, re, subprocess, sys
+from pathlib import Path
+path, task, worktree = sys.argv[1:]
+entrants = json.loads(Path(path).read_text()).get("entrants", [])
+matches = [item for item in entrants if item.get("id") == task]
+if len(matches) != 1 or Path(matches[0].get("root", "")).resolve() != Path(worktree).resolve():
+    raise SystemExit("benchmark starting root is not preflight-bound")
+expected = matches[0].get("starting_commit", "")
+actual = subprocess.check_output(["git", "-C", worktree, "rev-parse", "HEAD"], text=True).strip()
+status = subprocess.check_output(["git", "-C", worktree, "status", "--porcelain"], text=True)
+if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", expected) or actual != expected or status:
+    raise SystemExit("benchmark checkout differs from its frozen starting commit or is dirty")
+PYSTART
+}
+
 fm_bench_wrap_entrant_launch() {  # <task-id> <worktree> <shell-command>
   local id=${1-} worktree=${2-} command=${3-} root wrapped isolation_hash receipt_hash
   local harness=${4-} model=${5-} effort=${6-} raw=${7:-0} kind=${8:-ship}

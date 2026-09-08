@@ -1784,6 +1784,12 @@ def probe_entrants(
             continue
         report.ok(f"isolation.{entrant_id}.provision", "private clone, object store, temp, home, and session space recorded")
 
+        start = entrant.get("starting_commit")
+        head = run_git(["-C", str(entrant.get("root")), "rev-parse", "HEAD"])
+        if (not isinstance(start, str) or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", start) is None
+                or head.returncode or head.stdout.decode().strip() != start):
+            report.fail(f"isolation.{entrant_id}.start", "entrant HEAD must match its declared starting_commit")
+            continue
         entrant_root = Path(str(entrant.get("root"))).resolve()
         outside_private = [
             f"{key} ({Path(str(entrant.get(key))).resolve()})"
@@ -2832,6 +2838,35 @@ def check_result_plan_binding(root: Path, plan: dict[str, Any], report: Report) 
         report.fail("results.plan_binding", str(exc))
 
 
+def validate_archived_packet(sample: Path, record: dict[str, Any]) -> None:
+    root = sample.parent.parent
+    identity = as_object(record.get("sample"))
+    packet = identity.get("packet")
+    plan = load_json(root / "benchmark.json")
+    track = as_object(as_object(plan.get("tracks")).get(identity.get("track")))
+    if not isinstance(packet, str) or not any(item.get("id") == packet for item in track.get("packets", []) if isinstance(item, dict)):
+        raise GateError("archive packet is not planned for this sample")
+    frozen = as_object(load_json(root / "freeze.json", FREEZE_SCHEMA).get("hashes"))
+    files = as_object(record.get("files"))
+    names = as_object(record.get("groups")).get("packet_and_ground_truth")
+    expected = {}
+    for kind, primary in (("packets", "packet.md"), ("ground-truth", "ground-truth.md")):
+        sources = {name: digest for name, digest in frozen.items()
+                   if name == f"{kind}/{packet}.md" or name.startswith(f"{kind}/{packet}/")}
+        if not sources:
+            raise GateError("archive packet has no frozen source material")
+        for source, digest in sources.items():
+            destination = primary if source == f"{kind}/{packet}.md" else source
+            expected[destination] = digest
+    if not isinstance(names, list) or set(names) != set(expected) or len(names) != len(expected):
+        raise GateError("archive packet material does not cover its frozen sources")
+    for name, digest in expected.items():
+        path = sample / name
+        if (not is_within(path.resolve(), sample.resolve()) or not stat.S_ISREG(path.lstat().st_mode)
+                or files.get(name) != digest or sha256_file(path) != digest):
+            raise GateError("archived packet material differs from its frozen source")
+
+
 def validate_archived_projection(sample: Path, record: dict[str, Any]) -> None:
     binding = as_object(record.get("tree_binding"))
     if load_json(sample / "tree-binding.json") != binding:
@@ -3381,6 +3416,7 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             ok = False
             continue
         try:
+            validate_archived_packet(sample, record)
             validate_archived_projection(sample, record)
             capture = load_archived_measurements(sample, record)
             judging = load_json(sample / "judging.json")
@@ -4546,6 +4582,7 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
             continue
         judging = evidence_parts["judging.json"]
         try:
+            validate_archived_packet(sample, manifest)
             validate_archived_projection(sample, manifest)
             evaluator = load_archived_measurements(sample, manifest)
         except (GateError, OSError) as exc:

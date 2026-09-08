@@ -155,3 +155,7 @@ Each archived `evaluator_rerun.frozen_package` maps its package filenames to fro
 The archived entrypoint must be the execution contract’s `program`, or one of its explicitly preregistered `archive_programs`.
 The execution contract’s `archive_packages` maps each source entrypoint to its exact `argv` and complete `frozen_package` destination-to-source mapping. Archive layouts must match that frozen declaration. If omitted, each entrypoint uses its source path as `argv` and preserves the source paths of every frozen scoring file and both evaluator configuration files.
 Scored archives must retain valid timing intervals before archive verification, restore, or cleanup can pass.
+
+Each provisioned isolation entrant declares its full `starting_commit`. Preflight checks that revision, and fresh benchmark launches verify it and a clean checkout before skipping the ordinary default-branch refresh.
+
+Archived `packet.md` and `ground-truth.md` must match frozen `packets/<packet>.md` and `ground-truth/<packet>.md`. Files under packet-specific source directories retain their source-relative paths in the archive and must all appear in `packet_and_ground_truth`.

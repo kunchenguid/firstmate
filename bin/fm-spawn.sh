@@ -2440,6 +2440,14 @@ spawn_worktree_has_origin_config() {  # <worktree>
 
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
+  case "$ID" in
+    bench-*)
+      if [ "${FM_BENCH_LAUNCH_BYPASS:-}" != 1 ]; then
+        fm_bench_verify_start "$ID" "$worktree"
+        return $?
+      fi
+      ;;
+  esac
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1

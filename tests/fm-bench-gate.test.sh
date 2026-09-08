@@ -1484,6 +1484,7 @@ json.dump({
     "protected_paths": [f"{iso}/sealed"],
     "entrants": [
         {"id": f"bench-b1-{label}", "root": f"{iso}/{name}",
+         "starting_commit": __import__("subprocess").check_output(["git", "-C", f"{iso}/{name}", "rev-parse", "HEAD"], text=True).strip(),
          "track": "A", "role": "entrant",
          "candidate": "Fable 5 High" if label == "k7" else "GPT 5.6 Sol High",
          "private_object_store": f"{iso}/{name}/objects",
@@ -2135,6 +2136,7 @@ json.dump({
     "protected_paths": [f"{iso}/sealed"],
     "entrants": [
         {"id": f"bench-b1-{label}", "root": f"{iso}/{name}",
+         "starting_commit": __import__("subprocess").check_output(["git", "-C", f"{iso}/{name}", "rev-parse", "HEAD"], text=True).strip(),
          "track": "A", "role": "entrant",
          "candidate": "Fable 5 High" if label == "k7" else "GPT 5.6 Sol High",
          "private_object_store": f"{iso}/{name}/objects",
@@ -2250,6 +2252,15 @@ for path in sorted((root / "archive").glob("*/manifest.json")):
     if record["attempt"]["status"] != "scored":
         continue
     sample = path.parent
+    for kind, name in (("packets", "packet.md"), ("ground-truth", "ground-truth.md")):
+        source = f"{kind}/{record['sample']['packet']}.md"
+        target = root / source
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_bytes((sample / name).read_bytes())
+        (sample / name).write_bytes(target.read_bytes())
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        record["files"][name] = frozen["hashes"][source] = digest
     rerun = record["evaluator_rerun"]
     if not rerun.get("argv"):
         (sample / "scoring.sh").write_text('#!/bin/sh\ncat "$1/score.json"\n')
