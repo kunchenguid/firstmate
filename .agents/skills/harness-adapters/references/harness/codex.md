@@ -3,7 +3,7 @@
 **A worker without functioning supervision hooks can still work, produce, and finish while nothing ever wakes firstmate: it is silently invisible to supervision.**
 Treat missing hook permission as a threat to that supervision path, even when launch and instruction processing succeed.
 
-Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer version.
+Operating facts below were verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer version.
 
 ## Trust gates and launch verification
 
@@ -16,40 +16,32 @@ That Enter recipe applies only to this directory dialog.
 
 ### New or changed hooks
 
-**Hook trust is content-bound, not a once-per-machine gate like directory trust: any tool changing the shared `~/.codex/hooks.json` can reopen review, including tools unrelated to Firstmate.**
-The [official hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks), checked on 2026-09-08, describes recorded trust for the exact hook definition's hash and renewed review when hooks change.
-Firstmate's inspection that day found trust recorded per hook by file path, event, and index, with a content hash.
-The reported inventory contained fifteen trust entries for the shared file plus two bundled browser entries, and none for any project hooks file.
-The observed trigger was Orca rewriting the shared hooks file to install its hooks, not Firstmate's spawn or the worker-runtime switch.
-
-In the observed launches on 2026-09-08, a separate dialog appeared before instructions were processed: four hooks were new or changed, with an offer to let them run outside the sandbox.
+The hook-review dialog observed on 2026-09-08 appeared before instructions were processed: four hooks were new or changed, with an offer to let them run outside the sandbox.
 It presented three choices with the cursor on review, not either trust choice.
 Firstmate's key plane can confirm, escape, or interrupt but cannot move the selection.
 **Escape is the only safe key for this dialog through that plane**, because it offers going back without granting anything.
 Confirm opens a review flow the plane cannot navigate; declining disables precisely the hooks supervision depends on.
 Do not automate an answer or guess a selection.
-The dialog swallowed the ordinary stop command in the observed launch: delivery succeeded but stopping did not take effect, so Escape had to clear the dialog before recovery could proceed.
+The dialog can swallow the ordinary stop command: successful delivery does not prove the worker stopped, so clear the dialog with Escape before recovery.
 
-Escape cleared the dialog and instructions proceeded in two observed launches on that machine.
-The dialog recurred on the second launch after the first had been escaped: the changed hook definitions still required review under the hash-bound trust gate, and Escape granted nothing.
-Both launches nevertheless produced turn-end notifications: the first after one minute forty seconds, with a confirmed supervision wake, and the second after sixty-three seconds.
-This establishes that dismissal was survivable for those two workers; it does not establish that all four hooks ran or that the hooks were trusted rather than merely dismissed.
-**Trusted versus merely dismissed remains unresolved**, including why the notifications worked; do not turn those successful observations into a trust guarantee for future launches or versions.
+Escape allowed the observed workers to proceed, but the dialog recurred on a later launch.
+**Trusted versus merely dismissed remains unresolved**, including why turn-end notifications worked; neither dismissal nor those notifications establish that all four hooks ran or were approved.
+Do not infer a trust guarantee for future launches or versions from those observations.
 
 ### Required after every launch
 
 Before treating any Codex worker as supervised, verify that its actual turn-end signal was freshly written after this launch and that supervision received the corresponding wake.
-Inspect the active home's task-specific `state/<id>.turn-ended` evidence against the launch time, accounting for an older marker on a relaunch, and correlate it with the supervisor's received event.
+For a crewmate or scout, inspect the active home's task-specific `state/<id>.turn-ended` evidence against the launch time, accounting for an older marker on a relaunch, and correlate it with the supervisor's received event.
 A successful launch, instruction processing, completed work, or installed hook configuration is insufficient; keep supervision unverified while that evidence is absent.
-The first observed worker's signal at launch plus one minute forty seconds and resulting wake exemplify the required check, not a timeout or a guarantee about the next worker.
-`../../../bin/fm-spawn.sh` owns signal wiring; its Codex launch uses `notify` for the turn-end marker, so a notification is not proof that the four dialog-listed lifecycle hooks are all authorized.
+`../../../bin/fm-spawn.sh` owns signal wiring; its Codex crewmate and scout launches use `notify` for the turn-end marker, independently of the dialog-listed lifecycle hooks.
+For a secondmate's own supervision path, use `references/common/primary-hooks.md` and the Primary integration section below rather than expecting a parent-facing worker marker.
 
 ### Operator acceptance persistence
 
-Acceptance records trust for the reviewed content under the hash-bound gate above; it does not permanently clear future changes to the shared file.
-The operator is resolving the observed dialog manually, with knowledge of what is being granted; no completed acceptance or later-launch result has yet been reported.
-That operator's confirmed acceptance and matching recorded trust for the current definitions would settle their approval state; the two existing turn-end observations do not.
-The official documentation says untrusted non-managed hooks are skipped, but does not establish the approval state of those observed workers.
+**Hook acceptance is not a once-per-machine approval: trust is recorded for each reviewed definition's content hash, and new or changed definitions require renewed review.**
+The [official hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks), checked on 2026-09-08, owns this persistence rule and states that untrusted non-managed hooks are skipped.
+Any tool changing hook definitions in the shared `~/.codex/hooks.json` can therefore reopen review, including tools unrelated to Firstmate.
+This rule does not establish the approval state of the observed workers; that requires confirmed operator acceptance and matching recorded trust for the current definitions.
 Do not automate an answer, substitute another resolution path, or trigger trust experiments on live workers or their validation pipelines.
 
 ## Operating facts
