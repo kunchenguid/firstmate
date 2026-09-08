@@ -163,6 +163,7 @@ LANE=
 BASE_REF=origin/main
 JSON_PATH=
 SCRIPTS=()
+CHANGED_REASONS=()
 EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
@@ -1213,6 +1214,18 @@ add_script() {
   SCRIPTS+=("$p")
 }
 
+# Preserve the evidence chain for --changed inspection without changing the
+# path-only contract of other selection modes.
+add_changed_script() {
+  local script=$1 reason=$2 pair
+  add_script "$script"
+  pair="$(normalize_script_path "$script")"$'\t'"$reason"
+  for existing in "${CHANGED_REASONS[@]+"${CHANGED_REASONS[@]}"}"; do
+    [ "$existing" = "$pair" ] && return 0
+  done
+  CHANGED_REASONS+=("$pair")
+}
+
 select_all() {
   local s
   while IFS= read -r s; do
@@ -1591,6 +1604,9 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
+    .agents/skills/graph-board/assets/graph-server-page.html)
+      printf '%s\n' __script__:fm-graph-server.test.sh
+      ;;
     .agents/skills/*/SKILL.md|.agents/skills/war-room/templates/*)
       printf '%s\n' pure-contract-unit
       ;;
@@ -1605,8 +1621,7 @@ families_for_changed_path() {
     .opencode/plugins/fm-primary-cd-check.js)
       printf '%s\n' pure-contract-unit
       ;;
-    .github/*|.backpassrc.json|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
-    docs/configuration.md|docs/supervision-protocols/*)
+    .github/*|.backpassrc.json|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|README.md|docs/*)
       printf '%s\n' pure-contract-unit
       ;;
     tests/lib.sh|tests/*-helpers.sh|tests/fixtures.sh)
@@ -1637,7 +1652,7 @@ families_for_changed_path() {
     tests/*)
       printf '%s\n' "__unmapped__:$path"
       ;;
-    README.md|LICENSE|assets/*|docs/*|.gitignore|gnhf-score.txt|gnhf-night-report.md|rejected/*)
+    LICENSE|assets/*|.gitignore|gnhf-score.txt|gnhf-night-report.md|rejected/*)
       # gnhf-score.txt, gnhf-night-report.md, and rejected/* are autonomous-run
       # artifacts, not source paths; like .gitignore they select no test family.
       ;;
@@ -1648,8 +1663,100 @@ families_for_changed_path() {
   esac
 }
 
+# Files that can carry a dependency edge. Tests are the selectable leaves;
+# helpers, fixtures, and executable scripts make the graph transitive.
+dependency_nodes() {
+  local f
+  all_repo_tests
+  all_repo_test_helpers
+  for f in tests/fixtures/* tests/fixtures/*/* bin/*.sh bin/backends/*.sh; do
+    [ -f "$f" ] && printf '%s\n' "$f"
+  done | LC_ALL=C sort -u
+}
+
+# Emit the kind of edge from $1 to $2 when the file names the target through a
+# source, invocation, or fixture reference. Repository-relative references are
+# exact; SCRIPT_DIR forms use the target basename because their directory is
+# established by the caller.
+dependency_edge() {
+  local node=$1 target=$2 base
+  base=$(basename "$target")
+  [ -f "$node" ] || return 1
+  if grep -E '(^|[[:space:];])([.]|source)[[:space:]]+' "$node" | grep -Fq "$target" ||
+    grep -E '(^|[[:space:];])([.]|source)[[:space:]]+' "$node" | grep -Eq '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/.*'"$base"'([[:space:]"'"'"'\047;]|$)'; then
+    printf 'source\n'
+  elif grep -Fq "$target" "$node" || grep -Eq '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/.*'"$base"'([[:space:]"'"'"'\047;]|$)' "$node"; then
+    case "$node" in
+      tests/fixtures/*|tests/*-helpers.sh) printf 'fixture\n' ;;
+      *) printf 'invoke\n' ;;
+    esac
+  else
+    return 1
+  fi
+}
+
+dependency_candidates() {
+  local target=$1 base=$2
+  shift 2
+  grep -F -l -- "$target" "$@" 2>/dev/null || true
+  grep -E -l '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/.*'"$base"'([[:space:]"'"'"'\047;]|$)' "$@" 2>/dev/null || true
+}
+
+# Follow reverse references until every test leaf depending on $1 is found.
+# This is the repository's small, run-time equivalent of Bazel affected-targets
+# or git-based test impact analysis: no cache or second manifest can drift.
+select_dependency_dependents() {
+  local changed=$1 node edge current chain next_chain test_path
+  local found=0
+  local -a queue=() chains=() seen=() nodes=()
+  while IFS= read -r node; do
+    [ -n "$node" ] && nodes+=("$node")
+  done < <(dependency_nodes)
+  queue+=("$changed")
+  chains+=("$changed")
+  seen+=("$changed")
+
+  while [ "${#queue[@]}" -gt 0 ]; do
+    current=${queue[0]}
+    chain=${chains[0]}
+    queue=("${queue[@]:1}")
+    chains=("${chains[@]:1}")
+    while IFS= read -r node; do
+      [ -n "$node" ] || continue
+      [ "$node" = "$current" ] && continue
+      edge=$(dependency_edge "$node" "$current" || true)
+      [ -n "$edge" ] || continue
+      # Only a sourced library extends a script's dependency closure. An
+      # invocation is a direct test dependency, not proof that the caller's
+      # own consumers execute the invoked implementation.
+      case "$node" in
+        bin/backends/*|bin/*) [ "$edge" = source ] || continue ;;
+      esac
+      next_chain="$chain --$edge--> $node"
+      case "$node" in
+        tests/*.test.sh)
+          add_changed_script "$node" "changed=$changed via $next_chain"
+          found=1
+          ;;
+      esac
+      case "$node" in
+        tests/*.test.sh) ;;
+        *)
+          for test_path in "${seen[@]+"${seen[@]}"}"; do
+            [ "$test_path" = "$node" ] && continue 2
+          done
+          seen+=("$node")
+          queue+=("$node")
+          chains+=("$next_chain")
+          ;;
+      esac
+    done < <(dependency_candidates "$current" "$(basename "$current")" "${nodes[@]+"${nodes[@]}"}" | LC_ALL=C sort -u)
+  done
+  [ "$found" -eq 1 ]
+}
+
 select_changed() {
-  local base=$1 path entry fam script_name s
+  local base=$1 path entry fam script_name s changed_path
   local -a wanted_families=()
   local -a wanted_scripts=()
 
@@ -1659,18 +1766,24 @@ select_changed() {
 
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    case "$path" in
+      tests/*.test.sh) add_changed_script "$path" "changed=$path via changed-test" ;;
+    esac
+    if [ -f "$path" ] && select_dependency_dependents "$path"; then
+      continue
+    fi
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
       case "$entry" in
         __script__:*)
           script_name=${entry#__script__:}
-          wanted_scripts+=("$script_name")
+          wanted_scripts+=("$path"$'\t'"$script_name")
           ;;
         __unmapped__:*)
           die "no changed-test mapping for source path: ${entry#__unmapped__:}"
           ;;
         *)
-          wanted_families+=("$entry")
+          wanted_families+=("$path"$'\t'"$entry")
           ;;
       esac
     done < <(families_for_changed_path "$path")
@@ -1690,17 +1803,21 @@ select_changed() {
   done
 
   for f in "${unique_families[@]+"${unique_families[@]}"}"; do
+    changed_path=${f%%$'\t'*}
+    fam=${f#*$'\t'}
     while IFS= read -r s; do
       [ -n "$s" ] || continue
-      if [ "$(family_for_basename "$(basename "$s")")" = "$f" ]; then
-        add_script "$s"
+      if [ "$(family_for_basename "$(basename "$s")")" = "$fam" ]; then
+        add_changed_script "$s" "changed=$changed_path via family=$fam"
       fi
     done < <(all_repo_tests)
   done
 
   for script_name in "${wanted_scripts[@]+"${wanted_scripts[@]}"}"; do
+    changed_path=${script_name%%$'\t'*}
+    script_name=${script_name#*$'\t'}
     if [ -f "tests/$script_name" ]; then
-      add_script "tests/$script_name"
+        add_changed_script "tests/$script_name" "changed=$changed_path via script=$script_name"
     fi
   done
 
@@ -2107,7 +2224,17 @@ if [ "$LIST_ONLY" -eq 1 ] || [ "$LIST_SCHEDULED" -eq 1 ]; then
     done | LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -k2,2 | cut -f2-
   else
     for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
-      printf '%s\n' "$s"
+      if [ "$MODE" = changed ]; then
+        reason=
+        for entry in "${CHANGED_REASONS[@]+"${CHANGED_REASONS[@]}"}"; do
+          [ "${entry%%$'\t'*}" = "$s" ] || continue
+          reason=${entry#*$'\t'}
+          break
+        done
+        printf '%s\t%s\n' "$s" "${reason:-changed selection}"
+      else
+        printf '%s\n' "$s"
+      fi
     done
   fi
   exit 0

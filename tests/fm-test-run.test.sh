@@ -290,6 +290,107 @@ test_changed_runner_surfaces_select_their_family() {
   pass "runner and its documentation surfaces select their curated family, not just their contract owners"
 }
 
+test_changed_dependency_graph_is_precise_and_explains_selection() {
+  local tmp repo runner listed paths reason count
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-dependency-graph.XXXXXX")
+  repo="$tmp/repo"
+  runner=${FM_DEPENDENCY_RUNNER:-$RUNNER}
+  mkdir -p "$repo/bin" "$repo/tests/fixtures"
+  cp "$runner" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+cat >"$repo/bin/a.sh" <<'EOF'
+#!/usr/bin/env bash
+. "$FIXTURE_BIN/l.sh"
+EOF
+  printf '#!/usr/bin/env bash\n' >"$repo/bin/b.sh"
+  printf '#!/usr/bin/env bash\n' >"$repo/bin/l.sh"
+  # shellcheck disable=SC2016 # literal fixture source reference
+  printf '. "$ROOT/bin/a.sh"\n' >"$repo/tests/a-source.test.sh"
+  printf '# tests/fixtures/a.fixture\n' >"$repo/tests/a-fixture.test.sh"
+  printf 'bin/b.sh\n' >"$repo/tests/b-invokes.test.sh"
+  # shellcheck disable=SC2016 # literal fixture source reference
+  printf '. "$ROOT/bin/l.sh"\n' >"$repo/tests/l-direct.test.sh"
+  printf '# unrelated\n' >"$repo/tests/unrelated.test.sh"
+  printf '# family fallback owner\n' >"$repo/tests/fm-test-run.test.sh"
+  printf 'bin/a.sh\n' >"$repo/tests/fixtures/a.fixture"
+  printf '# fallback target\n' >"$repo/README.md"
+  chmod +x "$repo/tests"/*.test.sh
+  git -C "$repo" init -q
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
+
+  printf '# change A\n' >>"$repo/bin/a.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  paths=$(printf '%s\n' "$listed" | cut -f1 | LC_ALL=C sort)
+  count=$(printf '%s\n' "$paths" | wc -l | tr -d ' ')
+  [ "$count" = 2 ] || fail "A must select exactly its two dependents, got: $listed"
+  assert_contains "$paths" "tests/a-source.test.sh" "A source dependent is selected"
+  assert_contains "$paths" "tests/a-fixture.test.sh" "A fixture dependent is selected"
+  assert_not_contains "$paths" "tests/l-direct.test.sh" "A change does not select L-only tests"
+  reason=$(printf '%s\n' "$listed" | grep -F 'tests/a-source.test.sh' || true)
+  assert_contains "$reason" "changed=bin/a.sh" "--list identifies the changed source"
+  assert_contains "$reason" "source" "--list identifies the dependency edge"
+  git -C "$repo" add bin/a.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm change-a
+
+  printf '# change L\n' >>"$repo/bin/l.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  paths=$(printf '%s\n' "$listed" | cut -f1 | LC_ALL=C sort)
+  count=$(printf '%s\n' "$paths" | wc -l | tr -d ' ')
+  [ "$count" = 3 ] || fail "L must select its transitive closure, got: $listed"
+  assert_contains "$paths" "tests/a-source.test.sh" "L reaches the test through A"
+  assert_contains "$paths" "tests/a-fixture.test.sh" "L reaches the fixture test through A"
+  assert_contains "$paths" "tests/l-direct.test.sh" "L direct dependent is selected"
+  reason=$(printf '%s\n' "$listed" | grep -F 'tests/a-source.test.sh' || true)
+  assert_contains "$reason" "bin/l.sh --source--> bin/a.sh" "--list preserves the transitive edge"
+  git -C "$repo" add bin/l.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm change-l
+
+  printf '# docs change\n' >>"$repo/README.md"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-test-run.test.sh" "unmapped documentation falls back to its curated family"
+  rm -rf "$tmp"
+  pass "changed selection follows direct and transitive dependency edges with reasons"
+}
+
+test_changed_dependency_graph_covers_backend_closure_and_test_self() {
+  local tmp repo runner listed paths expected
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-dependency-backend.XXXXXX")
+  repo="$tmp/repo"
+  runner=${FM_DEPENDENCY_RUNNER:-$RUNNER}
+  mkdir -p "$repo/bin/backends" "$repo/tests"
+  cp "$runner" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/bin/backend.sh" <<'EOF'
+#!/usr/bin/env bash
+. "$BACKEND_DIR/backends/herdr.sh"
+EOF
+  printf '#!/usr/bin/env bash\n' >"$repo/bin/backends/herdr.sh"
+  printf 'bin/backend.sh\n' >"$repo/tests/backend-a.test.sh"
+  printf 'bin/backend.sh\n' >"$repo/tests/backend-b.test.sh"
+  printf '# changed test\n' >"$repo/tests/edited.test.sh"
+  printf '# tests/edited.test.sh\n' >"$repo/tests/mentions-edited.test.sh"
+  chmod +x "$repo/tests"/*.test.sh
+  git -C "$repo" init -q
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
+
+  printf '# changed backend\n' >>"$repo/bin/backends/herdr.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  paths=$(printf '%s\n' "$listed" | cut -f1 | LC_ALL=C sort)
+  expected=$(rg -l 'bin/backend\.sh' "$repo/tests" | sed "s|$repo/||" | LC_ALL=C sort)
+  [ "$paths" = "$expected" ] || fail "variable-sourced backend closure must equal rg dependents: $paths"
+
+  git -C "$repo" add bin/backends/herdr.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm backend-change
+  printf '# edited\n' >>"$repo/tests/edited.test.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  paths=$(printf '%s\n' "$listed" | cut -f1 | LC_ALL=C sort)
+  assert_contains "$paths" "tests/edited.test.sh" "a changed test always selects itself"
+  rm -rf "$tmp"
+  pass "variable source closures and changed test files never under-select"
+}
+
 test_changed_dependency_selection_and_unmapped_failure() {
   local tmp repo listed rc opencode_plugin
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
@@ -536,7 +637,7 @@ test_changed_war_room_template_selects_contract_family() {
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) \
     || fail "changed room template must select tests instead of refusing its path"
   expected=$(cd "$repo" && bin/fm-test-run.sh --list --family pure-contract-unit)
-  [ "$listed" = "$expected" ] || fail "room template must select the existing contract family"
+  [ "$(printf '%s\n' "$listed" | cut -f1)" = "$expected" ] || fail "room template must select the existing contract family"
   assert_contains "$listed" "tests/fm-skill-war-room.test.sh" \
     "room template must select its skill contract suite"
   pass "changed room template selects the contract family including its skill suite"
@@ -661,7 +762,7 @@ test_empty_selection_emits_summary() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
-  printf 'documentation only\n' >"$repo/README.md"
+  printf 'run artifact only\n' >"$repo/gnhf-night-report.md"
   out=$(cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --json "$tmp/artifacts/timing.json" 2>"$tmp/err") \
     || fail "empty valid changed selection must pass"
   printf '%s\n' "$out" | grep -Eq \
@@ -1633,6 +1734,8 @@ test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_runner_surfaces_select_their_family
 test_changed_war_room_template_selects_contract_family
+test_changed_dependency_graph_is_precise_and_explains_selection
+test_changed_dependency_graph_covers_backend_closure_and_test_self
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family
 test_changed_uses_bounded_automatic_concurrency
