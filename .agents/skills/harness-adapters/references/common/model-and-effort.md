@@ -16,6 +16,7 @@ Use `low` for well-understood work with an explicit bounded path and `xhigh` for
 Choose intermediate levels as complexity, uncertainty, blast radius, or open-ended reasoning rises.
 If an adapter lacks `xhigh`, cap at its highest supported non-`max` level rather than silently omitting the intent.
 Never select `max` through this fallback; only an explicit per-task or standing captain preference permits it.
+For Codex, an explicit `max` selection still requires the selected model's current catalog to advertise `max`.
 
 If requested effort is outside the adapter's accepted set, the spawn records `effort=` in task metadata but emits no effort flag.
 This preserves launch success instead of passing a known-bad value.
