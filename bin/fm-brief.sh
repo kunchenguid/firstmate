@@ -67,6 +67,11 @@
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
+# Every ship/scout scaffold also reinforces the configuration-owned nested
+# delegation rule.
+# Native child-agent facilities are outside fm-spawn.sh's
+# interception point, so the brief names the required profile classification
+# without claiming runtime enforcement that Firstmate cannot provide.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -211,6 +216,21 @@ When a terminal message says an instruction is waiting there - and at any natura
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
+
+# This is the single deliberate reinforcement of docs/configuration.md's
+# nested-delegation policy.
+# A worker needs the rule at the precise point a
+# third-party native child-agent facility may be available, while the complete
+# policy, schema, and enforcement boundary remain with the configuration doc.
+IFS= read -r -d '' NESTED_ROUTING_SECTION <<'EOF' || true
+# Nested delegation and model routing
+`config/crew-dispatch.json` in the active firstmate home is the current authority for worker routing.
+Before creating a child through a native subagent or delegation facility, classify the child task under that same current policy and explicitly pass the matching configured harness, model, and effort.
+Never inherit or improvise a model or effort from your own session, or use the obsolete Fable/Opus/Sonnet/Haiku tiers.
+An omitted model or effort in the selected profile deliberately uses that selected harness's own default for the omitted axis.
+Firstmate cannot intercept every third-party native child facility, so this is a briefing requirement rather than claimed runtime enforcement for those tools.
+EOF
+NESTED_ROUTING_SECTION=${NESTED_ROUTING_SECTION%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -361,6 +381,8 @@ $TASK_SECTION
 
 $HERDR_SECTION
 
+$NESTED_ROUTING_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -444,6 +466,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $TASK_SECTION
 
 $HERDR_SECTION
+
+$NESTED_ROUTING_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.

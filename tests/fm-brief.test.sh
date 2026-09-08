@@ -441,6 +441,34 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_nested_delegation_model_routing_contract() {
+  local home id brief kind
+  home="$TMP_ROOT/nested-routing-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-nested-routing-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep '# Nested delegation and model routing' "$brief" \
+      "$kind brief omitted the nested-delegation routing section"
+    assert_grep 'classify the child task under that same current policy' "$brief" \
+      "$kind brief omitted the same-policy child classification rule"
+    assert_grep 'explicitly pass the matching configured harness, model, and effort' "$brief" \
+      "$kind brief omitted the explicit child profile rule"
+    assert_grep 'Never inherit or improvise a model or effort from your own session' "$brief" \
+      "$kind brief permits inherited or improvised child routing"
+    assert_grep 'cannot intercept every third-party native child facility' "$brief" \
+      "$kind brief overclaims Firstmate runtime enforcement"
+  done
+
+  pass "fm-brief.sh: ship and scout briefs require configured nested model routing without overclaiming enforcement"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -880,6 +908,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_nested_delegation_model_routing_contract
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

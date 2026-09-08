@@ -429,6 +429,16 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+### Nested delegation
+
+When active, `config/crew-dispatch.json` is also the current authority for every worker's model and effort selection at every delegation depth.
+Before a crewmate creates a native child agent, it must classify the child task against the same rules or default and explicitly pass the selected profile's configured harness, model, and effort rather than inheriting or improvising either axis from its own session.
+An omitted model or effort remains an intentional selection of the chosen harness's default for that omitted axis.
+Profile arrays retain their normal `quota-array-dispatch` selection procedure at every depth.
+No legacy Fable/Opus/Sonnet/Haiku tier policy may choose a child profile.
+`fm-spawn.sh` enforces explicit resolved profiles only for fleet crewmate and scout spawns.
+Firstmate cannot intercept every third-party native child-agent tool, so ship and scout briefs carry this as an explicit worker requirement rather than claiming runtime enforcement outside the fleet lifecycle.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
