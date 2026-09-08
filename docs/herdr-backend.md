@@ -211,6 +211,7 @@ An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
+Doorbell-specific identity verification and guarded Enter recovery belong to `bin/fm-task-inbox-lib.sh`, not this generic backend submit path; [runtime backend verification](verification/runtime-backends.md#swallowed-enter-recovery) owns the cross-version evidence.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
@@ -332,6 +333,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 tests/fm-backend-herdr.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
+tests/fm-send-inbox-doorbell-herdr-live-e2e.test.sh
 tests/fm-backend-herdr-smoke.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh

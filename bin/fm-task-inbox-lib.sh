@@ -13,12 +13,15 @@
 #
 # Design (captain-adopted, data/fm-send-reliability-reframe-s1/report.md): the
 # payload moves to the filesystem, which is reliable; the terminal carries only
-# a short constant doorbell line. While the endpoint remains available, that
-# line does not need to be reliable because ringing it again is free. A
-# duplicated doorbell is a no-op by construction (the worker finds the inbox
-# empty or already handled), and a swallowed doorbell is detected by the
-# absence of the worker's acknowledgement and re-rung on a bounded schedule.
-# A positively dead or missing endpoint bypasses that schedule without being
+# a short constant doorbell line. The ring verifies an inconclusive submit and
+# retries Enter only while the composer positively holds this record's exact
+# doorbell, stops on proven emptiness, and otherwise sends no further key. An
+# initial send-failed verdict with an empty composer still reports failure
+# because the backend cannot distinguish a landed Enter from text never typed.
+# A duplicated doorbell is a no-op by construction (the worker finds the
+# inbox empty or already handled), so the absence of acknowledgement still
+# drives the bounded watcher re-ring schedule as a backstop. A positively dead
+# or missing endpoint bypasses that schedule without being
 # typed into, and its unhandled record surfaces through the ordinary stale wake
 # into stuck-crewmate-recovery.
 #
