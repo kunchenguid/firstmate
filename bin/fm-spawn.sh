@@ -3390,12 +3390,12 @@ if [ "$KIND" != secondmate ]; then
       elif [ -n "${HOME:-}" ]; then
         CLAUDE_USER_SETTINGS="$HOME/.claude/settings.json"
       fi
+      command -v jq >/dev/null 2>&1 || {
+        echo "error: jq is required to write this task's minimal settings.local.json" >&2
+        exit 1
+      }
       USER_HOOKS_JSON='{}'
       if [ -n "$CLAUDE_USER_SETTINGS" ] && [ -f "$CLAUDE_USER_SETTINGS" ]; then
-        command -v jq >/dev/null 2>&1 || {
-          echo "error: jq is required to mirror the captain's user-scope safety hooks from $CLAUDE_USER_SETTINGS into this task's minimal settings" >&2
-          exit 1
-        }
         USER_HOOKS_JSON=$(jq -c '.hooks // {}' "$CLAUDE_USER_SETTINGS" 2>/dev/null) || {
           echo "error: could not parse $CLAUDE_USER_SETTINGS as JSON to mirror its user-scope hooks" >&2
           exit 1
@@ -3912,7 +3912,7 @@ fi
 # D6: build this task's MCP config from the brief's declared extras. Default
 # is the empty set; an unknown extra was already dropped by fm_brief_tools.
 MCP_CONFIG="$TASK_TMP/mcp.json"
-TOOLS_EXTRAS=$(fm_brief_tools "$BRIEF" 2>/dev/null)
+TOOLS_EXTRAS=$(fm_brief_tools "$BRIEF")
 {
     printf '{"mcpServers":{'
     sep=''
