@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import json
 import re
 import signal
 import stat
@@ -164,6 +165,13 @@ def main(argv):
             except subprocess.TimeoutExpired:
                 pass
     finally:
+        binding = host / f"{task}.inbox/.worker-path"
+        try:
+            record = json.loads(binding.read_text())
+            if record.get("path") == str(Path(private) / f"{task}.inbox") and record.get("owner") == owner:
+                binding.unlink()
+        except (OSError, ValueError):
+            pass
         os.close(handled_fd)
         os.close(inbox_fd)
         os.close(descriptor)

@@ -2881,7 +2881,40 @@ def validate_attempt_failure(
 
 def valid_attempt_intervals(timing: dict[str, Any]) -> bool:
     intervals = timing.get("intervals")
-    if as_object(timing.get("failure")).get("class") == "no_commit_timeout":
+    failure = as_object(timing.get("failure"))
+    observations = timing.get("observations")
+    if observations is not None:
+        keys = {"dispatch_accepted_at", "first_assistant_event_at", "first_valid_final_commit_at", "observed_at"}
+        if (failure.get("status") != "void" or not isinstance(observations, dict)
+                or set(observations) != keys or not isinstance(intervals, dict)):
+            return False
+        start = observations["dispatch_accepted_at"]
+        end = observations["observed_at"]
+        assistant = observations["first_assistant_event_at"]
+        commit = observations["first_valid_final_commit_at"]
+        def timestamp(value):
+            return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+        if not timestamp(start) or not timestamp(end) or end < start:
+            return False
+        if assistant is not None and (not timestamp(assistant) or not start <= assistant <= end):
+            return False
+        if commit is not None and (assistant is None or not timestamp(commit) or not assistant <= commit <= end):
+            return False
+        expected = {} if commit is None else {
+            REQUIRED_TIMING_INTERVALS[0]: commit - start,
+            REQUIRED_TIMING_INTERVALS[1]: commit - assistant,
+        }
+        if set(intervals) != set(expected) or any(
+            not timestamp(intervals[key]) or not math.isclose(intervals[key], value, rel_tol=1e-9, abs_tol=1e-9)
+            for key, value in expected.items()
+        ):
+            return False
+        if failure.get("class") == "no_commit_timeout":
+            evidence = as_object(failure.get("no_commit_timeout"))
+            return commit is None and evidence.get("dispatch_accepted_at") == start and evidence.get("observed_at") == end
+        failure_class = failure.get("class")
+        return isinstance(failure_class, str) and REQUIRED_FAILURE_POLICY.get(failure_class) == "void_and_rerun"
+    if failure.get("class") == "no_commit_timeout":
         return intervals == {}
     return isinstance(intervals, dict) and all(
         isinstance(intervals.get(name), (int, float)) and not isinstance(intervals.get(name), bool)

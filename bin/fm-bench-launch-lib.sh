@@ -208,7 +208,10 @@ if brief:
         brief: str(stage / "brief.md"),
         str(Path(brief).parent / "report.md"): str(staged_state / f"{entrant_id}.report.md"),
         str(Path(brief).parent): str(staged_data),
-        code_root: str(staged_code),
+        **{str(Path(code_root) / relative): str(staged_code / relative)
+           for relative in ("bin", ".agents/skills", "docs", "AGENTS.md", "CLAUDE.md")},
+        str(declared_root): str(declared_root),
+        **({binary: binary} if binary else {}),
         str(Path(code_root) / "bin" / "fm-operational-input.sh"): str(staged_bin / "fm-operational-input.sh"),
         str(Path(code_root) / "bin" / "fm-busy-event.sh"): str(staged_bin / "fm-busy-event.sh"),
         state: str(staged_state),
@@ -217,7 +220,8 @@ if brief:
     }
     substitutions = {key: value for old, new in rewrites.items() if old
                      for key, value in ((quote(old), quote(new)), (old, new))}
-    pattern = re.compile("|".join(re.escape(key) for key in sorted(substitutions, key=len, reverse=True)))
+    pattern = re.compile("(?:" + "|".join(re.escape(key) for key in sorted(substitutions, key=len, reverse=True))
+                         + r")(?=$|[/\s\"'\x60;\x24\x29}])")
     def rewrite(text):
         return pattern.sub(lambda match: substitutions[match[0]], text)
     try:
@@ -261,8 +265,21 @@ if brief:
             (Path(state) / f"{entrant_id}.cursor-session").write_text(
                 f"projects_root={projects}\nworkspace_root={declared_root}\n"
                 + "".join(f"prior_conversation={name}\n" for name in prior), encoding="utf-8")
-        if binary:
+        if binary and not Path(binary).resolve().is_relative_to(declared_root):
             command = command.replace(quote(binary), shlex.quote(Path(binary).name))
+        private_inbox = staged_state / f"{entrant_id}.inbox"
+        (private_inbox / "handled").mkdir(parents=True)
+        host_inbox = Path(state) / f"{entrant_id}.inbox"
+        host_inbox.mkdir(exist_ok=True)
+        meta = Path(state) / f"{entrant_id}.meta"
+        owner = next((line for line in meta.read_text().splitlines() if line.startswith("spawn_gen=")), "") if meta.exists() else ""
+        fd, temporary = tempfile.mkstemp(prefix=".worker-path-", dir=host_inbox)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                json.dump({"path": str(private_inbox), "owner": owner}, stream)
+            os.replace(temporary, host_inbox / ".worker-path")
+        finally:
+            Path(temporary).unlink(missing_ok=True)
     except (OSError, UnicodeError):
         shutil.rmtree(stage)
         raise

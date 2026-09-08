@@ -137,3 +137,9 @@ A check that cannot be made to fail in a test is not enforcement; add the failin
 Confined briefs refer to staged source helpers, skills, and task-local file paths.
 The host relay appends complete status lines, publishes the scout report, and carries only that task’s inbox messages and acknowledgements while its launch generation remains current.
 Cursor’s supervisor binding reads transcripts from the entrant’s private home and excludes conversations that existed before launch.
+
+Staging rewrites only copied dependency paths; candidate worktree paths remain bound to the actual entrant root even when it lives below `FM_ROOT`.
+Inbox doorbells use the task’s private inbox binding, and the relay removes its binding when the launch ends.
+Void attempts may provide `observations` with `dispatch_accepted_at`, `first_assistant_event_at`, `first_valid_final_commit_at`, and `observed_at` from the shared clock.
+Unavailable assistant or commit endpoints are `null`; `intervals` must contain exactly the durations whose endpoints exist, so failures before a final commit carry an empty object.
+Observations must be finite and ordered, and any supplied durations must match them; existing complete interval records remain readable.

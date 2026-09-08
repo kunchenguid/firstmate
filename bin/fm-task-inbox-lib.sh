@@ -260,6 +260,21 @@ fm_task_inbox_body() {  # <record-path>
 fm_task_inbox_doorbell_line() {  # <record-path>
   local dir=${1%/*} abs quoted LC_ALL=C
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
+  if [ -f "$abs/.worker-path" ]; then
+    abs=$(python3 - "$abs" <<'PYWORKERPATH'
+import json, sys
+from pathlib import Path
+inbox = Path(sys.argv[1])
+record = json.loads((inbox / ".worker-path").read_text())
+meta = inbox.with_name(inbox.name.removesuffix(".inbox") + ".meta")
+owner = next((line for line in meta.read_text().splitlines() if line.startswith("spawn_gen=")), "") if meta.exists() else ""
+path = Path(record["path"])
+if record.get("owner") != owner or not path.is_absolute() or not path.is_dir():
+    raise SystemExit(1)
+print(path)
+PYWORKERPATH
+) || return 1
+  fi
   case "$abs" in
     *[![:print:]]*) return 1 ;;
   esac

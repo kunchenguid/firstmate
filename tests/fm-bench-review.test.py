@@ -110,6 +110,28 @@ os.execv(sys.argv[2], sys.argv[2:])
         with self.assertRaises(gate.GateError):
             gate.validate_attempt_failure(plan, failure, "scored", 10, [10])
 
+    def test_void_timing_tracks_available_endpoints(self):
+        for failure_class in ("provider_outage", "quota_exhaustion", "evaluator_infrastructure"):
+            failure = {"class": failure_class, "status": "void", "blocker_class": False}
+            plan = {"failure_policy": gate.REQUIRED_FAILURE_POLICY}
+            gate.validate_attempt_failure(plan, failure, "void")
+            for assistant, commit in ((None, None), (110, None), (110, 120)):
+                observations = {"dispatch_accepted_at": 100, "first_assistant_event_at": assistant,
+                                "first_valid_final_commit_at": commit, "observed_at": 130}
+                intervals = {} if commit is None else dict(zip(gate.REQUIRED_TIMING_INTERVALS, (20, 10)))
+                timing = {"failure": failure, "observations": observations, "intervals": intervals}
+                with self.subTest(failure_class=failure_class, assistant=assistant, commit=commit):
+                    self.assertTrue(gate.valid_attempt_intervals(timing))
+                    for field, value in (("observed_at", 90), ("observed_at", float("inf")),
+                                         ("first_assistant_event_at", 140), ("first_valid_final_commit_at", 99)):
+                        invalid = {**timing, "observations": {**observations, field: value}}
+                        self.assertFalse(gate.valid_attempt_intervals(invalid))
+                    invalid = {**timing, "intervals": {gate.REQUIRED_TIMING_INTERVALS[0]: 999}}
+                    self.assertFalse(gate.valid_attempt_intervals(invalid))
+            self.assertFalse(gate.valid_attempt_intervals({"failure": failure, "intervals": {}}))
+        self.assertFalse(gate.valid_attempt_intervals({"failure": {"class": "none", "status": "scored"},
+                                                       "observations": observations, "intervals": intervals}))
+
     def test_task_status_report_and_inbox_transport(self):
         host, private, data = [self.root / name for name in ("host", "private", "data")]
         for path in (host, private, data):
@@ -146,17 +168,37 @@ with (root / "{task}.status").open("a") as stream:
         self.assertEqual((inbox / "handled/0001.msg").read_text(), "task instruction\n")
 
     def test_launch_rewrites_brief_dependencies_and_cursor_binding(self):
-        bench, worktree, code, state, data = [self.root / name for name in ("bench", "tree", "code", "state", "data")]
+        bench, code, state, data = [self.root / name for name in ("bench", "code", "state", "data")]
+        worktree = code / "projects/entrant"
         for path in (bench, worktree, code, state, data):
-            path.mkdir()
+            path.mkdir(parents=True, exist_ok=True)
         task = "bench-worker"
+        (worktree / "keep").write_text("candidate file")
+        runtime = self.executable(worktree / "runtime", '#!/bin/sh\n[ "$1" = --workspace ] || exit 2\ncd "$2" || exit 3\nexec sh "$3"\n')
         (code / "bin").mkdir()
         for name in ("fm-operational-input.sh", "fm-busy-event.sh", "fm-busy-lib.sh"):
             shutil.copyfile(ROOT / "bin" / name, code / "bin" / name)
         self.executable(code / "bin/helper.sh", "#!/bin/sh\nprintf 'helper output\\n'\n")
         brief = data / "brief.md"
-        brief.write_text(f"{shlex.quote(str(code / 'bin/helper.sh'))} > {shlex.quote(str(state / (task + '.status')))}\n"
+        brief.write_text(f"test -f {shlex.quote(str(worktree / 'keep'))} || exit 4\n"
+                         f"{shlex.quote(str(code / 'bin/helper.sh'))} > {shlex.quote(str(state / (task + '.status')))}\n"
                          f"printf 'scout output\\n' > {shlex.quote(str(data / 'report.md'))}\n")
+        worker = self.executable(worktree / "receive.py", f'''#!{sys.executable}
+import shlex, sys, time
+from pathlib import Path
+line = shlex.split(sys.stdin.readline())
+inbox = Path(line[line.index("list") + 1].removesuffix("/*.msg"))
+assert inbox.is_relative_to(Path({str(worktree)!r}) / "private_session")
+message = inbox / "0001.msg"
+deadline = time.monotonic() + 5
+while not message.exists():
+    assert time.monotonic() < deadline
+    time.sleep(0.02)
+assert message.read_text() == "ordinary steering\\n"
+message.rename(inbox / "handled/0001.msg")
+''')
+        with brief.open("a") as stream:
+            stream.write(shlex.quote(str(worker)) + "\n")
         private = {}
         for name in ("private_object_store", "private_tmp", "private_home", "private_session"):
             path = worktree / name
@@ -173,13 +215,28 @@ with (root / "{task}.status").open("a") as stream:
             {"name": "test", "harness": "cursor", "model": "model", "effort": "high"}]}}}))
         (state / f"{task}.cursor-session").write_text("projects_root=/host/home/.cursor/projects\n")
         shell = '. "$1/bin/fm-bench-launch-lib.sh"\nfm_refuse_ungated_benchmark_entrant() { return 0; }\n' \
-                'fm_bench_wrap_entrant_launch "$2" "$3" "$4" cursor model high 0 scout "$5" "$6" "$7" "$7/$2.turn-ended"'
+                'fm_bench_wrap_entrant_launch "$2" "$3" "$4" cursor model high 0 scout "$5" "$6" "$7" "$7/$2.turn-ended" "$8"'
         result = subprocess.run(["bash", "-c", shell, "_", str(ROOT), task, str(worktree),
-                                 "sh " + shlex.quote(str(brief)), str(brief), str(code), str(state)],
+                                 "\'" + str(runtime) + "\' --workspace " + shlex.quote(str(worktree)) + " " + shlex.quote(str(brief)),
+                                 str(brief), str(code), str(state), str(runtime)],
                                 env={**os.environ, "FM_BENCH_ROOT": str(bench)}, text=True, capture_output=True, check=True)
-        shutil.rmtree(code)
+        shutil.rmtree(code / "bin")
         brief.unlink()
-        subprocess.run(["bash", "-c", result.stdout], check=True, timeout=10)
+        inbox = state / f"{task}.inbox"
+        message = inbox / "0001.msg"
+        message.write_text("ordinary steering\n")
+        bell = subprocess.run(["bash", "-c", '. "$1/bin/fm-task-inbox-lib.sh"; fm_task_inbox_doorbell_line "$2"',
+                               "_", str(ROOT), str(message)], check=True, capture_output=True, text=True).stdout
+        meta = state / f"{task}.meta"
+        meta.write_text("spawn_gen=replacement\n")
+        stale = subprocess.run(["bash", "-c", '. "$1/bin/fm-task-inbox-lib.sh"; fm_task_inbox_doorbell_line "$2"',
+                                "_", str(ROOT), str(message)], capture_output=True, text=True)
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertEqual(stale.stdout, "")
+        meta.unlink()
+        subprocess.run(["bash", "-c", result.stdout], input=bell + "\n", text=True, check=True, timeout=10)
+        self.assertEqual((inbox / "handled/0001.msg").read_text(), "ordinary steering\n")
+        self.assertFalse((inbox / ".worker-path").exists())
         self.assertEqual((state / f"{task}.status").read_text(), "helper output\n")
         self.assertEqual((data / "report.md").read_text(), "scout output\n")
         binding = dict(line.split("=", 1) for line in (state / f"{task}.cursor-session").read_text().splitlines())
