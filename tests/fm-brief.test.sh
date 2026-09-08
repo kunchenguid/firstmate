@@ -260,7 +260,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "a validated PR is the finish line, not the commit" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -333,6 +333,17 @@ test_no_mistakes_dod_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
+  # The pipeline invocation is a numbered step to perform, not a condition
+  # already satisfied by finishing the implementation - this is the closes-by-
+  # construction fix for workers reporting `done:` right after their commit.
+  assert_grep "2. Immediately start /no-mistakes yourself; do not wait for firstmate to tell you to." "$brief" \
+    "no-mistakes DOD must sequence starting the pipeline as a numbered step, not a condition"
+  assert_grep "never append \`done:\` on a status line that does not carry that PR URL" "$brief" \
+    "no-mistakes DOD must forbid a done: line with no PR URL"
+  assert_grep "the correct word is \`working:\` (for example \`working: implemented, starting /no-mistakes\`), and the exact next action is step 2 above" "$brief" \
+    "no-mistakes DOD must name working: plus the exact next command in place of a premature done:"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD must not leave the old wait-for-firstmate-to-tell-you-to handshake behind"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
@@ -370,6 +381,47 @@ test_no_mistakes_dod_wording() {
   assert_no_grep "no-mistakes refuses" "$brief" \
     "no-mistakes DOD must not claim the tool itself refuses --yes"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
+}
+
+# A worker that finished implementing and committing must never be told to
+# say `done:` before a PR-ending mode's PR actually exists, and the fix must
+# not spread that PR-only "done:" restriction onto a mode or kind whose
+# contract legitimately has no PR.
+test_done_requires_pr_url_only_where_a_pr_ends_the_task() {
+  local home id brief
+  home="$TMP_ROOT/done-pr-guard-home"
+  mkdir -p "$home/data"
+
+  for id in brief-guard-nm brief-guard-direct; do
+    case "$id" in
+      brief-guard-nm) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_grep "does not carry that PR URL" "$brief" \
+      "$id: PR-ending mode must forbid a done: line with no PR URL"
+    assert_grep "1. Implement" "$brief" \
+      "$id: PR-ending mode must sequence implementation as a numbered step"
+  done
+
+  id="brief-guard-local"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "done: ready in branch fm/$id" "$brief" \
+    "local-only brief lost its no-PR done: line"
+  assert_no_grep "does not carry that PR URL" "$brief" \
+    "local-only brief must not receive the PR-ending done: guard; it has no PR by design"
+
+  id="brief-guard-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'append `done: {one-line conclusion}`' "$brief" \
+    "scout brief lost its report-based done: line"
+  assert_no_grep "does not carry that PR URL" "$brief" \
+    "scout brief must not receive the PR-ending done: guard; a scout never has a PR"
+
+  pass "fm-brief.sh: the done:-requires-a-PR-URL guard lands only on PR-ending modes"
 }
 
 test_ask_user_escalation_format() {
@@ -878,6 +930,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_done_requires_pr_url_only_where_a_pr_ends_the_task
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
