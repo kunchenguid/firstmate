@@ -240,16 +240,21 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [idle-compact-enabled]
-  local mode=$1 id=$2 idle_compact_enabled=${3:-0}
+fm_dod_block() {  # <mode> <task-id>
+  local mode=$1 id=$2
   local post_commit
-  if [ "$idle_compact_enabled" = 1 ]; then
-    # shellcheck disable=SC2016  # single quotes are deliberate: this is literal brief text whose backtick-wrapped commands must reach the reading agent verbatim, not expand here.
-    post_commit='Right after that implementation commit lands, append `paused: awaiting compaction before validation` to the status file and stop for this turn - do NOT run `no-mistakes axi run` yet. A worker cannot self-trigger compaction (`/compact` is a terminal built-in, not a tool you can invoke), so firstmate'"'"'s idle-compact watcher reads that line - the phrase must START the line, and any detail you want to note (your measured lane size, the commit) may follow it - compacts your context while it is still warm, then rings you with a durable inbox message telling you to start the validation run - resume from that ring instead of waiting on a reply.'
-  else
-    # shellcheck disable=SC2016  # single quotes are deliberate: this is literal brief text whose backtick-wrapped commands must reach the reading agent verbatim, not expand here.
-    post_commit='Right after that implementation commit lands, start `no-mistakes axi run` yourself and continue driving it below - this host has no `config/idle-compact` configured, so a worker that stopped and waited here would never be resumed.'
-  fi
+  # Whether idle-compact is armed is decided at WAIT TIME by the worker
+  # itself (`bin/fm-idle-compact.sh enabled`), never baked into this brief at
+  # generation time: config/idle-compact can be added or removed at any point
+  # between when this brief is written and when the worker actually reaches
+  # this instruction, and a stale generation-time snapshot would either
+  # promise a ring that will never come or skip a ring that would have
+  # arrived. The bounded re-check below also covers a config change WHILE the
+  # worker is already waiting, so a paused worker can never wait forever.
+  # shellcheck disable=SC2016  # single quotes are deliberate: this is literal brief text whose backtick-wrapped commands must reach the reading agent verbatim, not expand here. $FM_ROOT is spliced in as an expanded segment between single-quoted runs (the '"$FM_ROOT"' idiom), the same technique the literal apostrophe below uses.
+  post_commit='Right after that implementation commit lands, check whether idle-compact is armed on this host right now: run `bash '"$FM_ROOT"'/bin/fm-idle-compact.sh enabled` (exit 0 = armed, exit 1 = not armed - absent, empty, invalid, or zero `config/idle-compact`). Check live rather than trusting this brief: the config can change after this brief was written.
+If armed, append `paused: awaiting compaction before validation` to the status file and stop for this turn - do NOT run `no-mistakes axi run` yet. A worker cannot self-trigger compaction (`/compact` is a terminal built-in, not a tool you can invoke), so firstmate'"'"'s idle-compact watcher reads that line - the phrase must START the line, and any detail you want to note (your measured lane size, the commit) may follow it - compacts your context while it is still warm, then rings you with a durable inbox message telling you to start the validation run - resume from that ring instead of waiting on a reply. Bounded fallback: if 60 minutes pass with no ring, re-run `bash '"$FM_ROOT"'/bin/fm-idle-compact.sh enabled` - idle-compact may have been disarmed while you waited; if it now reports not armed, or your wait passes 90 minutes regardless of that check, stop waiting and start `no-mistakes axi run` yourself.
+If not armed, start `no-mistakes axi run` yourself and continue driving it below - do not wait for a ring that will never come.'
   case "$mode" in
     direct-PR)
       cat <<EOF

@@ -1326,6 +1326,42 @@ test_does_not_absorb_over_an_unannounced_earlier_turn_end() {
 
 # --- tick entry point (fm_idle_compact_tick) --------------------------------
 
+# A worker deciding whether to wait for a compaction ring must not trust a
+# generation-time brief snapshot (config/idle-compact can change afterward),
+# so it checks live via `fm-idle-compact.sh enabled`. Exercised through the
+# real direct-execution entry point, not the function directly, since that
+# dispatch is the actual new surface.
+test_cli_enabled_reports_live_config_state() {
+  (
+    local dir out
+    dir=$(new_dir cli-enabled)
+
+    if FM_CONFIG_OVERRIDE="$dir/config" bash "$ROOT/bin/fm-idle-compact.sh" enabled >/dev/null 2>&1; then
+      fail "enabled must exit nonzero when config/idle-compact is absent"
+    fi
+
+    : > "$dir/config/idle-compact"
+    FM_CONFIG_OVERRIDE="$dir/config" bash "$ROOT/bin/fm-idle-compact.sh" enabled >/dev/null 2>&1 \
+      || fail "enabled must exit zero for an empty-but-present config (default minutes)"
+
+    printf '0\n' > "$dir/config/idle-compact"
+    if FM_CONFIG_OVERRIDE="$dir/config" bash "$ROOT/bin/fm-idle-compact.sh" enabled >/dev/null 2>&1; then
+      fail "enabled must exit nonzero when config/idle-compact is 0"
+    fi
+
+    printf 'not-a-number\n' > "$dir/config/idle-compact"
+    if FM_CONFIG_OVERRIDE="$dir/config" bash "$ROOT/bin/fm-idle-compact.sh" enabled >/dev/null 2>&1; then
+      fail "enabled must exit nonzero when config/idle-compact is invalid"
+    fi
+
+    printf '20\n' > "$dir/config/idle-compact"
+    out=$(FM_CONFIG_OVERRIDE="$dir/config" bash "$ROOT/bin/fm-idle-compact.sh" enabled) \
+      || fail "enabled must exit zero for a valid positive integer"
+    [ "$out" = 20 ] || fail "enabled must print the configured minutes on stdout (got: $out)"
+  )
+  pass "fm-idle-compact.sh enabled: reports the live config state, not a cached one"
+}
+
 test_tick_absent_config_is_grep_provably_inert() {
   (
     local dir log before after
@@ -1594,6 +1630,7 @@ test_absorbs_nothing_outside_an_in_flight_episode
 test_does_not_absorb_over_an_unannounced_earlier_turn_end
 test_does_not_absorb_while_a_sweep_holds_the_lock
 
+test_cli_enabled_reports_live_config_state
 test_tick_absent_config_is_grep_provably_inert
 test_tick_present_config_sweeps_eligible_task
 test_tick_delivers_the_ring_through_the_shared_sweep

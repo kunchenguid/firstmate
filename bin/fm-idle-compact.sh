@@ -876,8 +876,16 @@ fm_idle_compact_tick() {  # <state> [config-dir]
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   case "${1:-tick}" in
     tick) fm_idle_compact_tick "$STATE" "$CONFIG" ;;
+    # enabled: live query for a caller (a worker deciding whether to wait for
+    # a compaction ring, not just the sweep itself) that must not trust a
+    # generation-time snapshot, since config/idle-compact can be added or
+    # removed at any point afterward. Exit 0 and print the threshold minutes
+    # when enabled; exit 1 with no output otherwise (absent, empty-invalid,
+    # non-numeric, or zero) - the same validation fm_idle_compact_threshold_minutes
+    # already owns, so this never duplicates that logic.
+    enabled) fm_idle_compact_threshold_minutes "$CONFIG" ;;
     *)
-      echo "usage: fm-idle-compact.sh [tick]" >&2
+      echo "usage: fm-idle-compact.sh [tick|enabled]" >&2
       exit 2
       ;;
   esac
