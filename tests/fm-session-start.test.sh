@@ -730,7 +730,7 @@ EOF
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   jq -e --arg home "$home" '
-    .schema == "fm-secondmate-home-summary.v3"
+    .schema == "fm-secondmate-home-summary.v1"
     and .home == $home
     and (.generated_epoch | type) == "number"
   ' "$home/state/home-summary.json" >/dev/null \

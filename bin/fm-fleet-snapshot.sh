@@ -386,6 +386,13 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       | if $v == null then null else ($v | trim) end;
     def metadata($rest; $key):
       cap($rest; ".*(?:\\(|,[[:space:]]*)" + $key + ":[[:space:]]*(?<v>[^,)]*)");
+    # LOAD-BEARING, do not remove as a duplicate definition of the kind field.
+    # tasks-axi omits the (kind: ...) metadata entirely when a title begins with
+    # a canonical keyword, so those rows carry no explicit kind to read. Without
+    # this fallback a scout whose title starts with SCOUT reports kind null, its
+    # recorded report stops counting as a delivery, and it drops out of Recently
+    # Landed - the defect this selector exists to fix. Pinned by
+    # tests/fm-bearings-snapshot.test.sh "canonical or explicit task kind".
     def kind_of($rest):
       metadata($rest; "kind") as $kind
       | if $kind != null then $kind
@@ -1049,7 +1056,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
        elif ($holds_all | length) > 0 then "externally_held"
        else "no_active_work" end) as $state
     | {
-        schema:"fm-secondmate-home-summary.v3",
+        schema:"fm-secondmate-home-summary.v1",
         hold_classifier_schema:"fm-captain-hold-buckets.v1",
         generated:$generated,
         generated_epoch:$generated_epoch,
@@ -1283,11 +1290,6 @@ summary_file_has_schema() {  # <file> <expected-home> <schema>
   rm -f -- "$captured"
 }
 
-summary_file_has_stale_schema() {  # <file> <expected-home>
-  summary_file_has_schema "$1" "$2" "fm-secondmate-home-summary.v1" \
-    || summary_file_has_schema "$1" "$2" "fm-secondmate-home-summary.v2"
-}
-
 summary_file_oversized() {  # <file>
   local bytes
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
@@ -1346,7 +1348,7 @@ prepare_remote_summary_collection() {  # <sampled-row-json-lines>
   SNAPSHOT_SUMMARY_FILTER="$SNAPSHOT_COLLECT_DIR/summary-filter.jq"
   cat > "$SNAPSHOT_SUMMARY_FILTER" <<'JQ'
 length == 1 and (.[0] |
-  .schema == "fm-secondmate-home-summary.v3"
+  .schema == "fm-secondmate-home-summary.v1"
   and .hold_classifier_schema == "fm-captain-hold-buckets.v1"
   and .home == $home
   and (.generated | type) == "string"
@@ -1691,7 +1693,6 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
   local row id home host remote registered registry_error task sampled_spawn_gen status_file status_observation_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary_file summary_sampled summary_valid summary_invalidity state terminal terminal_contradiction contradiction
   local summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot summary_index=0
-  local summary_schema_stale
   local seen_homes=''
   registry_file="$JSON_TRANSPORT_DIR/secondmate-registry.json"
   union_file="$JSON_TRANSPORT_DIR/secondmate-union.json"
@@ -1757,7 +1758,6 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
     printf '{}\n' > "$summary_file" || return 1
     summary_sampled=false
     summary_valid=false
-    summary_schema_stale=false
     if [ -z "$reason" ] && [ -z "$home" ]; then reason="no recorded secondmate home"; fi
     if [ -z "$reason" ]; then
       case "$home" in
@@ -1797,10 +1797,6 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         elif [ -n "$cache_path" ] && summary_file_read "$cache_path" "$home" "$summary_file"; then
           summary_source='remote-ledger-cache'
           summary_freshness=cached
-        elif summary_file_has_stale_schema "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch" "$home" \
-          || { [ -n "$cache_path" ] && summary_file_has_stale_schema "$cache_path" "$home"; }; then
-          summary_schema_stale=true
-          reason="structured home ledger schema is stale; rerun the fleet update"
         elif summary_file_oversized "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch"; then
           reason="structured home ledger exceeded byte limit and no valid cached copy is available"
         elif [ "$SNAPSHOT_COLLECTION_TIMED_OUT" -eq 1 ] && [ -z "$collection_status" ]; then
@@ -1810,9 +1806,6 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         fi
       elif summary_file_read "$home/state/home-summary.json" "$home" "$summary_file"; then
         summary_source='local-ledger'
-      elif summary_file_has_stale_schema "$home/state/home-summary.json" "$home"; then
-        summary_schema_stale=true
-        reason="structured home ledger schema is stale; rerun the fleet update"
       elif summary_file_oversized "$home/state/home-summary.json"; then
         reason="structured home ledger exceeded byte limit"
       else
@@ -1871,10 +1864,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}' >> "$records_file" || return 1
     else
-      if [ "$summary_schema_stale" = true ]; then
-        provenance=unknown
-        freshness=stale
-      elif [ -n "$event_raw" ]; then
+      if [ -n "$event_raw" ]; then
         provenance='parent-event-fallback'
         freshness=historical-event
       else

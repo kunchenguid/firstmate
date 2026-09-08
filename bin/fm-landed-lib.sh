@@ -40,6 +40,13 @@ FM_LANDED_JQ_DEFS='
     and (.report_path // null) != null;
   def landed_artifact:
     if scout_report then (.report_path // null)
+    # LOAD-BEARING, do not remove as out-of-scope narrowing. This clause is what
+    # keeps an explicit scout that recorded no report out of Recently Landed.
+    # Without it such a row has none of the three artifacts, so it satisfies the
+    # compatibility fallback below and is rendered as shipped work with an empty
+    # artifact. Removing it fails tests/fm-captain-hold-lifecycle.test.sh on
+    # "released, retained, or rejected deliveries were misclassified" and
+    # tests/fm-bearings-snapshot.test.sh.
     elif .kind == "scout" then null
     elif .completion.verb == "merged" then (.pr_url // null)
     elif .completion.verb == "done" then (.local_note // null)
