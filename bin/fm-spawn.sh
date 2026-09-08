@@ -1690,20 +1690,16 @@ fm_raw_launch_canonical_model() {
 }
 
 case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
+  *' '*)  # raw launch command
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
-    if [ "$KIND" != secondmate ]; then
-      case "$HARNESS" in
-        env|command|exec|nice|nohup)
-          echo "error: raw launch commands cannot use '$HARNESS' as a launcher wrapper because their effective harness and model are not inspectable; use the verified harness and --model instead" >&2
-          exit 1
-          ;;
-      esac
+    if [ "$KIND" != secondmate ] && ! launch_template "$HARNESS" "$KIND" >/dev/null; then
+      echo "error: raw launch commands must begin with a direct, supported harness executable so their effective model is inspectable; use the verified harness and --model instead" >&2
+      exit 1
     fi
     ;;
   '')
@@ -1726,11 +1722,11 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); select a verified harness adapter" >&2; exit 1; }
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; select a verified harness adapter" >&2; exit 1; }
     ;;
 esac
 

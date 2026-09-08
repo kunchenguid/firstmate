@@ -38,6 +38,11 @@ make_spawn_fakebin() {
 shift
 exec "$@"
 SH
+cat > "$fakebin/opencode" <<'SH'
+#!/usr/bin/env bash
+set -u
+exec /bin/sh "${!#}"
+SH
   cat > "$fakebin/cursor-agent" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --list-models ]; then
@@ -58,7 +63,7 @@ jq -n --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg account_id "$acc
    accounts: [{provider: "codex", email: "hidden", organization: "none",
                accountId: $account_id, identityStatus: "verified"}]}'
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/quota-axi"
+  chmod +x "$fakebin/timeout" "$fakebin/opencode" "$fakebin/cursor-agent" "$fakebin/quota-axi"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -378,7 +383,7 @@ test_active_dispatch_profile_allows_positional_harness() {
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
-test_active_dispatch_profile_allows_raw_launch_command() {
+test_active_dispatch_profile_allows_direct_raw_launch_command() {
   local rec id out status launch
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
@@ -386,14 +391,14 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+    "$id" "$PROJ_DIR" "opencode --model gpt-5")
   status=$?
-  expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
-  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  expect_code 0 "$status" "a direct supported raw launch command should satisfy active dispatch-profile requirement"
+  assert_contains "$out" "spawned $id harness=opencode" "spawn did not report raw command harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  [ "$launch" = "opencode --model gpt-5" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  pass "active crew-dispatch profile allows a direct supported raw command"
 }
 
 test_claude_threads_model_and_effort() {
@@ -711,29 +716,34 @@ test_raw_codex_provider_models_require_inspectable_non_astra_launches() {
   pass "raw Codex-provider launches reject Astra while preserving explicit non-Astra OpenCode"
 }
 
-test_raw_launcher_wrappers_are_refused_before_launch() {
-  local rec env_id command_id out status
-  env_id=profile-raw-env-wrapper-z3fgd
-  command_id=profile-raw-command-wrapper-z3fge
-  rec=$(make_spawn_case profile-raw-launcher-wrapper codex "$env_id" "$command_id")
+test_raw_launch_classifier_requires_direct_supported_harness() {
+  local rec id out status index label command
+  local -a labels commands
+  id=profile-raw-launcher-classifier-z3fgd
+  labels=(time env command exec nice nohup custom-agent)
+  commands=(
+    "time opencode --model gpt-6-astra"
+    "env opencode --model gpt-6-astra"
+    "command omp --model openai-codex/gpt-6-astra"
+    "exec codex --model gpt-6-astra"
+    "nice opencode --model gpt-6-astra"
+    "nohup omp --model openai-codex/gpt-6-astra"
+    "custom-agent --model gpt-6-astra"
+  )
+  rec=$(make_spawn_case profile-raw-launcher-classifier codex "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$env_id" "$PROJ_DIR" \
-    "env opencode --model gpt-6-astra")
-  status=$?
-  expect_code 1 "$status" "an env-wrapped raw Astra command should refuse before launch"
-  assert_contains "$out" "cannot use 'env' as a launcher wrapper" "env wrapper refusal did not identify the uninspectable launcher"
-  assert_absent "$HOME_DIR/state/$env_id.meta" "env wrapper refusal wrote task metadata"
-  [ ! -s "$LAUNCH_LOG" ] || fail "env wrapper refusal typed a launch command"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$command_id" "$PROJ_DIR" \
-    "command omp --model openai-codex/gpt-6-astra")
-  status=$?
-  expect_code 1 "$status" "a command-wrapped raw Astra command should refuse before launch"
-  assert_contains "$out" "cannot use 'command' as a launcher wrapper" "command wrapper refusal did not identify the uninspectable launcher"
-  assert_absent "$HOME_DIR/state/$command_id.meta" "command wrapper refusal wrote task metadata"
-  [ ! -s "$LAUNCH_LOG" ] || fail "command wrapper refusal typed a launch command"
-  pass "raw launcher wrappers refuse before an Astra dispatch can launch"
+  for index in "${!labels[@]}"; do
+    label=${labels[$index]}
+    command=${commands[$index]}
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$command")
+    status=$?
+    expect_code 1 "$status" "a $label-prefixed raw command should refuse before launch"
+    assert_contains "$out" "must begin with a direct, supported harness executable" "$label prefix refusal did not identify the unsupported launcher"
+    assert_absent "$HOME_DIR/state/$id.meta" "$label prefix refusal wrote task metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$label prefix refusal typed a launch command"
+  done
+  pass "raw launch classification requires a direct supported harness"
 }
 
 test_raw_codex_home_override_is_refused() {
@@ -1534,20 +1544,20 @@ printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "${FM_TEST_ALLOWED-unset}" \
 SH
     out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated \
       run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id" "$PROJ_DIR" --harness "/bin/sh '$probe'")
+      "$id" "$PROJ_DIR" --harness "opencode --model gpt-5 $probe")
     status=$?
     expect_code 0 "$status" "allowlist=$setting spawn should succeed: $out"
     launch=$(cat "$LAUNCH_LOG")
     for pane_shell in /bin/sh /bin/bash /bin/zsh; do
       [ -x "$pane_shell" ] || continue
-      pane_path=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      pane_path=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:/usr/bin:/bin" TERM=xterm \
         TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
-        "$pane_shell" -c "printf %s \"\$PATH\"") \
+        "$pane_shell" -c "PATH='$FAKEBIN_DIR':\$PATH; export PATH; printf %s \"\$PATH\"") \
         || fail "could not read $pane_shell startup PATH"
-      result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:/usr/bin:/bin" TERM=xterm \
       TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
       FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED="$value" FM_TEST_EMPTY='' \
-      "$pane_shell" -c "$launch") || fail "allowlist=$setting emitted launch failed in $pane_shell"
+      "$pane_shell" -c "PATH='$FAKEBIN_DIR':\$PATH; export PATH; $launch") || fail "allowlist=$setting emitted launch failed in $pane_shell"
       case "$setting" in
         absent|missing-config) expected=$(printf '%s\n' synthetic-unrelated "$value" '' unset) ;;
         enabled) expected=$(printf '%s\n' unset "$value" '' unset) ;;
@@ -1806,7 +1816,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
-test_active_dispatch_profile_allows_raw_launch_command
+test_active_dispatch_profile_allows_direct_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
@@ -1818,7 +1828,7 @@ test_codex_home_is_refused_for_other_harnesses
 test_astra_without_a_profile_requires_primary_evidence
 test_astra_qualified_and_raw_models_cannot_bypass_evidence
 test_raw_codex_provider_models_require_inspectable_non_astra_launches
-test_raw_launcher_wrappers_are_refused_before_launch
+test_raw_launch_classifier_requires_direct_supported_harness
 test_raw_codex_home_override_is_refused
 test_astra_receipt_binds_the_selected_codex_home
 test_astra_receipt_requires_selected_provider_availability
