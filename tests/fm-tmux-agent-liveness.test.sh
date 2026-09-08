@@ -174,6 +174,26 @@ wait_for_state "$SESSION:copilot-argv" alive \
   || fail "a process carrying Copilot only in argv zero must classify alive"
 pass "tmux liveness: Copilot argv-zero identity survives a non-Copilot kernel command"
 
+mkdir -p "$LAB/claude/tools" "$LAB/kimi"
+cat > "$LAB/claude/tools/report.py" <<'SH'
+#!/bin/sh
+while :; do sleep 60; done
+SH
+cat > "$LAB/kimi/build.js" <<'SH'
+#!/bin/sh
+while :; do sleep 60; done
+SH
+chmod +x "$LAB/claude/tools/report.py" "$LAB/kimi/build.js"
+
+new_window python-script-decoy bash -c "exec -a python '$BASH_BIN' '$LAB/claude/tools/report.py'"
+wait_for_state "$SESSION:python-script-decoy" ambiguous \
+  || fail "a python script merely located under a claude-named directory must stay ambiguous"
+
+new_window node-script-decoy bash -c "exec -a node '$BASH_BIN' '$LAB/kimi/build.js'"
+wait_for_state "$SESSION:node-script-decoy" ambiguous \
+  || fail "a node script merely located under a kimi-named directory must stay ambiguous"
+pass "tmux liveness: interpreter scripts under harness-named directories stay ambiguous"
+
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy
 # worker would be torn down or relaunched. The decoys below are what keep the

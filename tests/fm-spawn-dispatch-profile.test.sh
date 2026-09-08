@@ -581,6 +581,65 @@ test_copilot_launch_clears_inherited_claude_project_dir() {
   pass "copilot launch clears inherited Claude project roots before entering another worktree"
 }
 
+test_copilot_launch_scrubs_foreign_harness_markers() {
+  local rec id out status launch parent_case harness_seen marker_seen
+
+  for parent_case in gemini rovo-atlassian rovo-dev omp; do
+    id="profile-copilot-$parent_case-z6ha"
+    rec=$(make_spawn_case "profile-copilot-$parent_case" copilot "$id")
+    read_case_record "$rec"
+
+    mkdir -p "$CASE_DIR/harness-ps"
+    cat > "$CASE_DIR/harness-ps/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' bash ;;
+  *"args="*) printf '%s\n' bash ;;
+  *"ppid="*) printf '%s\n' 1 ;;
+  *) exit 1 ;;
+esac
+SH
+    chmod +x "$CASE_DIR/harness-ps/ps"
+
+    cat > "$FAKEBIN_DIR/copilot" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s|%s\n' \
+  "${GEMINI_CLI-}" "${ATLASSIAN_AGENT_TYPE-}" "${ROVODEV_CLI-}" "${FM_OMP_HARNESS-}" > "$FM_MARKER_LOG"
+PATH="$FM_FAKE_PS_DIR:$PATH" COPILOT_CLI=1 env -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+  -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u CLAUDECODE "$FM_HARNESS_BIN" > "$FM_HARNESS_LOG"
+SH
+    chmod +x "$FAKEBIN_DIR/copilot"
+
+    case "$parent_case" in
+      gemini)
+        out=$(GEMINI_CLI=1 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+        ;;
+      rovo-atlassian)
+        out=$(ATLASSIAN_AGENT_TYPE=rovo run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+        ;;
+      rovo-dev)
+        out=$(ROVODEV_CLI=1 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+        ;;
+      omp)
+        out=$(FM_OMP_HARNESS=omp run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+        ;;
+    esac
+    status=$?
+    expect_code 0 "$status" "copilot spawn under $parent_case markers should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "-u FM_OMP_HARNESS -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI" \
+      "copilot launch did not scrub foreign harness markers for $parent_case"
+    FM_MARKER_LOG="$CASE_DIR/$parent_case.markers" FM_HARNESS_LOG="$CASE_DIR/$parent_case.harness" \
+      FM_HARNESS_BIN="$ROOT/bin/fm-harness.sh" FM_FAKE_PS_DIR="$CASE_DIR/harness-ps" PATH="$FAKEBIN_DIR:$PATH" \
+      bash -c "$launch" || fail "captured copilot launch for $parent_case did not execute"
+    harness_seen=$(cat "$CASE_DIR/$parent_case.harness")
+    [ "$harness_seen" = copilot ] || fail "copilot child under $parent_case markers detected as '$harness_seen'"
+    marker_seen=$(cat "$CASE_DIR/$parent_case.markers")
+    [ "$marker_seen" = '|||' ] || fail "copilot child under $parent_case retained foreign markers: '$marker_seen'"
+  done
+  pass "copilot launches scrub foreign markers before child detection"
+}
+
 test_copilot_preserves_repository_owned_hook_files() {
   local id=profile-copilot-repo-hooks-z6d out status hooks
   CASE_DIR="$TMP_ROOT/profile-copilot-repo-hooks"
@@ -1503,6 +1562,7 @@ test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_copilot_threads_autonomy_model_and_effort
 test_copilot_launch_clears_inherited_claude_project_dir
+test_copilot_launch_scrubs_foreign_harness_markers
 test_copilot_preserves_repository_owned_hook_files
 test_copilot_exact_worker_hook_collision_refuses
 test_copilot_failed_fresh_spawn_removes_worker_hook

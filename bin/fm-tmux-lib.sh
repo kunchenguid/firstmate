@@ -86,7 +86,7 @@ fm_tmux_composer_caps() {
 
 fm_tmux_harness_process_name() {  # <comm> <args>
   local comm=$1 args=${2:-} name
-  if name=$(fm_harness_process_name "$comm" "$args" 2>/dev/null); then
+  if name=$(fm_harness_process_matches_live "$comm" "$args" 2>/dev/null && printf '%s\n' "$FM_HARNESS_MATCH_NAME"); then
     printf '%s\n' "$name"
     return 0
   fi

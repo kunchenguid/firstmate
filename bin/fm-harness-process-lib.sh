@@ -78,6 +78,68 @@ fm_harness_interpreter_script_path() {  # <comm> <args>
   return 1
 }
 
+FM_HARNESS_IS_CLAUDE=0
+FM_HARNESS_MATCH_NAME=
+fm_harness_set_match_name() {  # <name>
+  FM_HARNESS_IS_CLAUDE=0
+  case "$1" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+  FM_HARNESS_MATCH_NAME=$1
+}
+
+fm_harness_process_matches_name_surfaces() {  # <comm> <args>
+  local comm=$1 args=$2 base argv0 name
+  base=$(basename -- "$comm")
+  if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
+    case "$base" in
+      *claude*) name=claude ;;
+      *codex*) name=codex ;;
+      copilot) name=copilot ;;
+      *opencode*) name=opencode ;;
+      *grok*) name=grok ;;
+      kimi) name=kimi ;;
+      pi-signed) name=pi-signed ;;
+      pi) name=pi ;;
+      omp) name=omp ;;
+    esac
+    [ -n "$name" ] || return 1
+    fm_harness_set_match_name "$name"
+    return 0
+  fi
+  argv0=${args%% *}
+  if name=$(fm_harness_path_name "$comm"); then
+    :
+  elif fm_harness_copilot_path_matches "$argv0"; then
+    name=copilot
+  elif name=$(fm_harness_path_name "$argv0"); then
+    :
+  fi
+  if [ -n "$name" ]; then
+    fm_harness_set_match_name "$name"
+    return 0
+  fi
+  return 1
+}
+
+fm_harness_process_matches_live() {  # <comm> <args>
+  local comm=$1 args=$2 argv0 script
+  FM_HARNESS_IS_CLAUDE=0
+  FM_HARNESS_MATCH_NAME=
+  if fm_harness_process_matches_name_surfaces "$comm" "$args"; then
+    return 0
+  fi
+  if script=$(fm_harness_interpreter_script_path "$comm" "$args") \
+     && [ "${script##*/}" = copilot ]; then
+    fm_harness_set_match_name copilot
+    return 0
+  fi
+  argv0=${args%% *}
+  if fm_cursor_process_matches "$comm" "$args" "$argv0"; then
+    FM_HARNESS_MATCH_NAME=cursor
+    return 0
+  fi
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -91,40 +153,11 @@ fm_harness_interpreter_script_path() {  # <comm> <args>
 #   3. a bare interpreter (node, python, MainThread) running a harness script
 #      path in its first non-flag script token.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
-FM_HARNESS_IS_CLAUDE=0
-FM_HARNESS_MATCH_NAME=
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name script
+  local comm=$1 args=$2 argv0 name script
   FM_HARNESS_IS_CLAUDE=0
   FM_HARNESS_MATCH_NAME=
-  base=$(basename -- "$comm")
-  if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    case "$base" in
-      *claude*) name=claude; FM_HARNESS_IS_CLAUDE=1 ;;
-      *codex*) name=codex ;;
-      copilot) name=copilot ;;
-      *opencode*) name=opencode ;;
-      *grok*) name=grok ;;
-      kimi) name=kimi ;;
-      pi-signed) name=pi-signed ;;
-      pi) name=pi ;;
-      omp) name=omp ;;
-    esac
-    [ -n "$name" ] || return 1
-    FM_HARNESS_MATCH_NAME=$name
-    return 0
-  fi
-  argv0=${args%% *}
-  if name=$(fm_harness_path_name "$comm"); then
-    :
-  elif fm_harness_copilot_path_matches "$argv0"; then
-    name=copilot
-  elif name=$(fm_harness_path_name "$argv0"); then
-    :
-  fi
-  if [ -n "$name" ]; then
-    case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
-    FM_HARNESS_MATCH_NAME=$name
+  if fm_harness_process_matches_name_surfaces "$comm" "$args"; then
     return 0
   fi
   if script=$(fm_harness_interpreter_script_path "$comm" "$args"); then
@@ -134,11 +167,11 @@ fm_harness_process_matches() {  # <comm> <args>
       [ "$name" != copilot ] || name=
     fi
     if [ -n "$name" ]; then
-      case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
-      FM_HARNESS_MATCH_NAME=$name
+      fm_harness_set_match_name "$name"
       return 0
     fi
   fi
+  argv0=${args%% *}
   if fm_cursor_process_matches "$comm" "$args" "$argv0"; then
     FM_HARNESS_MATCH_NAME=cursor
     return 0
