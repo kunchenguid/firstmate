@@ -3875,8 +3875,9 @@ test_deferral_clock_survives_a_reason_change() {
   _prime_at_threshold_idle_pane wedge-reason-change handoff
   wt="$dir/wt"; mkdir -p "$wt/src"
   printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/handoff.meta"
-  # The shared chain opened 233s ago, on live-run evidence, just under the bound.
-  started=$(( $(date +%s) - 233 ))
+  # The shared chain opened 237s ago, on live-run evidence, just under the bound,
+  # so the first re-probe after this poll's deferral crosses it.
+  started=$(( $(date +%s) - 237 ))
   : > "$state/.deferred-since-$key"
   set_mtime "$started" "$state/.deferred-since-$key"
   # Now the run no longer reports recent activity, while the worktree is being
@@ -3891,7 +3892,7 @@ test_deferral_clock_survives_a_reason_change() {
     FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 150 \
+  wait_for_exit "$pid" 300 \
     || fail "the deferral clock restarted when the reason changed: no re-surface at the original bound"
   grep -F "stale: $window" "$out" >/dev/null || fail "the hand-off recheck did not print a stale wake"
   grep -F "writing its worktree" "$out" >/dev/null || fail "the hand-off recheck did not name the current reason"

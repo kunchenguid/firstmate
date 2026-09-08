@@ -833,7 +833,9 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope]
 }
 
 # Defer ONE wedge escalation for a pane that went quiet while a harder signal
-# says the crew is alive. Two causes reach here, and only these two:
+# says the crew is alive. Two causes are admitted, and only these two; any other
+# cause is refused (non-zero, nothing recorded) so the caller's escalation
+# proceeds, because silence is only ever granted to a cause named on purpose:
 #   writing   its own task worktree is demonstrably still being written
 #             (crew_worktree_written_since in fm-classify-lib.sh): the pane and
 #             the run step both say nothing is happening, the worktree says
@@ -857,24 +859,29 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope]
 # must still carry the demand-deep-inspection history it had already earned).
 # The reason text names the current cause; the clock is the shared one.
 wedge_defer() {  # <window> <since-file> <triage-label> <idle-age> <writing|live-run>
-  local win=$1 since_file=$2 label=$3 age=$4 cause=$5 key dsf dage reason note
+  local win=$1 since_file=$2 label=$3 age=$4 cause=$5 key dsf dage what hint note
+  case "$cause" in
+    writing)
+      what="writing its worktree"
+      hint="; confirm the writes are real progress"
+      note="worktree written since the idle window opened"
+      ;;
+    live-run)
+      what="pipeline run still active"
+      hint=""
+      note="pipeline run still active"
+      ;;
+    *) return 1 ;;
+  esac
   key=$(window_key "$win")
   dsf="$STATE/.deferred-since-$key"
   [ -e "$dsf" ] || date +%s > "$dsf"
   dage=$(age_of "$dsf")
   date +%s > "$since_file"
-  case "$cause" in
-    writing)
-      reason="stale: $win (idle ${age}s, writing its worktree, deferred for ${dage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress)"
-      note="worktree written since the idle window opened"
-      ;;
-    *)
-      reason="stale: $win (idle ${age}s, pipeline run still active, deferred for ${dage}s, rechecked on a long cadence not a wedge)"
-      note="pipeline run still active"
-      ;;
-  esac
-  resurface_absorbed "$win" "$STATE/.deferred-resurfaced-$key" "$dage" "$reason"
+  resurface_absorbed "$win" "$STATE/.deferred-resurfaced-$key" "$dage" \
+    "stale: $win (idle ${age}s, ${what}, deferred for ${dage}s, rechecked on a long cadence not a wedge${hint})"
   triage_log "absorbed $label ($note, idle ${age}s): $win"
+  return 0
 }
 
 # Drop a window's deferral chain wherever its stale bookkeeping resets, so the
@@ -914,12 +921,12 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        if crew_run_activity_is_recent "$task"; then
-          wedge_defer "$win" "$since_file" "$label" "$age" live-run
+        if crew_run_activity_is_recent "$task" \
+          && wedge_defer "$win" "$since_file" "$label" "$age" live-run; then
           return 0
         fi
-        if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
-          wedge_defer "$win" "$since_file" "$label" "$age" writing
+        if crew_worktree_written_since "$task" "$STATE" "$since_file" \
+          && wedge_defer "$win" "$since_file" "$label" "$age" writing; then
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
