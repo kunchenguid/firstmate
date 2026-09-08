@@ -50,14 +50,13 @@
 # Remote routes use an outbox handoff: one atomic local tasks-axi mv removes the
 # selected set from the dispatchable backlog into data/handoff/<id>.outbox.md,
 # then an idempotent confined transfer and fm-backlog-receive.sh deliver it.
-# A present outbox remains the remote retry trigger until backlog receipt and
-# receiver wake are both confirmed; a companion pending-reply correlation makes
-# crash recovery reconcile an attempted or confirmed wake instead of blindly
-# resending it. An undelivered wake stays retryable on every resume under that
-# same correlation even after the watcher has escalated its unknown delivery
-# (bin/fm-pending-reply-lib.sh, retryable undelivered escalation): the durable
-# receipt is the work, the wake is only a live nudge, and only a confirmed
-# delivery is never resent. A prepared local wake is bound to the exact sorted
+# A present outbox remains the remote retry trigger only until backlog receipt
+# is confirmed, then it is released independently of the best-effort receiver
+# wake. The wake remains separately tracked by one pending-reply correlation and
+# is retried by later resumes and handoffs without blocking new backlog work.
+# An undelivered wake stays retryable under that same correlation even after the
+# watcher escalates its unknown delivery; only confirmed delivery prevents a
+# resend. A prepared local wake is bound to the exact sorted
 # requested-key batch; an unrelated handoff to that mate refuses until the
 # original batch is retried, so it cannot discard wake intent for work that
 # already moved. No two-phase journal exists.
@@ -523,7 +522,7 @@ outbox_item_count() { # <path>
 }
 
 remote_deliver_outbox() { # <secondmate-id> <outbox-path>
-  local id=$1 outbox=$2 remote_rel receive_out snapshot bytes hash generation counter counter_tmp current marker
+  local id=$1 outbox=$2 remote_rel receive_out snapshot bytes hash generation counter counter_tmp current marker wake_rc=0
   [ -f "$outbox" ] && [ ! -L "$outbox" ] || {
     echo "error: pending outbox is unavailable or unsafe: $outbox" >&2
     return 1
@@ -570,22 +569,25 @@ remote_deliver_outbox() { # <secondmate-id> <outbox-path>
   case "$(cat "$marker" 2>/dev/null || true)" in
     pending:*|confirmed|confirmed:*) ;;
     *) receiver_wake_mark_pending "$id" || {
-      echo "error: remote backlog is durable at $id, but receiver wake state could not be recorded; outbox preserved at $outbox" >&2
-      return 1
+      echo "error: remote backlog is durable at $id, but receiver wake state could not be recorded" >&2
+      wake_rc=1
     } ;;
   esac
-  if ! wake_pending_secondmate_receiver "$id" 1; then
-    echo "error: remote backlog is durable at $id; outbox preserved at $outbox for wake retry" >&2
-    return 1
+  if [ "$wake_rc" -eq 0 ]; then
+    wake_pending_secondmate_receiver "$id" 1 || wake_rc=$?
   fi
   rm -f -- "$outbox" || {
-    echo "error: receiver wake was confirmed but local outbox cleanup failed: $outbox" >&2
+    echo "error: remote backlog is durable at $id, but local outbox cleanup failed: $outbox" >&2
     return 1
   }
-  rm -f -- "$marker" || {
-    echo "error: remote outbox cleanup succeeded but confirmed receiver wake state could not be cleared: $marker" >&2
-    return 1
-  }
+  if [ "$wake_rc" -eq 0 ]; then
+    rm -f -- "$marker" || {
+      echo "error: remote outbox cleanup succeeded but confirmed receiver wake state could not be cleared: $marker" >&2
+      return 1
+    }
+  else
+    echo "warning: remote backlog is durable at $id and its outbox was released; the best-effort receiver wake remains pending for a later resume or handoff" >&2
+  fi
   printf '%s\n' "$receive_out"
 }
 
@@ -739,9 +741,35 @@ resume_pending_outboxes() {
   return "$failed"
 }
 
+resume_remote_wake() { # <secondmate-id>
+  local id=$1 marker="$STATE/.backlog-handoff-$1.wake-pending"
+  [ -e "$DATA/handoff/$id.outbox.md" ] || [ -L "$DATA/handoff/$id.outbox.md" ] || {
+    receiver_wake_clear_confirmed "$id" || return 1
+    [ -e "$marker" ] || [ -L "$marker" ] || return 0
+    wake_pending_secondmate_receiver "$id"
+  }
+}
+
+resume_pending_wakes() {
+  local marker name id failed=0
+  [ -d "$STATE" ] || return 0
+  for marker in "$STATE"/.backlog-handoff-*.wake-pending; do
+    [ -e "$marker" ] || [ -L "$marker" ] || continue
+    name=$(basename "$marker")
+    id=${name#.backlog-handoff-}
+    id=${id%.wake-pending}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: unsafe pending wake id: $id" >&2; failed=1; continue ;; esac
+    [ "$(secondmate_registry_field "$REG" "$id" remote 2>/dev/null || true)" = 1 ] || continue
+    with_remote_route_locks "$id" resume_remote_wake "$id" || failed=1
+  done
+  return "$failed"
+}
+
 if [ "$RESUME_PENDING" -eq 1 ]; then
-  resume_pending_outboxes
-  exit $?
+  FAILED=0
+  resume_pending_wakes || FAILED=1
+  resume_pending_outboxes || FAILED=1
+  exit "$FAILED"
 fi
 
 ACTIVE_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")

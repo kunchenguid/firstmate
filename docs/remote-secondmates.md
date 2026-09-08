@@ -220,10 +220,9 @@ bin/fm-backlog-handoff.sh <id> <item-key>...
 
 For a remote route, `tasks-axi mv` first moves the dependency-closed set atomically from the primary backlog into `data/handoff/<id>.outbox.md`.
 The outbox is then copied to the remote handoff scratch directory and `fm-backlog-receive.sh` atomically ingests every destination-absent key under the remote backlog's own lock.
-After receipt, the helper sends a marked routed-work instruction through the recorded remote endpoint and removes the outbox only after that wake is confirmed.
-A failed wake leaves the remote backlog intact and the outbox available for `--resume-pending`; an unresolved send is reported without a blind resend.
-An undelivered wake stays retryable under its same correlation on every resume, even after the watcher has escalated its unknown delivery, so the outbox never jams behind a wake the mate does not strictly need; `bin/fm-pending-reply-lib.sh` owns that retryable undelivered escalation contract.
-Bootstrap retries pending outboxes and emits `SECONDMATE_HANDOFF:` only when one remains.
+After receipt, the helper releases the outbox independently of the best-effort marked receiver wake, whose pending correlation is retried separately by later resumes and handoffs without blocking new backlog work.
+The `bin/fm-backlog-handoff.sh` header owns the stable wake-correlation and release contract, including retry after an undelivered wake is escalated.
+Bootstrap retries pending outboxes and wakes, and emits `SECONDMATE_HANDOFF:` only when an outbox remains.
 There is no two-phase journal and no additional tasks-axi release requirement.
 
 ## Sync, update, and retirement
