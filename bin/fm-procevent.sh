@@ -771,11 +771,10 @@ cmd_start() {
   CLAIM_STATE_DEVICE=$FM_PROCEVENT_CLAIM_STATE_DEVICE
   CLAIM_STATE_INODE=$FM_PROCEVENT_CLAIM_STATE_INODE
   STAGED_OUTPUT=
-  # Non-blocking on purpose, and the `return 0` below is the whole point: a stop
-  # holds this source lock for as long as it waits on this very runner, so waiting
-  # for it here made the runner outlive the ordinary stop signal every time and
-  # left the forced kill carrying the normal path. The contended holder is the
-  # stopper, which reclaims this claim itself.
+  # Exit cleanup must not wait for the source lock: retire and reconcile hold it
+  # while waiting for this runner, so blocking here creates a circular wait
+  # broken only by KILL. On contention, leave the generation-bound claim for
+  # the stopper or subsequent reconciliation to reclaim.
   release_start_claim() {
     extension_lifecycle_lock_release 2>/dev/null || true
     [ -z "$STAGED_OUTPUT" ] || rm -f -- "$STAGED_OUTPUT"
@@ -1275,13 +1274,9 @@ cmd_reconcile() {
 # its own process group leader, so the group signal is what actually reaches the
 # blocking child - signalling only the runner would leave that child alive and
 # reparented, which is exactly how a source that never completes leaks.
-# `proved` is passed only by this call's own escalation below, never by a caller
-# that merely encountered a leaderless group. Without it the
-# stop reads its own success as fresh ambiguity, abandons whatever survived the
-# ordinary signal, and leaves it unreachable forever.
-# A leaderless group nobody in this call ever proved remains refused too, for every
-# caller. That untouched refusal is what makes a crashed leader's group permanent,
-# and relaxing it is a separate open question, not something this path assumes.
+# Only stop_runner_pid's escalation after its successful TERM may pass `proved`:
+# re-reading the leader would discard ownership as our own signal ends it.
+# docs/configuration.md owns the operating contract and unproved-group limits.
 runner_group_signal() {  # <signal> <pid> <identity> [proved]
   local signal=$1 pid=$2 identity=$3 proved=${4-} state pgid
   if [ -n "$proved" ]; then

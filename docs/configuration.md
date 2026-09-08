@@ -830,16 +830,18 @@ Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `F
 Each claim binds its caller-reported home and runner PID to a process identity, unique claim generation, exact registration-file generation, and resolved state-root identity.
 Registration, acquisition, replacement, retirement, and generation-bound release are serialized at one machine-wide boundary per source.
 A live identity-matched owner is never displaced, and release removes only the exact generation the caller acquired.
-Retirement and orphan reconciliation select a runner process group for signalling only while its recorded process identity still matches and the live runner still leads that group.
-Once a stop has proved that and signalled, its own escalation to the forced signal continues against that same group even when the leader has since died to that very signal, because a leader dying to the stop's own signal is the ordinary outcome rather than fresh ambiguity.
-Without that, a stop read its own success as an unprovable group and abandoned whatever survived the ordinary signal.
+Every stop proves ownership before its first signal: the live runner's recorded process identity must match and it must still lead its process group.
+Once that stop has proved ownership and sent TERM, its own escalation to KILL checks only whether the proved group still has members; it does not re-read the leader's identity or group membership, which can change or become unreadable as TERM ends the leader.
+This proof belongs only to that stop's own escalation and cannot authorize another caller that encounters an unproved group.
 A claim counts as reclaimable only when its owner is stale and an independent process-group check finds no members; a crashed leader or reused pid whose process group still has members cannot relax ownership cleanup, so reconcile preserves the claim without signalling the ambiguous group or starting a replacement.
+If the leader dies to anything other than the stop's own signal, `retire`, `reconcile`, `sweep-home`, and the guard all refuse its surviving group permanently, and the source silently stops listening.
+Whether that group may ever be signalled remains an open decision; the repaired guard does not close this gap.
 Reclaiming a generation that IS gone is not gated on tidying its capture-reservation records.
 Those records are keyed by claim token and every replacement claims a fresh one, so a leftover that can no longer be located - a state-root identity a claim recorded before its home was re-created, for example - is stale bytes rather than an ownership hazard.
 Ordinary release and reclamation still attempt reservation cleanup and require it unless both owner staleness and whole-group absence prove the generation gone.
 The narrow live-owner terminal-self-retirement path also attempts cleanup but tolerates its own still-in-flight reservation, which the runner removes on the normal end-of-capture path; exact home, PID, and claim-token ownership remains mandatory before the claim is released.
-If identity cannot be established for a live PID, or a surviving owned group cannot be proved stopped, the operation preserves the registration and claim for safe retry rather than adding a second owner.
-A live PID whose identity no longer matches is a reused PID, so cleanup refuses it before signalling.
+If identity cannot be established before the first signal, or a surviving owned group cannot be proved stopped, the operation preserves the registration and claim for safe retry rather than adding a second owner.
+A live PID whose identity no longer matches is refused before the first signal.
 Identity and process-group verification cannot be made atomic with signalling in portable shell: the reaper signals only a target it has verified as the recorded generation, but PID and group reuse remain possible in the narrow interval between verification and the signal.
 Launch pacing is the primary host-wedge protection; watchdog cleanup is a backstop.
 
@@ -861,7 +863,8 @@ Detaching a runner into its own process group is what lets a persistent source o
 So a home's process-event state carries a lease that registration, attached start, reconciliation, acknowledgement, and listing refresh, and the watcher's reconcile cycle is what keeps it fresh in a live home.
 An attached public `start` continues refreshing the lease while its caller remains attached.
 Each runner fails closed unless a small guard starts successfully beside it in a separate process group.
-That guard accepts the lease only while the state root retains the device/inode identity recorded by the runner's claim, and stops the runner's whole process group after two consecutive checks cannot prove that identity and lease freshness.
+That guard accepts the lease only while the state root retains the device/inode identity recorded by the runner's claim, and initiates the verified stop after two consecutive checks cannot prove that identity and lease freshness, so one unreadable read cannot kill a live runner.
+For a runner whose ownership can still be proved, the nominal cleanup bound is the lease plus up to two check intervals plus the stop's grace period; scheduling delays or failed inspection and signalling can extend it.
 The group signal reaches the blocking child and everything under it exactly as retirement does.
 A runner exports the inherited `FM_PROCEVENT_IN_RUNNER` marker and every lease refresh is skipped under it, so a runner and its ordinary children do not certify their own owner, and the next reconcile in a live home simply starts a replacement runner.
 That no-self-refresh rule is CONFUSED-AGENT-GRADE, the same deliberate captain-decided grade `bin/fm-lease-lib.sh` documents: it stops the accidental case this boundary exists for, an orphaned or test-scaffolding source tree that would otherwise keep its own owner alive.

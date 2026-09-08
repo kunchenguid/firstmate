@@ -322,13 +322,8 @@ fm_procevent_source_lock_acquire() {
 }
 
 # fm_procevent_source_lock_try_acquire <source-id>
-# The refusing mode of the acquire above, for the one caller that must never wait
-# on this lock: a runner's own exit cleanup. Every stop holds this lock across
-# the wait it spends on that runner, so waiting there is a circular wait whose
-# only exit is the stop's forced kill - which is how the ordinary stop signal
-# stopped being what actually stops a runner. Refusing costs nothing: the only
-# holder a stopped runner ever contends with is the stopper, and it reclaims the
-# claim itself.
+# Non-blocking acquisition for release_start_claim in bin/fm-procevent.sh;
+# that caller owns the exit-cleanup lock-order invariant.
 fm_procevent_source_lock_try_acquire() {
   local id=$1 root
   fm_procevent_source_id_valid "$id" || return 1

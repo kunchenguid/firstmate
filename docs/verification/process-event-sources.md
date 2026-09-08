@@ -122,7 +122,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | PID-reuse safety | retirement refuses a live PID whose identity differs from the claim before signalling, and a surviving process group prevents stale-generation cleanup on both ordinary and failed reservation-removal paths |
 | coherent ownership reads | a claim replacement held inside the source boundary blocks `list` until one complete generation is visible |
 | retire-start exclusion | a queued start revalidates registration after the serialized retirement boundary and executes no child |
-| uncertain identity | a live owner whose identity probe transiently fails is not signaled or released, and its registration remains for retry |
+| uncertain identity before the first signal | a live owner whose identity probe transiently fails is not signaled or released, and its registration remains for retry |
 | bounded home sweep | a non-mutating full-tree preflight precedes teardown, then registrations and claim-only owned sources retire through the ordinary safe path at each home-removal boundary |
 | sweep refusal | uncertain identity preserves the runner, claim, registration, home, lease, and parent retirement evidence for retry |
 | foreign ownership | sweeping one home removes its registration without signaling or releasing another home's live claim |
@@ -176,40 +176,18 @@ The 2026-08-27 review inspected `bin/fm-harness.sh`, `bin/fm-supervision-instruc
 
 ## Runner lifetime and cleanup
 
-A runner started by `reconcile` is its own process group leader and is reparented to init, so it outlives the shell that started it by design.
-Removing a home's state directory does not stop an already-running child, and signalling only the runner leaves the blocking child alive.
+The [operating contract](../configuration.md#process-to-event-sources-stateprocevent) owns stop authority, the guard's lease and two-check debounce, claim reclamation, and the permanent leak and silent loss of listening after an unrelated leader death.
 
-Three paths stop a runner generation through its verified process group:
+Measured on 2026-09-08 on macOS (Darwin 25.5.0) against a stand-in poll child that traps TERM, INT, and HUP and keeps blocking: before the repair the guard signalled, lost the leader to that signal, and exited leaving the child running past 70 seconds.
+The guard caused the permanent leak by destroying the leader needed to prove ownership; a guard that causes that leak is worse than no guard.
+After the repair, the guard cleared that child in 7.7 seconds with a 5-second lease and 1-second check, and `retire` cleared the same shape in about 2.4 seconds.
+On the same date and host, retiring a healthy runner fell from about 2.8 seconds with a forced group signal every time to about 0.6 seconds with the ordinary signal alone.
+The circular lock wait described at `release_start_claim` in [`bin/fm-procevent.sh`](../../bin/fm-procevent.sh) explains why healthy runners required the forced signal; the measured delay was the stop waiting for exit cleanup that could not acquire its lock.
 
-- The runner starts only after its separate owner guard confirms initialization; the guard stops the runner group after two consecutive checks cannot prove the owning home's recorded physical identity and lease freshness.
-- `retire` resolves the runner PID and identity from this home's machine-wide claim, so retirement still works when the home's state is already gone.
-- `reconcile` stops a runner this home owns whose source registration has been removed, and reports it as `stopped=N`.
-
-The owner guard and explicit cleanup paths reach the blocking source and its descendants through the runner's group, including a child that handles the ordinary stop signal and keeps waiting.
-Reaching such a child requires the stop's escalation to survive losing the leader to its own first signal, which is what `runner_group_signal`'s proved mode carries.
-Measured on 2026-09-08 on macOS (Darwin 25.5.0) against a stand-in poll child that traps TERM, INT, and HUP and keeps blocking: before that mode the guard signalled, lost the leader to that signal, and exited leaving the child running past 70 seconds; after it the bound is the lease plus two consecutive failed checks plus the stop's grace period (roughly 630 seconds at the shipped 600-second lease and 15-second check, and 7.7 seconds measured with a 5-second lease and 1-second check), with two checks required so a single unreadable read cannot kill a live runner, and `retire` clears the same shape in about 2.4 seconds.
-The two halves hid each other, so they are only correct together.
-Holding the per-source lock across a stop's wait while the runner's own exit cleanup waited unboundedly for that same lock was a circular wait broken only by the forced signal, which made the forced signal the normal path and hid that the escalation could not prove itself.
-A runner's exit cleanup therefore refuses that lock rather than waiting for it: the only holder it ever contends with is the stopper, which reclaims the claim itself.
-Measured on the same date and host, retiring a healthy runner fell from about 2.8 seconds with a forced group signal every time to about 0.6 seconds with the ordinary signal alone.
-The registration launch floor independently bounds repeated runner launches while an owner-loss lease is still valid.
-The Lavish adapter's start-to-start poll governor separately bounds its internal retry loop under shipped defaults without delaying a normally blocking poll.
-An attached public `start` maintains the lease for its caller's lifetime.
-At the accepted confused-agent/accidental grade, the inherited `FM_PROCEVENT_IN_RUNNER` marker prevents detached runners and their ordinary children from refreshing it; adversarial unforgeability against a source that deliberately strips that marker is out of scope.
-
-The same group rule decides when a claim may be reclaimed, not only when a runner may be signalled.
-A leader that died while its process group kept running is not a gone generation.
-Because the leaderless group cannot be proved to belong to the recorded generation, `reconcile` preserves its claim without signalling it or starting a replacement.
-Once a stale owner and an independent group check prove the whole generation gone, an unreachable token-keyed capture reservation cannot veto reclamation.
-Known limit: when either a live reused PID or a leader that died to something other than this stop's own signal makes group ownership ambiguous, the reaper does not act because it cannot prove the group is the orphan generation; storm-rate containment plus ordinary lease and reconcile cleanup are the confused-agent-grade backstop.
-That refusal is permanent for a given generation rather than merely deferred: `retire`, `reconcile`, `sweep-home`, and the guard all decline the same group, so a leader lost to a crash leaves its blocking child running with nothing left to stop it, and the source stops listening without ever saying so.
-Whether such a group may be signalled at all is an open decision and is deliberately not answered here.
-Known limit: identity and process-group verification cannot be made atomic with signalling in portable shell.
-The reaper signals only a target it has verified as the orphan generation, but PID and group reuse remain possible in the narrow interval between verification and the signal; launch pacing is the primary host-wedge protection and watchdog cleanup is a backstop.
-
-`tests/fm-procevent.test.sh` covers owner-loss reaping, descendant churn cessation, cross-home scope, launch pacing, guard startup failure, attached-start continuity, explicit retirement, and stale-group reconciliation.
-It also covers a child that survives the ordinary stop signal, through both the guard and `retire`, that the ordinary signal is what stops a healthy runner rather than the forced one, and that a leaderless group left by a crash is still refused.
-Every stub that predates those cases dies on the ordinary signal, which is why neither half of the escalation was caught before: it was never reached, or never needed.
+[`tests/fm-procevent.test.sh`](../../tests/fm-procevent.test.sh) exercises these reproductions through the executable interface: a TERM-surviving child under both `retire` and the guard, escalation with an absent or zombie leader or probes configured to become unreadable after TERM, and refusal of mismatched live identities or nonleaders before the first signal.
+The healthy-runner case requires the attached `start` to return status 143 (TERM); the printed retirement duration and sampled stop windows are supplementary evidence, not a timing-based pass condition.
+The crashed-leader cases separately pin refusal and claim preservation when a leader dies outside the stop's own signal, so successful escalation cannot be mistaken for closing that limit.
+Refresh the regressions with `bash tests/fm-procevent.test.sh`; the dated measurements above are recorded observations, not fixed timing thresholds.
 
 ## Portability finding
 
