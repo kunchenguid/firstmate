@@ -642,6 +642,43 @@ test_copilot_exact_worker_hook_collision_refuses() {
   pass "copilot spawn refuses only its exact owned hook filename"
 }
 
+test_copilot_failed_fresh_spawn_removes_worker_hook() {
+  local rec id out status hooks retry_out retry_status
+  id=profile-copilot-retry-z6j
+  rec=$(make_spawn_case profile-copilot-retry copilot "$id")
+  read_case_record "$rec"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+
+  cat > "$FAKEBIN_DIR/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows|has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  send-keys) exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "copilot spawn should fail when tmux refuses spawn-time input"
+  assert_absent "$hooks" "failed fresh copilot spawn left its task worker hook behind"
+
+  FAKEBIN_DIR=$(make_spawn_fakebin "$CASE_DIR/retry-fake")
+  retry_out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  retry_status=$?
+  expect_code 0 "$retry_status" "copilot retry after failed fresh spawn should succeed"
+  assert_contains "$retry_out" "spawned $id harness=copilot" \
+    "copilot retry after failed fresh spawn did not report success"
+  assert_present "$hooks" "successful copilot retry did not recreate the task worker hook"
+  pass "failed fresh copilot spawns clean their task worker hook so retry works"
+}
+
 test_copilot_worker_hook_rejects_symlink_paths() {
   local case_name id out status hooks target
   for case_name in github-symlink hooks-symlink hook-symlink; do
@@ -1468,6 +1505,7 @@ test_copilot_threads_autonomy_model_and_effort
 test_copilot_launch_clears_inherited_claude_project_dir
 test_copilot_preserves_repository_owned_hook_files
 test_copilot_exact_worker_hook_collision_refuses
+test_copilot_failed_fresh_spawn_removes_worker_hook
 test_copilot_worker_hook_rejects_symlink_paths
 test_copilot_worker_hooks_ignore_foreign_sessions
 test_copilot_secondmate_skips_task_worker_hook_and_busy_gen

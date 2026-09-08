@@ -878,6 +878,8 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+SPAWN_FRESH_COPILOT_HOOK_PENDING=0
+SPAWN_FRESH_COPILOT_HOOK_PATH=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -933,6 +935,14 @@ spawn_abort_cleanup() {
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
       fi
     fi
+  fi
+  if [ "$SPAWN_FRESH_COPILOT_HOOK_PENDING" = 1 ]; then
+    SPAWN_FRESH_COPILOT_HOOK_PENDING=0
+    if [ -n "$SPAWN_FRESH_COPILOT_HOOK_PATH" ] \
+       && ! rm -f -- "$SPAWN_FRESH_COPILOT_HOOK_PATH"; then
+      echo "warning: could not remove aborted Copilot worker hook for $ID" >&2
+    fi
+    SPAWN_FRESH_COPILOT_HOOK_PATH=
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
@@ -3309,6 +3319,10 @@ EOF
       j_submit=$(json_escape "$copilot_hook_cmd_prefix user-prompt-submitted $(shell_quote "$TURNEND") 2>/dev/null || true")
       j_stop=$(json_escape "$copilot_hook_cmd_prefix agent-stop $(shell_quote "$TURNEND") 2>/dev/null || true")
       j_sessionend=$(json_escape "$copilot_hook_cmd_prefix session-end $(shell_quote "$TURNEND") 2>/dev/null || true")
+      if [ "$RELAUNCH" -eq 0 ]; then
+        SPAWN_FRESH_COPILOT_HOOK_PENDING=1
+        SPAWN_FRESH_COPILOT_HOOK_PATH=$local_copilot_hook_path
+      fi
       cat > "$local_copilot_hook_path" <<EOF
 {"version":1,"hooks":{"userPromptSubmitted":[{"type":"command","bash":"$j_submit","timeoutSec":10}],"agentStop":[{"type":"command","bash":"$j_stop","timeoutSec":10}],"sessionEnd":[{"type":"command","bash":"$j_sessionend","timeoutSec":10}]}}
 EOF
@@ -4053,6 +4067,8 @@ trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
 fi
+SPAWN_FRESH_COPILOT_HOOK_PENDING=0
+SPAWN_FRESH_COPILOT_HOOK_PATH=
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
     HUP) SPAWN_DEFERRED_SIGNAL_STATUS=129 ;;
