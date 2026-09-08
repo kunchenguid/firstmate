@@ -135,15 +135,17 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Measured whole remainder is ~63 min of serial work; the balanced shards
-    # are ~12.7 min each. Cap is a hang tripwire with roughly 1.6x margin, not
-    # the expected healthy end of the lane.
+    # Measured whole remainder is ~77 min of serial work across six shards, whose
+    # worst measured shard is ~13.4 min. Cap is a hang tripwire with roughly 1.5x
+    # margin, not the expected healthy end of the lane. The timing aggregate job
+    # below checks that margin against every run rather than leaving this comment
+    # to go stale again.
     timeout-minutes: 20
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -356,6 +358,23 @@ jobs:
           bin/fm-test-run.sh --aggregate-json \
             "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" \
             "${inputs[@]}"
+      # The measured counterpart to the coverage guard's unhinted-share bound:
+      # that one catches a hint that is missing, this one catches a hint that is
+      # wrong, and reports which scripts to re-measure before a shard reaches
+      # the cap above (docs/fm-test-portable-shards.md).
+      - name: Check portable serial shard balance
+        run: |
+          set -eu
+          shopt -s nullglob
+          serial=("$RUNNER_TEMP"/fm-test-aggregate/fm-test-timing-portable-serial-*.json)
+          if [ "${#serial[@]}" -eq 0 ]; then
+            echo "::warning::no portable serial timing JSON found; shard balance unchecked"
+            exit 0
+          fi
+          # Same literal as the tests-portable-serial job cap above:
+          # bin/fm-test-run.sh refuses when the two disagree rather than
+          # measuring headroom against a cap that has since moved.
+          bin/fm-test-run.sh --check-shard-balance --job-timeout-minutes 20 "${serial[@]}"
       - name: Upload aggregate timing artifact
         if: always()
         uses: actions/upload-artifact@v4
