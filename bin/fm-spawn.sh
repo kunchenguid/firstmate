@@ -1690,7 +1690,7 @@ fm_raw_launch_canonical_model() {
   printf '%s\n' "$model"
 }
 
-fm_raw_launch_model_identity_proven() {
+fm_launch_model_identity_proven() {
   local harness=$1 model=$2
   case "$harness" in
     omp)
@@ -1835,7 +1835,7 @@ if [ "$RAW_LAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
     echo "error: raw $HARNESS launch commands must be one canonical invocation with exactly one explicit --model before dispatch" >&2
     exit 1
   }
-  if ! fm_raw_launch_model_identity_proven "$HARNESS" "$RAW_MODEL"; then
+  if ! fm_launch_model_identity_proven "$HARNESS" "$RAW_MODEL"; then
     echo "error: raw $HARNESS launch commands must identify an exact model before dispatch; use a fully qualified model or the verified structured launcher instead" >&2
     exit 1
   fi
@@ -1864,6 +1864,10 @@ FM_DISPATCH_EFFECTIVE_WORKER_MODEL=
 FM_DISPATCH_QUOTA_EVIDENCE_SOURCE=
 FM_DISPATCH_QUOTA_SNAPSHOT_SHA256=
 if [ "$KIND" != secondmate ]; then
+  if ! fm_launch_model_identity_proven "$HARNESS" "${MODEL:-default}"; then
+    echo "error: $HARNESS launch commands must identify an exact model before dispatch; use a fully qualified --model selector" >&2
+    exit 1
+  fi
   if fm_dispatch_selection_receipt_required "$CONFIG/crew-dispatch.json" "$HARNESS" "${MODEL:-default}"; then
     SELECTION_RECEIPT_REQUIRED=1
   else

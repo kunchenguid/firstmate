@@ -652,9 +652,10 @@ test_astra_without_a_profile_requires_primary_evidence() {
 }
 
 test_astra_qualified_and_raw_models_cannot_bypass_evidence() {
-  local rec id out status
+  local rec id fuzzy_id out status
   id=profile-astra-qualified-z3fg
-  rec=$(make_spawn_case profile-astra-qualified omp "$id")
+  fuzzy_id=profile-astra-omp-fuzzy-z3fgh
+  rec=$(make_spawn_case profile-astra-qualified omp "$id" "$fuzzy_id")
   read_case_record "$rec"
   enable_astra_receipt_profile "$HOME_DIR"
 
@@ -665,6 +666,14 @@ test_astra_qualified_and_raw_models_cannot_bypass_evidence() {
   assert_contains "$out" "requires a current --selection-receipt" "qualified Astra bypassed the receipt gate"
   assert_absent "$HOME_DIR/state/$id.meta" "qualified Astra refusal wrote task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "qualified Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$fuzzy_id" "$PROJ_DIR" \
+    --harness omp --model astra --effort high)
+  status=$?
+  expect_code 1 "$status" "a structured omp fuzzy model selector should refuse before launch"
+  assert_contains "$out" "must identify an exact model" "structured omp fuzzy selector refusal did not require a fully qualified model"
+  assert_absent "$HOME_DIR/state/$fuzzy_id.meta" "structured omp fuzzy selector refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "structured omp fuzzy selector refusal typed a launch command"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     "codex --model gpt-6-astra")

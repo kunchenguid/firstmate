@@ -204,8 +204,10 @@ test_spawn_model_validation_scoped_to_listed_providers() {
   id=omp-model-fuzzy-q4
   out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model astra)
   status=$?
-  expect_code 0 "$status" "a bare fuzzy pattern is omp's own matcher's job: $out"
-  pass "fm-spawn: omp model validation is scoped to providers the listing can prove"
+  expect_code 1 "$status" "a bare fuzzy pattern must refuse before OMP resolves it: $out"
+  assert_contains "$out" "must identify an exact model" "bare fuzzy OMP refusal did not require a fully qualified model"
+  assert_absent "$HOME_DIR/state/$id.meta" "a bare fuzzy OMP refusal must publish no record"
+  pass "fm-spawn: omp model validation requires exact dispatch identities"
 }
 
 test_secondmate_launch_relies_on_discovery() {
