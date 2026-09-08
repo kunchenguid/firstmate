@@ -1697,6 +1697,14 @@ case "$ARG3" in
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
+    if [ "$KIND" != secondmate ]; then
+      case "$HARNESS" in
+        env|command|exec|nice|nohup)
+          echo "error: raw launch commands cannot use '$HARNESS' as a launcher wrapper because their effective harness and model are not inspectable; use the verified harness and --model instead" >&2
+          exit 1
+          ;;
+      esac
+    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the

@@ -711,6 +711,31 @@ test_raw_codex_provider_models_require_inspectable_non_astra_launches() {
   pass "raw Codex-provider launches reject Astra while preserving explicit non-Astra OpenCode"
 }
 
+test_raw_launcher_wrappers_are_refused_before_launch() {
+  local rec env_id command_id out status
+  env_id=profile-raw-env-wrapper-z3fgd
+  command_id=profile-raw-command-wrapper-z3fge
+  rec=$(make_spawn_case profile-raw-launcher-wrapper codex "$env_id" "$command_id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$env_id" "$PROJ_DIR" \
+    "env opencode --model gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "an env-wrapped raw Astra command should refuse before launch"
+  assert_contains "$out" "cannot use 'env' as a launcher wrapper" "env wrapper refusal did not identify the uninspectable launcher"
+  assert_absent "$HOME_DIR/state/$env_id.meta" "env wrapper refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "env wrapper refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$command_id" "$PROJ_DIR" \
+    "command omp --model openai-codex/gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "a command-wrapped raw Astra command should refuse before launch"
+  assert_contains "$out" "cannot use 'command' as a launcher wrapper" "command wrapper refusal did not identify the uninspectable launcher"
+  assert_absent "$HOME_DIR/state/$command_id.meta" "command wrapper refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "command wrapper refusal typed a launch command"
+  pass "raw launcher wrappers refuse before an Astra dispatch can launch"
+}
+
 test_raw_codex_home_override_is_refused() {
   local rec id out status codex_home launch
   id=profile-raw-codex-home-z3fh
@@ -1793,6 +1818,7 @@ test_codex_home_is_refused_for_other_harnesses
 test_astra_without_a_profile_requires_primary_evidence
 test_astra_qualified_and_raw_models_cannot_bypass_evidence
 test_raw_codex_provider_models_require_inspectable_non_astra_launches
+test_raw_launcher_wrappers_are_refused_before_launch
 test_raw_codex_home_override_is_refused
 test_astra_receipt_binds_the_selected_codex_home
 test_astra_receipt_requires_selected_provider_availability
