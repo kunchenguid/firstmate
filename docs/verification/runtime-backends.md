@@ -343,7 +343,7 @@ So "a `PreToolUse` hook alone reaches the prompt" was never tested and remains o
 What is known: the prompt exists on 2.1.263, it appears despite a pre-registered `hasTrustDialogAccepted`, and it named the two `permissions.allow` entries from A's tracked `settings.json`.
 What is not known: which property of that project reaches it. Only A prompted, B and C did not, and one observation of each is too thin to separate tracked-versus-local settings, the hook class, the specific rules involved, or something else about the project entirely.
 
-`hasTrustDialogHooksAccepted` was the obvious candidate for the key that pre-registers this acceptance, and it is RULED OUT.
+`hasTrustDialogHooksAccepted` was the obvious candidate for the key that pre-registers this acceptance, and it is NOT ESTABLISHED as that key.
 Read-only inspection of the operator's `~/.claude.json` on 2026-09-08 (71 project entries; `hasTrustDialogAccepted: true` in 37):
 
 ```sh
@@ -358,9 +358,10 @@ grep -c 'hasTrustDialogHooksAccepted"[[:space:]]*:[[:space:]]*true' ~/.claude.js
 0
 ```
 
-The key occurs in 7 entries, is `false` in every one, and never appears as `true` anywhere in the file at any depth.
-The two project-A worktree slots where the captain answered "Yes, I trust this folder" by hand hold exactly `{"hasTrustDialogAccepted": true}` - accepting the second prompt wrote no hooks key at all.
-Whatever persists that acceptance, it is not this key, so nothing in `bin/fm-claude-trust.sh` pre-registers the second prompt and a worker that meets it still wedges.
+The key occurs in 7 entries - all of them non-treehouse slots - is `false` in every one, and never appears as `true` anywhere in the file at any depth.
+The shape of the two project-A worktree slots the captain answered by hand carries no information either way: all 8 treehouse entries in this store hold exactly one key while its 63 non-treehouse entries hold 9 to 38, so a worker session never updates its own slot's entry.
+So pre-registering this key `true` would write a value the vendor has never been observed writing, and whether it records accepting the second prompt is NOT ESTABLISHED, because the only two known acceptances happened in slots this store does not update.
+Either way, nothing in `bin/fm-claude-trust.sh` pre-registers the second prompt and a worker that meets it still wedges.
 
 Refreshing this observation needs a live spawn against a project whose settings actually trigger the prompt, compared against the same worktree without the candidate key.
 No automated guard covers that, and Firstmate holds the controlled experiment as a separate deferred scout task.

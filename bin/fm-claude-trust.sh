@@ -24,10 +24,10 @@
 # suppressed the trust dialog: "Quick safety check ... This folder pre-approves
 # N tool permissions in .claude/settings.json". What configuration reaches that
 # prompt is UNESTABLISHED, so no settings shape is exempt. Nothing here
-# pre-registers it, and hasTrustDialogHooksAccepted is ruled out as the key that
-# would. docs/verification/runtime-backends.md under "Claude workspace trust"
-# owns the figures, the settings-shape table, the sent-Enter analysis, the open
-# captain question, and why refreshing it needs a live spawn.
+# pre-registers it, and hasTrustDialogHooksAccepted is NOT ESTABLISHED as the
+# key that would. docs/verification/runtime-backends.md under "Claude workspace
+# trust" owns the figures, the settings-shape table, the sent-Enter analysis,
+# the open captain question, and why refreshing it needs a live spawn.
 #
 # THE SCOPE TEST IS THE SAFETY PROPERTY, and it is STRUCTURAL rather than a
 # path policy. <worktree> must be a LINKED git worktree - its own git dir,
