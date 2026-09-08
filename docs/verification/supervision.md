@@ -385,6 +385,29 @@ fm-doc-audience-check: ok surfaces=64 local_links=188
 FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=80078
 ```
 
+The Claude Stop guard/auto-arm deadlock correction (a refused Stop primes a detached watcher start that survives the refusal, so the first refusal cannot guarantee the next) was verified on 2026-09-08 with the installed ShellCheck 0.11.0 and the same isolated behavior suites.
+The workflow YAML companion of `bin/fm-lint.sh` could not run: actionlint 1.7.12 was not on PATH.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-guard-stale-banner.test.sh tests/fm-turnend-guard.test.sh tests/fm-supervision-instructions.test.sh
+```
+
+Observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: local changed-file mode; ShellCheck source following disabled
+fm-lint-workflows.sh: actionlint not found; install actionlint 1.7.12 with bin/fm-install-actionlint.sh <destination-directory> and put that directory on PATH.
+fm-doc-audience-check: ok surfaces=97 local_links=350
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=152298
+```
+
+`bin/fm-lint.sh` exited 1 because actionlint was missing; ShellCheck itself ran.
+`bin/fm-doc-audience-check.sh` exited 0.
+`bin/fm-test-run.sh` over the four suites exited 0.
+
 The Pi extension-model pull-guard correction (`bin/fm-guard.sh` no longer reports a false watcher-down on a Pi primary during the extension's own watcher hand-off) was verified on 2026-08-13 with the installed ShellCheck 0.11.0 and isolated behavior suites.
 The guard verdict itself reads only state files and process liveness, so the portable suites are the enforcing evidence; `bin/fm-harness.sh`'s Pi marker detection, which selects the model, is exercised in the same suite through `PI_CODING_AGENT`.
 
