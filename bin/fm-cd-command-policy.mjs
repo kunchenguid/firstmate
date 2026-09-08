@@ -31,7 +31,7 @@ const CD_BUILTINS = new Set(["cd", "pushd", "popd"]);
 // them never persists to the parent shell (and generally just fails, since cd is
 // a builtin with no external program). `command` is deliberately NOT here: it
 // runs the builtin in the current shell, so `command cd x` still persists.
-const FORKING_WRAPPERS = new Set(["env", "sudo", "nohup", "timeout", "gtimeout", "exec", "coproc", "system-time"]);
+const FORKING_WRAPPERS = new Set(["env", "sudo", "nice", "nohup", "timeout", "gtimeout", "exec", "coproc", "system-time"]);
 
 function isPipe(separator) {
   return separator === "|" || separator === "|&";

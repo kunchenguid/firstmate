@@ -492,6 +492,7 @@ const WRAPPER_OPTIONS = {
   env: { noArgument: new Set(["0", "i", "P", "v"]), takesArgument: new Set(["a", "C", "S", "u"]) },
   exec: { noArgument: new Set(["c", "l"]), takesArgument: new Set(["a"]) },
   nohup: { noArgument: new Set(), takesArgument: new Set() },
+  nice: { noArgument: new Set(), takesArgument: new Set(["n"]) },
   sudo: { noArgument: new Set(["A", "B", "b", "E", "e", "H", "i", "K", "k", "l", "N", "n", "P", "S", "s", "v", "V"]), takesArgument: new Set(["C", "D", "g", "h", "p", "r", "R", "t", "T", "u", "U"]) },
   timeout: { noArgument: new Set(["f", "p", "v"]), takesArgument: new Set(["k", "s"]) },
 };
@@ -502,6 +503,7 @@ const WRAPPER_LONG_OPTIONS = {
   env: { noArgument: new Set(["ignore-environment", "null", "help", "version"]), takesArgument: new Set(["argv0", "block-signal", "chdir", "default-signal", "ignore-signal", "split-string", "unset"]) },
   exec: { noArgument: new Set(), takesArgument: new Set() },
   nohup: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
+  nice: { noArgument: new Set(["help", "version"]), takesArgument: new Set(["adjustment"]) },
   sudo: { noArgument: new Set(["askpass", "background", "bell", "edit", "help", "login", "non-interactive", "preserve-env", "preserve-groups", "remove-timestamp", "reset-timestamp", "set-home", "shell", "stdin", "validate", "version"]), takesArgument: new Set(["chdir", "chroot", "close-from", "command-timeout", "group", "host", "other-user", "prompt", "role", "type", "user"]) },
   timeout: { noArgument: new Set(["foreground", "preserve-status", "verbose", "help", "version"]), takesArgument: new Set(["kill-after", "signal"]) },
 };
@@ -556,7 +558,7 @@ function consumeWrapperOptions(name, words, index) {
 }
 
 const CONTROL_COMMAND_PREFIXES = new Set(["if", "then", "elif", "else", "while", "until", "do", "!"]);
-const COPROC_COMMAND_WORDS = new Set(["bash", "command", "env", "exec", "gtimeout", "nohup", "no-mistakes", "sh", "sudo", "time", "timeout", "zsh"]);
+const COPROC_COMMAND_WORDS = new Set(["bash", "command", "env", "exec", "gtimeout", "nice", "nohup", "no-mistakes", "sh", "sudo", "time", "timeout", "zsh"]);
 
 export function commandPosition(tokens) {
   const words = wordsInNode(tokens);
@@ -581,7 +583,7 @@ export function commandPosition(tokens) {
   while (command) {
     const name = basename(command.value);
     if (name === "time" && wrappers.includes("command")) break;
-    if (name === "exec" || name === "command" || name === "sudo" || name === "nohup" || name === "time") {
+    if (name === "exec" || name === "command" || name === "sudo" || name === "nice" || name === "nohup" || name === "time") {
       wrappers.push(name === "time" && command.value.includes("/") ? "system-time" : name);
       const options = consumeWrapperOptions(name, words, index + 1);
       unresolvedWrapperOption ||= options.unresolved;
@@ -780,28 +782,22 @@ function resolvedInvocationFields(word, context) {
 function isPipelineDriveInvocation(position, context) {
   if (!position.command) return false;
   const invocation = [];
-  const unquoted = [];
   const words = position.words.slice(position.index);
   for (let index = 0; index < words.length; index += 1) {
     const fields = resolvedInvocationFields(words[index], context);
     if (fields === null) {
-      const commandGroup = resolvedInvocationFields(words[index + 1], context);
-      const actionGroup = resolvedInvocationFields(words[index + 2], context);
-      if (commandGroup?.length === 1 && commandGroup[0] === "axi" &&
-          actionGroup?.length === 1 && ["run", "respond"].includes(actionGroup[0])) return true;
-      if (basename(invocation.at(-2) || "") === "no-mistakes" && invocation.at(-1) === "axi") return true;
-      invocation.push(null);
-      unquoted.push(false);
-      continue;
+      if (invocation.length === 0) {
+        const commandGroup = resolvedInvocationFields(words[index + 1], context);
+        const actionGroup = resolvedInvocationFields(words[index + 2], context);
+        return commandGroup?.length === 1 && commandGroup[0] === "axi" &&
+          actionGroup?.length === 1 && ["run", "respond"].includes(actionGroup[0]);
+      }
+      return basename(invocation[0] || "") === "no-mistakes" && invocation[1] === "axi" && invocation.length === 2;
     }
     invocation.push(...fields);
-    unquoted.push(...fields.map(() => !words[index].quoted));
+    if (invocation.length >= 3) break;
   }
-  const commandName = basename(resolveKnownWord(position.command, context.knownVariables) || position.command.value);
-  const genericForwarding = !["bash", "sh", "zsh"].includes(commandName);
-  return invocation.some((field, index) => basename(field || "") === "no-mistakes" &&
-    invocation[index + 1] === "axi" && ["run", "respond"].includes(invocation[index + 2]) &&
-    (index === 0 || (genericForwarding && unquoted.slice(index, index + 3).every(Boolean))));
+  return basename(invocation[0] || "") === "no-mistakes" && invocation[1] === "axi" && ["run", "respond"].includes(invocation[2]);
 }
 
 function shellPositionalArguments(position, payload, context) {
