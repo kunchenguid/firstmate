@@ -1535,7 +1535,6 @@ for post_term_case in mismatch unreadable unreadable-pgid nonleader; do
   POST_TERM_SOURCE="$HPOST_TERM/source.sh"
   POST_TERM_PID="$HPOST_TERM/child.pid"
   POST_TERM_SIGNALS="$HPOST_TERM/child.signals"
-  POST_TERM_UNREADABLE="$HPOST_TERM/identity-unreadable"
   cat > "$POST_TERM_SOURCE" <<'SH'
 #!/usr/bin/env bash
 trap 'printf "signalled\n" >> "$2"' TERM
@@ -1556,20 +1555,18 @@ SH
   kill -STOP "$POST_TERM_RUNNER" || fail "the post-TERM fixture could not keep its leader alive"
   cat > "$POST_TERM_BIN/ps" <<SH
 #!/usr/bin/env bash
-if [ -s "$POST_TERM_SIGNALS" ] && [ "\${1-}" = -p ] && [ "\${2-}" = "$POST_TERM_RUNNER" ] \
+if [ "\${1-}" = -p ] && [ "\${2-}" = "$POST_TERM_RUNNER" ] \
   && [ "\${3-}" = -o ] && [ "\${4-}" = lstart= ]; then
   if [ "$post_term_case" = mismatch ]; then
-    printf 'post-TERM reused identity\n'
+    printf 'reused identity\n'
     exit 0
   fi
-  kill -0 "$POST_TERM_RUNNER" 2>/dev/null || exit 75
-  printf 'unreadable\n' > "$POST_TERM_UNREADABLE"
-  exit 1
+  [ ! -s "$POST_TERM_SIGNALS" ] || exit 1
 fi
-if [ -s "$POST_TERM_SIGNALS" ] && [ "\${1-}" = -o ] && [ "\${2-}" = pgid= ] \
+if [ "\${1-}" = -o ] && [ "\${2-}" = pgid= ] \
   && [ "\${3-}" = -p ] && [ "\${4-}" = "$POST_TERM_RUNNER" ]; then
   case "$post_term_case" in
-    unreadable-pgid) exit 1 ;;
+    unreadable-pgid) [ ! -s "$POST_TERM_SIGNALS" ] || exit 1 ;;
     nonleader) printf '0\n'; exit 0 ;;
   esac
 fi
@@ -1579,26 +1576,24 @@ SH
   post_term_status=0
   post_term_out=$(PATH="$POST_TERM_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
     pe "$HPOST_TERM" retire post-term-src 2>&1) || post_term_status=$?
-  [ -s "$POST_TERM_SIGNALS" ] || fail "the post-TERM fixture never received TERM"
-  if [ "$post_term_case" != mismatch ]; then
-    [ -s "$POST_TERM_UNREADABLE" ] || fail "escalation never encountered an unreadable live identity"
-  fi
   case "$post_term_case" in
     mismatch|nonleader)
+      assert_absent "$POST_TERM_SIGNALS" "the first signal refuses $post_term_case evidence"
       [ "$post_term_status" -ne 0 ] || fail "retirement escalated despite $post_term_case evidence"
       assert_contains "$post_term_out" "cannot confirm runner identity" \
-        "post-TERM $post_term_case evidence refuses retirement"
+        "first-signal $post_term_case evidence refuses retirement"
       kill -0 "$POST_TERM_RUNNER" 2>/dev/null \
         || fail "the post-TERM fixture lost its leader instead of exercising $post_term_case evidence"
       kill -0 -"$POST_TERM_RUNNER" 2>/dev/null \
         || fail "a $post_term_case group was killed during escalation"
       assert_present "$HPOST_TERM/state/procevent/post-term-src.source" \
-        "post-TERM $post_term_case evidence preserves registration"
+        "first-signal $post_term_case evidence preserves registration"
       assert_present "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
-        "post-TERM $post_term_case evidence preserves its claim"
+        "first-signal $post_term_case evidence preserves its claim"
       kill -KILL -"$POST_TERM_RUNNER" 2>/dev/null || true
       ;;
     *)
+      [ -s "$POST_TERM_SIGNALS" ] || fail "the post-TERM fixture never received TERM"
       [ "$post_term_status" -eq 0 ] \
         || fail "retirement abandoned a proved stop after $post_term_case identity: $post_term_out"
       assert_absent "$HPOST_TERM/state/procevent/post-term-src.source" \
@@ -1610,7 +1605,7 @@ SH
   for _ in $(seq 1 50); do kill -0 -"$POST_TERM_RUNNER" 2>/dev/null || break; sleep 0.1; done
   kill -0 -"$POST_TERM_RUNNER" 2>/dev/null && fail "the post-TERM fixture group survived: $post_term_case"
   pe "$HPOST_TERM" retire post-term-src >/dev/null
-  pass "post-TERM $post_term_case evidence preserves the proved-stop boundary"
+  pass "stop $post_term_case evidence preserves the proved-stop boundary"
 done
 
 HBAD="$TMP_ROOT/hbad"; new_home "$HBAD"
@@ -2569,48 +2564,75 @@ printf 'signal-proof payload\n'
 SH
 chmod +x "$SIGNAL_PROOF_STUB"
 
-HPROOF="$TMP_ROOT/signal-proof-retire"; new_home "$HPROOF"
-pe_register "$HPROOF" lavish proof-src -- "$SIGNAL_PROOF_STUB" "$TMP_ROOT/proof-retire" >/dev/null
-pe "$HPROOF" reconcile >/dev/null
-wait_for "$HPROOF/state/procevent/proof-src.runner" \
-  || fail "the signal-proof listener never recorded its runner"
-PROOF_PID=$(cat "$HPROOF/state/procevent/proof-src.runner")
-wait_for "$TMP_ROOT/proof-retire.child" || fail "the signal-proof child never started"
-PROOF_CHILD=$(cat "$TMP_ROOT/proof-retire.child")
-PROOF_BIN=$(fm_fakebin "$TMP_ROOT/proof-retire-bin")
-REAL_PS=$(command -v ps) || fail "the escalation race fixture requires ps"
-kill -STOP "$PROOF_PID" || fail "the escalation race fixture could not pause its leader"
-cat > "$PROOF_BIN/ps" <<SH
-#!/usr/bin/env bash
-if [ "\${1-}" = -o ] && [ "\${2-}" = pgid= ] \
-  && [ "\${3-}" = -p ] && [ "\${4-}" = "$PROOF_PID" ] \
-  && [ -s "$TMP_ROOT/proof-retire.signals" ]; then
-  kill -0 "$PROOF_PID" 2>/dev/null || exit 75
-  kill -CONT "$PROOF_PID" || exit 75
-  for _ in \$(seq 1 100); do
-    if ! kill -0 "$PROOF_PID" 2>/dev/null; then
-      printf 'leader exited\n' > "$TMP_ROOT/proof-retire.raced"
-      exec "$REAL_PS" "\$@"
+trap '[ -z "${PROOF_RELEASE:-}" ] || touch "$PROOF_RELEASE"; fm_test_cleanup' EXIT
+for proof_state in absent zombie; do
+  HPROOF="$TMP_ROOT/signal-proof-retire-$proof_state"; new_home "$HPROOF"
+  PROOF_MARKER="$HPROOF/poll"
+  pe_register "$HPROOF" lavish proof-src -- "$SIGNAL_PROOF_STUB" "$PROOF_MARKER" >/dev/null
+  PROOF_RELEASE=
+  if [ "$proof_state" = zombie ]; then
+    PROOF_RELEASE="$HPROOF/reap"
+    FM_HOME="$HPROOF" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proof-proc" \
+      perl - "$PROOF_RELEASE" "$ROOT/bin/fm-procevent.sh" _start proof-src >"$HPROOF/start.log" 2>&1 <<'PL' &
+my $release = shift @ARGV;
+defined(my $pid = fork) or exit 125;
+if ($pid == 0) {
+  setpgrp(0, 0) or exit 125;
+  $ENV{FM_PROCEVENT_RUNNER_GROUP} = $$;
+  exec @ARGV;
+  exit 125;
+}
+my $deadline = time + ($ENV{FM_TEST_STUB_MAX_BLOCK_SECONDS} // 120);
+while (!-e $release && time < $deadline) { select undef, undef, undef, 0.05; }
+waitpid($pid, 0) == $pid or exit 125;
+PL
+  else
+    FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proof-proc" \
+      pe "$HPROOF" start proof-src >"$HPROOF/start.log" 2>&1 &
+  fi
+  PROOF_START=$!
+  wait_for "$HPROOF/state/procevent/proof-src.runner" \
+    || fail "the signal-proof listener never recorded its runner"
+  PROOF_PID=$(cat "$HPROOF/state/procevent/proof-src.runner")
+  wait_for "$PROOF_MARKER.child" || fail "the signal-proof child never started"
+  PROOF_CHILD=$(cat "$PROOF_MARKER.child")
+  FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proof-proc" \
+    pe "$HPROOF" retire proof-src >"$HPROOF/retire.log" 2>&1 &
+  PROOF_STOP=$!
+  proof_transition=0
+  for _ in $(seq 1 100); do
+    if [ "$proof_state" = zombie ]; then
+      case "$(ps -o stat= -p "$PROOF_PID" 2>/dev/null | tr -d '[:space:]')" in
+        Z*) proof_transition=1; break ;;
+      esac
+    elif ! kill -0 "$PROOF_PID" 2>/dev/null; then
+      proof_transition=1
+      break
     fi
+    sleep 0.05
+  done
+  proof_survivor=0
+  kill -0 "$PROOF_CHILD" 2>/dev/null && proof_survivor=1
+  proof_reaped=0
+  for _ in $(seq 1 100); do
+    if ! kill -0 "$PROOF_CHILD" 2>/dev/null; then proof_reaped=1; break; fi
     sleep 0.1
   done
-  exit 75
-fi
-exec "$REAL_PS" "\$@"
-SH
-chmod +x "$PROOF_BIN/ps"
-
-PATH="$PROOF_BIN:$PATH" pe "$HPROOF" retire proof-src >/dev/null \
-  || fail "retiring a signal-proof listener reported failure"
-[ -s "$TMP_ROOT/proof-retire.raced" ] \
-  || fail "the leader did not exit between escalation identity and process-group reads"
-wait_gone "-$PROOF_PID" \
-  || fail "retirement left the signal-proof listener's process group running"
-wait_gone "$PROOF_CHILD" \
-  || fail "retirement left a child that survived the ordinary stop signal running"
-[ -s "$TMP_ROOT/proof-retire.signals" ] \
-  || fail "the child under test was never signalled, so nothing about escalation was exercised"
-pass "retirement escalates past a child that survives the ordinary stop signal"
+  [ -z "$PROOF_RELEASE" ] || touch "$PROOF_RELEASE"
+  PROOF_RELEASE=
+  proof_status=0
+  wait "$PROOF_STOP" || proof_status=$?
+  [ "$proof_reaped" -eq 1 ] || kill -KILL -"$PROOF_PID" 2>/dev/null || true
+  wait "$PROOF_START" 2>/dev/null || true
+  [ "$proof_transition" -eq 1 ] || fail "the runner never became $proof_state after TERM"
+  [ "$proof_survivor" -eq 1 ] || fail "no child survived the $proof_state leader's TERM"
+  [ "$proof_reaped" -eq 1 ] || fail "escalation abandoned a child behind a $proof_state leader"
+  [ "$proof_status" -eq 0 ] || fail "retiring the $proof_state leader's group reported failure"
+  wait_gone "-$PROOF_PID" || fail "retirement left the $proof_state leader's group running"
+  [ -s "$PROOF_MARKER.signals" ] || fail "the signal-proof child never received TERM"
+  pass "retirement escalates after TERM leaves a surviving child ($proof_state leader)"
+done
+trap fm_test_cleanup EXIT
 
 # --- the owner guard reaps a signal-proof child too --------------------------
 #

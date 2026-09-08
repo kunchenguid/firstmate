@@ -1278,29 +1278,24 @@ cmd_reconcile() {
 # `proved` is passed only by this call's own escalation below, never by a caller
 # that merely encountered a leaderless group. Without it the
 # stop reads its own success as fresh ambiguity, abandons whatever survived the
-# ordinary signal, and leaves it unreachable forever. A reused pid is still alive
-# with a mismatched identity, so it reads stale here and is still refused; a
-# leaderless group nobody in this call ever proved remains refused too, for every
+# ordinary signal, and leaves it unreachable forever.
+# A leaderless group nobody in this call ever proved remains refused too, for every
 # caller. That untouched refusal is what makes a crashed leader's group permanent,
 # and relaxing it is a separate open question, not something this path assumes.
 runner_group_signal() {  # <signal> <pid> <identity> [proved]
   local signal=$1 pid=$2 identity=$3 proved=${4-} state pgid
-  fm_procevent_pid_state "$pid" "$identity"
-  state=$?
-  case "$state" in
-    0) ;;
-    1) fm_procevent_group_alive "$pid" && return 2; return 1 ;;
-    2|3) [ -n "$proved" ] || return 2 ;;
-    *) return 2 ;;
-  esac
-  # A proved escalation has no leader left to re-read a pgid from; state 3 already
-  # established that this exact numeric group still has members.
-  if [ "$state" -ne 3 ]; then
-    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || pgid=
-    if [ "$pgid" != "$pid" ]; then
-      [ -n "$proved" ] && [ -z "$pgid" ] || return 2
-      fm_procevent_group_alive "$pid" || return 1
-    fi
+  if [ -n "$proved" ]; then
+    fm_procevent_group_alive "$pid" || return 1
+  else
+    fm_procevent_pid_state "$pid" "$identity"
+    state=$?
+    case "$state" in
+      0) ;;
+      1) fm_procevent_group_alive "$pid" && return 2; return 1 ;;
+      *) return 2 ;;
+    esac
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
+    [ "$pgid" = "$pid" ] || return 2
   fi
   # KNOWN LIMIT: portable shell cannot make this verification and signal atomic,
   # so the PID and group could be reused in the interval between them.
