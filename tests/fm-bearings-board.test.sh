@@ -206,7 +206,7 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
 }
 
 test_build_injects_binds_then_arms() {
-  local home data board out sid
+  local home data board out
   home=$(make_home build)
   data="$home/payload.json"
   board="$home/.lavish/bearings-board.html"
@@ -214,9 +214,10 @@ test_build_injects_binds_then_arms() {
 
   out=$(run_board "$home" build "$data") || fail "a valid payload did not build"
   assert_contains "$out" "board: $board" "build did not report the board path: $out"
-  assert_contains "$out" "served: $board" "build did not establish the Lavish session: $out"
-  assert_contains "$out" "bound: " "build did not report the answer binding: $out"
-  assert_contains "$out" "armed: " "the first build did not arm the board source: $out"
+  assert_contains "$out" "served: $board" "build did not report the served board: $out"
+  assert_contains "$out" "open: $board" "build did not report the local HTML path: $out"
+  assert_not_contains "$out" "bound: " "build still bound a Lavish answer source: $out"
+  assert_not_contains "$out" "armed: " "build still armed a Lavish process-event source: $out"
   assert_present "$board" "build reported success without a board"
 
   # Round-trip: the payload extracted from the built page is byte-for-byte the
@@ -232,95 +233,27 @@ test_build_injects_binds_then_arms() {
   grep -qxF '__FM_BEARINGS_BOARD_DATA__' "$board" \
     && fail "the data slot survived injection"
 
-  sid=$(run_lavish_source_id "$home" "$board")
-  assert_contains "$out" "bound: $sid" "the binding does not name the board source: $out"
-  [ "$(run_decisions "$home" binding "$sid")" = "(any)" ] \
-    || fail "the board source is not bound any-origin"
-  run_procevent "$home" list | awk 'NR > 1 { print $1 }' | grep -Fxq "$sid" \
-    || fail "the board source is not registered after build"
-  pass "build injects the payload, binds any-origin, then arms the source"
+  pass "build injects the payload into a local HTML board without Lavish"
 }
 
 test_registration_cannot_consume_before_any_origin_binding() {
-  local home data runtime origin key hold board sid show
+  local home data board out
   home=$(make_home order-proof)
   data="$home/payload.json"
-  runtime="$home/runtime"
-  origin=order-proof-review
-  key=captain-choice
-  hold="$origin-decision-$key"
   board="$home/.lavish/bearings-board.html"
-
-  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
-  cat > "$home/data/backlog.md" <<'EOF'
-## In flight
-
-## Queued
-
-## Done
-EOF
-  fm_write_meta "$home/state/$origin.meta" "project=$home/projects/sample" "kind=scout"
-  run_decisions "$home" hold "$origin" "$key" \
-    --title "Choose the order proof" --reason "captain choice pending" --repo sample >/dev/null \
-    || fail "could not create the order-proof captain hold"
-
   write_valid_payload "$data"
-  jq --arg hold "$hold" '.captains_call[0].key = $hold' "$data" > "$data.tmp" \
-    && mv "$data.tmp" "$data"
-
-  mkdir -p "$runtime"
-  cp -R "$ROOT/bin" "$runtime/bin"
-  cat > "$runtime/bin/fm-procevent-lavish.sh" <<'SH'
-#!/usr/bin/env bash
-set -eu
-if [ "${1:-}" = arm ]; then
-  artifact=${2:-}
-  "$REAL_LAVISH_ADAPTER" arm "$artifact" >/dev/null
-  sid=$("$REAL_LAVISH_ADAPTER" source-id "$artifact")
-  "$REAL_PROCEVENT" start "$sid" >/dev/null
-  exit 0
-fi
-exec "$REAL_LAVISH_ADAPTER" "$@"
-SH
-  chmod +x "$runtime/bin/fm-procevent-lavish.sh"
-  cat > "$home/fakebin/lavish-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" != poll ]; then
-  exit 0
-fi
-cat <<EOF
-session:
-  status: feedback
-  session_ended: false
-prompts[1]{uid,prompt,selector,tag,text}:
-  "2","Order proof: yes\\n\\nContext data:\\n{\\n  \\"question\\": \\"$ORDER_PROOF_HOLD\\",\\n  \\"answer\\": \\"yes\\"\\n}","form",choice,"Order proof: yes"
-EOF
-SH
-  chmod +x "$home/fakebin/lavish-axi"
-
-  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$runtime" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-    FM_BEARINGS_BOARD_TEMPLATE="$ROOT/.agents/skills/bearings/assets/board-template.html" \
-    REAL_LAVISH_ADAPTER="$ROOT/bin/fm-procevent-lavish.sh" \
-    REAL_PROCEVENT="$ROOT/bin/fm-procevent.sh" ORDER_PROOF_HOLD="$hold" \
-    "$runtime/bin/fm-bearings-board.sh" build "$data" >/dev/null \
-    || fail "the order-proof board build failed"
-
-  show=$(cd "$home" && tasks-axi show "$hold" --full) \
-    || fail "the order-proof captain hold disappeared"
-  assert_contains "$show" "state: done" \
-    "registration consumed its answer before the any-origin binding existed"
-  assert_contains "$show" "Resolution mode: answered" \
-    "the answer was not closed through the real keyed-answer intake"
-  sid=$(run_lavish_source_id "$home" "$board")
-  [ "$(run_decisions "$home" binding "$sid")" = "(any)" ] \
-    || fail "the order-proof source did not retain its any-origin binding"
-  pass "registration can consume answers only after any-origin binding exists"
+  out=$(run_board "$home" build "$data") || fail "the order-proof board build failed"
+  assert_present "$board" "build did not write the board"
+  assert_not_contains "$out" "bound: " "build bound a Lavish source: $out"
+  assert_not_contains "$out" "armed: " "build armed a Lavish source: $out"
+  [ ! -d "$home/state/procevent" ] \
+    || [ -z "$(find "$home/state/procevent" -name '*.source' 2>/dev/null)" ] \
+    || fail "build registered a process-event source"
+  pass "board build does not arm Lavish or consume answers"
 }
 
 test_build_does_not_bind_or_arm_when_session_start_fails() {
-  local home data rc sid
+  local home data rc out
   home=$(make_home serve-failure)
   data="$home/payload.json"
   write_valid_payload "$data"
@@ -331,16 +264,14 @@ SH
   chmod +x "$home/fakebin/lavish-axi"
 
   set +e
-  run_board "$home" build "$data" >/dev/null 2>&1
+  out=$(run_board "$home" build "$data" 2>&1)
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "build continued after Lavish session establishment failed"
-  sid=$(run_lavish_source_id "$home" "$home/.lavish/bearings-board.html")
-  ! run_decisions "$home" binding "$sid" >/dev/null 2>&1 \
-    || fail "build bound the board before its Lavish session existed"
-  ! run_procevent "$home" list | awk 'NR > 1 { print $1 }' | grep -Fxq "$sid" \
-    || fail "build armed the board before its Lavish session existed"
-  pass "build establishes the Lavish session before binding and arming"
+  [ "$rc" -eq 0 ] || fail "build failed without Lavish: $out"
+  assert_present "$home/.lavish/bearings-board.html" "build did not write the board without Lavish"
+  assert_not_contains "$out" "bound: " "build bound a Lavish source without Lavish: $out"
+  assert_not_contains "$out" "armed: " "build armed a Lavish source without Lavish: $out"
+  pass "build writes the HTML board without Lavish"
 }
 
 run_lavish_source_id() {  # <home> <artifact>
@@ -361,12 +292,12 @@ test_rebuild_is_idempotent_and_does_not_double_arm() {
 
   jq '.generated = "2026-08-19T01:00Z"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   out=$(run_board "$home" build "$data") || fail "the rebuild failed"
-  assert_contains "$out" "already-armed: " "the rebuild re-armed an already registered source: $out"
+  assert_contains "$out" "board: $board" "the rebuild did not report the board: $out"
   extract_payload "$board" | jq -e '.generated == "2026-08-19T01:00Z"' >/dev/null \
     || fail "the rebuild did not refresh the board payload in place"
-  records=$(find "$home/state/procevent" -name '*.source' | wc -l | tr -d ' ')
-  [ "$records" = 1 ] || fail "rebuilding left $records source registrations instead of 1"
-  pass "rebuild refreshes the board in place without double-arming"
+  records=$(find "$home/state/procevent" -name '*.source' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$records" = 0 ] || fail "rebuilding registered $records Lavish sources"
+  pass "rebuild refreshes the board in place without Lavish"
 }
 
 test_build_refuses_a_template_without_exactly_one_slot() {

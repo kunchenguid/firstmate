@@ -2,20 +2,18 @@
 # Merge a task's PR or MR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
-# addressed through gh-axi by the derived owner and repository; a GitLab merge
+# addressed through gh by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
-# The gh-axi merge abstraction always performs the merge; the outcome read that
-# follows it never becomes a prerequisite for reaching that abstraction. After
-# gh-axi returns success, GitHub's live state is read back and accepted only
+# The gh merge always performs the merge; the outcome read that
+# follows it never becomes a prerequisite for reaching that call. After
+# gh returns success, GitHub's live state is read back and accepted only
 # when the pull request is merged or in the merge queue. gh's GraphQL API
-# supplies that queue-aware read when gh is on PATH; when gh is absent or its
-# read fails, gh-axi's own view still proves a landed merge, and every outcome
-# it cannot prove refuses, reporting the single failed read when gh is absent
-# and naming both failed reads when gh is present and its own read failed.
+# supplies that queue-aware read; when that read fails, `gh pr view --json`
+# still proves a landed merge, and every outcome it cannot prove refuses.
 # If the pull request remains open and the base branch has an effective
 # merge_queue rule, the refusal names the queue's configured merge method and
 # the exact -- --auto --<method> retry flags, unless the caller already passed
@@ -31,8 +29,8 @@
 # landed or queued yet, or, when the merge command itself failed, that auto-merge
 # was only requested; both are read from the caller's own arguments rather than
 # from the forge's prose. The observed state is judged the same way whichever
-# read produced it, and a refusal built on the gh-axi view says the merge queue
-# could not be observed at all rather than implying an unqueued pull request.
+# read produced it, and a refusal built on the `gh pr view` fallback says the
+# merge queue could not be observed at all rather than implying an unqueued pull request.
 # Every refusal that follows a merge command which returned success quotes that
 # command's own output, marked as the forge's text and kept apart from this
 # script's verdict, including the refusal for an outcome that cannot be read;
@@ -318,11 +316,11 @@ FIELDS
   FM_PR_MERGE_HEAD=$live_head
 }
 
-# Read one live GitHub pull request view after gh-axi returns. The selected
+# Read one live GitHub pull request view after gh pr merge returns. The selected
 # fields distinguish a landed pull request from a merge-queue entry and retain
-# the concrete state needed for a refusal. gh supplies the complete queue-aware
-# view when available; gh-axi remains the degradation path that can prove a
-# landed merge without making gh a prerequisite for the merge abstraction.
+# the concrete state needed for a refusal. GraphQL supplies the complete
+# queue-aware view; `gh pr view --json` is the degradation path that can prove
+# a landed merge when that read fails.
 FM_PR_GITHUB_STATE=
 FM_PR_GITHUB_MERGED=
 FM_PR_GITHUB_QUEUED=
@@ -368,48 +366,56 @@ FIELDS
   FM_PR_GITHUB_QUEUE_OBSERVED=true
 }
 
-github_read_outcome_with_gh_axi() {
-  local output state
-  if ! output=$(gh-axi pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>/dev/null); then
+github_read_outcome_with_gh_pr_view() {
+  local fields line
+  local total=0 named=0
+  local state='' merged='' queued='' base=''
+
+  if ! fields=$(gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    --json state,merged,isInMergeQueue,baseRefName \
+    --jq '"state=" + (.state // ""), "merged=" + (.merged | tostring), "queued=" + (.isInMergeQueue | tostring), "base=" + (.baseRefName // "")' \
+    2>/dev/null) || [ -z "$fields" ]; then
     return 1
   fi
-  if ! state=$(printf '%s\n' "$output" | awk '
-    $1 == "state:" { count++; value=$2 }
-    END { if (count == 1 && value != "") print value; else exit 1 }
-  '); then
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merged=*) merged=${line#merged=} ;;
+      queued=*) queued=${line#queued=} ;;
+      base=*) base=${line#base=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 4 ] || [ "$total" -ne 4 ] || [ -z "$state" ] \
+    || { [ "$merged" != true ] && [ "$merged" != false ]; } \
+    || { [ "$queued" != true ] && [ "$queued" != false ]; } \
+    || [ -z "$base" ]; then
     return 1
   fi
-  case "$state" in
-    merged)
-      FM_PR_GITHUB_STATE=MERGED
-      FM_PR_GITHUB_MERGED=true
-      FM_PR_GITHUB_QUEUED=false
-      ;;
-    *)
-      FM_PR_GITHUB_STATE=$state
-      FM_PR_GITHUB_MERGED=false
-      FM_PR_GITHUB_QUEUED=unknown
-      ;;
-  esac
-  FM_PR_GITHUB_BASE=
-  FM_PR_GITHUB_QUEUE_OBSERVED=false
+
+  FM_PR_GITHUB_STATE=$state
+  FM_PR_GITHUB_MERGED=$merged
+  FM_PR_GITHUB_QUEUED=$queued
+  FM_PR_GITHUB_BASE=$base
+  FM_PR_GITHUB_QUEUE_OBSERVED=true
 }
 
 github_read_outcome() {
   if ! command -v gh >/dev/null 2>&1; then
-    github_read_outcome_with_gh_axi && return 0
     echo "error: could not read the GitHub pull request outcome after the merge attempt; PR metadata and merge poll remain recorded" >&2
     return 1
   fi
-  # Only a failed gh read falls back. A gh read that completes and reports the
-  # pull request as neither merged nor queued is a concrete outcome, not a
-  # missing one, so it keeps its own refusal. The gh-axi view cannot observe the
-  # merge queue, so it can only turn this into a proved merge or into a refusal.
+  # Only a failed GraphQL read falls back. A GraphQL read that completes and
+  # reports the pull request as neither merged nor queued is a concrete outcome.
   github_read_outcome_with_gh && return 0
-  if github_read_outcome_with_gh_axi && [ "$FM_PR_GITHUB_MERGED" = true ]; then
+  if github_read_outcome_with_gh_pr_view && [ "$FM_PR_GITHUB_MERGED" = true ]; then
     return 0
   fi
-  echo "error: could not read the GitHub pull request outcome after the merge attempt: the gh read failed and the gh-axi view could not prove the outcome either; PR metadata and merge poll remain recorded" >&2
+  echo "error: could not read the GitHub pull request outcome after the merge attempt: the gh read failed and the fallback view could not prove the outcome either; PR metadata and merge poll remain recorded" >&2
   return 1
 }
 
@@ -639,7 +645,7 @@ case "$PROVIDER" in
       FM_PR_GITHUB_AUTO_REQUESTED=true
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
-    if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    if merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
     else

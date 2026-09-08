@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-bearings-board.sh - build and arm the /bearings lavish fleet board.
+# fm-bearings-board.sh - build the /bearings local HTML fleet board.
 #
 # The board is the captain-facing interactive surface of /bearings lavish: the
 # shipped template (.agents/skills/bearings/assets/board-template.html) plus one
@@ -12,19 +12,11 @@
 #   fm-bearings-board.sh path
 #
 # build      Validate the payload and inject it into a fresh copy of the shipped
-#            template at the stable board path. Establish or resume the Lavish
-#            session on that board BEFORE binding and arming its answer source,
-#            so a registered poll can never race a session that does not exist.
-#            Bind to the keyed-answer intake (bin/fm-captain-hold.sh) ALWAYS
-#            precedes arm, so the board can never produce an answer that has
-#            nowhere to go (captain-hold-lifecycle's ordering rule, enforced
-#            here rather than left to agent memory). Output starts with
-#            `board: <path>`, then includes lavish-axi's session output and
-#            the remaining status:
+#            template at the stable board path. This home does not run lavish-axi;
+#            the captain opens the HTML file in a browser and answers in chat.
+#            Output starts with `board: <path>`, then:
 #              served: <path>
-#              bound: <source-id>
-#              armed: <source-id>            (first registration)
-#              already-armed: <source-id>    (registration already present)
+#              open: <path>
 # path       Print the stable board path for this home.
 #
 # Validation is fail-closed: the payload must be valid JSON with
@@ -176,24 +168,10 @@ command_build() {
     fail "cannot publish the board"
   fi
   printf 'board: %s\n' "$board"
-
-  command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
-  lavish-axi "$board" || fail "cannot establish the board Lavish session"
+  # This home does not use lavish-axi. The board is a local HTML file the
+  # captain opens in a browser; answers stay in chat.
   printf 'served: %s\n' "$board"
-
-  sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
-    || fail "cannot derive the board source id"
-  "$SCRIPT_DIR/fm-captain-hold.sh" bind "$sid" >/dev/null \
-    || fail "cannot bind the board source to the keyed-answer intake"
-  printf 'bound: %s\n' "$sid"
-
-  if "$SCRIPT_DIR/fm-procevent.sh" list | awk 'NR > 1 { print $1 }' | grep -Fxq "$sid"; then
-    printf 'already-armed: %s\n' "$sid"
-  else
-    "$SCRIPT_DIR/fm-procevent-lavish.sh" arm "$board" >/dev/null \
-      || fail "cannot arm the board as a process-event source"
-    printf 'armed: %s\n' "$sid"
-  fi
+  printf 'open: %s\n' "$board"
 }
 
 case "${1-}" in

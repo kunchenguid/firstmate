@@ -136,9 +136,18 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
+  "pr merge")
+    printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+    printf 'merged:\\n  number: %s\\n  status: ok\\n' "\${3:-}"
+    exit 0
+    ;;
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *--json*)
+        cat "\$FM_TEST_GH_OUTCOME"
+        exit 0
+        ;;
     esac
     ;;
   "api graphql")
@@ -162,15 +171,17 @@ add_gh_mocks_merge_fails() {
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-case "${1:-} ${2:-}" in
-  "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
-  esac
-  exit 0
+exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
+  "pr merge")
+    printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+    echo "error: pr merge failed" >&2
+    exit 1
+    ;;
   "api graphql")
     cat "$FM_TEST_GH_OUTCOME"
     exit 0
@@ -194,10 +205,16 @@ add_gh_mock_outcome_read_fails() {
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
+  "pr merge")
+    printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+    printf 'merged:\\n  number: %s\\n  status: ok\\n' "\${3:-}"
+    exit 0
+    ;;
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
     esac
+    exit 1
     ;;
   "api graphql")
     echo 'error: could not reach the GitHub API' >&2
@@ -414,21 +431,37 @@ test_pr_metadata_is_recorded_before_the_forge_call() {
   case_dir=$(make_case records-ahead-of-forge-call)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 5151515151515151515151515151515151515151
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr merge")
+    printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
     cat "$FM_STATE_OVERRIDE/task-x1.meta" > "$FM_TEST_META_AT_MERGE"
     printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}"
+    exit 0
     ;;
   "pr view")
-    printf 'pull_request:\n  number: %s\n  state: merged\n' "$3"
+    case " $* " in
+      *headRefOid*) printf '%s\n' '5151515151515151515151515151515151515151' ; exit 0 ;;
+      *--json*)
+        cat "$FM_TEST_GH_OUTCOME"
+        exit 0
+        ;;
+    esac
+    ;;
+  "api graphql")
+    cat "$FM_TEST_GH_OUTCOME"
+    exit 0
+    ;;
+  api\ *)
+    cat "$FM_TEST_GH_RULES"
+    exit 0
     ;;
 esac
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/gh-axi"
+  chmod +x "$case_dir/fakebin/gh"
   : > "$case_dir/gh-axi.log"
   : > "$case_dir/meta-at-merge"
 
@@ -555,7 +588,7 @@ test_github_unreadable_outcome_keeps_pr_bookkeeping() {
   expect_code 1 "$rc" "github-outcome-read-fails: an unreadable outcome must fail"
   assert_grep 'could not read the GitHub pull request outcome after the merge attempt' \
     "$case_dir/stderr" "github-outcome-read-fails: the unreadable outcome was not reported"
-  assert_grep 'the gh read failed and the gh-axi view could not prove the outcome either' \
+  assert_grep 'the gh read failed and the fallback view could not prove the outcome either' \
     "$case_dir/stderr" "github-outcome-read-fails: the refusal did not name both failed reads"
   assert_no_grep 'verified: ' "$case_dir/stdout" \
     "github-outcome-read-fails: an unproved merge was reported as verified"
@@ -574,15 +607,36 @@ test_github_refusal_quotes_the_forge_output() {
   case_dir=$(make_case github-refusal-quotes-forge)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 6161616161616161616161616161616161616161
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
-  "pr merge") echo "will be added to the merge queue when all requirements are met" ;;
+  "pr merge")
+    printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+    echo "will be added to the merge queue when all requirements are met"
+    exit 0
+    ;;
+  "pr view")
+    case " $* " in
+      *headRefOid*) printf '%s\n' '6161616161616161616161616161616161616161' ; exit 0 ;;
+      *--json*)
+        cat "$FM_TEST_GH_OUTCOME"
+        exit 0
+        ;;
+    esac
+    ;;
+  "api graphql")
+    cat "$FM_TEST_GH_OUTCOME"
+    exit 0
+    ;;
+  api\ *)
+    cat "$FM_TEST_GH_RULES"
+    exit 0
+    ;;
 esac
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/gh-axi"
+  chmod +x "$case_dir/fakebin/gh"
   write_github_outcome "$case_dir" OPEN false false main
   : > "$case_dir/gh-axi.log"
   : > "$case_dir/gh.log"
@@ -867,16 +921,6 @@ test_github_fallback_view_refusal_says_the_queue_was_unobservable() {
   case_dir=$(make_case github-fallback-unobservable-queue)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 8686868686868686868686868686868686868686
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-case "${1:-} ${2:-}" in
-  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
-  "pr view") printf 'pull_request:\n  number: %s\n  state: open\n' "$3" ;;
-esac
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/gh-axi"
   rm "$case_dir/fakebin/gh"
   ghless_path="$case_dir/path-without-gh"
   mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
@@ -889,22 +933,10 @@ SH
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "github-fallback-unobservable-queue: an unproved merge must fail"
-  assert_grep 'isInMergeQueue=unknown' "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: refusal did not name the concrete observed state"
-  assert_grep 'the merge queue could not be observed for https://github.com/example/repo/pull/73' \
-    "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: the refusal implied an unqueued PR it could not see"
-  assert_grep "re-check the pull request's merge queue state" "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: the refusal named no concrete next step"
-  # The lowercase state the fallback view reports must be judged the same way
-  # the queue-aware read's uppercase enum is, or every explanation is skipped.
-  assert_grep 'auto-merge was requested and armed for https://github.com/example/repo/pull/73' \
-    "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: the fallback view's state skipped the auto-merge explanation"
+  expect_code 127 "$rc" "github-fallback-unobservable-queue: merge without gh must fail"
   assert_no_grep 'verified: ' "$case_dir/stdout" \
     "github-fallback-unobservable-queue: an unproved merge was reported as verified"
-  pass "fm-pr-merge says the merge queue was unobservable when only the gh-axi view answered"
+  pass "fm-pr-merge requires gh for GitHub merges"
 }
 
 test_github_unreadable_outcome_refusal_quotes_the_forge_output() {
@@ -923,6 +955,29 @@ exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi"
   add_gh_mock_outcome_read_fails "$case_dir" 8787878787878787878787878787878787878787
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge")
+    printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+    echo "will be added to the merge queue when all requirements are met"
+    exit 0
+    ;;
+  "pr view")
+    case " $* " in
+      *headRefOid*) printf '%s\n' '8787878787878787878787878787878787878787' ; exit 0 ;;
+    esac
+    exit 1
+    ;;
+  "api graphql")
+    echo 'error: could not reach the GitHub API' >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
   : > "$case_dir/gh-axi.log"
   : > "$case_dir/gh.log"
 
@@ -954,7 +1009,33 @@ test_github_failed_gh_read_falls_back_to_gh_axi() {
   case_dir=$(make_case github-gh-read-falls-back)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 5151515151515151515151515151515151515151
-  add_gh_mock_outcome_read_fails "$case_dir" 5151515151515151515151515151515151515151
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+case "${1:-} ${2:-}" in
+  "pr merge")
+    printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+    printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}"
+    exit 0
+    ;;
+  "pr view")
+    case " $* " in
+      *headRefOid*) printf '%s\n' '5151515151515151515151515151515151515151' ; exit 0 ;;
+      *--json*)
+        cat "$FM_TEST_GH_OUTCOME"
+        exit 0
+        ;;
+    esac
+    exit 1
+    ;;
+  "api graphql")
+    echo 'error: could not reach the GitHub API' >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
   : > "$case_dir/gh-axi.log"
   : > "$case_dir/gh.log"
 
@@ -964,14 +1045,14 @@ test_github_failed_gh_read_falls_back_to_gh_axi() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "github-gh-read-falls-back: a merge the gh-axi view proves must succeed"
-  assert_grep 'pr view 63 --repo example/repo' "$case_dir/gh-axi.log" \
-    "github-gh-read-falls-back: the gh-axi view was never consulted after gh's read failed"
+  expect_code 0 "$rc" "github-gh-read-falls-back: a merge the fallback view proves must succeed"
+  assert_grep 'pr view 63 --repo example/repo' "$case_dir/gh.log" \
+    "github-gh-read-falls-back: the fallback view was never consulted after GraphQL failed"
   assert_grep 'verified: https://github.com/example/repo/pull/63 is merged' \
     "$case_dir/stdout" "github-gh-read-falls-back: the proven merge was not reported"
   assert_grep 'pr=https://github.com/example/repo/pull/63' "$case_dir/state/task-x1.meta" \
     "github-gh-read-falls-back: the merged PR was not recorded for teardown"
-  pass "fm-pr-merge falls back to the gh-axi view when gh's read fails"
+  pass "fm-pr-merge falls back to gh pr view when GraphQL fails"
 }
 
 test_github_failed_merge_names_an_observed_landed_state() {
@@ -1018,14 +1099,10 @@ test_github_without_gh_still_uses_gh_axi_merge() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "github-without-gh: gh-axi can prove a landed merge without gh"
-  assert_grep 'pr merge 60 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    "github-without-gh: the configured merge abstraction was not invoked"
-  assert_grep 'pr view 60 --repo example/repo' "$case_dir/gh-axi.log" \
-    "github-without-gh: the gh-axi fallback did not verify the landed state"
-  assert_grep 'verified: https://github.com/example/repo/pull/60 is merged' \
-    "$case_dir/stdout" "github-without-gh: the fallback did not report the proven merge"
-  pass "fm-pr-merge reaches and verifies the gh-axi merge path without gh"
+  expect_code 127 "$rc" "github-without-gh: GitHub merges require gh"
+  assert_no_grep 'verified: ' "$case_dir/stdout" \
+    "github-without-gh: a merge without gh was reported as verified"
+  pass "fm-pr-merge requires gh for GitHub merges"
 }
 
 test_github_without_gh_failed_read_keeps_bookkeeping() {
@@ -1053,16 +1130,12 @@ SH
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "github-without-gh-read-fails: an unreadable outcome must fail"
-  assert_grep 'pr merge 61 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    "github-without-gh-read-fails: the merge call did not happen before the failed read"
-  assert_grep 'could not read the GitHub pull request outcome after the merge attempt' \
-    "$case_dir/stderr" "github-without-gh-read-fails: the failed read was not reported"
+  expect_code 127 "$rc" "github-without-gh-read-fails: GitHub merges require gh"
   assert_grep 'pr=https://github.com/example/repo/pull/61' "$case_dir/state/task-x1.meta" \
-    "github-without-gh-read-fails: a landed merge lost its PR metadata"
+    "github-without-gh-read-fails: a merge attempt lost its PR metadata"
   assert_present "$case_dir/state/task-x1.check.sh" \
-    "github-without-gh-read-fails: a landed merge lost its merge poll"
-  pass "fm-pr-merge preserves bookkeeping when gh is absent and the fallback read fails"
+    "github-without-gh-read-fails: a merge attempt lost its merge poll"
+  pass "fm-pr-merge preserves bookkeeping when gh is absent"
 }
 
 test_github_zero_exit_queue_required_refuses_with_exact_retry() {
