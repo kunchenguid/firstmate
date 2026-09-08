@@ -2242,11 +2242,41 @@ EOF
 # assumption already written into it. tmux is the classifier-backed backend that
 # needs no credentials; herdr's own classifier is pinned by the fake-backed cases
 # above and by tests/fm-secondmate-liveness.test.sh.
-LIVE_TMUX_SOCKET=
+# Every private server this file starts is recorded in a FILE rather than a shell
+# variable, because the builder below runs inside a command substitution and any
+# variable it set would die with that subshell (tests/lib.sh documents the same
+# pitfall for fm_test_tmproot). Cleanup runs at the end of each case and again on
+# EXIT, so a failing assertion leaves no tmux server behind either.
+LIVE_TMUX_REGISTRY="$TMP_ROOT/live-tmux-sockets"
+live_tmux_register() {  # <socket>
+  printf '%s\n' "$1" >> "$LIVE_TMUX_REGISTRY"
+}
 live_tmux_cleanup() {
-  [ -n "$LIVE_TMUX_SOCKET" ] || return 0
-  tmux -L "$LIVE_TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
-  LIVE_TMUX_SOCKET=
+  local sock
+  [ -f "$LIVE_TMUX_REGISTRY" ] || return 0
+  while IFS= read -r sock; do
+    [ -n "$sock" ] || continue
+    tmux -L "$sock" kill-server >/dev/null 2>&1 || true
+  done < "$LIVE_TMUX_REGISTRY"
+  : > "$LIVE_TMUX_REGISTRY"
+}
+trap 'live_tmux_cleanup; fm_test_cleanup' EXIT
+trap 'live_tmux_cleanup; fm_test_cleanup; exit 130' INT
+trap 'live_tmux_cleanup; fm_test_cleanup; exit 143' TERM
+
+# Stand-in agent binaries, shared by every case here. Symlinks to a real
+# long-running system binary, never copies: a copied platform binary fails
+# code-signing validation and is killed on macOS arm64
+# (tests/fm-tmux-agent-liveness.test.sh). The symlink name is the executable
+# identity the classifier reads.
+LIVE_AGENT_BIN="$TMP_ROOT/live-agent-bin"
+make_live_agent_bin() {
+  local sleep_bin
+  [ -e "$LIVE_AGENT_BIN/claude" ] && return 0
+  sleep_bin=$(command -v sleep) || return 1
+  mkdir -p "$LIVE_AGENT_BIN"
+  ln -s "$sleep_bin" "$LIVE_AGENT_BIN/claude"
+  ln -s "$sleep_bin" "$LIVE_AGENT_BIN/notaharness"
 }
 
 # A case dir whose fakebin's `tmux` is a shim onto a private real server, so the
@@ -2261,15 +2291,16 @@ make_live_tmux_case() {  # <name> <window-name> [cmd...] -> echoes case dir
   d=$(new_case "$name")
   make_repo_on_branch "$d/wt" "fm/$name"
   make_fakebin "$d" >/dev/null
+  local sock
   real=$(command -v tmux) || return 1
-  LIVE_TMUX_SOCKET="fm-crew-state-$$-$name"
-  printf '#!/usr/bin/env bash\nexec %s -L %s "$@"\n' "$real" "$LIVE_TMUX_SOCKET" > "$d/fakebin/tmux"
+  sock="fm-crew-state-$$-$name"
+  live_tmux_register "$sock"
+  printf '#!/usr/bin/env bash\nexec %s -L %s "$@"\n' "$real" "$sock" > "$d/fakebin/tmux"
   chmod +x "$d/fakebin/tmux"
   if [ "$#" -gt 0 ]; then
-    "$real" -L "$LIVE_TMUX_SOCKET" new-session -d -s live -n "$window" -c "$d/wt" -- "$@" \
-      || return 1
+    "$real" -L "$sock" new-session -d -s live -n "$window" -c "$d/wt" -- "$@" || return 1
   else
-    "$real" -L "$LIVE_TMUX_SOCKET" new-session -d -s live -n "$window" -c "$d/wt" || return 1
+    "$real" -L "$sock" new-session -d -s live -n "$window" -c "$d/wt" || return 1
   fi
   printf '%s\n' "$d"
 }
@@ -2326,21 +2357,10 @@ test_readable_pane_without_an_agent_refuses_a_stale_working_log() {
 test_a_live_pane_keeps_its_working_log() {
   reset_fakes
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (live pane)"; return 0; }
-  local d out sleep_bin
-  sleep_bin=$(command -v sleep) || { echo "skip: sleep not found"; return 0; }
-  d=$(new_case live-pane)
-  make_repo_on_branch "$d/wt" fm/live-pane
-  make_fakebin "$d" >/dev/null
-  # A symlink, never a copy: a copied platform binary fails code-signing
-  # validation and is killed on macOS arm64 (tests/fm-tmux-agent-liveness.test.sh).
-  mkdir -p "$d/agentbin"
-  ln -s "$sleep_bin" "$d/agentbin/claude"
-  local real; real=$(command -v tmux)
-  LIVE_TMUX_SOCKET="fm-crew-state-$$-live-pane"
-  printf '#!/usr/bin/env bash\nexec %s -L %s "$@"\n' "$real" "$LIVE_TMUX_SOCKET" > "$d/fakebin/tmux"
-  chmod +x "$d/fakebin/tmux"
-  "$real" -L "$LIVE_TMUX_SOCKET" new-session -d -s live -n agent -c "$d/wt" -- \
-    "$d/agentbin/claude" 900 || fail "could not start the private tmux server"
+  local d out
+  make_live_agent_bin || { echo "skip: sleep not found"; return 0; }
+  d=$(make_live_tmux_case live-pane agent "$LIVE_AGENT_BIN/claude" 900) \
+    || fail "could not start the private tmux server"
   fm_write_meta "$d/state/live-pane.meta" "window=live:agent" "worktree=$d/wt" \
     "kind=ship" "harness=claude"
   printf 'working: implementing the fix\n' > "$d/state/live-pane.status"
@@ -2353,17 +2373,16 @@ test_a_live_pane_keeps_its_working_log() {
   assert_contains "$out" "state: working" "a live agent pane keeps its working: log"
   assert_contains "$out" "source: status-log" "a live agent pane still reads from the log"
 
-  # Same pane, a process the classifier cannot attribute: still not death.
-  live_tmux_cleanup
-  ln -s "$sleep_bin" "$d/agentbin/notaharness"
-  LIVE_TMUX_SOCKET="fm-crew-state-$$-live-pane-2"
-  printf '#!/usr/bin/env bash\nexec %s -L %s "$@"\n' "$real" "$LIVE_TMUX_SOCKET" > "$d/fakebin/tmux"
-  chmod +x "$d/fakebin/tmux"
-  "$real" -L "$LIVE_TMUX_SOCKET" new-session -d -s live -n agent -c "$d/wt" -- \
-    "$d/agentbin/notaharness" 900 || fail "could not restart the private tmux server"
+  # A process the classifier cannot attribute at all: still not death.
+  d=$(make_live_tmux_case unattributable-pane agent "$LIVE_AGENT_BIN/notaharness" 900) \
+    || fail "could not start the second private tmux server"
+  fm_write_meta "$d/state/unattributable-pane.meta" "window=live:agent" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  printf 'working: implementing the fix\n' > "$d/state/unattributable-pane.status"
+  arm_idle_record "$d/state" unattributable-pane
   wait_agent_state "$d" live:agent ambiguous \
     || fail "the unattributable pane did not classify as ambiguous"
-  out=$(run_crew_state "$d" live-pane)
+  out=$(run_crew_state "$d" unattributable-pane)
   assert_contains "$out" "state: working" "an unattributable pane is not death and keeps its log"
   live_tmux_cleanup
   pass "a live or unattributable pane keeps its working: log"
