@@ -567,6 +567,7 @@ A later poll retries that fetch and, on success, surfaces the real sender and su
 
 A home that wants mail polled unattended arms the standing check in the live home: `bin/fm-mail-check.sh arm`.
 Arming writes `state/mail.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`), so the plane's `poll` runs on its own: new mail still surfaces as `check: mail <uid>` wakes from the poll, and the standing check itself also prints a line (and the watcher turns that line into a wake) when a successful poll surfaces new mail, when the poll fails, exceeds `FM_MAIL_CHECK_BUDGET` seconds (default 15, valid 5..25, cut to fit `FM_CHECK_TIMEOUT`), or `fm-mail.sh` is missing from the check's home.
+A repeated failure or timeout still prints that line when the poll queued new mail, so the watcher wakes to drain it instead of treating the unchanged finding as silence.
 `bin/fm-mail-check.sh disarm` removes the standing check.
 
 ## Relay (.env)

@@ -228,6 +228,34 @@ test_slow_poll_times_out_and_is_reported() {
   pass "fm-mail-check: a slow poll times out into a one-line report"
 }
 
+test_repeated_failure_that_queued_new_mail_still_wakes() {
+  # A poll can append durable mail wakes and then fail with the same cause as
+  # the last check. Difference-record silence would leave those wakes queued
+  # and unacted; the check must print again so the watcher wakes firstmate.
+  local tmpbin home out check_bin
+  tmpbin="$TMP_ROOT/repeat-wake/bin"
+  home="$TMP_ROOT/repeat-wake/home"
+  mkdir -p "$tmpbin" "$home/state"
+  check_bin="$tmpbin/fm-mail-check.sh"
+  cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+    [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
+  done
+  printf '%s\n' '#!/usr/bin/env bash' 'echo "fm-mail: woke for 42"' 'echo "fm-mail: connection refused" >&2' 'exit 1' > "$tmpbin/fm-mail.sh"
+  chmod +x "$tmpbin/fm-mail.sh"
+
+  out="$home/out1.txt"
+  run_check "$home" "$out" "$check_bin"
+  assert_contains "$(cat "$out")" "mail: connection refused" "the first failed poll that queued new mail reports the failure"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "the first report is exactly one line: $(cat "$out")"
+
+  out="$home/out2.txt"
+  run_check "$home" "$out" "$check_bin"
+  assert_contains "$(cat "$out")" "mail: connection refused" "the same failure must still print when that poll queued new mail"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "the repeat report is exactly one line: $(cat "$out")"
+  pass "fm-mail-check: a repeated failure that queued new mail still wakes"
+}
+
 test_fail_closed_poll_after_wake_reports_the_failure() {
   # A poll can publish a wake and then fail closed (stale retry still on disk
   # and unwritable). The standing check must report that failure, not the
@@ -276,4 +304,5 @@ test_failure_is_reported_once_until_it_changes
 test_unconfigured_home_is_reported_once
 test_slow_poll_times_out_and_is_reported
 test_fail_closed_poll_after_wake_reports_the_failure
+test_repeated_failure_that_queued_new_mail_still_wakes
 test_missing_mail_plane_is_reported
