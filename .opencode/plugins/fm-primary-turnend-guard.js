@@ -44,7 +44,10 @@ function resolvePath(anchor) {
 
 function runGuard(root) {
   if (!root) return Promise.resolve({ code: 0, stderr: "" });
-  return runProcess(`${root}/bin/fm-turnend-guard.sh`, [], '{"stop_hook_active":false}');
+  // Spawned through bash, not by its shebang: Windows has no shebang, so
+  // CreateProcess refuses a .sh outright and runProcess's error handler turns
+  // that into a silent {code: 0} - the guard would look like it passed.
+  return runProcess("bash", [`${root}/bin/fm-turnend-guard.sh`], '{"stop_hook_active":false}');
 }
 
 async function letWatchArmRun(sessionID, client) {
