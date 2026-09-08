@@ -726,6 +726,12 @@ function sourcedScript(position) {
   return position.words[position.index + 1] || null;
 }
 
+function sourcedProcessPayload(position) {
+  const script = sourcedScript(position);
+  if (!script || script.value !== "" || script.subs.length !== 1 || script.subs[0].kind !== "process") return null;
+  return staticSubstitutionOutput(script.subs[0]);
+}
+
 function wordReferencesAny(word, names) {
   if (!word || names.size === 0) return false;
   for (const match of word.value.matchAll(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g)) {
@@ -735,7 +741,7 @@ function wordReferencesAny(word, names) {
 }
 
 function staticSubstitutionOutput(substitution) {
-  if (substitution.kind !== "command") return null;
+  if (!["command", "process"].includes(substitution.kind)) return null;
   const lexed = new Lexer(substitution.content).tokenize();
   if (lexed.error) return null;
   const program = splitProgram(lexed.tokens);
@@ -744,10 +750,18 @@ function staticSubstitutionOutput(substitution) {
   if (words.some((word) => !word.literal || word.subs.length > 0)) return null;
   const values = words.map((word) => word.value);
   if (values[0] === "command" && values[1] === "-v" && basename(values[2] || "") === "no-mistakes" && values.length === 3) return "no-mistakes";
+  if (values[0] === "echo" && values.length > 1 && !values[1].startsWith("-")) {
+    const output = `${values.slice(1).join(" ")}\n`;
+    return substitution.kind === "command" ? output.trimEnd() : output;
+  }
   if (values[0] !== "printf" || values.length < 2) return null;
   const format = values[1];
   if (!format.includes("%")) return format;
   if (format === "%s") return values.slice(2).join("");
+  if (format === "%s\\n") {
+    const output = `${values.slice(2).join("\n")}\n`;
+    return substitution.kind === "command" ? output.trimEnd() : output;
+  }
   return null;
 }
 
@@ -819,6 +833,19 @@ function isPipelineDriveInvocation(position, context) {
     if (invocation.length >= 3) break;
   }
   return basename(invocation[0] || "") === "no-mistakes" && invocation[1] === "axi" && ["run", "respond"].includes(invocation[2]);
+}
+
+function setPositionalArguments(position, context) {
+  if (basename(position.command?.value || "") !== "set") return null;
+  const args = position.words.slice(position.index + 1);
+  if (args[0]?.value !== "--") return null;
+  const fields = [];
+  for (const word of args.slice(1)) {
+    const resolved = resolvedInvocationFields(word, context);
+    if (resolved === null) return null;
+    fields.push(...resolved);
+  }
+  return [context.positionalArguments?.[0] || "", ...fields];
 }
 
 function shellPositionalArguments(position, payload, context) {
@@ -1121,6 +1148,7 @@ function analyzeProgram(command, context, depth = 0) {
     const shellPayload = shell?.kind === "command" ? shell.payload : null;
     const shellScript = shell?.kind === "script" ? shell.payload : null;
     const sourceScript = sourcedScript(position);
+    const sourceProcessPayload = sourcedProcessPayload(position);
     const resolvedEvalPayload = evalPayload(position, nodeContext);
     const heredocPayloads = shellHeredocPayloads(tokens, position, nodeContext);
     const hereStringPayloads = shellHereStringPayloads(tokens, position, nodeContext);
@@ -1129,7 +1157,6 @@ function analyzeProgram(command, context, depth = 0) {
       nodeNestedProtected ||= Boolean(protectedIdentity(script.value, context.root)) || wordReferencesAny(script, nodeContext.protectedVariables);
       unclassifiableProtected ||= hasUnclassifiableProtectedExpansion(script, context.root);
     }
-    if (sourceScript?.subs.some((substitution) => substitution.kind === "process")) pipelineDrive = true;
     if (shellPayload) {
       const resolvedShellPayload = resolveKnownWord(shellPayload, nodeContext.knownVariables);
       if (resolvedShellPayload === null) {
@@ -1154,7 +1181,7 @@ function analyzeProgram(command, context, depth = 0) {
         unresolvedExecutionPayloadMentionsPipelineDrive(position.words.slice(position.index + 1))) {
       pipelineDrive = true;
     }
-    for (const payload of [resolvedEvalPayload, ...heredocPayloads, ...hereStringPayloads]) {
+    for (const payload of [resolvedEvalPayload, sourceProcessPayload, ...heredocPayloads, ...hereStringPayloads]) {
       if (payload === null) continue;
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
@@ -1208,6 +1235,8 @@ function analyzeProgram(command, context, depth = 0) {
         if (binding.kind === "for" && assignmentPrefixes.some((word) => assignmentName(word) === binding.name) && execution !== "never") binding.bodyAssigned = true;
       }
     } else if (commandName === "export") activeContext = contextWithAssignments(activeContext, args.filter((word) => isAssignment(word.value)));
+    const positionalArguments = setPositionalArguments(position, nodeContext);
+    if (positionalArguments !== null) activeContext = { ...activeContext, positionalArguments };
     if (firstName === "fi" && conditionalBindings.length > 0) {
       const branch = conditionalBindings.pop();
       const thenContext = branch.thenContext || activeContext;
