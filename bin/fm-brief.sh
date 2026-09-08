@@ -347,6 +347,35 @@ if [ "$VALIDATE_BOOKENDS" -eq 1 ]; then
     exit 1
   fi
   [ -n "$VB_OPEN" ] || { echo "error: $VB_BRIEF bookends are empty; fill the task text before launch" >&2; exit 1; }
+
+  VB_BYTES=$(wc -c < "$VB_BRIEF" | tr -d '[:space:]')
+  VB_ESTIMATE=$(( (VB_BYTES + 2) / 3 ))
+  printf 'utf8_bytes=%s\n' "$VB_BYTES"
+  printf 'estimated_tokens=ceil(UTF-8 bytes / 3)=%s\n' "$VB_ESTIMATE"
+  VB_RESOURCES=$(awk '
+    /^Read `\/[^`]+`\.$/ {
+      path=$0
+      sub(/^Read `/, "", path)
+      sub(/`\.$/, "", path)
+      if (!seen[path]++) print path
+    }
+  ' "$VB_BRIEF")
+  if [ -z "$VB_RESOURCES" ]; then
+    printf 'selected_resource_costs=none\n'
+  else
+    while IFS= read -r VB_RESOURCE; do
+      if [ -f "$VB_RESOURCE" ]; then
+        VB_RESOURCE_BYTES=$(wc -c < "$VB_RESOURCE" | tr -d '[:space:]')
+        VB_RESOURCE_ESTIMATE=$(( (VB_RESOURCE_BYTES + 2) / 3 ))
+        printf 'selected_resource_cost path=%s utf8_bytes=%s estimated_tokens=ceil(UTF-8 bytes / 3)=%s\n' \
+          "$VB_RESOURCE" "$VB_RESOURCE_BYTES" "$VB_RESOURCE_ESTIMATE"
+      else
+        printf 'selected_resource_cost path=%s unavailable\n' "$VB_RESOURCE"
+      fi
+    done <<EOF
+$VB_RESOURCES
+EOF
+  fi
   exit 0
 fi
 

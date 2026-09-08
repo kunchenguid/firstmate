@@ -237,6 +237,146 @@ test_ordinary_briefs_bookend_load_bearing_task() {
   pass "fm-brief: every ordinary ship mode and scout variant fills both standalone slots from one input and keeps the load-bearing bookends"
 }
 
+test_brief_selector_rules_and_fill_oracles() {
+  local home="$TMP_ROOT/selector-home" skill="$ROOT/.agents/skills/crewmate-briefing/SKILL.md"
+  local lib=/Users/pedromuller/dev/firstmate/data/ecc-curated/5064474d4d762dc9640234a41617cccb79185cec
+  local perf="$lib/skills/benchmark-optimization-loop/SKILL.md"
+  local latency="$lib/skills/latency-critical-systems/SKILL.md"
+  local dashboard="$lib/skills/dashboard-builder/SKILL.md"
+  local contract="$lib/skills/contract-first/SKILL.md"
+  local review="$lib/lenses/review-evidence.md"
+  local silent="$lib/lenses/silent-failure.md"
+  local security="$lib/lenses/security-boundary.md"
+  local a11y="$lib/lenses/a11y-readback.md"
+  local path count id brief intent spec normalized expected
+
+  mkdir -p "$home/data"
+  for path in "$perf" "$latency" "$dashboard" "$contract" "$review" "$silent" "$security" "$a11y"; do
+    count=$(grep -F -c "Read \`$path\`." "$skill" || true)
+    [ "$count" -eq 1 ] || fail "selector skill points at $path $count times instead of once"
+  done
+
+  id=selector-perf
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  intent="$home/$id-intent.txt"
+  spec="$home/$id-spec.txt"
+  printf 'Measure performance and scaling.\n' > "$intent"
+  printf "Read \`%s\`.\n" "$perf" > "$spec"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --fill "$intent" "$spec" >/dev/null 2>&1 \
+    || fail "--fill failed for the performance-only selector fixture"
+  for path in "$perf" "$latency" "$dashboard" "$contract" "$review" "$silent" "$security" "$a11y"; do
+    count=$(grep -F -c "Read \`$path\`." "$brief" || true)
+    if [ "$path" = "$perf" ]; then [ "$count" -eq 2 ] || fail "performance pointer appears $count times instead of once per bookend"; else [ "$count" -eq 0 ] || fail "non-applicable pointer $path appears $count times"; fi
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$brief" >/dev/null 2>&1 \
+    || fail "performance-only filled brief failed bookend validation"
+
+  id=selector-dashboard-liveness
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  intent="$home/$id-intent.txt"
+  spec="$home/$id-spec.txt"
+  printf 'Design a dashboard viewer with fresh streaming liveness.\n' > "$intent"
+  printf "Read \`%s\`.\nRead \`%s\`.\n" "$dashboard" "$latency" > "$spec"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --fill "$intent" "$spec" >/dev/null 2>&1 \
+    || fail "--fill failed for the dashboard+liveness selector fixture"
+  for path in "$dashboard" "$latency"; do
+    count=$(grep -F -c "Read \`$path\`." "$brief" || true)
+    [ "$count" -eq 2 ] || fail "applicable pointer $path appears $count times instead of once per bookend"
+  done
+  for path in "$perf" "$contract" "$review" "$silent" "$security" "$a11y"; do
+    count=$(grep -F -c "Read \`$path\`." "$brief" || true)
+    [ "$count" -eq 0 ] || fail "non-applicable pointer $path appears $count times"
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$brief" >/dev/null 2>&1 \
+    || fail "dashboard+liveness filled brief failed bookend validation"
+
+  id=selector-boundary
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  intent="$home/$id-intent.txt"
+  spec="$home/$id-spec.txt"
+  printf 'Change the independently named producer and consumer.\n' > "$intent"
+  printf "Read \`%s\`.\n" "$contract" > "$spec"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --fill "$intent" "$spec" >/dev/null 2>&1 \
+    || fail "--fill failed for the producer/consumer selector fixture"
+  count=$(grep -F -c "Read \`$contract\`." "$brief" || true)
+  [ "$count" -eq 2 ] || fail "contract pointer appears $count times instead of once per bookend"
+  for path in "$perf" "$latency" "$dashboard" "$review" "$silent" "$security" "$a11y"; do
+    count=$(grep -F -c "Read \`$path\`." "$brief" || true)
+    [ "$count" -eq 0 ] || fail "non-applicable pointer $path appears $count times"
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$brief" >/dev/null 2>&1 \
+    || fail "producer/consumer boundary filled brief failed bookend validation"
+
+  id=selector-visual
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode local-only --visual >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  intent="$home/$id-intent.txt"
+  spec="$home/$id-spec.txt"
+  printf 'Review the viewer panel.\n' > "$intent"
+  printf "Read \`%s\`.\nRead \`%s\`.\n" "$dashboard" "$a11y" > "$spec"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --fill "$intent" "$spec" >/dev/null 2>&1 \
+    || fail "--fill failed for the visual selector fixture"
+  for path in "$dashboard" "$a11y"; do
+    count=$(grep -F -c "Read \`$path\`." "$brief" || true)
+    [ "$count" -eq 2 ] || fail "visual applicable pointer $path appears $count times instead of once per bookend"
+  done
+  for path in "$perf" "$latency" "$contract" "$review" "$silent" "$security"; do
+    count=$(grep -F -c "Read \`$path\`." "$brief" || true)
+    [ "$count" -eq 0 ] || fail "visual non-applicable pointer $path appears $count times"
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$brief" >/dev/null 2>&1 \
+    || fail "visual filled brief failed bookend validation"
+
+  id='access-writer-w1'
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" someproj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  normalized="$home/$id-normalized.md"
+  expected="$ROOT/tests/fixtures/fm-brief-writer-scout.golden"
+  sed -e "s|$home|{{FM_HOME}}|g" -e "s|$ROOT|{{FM_ROOT}}|g" "$brief" > "$normalized"
+  cmp -s "$expected" "$normalized" \
+    || fail "empty-spec writer-scout scaffold changed from its byte-identical golden"
+  intent="$home/$id-intent.txt"
+  printf 'Unrelated prose with no selected resource.\n' > "$intent"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --fill "$intent" >/dev/null 2>&1
+  for path in "$perf" "$latency" "$dashboard" "$contract" "$review" "$silent" "$security" "$a11y"; do
+    count=$(grep -F -c "Read \`$path\`." "$brief" || true)
+    [ "$count" -eq 0 ] || fail "empty-spec non-applicable pointer $path appears $count times"
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$brief" >/dev/null 2>&1 \
+    || fail "empty-spec filled brief failed bookend validation"
+
+  pass "fm-brief: selector pointer sets are bookend-complete and unrelated writer-scout output stays byte-identical"
+}
+
+test_validate_bookends_reports_byte_and_resource_costs() {
+  local home="$TMP_ROOT/byte-accounting-home" id=byte-accounting brief intent spec out bytes estimate path resource_bytes resource_estimate
+  local lib=/Users/pedromuller/dev/firstmate/data/ecc-curated/5064474d4d762dc9640234a41617cccb79185cec
+  path="$lib/skills/benchmark-optimization-loop/SKILL.md"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  intent="$home/intent.txt"
+  spec="$home/spec.txt"
+  printf 'Measure café performance.\n' > "$intent"
+  printf "Read \`%s\`.\n" "$path" > "$spec"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --fill "$intent" "$spec" >/dev/null 2>&1 \
+    || fail "--fill failed for the byte-accounting fixture"
+  bytes=$(wc -c < "$brief" | tr -d ' ')
+  estimate=$(( (bytes + 2) / 3 ))
+  resource_bytes=$(wc -c < "$path" | tr -d ' ')
+  resource_estimate=$(( (resource_bytes + 2) / 3 ))
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$brief")
+  assert_contains "$out" "utf8_bytes=$bytes" "bookend validation omitted the UTF-8 byte count"
+  assert_contains "$out" "estimated_tokens=ceil(UTF-8 bytes / 3)=$estimate" \
+    "bookend validation omitted the labelled bytes/3 estimate"
+  assert_contains "$out" "selected_resource_cost path=$path utf8_bytes=$resource_bytes estimated_tokens=ceil(UTF-8 bytes / 3)=$resource_estimate" \
+    "bookend validation omitted the selected-resource cost"
+  pass "fm-brief.sh: --validate-bookends reports brief bytes, labelled bytes/3 estimate, and selected-resource costs"
+}
+
 test_fill_refuses_non_ordinary_or_already_filled_brief() {
   local home text_file out status
   home="$TMP_ROOT/fill-refuse-home"
@@ -1861,6 +2001,8 @@ test_crewmate_brief_explains_session_lock_scope
 test_ordinary_briefs_state_slice_contracts
 test_instructed_wait_premise_binds_to_real_wait_reader
 test_ordinary_briefs_bookend_load_bearing_task
+test_brief_selector_rules_and_fill_oracles
+test_validate_bookends_reports_byte_and_resource_costs
 test_fill_refuses_non_ordinary_or_already_filled_brief
 test_validate_bookends_refuses_half_filled_and_divergent
 test_validate_bookends_is_no_op_for_secondmate_charter
