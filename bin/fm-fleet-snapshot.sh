@@ -3,6 +3,11 @@
 #
 # Output contract: `--json` prints one object with schema
 # `fm-fleet-snapshot.v1`.
+# Records are omitted only through the documented bounds below, which the
+# output itself discloses. A record that fails to compose is never silently
+# dropped instead: the command prints no object, writes a diagnostic to stderr,
+# and exits non-zero rather than publishing a truncated tasks[] or
+# scout_reports[] that a consumer would read as a complete fleet.
 # The command does not acquire the session lock, drain wakes, arm watchers,
 # mutate backlog state, or write reports. Its default ledger collector may
 # atomically refresh parent-side cached copies of remote home summaries under
