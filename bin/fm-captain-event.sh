@@ -66,7 +66,7 @@
 #       --incarnation <stable-id> --producer <name> \
 #       --harness-event-id <stable-id> --audience captain \
 #       --kind primary.message|primary.final|worker.message|worker.final \
-#       --summary <text> [--summary-truncated true|false] \
+#       --summary=<text> [--summary-truncated true|false] \
 #       [--occurred-at-ms <uint>] [--ref <allowlisted-key>=<value>]...
 #     Publish or idempotently find an event; print its seq.
 #   fm-captain-event.sh read --after <uint> [--limit <1..1000>]

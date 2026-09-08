@@ -228,7 +228,9 @@ export function installCaptainEventPublisher(pi: ExtensionAPI, options: Publishe
       "--harness-event-id", harnessEventId,
       "--audience", "captain",
       "--kind", kind,
-      "--summary", summary.text,
+      // Summary is the only free-form option value; bind it with `=` so
+      // Markdown bullets and other leading-hyphen prose stay data to argparse.
+      `--summary=${summary.text}`,
       "--summary-truncated", String(summary.truncated),
       "--occurred-at-ms", String(message.timestamp),
     ];

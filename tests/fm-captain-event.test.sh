@@ -589,10 +589,12 @@ set -eu
 [ "${1-}" = append ] || exit 0
 shift
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = --summary ]; then
-    printf '%s\n' "$2" >> "$FM_CAPTURE"
-    exit 0
-  fi
+  case "$1" in
+    --summary=*)
+      printf '%s\n' "${1#--summary=}" >> "$FM_CAPTURE"
+      exit 0
+      ;;
+  esac
   shift
 done
 exit 1
@@ -741,7 +743,7 @@ const primary = {
   role: "assistant",
   content: [
     { type: "thinking", thinking: "PRIVATE_REASONING" },
-    { type: "text", text: "Captain result token=verysecretvalue" },
+    { type: "text", text: "- Captain result token=verysecretvalue" },
     { type: "toolCall", name: "bash", arguments: { value: "PRIVATE_TOOL_ARG" } },
   ],
   stopReason: "stop",
@@ -754,7 +756,7 @@ for (const handler of primaryPi.handlers.get("turn_end") ?? []) await handler({ 
 for (const handler of primaryPi.handlers.get("turn_end") ?? []) await handler({ message: primary }, context);
 const worker = {
   role: "assistant",
-  content: [{ type: "text", text: "Worker progress" }, { type: "toolCall", name: "read", arguments: { path: "/private" } }],
+  content: [{ type: "text", text: "--- Worker progress" }, { type: "toolCall", name: "read", arguments: { path: "/private" } }],
   stopReason: "toolUse",
   timestamp: 102,
 };
@@ -767,18 +769,19 @@ JS
     and .[0].kind == "primary.final"
     and .[0].source_home == "secondmate:ios"
     and .[0].source_role == "primary"
-    and .[0].summary == "Captain result [REDACTED]"
+    and .[0].summary == "- Captain result [REDACTED]"
     and .[1].kind == "worker.message"
     and .[1].source_home == "secondmate:ios"
     and .[1].source_role == "worker"
     and .[1].task_id == "worker-one"
     and .[1].incarnation == "s1.2.3"
+    and .[1].summary == "--- Worker progress"
     and (tostring | contains("PRIVATE_REASONING") | not)
     and (tostring | contains("PRIVATE_TOOL_ARG") | not)
     and (tostring | contains("provider-secret-id") | not)
     and (tostring | contains("session-secret-id") | not)
   ' "$journal" >/dev/null || fail "Pi semantic producer leaked private blocks/ids or misclassified its turns"
-  pass "the tracked Pi primary call site publishes typed turns without exposing trusted ids to the model"
+  pass "the tracked Pi call site preserves leading-hyphen prose without exposing trusted ids to the model"
 else
   echo "skip: node with TypeScript stripping unavailable for Pi producer behavior"
 fi
