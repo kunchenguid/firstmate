@@ -4551,7 +4551,7 @@ test_live_captain_held_first_sight_silenced_by_away_record() {
 test_backlog_hold_never_rechecked_while_away_record_exists() {
   local dir out capture wakes
   dir=$(make_hold_home away-record-backlog-hold 'done: PR https://example.test/pr/9 checks green' hold) \
-    || { fail "could not build the backlog-hold fixture"; return 0; }
+    || fail "could not build the backlog-hold fixture"
   out="$dir/watch.out"; capture="$dir/pane.txt"
   write_away_record "$dir/state"
   # Without the record the FIRST sight of a held delivery alarms

@@ -1110,7 +1110,7 @@ test_housekeeping_declared_time_controls_pause_recheck() {
   local dir state fakebin task win pane key now future past escalations
   dir=$(make_supercase pause-until-cadence)
   state="$dir/state"; fakebin="$dir/fakebin"
-  task=held-until; win="sess:fm-$task"; pane="$dir/pane.txt"
+  task='held-until'; win="sess:fm-$task"; pane="$dir/pane.txt"
   printf 'idle prompt $\n' > "$pane"
   fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
   key=$(printf '%s' "$task" | tr ':/.' '___')
