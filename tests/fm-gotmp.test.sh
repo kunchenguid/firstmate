@@ -67,6 +67,8 @@ SH
   # Lifecycle serialization, status presentation retirement, and shared adapter
   # ownership are sourced by teardown.
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
+  # fm-agy-lib.sh: teardown sources it for the Antigravity hooks retire path.
+  ln -s "$ROOT/bin/fm-agy-lib.sh" "$fake/bin/fm-agy-lib.sh"
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
   # wedge detector's bounded worktree write probe.
@@ -167,6 +169,8 @@ SH
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
+  # fm-agy-lib.sh: teardown sources it for the Antigravity hooks retire path.
+  ln -s "$ROOT/bin/fm-agy-lib.sh" "$fake/bin/fm-agy-lib.sh"
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
   # wedge detector's bounded worktree write probe.

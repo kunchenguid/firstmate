@@ -7,7 +7,6 @@
 # Removal restores that key while preserving changes to other project keys.
 #
 # Sourcing: set -u safe; no side effects on source.
-FM_AGY_HOOKS_KEY=fm-busy-state
 
 fm_agy_shquote() {
   local s=$1

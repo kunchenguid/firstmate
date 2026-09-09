@@ -175,6 +175,7 @@ while :; do
 done
 # Release only a lock still owned here: a successor's lock is never removed,
 # including on the abort paths below that fire after an eviction.
+# shellcheck disable=SC2329 # Registered by the EXIT trap below, which extended analysis cannot see.
 lock_release() {
   [ -n "$LOCK_TOKEN" ] || return 0
   [ "$(lock_owner)" = "$LOCK_TOKEN" ] || return 0
