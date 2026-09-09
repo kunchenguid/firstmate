@@ -1504,6 +1504,101 @@ test_failed_send_discards_undelivered_expectation() {
   pass "failed transport discards undelivered expectation only"
 }
 
+test_tick_settled_records_skip_lock_and_subprocess_work() {
+  # A resolved record whose escalation is already closed, or that never
+  # escalated, is fully settled: later tick passes must not re-lock it, re-read
+  # it through fm_pending_reply_get, or rescan its parent status. This is the
+  # fast path that keeps a healthy watcher cycle inside the stale-beacon grace
+  # as the retained settled store grows (measured: ~5.8 field reads plus one
+  # per-correlation lock per settled record per poll before this path).
+  (
+    local home state c_closed c_never rec log
+    home=$(setup_parent settled-fast-path)
+    state="$home/state"
+    # This fixture clock is intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=12000
+    log="$home/close-calls.log"
+    : > "$log"
+    # Record 1: resolved AND escalation_closed_epoch set (fully settled).
+    c_closed=$(fm_pending_reply_create "$home" "$state" hibit "settled request")
+    fm_pending_reply_mark_delivered "$state" "$c_closed"
+    rec=$(fm_pending_reply_path "$state" "$c_closed")
+    fm_pending_reply_set "$rec" phase escalated || fail "fixture escalation failed"
+    fm_pending_reply_set "$rec" escalated_epoch 12000 || fail "fixture escalated_epoch failed"
+    printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=hibit pending-reply-id=%s request=settled request\n' \
+      "$c_closed" "$c_closed" > "$state/hibit.status"
+    printf 'done [corr=%s]: late reply\n' "$c_closed" >> "$state/hibit.status"
+    fm_pending_reply_try_resolve "$state" "$c_closed" || fail "settled fixture should resolve"
+    [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+      || fail "settled fixture should have closed its escalation"
+    # Record 2: resolved with no escalation at all.
+    c_never=$(fm_pending_reply_create "$home" "$state" hibit "plain answer")
+    fm_pending_reply_mark_delivered "$state" "$c_never"
+    printf 'done [corr=%s]: answer\n' "$c_never" > "$state/plain.status"
+    fm_pending_reply_try_resolve "$state" "$c_never" "$state/plain.status" \
+      || fail "plain fixture should resolve"
+    rec=$(fm_pending_reply_path "$state" "$c_never")
+    [ -z "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
+      || fail "plain fixture must never have escalated"
+    # Count how many times a tick pass reaches the escalation-close path (the
+    # only remaining place the per-correlation lock is taken for a resolved
+    # record). Runtime override called by the tick.
+    # shellcheck disable=SC2329
+    fm_pending_reply_close_escalation() { printf 'close\n' >> "$log"; }
+    fm_pending_reply_tick "$state" || fail "settled tick failed"
+    [ ! -s "$log" ] \
+      || fail "a settled store must not take the per-correlation lock, close log: $(cat "$log")"
+    # The settled fast path is builtin-only: the same store must still tick with
+    # no external subprocess available at all. PATH is deliberately stripped here.
+    # shellcheck disable=SC2123
+    PATH=/nonexistent
+    fm_pending_reply_tick "$state" || fail "settled tick must need no external subprocess"
+  ) || fail "settled fast-path regression failed"
+  pass "tick fast path: settled records cost no lock, no re-read, no subprocess"
+}
+
+test_tick_still_closes_an_open_escalation_on_a_resolved_record() {
+  # The fast path must not weaken the retry that converges an open escalation:
+  # a resolved record whose close was deferred (escalation_closed_epoch still
+  # empty, e.g. its status destination was unreachable at resolve time) is
+  # retried by the next tick under the per-correlation lock, exactly as before.
+  local home state corr rec open_status open
+  home=$(setup_parent open-close-retry)
+  state="$home/state"
+  # This fixture clock is intentionally reset after the isolated subshell tests.
+  # shellcheck disable=SC2031
+  export FM_PENDING_REPLY_NOW=13000
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "converge close")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" phase escalated || fail "fixture escalation failed"
+  fm_pending_reply_set "$rec" escalated_epoch 12900 || fail "fixture escalated_epoch failed"
+  open_status="$state/hibit.status"
+  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=hibit pending-reply-id=%s request=converge close\n' \
+    "$corr" "$corr" > "$open_status"
+  printf 'done [corr=%s]: late reply\n' "$corr" >> "$open_status"
+  # Defer the close the way a transient failure does: the record's status
+  # destination is unreachable at resolve time, so try_resolve leaves
+  # escalation_closed_epoch empty while still resolving the record.
+  fm_pending_reply_set "$rec" parent_status "" || fail "fixture parent_status failed"
+  fm_pending_reply_try_resolve "$state" "$corr" "$open_status" || fail "record should resolve"
+  [ "$(phase_of "$state" "$corr")" = resolved ] || fail "record should be resolved"
+  [ -z "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+    || fail "fixture close should still be open"
+  # The escalation's status destination is reachable again; the next tick must
+  # retry the close and converge.
+  fm_pending_reply_set "$rec" parent_status "$open_status" || fail "restore parent_status failed"
+  fm_pending_reply_tick "$state" || fail "tick should retry the deferred close"
+  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+    || fail "tick did not close the still-open escalation"
+  [ "$(grep -Fc "resolved [key=pending-reply-$corr]: pending-reply-resolved:" "$open_status")" -eq 1 ] \
+    || fail "tick should append exactly one guarded decision close"
+  open=$(status_open_decisions "$open_status")
+  [ -z "$open" ] || fail "open escalation remained open after the tick: $open"
+  pass "tick still closes an open escalation on a resolved record"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1533,6 +1628,8 @@ test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
+test_tick_settled_records_skip_lock_and_subprocess_work
+test_tick_still_closes_an_open_escalation_on_a_resolved_record
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation

@@ -1407,28 +1407,63 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   return 0
 }
 
+# Read the dispatch fields one tick pass needs from a record in a single
+# builtin pass (no subprocess), assigning each named variable: corr_id,
+# task_id, phase, escalated_epoch, escalation_closed_epoch. A record without a
+# key, or a missing record file, leaves that variable empty - the same result
+# fm_pending_reply_get returns for a missing key. A later occurrence of a key
+# wins, matching fm_pending_reply_get's tail -1. This is the read that keeps a
+# fully settled record (phase resolved, escalation closed or never opened)
+# subprocess-free on every later poll.
+fm_pending_reply_tick_capture() {  # <record-path> <corr-var> <task-var> <phase-var> <escalated-var> <closed-var>
+  local rec=$1 corr_var=$2 task_var=$3 phase_var=$4 escalated_var=$5 closed_var=$6
+  local line value
+  printf -v "$corr_var" ''
+  printf -v "$task_var" ''
+  printf -v "$phase_var" ''
+  printf -v "$escalated_var" ''
+  printf -v "$closed_var" ''
+  [ -f "$rec" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      corr_id=*) value=${line#corr_id=}; printf -v "$corr_var" '%s' "$value" ;;
+      task_id=*) value=${line#task_id=}; printf -v "$task_var" '%s' "$value" ;;
+      phase=*) value=${line#phase=}; printf -v "$phase_var" '%s' "$value" ;;
+      escalated_epoch=*) value=${line#escalated_epoch=}; printf -v "$escalated_var" '%s' "$value" ;;
+      escalation_closed_epoch=*) value=${line#escalation_closed_epoch=}; printf -v "$closed_var" '%s' "$value" ;;
+    esac
+  done < "$rec"
+}
+
 # Scan every pending record for this parent state. Safe to call every poll.
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
+# The resolved-record fast path uses fm_pending_reply_tick_capture above, so a
+# fully settled record costs no subprocess and no lock on any poll.
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
-  local observation observation_task found i
+  local observation observation_task found i escalated closed
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
-    case "$(basename "$rec")" in
+    case "${rec##*/}" in
       .*) continue ;;
     esac
-    corr=$(fm_pending_reply_get "$rec" corr_id)
-    [ -n "$corr" ] || corr=$(basename "$rec")
-    task_id=$(fm_pending_reply_get "$rec" task_id)
-    phase=$(fm_pending_reply_get "$rec" phase)
+    # One builtin pass captures every field this loop dispatches on, replacing
+    # the three per-record fm_pending_reply_get subprocess reads.
+    fm_pending_reply_tick_capture "$rec" corr task_id phase escalated closed
+    [ -n "$corr" ] || corr=${rec##*/}
     if [ "$phase" = resolved ]; then
       # Cheap no-op unless an escalation for this record is still open; this is
       # the retry that makes the close converge after a transient write failure.
-      fm_pending_reply_close_escalation "$state" "$corr" || true
+      # A resolved record whose escalation is already closed (escalation_closed_epoch
+      # set) or was never opened (escalated_epoch empty) needs no lock and no
+      # status rescan on this or any later poll.
+      if [ -n "$escalated" ] && [ -z "$closed" ]; then
+        fm_pending_reply_close_escalation "$state" "$corr" || true
+      fi
       continue
     fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
