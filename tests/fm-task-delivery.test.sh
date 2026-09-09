@@ -433,13 +433,13 @@ test_local_merge_uses_the_recorded_ship_branch() {
   git -C "$proj" config user.email test@example.com
   git -C "$proj" config user.name test
   printf 'base\n' > "$proj/base"
-  git -C "$proj" add base && git -C "$proj" commit -qm base \
-    || fail "could not commit local-merge branch fixture base"
+  git -C "$proj" add base || fail "could not stage local-merge branch fixture base"
+  git -C "$proj" commit -qm base || fail "could not commit local-merge branch fixture base"
   main=$(git -C "$proj" branch --show-current)
   git -C "$proj" checkout -qb "fix/$id" || fail "could not create recorded branch fixture"
   printf 'change\n' > "$proj/change"
-  git -C "$proj" add change && git -C "$proj" commit -qm change \
-    || fail "could not commit recorded branch fixture"
+  git -C "$proj" add change || fail "could not stage recorded branch fixture"
+  git -C "$proj" commit -qm change || fail "could not commit recorded branch fixture"
   fix=$(git -C "$proj" rev-parse HEAD)
   git -C "$proj" checkout -q "$main" || fail "could not restore fixture default branch"
   cat > "$home/data/projects.md" <<EOF
