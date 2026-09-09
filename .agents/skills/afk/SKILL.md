@@ -19,12 +19,14 @@ Hold-for-return is the default and the only reach profile this release records: 
 ## Entering: `/afk [words]`
 
 1. **Translate the captain's words into mandate clauses.**
-   The words are recorded verbatim; the clauses are your reading of them in the grammar `bin/fm-afk-contract.sh` owns (`<action> <object> when <condition> [stop <condition>]`, with the fixed verb list, a named object, and a verifiable condition).
-   Read `bin/fm-afk-contract.sh --help` for the grammar and the refusal rules rather than memorizing them.
-   Write only clauses the words actually support; a wish you cannot ground in a named object and a verifiable condition is not a clause, and the compiler will refuse it with the missing part named.
+   The words are recorded verbatim; the clauses are your reading of them as explicit fields `bin/fm-afk-contract.sh` records: an action from its fixed verb list, the object in the captain's words, and the stated precondition in the captain's words, plus an optional stop.
+   Read `bin/fm-afk-contract.sh --help` for the field flags, the verb list, and the never-set rather than memorizing them.
+   No static parser reads the object or precondition text, by the captain's mandate: you supply the fields, the script records them verbatim and refuses only a missing field, an unlisted verb, or a never-set concept (credentials, logins, legal or financial acceptance, attended prompts), naming the missing part.
+   Whether a precondition holds is the supervision session's judgment at execution time in a later phase.
+   Write only clauses the words actually support; a wish with no object or no stated precondition is not a clause.
    Plain `/afk` with no words has no clauses.
 2. **Propose and read back.**
-   Run `bin/fm-afk-launch.sh propose --words-file <path> [--clause <text>]... [--expected-return <UTC ISO 8601>] [--spend <n>]` (or `--words <text>`), and relay its read-back to the captain in `AGENTS.md` section 9 language: the accepted clauses as a numbered list, every refused clause with the part it is missing, the expected return, the spend cap, and the one-sentence reach announcement.
+   Run `bin/fm-afk-launch.sh propose --words-file <path> [--action <verb> --object <text> --when <text> [--stop <text>]]... [--expected-return <UTC ISO 8601>] [--spend <n>]` (or `--words <text>`), and relay its read-back to the captain in `AGENTS.md` section 9 language: the accepted clauses as a numbered list, every refused clause with the part it is missing, the expected return, the spend cap, and the one-sentence reach announcement.
    A refused clause does not fail the proposal; the captain can restate it or leave it refused.
    Exit 3 only means a clause was refused; the proposal stands.
 3. **Confirm on the captain's go.**

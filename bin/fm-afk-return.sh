@@ -305,7 +305,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
     archive_dir=$(fm_afk_contract_archive_dir "$STATE")
     for superseded in "$archive_dir/$since-superseded-"*.afk-contract; do
       [ -f "$superseded" ] || continue
-      stamp=${superseded##*/$since-superseded-}
+      stamp=${superseded##*/"$since"-superseded-}
       stamp=${stamp%%-*}
       stamp=${stamp%.afk-contract}
       case "$stamp" in ''|*[!0-9]*) superseded_at=unknown ;; *) superseded_at=$(epoch_to_iso "$stamp") ;; esac

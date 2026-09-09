@@ -320,9 +320,9 @@ test_return_brief_composes_from_record_store_and_held_set() {
     && tasks-axi hold fix-windows --reason 'awaiting the captain on the merge' --kind captain --file data/backlog.md >/dev/null) \
     || fail "could not seed the held backlog"
   contract_in "$dir" propose --words 'merge the windows fix when green, then cut a prerelease' \
-    --clause 'merge task fix-windows PR when checks green' \
-    --clause 'prerelease repo no-mistakes when after clause 1' \
-    --clause 'merge everything when regardless' >/dev/null 2>&1 || true
+    --action merge --object 'task fix-windows PR' --when 'checks green' \
+    --action prerelease --object 'repo no-mistakes' --when 'after clause 1' \
+    --action merge --object everything >/dev/null 2>&1 || true
   contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the away-posture record"
   # Two live blockers, one on a task with a captain-verdict outcome and one on a
   # task with a routine outcome. A third task failed outright.
@@ -361,7 +361,7 @@ test_return_brief_composes_from_record_store_and_held_set() {
     || fail "the brief sections are out of order (health $health_line, clauses $clauses_line, waiting $waiting_line, failed $failed_line)"
   assert_contains "$out" '1. merge task fix-windows PR when checks green - recorded, not executed by this release' "the accepted clause was not listed as recorded-only"
   assert_contains "$out" '2. prerelease repo no-mistakes when after clause 1 - recorded, not executed by this release' "the second clause was not listed"
-  assert_contains "$out" '3. "merge everything when regardless" - refused at entry: missing object' "the refused clause was not listed with its missing part"
+  assert_contains "$out" '3. "action=merge object=everything when=(none)" - refused at entry: missing when' "the refused clause was not listed with its missing part"
   assert_contains "$out" 'merge the windows fix when green, then cut a prerelease' "the captain's verbatim words were not carried into the brief"
   assert_contains "$out" 'fix-windows,queued,task' "the held backlog item was not listed under waiting on you"
   assert_contains "$out" 'awaiting the captain on the merge' "the hold reason was not listed"
@@ -397,14 +397,14 @@ test_return_brief_keeps_refresh_history() {
   dir="$TMP_ROOT/brief-refresh"
   install_runner "$dir"
   contract_in "$dir" propose --words 'first mandate' \
-    --clause 'merge task first PR when checks green' >/dev/null 2>&1 || fail "could not propose the first mandate"
+    --action merge --object 'task first PR' --when 'checks green' >/dev/null 2>&1 || fail "could not propose the first mandate"
   contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the first mandate"
   first_epoch=$(contract_in "$dir" field entered_epoch)
   outcome_in "$dir" append --task first --verdict routine \
     --summary 'completed before the mandate refresh' --wake 'signal: first.status' >/dev/null \
     || fail "could not seed the pre-refresh outcome"
   contract_in "$dir" propose --words 'replacement mandate' \
-    --clause 'wake-me task second when at 2026-09-08T08:00Z' >/dev/null 2>&1 || fail "could not propose the replacement mandate"
+    --action wake-me --object 'task second' --when 'at 2026-09-08T08:00Z' >/dev/null 2>&1 || fail "could not propose the replacement mandate"
   contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the replacement mandate"
   [ "$(contract_in "$dir" field entered_epoch)" = "$first_epoch" ] || fail "refresh changed the away-window boundary"
   touch "$dir/home/state/.last-watcher-beat"

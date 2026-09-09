@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-afk-contract.sh - the one owner of the away-posture record: its schema, the
-# mandate-clause grammar and compiler, refusal naming the missing part, the
-# read-back rendering, the entry announcement, and the archive at return.
+# mandate-clause fields and their structural check, refusal naming the missing
+# part, the read-back rendering, the entry announcement, and the archive at return.
 #
 # POSTURE. Away mode is a posture of the one supervision session, recorded in
 # state/.afk-contract and never inferred from chat. While the record exists the
@@ -25,16 +25,18 @@
 #   confirmed_epoch: <seconds>
 #   words: |                       the captain's words, verbatim, never edited,
 #     <line>                       one record line per input line (or `words: -`
-#     ...                          when /afk carried no words)
-#   clauses:                       accepted clauses, compiled from --clause inputs
+#     ...                          when /afk carried no words); the block's
+#                                  final newline is the line shape, so words
+#                                  given without one read back with one
+#   clauses:                       accepted clauses, recorded from the fields given
 #     - id: <input ordinal>
 #       action: <verb>
-#       object: <text>
-#       when: <condition>
-#       stop: <condition> | -
+#       object: <text, verbatim>
+#       when: <precondition text, verbatim>
+#       stop: <text, verbatim> | -
 #   refused:                       clauses missing a part, with the part named
 #     - id: <input ordinal>
-#       text: <the clause as given>
+#       text: <the fields as given>
 #       missing: <part - reason>
 # A proposal (state/.afk-contract.proposed) has the same shape without the
 # confirmed fields; confirmation stamps the first entry time. Archived final
@@ -44,38 +46,41 @@
 # fail-safe. Durable archive-chain identity and same-second session identity are
 # deferred to phase 4 (fm-afk-clauses-execute-r1).
 #
-# CLAUSE GRAMMAR. One clause per --clause argument, on one line:
-#   <action> <object> when <condition> [stop <condition>]
+# CLAUSE FIELDS. A clause is given as explicit fields, one clause per --action:
+#   --action <verb> --object <text> --when <text> [--stop <text>]
 #   action  one of: merge land prerelease install rerun dispatch abort-run answer
 #           discard wake-me. A new verb is a code change here, never a prompt change.
-#   object  a named thing: a task id, "task X's PR", a repo, a machine, a named
-#           run. A class word (anything, everything, whatever, any, all, every,
-#           whichever, whoever) is refused: the object must name a thing.
-#   when    a verifiable condition: "checks green"; "red on <check>" (a red merge
-#           or landing names one check token using letters, digits, dot, dash,
-#           underscore, slash, or colon, never a class or quantifier); "after
-#           clause N" (an earlier accepted clause); a named event such as
-#           "install deadlocks"; or a time "at <UTC ISO 8601>". Unconditional
-#           wording (regardless, always, unconditionally, anyway, no matter what,
-#           whatever happens) is refused because nothing verifies it.
-#   stop    optional: a condition that ends the clause early.
-# The never-set is checked before the grammar: a clause naming credentials,
-# passwords or logins, legal or financial acceptance, or an attended prompt is
-# refused for every actor, because those are physically the captain's.
-# A clause missing any required part is refused with that part named, recorded
+#   object  the thing the clause acts on, in the captain's words, verbatim.
+#   when    the stated precondition, in the captain's words, verbatim.
+#   stop    optional: what ends the clause early, verbatim.
+# NO STATIC NATURAL-LANGUAGE PARSER EXISTS HERE, BY THE CAPTAIN'S MANDATE. The
+# object and precondition text are recorded exactly as given and are never
+# tokenized, classified, or semantically validated by this script; whether a
+# precondition holds is the supervision session's judgment at execution time
+# in a later phase. The structural check asserts only that the action, object,
+# and precondition fields are present, and that the action is a listed verb.
+# THE NEVER-SET is a forbidden-concept safety scan, not understanding: a clause
+# whose fields mention credentials, passwords, logins, legal or financial
+# acceptance, payments, invoices, one-time codes, or an attended prompt is
+# refused for every actor because those are physically the captain's. The scan
+# lowercases the fields, turns punctuation into spaces, and matches each
+# protected concept at token prefixes, so compound and plural spellings such as
+# credential-prompt, credentials/keys, and payments are caught.
+# A clause missing a required field is refused with that field named, recorded
 # under refused:, read back beside the accepted list, and never executes. Ids
-# are the input ordinals across accepted and refused clauses, so "after clause
-# N" always means the N-th clause the captain gave.
+# are the input ordinals across accepted and refused clauses.
 # THIS RELEASE RECORDS CLAUSES AND DOES NOT EXECUTE THEM: the guarded gates learn
 # to cite a clause in a later phase, and the announcement and return brief both
 # say so, so a recorded clause is never mistaken for a promise.
 #
 # Usage:
 #   fm-afk-contract.sh compile [--words-file <path> | --words <text>]
-#       [--clause <text>]... [--expected-return <UTC ISO 8601>] [--spend <n>]
+#       [--action <verb> --object <text> --when <text> [--stop <text>]]...
+#       [--expected-return <UTC ISO 8601>] [--spend <n>]
 #     Compile without writing; print the read-back. Exit 0 with every clause
 #     accepted, 3 when at least one clause was refused (the read-back names the
-#     missing part), 2 on a usage error.
+#     missing part), 2 on a usage error. --words-file keeps the file's bytes
+#     verbatim, trailing newlines included.
 #   fm-afk-contract.sh propose [same options]
 #     Compile, write the proposal, and print the read-back; exits as compile.
 #     A refused clause does not fail the proposal: it is recorded as refused so
@@ -92,6 +97,8 @@
 #   fm-afk-contract.sh field <name> [--proposal]
 #   fm-afk-contract.sh words [--proposal | --path <record>]
 #   fm-afk-contract.sh clauses [--proposal | --path <record>]   TSV: id action object when stop
+#     (a verbatim field containing a tab or newline is stored with those
+#     collapsed to spaces, the one normalization the record's line shape needs)
 #   fm-afk-contract.sh refused [--proposal | --path <record>]   TSV: id text missing
 #   fm-afk-contract.sh archive              move the record aside; print its path
 #   fm-afk-contract.sh archived <entered_epoch>   print that archived record's path
@@ -150,130 +157,48 @@ fm_afk_contract_oneline() {  # <text>
   printf '%s' "$1" | tr '\t\r\n' '   ' | sed 's/^ *//; s/ *$//; s/  */ /g'
 }
 
-# --- clause compiler --------------------------------------------------------
+# --- clause structural check and never-set scan ------------------------------
 
-fm_afk_contract_object_is_named() {  # <action> <object>
-  local action=$1 object
-  object=$(fm_afk_contract_lower "$2")
-  if [[ "$object" =~ (^|[[:space:]])task[[:space:]]+[^[:space:]]+ ]]; then
-    return 0
-  fi
-  if [[ "$object" =~ (^|[[:space:]])repo[[:space:]]+[^[:space:]]+ ]]; then
-    return 0
-  fi
-  if [[ "$object" =~ (^|[[:space:]])machine[[:space:]]+[^[:space:]]+ ]]; then
-    return 0
-  fi
-  if [[ "$object" =~ ^[^[:space:]].*[[:space:]]run([[:space:]].*)?$ ]]; then
-    return 0
-  fi
-  if [ "$action" = install ] && [[ "$object" =~ [[:space:]]on[[:space:]]+[^[:space:]]+ ]]; then
-    return 0
-  fi
+# fm_afk_contract_never_set_hit <text...>: prints the protected concept the
+# text mentions, or nothing. This is the one forbidden-concept scan: lowercase,
+# punctuation to spaces, then each token compared at its prefix against the
+# protected stems, plus the two-word concepts. It understands nothing about the
+# sentence; it only refuses to record authority over the captain's own things.
+fm_afk_contract_never_set_hit() {  # <text...>
+  local normalized word
+  local -a tokens
+  normalized=$(printf '%s ' "$@" | tr '[:upper:]' '[:lower:]' | sed 's/[^[:alnum:]]/ /g; s/  */ /g')
+  case " $normalized " in
+    *" log in "*) printf 'log in'; return 0 ;;
+    *" sign in "*) printf 'sign in'; return 0 ;;
+    *" attended prompt"*) printf 'attended prompt'; return 0 ;;
+  esac
+  read -r -a tokens <<< "$normalized"
+  for word in "${tokens[@]}"; do
+    case "$word" in
+      credential*|password*|passcode*|login*|signin*|2fa*|otp*|mfa*|legal*|financial*|payment*|invoice*)
+        printf '%s' "$word"
+        return 0 ;;
+    esac
+  done
   return 1
 }
 
-fm_afk_contract_red_check_name() {  # <condition>
-  local lower named
-  lower=$(fm_afk_contract_lower "$(fm_afk_contract_oneline "$1")")
-  case "$lower" in
-    "red on "*) named=${lower#red on } ;;
-    "even if "*" is red") named=${lower#even if }; named=${named% is red} ;;
-    *" is red") named=${lower% is red} ;;
-    *) return 1 ;;
-  esac
-  [[ "$named" =~ ^[[:alnum:]._/:-]+$ ]] || return 1
-  case "$named" in all|any|every|the|check|checks) return 1 ;; esac
-  printf '%s\n' "$named"
-}
-
-fm_afk_contract_condition_is_verifiable() {  # <condition>
-  local condition lower timestamp
-  condition=$(fm_afk_contract_oneline "$1")
-  lower=$(fm_afk_contract_lower "$condition")
-  case "$lower" in
-    "checks green"|"checks are green") return 0 ;;
-    "red on "*|"even if "*" is red"|*" is red")
-      fm_afk_contract_red_check_name "$condition" >/dev/null && return 0 ;;
-    "after clause "[0-9]*)
-      case "${lower#after clause }" in *[!0-9]*) ;; *) return 0 ;; esac ;;
-    "at "*)
-      timestamp=${condition#???}
-      fm_afk_contract_validate_iso "$timestamp" && return 0 ;;
-  esac
-  [[ "$lower" =~ ^.+[[:space:]](deadlocks|fails|failed|succeeds|succeeded|completes|completed|lands|landed|ships|shipped|finishes|finished|exits|exited|returns|returned|starts|started|stops|stopped)([[:space:]].+)?$ ]]
-}
-
-# Parse one clause into C_ACTION C_OBJECT C_WHEN C_STOP, then validate against
-# the grammar above. On refusal C_MISSING names the part and the reason.
-# <accepted-ids> is a space-separated list of earlier accepted ordinals, for
-# "after clause N" references.
-fm_afk_contract_clause_compile() {  # <ordinal> <text> <accepted-ids>
-  local ordinal=$1 text accepted=$3 lower normalized object_normalized head rest rest_lower head_lower cond_lower word ref
-  local -a protected_tokens
-  C_ACTION=; C_OBJECT=; C_WHEN=; C_STOP=-; C_MISSING=
-  text=$(fm_afk_contract_oneline "$2")
-  lower=$(fm_afk_contract_lower "$text")
-  # The never-set outranks the grammar: no actor may hold these, in either posture.
-  normalized=$(printf '%s' "$lower" | sed 's/[^[:alnum:]]/ /g; s/  */ /g')
-  case " $normalized " in
-    *" log in "*|*" sign in "*|*" attended prompt "*)
-      C_MISSING="object - the never-set refuses it: credentials, logins, legal or financial acceptance, and attended prompts are the captain's"
-      return 1 ;;
-  esac
-  read -r -a protected_tokens <<< "$normalized"
-  for word in "${protected_tokens[@]}"; do
-    case "$word" in
-      credential*|password*|passcode*|login*|2fa*|otp*|mfa*|legal*|financial*|payment*|invoice*)
-        C_MISSING="object - the never-set refuses it: credentials, logins, legal or financial acceptance, and attended prompts are the captain's ('$word')"
-        return 1 ;;
-    esac
-  done
-  case " $lower " in
-    *" when "*)
-      head_lower=${lower%% when *}
-      head=${text:0:${#head_lower}}
-      rest=${text:$(( ${#head_lower} + 6 ))}
-      ;;
-    *)
-      head=$text
-      rest=
-      ;;
-  esac
-  case "$lower" in
-    "when "*) head=; rest=${text:5} ;;
-  esac
-  C_ACTION=$(fm_afk_contract_lower "${head%% *}")
-  case "$head" in
-    *" "*) C_OBJECT=${head#* } ;;
-    *) C_OBJECT= ;;
-  esac
-  C_OBJECT=$(fm_afk_contract_oneline "$C_OBJECT")
-  rest_lower=$(fm_afk_contract_lower "$rest")
-  case "$rest_lower" in
-    *" stop")
-      cond_lower=${rest_lower% stop}
-      C_WHEN=${rest:0:${#cond_lower}}
-      C_STOP=
-      ;;
-    *" stop "*)
-      cond_lower=${rest_lower%% stop *}
-      C_WHEN=${rest:0:${#cond_lower}}
-      C_STOP=${rest:$(( ${#cond_lower} + 6 ))}
-      ;;
-    *)
-      C_WHEN=$rest
-      C_STOP=-
-      ;;
-  esac
-  case "$rest_lower" in
-    "stop "*) C_WHEN=; C_STOP=${rest:5} ;;
-  esac
-  C_WHEN=$(fm_afk_contract_oneline "$C_WHEN")
-  C_STOP=$(fm_afk_contract_oneline "$C_STOP")
+# Check one clause's fields. Sets C_ACTION C_OBJECT C_WHEN C_STOP; on refusal
+# C_MISSING names the missing field and the reason. The fields are never parsed:
+# presence, the listed verb, and the never-set are the whole check.
+fm_afk_contract_clause_check() {  # <action> <object> <when> <stop>
+  local hit
+  C_ACTION=$(fm_afk_contract_lower "$(fm_afk_contract_oneline "$1")")
+  C_OBJECT=$(fm_afk_contract_oneline "$2")
+  C_WHEN=$(fm_afk_contract_oneline "$3")
+  C_STOP=$(fm_afk_contract_oneline "$4")
   [ -n "$C_STOP" ] || C_STOP=-
-
-  # action
+  C_MISSING=
+  if hit=$(fm_afk_contract_never_set_hit "$C_ACTION" "$C_OBJECT" "$C_WHEN" "$C_STOP"); then
+    C_MISSING="object - the never-set refuses it: credentials, logins, legal or financial acceptance, payments, and attended prompts are the captain's ('$hit')"
+    return 1
+  fi
   if [ -z "$C_ACTION" ]; then
     C_MISSING='action - the clause names no action'
     return 1
@@ -284,79 +209,24 @@ fm_afk_contract_clause_compile() {  # <ordinal> <text> <accepted-ids>
       C_MISSING="action - '$C_ACTION' is not a mandate verb (one of: ${FM_AFK_CONTRACT_VERBS// /, })"
       return 1 ;;
   esac
-  # object
   if [ -z "$C_OBJECT" ]; then
     C_MISSING='object - the clause names no thing to act on'
     return 1
   fi
-  object_normalized=$(printf '%s' "$(fm_afk_contract_lower "$C_OBJECT")" | sed 's/[^[:alnum:]]/ /g; s/  */ /g')
-  for word in anything everything whatever any all every whichever whoever; do
-    case " $object_normalized " in
-      *" $word "*)
-        C_MISSING="object - names a class ('$word'), not a thing: name the task, PR, repo, machine, or run"
-        return 1 ;;
-    esac
-  done
-  if ! fm_afk_contract_object_is_named "$C_ACTION" "$C_OBJECT"; then
-    C_MISSING="object - no named task, PR role, repo, machine, or run: name the thing to act on"
-    return 1
-  fi
-  # when
   if [ -z "$C_WHEN" ]; then
-    C_MISSING='when - no verifiable condition: name the check, event, clause, or time'
+    C_MISSING='when - the clause states no precondition'
     return 1
   fi
-  cond_lower=$(fm_afk_contract_lower "$C_WHEN")
-  for word in regardless always unconditionally anyway "no matter what" "whatever happens" "in any case"; do
-    case " $cond_lower " in
-      *" $word "*)
-        C_MISSING="when - not verifiable ('$word'): name the check, event, clause, or time"
-        return 1 ;;
-    esac
-  done
-  if ! fm_afk_contract_condition_is_verifiable "$C_WHEN"; then
-    case "$C_ACTION:$cond_lower" in
-      merge:"red on "*|land:"red on "*|merge:*" is red"|land:*" is red")
-        C_MISSING="when - the failing check must be one specific named check"
-        return 1 ;;
-    esac
-    C_MISSING="when - no verifiable condition: name the check, event, clause, or UTC time"
-    return 1
-  fi
-  case "$cond_lower" in
-    "after clause "*|*" after clause "*)
-      ref=${cond_lower##*after clause }
-      ref=${ref%% *}
-      case "$ref" in
-        ''|*[!0-9]*)
-          C_MISSING="when - 'after clause' names no clause number"
-          return 1 ;;
-      esac
-      if [ "$ref" -ge "$ordinal" ]; then
-        C_MISSING="when - 'after clause $ref' names this clause or a later one"
-        return 1
-      fi
-      case " $accepted " in
-        *" $ref "*) ;;
-        *)
-          C_MISSING="when - 'after clause $ref' names a refused clause"
-          return 1 ;;
-      esac
-      ;;
-  esac
-  case " $lower " in
-    *" stop "*|"stop "*)
-      if [ "$C_STOP" = - ]; then
-        C_MISSING='stop - "stop" was given with no condition after it'
-        return 1
-      fi
-      if ! fm_afk_contract_condition_is_verifiable "$C_STOP"; then
-        C_MISSING='stop - no verifiable condition: name the check, event, clause, or UTC time'
-        return 1
-      fi
-      ;;
-  esac
   return 0
+}
+
+# The refused list keeps the fields exactly as given, so the captain sees what
+# was refused; an absent field reads as "(none)".
+fm_afk_contract_clause_as_given() {  # <action> <object> <when> <stop>
+  local text
+  text="action=${1:-(none)} object=${2:-(none)} when=${3:-(none)}"
+  [ -z "$4" ] || text="$text stop=$4"
+  fm_afk_contract_oneline "$text"
 }
 
 # --- record writing ---------------------------------------------------------
@@ -366,27 +236,25 @@ fm_afk_contract_validate_iso() {  # <ts>
 }
 
 # Compile every input into a record body on stdout (everything except the
-# confirmed fields). Inputs: WORDS (verbatim), CLAUSES (one per line, the raw
-# arguments joined with newlines), EXPECTED_RETURN, SPEND.
+# confirmed fields). Inputs: WORDS (verbatim), the parallel clause field arrays
+# CLAUSE_ACTIONS CLAUSE_OBJECTS CLAUSE_WHENS CLAUSE_STOPS, EXPECTED_RETURN, SPEND.
 fm_afk_contract_render_body() {  # <entered-iso> <entered-epoch>
-  local entered=$1 entered_epoch=$2 ordinal=0 accepted="" clause
+  local entered=$1 entered_epoch=$2 ordinal=0 i
   local accepted_block="" refused_block=""
-  while IFS= read -r clause || [ -n "$clause" ]; do
-    [ -n "$(fm_afk_contract_oneline "$clause")" ] || continue
+  i=0
+  while [ "$i" -lt "${#CLAUSE_ACTIONS[@]}" ]; do
     ordinal=$((ordinal + 1))
-    if fm_afk_contract_clause_compile "$ordinal" "$clause" "$accepted"; then
-      accepted="$accepted $ordinal"
+    if fm_afk_contract_clause_check "${CLAUSE_ACTIONS[$i]}" "${CLAUSE_OBJECTS[$i]}" "${CLAUSE_WHENS[$i]}" "${CLAUSE_STOPS[$i]}"; then
       accepted_block="$accepted_block$(printf '  - id: %s\n    action: %s\n    object: %s\n    when: %s\n    stop: %s' \
         "$ordinal" "$C_ACTION" "$C_OBJECT" "$C_WHEN" "$C_STOP")
 "
     else
       refused_block="$refused_block$(printf '  - id: %s\n    text: %s\n    missing: %s' \
-        "$ordinal" "$(fm_afk_contract_oneline "$clause")" "$C_MISSING")
+        "$ordinal" "$(fm_afk_contract_clause_as_given "${CLAUSE_ACTIONS[$i]}" "${CLAUSE_OBJECTS[$i]}" "${CLAUSE_WHENS[$i]}" "${CLAUSE_STOPS[$i]}")" "$C_MISSING")
 "
     fi
-  done <<EOF
-$CLAUSES
-EOF
+    i=$((i + 1))
+  done
   printf 'version: %s\n' "$FM_AFK_CONTRACT_VERSION"
   printf 'entered: %s\n' "$entered"
   printf 'entered_epoch: %s\n' "$entered_epoch"
@@ -395,8 +263,13 @@ EOF
   printf 'reach_announced: %s\n' "$FM_AFK_CONTRACT_REACH_ANNOUNCED"
   printf 'spend_max_concurrent_workers: %s\n' "${SPEND:-$FM_AFK_CONTRACT_SPEND_DEFAULT}"
   if [ -n "$WORDS" ]; then
+    # The block stores one record line per words line; a single final newline
+    # is the line shape itself, so words that end in one keep exactly it and
+    # words given without one gain it. Every other byte is kept as given.
+    local words_body=$WORDS
+    case "$words_body" in *$'\n') words_body=${words_body%$'\n'} ;; esac
     printf 'words: |\n'
-    printf '%s\n' "$WORDS" | sed 's/^/  /'
+    printf '%s\n' "$words_body" | sed 's/^/  /'
   else
     printf 'words: -\n'
   fi
@@ -479,10 +352,10 @@ fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
       ''|*[!0-9]*) fm_afk_contract_log "record $path was never confirmed"; return 1 ;;
     esac
   fi
-  grep -q '^clauses:$' "$path" && grep -q '^refused:$' "$path" || {
+  if ! grep -q '^clauses:$' "$path" || ! grep -q '^refused:$' "$path"; then
     fm_afk_contract_log "record $path lacks its clause sections"
     return 1
-  }
+  fi
 }
 
 # --- rendering --------------------------------------------------------------
@@ -549,9 +422,10 @@ fm_afk_contract_render_announcement() {  # <path>
 
 # --- subcommands ------------------------------------------------------------
 
-fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS CLAUSES EXPECTED_RETURN SPEND
-  local words_file=
-  WORDS=; CLAUSES=; EXPECTED_RETURN=-; SPEND=$FM_AFK_CONTRACT_SPEND_DEFAULT
+fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, the CLAUSE_* arrays, EXPECTED_RETURN, SPEND
+  local words_file='' open=-1
+  WORDS=; EXPECTED_RETURN=-; SPEND=$FM_AFK_CONTRACT_SPEND_DEFAULT
+  CLAUSE_ACTIONS=(); CLAUSE_OBJECTS=(); CLAUSE_WHENS=(); CLAUSE_STOPS=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --words-file)
@@ -562,11 +436,19 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS CLAUSES EXPECTED_RETUR
         [ "$#" -gt 1 ] || { fm_afk_contract_log '--words requires text'; return 2; }
         WORDS=$2
         shift 2 ;;
-      --clause)
-        [ "$#" -gt 1 ] && [ -n "$(fm_afk_contract_oneline "$2")" ] \
-          || { fm_afk_contract_log '--clause requires text: <action> <object> when <condition> [stop <condition>]'; return 2; }
-        CLAUSES="$CLAUSES$(fm_afk_contract_oneline "$2")
-"
+      --action)
+        [ "$#" -gt 1 ] || { fm_afk_contract_log '--action requires a verb; it opens a clause for the --object, --when, and --stop that follow it'; return 2; }
+        CLAUSE_ACTIONS+=("$2"); CLAUSE_OBJECTS+=(''); CLAUSE_WHENS+=(''); CLAUSE_STOPS+=('')
+        open=$(( ${#CLAUSE_ACTIONS[@]} - 1 ))
+        shift 2 ;;
+      --object|--when|--stop)
+        [ "$#" -gt 1 ] || { fm_afk_contract_log "$1 requires text"; return 2; }
+        [ "$open" -ge 0 ] || { fm_afk_contract_log "$1 must follow the --action that opens its clause"; return 2; }
+        case "$1" in
+          --object) CLAUSE_OBJECTS[open]=$2 ;;
+          --when) CLAUSE_WHENS[open]=$2 ;;
+          --stop) CLAUSE_STOPS[open]=$2 ;;
+        esac
         shift 2 ;;
       --expected-return)
         [ "$#" -gt 1 ] || { fm_afk_contract_log '--expected-return requires a UTC ISO 8601 time'; return 2; }
@@ -588,7 +470,10 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS CLAUSES EXPECTED_RETUR
   done
   if [ -n "$words_file" ]; then
     [ -f "$words_file" ] || { fm_afk_contract_log "words file not found: $words_file"; return 2; }
-    WORDS=$(cat "$words_file")
+    # Command substitution strips trailing newlines; the sentinel keeps the
+    # file's bytes verbatim, trailing newlines included.
+    WORDS=$(cat "$words_file"; printf x) || return 1
+    WORDS=${WORDS%x}
   fi
   return 0
 }

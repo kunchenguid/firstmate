@@ -59,12 +59,12 @@ unit_propose_confirm_records_the_posture_without_a_daemon() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-propose.XXXXXX")
   mkdir -p "$st/state"
   out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_PRIMARY_HARNESS=pi "$LAUNCH" propose \
-    --words 'merge the windows fix when green' --clause 'merge task fix-windows PR when checks green' \
-    --clause 'merge regardless' 2>&1)
+    --words 'merge the windows fix when green' --action merge --object 'task fix-windows PR' --when 'checks green' \
+    --action merge --object regardless 2>&1)
   rc=$?
   if [ "$rc" -eq 3 ] && [ -f "$st/state/.afk-contract.proposed" ] \
     && printf '%s' "$out" | grep -F '1. merge task fix-windows PR when checks green' >/dev/null \
-    && printf '%s' "$out" | grep -F '2. "merge regardless" - refused: missing object' >/dev/null \
+    && printf '%s' "$out" | grep -F '2. "action=merge object=regardless when=(none)" - refused: missing when' >/dev/null \
     && [ ! -e "$st/state/.afk-contract" ]; then
     pass "propose: the read-back lists accepted and refused clauses and writes only a proposal"
   else
@@ -80,7 +80,7 @@ unit_propose_confirm_records_the_posture_without_a_daemon() {
     fail "confirm: record, announcement, or daemon state wrong (rc=$rc): $out"
   fi
   printf 'schema\tfm-afk-return.v1\nphase\tblocked\n' > "$st/state/.afk-return-catchup"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" propose --clause 'merge task a PR when checks green' >/dev/null 2>&1; then
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" propose --action merge --object 'task a PR' --when 'checks green' >/dev/null 2>&1; then
     fail "propose: accepted a new mandate while the prior return catch-up was pending"
   else
     pass "propose: refuses while the prior return catch-up is pending"
@@ -117,7 +117,7 @@ unit_daemon_entry_requires_confirmation() {
   local st out rc
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-entry-record.XXXXXX")
   mkdir -p "$st/state"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" propose --clause 'merge task a PR when checks green' >/dev/null 2>&1
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" propose --action merge --object 'task a PR' --when 'checks green' >/dev/null 2>&1
   out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ] && [ -f "$st/state/.afk-contract.proposed" ] && [ ! -e "$st/state/.afk-contract" ] \

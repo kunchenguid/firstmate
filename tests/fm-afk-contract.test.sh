@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-afk-contract.test.sh - the away-posture record owner
-# (bin/fm-afk-contract.sh): the mandate-clause grammar and every refusal naming
-# its missing part, the read-back rendering, the entry announcement (hold-for-
+# (bin/fm-afk-contract.sh): the mandate-clause fields, the structural refusal
+# naming the missing part, the never-set scan, the read-back rendering, the entry announcement (hold-for-
 # return only), the propose/confirm lifecycle with verbatim words, the refresh
 # and replace rules, the archive at return, and the read subcommands every
 # consumer uses instead of parsing the file.
@@ -25,113 +25,99 @@ contract() {  # <home> <args...>
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CONTRACT" "$@"
 }
 
-# compile_refusal <clause> <expected-missing-fragment> <label>
+# compile_refusal <expected-missing-fragment> <label> <field flags...>
 compile_refusal() {
-  local home out rc
+  local expected=$1 label=$2 home out rc
+  shift 2
   home=$(make_home "refuse-$RANDOM-$$")
   set +e
-  out=$(contract "$home" compile --clause "$1" 2>&1)
+  out=$(contract "$home" compile "$@" 2>&1)
   rc=$?
   set -e
-  [ "$rc" -eq 3 ] || fail "$3: expected exit 3 for a refused clause, got $rc: $out"
-  assert_contains "$out" "refused: missing $2" "$3: the refusal did not name the missing part"
-  assert_contains "$out" '    (none)' "$3: a refused-only compile should list no accepted clause"
+  [ "$rc" -eq 3 ] || fail "$label: expected exit 3 for a refused clause, got $rc: $out"
+  assert_contains "$out" "refused: missing $expected" "$label: the refusal did not name the missing part"
+  assert_contains "$out" '    (none)' "$label: a refused-only compile should list no accepted clause"
 }
 
-compile_accept() {  # <clause> <expected-readback-line> <label>
-  local home out rc
+# compile_accept <expected-readback-line> <label> <field flags...>
+compile_accept() {
+  local expected=$1 label=$2 home out rc
+  shift 2
   home=$(make_home "accept-$RANDOM-$$")
   set +e
-  out=$(contract "$home" compile --clause "$1" 2>&1)
+  out=$(contract "$home" compile "$@" 2>&1)
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "$3: expected exit 0 for an accepted clause, got $rc: $out"
-  assert_contains "$out" "$2" "$3: the accepted clause was not read back as compiled"
+  [ "$rc" -eq 0 ] || fail "$label: expected exit 0 for an accepted clause, got $rc: $out"
+  assert_contains "$out" "$expected" "$label: the accepted clause was not read back as given"
 }
 
-test_grammar_refuses_each_missing_part_by_name() {
-  compile_refusal 'fix whatever breaks' "action - 'fix' is not a mandate verb" 'unknown verb'
-  compile_refusal 'merge' 'object - the clause names no thing to act on' 'no object'
-  compile_refusal 'merge when checks green' 'object - the clause names no thing to act on' 'object absent before when'
-  compile_refusal 'discard anything stuck when it fails twice' "object - names a class ('anything')" 'class object'
-  compile_refusal 'merge task x PR' 'when - no verifiable condition' 'no when'
-  compile_refusal 'merge task x PR when' 'when - no verifiable condition' 'empty when'
-  compile_refusal 'merge task x PR when regardless of checks' "when - not verifiable ('regardless')" 'unconditional when'
-  compile_refusal 'merge task x PR when red' 'when - no verifiable condition' 'red merge without a named check'
-  compile_refusal 'land task x branch when checks fail' 'when - no verifiable condition' 'red landing without a named check'
-  compile_refusal 'merge task x PR when looks red enough' 'when - no verifiable condition' 'red wording outside the approved forms'
-  compile_refusal 'merge task x PR when red on all checks' 'when - the failing check must be one specific named check' 'red merge names a check class'
-  compile_refusal 'merge task x PR when any check is red' 'when - the failing check must be one specific named check' 'red merge names any check'
-  compile_refusal 'merge task x PR when checks is red' 'when - the failing check must be one specific named check' 'red merge names bare checks'
-  compile_refusal 'rerun task z when after clause 7' "when - 'after clause 7' names this clause or a later one" 'forward clause reference'
-  compile_refusal 'merge task x PR when checks green stop' 'stop - "stop" was given with no condition after it' 'empty stop'
-  compile_refusal 'merge PR when checks green' 'object - no named task, PR role, repo, machine, or run' 'unnamed PR'
-  compile_refusal 'merge task x PR when looks okay' 'when - no verifiable condition' 'unverifiable condition'
-  compile_refusal 'answer the credential prompt on task q when asked' 'object - the never-set refuses it' 'never-set: credentials'
-  compile_refusal 'answer the legal acceptance on task q when asked' 'object - the never-set refuses it' 'never-set: legal'
-  compile_refusal 'answer the attended prompt on task q when asked' 'object - the never-set refuses it' 'never-set: attended prompt'
-  compile_refusal 'answer task q credential-prompt when prompt starts' 'object - the never-set refuses it' 'never-set: credential compound'
-  compile_refusal 'answer task q credentials/keys when prompt starts' 'object - the never-set refuses it' 'never-set: credential punctuation'
-  compile_refusal 'answer task q attended-prompt when prompt starts' 'object - the never-set refuses it' 'never-set: attended compound'
-  compile_refusal 'answer task q payments when prompt starts' 'object - the never-set refuses it' 'never-set: payment prefix'
-  compile_refusal 'discard task anything, when checks green' "object - names a class ('anything')" 'class object with punctuation'
-  pass "every malformed clause is refused with its missing part named"
+# The structural check refuses only a missing field, an unlisted verb, or a
+# never-set concept, and names the missing part every time.
+test_fields_refuse_each_missing_part_by_name() {
+  compile_refusal "action - 'fix' is not a mandate verb" 'unknown verb' --action fix --object 'whatever breaks' --when 'it breaks'
+  compile_refusal 'action - the clause names no action' 'empty verb' --action '' --object 'task x PR' --when 'checks green'
+  compile_refusal 'object - the clause names no thing to act on' 'no object' --action merge --when 'checks green'
+  compile_refusal 'object - the clause names no thing to act on' 'blank object' --action merge --object '   ' --when 'checks green'
+  compile_refusal 'when - the clause states no precondition' 'no when' --action merge --object 'task x PR'
+  compile_refusal 'when - the clause states no precondition' 'blank when' --action merge --object 'task x PR' --when ' '
+  compile_refusal 'object - the never-set refuses it' 'never-set: credentials' --action answer --object 'the credential prompt on task q' --when asked
+  compile_refusal 'object - the never-set refuses it' 'never-set: legal' --action answer --object 'the legal acceptance on task q' --when asked
+  compile_refusal 'object - the never-set refuses it' 'never-set: attended prompt' --action answer --object 'the attended prompt on task q' --when asked
+  compile_refusal 'object - the never-set refuses it' 'never-set: credential compound' --action answer --object 'task q credential-prompt' --when 'prompt starts'
+  compile_refusal 'object - the never-set refuses it' 'never-set: credential punctuation' --action answer --object 'task q credentials/keys' --when 'prompt starts'
+  compile_refusal 'object - the never-set refuses it' 'never-set: attended compound' --action answer --object 'task q attended-prompt' --when 'prompt starts'
+  compile_refusal 'object - the never-set refuses it' 'never-set: payment prefix' --action answer --object 'task q payments' --when 'prompt starts'
+  compile_refusal 'object - the never-set refuses it' 'never-set: in the precondition' --action merge --object 'task x PR' --when 'after the Login/2FA prompt clears'
+  compile_refusal 'object - the never-set refuses it' 'never-set: in the stop' --action merge --object 'task x PR' --when 'checks green' --stop 'if a PASSWORD is asked'
+  pass "every malformed clause is refused with its missing part named, and the never-set holds across punctuation and compounds"
 }
 
-test_grammar_accepts_the_legal_shapes() {
-  compile_accept 'merge task nm-windows-fix-r1 PR when checks green' \
-    '1. merge task nm-windows-fix-r1 PR when checks green' 'green merge'
-  compile_accept "merge task x's PR when checks green" \
-    "1. merge task x's PR when checks green" 'possessive PR role'
-  compile_accept 'Merge task y PR when red on nm-ci-windows' \
-    '1. merge task y PR when red on nm-ci-windows' 'red merge with the failing check named'
-  compile_accept 'merge task y PR when nm-ci-windows is red' \
-    '1. merge task y PR when nm-ci-windows is red' 'named check is red'
-  compile_accept 'merge task y PR when even if nm-ci-windows is red stop the captain returns' \
-    '1. merge task y PR when even if nm-ci-windows is red stop the captain returns' 'red merge with a stop condition'
-  compile_accept 'abort-run no-mistakes run for task nm-ci-windows-git-shard-split-r1 when install deadlocks' \
-    '1. abort-run no-mistakes run for task nm-ci-windows-git-shard-split-r1 when install deadlocks' 'named event'
-  compile_accept 'wake-me task fix-windows when at 2026-09-08T08:00Z' \
-    '1. wake-me task fix-windows when at 2026-09-08T08:00Z' 'time condition'
-  compile_accept 'discard the worktree of task w when its rerun fails twice' \
-    '1. discard the worktree of task w when its rerun fails twice' 'named discard'
-  pass "the legal clause shapes compile and read back as given"
+# No parser reads the object or precondition: any text the captain gives is
+# recorded verbatim, including wording a grammar would have judged.
+test_fields_record_the_captain_wording_verbatim() {
+  compile_accept '1. merge task nm-windows-fix-r1 PR when checks green' 'green merge' \
+    --action merge --object 'task nm-windows-fix-r1 PR' --when 'checks green'
+  compile_accept "1. merge task x's PR when checks green" 'possessive PR role' \
+    --action merge --object "task x's PR" --when 'checks green'
+  compile_accept '1. merge task y PR when red on nm-ci-windows' 'red merge with the failing check named' \
+    --action Merge --object 'task y PR' --when 'red on nm-ci-windows'
+  compile_accept '1. merge task y PR when even if nm-ci-windows is red stop the captain returns' 'stop field' \
+    --action merge --object 'task y PR' --when 'even if nm-ci-windows is red' --stop 'the captain returns'
+  compile_accept '1. abort-run no-mistakes run for task nm-ci-windows-git-shard-split-r1 when install deadlocks' 'named event' \
+    --action abort-run --object 'no-mistakes run for task nm-ci-windows-git-shard-split-r1' --when 'install deadlocks'
+  compile_accept '1. wake-me task fix-windows when at 2026-09-08T08:00Z' 'time precondition' \
+    --action wake-me --object 'task fix-windows' --when 'at 2026-09-08T08:00Z'
+  compile_accept '1. discard the worktree of task w when its rerun fails twice' 'named discard' \
+    --action discard --object 'the worktree of task w' --when 'its rerun fails twice'
+  compile_accept '1. merge task x PR when looks red enough, honestly' 'wording is recorded, never judged' \
+    --action merge --object 'task x PR' --when 'looks red enough, honestly'
+  compile_accept '1. dispatch these queued items when the windows lane is green' 'dispatch' \
+    --action dispatch --object 'these queued items' --when 'the windows lane is green'
+  pass "clause fields are recorded verbatim, and no static parser judges the wording"
 }
 
-test_grammar_accepts_dependent_legal_shapes() {
-  local home out
-  home=$(make_home dependent-legal)
-  out=$(contract "$home" compile \
-    --clause "merge task x's PR when checks green" \
-    --clause 'prerelease repo no-mistakes when after clause 1' \
-    --clause 'install the prerelease on mini and macbook when after clause 2' \
-    --clause 'rerun task y when after clause 3' 2>&1) \
-    || fail "dependent legal clauses were refused: $out"
-  assert_contains "$out" '2. prerelease repo no-mistakes when after clause 1' 'repo clause'
-  assert_contains "$out" '3. install the prerelease on mini and macbook when after clause 2' 'machine clause'
-  assert_contains "$out" '4. rerun task y when after clause 3' 'rerun clause'
-  pass "dependent repo, machine, and task clauses compile"
-}
-
-test_clause_ids_are_input_ordinals_and_references_bind_to_accepted_clauses() {
+test_clause_ids_are_input_ordinals_across_accepted_and_refused() {
   local home out rc
   home=$(make_home ordinals)
   set +e
   out=$(contract "$home" compile \
-    --clause 'merge task a PR when checks green' \
-    --clause 'merge regardless' \
-    --clause 'prerelease repo r when after clause 1' \
-    --clause 'install the prerelease on mini when after clause 2' \
-    --clause 'rerun task t when after clause 3' 2>&1)
+    --action merge --object 'task a PR' --when 'checks green' \
+    --action merge --object regardless \
+    --action prerelease --object 'repo r' --when 'after clause 1' \
+    --action install --object 'the prerelease on mini' --when 'after clause 3' \
+    --action rerun --object 'task t' --when 'after clause 4' 2>&1)
   rc=$?
   set -e
   [ "$rc" -eq 3 ] || fail "a mixed compile should exit 3 (rc=$rc): $out"
   assert_contains "$out" '1. merge task a PR when checks green' 'clause 1 accepted'
-  assert_contains "$out" '2. "merge regardless" - refused: missing object - no named task, PR role, repo, machine, or run' 'clause 2 refused for its unnamed object'
-  assert_contains "$out" '3. prerelease repo r when after clause 1' 'clause 3 accepted against clause 1'
-  assert_contains "$out" "4. \"install the prerelease on mini when after clause 2\" - refused: missing when - 'after clause 2' names a refused clause" 'clause 4 refused for referencing a refused clause'
-  assert_contains "$out" '5. rerun task t when after clause 3' 'clause 5 accepted against clause 3, keeping its input ordinal'
-  pass "clause ids are input ordinals, and after-clause references bind only to earlier accepted clauses"
+  assert_contains "$out" '2. "action=merge object=regardless when=(none)" - refused: missing when - the clause states no precondition' 'clause 2 refused for its missing precondition'
+  assert_contains "$out" '3. prerelease repo r when after clause 1' 'clause 3 keeps its input ordinal'
+  assert_contains "$out" '4. install the prerelease on mini when after clause 3' 'clause 4 keeps its input ordinal'
+  assert_contains "$out" '5. rerun task t when after clause 4' 'clause 5 keeps its input ordinal'
+  [ "$(contract "$home" compile --action merge --object 'task a PR' --when 'checks green' --action merge --object regardless --action rerun --object 'task t' --when 'after clause 1' 2>/dev/null | grep -c '^    [0-9]')" -eq 3 ] \
+    || fail "the read-back did not list every clause once"
+  pass "clause ids are input ordinals across accepted and refused clauses"
 }
 
 test_readback_renders_words_verbatim_and_both_lists() {
@@ -140,8 +126,8 @@ test_readback_renders_words_verbatim_and_both_lists() {
   words="$home/words.txt"
   printf 'drive the windows fix to green and merge it,\n  cut a prerelease; then re-run "nm-ci-windows"\n\tif the install deadlocks abort the competing pipeline\n' > "$words"
   out=$(contract "$home" propose --words-file "$words" --expected-return 2026-09-08T08:00Z --spend 3 \
-    --clause 'merge task nm-windows-fix-r1 PR when checks green' \
-    --clause 'merge regardless of checks' 2>&1) || true
+    --action merge --object 'task nm-windows-fix-r1 PR' --when 'checks green' \
+    --action merge --object 'regardless of checks' 2>&1) || true
   assert_contains "$out" 'Away posture read-back (proposed, not yet confirmed):' 'read-back title'
   assert_contains "$out" 'expected return: 2026-09-08T08:00Z' 'expected return rendered'
   assert_contains "$out" 'spend cap: 3 concurrent workers' 'spend cap rendered'
@@ -152,20 +138,20 @@ test_readback_renders_words_verbatim_and_both_lists() {
   assert_contains "$out" '  accepted clauses:' 'accepted list header'
   assert_contains "$out" '    1. merge task nm-windows-fix-r1 PR when checks green' 'accepted clause'
   assert_contains "$out" '  refused clauses:' 'refused list header'
-  assert_contains "$out" '    2. "merge regardless of checks" - refused: missing object' 'refused clause'
+  assert_contains "$out" '    2. "action=merge object=regardless of checks when=(none)" - refused: missing when' 'refused clause'
   assert_contains "$out" 'every clause expires at return' 'the never-set reminder'
   assert_contains "$out" 'recorded clauses are held for the return brief and are not executed by this release' 'the not-executed notice'
   assert_contains "$out" 'Say go to confirm' 'confirmation prompt'
-  # The verbatim words survive the record byte for byte.
-  [ "$(contract "$home" words --proposal)" = "$(cat "$words")" ] || fail "the proposal did not keep the words verbatim"
+  # The verbatim words survive the record byte for byte, trailing newline included.
+  [ "$(contract "$home" words --proposal; printf x)" = "$(cat "$words"; printf x)" ] || fail "the proposal did not keep the words verbatim"
   pass "the read-back renders the words verbatim beside the accepted and refused lists"
 }
 
 test_propose_confirm_writes_the_record_and_announces_hold_for_return() {
   local home out record proposed_epoch
   home=$(make_home lifecycle)
-  contract "$home" propose --words 'merge it when green' --clause 'merge task a PR when checks green' \
-    --clause 'merge everything when regardless' >/dev/null 2>&1 || true
+  contract "$home" propose --words 'merge it when green' --action merge --object 'task a PR' --when 'checks green' \
+    --action merge --object everything >/dev/null 2>&1 || true
   [ -f "$home/state/.afk-contract.proposed" ] || fail "propose did not write the proposal"
   proposed_epoch=$(contract "$home" field entered_epoch --proposal)
   contract "$home" present && fail "a proposal alone must not count as the posture"
@@ -187,7 +173,7 @@ test_propose_confirm_writes_the_record_and_announces_hold_for_return() {
   [ "$(contract "$home" field entered_epoch)" -gt "$proposed_epoch" ] || fail "entry time was not stamped at confirmation"
   [ "$(contract "$home" words)" = 'merge it when green' ] || fail "words did not round-trip"
   [ "$(contract "$home" clauses)" = "$(printf '1\tmerge\ttask a PR\tchecks green\t-')" ] || fail "clauses TSV is wrong: $(contract "$home" clauses)"
-  [ "$(contract "$home" refused | cut -f1,2)" = "$(printf '2\tmerge everything when regardless')" ] || fail "refused TSV is wrong: $(contract "$home" refused)"
+  [ "$(contract "$home" refused | cut -f1,2)" = "$(printf '2\taction=merge object=everything when=(none)')" ] || fail "refused TSV is wrong: $(contract "$home" refused)"
   pass "propose then confirm writes the record, announces hold-for-return only, and every read subcommand reflects it"
 }
 
@@ -220,7 +206,7 @@ test_confirming_a_new_proposal_archives_the_standing_record() {
   contract "$home" confirm >/dev/null 2>&1 || fail "first confirm failed"
   first_epoch=$(contract "$home" field entered_epoch)
   sleep 1
-  contract "$home" propose --clause 'merge task a PR when checks green' >/dev/null 2>&1 || fail "second propose failed"
+  contract "$home" propose --action merge --object 'task a PR' --when 'checks green' >/dev/null 2>&1 || fail "second propose failed"
   contract "$home" confirm >/dev/null 2>&1 || fail "second confirm failed"
   archived=$(find "$home/state/afk-contracts" -name "$first_epoch-superseded-*.afk-contract" -print -quit)
   [ -f "$archived" ] || fail "the superseded record was not archived"
@@ -278,11 +264,11 @@ test_inputs_are_validated() {
   set -e
   [ "$rc" -eq 2 ] || fail "a zero spend cap should be a usage error (rc=$rc): $out"
   set +e
-  out=$(contract "$home" propose --clause '   ' 2>&1)
+  out=$(contract "$home" propose --object 'task x PR' 2>&1)
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "an empty clause should be a usage error, not a silent skip (rc=$rc): $out"
-  assert_contains "$out" '--clause requires text' 'empty clause refusal wording'
+  assert_contains "$out" '--object must follow the --action that opens its clause' 'a field with no open clause is a usage error'
   [ ! -f "$home/state/.afk-contract.proposed" ] || fail "an invalid proposal was written"
   set +e
   out=$(contract "$home" announce 2>&1)
@@ -299,10 +285,9 @@ test_inputs_are_validated() {
   pass "malformed inputs and foreign record versions are refused rather than guessed"
 }
 
-test_grammar_refuses_each_missing_part_by_name
-test_grammar_accepts_the_legal_shapes
-test_grammar_accepts_dependent_legal_shapes
-test_clause_ids_are_input_ordinals_and_references_bind_to_accepted_clauses
+test_fields_refuse_each_missing_part_by_name
+test_fields_record_the_captain_wording_verbatim
+test_clause_ids_are_input_ordinals_across_accepted_and_refused
 test_readback_renders_words_verbatim_and_both_lists
 test_propose_confirm_writes_the_record_and_announces_hold_for_return
 test_confirm_requires_readback_and_refresh_is_a_no_op
