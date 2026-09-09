@@ -112,6 +112,7 @@ init_changed_fixture_repo() {
     fm-procevent-quota.test.sh \
     fm-quota-choose.test.sh \
     fm-pi-watch-extension.test.sh \
+    fm-pi-windows-shell-invocation.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
     fm-backend-cmux.test.sh \
@@ -152,12 +153,77 @@ init_changed_fixture_repo() {
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions/lib"
+  : >"$repo/.pi/extensions/lib/fm-operational-input.ts"
   : >"$repo/docs/fm-test-isolation-proof.md"
   : >"$repo/CONTRIBUTING.md"
   : >"$repo/src/unmapped.ts"
   git -C "$repo" init -q
   git -C "$repo" add .
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
+}
+
+# Build a repository with a primary checkout and one linked worktree, each
+# holding a runnable copy of the runner and a probe suite that records the fact
+# that it ran. Untracked copies are enough: the runner resolves its root from
+# its own path, and the probe is named explicitly.
+init_primary_and_linked_worktree() {
+  local repo=$1 linked=$2 tree
+  fm_git_init_commit "$repo"
+  git -C "$repo" worktree add --quiet -b linked-probe "$linked"
+  for tree in "$repo" "$linked"; do
+    mkdir -p "$tree/bin" "$tree/tests"
+    cp "$RUNNER" "$tree/bin/fm-test-run.sh"
+    chmod +x "$tree/bin/fm-test-run.sh"
+    cat >"$tree/tests/probe.test.sh" <<PROBE
+#!/usr/bin/env bash
+echo "ok - probe suite"
+: >"$tree/ran"
+PROBE
+    chmod +x "$tree/tests/probe.test.sh"
+  done
+}
+
+# A task worker's isolated placement is checked once, when the task starts.
+# Nothing re-checks it, so a worker that later changes directory into the
+# repository's primary checkout would run this branch-switching suite in the one
+# checkout every linked worktree resolves against. The runner refuses that.
+test_task_marker_refuses_the_primary_checkout() {
+  local tmp repo linked out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-primary.XXXXXX")
+  repo="$tmp/repo"
+  linked="$tmp/linked"
+  init_primary_and_linked_worktree "$repo" "$linked"
+
+  # Marker set, primary checkout: refuse, name the primary, and run nothing.
+  out=$(FM_TASK_ID=probe-task "$repo/bin/fm-test-run.sh" tests/probe.test.sh 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "the runner must refuse the primary checkout under a task marker"; }
+  assert_contains "$out" "primary checkout" "refusal did not name the primary checkout"
+  assert_contains "$out" "FM_TASK_ID=probe-task" "refusal did not name the task marker"
+  assert_contains "$out" "task worktree" "refusal did not point at the task worktree"
+  assert_not_contains "$out" "FM_TEST_BEGIN" "the refusal must happen before any suite runs"
+  assert_absent "$repo/ran" "the refused run still executed a suite"
+
+  # Marker set, linked worktree: the assigned placement, so the suite runs.
+  FM_TASK_ID=probe-task "$linked/bin/fm-test-run.sh" tests/probe.test.sh >/dev/null 2>&1 \
+    || { rm -rf "$tmp"; fail "the runner must still run in a linked task worktree"; }
+  assert_present "$linked/ran" "the linked-worktree run did not execute its suite"
+
+  # No marker: a person in their own checkout is unaffected.
+  "$repo/bin/fm-test-run.sh" tests/probe.test.sh >/dev/null 2>&1 \
+    || { rm -rf "$tmp"; fail "an unmarked run in the primary checkout must be unchanged"; }
+  assert_present "$repo/ran" "the unmarked run did not execute its suite"
+
+  # Inspection executes nothing, so it stays available even in the primary.
+  rm -f "$repo/ran"
+  out=$(FM_TASK_ID=probe-task "$repo/bin/fm-test-run.sh" --list tests/probe.test.sh 2>&1) \
+    || { rm -rf "$tmp"; fail "--list must remain available under a task marker"; }
+  [ "$out" = "tests/probe.test.sh" ] \
+    || { rm -rf "$tmp"; fail "--list under a task marker printed: $out"; }
+  assert_absent "$repo/ran" "--list must not execute a suite"
+
+  rm -rf "$tmp"
+  pass "a task marker refuses execution in the primary checkout and leaves worktrees and inspection alone"
 }
 
 test_changed_runner_surfaces_select_their_family() {
@@ -206,6 +272,19 @@ test_changed_runner_surfaces_select_their_family() {
   pass "runner and its documentation surfaces select their curated family, not just their contract owners"
 }
 
+test_shell_line_ending_policy_selects_runner_contract() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-attributes.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  printf '*.sh text eol=lf\n' >"$repo/.gitattributes"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-test-run.test.sh" \
+    "shell line-ending policy selects the runner contract"
+  rm -rf "$tmp"
+  pass "shell line-ending policy selects runner coverage"
+}
+
 test_changed_dependency_selection_and_unmapped_failure() {
   local tmp repo listed rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
@@ -242,8 +321,17 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-ask-user-authority.test.sh" "skill source selects pure contract coverage"
   assert_contains "$listed" "tests/fm-cd-pretool-check.test.sh" "Claude and Pi source selects hook coverage"
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
+  assert_contains "$listed" "tests/fm-pi-windows-shell-invocation.test.sh" \
+    "turn-end extension selects native-Windows shell coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  printf '\n' >>"$repo/.pi/extensions/lib/fm-operational-input.ts"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pi-windows-shell-invocation.test.sh" \
+    "operational-input extension selects native-Windows shell coverage"
+  git -C "$repo" add .pi/extensions/lib/fm-operational-input.ts
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm operational-input-source-change
 
   printf '\n' >>"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
@@ -304,8 +392,12 @@ test_changed_dependency_selection_and_unmapped_failure() {
   [ "$rc" -eq 2 ] || fail "unmapped changed source must fail with exit 2, got $rc"
   grep -Fq 'no changed-test mapping for source path: src/unmapped.ts' "$tmp/err" \
     || fail "unmapped changed source failure is not actionable: $(cat "$tmp/err")"
+
+  rm -f "$repo/src/unmapped.ts"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  [ -z "$listed" ] || fail "a retired unmapped source without consumers selected tests: $listed"
   rm -rf "$tmp"
-  pass "changed selection covers dependents and fails closed for unmapped source"
+  pass "changed selection covers dependents, fails closed for live unmapped source, and accepts retired unconsumed source"
 }
 
 # A direct test reference is per-script evidence. Widening it to the referencing
@@ -420,6 +512,50 @@ SH
 
   rm -rf "$tmp"
   pass "changed defaults to bounded automatic scheduling with serial override"
+}
+
+test_windows_posix_mode_emulation_does_not_fail_parallel_runs() {
+  local tmp repo fakebin real_stat out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-windows-modes.XXXXXX")
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  real_stat=$(command -v stat)
+  init_changed_fixture_repo "$repo"
+  mkdir -p "$fakebin"
+  cat >"$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FAKE_UNAME:-MINGW64_NT-10.0}"
+SH
+  cat >"$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -c ] && [ "${2:-}" = %a ]; then
+  printf '%s\n' 755
+  exit 0
+fi
+exec "$REAL_STAT" "$@"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/stat"
+  set +e
+  out=$(cd "$repo" && PATH="$fakebin:$PATH" REAL_STAT="$real_stat" \
+    bin/fm-test-run.sh --jobs 2 \
+      tests/fm-cd-pretool-check.test.sh tests/fm-ask-user-authority.test.sh 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "native-Windows POSIX-mode emulation"
+  assert_contains "$out" "FM_TEST_SUMMARY total=2 failed=0" \
+    "Windows mode emulation did not complete both parallel scripts"
+
+  set +e
+  out=$(cd "$repo" && PATH="$fakebin:$PATH" REAL_STAT="$real_stat" FAKE_UNAME=CYGWIN_NT-10.0 \
+    bin/fm-test-run.sh --jobs 2 \
+      tests/fm-cd-pretool-check.test.sh tests/fm-ask-user-authority.test.sh 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "Cygwin POSIX-mode enforcement"
+  assert_contains "$out" "isolation failure: worker root mode is 755, expected 0700" \
+    "Cygwin mode enforcement did not reject a non-0700 worker root"
+  rm -rf "$tmp"
+  pass "Windows emulation exempts only synthetic POSIX modes"
 }
 
 # A local verification round names the subjects it cares about. Exercise begin/end
@@ -712,6 +848,80 @@ assert doc["summary"]["failed"] == 0
 ' "$json" || { rm -rf "$tmp"; fail "JSON gate_skip accounting is wrong"; }
   rm -rf "$tmp"
   pass "gate-skip accounting is honest and non-failing"
+}
+
+test_gate_skip_reason_is_recorded() {
+  local tmp skip_f out json
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-skipreason.XXXXXX")
+  skip_f="$tmp/skip.test.sh"
+  out="$tmp/out.txt"
+  json="$tmp/timing.json"
+  cat >"$skip_f" <<'SH'
+#!/usr/bin/env bash
+echo "skip: live: fmnosuchharness absent"
+exit 0
+SH
+  chmod +x "$skip_f"
+  "$RUNNER" --json "$json" "$skip_f" >"$out" 2>"$tmp/err.txt" \
+    || fail "a capability skip must still exit 0 from the runner"
+  grep -q 'live: fmnosuchharness absent' "$tmp/err.txt" \
+    || fail "the runner log must name what this host could not exercise: $(cat "$tmp/err.txt")"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+record = doc["scripts"][0]
+assert record["gate_skip"] is True, record
+assert record["gate_skip_reason"] == "live: fmnosuchharness absent", record
+' "$json" || { rm -rf "$tmp"; fail "the timing artifact must carry the skip reason"; }
+  rm -rf "$tmp"
+  pass "a gate skip records why it skipped"
+}
+
+test_a_run_that_ran_records_no_skip_reason() {
+  local tmp ran_f json
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-ranreason.XXXXXX")
+  ran_f="$tmp/ran.test.sh"
+  json="$tmp/timing.json"
+  cat >"$ran_f" <<'SH'
+#!/usr/bin/env bash
+echo "ok - ran"
+exit 0
+SH
+  chmod +x "$ran_f"
+  "$RUNNER" --json "$json" "$ran_f" >"$tmp/out.txt" 2>&1 \
+    || fail "a passing fixture must exit 0 from the runner"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+record = doc["scripts"][0]
+assert record["gate_skip"] is False, record
+assert record["gate_skip_reason"] == "", record
+' "$json" || { rm -rf "$tmp"; fail "a script that ran must carry an empty skip reason"; }
+  rm -rf "$tmp"
+  pass "a script that actually ran records no skip reason"
+}
+
+test_live_guards_expect_a_capability_skip_class() {
+  local tmp out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-liveclass.XXXXXX")
+  out="$tmp/out.txt"
+  # FM_LIVE=0 makes every live guard refuse without touching a harness, so this
+  # exercises the real family through the real runner in bounded time.
+  FM_LIVE=0 "$RUNNER" --json "$tmp/timing.json" \
+    tests/fm-composer-matrix-live-e2e.test.sh >"$out" 2>"$tmp/err.txt" \
+    || fail "a disabled live guard must not fail the runner: $(cat "$tmp/err.txt")"
+  grep -q 'expected_gate_skip=live-capability' "$out" \
+    || fail "the live-harness family must expect a capability skip: $(grep FM_TEST_BEGIN "$out")"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+record = doc["scripts"][0]
+assert record["expected_gate_skip"] == "live-capability", record
+assert record["gate_skip"] is True, record
+assert record["gate_skip_reason"].startswith("live: "), record
+' "$tmp/timing.json" || { rm -rf "$tmp"; fail "the live guard record is wrong"; }
+  rm -rf "$tmp"
+  pass "live guards are recorded as a capability class, not a bare env opt-in"
 }
 
 test_fail_on_gate_skip_token() {
@@ -1374,16 +1584,22 @@ test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
 test_changed_file_selection_is_conservative
+test_task_marker_refuses_the_primary_checkout
 test_changed_runner_surfaces_select_their_family
+test_shell_line_ending_policy_selects_runner_contract
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family
 test_changed_uses_bounded_automatic_concurrency
+test_windows_posix_mode_emulation_does_not_fail_parallel_runs
 test_script_list_uses_bounded_automatic_concurrency
 test_family_proofs_run_in_separate_concurrent_phases
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
 test_gate_skip_accounting
+test_gate_skip_reason_is_recorded
+test_a_run_that_ran_records_no_skip_reason
+test_live_guards_expect_a_capability_skip_class
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard

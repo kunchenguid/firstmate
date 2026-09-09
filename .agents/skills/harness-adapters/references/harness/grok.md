@@ -11,7 +11,7 @@ Launch shape: `grok --always-approve "$(cat <brief>)"`.
 | Busy state | The last rendered-tail fallback, isolated to Grok pending a semantic source: ASCII mid-turn `Ctrl+c:cancel`, absent from idle bar `Shift+Tab:mode │ Ctrl+.:shortcuts`, never the locale-fragile braille spinner. |
 | Exit | `/exit` prints `Resume this session with: grok --resume <session-id>`; fallback is `Ctrl+Q` twice within 1000ms, `Ctrl+D` quits in VS Code-family terminals, and `Ctrl+C` interrupts. |
 | Interrupt | Single `Ctrl+C`; Escape only focuses scrollback. |
-| Skill | `/<skill>`, for example `/no-mistakes`, with end-to-end user-skill discovery, invocation, and real `no-mistakes axi run` evidence; the popup may consume Enter and fill an argument placeholder, requiring a real second Enter. |
+| Skill | `/<skill>`, for example `/firstmate-coding-guidelines`, with end-to-end user-skill discovery and invocation evidence from the now-retired local no-mistakes path used only as an invocation specimen; the popup may consume Enter and fill an argument placeholder, requiring a real second Enter. |
 | Autonomy | `--always-approve`, footer `· always-approve`, verified unattended; `--permission-mode bypassPermissions` is stronger equivalent. |
 | Marker | `GROK_AGENT=1` on child or tool processes in 0.2.73 and no `CLAUDECODE`; a 1.0.0 hook instead had `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`, and `GROK_WORKSPACE_ROOT` without `GROK_AGENT`, so ancestry guarantees identity. |
 | Resume | `grok --resume <session-id>`, or `grok -c` / `--continue` for cwd latest; `--fork-session` creates a new id. |
@@ -23,10 +23,10 @@ Reliable Grok rules must account for hook markers as well as the child fast path
 
 ## Submission and startup
 
-Slash autocomplete can turn the first Enter into selection plus an argument hint, including `/no-mistakes`'s optional task argument or `/compact compaction instructions`, without submission.
+Slash autocomplete can turn the first Enter into selection plus an argument hint, including `/compact compaction instructions`, without submission.
 The shared classifier keeps that text pending, and retry sends the second Enter on both verified backends; Herdr may also prove a turn through native state.
 
-On 2026-07-03 two Grok 0.2.82 Herdr workers left `/no-mistakes` typed for minutes while send returned success.
+On 2026-07-03 two Grok 0.2.82 Herdr workers left the historically tested skill command typed for minutes while send returned success.
 Old Herdr logic treated any pane delta as submission, including popup closure and placeholder fill.
 Tmux and Herdr now route captures through `../../../bin/fm-composer-lib.sh`, which classifies real text on every proven content row.
 `../../../docs/herdr-backend.md` owns the boundary and `../../../tests/fm-backend-herdr.test.sh` covers it.

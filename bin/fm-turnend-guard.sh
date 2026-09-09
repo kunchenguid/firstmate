@@ -35,9 +35,17 @@
 # Away mode (state/.afk): the away-mode daemon owns supervision and runs the
 # watcher one-shot, restarting it after every wake, so the watch lock is
 # regularly unheld at a turn boundary with nothing wrong. A live
-# identity-matched daemon holding this home, plus the unchanged fresh-beacon
-# test, is what proves supervision there - see fm_afk_daemon_owns_supervision in
-# bin/fm-wake-lib.sh. The strict watcher predicate is unchanged everywhere else.
+# identity-matched daemon holding this home, plus a fresh beacon, is what
+# proves supervision there - see fm_afk_daemon_owns_supervision in
+# bin/fm-wake-lib.sh. The beacon freshness test there uses AFK_GRACE
+# (fm_poll_derived_grace, docs/turnend-guard.md "Guard grace and the poll
+# cadence"), not the flat $GRACE every other check on this page uses: the
+# daemon starts a fresh one-shot watcher only after it finishes handling the
+# previous wake, and that handling can legitimately run past a flat 300s
+# window under load (a slow registered check, a busy supervisor pane) with the
+# daemon perfectly healthy throughout. The strict watcher predicate and $GRACE
+# are unchanged everywhere else, including for a dead daemon pid or a beacon
+# older than AFK_GRACE, which still block.
 #
 # Loop-guard, codex/Grok (default) mode: never block twice in the same turn.
 # Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
@@ -191,10 +199,15 @@ fi
 # hand-off, when no watcher process holds the lock and nothing is wrong, so
 # requiring one here alarmed on healthy away-mode supervision. A live
 # identity-matched daemon holding this home is the right owner to test for.
-# The beacon half of the predicate is deliberately unchanged: a daemon that
-# stops restarting its watcher still blocks once the beacon passes grace, and
-# a home with no daemon and no watcher blocks exactly as before.
-if [ "$FM_SUP_WATCHER_FRESH" = true ] && fm_afk_daemon_owns_supervision "$STATE"; then
+# The beacon half of the predicate still applies: a daemon that stops
+# restarting its watcher still blocks once the beacon passes grace, and a home
+# with no daemon and no watcher blocks exactly as before. It uses AFK_GRACE
+# (poll-cadence-derived, see the comment above) instead of the flat $GRACE
+# every other check on this page uses, so a daemon that is genuinely still
+# cycling - just slower than a fixed 300s window - is not misread as down.
+AFK_GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
+if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
+  && fm_afk_daemon_owns_supervision "$STATE"; then
   allow_supervised_stop
 fi
 
@@ -214,6 +227,8 @@ block_stop() {
       printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
     elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
       printf '●  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
+    elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
+      printf '●  %s registered custom check(s), but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_CHECKS" "$FM_SUP_BEACON_DESC"
     else
       printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     fi
@@ -449,6 +464,8 @@ if [ "$terminal_status" -eq 0 ]; then
     NEED_DESC="$FM_SUP_IN_FLIGHT task(s) in flight"
   elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
     NEED_DESC="$FM_SUP_SOURCES process-event source(s) registered"
+  elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
+    NEED_DESC="$FM_SUP_CHECKS registered custom check(s)"
   else
     NEED_DESC="X-mode relay polling active"
   fi

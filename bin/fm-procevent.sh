@@ -137,19 +137,44 @@
 # captain chose; the intake owns every rule about what happens next. This runner
 # names no adapter, parses no result, and knows no decision rule, so a future
 # built-in source needs nothing here beyond an `answers` command and a binding.
-# External binding responses never enter this authority-bearing intake.
+# Reconcile selections use the parallel `reconciles` adapter command and the
+# binding-verified `reconcile-requests` intake, never the keyed-answer value.
+# External binding responses never enter either authority-bearing intake.
 #
 # Feeding is deliberately independent of handling: it never acknowledges a result
 # and never suppresses a wake. Recording the captain's answer is transcription,
 # while ACTING on it is firstmate's judgement, so the capture stays unacknowledged
 # and its `check` wake reaches the handler exactly as it would have anyway.
 #
+# A runner is bound to the HOME that owns it, not to the one session that armed
+# it: a persistent source is meant to outlive that session, so reconcile stops a
+# runner whose source is retired in a live home, and this lease is the backstop
+# for a home that is GONE. Detaching a runner into its own
+# process group is what lets a persistent source outlive the turn that armed it,
+# and with nothing else it is also what lets a runner outlive its whole home:
+# reparented to init, it keeps its blocking child - and everything that child
+# spawns - running with nobody left to reap it. So every runner starts a small
+# guard beside it, in its own separate process group, which re-reads the owning
+# state root's lease on a bounded cadence and stops the runner's whole process
+# group once that lease can no longer be proved fresh. Owner-presence operations
+# refresh the lease, an attached public start keeps it fresh while its caller
+# remains attached, and the watcher's reconcile cycle keeps it fresh in a live
+# home. A runner exports the inherited FM_PROCEVENT_IN_RUNNER marker and every
+# refresh is skipped under it, so a runner and its ordinary children do not
+# certify their own owner. That rule is CONFUSED-AGENT-GRADE, the grade
+# bin/fm-lease-lib.sh documents: a source that DELIBERATELY strips the marker
+# can still refresh, and adversarial-grade unforgeability is out of scope (see
+# docs/configuration.md). Scope is the owning state root and one runner
+# generation, never a script or process name, so a live source in
+# another home is untouched. See bin/fm-procevent-lib.sh for the lease itself.
+#
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
-# only a claim whose whole generation is gone is reclaimed. A runner leads its
-# own process group, so a crashed leader whose group still has members is not
-# stale: reconcile stops that surviving group and releases its generation before
-# any replacement starts, and keeps the claim for a later retry when it cannot.
+# only a claim whose stale owner and independently absent process group prove
+# its whole generation gone is reclaimed. A crashed leader or reused pid whose
+# process group still has members cannot relax ownership cleanup. Reconcile
+# signals only a live identity-matched runner group and otherwise keeps the
+# claim without starting a replacement.
 #
 # Durability boundary: see bin/fm-procevent-lib.sh. This runner proves capture
 # before publication and bounded re-announcement until handled, and nothing
@@ -360,6 +385,19 @@ feed_keyed_answers() {  # <adapter> <source-id> <result-file>
         --source "the captured result $id sequence $seq" >/dev/null 2>&1
 }
 
+feed_reconcile_requests() {  # <adapter> <source-id> <result-file>
+  local adapter=$1 id=$2 result=$3 script origin seq rows
+  script=$(adapter_script "$adapter")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
+  [ -n "$origin" ] || return 1
+  seq=$(fm_procevent_result_sequence "$result") || return 1
+  rows=$("$script" reconciles "$result" 2>/dev/null) || return 1
+  printf '%s\n' "$rows" \
+    | "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests \
+        --source-id "$id" --source "the captured result $id sequence $seq" >/dev/null 2>&1
+}
+
 read_adapter() {  # <source-id>
   local f; f=$(source_file "$1")
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
@@ -421,6 +459,7 @@ cmd_register() {
     die "cannot publish the registration"
   fi
   fm_procevent_source_lock_release "$id"
+  owner_lease_refresh
   printf 'registered: %s (%s)\n' "$id" "$adapter"
 }
 
@@ -510,6 +549,7 @@ cmd_register_extension() {
   fi
   fm_procevent_source_lock_release "$id"
   extension_lifecycle_lock_release
+  owner_lease_refresh
   printf 'registered: %s (%s from %s@%s)\n' "$id" "$adapter" "$extension_id" "$extension_version"
   printf 'owner-token: %s\n' "$registration_token"
   printf 'retire: bin/fm-procevent.sh retire %s --if-owner %s\n' "$id" "$registration_token"
@@ -569,8 +609,15 @@ publish_pending() {  # [result-file-to-skip]
   printf '%s\n' "$published"
 }
 
-isolate_runner() {  # <wait|detach> <source-id>
-  local mode=$1 id=$2 program
+# Start one command as the leader of a fresh process group, either waiting for
+# it (the public `start` boundary) or detaching from it (reconcile's restart and
+# the runner's own owner guard). The guard deliberately gets its OWN group
+# rather than joining the runner's: it has to survive the group signal it sends,
+# and a member of the runner's group would also make that group read as alive
+# after the runner itself is gone.
+isolate_process() {  # <wait|detach> <command> [argv...]
+  local mode=$1 program
+  shift
   # shellcheck disable=SC2016 # Perl owns every $ expression in this literal program.
   program='my $mode = shift @ARGV;
     defined(my $pid = fork) or exit 125;
@@ -586,27 +633,66 @@ isolate_runner() {  # <wait|detach> <source-id>
     exit(128 + ($status & 127)) if $status & 127;
     exit($status >> 8);'
   if [ "$mode" = wait ]; then
-    exec perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id"
+    perl -e "$program" "$mode" "$@"
+    return $?
   fi
-  perl -e "$program" "$mode" "$SCRIPT_DIR/fm-procevent.sh" _start "$id" >/dev/null 2>&1 &
+  perl -e "$program" "$mode" "$@" >/dev/null 2>&1 &
 }
 
-require_runner_group() {
-  local pgid
+isolate_runner() {  # <wait|detach> <source-id>
+  isolate_process "$1" "$SCRIPT_DIR/fm-procevent.sh" _start "$2"
+}
+
+require_isolated_group() {  # <role>
+  local role=$1 pgid
   [ "${FM_PROCEVENT_RUNNER_GROUP:-}" = "$$" ] \
-    || die "runner process group was not isolated"
+    || die "$role process group was not isolated"
   pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]') \
-    || die "cannot inspect runner process group"
-  [ -n "$pgid" ] || die "cannot inspect runner process group"
-  [ "$pgid" = "$$" ] || die "runner does not lead its process group"
+    || die "cannot inspect $role process group"
+  [ -n "$pgid" ] || die "cannot inspect $role process group"
+  [ "$pgid" = "$$" ] || die "$role does not lead its process group"
   unset FM_PROCEVENT_RUNNER_GROUP
 }
 
+require_runner_group() { require_isolated_group runner; }
+
+# Record owner-presence activity for this home. Skipped under the inherited
+# FM_PROCEVENT_IN_RUNNER marker, so a runner and its ordinary children do not
+# keep refreshing their own lease after the home goes away.
+# Confused-agent-grade: a source that deliberately unsets the marker can still
+# refresh, and that is out of scope (see docs/configuration.md).
+owner_lease_refresh() {
+  [ "${FM_PROCEVENT_IN_RUNNER:-0}" = 1 ] && return 0
+  fm_procevent_owner_lease_touch "$STATE" 2>/dev/null || true
+}
+
+owner_lease_keepalive() {  # <parent-pid> <parent-identity>
+  local parent=$1 identity=$2 state
+  while :; do
+    sleep 1
+    fm_procevent_pid_state "$parent" "$identity"
+    state=$?
+    case "$state" in
+      0) owner_lease_refresh ;;
+      2) ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
 cmd_start_public() {
-  local id=${1-}
+  local id=${1-} identity keeper status
   [ "$#" -eq 1 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  owner_lease_refresh
+  identity=$(fm_pid_identity "$$" 2>/dev/null) || die "cannot identify the attached owner"
+  owner_lease_keepalive "$$" "$identity" &
+  keeper=$!
   isolate_runner wait "$id"
+  status=$?
+  kill "$keeper" 2>/dev/null || true
+  wait "$keeper" 2>/dev/null || true
+  return "$status"
 }
 
 cmd_start() {
@@ -665,6 +751,10 @@ cmd_start() {
       die "extension registration owner is unreadable: $id"
       ;;
   esac
+  exec 7<"$(source_file "$id")" || {
+    fm_procevent_source_lock_release "$id"
+    die "cannot retain registration identity: $id"
+  }
   fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")" "$STATE"
   claimed=$?
   fm_procevent_source_lock_release "$id"
@@ -678,6 +768,8 @@ cmd_start() {
   CLAIM_PID=$$
   CLAIM_TOKEN=$FM_PROCEVENT_CLAIM_TOKEN
   CLAIM_REG_IDENTITY=$FM_PROCEVENT_CLAIM_REG_IDENTITY
+  CLAIM_STATE_DEVICE=$FM_PROCEVENT_CLAIM_STATE_DEVICE
+  CLAIM_STATE_INODE=$FM_PROCEVENT_CLAIM_STATE_INODE
   STAGED_OUTPUT=
   release_start_claim() {
     extension_lifecycle_lock_release 2>/dev/null || true
@@ -695,7 +787,14 @@ cmd_start() {
     fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
   }
   trap release_start_claim EXIT
-  local runner inbox reservation_dir staging
+  # The inherited marker keeps the runner and its ordinary children from
+  # accidentally refreshing the owner lease. A source that deliberately strips
+  # it is outside this confused-agent-grade boundary.
+  export FM_PROCEVENT_IN_RUNNER=1
+  start_owner_guard "$id" || die "cannot start the runner's owner guard: $id"
+  local launch_floor runner inbox reservation_dir staging launch_ready launch_reply launch_pid
+  launch_floor=$(fm_procevent_launch_floor_seconds) \
+    || die "FM_PROCEVENT_LAUNCH_FLOOR_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_FLOOR_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_FLOOR_MAX_SECONDS"
   if [ "$extension_owner" -eq 1 ]; then
     staging=$(fm_procevent_extension_staging_prepare "$STATE") \
       || die "cannot safely prepare the external registry staging boundary"
@@ -732,13 +831,45 @@ cmd_start() {
   # Built-in adapters do not run the extension capture helper, so keep this
   # sentinel defined while sharing the no-result branch below under `set -u`.
   local truncated=0 capture_state='' durable='' reservation_terminal='' reservation_silent=''
+  fm_procevent_launch_floor_wait "$STATE" "$id" "$CLAIM_REG_IDENTITY" "$launch_floor"
+  case "$?" in
+    0) ;;
+    # A superseded generation leaves nothing behind. The runner marker is
+    # written before this wait, and a home sweep counts a marker with no owned
+    # claim as a preflight failure, so exiting without removing it would make
+    # that home refuse to sweep.
+    2) [ "$extension_owner" -eq 1 ] || rm -f -- "$runner"; exit 0 ;;
+    *) die "cannot enforce the source launch floor: $id" ;;
+  esac
+  exec 7<&-
   if [ "$extension_owner" -eq 1 ]; then
-    capture_state=$(perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \
+    launch_ready=".$id.$CLAIM_TOKEN.launch-ready"
+    launch_reply="$REG/.$id.$CLAIM_TOKEN.launch-reply"
+    (umask 077; : > "$REG/$launch_ready" && : > "$launch_reply") || {
+      rm -f -- "$REG/$launch_ready" "$launch_reply"
+      fm_procevent_source_lock_release "$id"
+      die "cannot prepare the source launch boundary: $id"
+    }
+    perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \
       9 8 6 "$id" "$adapter" "$FM_PROCEVENT_EXTENSION_ID" \
       "$FM_PROCEVENT_EXTENSION_VERSION" "$FM_PROCEVENT_EXTENSION_CAPABILITY_VERSION" \
       "$FM_PROCEVENT_EXTENSION_PACKAGE_DIGEST" "$FM_PROCEVENT_EXTENSION_BINDING_DIGEST" \
-      "$CLAIM_TOKEN" "$runner" "$out" "$$" "$(fm_pid_identity "$$")" "$MAX_OUTPUT_BYTES" -- "${ARGV[@]}") \
-      || die "cannot safely stage the extension result"
+      "$CLAIM_TOKEN" "$runner" "$out" "$$" "$(fm_pid_identity "$$")" "$MAX_OUTPUT_BYTES" \
+      "$launch_ready" -- "${ARGV[@]}" > "$launch_reply" &
+    launch_pid=$!
+    while [ ! -s "$REG/$launch_ready" ] && kill -0 "$launch_pid" 2>/dev/null; do sleep 0.01; done
+    fm_procevent_source_lock_release "$id" \
+      || die "cannot release the source launch boundary: $id"
+    wait "$launch_pid" || {
+      rm -f -- "$REG/$launch_ready" "$launch_reply"
+      die "cannot safely stage the extension result"
+    }
+    [ -s "$REG/$launch_ready" ] || {
+      rm -f -- "$REG/$launch_ready" "$launch_reply"
+      die "cannot establish the source launch boundary: $id"
+    }
+    IFS= read -r capture_state < "$launch_reply" || capture_state=
+    rm -f -- "$REG/$launch_ready" "$launch_reply"
     IFS=$'\t' read -r capture_state durable rc truncated reservation_terminal reservation_silent <<EOF
 $capture_state
 EOF
@@ -753,10 +884,38 @@ EOF
       FM_PROCEVENT_CAPTURE_RESERVATION_SILENT=$reservation_silent
     fi
   else
-    [ ! -e "$out" ] && [ ! -L "$out" ] || die "cannot safely stage output"
-    (umask 077; : > "$out") || die "cannot stage output"
+    [ ! -e "$out" ] && [ ! -L "$out" ] || {
+      fm_procevent_source_lock_release "$id"
+      die "cannot safely stage output"
+    }
+    (umask 077; : > "$out") || {
+      fm_procevent_source_lock_release "$id"
+      die "cannot stage output"
+    }
     STAGED_OUTPUT=$out
-    "${ARGV[@]}" 2>/dev/null | perl -e '
+    launch_ready="$REG/.$id.$CLAIM_TOKEN.launch-pipe"
+    mkfifo -m 600 "$launch_ready" || {
+      fm_procevent_source_lock_release "$id"
+      die "cannot prepare the source launch boundary: $id"
+    }
+    exec 5<> "$launch_ready" || {
+      rm -f -- "$launch_ready"
+      fm_procevent_source_lock_release "$id"
+      die "cannot retain the source launch boundary: $id"
+    }
+    exec 4< "$launch_ready" || {
+      exec 5>&-
+      rm -f -- "$launch_ready"
+      fm_procevent_source_lock_release "$id"
+      die "cannot retain the source output boundary: $id"
+    }
+    "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
+    launch_pid=$!
+    exec 5>&-
+    rm -f -- "$launch_ready"
+    fm_procevent_source_lock_release "$id" \
+      || die "cannot release the source launch boundary: $id"
+    perl -e '
       use strict;
       use warnings;
       my $limit = shift;
@@ -779,10 +938,11 @@ EOF
         $truncated = 1 if $take < $count;
       }
       exit($truncated ? 3 : 0);
-    ' "$MAX_OUTPUT_BYTES" > "$out"
-    local pipe_status=("${PIPESTATUS[@]}")
-    rc=${pipe_status[0]}
-    bound_rc=${pipe_status[1]}
+    ' "$MAX_OUTPUT_BYTES" <&4 > "$out"
+    bound_rc=$?
+    exec 4<&-
+    wait "$launch_pid"
+    rc=$?
     case "$bound_rc" in
       0) ;;
       3) truncated=1 ;;
@@ -816,6 +976,10 @@ EOF
 
   # Independent of publication and acknowledgement, so it runs once per capture
   # for every adapter and cannot change what the handler receives.
+  if [ "$extension_owner" -eq 0 ] \
+    && feed_reconcile_requests "$adapter" "$id" "$durable"; then
+    printf 'reconciles-fed: %s\n' "$id"
+  fi
   if [ "$extension_owner" -eq 0 ] \
     && feed_keyed_answers "$adapter" "$id" "$durable"; then
     printf 'answers-fed: %s\n' "$id"
@@ -892,7 +1056,7 @@ retire_owned_terminal_source() {  # <source-id>
     && [ "$current_identity" = "$CLAIM_REG_IDENTITY" ] \
     && fm_procevent_claim_mark_terminal_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN"; then
     if rm -f -- "$registration" && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
-      fm_procevent_claim_release_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" || status=1
+      fm_procevent_claim_release_terminal_self_locked "$id" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" || status=1
     else
       status=1
     fi
@@ -903,6 +1067,106 @@ retire_owned_terminal_source() {  # <source-id>
   return "$status"
 }
 
+# Bind this runner's lifetime to the home that owns it. Started once the
+# claim is held, so the guard names the exact generation it protects, and
+# detached into its OWN process group so the group signal it may later send
+# reaches the runner and every descendant without killing the guard first.
+# If signalling cannot be proved safe or does not finish, the guard remains
+# alive and retries on its normal check cadence rather than abandoning cleanup.
+start_owner_guard() {  # <source-id>
+  local identity ready value
+  identity=$(fm_pid_identity "$$" 2>/dev/null) || return 1
+  ready=$(umask 077; mktemp "$REG/.owner-guard-ready.XXXXXX") || return 1
+  if ! isolate_process detach "$SCRIPT_DIR/fm-procevent.sh" _owner-watchdog \
+      "$1" "$$" "$identity" "$ready" "$CLAIM_STATE_DEVICE" "$CLAIM_STATE_INODE"; then
+    rm -f -- "$ready"
+    return 1
+  fi
+  for _ in $(seq 1 50); do
+    if [ -s "$ready" ]; then
+      IFS= read -r value < "$ready" || value=
+      rm -f -- "$ready"
+      [ "$value" = ready ]
+      return $?
+    fi
+    sleep 0.1
+  done
+  rm -f -- "$ready"
+  return 1
+}
+
+# The runner's owner guard, which bounds an accidentally orphaned detached
+# runner after its home ends. It revalidates the recorded physical state root
+# and its lease on a bounded cadence and, after two consecutive checks cannot prove
+# both, invokes the identity-gated stop for the runner's whole process group -
+# which is what reaches the blocking child and everything that child spawned,
+# exactly as retirement does. A failed verified stop stays on the retry cadence;
+# an absent leader ends the guard without signalling an ambiguous group.
+#
+# Scope is the owning state root and this one runner generation. It never
+# matches on a script name, a command line, or a process name: those are shared
+# by every home running the same adapter, and a live source in another home
+# proves its own owner through that home's own lease.
+cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file> <state-device> <state-inode>
+  local id=${1-} pid=${2-} identity=${3-} ready=${4-} state_device=${5-} state_inode=${6-}
+  local lease tick misses=0 pid_state state_identity current_device current_inode
+  [ "$#" -eq 6 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  case "$pid" in ''|*[!0-9]*) die "runner pid must be a positive integer: $pid" ;; esac
+  [ -n "$identity" ] || die "runner identity is required"
+  case "$state_device" in ''|*[!0-9]*) die "state device must be an integer" ;; esac
+  case "$state_inode" in ''|*[!0-9]*) die "state inode must be an integer" ;; esac
+  [ "${ready%/*}" = "$REG" ] && [ -f "$ready" ] && [ ! -L "$ready" ] \
+    || die "owner guard readiness boundary is invalid"
+  trap 'printf "failed\n" > "$ready" 2>/dev/null || true' EXIT
+  require_isolated_group guard
+  lease=$(fm_procevent_owner_lease_seconds) \
+    || die "FM_PROCEVENT_OWNER_LEASE_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_LEASE_MIN_SECONDS to $FM_PROCEVENT_OWNER_LEASE_MAX_SECONDS"
+  tick=$(fm_procevent_owner_check_seconds) \
+    || die "FM_PROCEVENT_OWNER_CHECK_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS to $FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS"
+  fm_procevent_pid_state "$pid" "$identity"
+  pid_state=$?
+  [ "$pid_state" -eq 0 ] || die "runner identity changed before owner guard initialization"
+  state_identity=$(fm_procevent_claim_state_root_identity "$STATE") \
+    || die "owning state root identity is unreadable at owner guard initialization"
+  IFS=$'\t' read -r _ current_device current_inode _ _ <<< "$state_identity"
+  [ "$current_device" = "$state_device" ] && [ "$current_inode" = "$state_inode" ] \
+    || die "owning state root identity changed before owner guard initialization"
+  fm_procevent_owner_alive "$STATE" "$lease" \
+    || die "owning home lease is not fresh at owner guard initialization"
+  printf 'ready\n' > "$ready" || die "cannot confirm owner guard initialization"
+  trap - EXIT
+  while :; do
+    sleep "$tick"
+    fm_procevent_pid_state "$pid" "$identity"
+    pid_state=$?
+    case "$pid_state" in
+      1|3) exit 0 ;;
+      0) ;;
+      *) continue ;;
+    esac
+    state_identity=$(fm_procevent_claim_state_root_identity "$STATE" 2>/dev/null || true)
+    current_device=
+    current_inode=
+    [ -z "$state_identity" ] \
+      || IFS=$'\t' read -r _ current_device current_inode _ _ <<< "$state_identity"
+    if [ "$current_device" = "$state_device" ] \
+      && [ "$current_inode" = "$state_inode" ] \
+      && fm_procevent_owner_alive "$STATE" "$lease"; then
+      misses=0
+      continue
+    fi
+    # Two consecutive misses, so one unreadable read cannot end a live runner.
+    misses=$((misses + 1))
+    [ "$misses" -ge 2 ] || continue
+    if stop_runner_pid "$pid" "$identity"; then
+      exit 0
+    fi
+    # Identity/group inspection and signalling can fail transiently. Keep the
+    # guard alive so the next normal tick retries the same generation cleanup.
+  done
+}
+
 # Start a runner outside the watcher cycle that noticed it was missing. The
 # public start boundary establishes its own process group before claiming.
 detach_runner() {  # <source-id>
@@ -911,6 +1175,7 @@ detach_runner() {  # <source-id>
 
 cmd_reconcile() {
   local rec id published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
+  owner_lease_refresh
   published=$(publish_pending)
 
   # Stop a runner this home owns whose source is no longer registered. Without
@@ -942,7 +1207,7 @@ cmd_reconcile() {
     stop_state=$?
     case "$stop_state" in
       0|1)
-        if fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+        if fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
           rm -f -- "$(staging_file "$id" "$token")"
           rm -f -- "$(runner_file "$id")"
           stopped=$((stopped + 1))
@@ -982,36 +1247,14 @@ cmd_reconcile() {
             && rm -f -- "$(source_file "$id")" \
             && [ ! -e "$(source_file "$id")" ] \
             && [ ! -L "$(source_file "$id")" ] \
-            && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
+            && fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
             stopped=$((stopped + 1))
           else
             uncertain=$((uncertain + 1))
           fi
         elif [ "$claim_state" -eq 3 ]; then
-          # The leader crashed but its owned group is still consuming the
-          # source. Never start a replacement alongside it: stop that group and
-          # release its generation first, and if either cannot be proved, keep
-          # the claim and retry on a later cycle rather than adding a second
-          # poller. Only the owning home may signal its own group.
-          owner=$FM_PROCEVENT_CLAIM_HOME
-          pid=$FM_PROCEVENT_CLAIM_PID
-          token=$FM_PROCEVENT_CLAIM_TOKEN
-          identity=$FM_PROCEVENT_CLAIM_IDENTITY
-          stop_state=2
-          if fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
-            stop_runner_pid "$pid" "$identity"
-            stop_state=$?
-          fi
-          if [ "$stop_state" -eq 0 ] \
-            && cleanup_extension_registration_invocations_locked "$id" \
-            && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
-            rm -f -- "$(staging_file "$id" "$token")"
-            rm -f -- "$(runner_file "$id")"
-            fm_procevent_source_lock_release "$id"
-            detach_runner "$id"
-            started=$((started + 1))
-            continue
-          fi
+          # A leaderless group's generation is ambiguous under PID/PGID reuse,
+          # so preserve its claim without signalling or starting a replacement.
           uncertain=$((uncertain + 1))
         elif [ "$claim_state" -eq 2 ]; then
           uncertain=$((uncertain + 1))
@@ -1027,38 +1270,40 @@ cmd_reconcile() {
 # its own process group leader, so the group signal is what actually reaches the
 # blocking child - signalling only the runner would leave that child alive and
 # reparented, which is exactly how a source that never completes leaks.
-stop_runner_pid() {  # <pid> <identity>
-  local pid=${1-} identity=${2-} state pgid i=0
-  case "$pid" in ''|*[!0-9]*) return 2 ;; esac
-  [ -n "$identity" ] || return 2
+runner_group_signal() {  # <signal> <pid> <identity>
+  local signal=$1 pid=$2 identity=$3 state pgid
+  # KNOWN LIMIT: only an alive identity-matched leader proves group ownership.
+  # Detected reused PIDs and absent leaders are refused before signalling;
+  # launch pacing, leases, and reconcile cleanup are the backstop.
   fm_procevent_pid_state "$pid" "$identity"
   state=$?
   case "$state" in
-    0)
-      # A live identity-matched leader still owns its group, so prove the group
-      # really is the one this pid leads before signalling it.
-      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
-      [ "$pgid" = "$pid" ] || return 2
-      ;;
-    3)
-      # The leader crashed but its owned group is still running. Its pgid cannot
-      # be read from the dead leader, and it does not need to be: only an absent
-      # leader reaches this state, so the group cannot belong to a reused pid.
-      ;;
-    *) return "$state" ;;
+    0) ;;
+    1) fm_procevent_group_alive "$pid" && return 2; return 1 ;;
+    *) return 2 ;;
   esac
-  kill -TERM -"$pid" 2>/dev/null || return 2
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
+  [ "$pgid" = "$pid" ] || return 2
+  # KNOWN LIMIT: portable shell cannot make this verification and signal atomic,
+  # so the PID and group could be reused in the interval between them.
+  kill -"$signal" -"$pid" 2>/dev/null || return 2
+}
+
+stop_runner_pid() {  # <pid> <identity>
+  local pid=${1-} identity=${2-} signal_state i=0
+  case "$pid" in ''|*[!0-9]*) return 2 ;; esac
+  [ -n "$identity" ] || return 2
+  runner_group_signal TERM "$pid" "$identity"
+  signal_state=$?
+  [ "$signal_state" -eq 0 ] || return "$signal_state"
   while [ "$i" -lt 20 ]; do
     kill -0 -"$pid" 2>/dev/null || return 0
-    if kill -0 "$pid" 2>/dev/null; then
-      fm_procevent_pid_state "$pid" "$identity"
-      state=$?
-      [ "$state" -eq 2 ] && return 2
-    fi
     sleep 0.1
     i=$((i + 1))
   done
-  kill -KILL -"$pid" 2>/dev/null || return 2
+  runner_group_signal KILL "$pid" "$identity"
+  signal_state=$?
+  [ "$signal_state" -eq 0 ] || return "$signal_state"
   i=0
   while [ "$i" -lt 20 ]; do
     kill -0 -"$pid" 2>/dev/null || return 0
@@ -1095,6 +1340,7 @@ cmd_handled() {
   local id=${1-} seq=${2-} status
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
+  owner_lease_refresh
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   fm_procevent_mark_handled "$STATE" "$id" "$seq"
   status=$?
@@ -1193,7 +1439,7 @@ cmd_retire() {
         fm_procevent_source_lock_release "$id"
         die "cannot prove external adapter cleanup; source remains registered: $id"
       fi
-      if ! fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token"; then
+      if ! fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token"; then
         fm_procevent_source_lock_release "$id"
         die "cannot release source ownership: $id"
       fi
@@ -1371,6 +1617,7 @@ cmd_sweep_home() {
 
 cmd_list() {
   local rec id adapter owner pending
+  owner_lease_refresh
   if ! fm_procevent_any_registered "$STATE"; then
     printf 'no sources registered\n'
     return 0
@@ -1491,6 +1738,7 @@ case "${1-}" in
   register-extension) shift; cmd_register_extension "$@" ;;
   start)              shift; cmd_start_public "$@" ;;
   _start)             shift; cmd_start "$@" ;;
+  _owner-watchdog)    shift; cmd_owner_watchdog "$@" ;;
   reconcile)          shift; cmd_reconcile "$@" ;;
   classify)           shift; cmd_classify "$@" ;;
   handled)            shift; cmd_handled "$@" ;;

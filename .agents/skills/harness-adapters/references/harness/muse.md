@@ -30,7 +30,7 @@ It resolves non-secret `XDG_CONFIG_HOME` and `XDG_DATA_HOME` absolutely before p
 
 With neither worker-reachable credential, spawn refuses.
 Unauthenticated Muse otherwise waits forever at `Sign in at this page: https://auth.meta.com/oauth/device/?code=XXXX-XXXX` and `Waiting for approval…`, which resembles a wedge.
-Escalate the refusal as a needed credential.
+Before escalating the refusal as a needed credential, check the [worker launch environment contract](../../../../../docs/configuration.md#worker-launch-environment-configlaunch-env-allowlist) for a withheld environment grant.
 
 ## Foreign personal context
 

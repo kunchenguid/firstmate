@@ -22,7 +22,13 @@ make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
   mkdir -p "$home/state" "$home/data"
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" lavish-axi
+  # A fail-if-invoked sentinel proves rendering stays independent of Lavish.
+  cat > "$fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_LAVISH_LOG:?}"
+exit 99
+SH
+  chmod +x "$fakebin/lavish-axi"
   printf '%s\n' "$home"
 }
 
@@ -33,10 +39,10 @@ render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, captains_call:$calls, underway:[], landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
-  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_TEST_LAVISH_LOG="$home/lavish.log" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     "$BOARD" build "$data" >/dev/null || fail "the board did not build"
+  [ ! -e "$home/lavish.log" ] || fail "the read-only board invoked lavish-axi"
   node "$HARNESS" "$home/.lavish/bearings-board.html" \
     || fail "the built board could not be rendered"
 }

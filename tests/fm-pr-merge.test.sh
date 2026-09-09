@@ -7,11 +7,11 @@
 #
 # Matrix:
 #   (a) a verified merge records pr= and pr_head=
-#   (b) merge is refused when gh-axi pr merge itself fails (no silent success)
-#   (c) extra gh-axi pr merge args are forwarded after number and --repo
-#   (d) merge is refused before gh-axi when task meta is missing
-#   (e) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
-#   (f) malformed PR URL fails fast without calling gh-axi
+#   (b) merge is refused when gh pr merge itself fails (no silent success)
+#   (c) extra gh pr merge args are forwarded after number and --repo
+#   (d) merge is refused before gh when task meta is missing
+#   (e) PR URL is parsed to number + --repo for gh (defaults to --squash)
+#   (f) malformed PR URL fails fast without calling gh
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL,
 #       including a bundled short-option cluster that carries -R
@@ -34,7 +34,7 @@
 #       recorded and the merge poll armed
 #   (y) agreeing queue rules still produce exact retry flags
 #   (z) conflicting queue rules report ambiguous retry guidance
-#   (aa) gh-axi remains usable when gh is absent
+#   (aa) absence of gh refuses without falling back to gh-axi
 #   (ab) a landed merge whose fallback outcome read fails keeps its poll armed
 #   (ac) a successful merge in a secondmate home reports the landed PR upward
 #       once, on the route its parent binding names, and a repeat merge of the
@@ -48,7 +48,8 @@
 #   (ai) an uncommitted marker retry never loses the durable outcome
 #   (aj) distinct merged PRs for a reused task each survive queue deduplication
 #   (ak) pr= is already recorded when the forge call that can land the merge runs
-#   (al) a failed gh read falls back to the gh-axi view, which can prove a merge
+#   (al) a failed gh GraphQL read falls back to gh pr view, which can prove a
+#        merge
 #   (am) a failed merge command still names an outcome read that proves a landed
 #       or queued pull request, without masking the forge failure
 #   (an) a refusal after a zero-exit merge quotes the forge's own output, marked
@@ -66,8 +67,6 @@
 #       guesses no method
 #   (au) unreadable branch rules are reported apart from a queue-less base
 #   (av) a base branch with no queue rule says nothing about a merge queue
-#   (aw) a refusal built on the gh-axi view says the merge queue could not be
-#       observed, and judges that view's state like the queue-aware one
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -91,13 +90,29 @@ MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
 
-# Build a fresh sandbox for one test case: a state dir with a task meta and a
-# fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.
+# Poison the removed wrapper in every case so an implementation regression is
+# observable even when the case otherwise expects the merge command to fail.
+add_gh_axi_poison() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_FORBIDDEN_GH_AXI_LOG"
+echo "error: forbidden gh-axi invocation in direct-gh merge test" >&2
+exit 97
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
+# Build a fresh sandbox for one test case: a state dir with task metadata, a
+# direct-gh call log, a merge-only log, and a poison gh-axi executable.
 make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/home/data" "$case_dir/home/config" "$fakebin"
+  cp "$ROOT/.tasks.toml" "$case_dir/home/.tasks.toml"
+  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' \
+    > "$case_dir/home/data/backlog.md"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
     "worktree=$case_dir/wt" \
@@ -111,34 +126,25 @@ make_case() {
     'base=main' > "$case_dir/github-outcome"
   : > "$case_dir/github-rules"
   : > "$case_dir/gh.log"
+  : > "$case_dir/gh-merge.log"
+  : > "$case_dir/gh-axi.log"
+  add_gh_axi_poison "$case_dir"
   # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
   # stat and simply skips the pr_head lookup via `gh` in that case, so give it
   # one that resolves for cases that want pr_head recorded.
   printf '%s\n' "$case_dir"
 }
 
-# gh-axi mock recording every invocation to a log file, and gh mock answering
-# headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
-add_gh_mocks() {
+# Direct gh mock answering merge, head, outcome, and branch-rule reads.
+# Args: case_dir head_sha
+add_gh_mock() {
   local case_dir=$1 head=$2
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-case "${1:-} ${2:-}" in
-  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
-  "pr view")
-    [ "$#" -eq 5 ] && [ "${4:-}" = --repo ] || exit 2
-    printf 'pull_request:\n  number: %s\n  state: %s\n' "$3" "${FM_TEST_GH_MERGE_STATE:-merged}"
-    ;;
-esac
-exit 0
-SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
   "pr merge")
-    printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+    printf '%s\n' "\$*" >> "\$FM_TEST_GH_MERGE_LOG"
     printf 'merged:\\n  number: %s\\n  status: ok\\n' "\${3:-}"
     exit 0
     ;;
@@ -162,24 +168,19 @@ case "\${1:-} \${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  chmod +x "$case_dir/fakebin/gh"
 }
 
-# gh-axi mock that fails the merge call but succeeds everything else, so a
+# Direct gh mock that fails the merge call but succeeds everything else, so a
 # real merge failure is distinguishable from the recording step.
-add_gh_mocks_merge_fails() {
+add_gh_mock_merge_fails() {
   local case_dir=$1
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-exit 0
-SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr merge")
-    printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+    printf '%s\n' "$*" >> "$FM_TEST_GH_MERGE_LOG"
     echo "error: pr merge failed" >&2
     exit 1
     ;;
@@ -194,7 +195,7 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+  chmod +x "$case_dir/fakebin/gh"
 }
 
 # gh mock that still answers fm-pr-check.sh's head lookup but cannot answer the
@@ -207,7 +208,7 @@ add_gh_mock_outcome_read_fails() {
 printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
   "pr merge")
-    printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+    printf '%s\n' "\$*" >> "\$FM_TEST_GH_MERGE_LOG"
     printf 'merged:\\n  number: %s\\n  status: ok\\n' "\${3:-}"
     exit 0
     ;;
@@ -225,22 +226,6 @@ esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh"
-}
-
-# gh-axi mock that merges but cannot answer its own view, so a case can prove
-# what happens when neither reader can establish the outcome. Args: case_dir
-add_gh_axi_mock_view_fails() {
-  local case_dir=$1
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-case "${1:-} ${2:-}" in
-  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
-  "pr view") exit 1 ;;
-esac
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/gh-axi"
 }
 
 add_failing_poll_publish_mv() {
@@ -329,9 +314,9 @@ make_gitlab_case() {
   shift
   case_dir=$(make_case "$name")
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  add_gh_mock "$case_dir" cccccccccccccccccccccccccccccccccccccccc
   add_glab_mock "$case_dir"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/glab.log"
   write_mr_json "$case_dir/mr.json" "$@"
   write_mr_json "$case_dir/mr-post.json" state=merged
@@ -372,9 +357,10 @@ glab_merge_line() {
 run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
-  FM_HOME="${FM_TEST_HOME:-$ROOT}" \
+  FM_HOME="${FM_TEST_HOME:-$case_dir/home}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
-  FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_MERGE_LOG="$case_dir/gh-merge.log" \
+  FM_TEST_FORBIDDEN_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
@@ -382,6 +368,7 @@ run_pr_merge() {
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
+  HOME="${FM_TEST_USER_HOME:-$case_dir/user-home}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -390,6 +377,16 @@ run_pr_merge() {
     return 1
   fi
   return "$rc"
+}
+
+assert_no_gh_axi_invocation() {
+  local log
+  for log in "$TMP_ROOT"/*/gh-axi.log; do
+    [ -e "$log" ] || continue
+    [ ! -s "$log" ] \
+      || fail "forbidden gh-axi invocation recorded in $log: $(tr '\n' ' ' < "$log")"
+  done
+  pass "fm-pr-merge never invokes gh-axi in the direct-gh behavior matrix"
 }
 
 write_github_outcome() {
@@ -405,8 +402,8 @@ test_verified_merge_records_pr_and_head() {
   local case_dir rc
   case_dir=$(make_case records-before-merge)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  : > "$case_dir/gh-merge.log"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
@@ -419,25 +416,25 @@ test_verified_merge_records_pr_and_head() {
     "records-before-merge: pr= was not recorded"
   assert_grep 'pr_head=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr_head= was not recorded"
-  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
+  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-merge.log" \
+    || fail "records-before-merge: gh pr merge was not invoked with number, --repo, and default --squash"
   pass "fm-pr-merge records pr= and pr_head= for a verified GitHub merge"
 }
 
-# The forge call is the point of no return: once gh-axi has merged, nothing this
+# The forge call is the point of no return: once gh has merged, nothing this
 # script does afterwards can un-merge it. Proving pr= is already in the task's
 # meta at that moment is what makes a later failure unable to lose the merge.
 test_pr_metadata_is_recorded_before_the_forge_call() {
   local case_dir rc
   case_dir=$(make_case records-ahead-of-forge-call)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 5151515151515151515151515151515151515151
+  add_gh_mock "$case_dir" 5151515151515151515151515151515151515151
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr merge")
-    printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+    printf '%s\n' "$*" >> "$FM_TEST_GH_MERGE_LOG"
     cat "$FM_STATE_OVERRIDE/task-x1.meta" > "$FM_TEST_META_AT_MERGE"
     printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}"
     exit 0
@@ -463,7 +460,7 @@ esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/meta-at-merge"
 
   set +e
@@ -473,7 +470,7 @@ SH
   set -e
 
   expect_code 0 "$rc" "records-ahead-of-forge-call: fm-pr-merge should succeed"
-  assert_grep 'pr merge 62 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+  assert_grep 'pr merge 62 --repo example/repo --squash' "$case_dir/gh-merge.log" \
     "records-ahead-of-forge-call: the merge abstraction was never invoked"
   assert_grep 'pr=https://github.com/example/repo/pull/62' "$case_dir/meta-at-merge" \
     "records-ahead-of-forge-call: the merge ran before pr= was recorded"
@@ -484,8 +481,8 @@ test_merge_failure_propagates_after_recording() {
   local case_dir rc
   case_dir=$(make_case merge-fails)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks_merge_fails "$case_dir"
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock_merge_fails "$case_dir"
+  : > "$case_dir/gh-merge.log"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/13 \
@@ -493,7 +490,7 @@ test_merge_failure_propagates_after_recording() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
+  expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
@@ -503,8 +500,8 @@ test_github_merged_outcome_is_verified() {
   local case_dir rc
   case_dir=$(make_case github-verified-merged)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 1010101010101010101010101010101010101010
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" 1010101010101010101010101010101010101010
+  : > "$case_dir/gh-merge.log"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/51 \
@@ -523,9 +520,9 @@ test_github_merged_outcome_is_verified() {
 test_github_verified_merge_requires_poll_recording() {
   local case_dir rc
   case_dir=$(make_case github-poll-recording-fails)
-  add_gh_mocks "$case_dir" 1111111111111111111111111111111111111111
+  add_gh_mock "$case_dir" 1111111111111111111111111111111111111111
   add_failing_poll_publish_mv "$case_dir"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/55 \
@@ -549,9 +546,9 @@ test_github_open_unqueued_outcome_refuses() {
   local case_dir rc
   case_dir=$(make_case github-open-unqueued)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 2020202020202020202020202020202020202020
+  add_gh_mock "$case_dir" 2020202020202020202020202020202020202020
   write_github_outcome "$case_dir" OPEN false false master
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -574,10 +571,9 @@ test_github_unreadable_outcome_keeps_pr_bookkeeping() {
   local case_dir rc
   case_dir=$(make_case github-outcome-read-fails)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 3131313131313131313131313131313131313131
+  add_gh_mock "$case_dir" 3131313131313131313131313131313131313131
   add_gh_mock_outcome_read_fails "$case_dir" 3131313131313131313131313131313131313131
-  add_gh_axi_mock_view_fails "$case_dir"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -607,13 +603,13 @@ test_github_refusal_quotes_the_forge_output() {
   local case_dir rc
   case_dir=$(make_case github-refusal-quotes-forge)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 6161616161616161616161616161616161616161
+  add_gh_mock "$case_dir" 6161616161616161616161616161616161616161
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr merge")
-    printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+    printf '%s\n' "$*" >> "$FM_TEST_GH_MERGE_LOG"
     echo "will be added to the merge queue when all requirements are met"
     exit 0
     ;;
@@ -639,7 +635,7 @@ exit 0
 SH
   chmod +x "$case_dir/fakebin/gh"
   write_github_outcome "$case_dir" OPEN false false main
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -673,10 +669,10 @@ test_github_auto_merge_without_queue_refuses_legibly() {
   for spelling in --auto --auto=true; do
     case_dir=$(make_case "github-auto-no-queue${spelling#--auto}")
     mkdir -p "$case_dir/wt"
-    add_gh_mocks "$case_dir" 7171717171717171717171717171717171717171
+    add_gh_mock "$case_dir" 7171717171717171717171717171717171717171
     write_github_outcome "$case_dir" OPEN false false main
     : > "$case_dir/github-rules"
-    : > "$case_dir/gh-axi.log"
+    : > "$case_dir/gh-merge.log"
     : > "$case_dir/gh.log"
 
     set +e
@@ -693,9 +689,9 @@ test_github_auto_merge_without_queue_refuses_legibly() {
       "$case_dir/stderr" "github-auto-no-queue: the refusal never explained the armed auto-merge"
     assert_grep 'nothing is merged or in the merge queue yet' "$case_dir/stderr" \
       "github-auto-no-queue: the refusal left the operator to infer the pending state"
-    grep -qxF "pr merge 66 --repo example/repo $spelling --merge" "$case_dir/gh-axi.log" \
+    grep -qxF "pr merge 66 --repo example/repo $spelling --merge" "$case_dir/gh-merge.log" \
       || fail "github-auto-no-queue: the attempted merge was changed unexpectedly"
-    [ "$(wc -l < "$case_dir/gh-axi.log" | tr -d '[:space:]')" = 1 ] \
+    [ "$(wc -l < "$case_dir/gh-merge.log" | tr -d '[:space:]')" = 1 ] \
       || fail "github-auto-no-queue: the wrapper attempted more than one merge"
     assert_grep 'pr=https://github.com/example/repo/pull/66' "$case_dir/state/task-x1.meta" \
       "github-auto-no-queue: the attempted merge lost its PR reference"
@@ -709,10 +705,10 @@ test_github_failed_merge_never_claims_armed_auto_merge() {
   local case_dir rc
   case_dir=$(make_case github-auto-merge-command-fails)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks_merge_fails "$case_dir"
+  add_gh_mock_merge_fails "$case_dir"
   write_github_outcome "$case_dir" OPEN false false main
   : > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -740,10 +736,10 @@ test_github_failed_merge_with_queue_flags_never_claims_acceptance() {
   local case_dir rc
   case_dir=$(make_case github-failed-merge-queue-flags)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks_merge_fails "$case_dir"
+  add_gh_mock_merge_fails "$case_dir"
   write_github_outcome "$case_dir" OPEN false false main
   printf 'merge_method=MERGE\n' > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -774,10 +770,10 @@ test_github_accepted_queue_flags_do_not_echo_back_the_same_command() {
   local case_dir rc
   case_dir=$(make_case github-accepted-queue-flags)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 8181818181818181818181818181818181818181
+  add_gh_mock "$case_dir" 8181818181818181818181818181818181818181
   write_github_outcome "$case_dir" OPEN false false main
   printf 'merge_method=MERGE\n' > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -805,10 +801,10 @@ test_github_mismatched_queue_flags_still_name_the_retry() {
   local case_dir rc
   case_dir=$(make_case github-mismatched-queue-flags)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 8282828282828282828282828282828282828282
+  add_gh_mock "$case_dir" 8282828282828282828282828282828282828282
   write_github_outcome "$case_dir" OPEN false false main
   printf 'merge_method=REBASE\n' > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -829,10 +825,10 @@ test_github_unrecognised_queue_method_still_names_the_queue() {
   local case_dir rc
   case_dir=$(make_case github-unrecognised-queue-method)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 8383838383838383838383838383838383838383
+  add_gh_mock "$case_dir" 8383838383838383838383838383838383838383
   write_github_outcome "$case_dir" OPEN false false main
   printf 'merge_method=FASTFORWARD\n' > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -856,7 +852,7 @@ test_github_unreadable_queue_rules_are_not_reported_as_no_queue() {
   local case_dir rc
   case_dir=$(make_case github-unreadable-queue-rules)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 8484848484848484848484848484848484848484
+  add_gh_mock "$case_dir" 8484848484848484848484848484848484848484
   write_github_outcome "$case_dir" OPEN false false main
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -876,7 +872,7 @@ esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -897,10 +893,10 @@ test_github_no_queue_rule_says_nothing_about_a_queue() {
   local case_dir rc
   case_dir=$(make_case github-no-queue-rule)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 8585858585858585858585858585858585858585
+  add_gh_mock "$case_dir" 8585858585858585858585858585858585858585
   write_github_outcome "$case_dir" OPEN false false main
   : > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -917,51 +913,18 @@ test_github_no_queue_rule_says_nothing_about_a_queue() {
   pass "fm-pr-merge says nothing about a merge queue when the base branch has no queue rule"
 }
 
-test_github_fallback_view_refusal_says_the_queue_was_unobservable() {
-  local case_dir ghless_path rc
-  case_dir=$(make_case github-fallback-unobservable-queue)
-  mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 8686868686868686868686868686868686868686
-  rm "$case_dir/fakebin/gh"
-  ghless_path="$case_dir/path-without-gh"
-  mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
-  : > "$case_dir/gh-axi.log"
-
-  set +e
-  PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
-    https://github.com/example/repo/pull/73 -- --auto --merge \
-    > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 127 "$rc" "github-fallback-unobservable-queue: merge without gh must fail"
-  assert_no_grep 'verified: ' "$case_dir/stdout" \
-    "github-fallback-unobservable-queue: an unproved merge was reported as verified"
-  pass "fm-pr-merge requires gh for GitHub merges"
-}
-
 test_github_unreadable_outcome_refusal_quotes_the_forge_output() {
   local case_dir rc
   case_dir=$(make_case github-unreadable-outcome-quotes-forge)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 8787878787878787878787878787878787878787
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-case "${1:-} ${2:-}" in
-  "pr merge") echo "will be added to the merge queue when all requirements are met" ;;
-  "pr view") exit 1 ;;
-esac
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/gh-axi"
+  add_gh_mock "$case_dir" 8787878787878787878787878787878787878787
   add_gh_mock_outcome_read_fails "$case_dir" 8787878787878787878787878787878787878787
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr merge")
-    printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+    printf '%s\n' "$*" >> "$FM_TEST_GH_MERGE_LOG"
     echo "will be added to the merge queue when all requirements are met"
     exit 0
     ;;
@@ -979,7 +942,7 @@ esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -1005,17 +968,17 @@ SH
   pass "fm-pr-merge quotes the forge output when it cannot read the outcome either"
 }
 
-test_github_failed_gh_read_falls_back_to_gh_axi() {
+test_github_failed_graphql_read_falls_back_to_gh_pr_view() {
   local case_dir rc
   case_dir=$(make_case github-gh-read-falls-back)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 5151515151515151515151515151515151515151
+  add_gh_mock "$case_dir" 5151515151515151515151515151515151515151
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr merge")
-    printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+    printf '%s\n' "$*" >> "$FM_TEST_GH_MERGE_LOG"
     printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}"
     exit 0
     ;;
@@ -1037,7 +1000,7 @@ esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -1086,9 +1049,9 @@ test_github_failed_merge_names_an_observed_landed_state() {
   local case_dir rc
   case_dir=$(make_case github-failed-merge-actually-landed)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks_merge_fails "$case_dir"
+  add_gh_mock_merge_fails "$case_dir"
   write_github_outcome "$case_dir" MERGED true false main
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -1109,46 +1072,13 @@ test_github_failed_merge_names_an_observed_landed_state() {
   pass "fm-pr-merge names a landed state hiding behind a failed GitHub merge command"
 }
 
-test_github_without_gh_still_uses_gh_axi_merge() {
-  local case_dir ghless_path rc
-  case_dir=$(make_case github-without-gh)
-  mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 4141414141414141414141414141414141414141
-  rm "$case_dir/fakebin/gh"
-  ghless_path="$case_dir/path-without-gh"
-  mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
-  : > "$case_dir/gh-axi.log"
-
-  set +e
-  PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
-    https://github.com/example/repo/pull/60 \
-    > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 127 "$rc" "github-without-gh: GitHub merges require gh"
-  assert_no_grep 'verified: ' "$case_dir/stdout" \
-    "github-without-gh: a merge without gh was reported as verified"
-  pass "fm-pr-merge requires gh for GitHub merges"
-}
-
-test_github_without_gh_failed_read_keeps_bookkeeping() {
+test_github_without_gh_refuses_without_gh_axi_and_keeps_bookkeeping() {
   local case_dir ghless_path rc
   case_dir=$(make_case github-without-gh-read-fails)
   mkdir -p "$case_dir/wt"
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-case "${1:-} ${2:-}" in
-  "pr merge") exit 0 ;;
-  "pr view") exit 1 ;;
-esac
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/gh-axi"
   ghless_path="$case_dir/path-without-gh"
   mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
 
   set +e
   PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
@@ -1162,17 +1092,19 @@ SH
     "github-without-gh-read-fails: a merge attempt lost its PR metadata"
   assert_present "$case_dir/state/task-x1.check.sh" \
     "github-without-gh-read-fails: a merge attempt lost its merge poll"
-  pass "fm-pr-merge preserves bookkeeping when gh is absent"
+  [ ! -s "$case_dir/gh-merge.log" ] \
+    || fail "github-without-gh-read-fails: a direct gh merge was recorded despite gh being absent"
+  pass "fm-pr-merge requires gh without falling back to gh-axi and preserves bookkeeping"
 }
 
 test_github_zero_exit_queue_required_refuses_with_exact_retry() {
   local case_dir rc
   case_dir=$(make_case github-zero-exit-queue-required)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 2121212121212121212121212121212121212121
+  add_gh_mock "$case_dir" 2121212121212121212121212121212121212121
   write_github_outcome "$case_dir" OPEN false false 'release/2026'
   printf 'merge_method=REBASE\n' > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -1190,11 +1122,11 @@ test_github_zero_exit_queue_required_refuses_with_exact_retry() {
     "github-zero-exit-queue-required: refusal did not name the exact compatible flags"
   assert_grep 'api --paginate repos/example/repo/rules/branches/release%2F2026' "$case_dir/gh.log" \
     "github-zero-exit-queue-required: queue rules were not read with pagination and encoded branch path"
-  grep -qxF 'pr merge 56 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 56 --repo example/repo --squash' "$case_dir/gh-merge.log" \
     || fail "github-zero-exit-queue-required: the attempted merge was changed unexpectedly"
-  [ "$(wc -l < "$case_dir/gh-axi.log" | tr -d '[:space:]')" = 1 ] \
+  [ "$(wc -l < "$case_dir/gh-merge.log" | tr -d '[:space:]')" = 1 ] \
     || fail "github-zero-exit-queue-required: the wrapper attempted more than one merge"
-  assert_no_grep --auto "$case_dir/gh-axi.log" \
+  assert_no_grep --auto "$case_dir/gh-merge.log" \
     "github-zero-exit-queue-required: queue flags were auto-applied to the attempted merge"
   assert_grep 'pr=https://github.com/example/repo/pull/56' "$case_dir/state/task-x1.meta" \
     "github-zero-exit-queue-required: the attempted merge lost its PR reference"
@@ -1207,10 +1139,10 @@ test_github_closed_unqueued_outcome_omits_retry_flags() {
   local case_dir rc
   case_dir=$(make_case github-closed-unqueued)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 2323232323232323232323232323232323232323
+  add_gh_mock "$case_dir" 2323232323232323232323232323232323232323
   write_github_outcome "$case_dir" CLOSED false false master
   printf 'merge_method=MERGE\n' > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -1237,9 +1169,9 @@ test_github_queued_outcome_is_verified() {
   local case_dir rc
   case_dir=$(make_case github-verified-queued)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 3030303030303030303030303030303030303030
+  add_gh_mock "$case_dir" 3030303030303030303030303030303030303030
   write_github_outcome "$case_dir" OPEN false true master
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -1262,10 +1194,10 @@ test_github_queue_required_refusal_names_retry_flags() {
   local case_dir rc
   case_dir=$(make_case github-queue-required)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks_merge_fails "$case_dir"
+  add_gh_mock_merge_fails "$case_dir"
   write_github_outcome "$case_dir" OPEN false false master
   printf 'merge_method=MERGE\n' > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -1281,7 +1213,7 @@ test_github_queue_required_refusal_names_retry_flags() {
     "github-queue-required: refusal did not name the queue requirement"
   grep -F -- '-- --auto --merge' "$case_dir/stderr" >/dev/null \
     || fail "github-queue-required: refusal did not name the exact compatible flags"
-  grep -qxF 'pr merge 54 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 54 --repo example/repo --squash' "$case_dir/gh-merge.log" \
     || fail "github-queue-required: the wrapper silently changed the attempted merge semantics"
   assert_present "$case_dir/state/task-x1.check.sh" \
     "github-queue-required: the failed forge call did not leave the merge poll armed"
@@ -1292,10 +1224,10 @@ test_github_agreeing_queue_rules_keep_retry_guidance() {
   local case_dir rc
   case_dir=$(make_case github-agreeing-queue-rules)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 2424242424242424242424242424242424242424
+  add_gh_mock "$case_dir" 2424242424242424242424242424242424242424
   write_github_outcome "$case_dir" OPEN false false main
   printf 'merge_method=REBASE\nmerge_method=REBASE\n' > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -1318,11 +1250,11 @@ test_github_conflicting_queue_rules_report_ambiguity() {
   local case_dir rc
   case_dir=$(make_case github-conflicting-queue-rules)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 2525252525252525252525252525252525252525
+  add_gh_mock "$case_dir" 2525252525252525252525252525252525252525
   write_github_outcome "$case_dir" OPEN false false main
   printf 'merge_method=MERGE\nmerge_method=SQUASH\nmerge_method=SQUASH\n' \
     > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-merge.log"
   : > "$case_dir/gh.log"
 
   set +e
@@ -1348,24 +1280,23 @@ test_extra_merge_args_forwarded() {
   local case_dir rc
   case_dir=$(make_case extra-args)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 2222222222222222222222222222222222222222
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" 2222222222222222222222222222222222222222
+  : > "$case_dir/gh-merge.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/15 -- --squash --delete-branch \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "extra-args: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 15 --repo example/repo --squash --delete-branch' "$case_dir/gh-axi.log" \
-    || fail "extra-args: extra gh-axi pr merge flags were not forwarded"
-  pass "fm-pr-merge forwards extra flags to gh-axi pr merge after the -- separator"
+  grep -qxF 'pr merge 15 --repo example/repo --squash --delete-branch' "$case_dir/gh-merge.log" \
+    || fail "extra-args: extra gh pr merge flags were not forwarded"
+  pass "fm-pr-merge forwards extra flags to gh pr merge after the -- separator"
 }
 
 test_missing_meta_refuses_before_merge() {
-  local case_dir fakebin rc
-  case_dir="$TMP_ROOT/missing-meta"
-  fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$fakebin"
-  add_gh_mocks "$case_dir" 3333333333333333333333333333333333333333
-  : > "$case_dir/gh-axi.log"
+  local case_dir rc
+  case_dir=$(make_case missing-meta)
+  rm -f "$case_dir/state/task-x1.meta"
+  add_gh_mock "$case_dir" 3333333333333333333333333333333333333333
+  : > "$case_dir/gh-merge.log"
 
   set +e
   run_pr_merge "$case_dir" missing-x1 https://github.com/example/repo/pull/21 \
@@ -1376,7 +1307,7 @@ test_missing_meta_refuses_before_merge() {
   expect_code 1 "$rc" "missing-meta: fm-pr-merge should refuse"
   assert_grep 'error: task metadata is unavailable' "$case_dir/stderr" \
     "missing-meta: refusal did not explain missing meta"
-  [ ! -s "$case_dir/gh-axi.log" ] || fail "missing-meta: gh-axi pr merge was invoked"
+  [ ! -s "$case_dir/gh-merge.log" ] || fail "missing-meta: gh pr merge was invoked"
   assert_absent "$case_dir/state/missing-x1.check.sh" \
     "missing-meta: fm-pr-check should not arm a poll for an unknown task"
   pass "fm-pr-merge refuses before merging when task meta is missing"
@@ -1386,8 +1317,8 @@ test_malformed_url_refuses_before_merge() {
   local case_dir rc
   case_dir=$(make_case malformed-url)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 4444444444444444444444444444444444444444
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" 4444444444444444444444444444444444444444
+  : > "$case_dir/gh-merge.log"
 
   set +e
   # A near-miss GitLab URL: one namespace segment where a project needs at
@@ -1405,17 +1336,17 @@ test_malformed_url_refuses_before_merge() {
     "malformed-url: malformed PR URL was recorded in meta"
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "malformed-url: malformed PR URL armed a merge poll"
-  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
-    "malformed-url: gh-axi pr merge was invoked for a malformed URL"
-  pass "fm-pr-merge refuses malformed PR URLs before calling gh-axi"
+  assert_no_grep 'pr merge' "$case_dir/gh-merge.log" \
+    "malformed-url: gh pr merge was invoked for a malformed URL"
+  pass "fm-pr-merge refuses malformed PR URLs before calling gh"
 }
 
 test_rejects_unsafe_url_segments_before_recording() {
   local case_dir rc
   case_dir=$(make_case unsafe-url-segment)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 8888888888888888888888888888888888888888
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" 8888888888888888888888888888888888888888
+  : > "$case_dir/gh-merge.log"
 
   set +e
   # shellcheck disable=SC2016  # Literal command substitution probes URL parsing safety.
@@ -1432,8 +1363,8 @@ test_rejects_unsafe_url_segments_before_recording() {
     "unsafe-url-segment: unsafe PR URL was recorded in meta"
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "unsafe-url-segment: unsafe PR URL armed a merge poll"
-  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
-    "unsafe-url-segment: gh-axi pr merge was invoked for an unsafe URL"
+  assert_no_grep 'pr merge' "$case_dir/gh-merge.log" \
+    "unsafe-url-segment: gh pr merge was invoked for an unsafe URL"
   pass "fm-pr-merge refuses unsafe PR URL segments before recording state"
 }
 
@@ -1441,8 +1372,8 @@ test_repo_override_args_refuse_before_recording() {
   local case_dir rc
   case_dir=$(make_case repo-override)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 9999999999999999999999999999999999999999
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" 9999999999999999999999999999999999999999
+  : > "$case_dir/gh-merge.log"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/right/repo/pull/5 -- --repo wrong/repo \
@@ -1457,8 +1388,8 @@ test_repo_override_args_refuse_before_recording() {
     "repo-override: PR URL was recorded before rejecting repo override"
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "repo-override: repo override armed a merge poll"
-  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
-    "repo-override: gh-axi pr merge was invoked despite repo override"
+  assert_no_grep 'pr merge' "$case_dir/gh-merge.log" \
+    "repo-override: gh pr merge was invoked despite repo override"
   pass "fm-pr-merge refuses repo override args before recording state"
 }
 
@@ -1470,8 +1401,8 @@ test_bundled_repo_override_args_refuse_before_recording() {
   local case_dir rc
   case_dir=$(make_case bundled-repo-override)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" abababababababababababababababababababab
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" abababababababababababababababababababab
+  : > "$case_dir/gh-merge.log"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/right/repo/pull/6 -- -dR wrong/repo \
@@ -1486,8 +1417,8 @@ test_bundled_repo_override_args_refuse_before_recording() {
     "bundled-repo-override: PR URL was recorded before rejecting the bundled repo override"
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "bundled-repo-override: a bundled repo override armed a merge poll"
-  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
-    "bundled-repo-override: gh-axi pr merge was invoked despite the bundled repo override"
+  assert_no_grep 'pr merge' "$case_dir/gh-merge.log" \
+    "bundled-repo-override: gh pr merge was invoked despite the bundled repo override"
 
   case_dir=$(make_gitlab_case bundled-repo-override-gitlab)
 
@@ -1511,14 +1442,14 @@ test_bundled_repo_override_args_refuse_before_recording() {
   # cluster is still the caller's business and still reaches the forge.
   case_dir=$(make_case bundled-non-repo-cluster)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc
+  : > "$case_dir/gh-merge.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/8 -- -d \
     > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "bundled-non-repo-cluster: fm-pr-merge refused a short flag that overrides nothing"
 
-  grep -qxF 'pr merge 8 --repo example/repo --squash -d' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 8 --repo example/repo --squash -d' "$case_dir/gh-merge.log" \
     || fail "bundled-non-repo-cluster: a short flag carrying no repository override was not forwarded"
   pass "fm-pr-merge refuses a bundled short-option repo override and forwards other short flags"
 }
@@ -1527,20 +1458,20 @@ test_explicit_merge_method_not_overridden() {
   local case_dir
   case_dir=$(make_case explicit-merge-method)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 5555555555555555555555555555555555555555
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" 5555555555555555555555555555555555555555
+  : > "$case_dir/gh-merge.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/22 -- --merge \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "explicit-merge-method: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 22 --repo example/repo --merge' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 22 --repo example/repo --merge' "$case_dir/gh-merge.log" \
     || fail "explicit-merge-method: caller --merge was not forwarded without an extra default --squash"
   local flag
   for flag in -m -r -s; do
-    : > "$case_dir/gh-axi.log"
+    : > "$case_dir/gh-merge.log"
     run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/22 -- "$flag" \
       > "$case_dir/stdout" 2> "$case_dir/stderr" || fail 'short strategy flag was refused'
-    grep -qxF "pr merge 22 --repo example/repo $flag" "$case_dir/gh-axi.log" \
+    grep -qxF "pr merge 22 --repo example/repo $flag" "$case_dir/gh-merge.log" \
       || fail 'short strategy flag received an extra default --squash'
   done
   pass "fm-pr-merge does not add default --squash when the caller passes an explicit merge method"
@@ -1550,27 +1481,27 @@ test_method_equals_merge_method_not_overridden() {
   local case_dir
   case_dir=$(make_case method-equals-merge-method)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" 7777777777777777777777777777777777777777
+  : > "$case_dir/gh-merge.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/23 -- --method=merge \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "method-equals-merge-method: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 23 --repo example/repo --merge' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 23 --repo example/repo --merge' "$case_dir/gh-merge.log" \
     || fail "method-equals-merge-method: caller --method=merge was not forwarded without an extra default --squash"
   if [ -n "$REAL_GH" ]; then
     # Fixture-controlled words only; --help validates flags without a merge.
     local -a emitted
-    read -r -a emitted < "$case_dir/gh-axi.log"
+    read -r -a emitted < "$case_dir/gh-merge.log"
     "$REAL_GH" "${emitted[@]}" --help >/dev/null \
       || fail "translated merge arguments are not accepted by the installed gh"
   fi
   local method rc
   for method in squash rebase; do
-    : > "$case_dir/gh-axi.log"
+    : > "$case_dir/gh-merge.log"
     run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/23 -- --method "$method" \
       > "$case_dir/stdout" 2> "$case_dir/stderr" || fail 'split --method failed'
-    grep -qxF "pr merge 23 --repo example/repo --$method" "$case_dir/gh-axi.log" \
+    grep -qxF "pr merge 23 --repo example/repo --$method" "$case_dir/gh-merge.log" \
       || fail 'split --method was not translated'
   done
   : > "$case_dir/gh.log"
@@ -1587,19 +1518,19 @@ test_method_equals_merge_method_not_overridden() {
   pass "fm-pr-merge respects --method=<value> as an explicit merge method"
 }
 
-test_parses_pr_url_for_gh_axi() {
+test_parses_pr_url_for_gh() {
   local case_dir
   case_dir=$(make_case url-parsing)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" 6666666666666666666666666666666666666666
+  : > "$case_dir/gh-merge.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "url-parsing: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 126 --repo my-org/my-repo --squash' "$case_dir/gh-axi.log" \
-    || fail "url-parsing: gh-axi pr merge was not invoked as number + --repo + default --squash"
-  pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
+  grep -qxF 'pr merge 126 --repo my-org/my-repo --squash' "$case_dir/gh-merge.log" \
+    || fail "url-parsing: gh pr merge was not invoked as number + --repo + default --squash"
+  pass "fm-pr-merge parses a GitHub PR URL into gh number and --repo arguments"
 }
 
 test_gitlab_url_resolves_and_merges() {
@@ -1622,7 +1553,7 @@ test_gitlab_url_resolves_and_merges() {
     || fail "gitlab-merges: unexpected merge invocation: '$merge_line'"
   assert_grep "successful pipeline at head $MR_HEAD" "$case_dir/stderr" \
     "gitlab-merges: the verified head was not reported"
-  [ ! -s "$case_dir/gh-axi.log" ] || fail "gitlab-merges: a merge request reached the GitHub CLI"
+  [ ! -s "$case_dir/gh-merge.log" ] || fail "gitlab-merges: a merge request reached the GitHub CLI"
   pass "fm-pr-merge merges a GitLab merge request through glab instead of refusing it"
 }
 
@@ -1709,7 +1640,7 @@ test_gitlab_merge_failure_propagates() {
 # Each pre-merge condition, driven one at a time, so no condition can be
 # carried by another. The refusal names that condition, no merge is attempted,
 # and pr= is still recorded and the poll still armed exactly as the GitHub path
-# leaves them when gh-axi itself fails.
+# leaves them when gh itself fails.
 test_gitlab_each_condition_refuses_independently() {
   local case_dir rc name expected spec
   set -- \
@@ -1860,7 +1791,8 @@ test_gitlab_missing_tool_refuses_before_recording() {
     set +e
     FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$case_dir/state" \
-    FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+    FM_TEST_GH_MERGE_LOG="$case_dir/gh-merge.log" \
+    FM_TEST_FORBIDDEN_GH_AXI_LOG="$case_dir/gh-axi.log" \
     FM_TEST_GLAB_LOG="$case_dir/glab.log" \
     FM_TEST_GLAB_JSON="$case_dir/mr.json" \
     PATH="$case_dir/no$tool" \
@@ -1904,15 +1836,15 @@ test_github_still_forwards_sha_arg() {
   local case_dir
   case_dir=$(make_case github-sha-arg)
   mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" dddddddddddddddddddddddddddddddddddddddd
-  : > "$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" dddddddddddddddddddddddddddddddddddddddd
+  : > "$case_dir/gh-merge.log"
 
   # --sha is rejected only where the head is firstmate's to determine. GitHub's
   # extra args are the caller's business exactly as they were.
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/44 -- --sha abc123 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "github-sha-arg: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 44 --repo example/repo --squash --match-head-commit abc123' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 44 --repo example/repo --squash --match-head-commit abc123' "$case_dir/gh-merge.log" \
     || fail "github-sha-arg: the GitHub path stopped forwarding a caller --sha"
   pass "fm-pr-merge leaves GitHub extra-arg handling unchanged, including --sha"
 }
@@ -1949,8 +1881,8 @@ test_secondmate_merge_reports_upward_once() {
   local case_dir replies url
   url=https://github.com/example/repo/pull/61
   case_dir=$(make_home_case secondmate-merge-reports remote)
-  add_gh_mocks "$case_dir" 5555555555555555555555555555555555555555
-  : >"$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" 5555555555555555555555555555555555555555
+  : >"$case_dir/gh-merge.log"
   replies="$case_dir/state/parent-replies.status"
 
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
@@ -1981,8 +1913,8 @@ test_secondmate_merge_reports_on_the_local_route() {
   url=https://github.com/example/repo/pull/62
   case_dir=$(make_home_case secondmate-merge-local local "$TMP_ROOT/secondmate-merge-local/parent")
   mkdir -p "$TMP_ROOT/secondmate-merge-local/parent/state"
-  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
-  : >"$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" 6666666666666666666666666666666666666666
+  : >"$case_dir/gh-merge.log"
   parent_status="$TMP_ROOT/secondmate-merge-local/parent/state/mate-x.status"
 
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
@@ -1998,8 +1930,8 @@ test_secondmate_merge_reports_on_the_local_route() {
 test_failed_merge_reports_nothing() {
   local case_dir rc
   case_dir=$(make_home_case failed-merge-silent remote)
-  add_gh_mocks_merge_fails "$case_dir"
-  : >"$case_dir/gh-axi.log"
+  add_gh_mock_merge_fails "$case_dir"
+  : >"$case_dir/gh-merge.log"
 
   set +e
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/63 \
@@ -2076,8 +2008,8 @@ test_main_home_merge_leaves_a_durable_wake() {
   local case_dir url
   url=https://github.com/example/repo/pull/64
   case_dir=$(make_home_case main-merge-wake)
-  add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
-  : >"$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" 7777777777777777777777777777777777777777
+  : >"$case_dir/gh-merge.log"
 
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "main-merge-wake: merge failed"
@@ -2095,9 +2027,9 @@ test_queued_github_merge_leaves_the_poll_armed() {
   local case_dir url
   url=https://github.com/example/repo/pull/66
   case_dir=$(make_home_case queued-github-merge)
-  add_gh_mocks "$case_dir" 9999999999999999999999999999999999999999
+  add_gh_mock "$case_dir" 9999999999999999999999999999999999999999
   write_github_outcome "$case_dir" OPEN false true main
-  : >"$case_dir/gh-axi.log"
+  : >"$case_dir/gh-merge.log"
 
   FM_TEST_GH_MERGE_STATE=open FM_TEST_HOME="$case_dir/home" \
     run_pr_merge "$case_dir" task-x1 "$url" \
@@ -2118,8 +2050,8 @@ test_distinct_merged_prs_keep_distinct_wakes() {
   first_url=https://github.com/example/repo/pull/68
   second_url=https://github.com/example/repo/pull/69
   case_dir=$(make_home_case distinct-merge-wakes)
-  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-  : >"$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : >"$case_dir/gh-merge.log"
 
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$first_url" \
     >"$case_dir/stdout-1" 2>"$case_dir/stderr-1" \
@@ -2149,8 +2081,8 @@ test_uncommitted_marker_retry_is_never_silent() {
   local case_dir url count
   url=https://github.com/example/repo/pull/67
   case_dir=$(make_home_case uncommitted-wake-retry)
-  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  : >"$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  : >"$case_dir/gh-merge.log"
   cat >"$case_dir/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 case "${!#}" in
@@ -2196,8 +2128,8 @@ test_secondmate_without_parent_binding_is_loud() {
   local case_dir rc url
   url=https://github.com/example/repo/pull/65
   case_dir=$(make_home_case unbound-secondmate)
-  add_gh_mocks "$case_dir" 8888888888888888888888888888888888888888
-  : >"$case_dir/gh-axi.log"
+  add_gh_mock "$case_dir" 8888888888888888888888888888888888888888
+  : >"$case_dir/gh-merge.log"
   # A secondmate identity with no parent binding: exactly the seeding gap that
   # let three real merges land in silence.
   printf '%s\n' mate-x >"$case_dir/home/.fm-secondmate-home"
@@ -2232,14 +2164,12 @@ test_github_mismatched_queue_flags_still_name_the_retry
 test_github_unrecognised_queue_method_still_names_the_queue
 test_github_unreadable_queue_rules_are_not_reported_as_no_queue
 test_github_no_queue_rule_says_nothing_about_a_queue
-test_github_fallback_view_refusal_says_the_queue_was_unobservable
 test_github_auto_merge_without_queue_refuses_legibly
 test_github_failed_merge_never_claims_armed_auto_merge
 test_github_failed_merge_with_queue_flags_never_claims_acceptance
-test_github_failed_gh_read_falls_back_to_gh_axi
+test_github_failed_graphql_read_falls_back_to_gh_pr_view
 test_github_failed_merge_names_an_observed_landed_state
-test_github_without_gh_still_uses_gh_axi_merge
-test_github_without_gh_failed_read_keeps_bookkeeping
+test_github_without_gh_refuses_without_gh_axi_and_keeps_bookkeeping
 test_github_merged_outcome_is_verified
 test_github_verified_merge_requires_poll_recording
 test_github_queued_outcome_is_verified
@@ -2252,7 +2182,7 @@ test_repo_override_args_refuse_before_recording
 test_bundled_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
-test_parses_pr_url_for_gh_axi
+test_parses_pr_url_for_gh
 test_github_still_forwards_sha_arg
 test_gitlab_url_resolves_and_merges
 test_gitlab_host_comes_from_the_url
@@ -2265,6 +2195,183 @@ test_gitlab_stale_recorded_head_is_reported
 test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses
 test_gitlab_missing_tool_refuses_before_recording
+
+# The merge gate asks whether the task is still held for the captain. A home
+# that carries no backlog records no captain calls at all, so nothing can be
+# held and the merge must proceed; a backlog that EXISTS but cannot be read may
+# hide a live hold, so that one must refuse. The two states are distinct and
+# only the second is a refusal.
+test_absent_backlog_still_merges() {
+  local case_dir rc
+  case_dir=$(make_case absent-backlog-merges)
+  mkdir -p "$case_dir/wt"
+  add_gh_mock "$case_dir" 6161616161616161616161616161616161616161
+  : > "$case_dir/gh-merge.log"
+  rm -f "$case_dir/home/data/backlog.md"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/61 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "absent-backlog-merges: a home with no backlog must still merge"
+  assert_no_grep 'held for the captain' "$case_dir/stderr" \
+    "absent-backlog-merges: an absent backlog was read as a captain hold"
+  grep -qxF 'pr merge 61 --repo example/repo --squash' "$case_dir/gh-merge.log" \
+    || fail "absent-backlog-merges: the merge was not attempted"
+  pass "fm-pr-merge proceeds when the home carries no backlog at all"
+}
+
+test_unreadable_backlog_refuses_the_merge() {
+  local case_dir rc
+  case_dir=$(make_case unreadable-backlog-refuses)
+  mkdir -p "$case_dir/wt"
+  add_gh_mock "$case_dir" 6262626262626262626262626262626262626262
+  : > "$case_dir/gh-merge.log"
+  chmod 000 "$case_dir/home/data/backlog.md"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/62 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 644 "$case_dir/home/data/backlog.md"
+
+  expect_code 1 "$rc" "unreadable-backlog-refuses: an unreadable authority record must refuse"
+  assert_grep 'refusing to merge' "$case_dir/stderr" \
+    "unreadable-backlog-refuses: the refusal did not say it refused to merge"
+  [ ! -s "$case_dir/gh-merge.log" ] \
+    || fail "unreadable-backlog-refuses: the forge was called despite an unreadable record"
+  pass "fm-pr-merge refuses when the backlog exists but cannot be read"
+}
+
+test_unreadable_backend_config_refuses_the_merge() {
+  local case_dir rc
+  case_dir=$(make_case unreadable-backend-config-refuses)
+  mkdir -p "$case_dir/wt"
+  add_gh_mock "$case_dir" 6363636363636363636363636363636363636363
+  : > "$case_dir/gh-merge.log"
+  rm -f "$case_dir/home/data/backlog.md"
+  chmod 000 "$case_dir/home/.tasks.toml"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/63 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 644 "$case_dir/home/.tasks.toml"
+
+  expect_code 1 "$rc" "unreadable-backend-config-refuses: an unreadable authority route must refuse"
+  assert_grep 'tasks-axi backend configuration cannot be read' "$case_dir/stderr" \
+    "unreadable-backend-config-refuses: the unreadable authority route was not named"
+  [ ! -s "$case_dir/gh-merge.log" ] \
+    || fail "unreadable-backend-config-refuses: the forge was called despite an unreadable authority route"
+  pass "fm-pr-merge refuses when its configured backend cannot be read"
+}
+
+test_unreadable_user_backend_config_refuses_the_merge() {
+  local case_dir rc user_config
+  case_dir=$(make_case unreadable-user-backend-config-refuses)
+  user_config="$case_dir/user-home/.tasks-axi/config.toml"
+  mkdir -p "$case_dir/wt" "${user_config%/*}"
+  add_gh_mock "$case_dir" 6464646464646464646464646464646464646464
+  : > "$case_dir/gh-merge.log"
+  rm -f "$case_dir/home/.tasks.toml" "$case_dir/home/data/backlog.md"
+  printf '%s\n' 'backend = "beads"' > "$user_config"
+  chmod 000 "$user_config"
+
+  set +e
+  FM_TEST_USER_HOME="$case_dir/user-home" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/64 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 644 "$user_config"
+
+  expect_code 1 "$rc" "unreadable-user-backend-config-refuses: an unreadable authority route must refuse"
+  assert_grep "tasks-axi backend configuration cannot be read at $user_config" "$case_dir/stderr" \
+    "unreadable-user-backend-config-refuses: the unreadable authority route was not named"
+  [ ! -s "$case_dir/gh-merge.log" ] \
+    || fail "unreadable-user-backend-config-refuses: the forge was called despite an unreadable authority route"
+  pass "fm-pr-merge refuses when its user backend configuration cannot be read"
+}
+
+test_untraversable_user_backend_config_directory_refuses_the_merge() {
+  local case_dir rc user_config
+  case_dir=$(make_case untraversable-user-backend-config-directory-refuses)
+  user_config="$case_dir/user-home/.tasks-axi/config.toml"
+  mkdir -p "$case_dir/wt" "${user_config%/*}"
+  add_gh_mock "$case_dir" 6666666666666666666666666666666666666666
+  : > "$case_dir/gh-merge.log"
+  rm -f "$case_dir/home/.tasks.toml" "$case_dir/home/data/backlog.md"
+  printf '%s\n' 'backend = "beads"' > "$user_config"
+  chmod 000 "${user_config%/*}"
+
+  set +e
+  FM_TEST_USER_HOME="$case_dir/user-home" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/66 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 755 "${user_config%/*}"
+
+  expect_code 1 "$rc" "untraversable-user-backend-config-directory-refuses: an unreadable authority route must refuse"
+  assert_grep "tasks-axi backend configuration cannot be read at $user_config" "$case_dir/stderr" \
+    "untraversable-user-backend-config-directory-refuses: the unreadable authority route was not named"
+  [ ! -s "$case_dir/gh-merge.log" ] \
+    || fail "untraversable-user-backend-config-directory-refuses: the forge was called despite an unreadable authority route"
+  pass "fm-pr-merge refuses when its user backend configuration directory cannot be traversed"
+}
+
+test_absent_user_backend_config_directory_and_backlog_still_merge() {
+  local case_dir rc
+  case_dir=$(make_case absent-user-backend-config-directory-and-backlog-merges)
+  mkdir -p "$case_dir/wt" "$case_dir/user-home"
+  add_gh_mock "$case_dir" 6767676767676767676767676767676767676767
+  : > "$case_dir/gh-merge.log"
+  rm -f "$case_dir/home/.tasks.toml" "$case_dir/home/data/backlog.md"
+
+  set +e
+  FM_TEST_USER_HOME="$case_dir/user-home" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/67 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "absent-user-backend-config-directory-and-backlog-merges: sound defaults and no backlog must permit merging"
+  [ "$(grep -c '^pr merge ' "$case_dir/gh-merge.log")" -eq 1 ] \
+    || fail "absent-user-backend-config-directory-and-backlog-merges: the forge must merge exactly once"
+  grep -qxF 'pr merge 67 --repo example/repo --squash' "$case_dir/gh-merge.log" \
+    || fail "absent-user-backend-config-directory-and-backlog-merges: the expected merge was not attempted"
+  pass "fm-pr-merge proceeds once when its user configuration directory and backlog are genuinely absent"
+}
+
+test_backend_override_bypasses_unreadable_user_config() {
+  local case_dir rc user_config
+  case_dir=$(make_case backend-override-bypasses-unreadable-user-config)
+  user_config="$case_dir/user-home/.tasks-axi/config.toml"
+  mkdir -p "$case_dir/wt" "${user_config%/*}"
+  add_gh_mock "$case_dir" 6565656565656565656565656565656565656565
+  : > "$case_dir/gh-merge.log"
+  rm -f "$case_dir/home/.tasks.toml" "$case_dir/home/data/backlog.md"
+  printf '%s\n' 'backend = "beads"' > "$user_config"
+  chmod 000 "$user_config"
+
+  set +e
+  TASKS_AXI_BACKEND=markdown FM_TEST_USER_HOME="$case_dir/user-home" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/65 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 644 "$user_config"
+
+  expect_code 0 "$rc" "backend-override-bypasses-unreadable-user-config: an explicit backend must bypass config"
+  grep -qxF 'pr merge 65 --repo example/repo --squash' "$case_dir/gh-merge.log" \
+    || fail "backend-override-bypasses-unreadable-user-config: the merge was not attempted"
+  pass "fm-pr-merge honors a backend override over an unreadable user configuration"
+}
+
 test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
@@ -2277,3 +2384,11 @@ test_queued_github_merge_leaves_the_poll_armed
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
+test_absent_backlog_still_merges
+test_unreadable_backlog_refuses_the_merge
+test_unreadable_backend_config_refuses_the_merge
+test_unreadable_user_backend_config_refuses_the_merge
+test_untraversable_user_backend_config_directory_refuses_the_merge
+test_absent_user_backend_config_directory_and_backlog_still_merge
+test_backend_override_bypasses_unreadable_user_config
+assert_no_gh_axi_invocation

@@ -170,7 +170,12 @@ EOF
 
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
+  # A claude spawn pre-registers workspace trust in the launching user's own
+  # store (bin/fm-claude-trust.sh), and a relaunch reaches it through fm-control.sh, so this runs against a throwaway HOME;
+  # without it this suite would write the developer's real ~/.claude.json.
+  mkdir -p "$dir/user-home"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
@@ -185,7 +190,12 @@ run_control() {  # <case-dir> <args...>
 
 run_spawn() {  # <case-dir> <args...>
   local dir=$1; shift
+  # A claude spawn pre-registers workspace trust in the launching user's own
+  # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
+  # without it this suite would write the developer's real ~/.claude.json.
+  mkdir -p "$dir/user-home"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
 }
@@ -314,6 +324,44 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_relaunch_from_linked_home_preserves_recorded_worktree() {
+  local dir out rc head fetch_head
+  dir=$(new_case linked-home rl42)
+  add_ship_task "$dir" rl42 claude
+  git -C "$dir/proj" worktree add --quiet --detach "$dir/secondmate" HEAD
+  sed "s|^project=.*|project=$dir/secondmate|" "$dir/home/state/rl42.meta" > "$dir/linked.meta"
+  mv "$dir/linked.meta" "$dir/home/state/rl42.meta"
+  printf 'committed task work\n' > "$dir/wt/task.txt"
+  git -C "$dir/wt" add task.txt
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm task-work
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'unfinished task work\n' >> "$dir/wt/task.txt"
+  fetch_head=$(git -C "$dir/wt" rev-parse --git-path FETCH_HEAD)
+
+  out=$(run_control "$dir" rl42 relaunch --note "continue from linked home"); rc=$?
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# evidence begin: linked-home relaunch\n'
+    printf '$ bin/fm-control.sh rl42 relaunch --note "continue from linked home"\n%s\nexit=%s\n' "$out" "$rc"
+    printf 'worker HEAD before=%s after=%s\n' "$head" "$(git -C "$dir/wt" rev-parse HEAD)"
+    printf 'saved task metadata:\n'; cat "$dir/home/state/rl42.meta"
+    printf 'worker status:\n'; git -C "$dir/wt" status --short
+    printf 'preserved task.txt:\n'; cat "$dir/wt/task.txt"
+    if [ -e "$fetch_head" ]; then
+      printf 'worker FETCH_HEAD:\n'; cat "$fetch_head"
+    else
+      printf 'worker FETCH_HEAD absent\n'
+    fi
+    printf '# evidence end\n'
+  fi
+  expect_code 0 "$rc" "a linked spawning home should relaunch its recorded copy"$'\n'"$out"
+  [ "$(meta_field "$dir" rl42 worktree)" = "$dir/wt" ] || fail "relaunch replaced the recorded copy"
+  [ "$(meta_field "$dir" rl42 project)" = "$dir/secondmate" ] || fail "relaunch replaced the linked spawning home"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head" ] || fail "relaunch reset committed task work"
+  assert_grep 'unfinished task work' "$dir/wt/task.txt" "relaunch discarded unfinished task work"
+  [ ! -e "$fetch_head" ] || fail "relaunch fetched instead of preserving the recorded copy"
+  pass "fm-control relaunch: a linked spawning home preserves committed and unfinished work in the recorded copy"
+}
+
 test_relaunch_preserves_durable_task_metadata() {
   local dir out rc
   dir=$(new_case durable-meta rl19)
@@ -355,7 +403,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_RELEASE="$launch_release" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 200 ]; do
+  while [ ! -e "$prepare" ] && [ "$i" -lt 500 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -374,7 +422,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
       --carry-platform x --carry-max 280 > "$dir/link.out" 2>&1 &
   link_pid=$!
   i=0
-  while [ ! -e "$waiting" ] && [ "$i" -lt 200 ]; do
+  while [ ! -e "$waiting" ] && [ "$i" -lt 500 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -387,7 +435,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
   }
   : > "$launch_release"
   i=0
-  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do
+  while [ ! -e "$ready" ] && [ "$i" -lt 500 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -571,6 +619,31 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   [ "$(meta_field "$dir" rl6 model)" = opus ] || fail "the model should carry across a same-harness relaunch"
   [ "$(meta_field "$dir" rl6 effort)" = high ] || fail "the effort should carry across a same-harness relaunch"
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
+}
+
+test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
+  local dir out rc id=rl-ultra
+  dir=$(new_case native-ultra "$id")
+  add_ship_task "$dir" "$id" pi
+  printf pi > "$dir/fake/command"
+  printf pi > "$dir/fake/becomes"
+  printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
+  chmod +x "$dir/fakebin/pi"
+  sed 's|^model=default$|model=codex-native/gpt-6-astra|; s/^effort=default$/effort=ultra/' \
+    "$dir/home/state/$id.meta" > "$dir/home/state/$id.meta.tmp"
+  mv "$dir/home/state/$id.meta.tmp" "$dir/home/state/$id.meta"
+  out=$(run_control "$dir" "$id" relaunch --model openai-codex/gpt-6-astra --note "invalid native effort transfer"); rc=$?
+  expect_code 1 "$rc" "Ultra transferred to ordinary Pi"
+  assert_contains "$out" "ultra effort requires pi or pi-signed" "model-aware relaunch refusal missing"
+  [ "$(cat "$dir/fake/command")" = pi ] || fail "invalid Ultra relaunch stopped the running agent"
+  [ ! -s "$dir/fake/literal" ] || fail "invalid Ultra relaunch sent lifecycle input"
+  out=$(run_control "$dir" "$id" relaunch --note "preserve explicit native effort"); rc=$?
+  expect_code 0 "$rc" "native Ultra relaunch failed: $out"
+  [ "$(meta_field "$dir" "$id" effort)" = ultra ] || fail "relaunch lost Ultra metadata"
+  [ "$(meta_field "$dir" "$id" model)" = codex-native/gpt-6-astra ] || fail "relaunch lost native model"
+  assert_contains "$(cat "$dir/fake/literal")" "--codex-effort 'ultra'" "relaunch lost native flag"
+  assert_not_contains "$(cat "$dir/fake/literal")" "--thinking 'ultra'" "relaunch used an invalid Pi level"
+  pass "native Ultra relaunch preserves its profile and rejects an unsupported model before stopping"
 }
 
 test_explicit_model_wins_over_the_recorded_one() {
@@ -1485,6 +1558,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
@@ -1495,6 +1569,7 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared

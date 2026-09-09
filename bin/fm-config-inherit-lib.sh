@@ -63,7 +63,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist}"
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
@@ -93,9 +93,17 @@ fm_config_inherit_items() {
   printf '%s\n' "$FM_SHARED_CAPTAIN_REL"
 }
 
+fm_config_source_present() {
+  perl -MErrno=ENOENT -e '
+    if (lstat $ARGV[0]) { print 1 }
+    elsif ($! == ENOENT) { print 0 }
+    else { die "error: cannot inspect configuration source at $ARGV[0]: $!\n" }
+  ' -- "$1"
+}
+
 fm_inherit_file_mode() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %Lp "$1" 2>/dev/null
+    /usr/bin/stat -f %Lp "$1" 2>/dev/null
   else
     stat -c %a "$1" 2>/dev/null
   fi
@@ -103,7 +111,7 @@ fm_inherit_file_mode() {
 
 fm_inherit_file_device() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %d "$1" 2>/dev/null
+    /usr/bin/stat -f %d "$1" 2>/dev/null
   else
     stat -c %d "$1" 2>/dev/null
   fi
@@ -111,7 +119,7 @@ fm_inherit_file_device() {
 
 fm_inherit_file_link_count() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %l "$1" 2>/dev/null
+    /usr/bin/stat -f %l "$1" 2>/dev/null
   else
     stat -c %h "$1" 2>/dev/null
   fi
@@ -175,12 +183,13 @@ destination_allows_inherited_item() {
 # so this writes nothing there. It emits concise stderr diagnostics only for
 # notable events: a guard skip or a copy/remove error. A source item that is
 # present is copied only when its content differs (idempotent: a re-run never
-# churns mtimes). A source item that is absent is mirrored as a missing
+# churns mtimes). A source item proven absent is mirrored as a missing
 # destination item, so clearing the primary's value clears it downstream too
-# (primary-authoritative). The destination dir is created lazily, only when there
-# is actually something to write, so a primary with no inherited config item set is a
-# complete no-op (it leaves the secondmate home exactly as it was - the
-# backward-compatible path). When FM_CONFIG_INHERIT_REPORT points at a writable
+# (primary-authoritative). Inspection errors or existing nonregular sources
+# leave that destination item unchanged and report an error; inaccessible paths
+# and dangling source links must never silently remove an inherited grant.
+# The destination dir is created lazily, only when there is something to copy;
+# absence on both sides is a no-op. When FM_CONFIG_INHERIT_REPORT points at a writable
 # file, one tab-separated line per item is appended there:
 #   <item> <status> <reason>
 # Status is pushed, unchanged, skipped, or error. Skipped items are warnings and
@@ -440,7 +449,7 @@ propagate_secondmate_inheritance() {
 }
 
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest reason rc
+  local src_config=$1 dest_config=$2 item src dest source_present reason rc
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
   rc=0
@@ -454,6 +463,13 @@ propagate_inheritable_config() {
     fi
     src="$src_config/$item"
     dest="$dest_config/$item"
+    if ! source_present=$(fm_config_source_present "$src"); then
+      reason="cannot inspect primary source"
+      warn_inheritable_config_error "$item" "$src" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
+      continue
+    fi
     # This one scalar config is consumed as a local safety boundary, so reject
     # every unsafe or malformed source/destination artifact before the generic
     # byte-copy behavior below can treat it as ordinary inherited material.
@@ -514,6 +530,11 @@ propagate_inheritable_config() {
       else
         record_inheritable_config_result "$item" unchanged ""
       fi
+    elif [ "$source_present" = 1 ]; then
+      reason="primary source is not a regular file"
+      warn_inheritable_config_error "$item" "$src" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
     elif [ -e "$dest" ] || [ -L "$dest" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)

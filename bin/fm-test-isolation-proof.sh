@@ -216,8 +216,8 @@ EOF
 
 dir_mode() {
   local path=$1
-  if stat -f %Lp "$path" >/dev/null 2>&1; then
-    stat -f %Lp "$path"
+  if /usr/bin/stat -f %Lp "$path" >/dev/null 2>&1; then
+    /usr/bin/stat -f %Lp "$path"
   else
     stat -c %a "$path"
   fi

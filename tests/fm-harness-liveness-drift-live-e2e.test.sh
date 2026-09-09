@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/fm-harness-liveness-drift-live-e2e.test.sh - opt-in drift guard proving
+# tests/fm-harness-liveness-drift-live-e2e.test.sh - default-on drift guard proving
 # every INSTALLED harness is still classified `alive` by the tmux liveness
 # probe (bin/backends/tmux.sh).
 #
@@ -16,16 +16,17 @@
 # unauthenticated harness still starts its process, which is all the liveness
 # probe reads.
 #
-# Standard CI has no harness binaries or credentials, so this real-harness guard
-# is opt-in and on-demand. The portable counterpart in
+# Portable serial CI installs the public Pi package but no credentials, so this
+# guard checks that available token-free surface there and runs against every installed
+# harness on more capable hosts. The portable counterpart in
 # tests/fm-tmux-agent-liveness.test.sh pins the classifier logic in CI. Run this
 # guard after any harness upgrade and before trusting refreshed evidence.
 set -u
 
-if [ "${FM_HARNESS_LIVENESS_DRIFT:-0}" != 1 ]; then
-  echo "skip: set FM_HARNESS_LIVENESS_DRIFT=1 to run the installed-harness liveness drift guard"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate default-on FM_HARNESS_LIVENESS_DRIFT tmux
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -33,7 +34,6 @@ fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
 
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-drift-$$"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness-drift.XXXXXX")
@@ -67,6 +67,18 @@ fm_backend_source tmux || fail "fm_backend_source tmux failed"
 # order so this guard covers the same binary firstmate would actually launch.
 resolve_harness_binary() {  # <harness>
   local harness=$1 candidate
+  # cursor is resolved FIRST, before the generic PATH lookup, and only through
+  # the verified owner fm-spawn uses. The Cursor agent never installs as
+  # `cursor`: it installs as `cursor-agent` plus the legacy alias `agent`. A
+  # machine that also has the Cursor editor does have an executable `cursor` on
+  # PATH, and launching that one exits immediately, leaving a bare shell in the
+  # pane that this guard then reports as liveness drift the classifier can do
+  # nothing about. Asking the owner first also keeps an unrelated executable
+  # named `agent` rejected here exactly as it would be at launch.
+  if [ "$harness" = cursor ]; then
+    fm_cursor_resolve_binary 2>/dev/null && return 0
+    return 1
+  fi
   candidate=$(command -v "$harness" 2>/dev/null || true)
   if [ -n "$candidate" ] && [ -x "$candidate" ]; then
     printf '%s\n' "$candidate"
@@ -75,15 +87,6 @@ resolve_harness_binary() {  # <harness>
   if [ "$harness" = kimi ] && [ -n "${HOME:-}" ] && [ -x "$HOME/.kimi-code/bin/kimi" ]; then
     printf '%s\n' "$HOME/.kimi-code/bin/kimi"
     return 0
-  fi
-  # cursor is never on PATH under the name `cursor`: it installs as
-  # `cursor-agent` plus the legacy alias `agent`, and its user-local install is
-  # routinely absent from a non-interactive PATH. Resolve it through the same
-  # verified owner fm-spawn uses, so an unrelated executable named `agent` is
-  # rejected here exactly as it would be at launch.
-  if [ "$harness" = cursor ]; then
-    fm_cursor_resolve_binary 2>/dev/null && return 0
-    return 1
   fi
   return 1
 }

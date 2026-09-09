@@ -11,13 +11,26 @@
 #   fm-bearings-board.sh build <data.json>
 #   fm-bearings-board.sh path
 #
-# build      Validate the payload and inject it into a fresh copy of the shipped
-#            template at the stable board path. This home does not run lavish-axi;
-#            the captain opens the HTML file in a browser and answers in chat.
-#            Output starts with `board: <path>`, then:
+# build      Validate the payload, drop the Captain's Call cards whose subject
+#            already landed, and inject the effective payload into a fresh copy
+#            of the shipped template at the stable board path. This home does
+#            not run lavish-axi or register an answer source; the captain opens
+#            the HTML file in a browser and answers in chat. Output starts with
+#            `board: <path>`, then:
 #              served: <path>
 #              open: <path>
+#            Every dropped card is named on stderr as a `dropped-landed-card:`
+#            line, so a rebuild states what it removed instead of quietly
+#            shrinking Captain's Call.
 # path       Print the stable board path for this home.
+#
+# CAPTAIN'S CALL HYGIENE. A decision card is dropped when its work item, PR, or
+# structured artifact/version subject appears among the payload's own landed
+# rows, or when `bin/fm-captain-hold.sh open` reports the task is no longer an
+# open captain call. A newer published version also supersedes a version card.
+# A task whose state cannot be established is kept, because a call wrongly
+# hidden is worse than a card wrongly shown. Cleanup is therefore a normal
+# rebuild effect rather than a committed migration or direct state mutation.
 #
 # Validation is fail-closed: the payload must be valid JSON with
 # schema=fm-bearings-board.v1 and every renderer-consumed field must satisfy
@@ -30,9 +43,10 @@
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place. The directory name is retained
-# for path compatibility only; there is no Lavish session or polling. Injection escapes
-# every `<` in the compact JSON as the \u003c string escape, so a payload string
-# containing "</script>" can never terminate the data block early.
+# for path compatibility only; there is no Lavish session or polling.
+# Injection escapes every `<` in the compact JSON as the \u003c string escape,
+# so a payload string containing "</script>" can never terminate the data block
+# early.
 #
 # FM_BEARINGS_BOARD_TEMPLATE overrides the shipped template path (tests only).
 set -eu
@@ -71,6 +85,14 @@ validate_payload() {  # <data.json>
       or (.[$name]
         | type == "string"
           and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
+    def version: type == "string" and test("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$");
+    def optional_subject:
+      (has("subject") | not)
+      or (.subject
+        | type == "object"
+          and (keys | sort) == ["artifact", "version"]
+          and (.artifact | slug(128))
+          and (.version | version));
     def call_item:
       type == "object"
       and (.key | slug(128))
@@ -88,12 +110,16 @@ validate_payload() {  # <data.json>
       and (optional_string("decide"))
       and (optional_string("detail"))
       and (optional_https_url("pr_url"))
+      and optional_subject
+      and (if has("subject") then .type == "decision" else true end)
       and (optional_string("freeform_hint"))
       and ((has("close") | not) or (.close == "done" or .close == "release"))
       and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"))
       and ((has("recommend_value") | not)
         or ((.recommend_value | slug(128))
-          and (.recommend_value as $recommend | [.options[].value] | index($recommend) != null)))
+          and (.recommend_value as $recommend
+            | ([.options[].value] | index($recommend) != null))))
+      and ([.options[].value] | index("reconcile") == null)
       and (if .type == "merge" then (.risk | nonempty_string) else true end);
     def underway_item:
       type == "object" and repo_marker and (.id | nonempty_string)
@@ -101,7 +127,8 @@ validate_payload() {  # <data.json>
     def landed_item:
       type == "object" and repo_marker and (.id | nonempty_string)
       and (.what | nonempty_string) and (.owner | nonempty_string)
-      and optional_https_url("pr_url");
+      and optional_https_url("pr_url")
+      and optional_subject;
     def charted_item:
       type == "object" and repo_marker and (.id | slug(128))
       and (.title | nonempty_string) and (.reason | type == "string")
@@ -128,8 +155,70 @@ validate_payload() {  # <data.json>
   ' "$1" >/dev/null
 }
 
+# --- Captain's Call hygiene ---------------------------------------------------
+# A held decision whose subject already shipped is not a live call, so it is
+# dropped here instead of being carded again. All checks use exact structured
+# identities; unknown subject state keeps the card.
+
+decision_card_is_stale() {  # <task-id> <landed-0-or-1>
+  local task=$1 landed=$2 rc=0
+  if [ "$landed" = 1 ]; then
+    printf 'structured subject already landed\n'
+    return 0
+  fi
+  "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" --distinguish-absent >/dev/null 2>&1 || rc=$?
+  # 1 is a definite "no longer an open captain call". 2 is "cannot tell", 3 is
+  # absent from this backlog, and a call wrongly hidden is worse than a card
+  # wrongly shown, so both uncertain and absent cards stay.
+  if [ "$rc" -eq 1 ]; then
+    printf 'no longer an open captain call\n'
+    return 0
+  fi
+  return 1
+}
+
+# Drop every stale decision card while preserving every surviving input field.
+# The resulting JSON is the exact effective payload embedded in the read-only
+# board; no answer, reconcile, merge, or dispatch control is synthesized here.
+effective_payload() {  # <data.json> <dest.json>
+  local data=$1 dest=$2 landed_keys key reason drop='' tmp landed=0
+  landed_keys=$(jq -c '
+    def version_parts: split(".") | map(tonumber);
+    . as $payload
+    | [$payload.captains_call[]
+      | select(.type == "decision")
+      | . as $card
+      | select(
+          ($payload.landed | any(.id == $card.key))
+          or (($card.pr_url? != null) and ($payload.landed | any(.pr_url? == $card.pr_url)))
+          or (($card.subject? != null) and ($payload.landed | any(
+            (.subject? != null)
+            and (.subject.artifact == $card.subject.artifact)
+            and ((.subject.version | version_parts) >= ($card.subject.version | version_parts)))))
+        )
+      | .key]
+  ' "$data") || return 1
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    landed=0
+    if jq -e --arg key "$key" 'index($key) != null' <<< "$landed_keys" >/dev/null; then
+      landed=1
+    fi
+    reason=$(decision_card_is_stale "$key" "$landed") || continue
+    printf 'dropped-landed-card: %s (%s)\n' "$key" "$reason" >&2
+    drop=$drop$key$'\n'
+  done < <(jq -r '.captains_call[]? | select(.type == "decision") | .key' "$data")
+  tmp=$(printf '%s' "$drop" | jq -R -s 'split("\n") | map(select(length > 0))') || return 1
+  jq --argjson dropped "$tmp" '
+    .captains_call = [
+      .captains_call[]
+      | . as $card
+      | select($card.type != "decision" or (($dropped | index($card.key)) == null))
+    ]' "$data" > "$dest" || return 1
+}
+
 command_build() {
-  local data=${1-} board json tmp extracted
+  local data=${1-} board json tmp extracted effective
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"
@@ -139,7 +228,14 @@ command_build() {
   [ "$(grep -cxF "$PLACEHOLDER" "$TEMPLATE")" -eq 1 ] \
     || fail "board template does not carry exactly one data slot: $TEMPLATE"
 
-  json=$(jq -c . "$data") || fail "cannot compact the board data"
+  effective=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-payload.XXXXXX") \
+    || fail "cannot stage the board payload"
+  if ! effective_payload "$data" "$effective"; then
+    rm -f -- "$effective"
+    fail "cannot reconcile the board payload against landed work"
+  fi
+  json=$(jq -c . "$effective") || { rm -f -- "$effective"; fail "cannot compact the board data"; }
+  rm -f -- "$effective"
   # `<` never appears in JSON syntax outside strings, so escaping every
   # occurrence keeps the payload valid JSON while making </script> inert.
   json=${json//</\\u003c}

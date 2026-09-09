@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-bearings-board.sh: fail-closed payload validation,
-# slot-injection round-trip through the built page, bind-before-arm, and
-# idempotent re-arm of the stable board source.
+# stale-card filtering, effective-payload round-trip through the built page,
+# and idempotent rebuild of the stable local HTML file.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -14,10 +14,9 @@ TMP_ROOT=$(fm_test_tmproot fm-bearings-board)
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 make_home() {  # <name>
-  local home="$TMP_ROOT/$1" fakebin
+  local home="$TMP_ROOT/$1"
   mkdir -p "$home/state" "$home/data"
-  fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" lavish-axi
+  fm_fakebin "$home" >/dev/null
   printf '%s\n' "$home"
 }
 
@@ -28,23 +27,6 @@ run_board() {  # <home> <args...>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     "$BOARD" "$@"
-}
-
-run_procevent() {  # <home> <command args...>
-  local home=$1
-  shift
-  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-    "$ROOT/bin/fm-procevent.sh" "$@"
-}
-
-run_decisions() {  # <home> <command args...>
-  local home=$1
-  shift
-  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    "$ROOT/bin/fm-decision-hold.sh" "$@"
 }
 
 # A realistic payload: a cross-origin full-identity decision key past the old
@@ -155,6 +137,12 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   [ "$rc" -ne 0 ] || fail "a negative omitted-warning count was accepted"
 
   write_valid_payload "$data"
+  jq '.captains_call[0].subject = {"artifact":"quota-axi","version":"0.1"}' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an invalid structured version subject was accepted"
+
+  write_valid_payload "$data"
   jq '.captains_call[0].type = "verdict"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "an unknown captains_call type was accepted"
@@ -205,7 +193,7 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   pass "build refuses malformed payloads before touching the board"
 }
 
-test_build_injects_binds_then_arms() {
+test_build_injects_effective_payload_locally() {
   local home data board out
   home=$(make_home build)
   data="$home/payload.json"
@@ -220,9 +208,8 @@ test_build_injects_binds_then_arms() {
   assert_not_contains "$out" "armed: " "build still armed a Lavish process-event source: $out"
   assert_present "$board" "build reported success without a board"
 
-  # Round-trip: the payload extracted from the built page is byte-for-byte the
-  # same JSON document, and the escaped </script> string can no longer
-  # terminate the data block.
+  # With no stale cards, the effective payload is the input payload exactly.
+  # The escaped </script> string can no longer terminate the data block.
   extract_payload "$board" | jq -S . > "$home/extracted.json" \
     || fail "the built board does not carry parseable payload JSON"
   jq -S . "$data" > "$home/expected.json"
@@ -236,7 +223,7 @@ test_build_injects_binds_then_arms() {
   pass "build injects the payload into a local HTML board without Lavish"
 }
 
-test_registration_cannot_consume_before_any_origin_binding() {
+test_build_registers_no_answer_source() {
   local home data board out
   home=$(make_home order-proof)
   data="$home/payload.json"
@@ -252,37 +239,27 @@ test_registration_cannot_consume_before_any_origin_binding() {
   pass "board build does not arm Lavish or consume answers"
 }
 
-test_build_does_not_bind_or_arm_when_session_start_fails() {
-  local home data rc out
-  home=$(make_home serve-failure)
+test_build_does_not_invoke_lavish() {
+  local home data out
+  home=$(make_home no-lavish)
   data="$home/payload.json"
   write_valid_payload "$data"
   cat > "$home/fakebin/lavish-axi" <<'SH'
 #!/usr/bin/env bash
-exit 1
+touch "$FM_HOME/lavish-was-invoked"
+exit 91
 SH
   chmod +x "$home/fakebin/lavish-axi"
 
-  set +e
-  out=$(run_board "$home" build "$data" 2>&1)
-  rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "build failed without Lavish: $out"
+  out=$(run_board "$home" build "$data" 2>&1) || fail "build invoked or required Lavish: $out"
   assert_present "$home/.lavish/bearings-board.html" "build did not write the board without Lavish"
+  assert_absent "$home/lavish-was-invoked" "build invoked lavish-axi"
   assert_not_contains "$out" "bound: " "build bound a Lavish source without Lavish: $out"
   assert_not_contains "$out" "armed: " "build armed a Lavish source without Lavish: $out"
-  pass "build writes the HTML board without Lavish"
+  pass "build writes the local HTML board without invoking Lavish"
 }
 
-run_lavish_source_id() {  # <home> <artifact>
-  local home=$1
-  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-    "$ROOT/bin/fm-procevent-lavish.sh" source-id "$2"
-}
-
-test_rebuild_is_idempotent_and_does_not_double_arm() {
+test_rebuild_is_idempotent_and_refreshes_in_place() {
   local home data board out records
   home=$(make_home rearm)
   data="$home/payload.json"
@@ -335,11 +312,125 @@ test_charted_kind_is_optional_and_accepts_both_values() {
   pass "charted kind is optional and accepts queued and warning"
 }
 
+# --- A landed subject is not a live call -------------------------------------
+
+test_build_drops_decision_cards_whose_subject_already_landed() {
+  local home data board out
+  home=$(make_home landed-cards)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+  jq '.captains_call = [
+        {"key":"landed-by-task","type":"decision","repo":"sample","title":"Already shipped",
+         "options":[{"value":"yes","label":"Yes"}]},
+        {"key":"timeout-reattach","type":"decision","repo":"sample","title":"Already merged",
+         "pr_url":"https://github.com/sample/sample/pull/7",
+         "options":[{"value":"yes","label":"Yes"}]},
+        {"key":"quota-version","type":"decision","repo":"sample","title":"Old quota release",
+         "subject":{"artifact":"quota-axi","version":"0.1.37"},
+         "options":[{"value":"yes","label":"Yes"}]},
+        {"key":"still-open","type":"decision","repo":"sample","title":"Genuinely open",
+         "subject":{"artifact":"quota-axi","version":"0.2.0"},
+         "options":[{"value":"yes","label":"Yes"}]}
+      ]
+      | .landed = [
+        {"id":"landed-by-task","repo":"sample","what":"shipped it","owner":"crew"},
+        {"id":"some-other-task","repo":"sample","what":"merged timeout reattach","owner":"crew",
+         "pr_url":"https://github.com/sample/sample/pull/7"},
+        {"id":"quota-release","repo":"sample","what":"published quota-axi","owner":"crew",
+         "subject":{"artifact":"quota-axi","version":"0.1.38"}},
+        {"id":"unrelated\nstill-open","repo":"sample","what":"unrelated multiline identity","owner":"crew"}
+      ]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  out=$(run_board "$home" build "$data" 2>&1) || fail "the hygiene build failed: $out"
+  assert_contains "$out" "dropped-landed-card: landed-by-task" \
+    "the build did not report dropping the landed work item card: $out"
+  assert_contains "$out" "dropped-landed-card: timeout-reattach" \
+    "the build did not report dropping the merged timeout/reattach card: $out"
+  assert_contains "$out" "dropped-landed-card: quota-version" \
+    "the build did not report dropping the superseded quota-axi version card: $out"
+  extract_payload "$board" | jq -S . > "$home/extracted.json" \
+    || fail "the stale-filtered board does not carry parseable payload JSON"
+  jq -S '.captains_call = [.captains_call[] | select(.key == "still-open")]' \
+    "$data" > "$home/expected.json"
+  diff -u "$home/expected.json" "$home/extracted.json" >/dev/null \
+    || fail "the embedded effective payload changed more than the stale cards"
+  pass "build drops landed decision cards and round-trips the effective payload"
+}
+
+test_build_keeps_a_decision_absent_from_the_main_backlog() {
+  local home data board out
+  home=$(make_home remote-decision-card)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  write_valid_payload "$data"
+  jq '.captains_call = [{
+        "key":"remote-mate-call","type":"decision","repo":"sample",
+        "title":"Remote secondmate decision",
+        "options":[{"value":"yes","label":"Yes"}]
+      }]
+      | .landed = []' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+
+  out=$(run_board "$home" build "$data" 2>&1) || fail "the remote-card build failed: $out"
+  assert_not_contains "$out" "dropped-landed-card: remote-mate-call" \
+    "an absent remote card was reported as landed: $out"
+  extract_payload "$board" | jq -e '
+    [.captains_call[] | select(.key == "remote-mate-call")] | length == 1
+  ' >/dev/null || fail "the hygiene check dropped a decision absent from the main backlog"
+  pass "build keeps remote decisions absent from the main backlog"
+}
+
+# --- The read-only board exposes no reconcile control ------------------------
+
+test_build_refuses_a_payload_that_occupies_the_reconcile_value() {
+  local home data rc out
+  home=$(make_home reconcile-reserved)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call[0].options += [{"value":"reconcile","label":"Something else"}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e
+  out=$(run_board "$home" build "$data" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a payload occupying the reserved reconcile value was accepted"
+  assert_absent "$home/.lavish/bearings-board.html" "a refused payload still produced a board"
+  pass "build refuses a payload that occupies the reserved reconcile value"
+}
+
+test_build_refuses_a_nondecision_reconcile_value() {
+  local home data rc out
+  home=$(make_home merge-reconcile-reserved)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call[1].options += [{"value":"reconcile","label":"Merge action"}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e
+  out=$(run_board "$home" build "$data" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a merge card occupying the reconcile value was accepted"
+  assert_absent "$home/.lavish/bearings-board.html" "a refused merge card still produced a board"
+  pass "build reserves reconcile across non-decision cards"
+}
+
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
-test_build_injects_binds_then_arms
-test_registration_cannot_consume_before_any_origin_binding
-test_build_does_not_bind_or_arm_when_session_start_fails
-test_rebuild_is_idempotent_and_does_not_double_arm
+test_build_injects_effective_payload_locally
+test_build_registers_no_answer_source
+test_build_does_not_invoke_lavish
+test_rebuild_is_idempotent_and_refreshes_in_place
 test_build_refuses_a_template_without_exactly_one_slot
+test_build_drops_decision_cards_whose_subject_already_landed
+test_build_keeps_a_decision_absent_from_the_main_backlog
+test_build_refuses_a_payload_that_occupies_the_reconcile_value
+test_build_refuses_a_nondecision_reconcile_value
