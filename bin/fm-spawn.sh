@@ -1444,7 +1444,7 @@ launch_template() {
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
-    hermes|antigravity) printf '%s' 'env FM_WORKER_BRIDGE_HARNESS=__BRIDGEHARNESS__ __BRIDGEBIN__ --harness __BRIDGEHARNESS__ --state __BRIDGESTATE__ --id __BRIDGEID__ --gen __BRIDGEGEN__ --backend __BRIDGEBACKEND__ --brief __BRIEF__ __MODELFLAG____EFFORTFLAG__' ;;
+    hermes|antigravity) printf '%s' '__BRIDGEBIN__ --harness __BRIDGEHARNESS__ --state __BRIDGESTATE__ --id __BRIDGEID__ --gen __BRIDGEGEN__ --backend __BRIDGEBACKEND__ --brief __BRIEF__ __MODELFLAG____EFFORTFLAG__' ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'

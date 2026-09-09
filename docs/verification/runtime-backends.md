@@ -1642,3 +1642,6 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=141993
 
 This guard exercises the actual spawn template, Treehouse lease, native CLI tool writes, generation-bound semantic state, Herdr lifecycle registration, durable inbox acknowledgement, control-plane exit, and guarded scout teardown.
 Herdr's native registration and the bridge's semantic record are distinct observations; the latter owns Firstmate's busy verdict.
+
+The installed Antigravity release has since advanced to 1.1.28, whose changelog states that an expired `--print-timeout` now returns partial output and exits successfully with a warning on stderr.
+The bridge therefore dispatches an explicit 24h `--print-timeout` and records any run carrying agy's stable stderr `error:` marker as a failed turn; the credentialed evidence above was taken on 1.1.27 and should be refreshed on the current release.

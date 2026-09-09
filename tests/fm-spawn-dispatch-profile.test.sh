@@ -1204,7 +1204,7 @@ SH
 }
 
 test_worker_bridge_spawn_delivers_native_profile() {
-  local harness kind rec id out launch native
+  local harness kind rec id out launch native envelope_kind
   for harness in hermes antigravity; do
     for kind in ship scout; do
       id="bridge-$harness-$kind"
@@ -1254,6 +1254,10 @@ PY
       assert_grep 'follow this brief instead of that supervisor contract' "$CASE_DIR/native-prompt" \
         "$harness $kind lost the worker role contract"
       assert_grep "brief for $id" "$CASE_DIR/native-prompt" "$harness $kind lost the task brief"
+      envelope_kind=$("$ROOT/bin/fm-operational-input.sh" kind < "$CASE_DIR/native-prompt") \
+        || fail "$harness $kind delivered a brief the operational-input owner cannot type"
+      [ "$envelope_kind" = launch-brief ] \
+        || fail "$harness $kind delivered kind '$envelope_kind' instead of the canonical launch-brief envelope"
       assert_grep 'state=idle' "$HOME_DIR/state/$id.busy-state" "$harness $kind did not publish idle"
       assert_present "$HOME_DIR/state/$id.turn-ended" "$harness $kind did not publish its completion wake"
       pass "$harness $kind emitted launch delivers native model, effort, role, and generation-bound completion"

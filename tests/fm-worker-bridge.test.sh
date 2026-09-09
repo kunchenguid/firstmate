@@ -24,13 +24,18 @@ if os.environ.get('BRIDGE_HUGE'):
     if sys.argv[0].endswith('hermes'): print('session_id: exact-hermes-session', file=sys.stderr)
     sys.stdout.buffer.write(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','response':'\\u754c'*700000}, ensure_ascii=False).encode())
     sys.exit(0)
-if '--print' in sys.argv and sys.argv[sys.argv.index('--print')+1] == 'fail-json':
+if os.environ.get('BRIDGE_BANNER'): print('Antigravity update available')
+if os.environ.get('BRIDGE_TRUNCATED'): print('error: print timeout expired (response may be truncated)', file=sys.stderr)
+if '--print' in sys.argv and sys.argv[sys.argv.index('--print')+1].endswith('fail-json'):
     print(json.dumps({'status':'FAILURE','response':'failed without id'})); sys.exit(0)
 if sys.argv[0].endswith('hermes'): print('session_id: exact-hermes-session', file=sys.stderr)
 print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','response':'BRIDGE_OK'}))
 ''')
         binary.chmod(0o755)
     env = dict(os.environ, PATH=str(fake)+os.pathsep+os.environ['PATH'], BRIDGE_CALLS=str(base/'calls'))
+    def envelope(body):
+        return subprocess.run([str(root/'bin/fm-operational-input.sh'),'encode','launch-brief'],
+            input=body,text=True,capture_output=True,check=True).stdout
     for harness in ('antigravity', 'hermes'):
         state = base / harness; state.mkdir()
         brief = state / 'brief'; brief.write_text('literal $HOME `no-exec`')
@@ -51,13 +56,17 @@ print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','res
         calls = [json.loads(line) for line in (base/'calls').read_text().splitlines()[-2:]]
         if harness == 'antigravity':
             assert '--conversation' not in calls[0]
+            assert calls[0][calls[0].index('--print')+1] == envelope('literal $HOME `no-exec`'), calls[0]
+            assert calls[0][calls[0].index('--print-timeout')+1] == '24h', calls[0]
             assert calls[1][calls[1].index('--conversation')+1] == 'conversation-exact'
         else:
             assert calls[0][calls[0].index('--continue')+1] == calls[1][calls[1].index('--continue')+1]
         assert 'state=idle' in (state/'probe.busy-state').read_text()
         assert (state/'probe.turn-ended').exists()
         huge = subprocess.run(command,input='/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_HUGE='1'),timeout=30)
+        assert huge.returncode == 0, huge.stderr[:400]
         assert 'exceeded the 1 MiB protocol limit' in huge.stdout, huge.stdout[:400]
+        assert 'turn failed' in huge.stdout, huge.stdout[:400]
         if harness == 'antigravity':
             result = subprocess.run(command,input='fail-json\nretry\n/exit\n',capture_output=True,text=True,env=env,timeout=20)
             assert result.returncode == 0, result.stderr
@@ -69,7 +78,13 @@ print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','res
             assert result.returncode == 0, result.stderr
             calls = [json.loads(line) for line in (base/'calls').read_text().splitlines()[-2:]]
             assert '--conversation' not in calls[1], calls[1]
-            assert calls[1][calls[1].index('--print')+1] == 'fail-json\n\nretry', calls[1]
+            assert calls[1][calls[1].index('--print')+1] == envelope('fail-json') + '\n\nretry', calls[1]
+            truncated = subprocess.run(command,input='/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_TRUNCATED='1'),timeout=20)
+            assert truncated.returncode == 0, truncated.stderr
+            assert 'turn failed' in truncated.stdout, truncated.stdout
+            banner = subprocess.run(command,input='again\n/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_BANNER='1'),timeout=20)
+            assert banner.returncode == 0, banner.stderr
+            assert banner.stdout.count('turn failed') == 2, banner.stdout
         result = subprocess.run(command,input='/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_FAIL='1'),timeout=20)
         assert 'turn failed' in result.stdout
         assert 'blocked:' in (state/'probe.status').read_text()

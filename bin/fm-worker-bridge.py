@@ -22,6 +22,9 @@ import uuid
 import tempfile
 import time
 
+PROTOCOL_LIMIT = 1024 * 1024
+ANTIGRAVITY_PRINT_TIMEOUT = '24h'
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -37,7 +40,9 @@ def main():
     root = Path(__file__).resolve().parent
     state = Path(args.state)
     session = 'firstmate-' + uuid.uuid4().hex
-    brief = Path(args.brief).read_text()
+    brief = subprocess.run([str(root / 'fm-operational-input.sh'), 'encode', 'launch-brief'],
+        input=Path(args.brief).read_text(), text=True,
+        stdout=subprocess.PIPE, check=True).stdout
     conversation = None
     env = os.environ.copy()
     for key in ('CLAUDECODE', 'PI_CODING_AGENT', 'GROK_AGENT', 'FM_PI_HARNESS',
@@ -116,6 +121,21 @@ def main():
             raise KeyboardInterrupt
         raise SystemExit(128 + signum)
 
+    def antigravity_result(output):
+        nonlocal conversation
+        try:
+            result = json.loads(output)
+        except ValueError as error:
+            return False, 'Antigravity returned no readable JSON result: ' + str(error)
+        if not isinstance(result, dict):
+            return False, 'Antigravity JSON result must be an object'
+        response = result.get('response', output)
+        next_conversation = result.get('conversation_id')
+        if result.get('status') != 'SUCCESS' or not isinstance(next_conversation, str) or not next_conversation:
+            return False, response
+        conversation = next_conversation
+        return True, response
+
     signal.signal(signal.SIGINT, terminated)
     signal.signal(signal.SIGTERM, terminated)
     signal.signal(signal.SIGHUP, terminated)
@@ -132,10 +152,11 @@ def main():
         else:
             text = prompt if conversation or prompt == brief else brief.rstrip() + '\n\n' + prompt
             command = ['agy', '--print', text, '--output-format', 'json',
+                       '--print-timeout', ANTIGRAVITY_PRINT_TIMEOUT,
                        '--dangerously-skip-permissions']
             if conversation:
                 command += ['--conversation', conversation]
-            if args.effort in ('low', 'medium', 'high'):
+            if args.effort:
                 command += ['--effort', args.effort]
             payload = ''
         if args.model:
@@ -159,26 +180,23 @@ def main():
             terminate(process)
             output_file.seek(0)
             error_file.seek(0)
-            raw_output = output_file.read(1024 * 1024 + 1)
-            raw_errors = error_file.read(1024 * 1024 + 1)
-            if len(raw_output) > 1024 * 1024 or len(raw_errors) > 1024 * 1024:
-                raise ValueError('CLI output exceeded the 1 MiB protocol limit')
-            output = raw_output.decode(errors='replace')
-            errors = raw_errors.decode(errors='replace')
+            raw_output = output_file.read(PROTOCOL_LIMIT + 1)
+            raw_errors = error_file.read(PROTOCOL_LIMIT + 1)
+            overflow = len(raw_output) > PROTOCOL_LIMIT or len(raw_errors) > PROTOCOL_LIMIT
+            output = raw_output[:PROTOCOL_LIMIT].decode(errors='replace')
+            errors = raw_errors[:PROTOCOL_LIMIT].decode(errors='replace')
             if errors:
                 print(errors, flush=True)
-            success = process.returncode == 0
+            if overflow:
+                print('CLI output exceeded the 1 MiB protocol limit', flush=True)
+            success = process.returncode == 0 and not overflow
             if args.harness == 'hermes':
                 success = success and bool(re.search(r'^session_id: \S+$', errors, re.M)) and bool(output.strip())
+            else:
+                success = success and not re.search(r'^error: ', errors, re.M)
             if args.harness == 'antigravity' and success:
-                result = json.loads(output)
-                if not isinstance(result, dict):
-                    raise ValueError('Antigravity JSON result must be an object')
-                next_conversation = result.get('conversation_id')
-                success = result.get('status') == 'SUCCESS' and isinstance(next_conversation, str) and bool(next_conversation)
-                if success:
-                    conversation = next_conversation
-                print(result.get('response', output), flush=True)
+                success, response = antigravity_result(output)
+                print(response, flush=True)
             else:
                 print(output, flush=True)
             if not success:
