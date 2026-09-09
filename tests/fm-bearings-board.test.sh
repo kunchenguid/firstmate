@@ -343,7 +343,7 @@ test_registration_cannot_consume_before_any_origin_binding() {
   hold="$origin-decision-$key"
   board="$home/.lavish/bearings-board.html"
 
-  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$home/.tasks.toml"
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 
@@ -658,7 +658,7 @@ test_build_keeps_a_decision_absent_from_the_main_backlog() {
   home=$(make_home remote-decision-card)
   data="$home/payload.json"
   board="$home/.lavish/bearings-board.html"
-  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$home/.tasks.toml"
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 

@@ -243,7 +243,9 @@ remote_sync_failure_reason() { # <exit-status> <output>
     printf '%s\n' "the Firstmate copy on that host is too old to sync to this primary's commit; run /updatefirstmate"
     return 0
   fi
-  first_line "$2"
+  # The capture can carry a TASKS_CONFIG diagnostic ahead of the reason, and the
+  # reason is what this returns; the callers report the diagnostic themselves.
+  first_line "$(tasks_config_strip_report_lines "$2")"
 }
 
 dirty_status() {
@@ -253,6 +255,84 @@ dirty_status() {
   else
     git -C "$dir" status --porcelain 2>/dev/null | head -1
   fi
+}
+
+# A home's .tasks.toml is per-home local material: bootstrap materializes it once
+# at session start and leaves an existing one byte-for-byte untouched
+# (bin/fm-bootstrap.sh tasks_config_setup). Every home this library advances IS a
+# checkout - the primary home, a treehouse secondmate worktree, a standalone
+# clone, a remote persistent home - so an advance that renames or removes a
+# still-tracked .tasks.toml deletes the live file mid-session, and nothing
+# re-seeds it until that home's next session start: it silently loses its backlog
+# addressing, archive path, and done_keep. Carry the file across the advance here,
+# at the single ff implementation, so every home the fleet advances keeps the same
+# guarantee rather than only the one the caller happened to think of.
+#
+# Put the file back only when the advance actually REMOVED it. A writer other than
+# the fast-forward that touches .tasks.toml inside this window owns the file, and
+# putting the snapshot back over it would be the very data loss this carry exists
+# to prevent. Every TASKS_CONFIG line below therefore reports an outcome that
+# already happened: a home that kept its file stays silent, and a home that lost
+# one says so loudly rather than being left unaddressed in silence.
+TASKS_CONFIG_SNAPSHOT=""
+TASKS_CONFIG_CARRIED=no
+# A .tasks.toml that this home customized while it was still TRACKED reads as an
+# ordinary modification, so the dirty guard below stops the advance before the
+# carry is ever reached - and it stays stopped, because the target commit deletes
+# that tracked path, so the modification never clears on its own. Naming it is all
+# this can honestly do: setting a modified tracked file aside to advance anyway
+# would break the fast-forward-only, never-stash contract on the exact home with
+# real customization to lose.
+tasks_config_modified_tracked() {  # <dir>
+  git -C "$1" status --porcelain -- .tasks.toml 2>/dev/null | grep -q '^ *M'
+}
+
+tasks_config_stage() {  # <dir>
+  local dir=$1 tmp=""
+  TASKS_CONFIG_SNAPSHOT=""
+  TASKS_CONFIG_CARRIED=no
+  [ -f "$dir/.tasks.toml" ] && [ ! -L "$dir/.tasks.toml" ] || return 0
+  TASKS_CONFIG_CARRIED=yes
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-tasks-toml.XXXXXX") || tmp=""
+  if [ -n "$tmp" ] && ! cp "$dir/.tasks.toml" "$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+    tmp=""
+  fi
+  TASKS_CONFIG_SNAPSHOT=$tmp
+}
+
+# A stage that could not be taken is reported here too, and only here: it costs the
+# home nothing unless the advance also removed the file, and reporting it before
+# the advance would announce a loss that has not happened.
+tasks_config_restore() {  # <dir>
+  local dir=$1
+  if [ "$TASKS_CONFIG_CARRIED" = yes ] \
+    && [ ! -e "$dir/.tasks.toml" ] && [ ! -L "$dir/.tasks.toml" ]; then
+    if [ -n "$TASKS_CONFIG_SNAPSHOT" ] \
+      && cp "$TASKS_CONFIG_SNAPSHOT" "$dir/.tasks.toml" 2>/dev/null; then
+      echo "TASKS_CONFIG: restored $dir/.tasks.toml, which the update removed"
+    else
+      echo "TASKS_CONFIG: the update removed $dir/.tasks.toml and it could not be restored"
+    fi
+  fi
+  [ -z "$TASKS_CONFIG_SNAPSHOT" ] || rm -f "$TASKS_CONFIG_SNAPSHOT" 2>/dev/null
+  TASKS_CONFIG_SNAPSHOT=""
+  TASKS_CONFIG_CARRIED=no
+}
+
+# TASKS_CONFIG is a home-level diagnostic, not part of any caller's parseable
+# protocol, so a lane that CAPTURES ff output instead of letting it through must
+# re-emit these lines rather than swallow them: a home that lost its backlog
+# config has to be as loud on the remote lane as it is on the local one. The
+# prefix lives here, beside the only code that writes it.
+tasks_config_report_lines() {  # <captured-output>
+  printf '%s\n' "$1" | grep '^TASKS_CONFIG: ' || true
+}
+
+# The same capture with those lines taken out, for a caller that reports the rest
+# of the ff output as one reason string.
+tasks_config_strip_report_lines() {  # <captured-output>
+  printf '%s\n' "$1" | grep -v '^TASKS_CONFIG: ' || true
 }
 
 # List this home's LIVE secondmate direct reports from state/<id>.meta records.
@@ -343,7 +423,11 @@ ff_target() {
   fi
 
   if [ -n "$(dirty_status "$dir" "$ignore_seed_marker")" ]; then
-    echo "$label: skipped: dirty working tree"
+    if tasks_config_modified_tracked "$dir"; then
+      echo "$label: skipped: dirty working tree: .tasks.toml is modified and still tracked here, and this update untracks it; copy it aside, run git -C $dir checkout -- .tasks.toml, update, then put your copy back"
+    else
+      echo "$label: skipped: dirty working tree"
+    fi
     return 0
   fi
 
@@ -367,10 +451,13 @@ ff_target() {
 
   instr=$(changed_instr "$dir" "$base")
   before=$(git -C "$dir" rev-parse --short HEAD)
+  tasks_config_stage "$dir"
   if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
+    tasks_config_restore "$dir"
     echo "$label: skipped: fast-forward failed: $(first_line "$out")"
     return 0
   fi
+  tasks_config_restore "$dir"
   after=$(git -C "$dir" rev-parse --short HEAD)
   FF_STATUS="updated"
   FF_INSTR="$instr"

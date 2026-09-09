@@ -294,6 +294,123 @@ EOF
   pass "T3e a legacy remote advance still restarts the live remote mate"
 }
 
+# --- T3f: a remote host's TASKS_CONFIG diagnostic reaches the operator -------
+# The carry runs on the host, so the host is the only place that fact exists. If
+# this lane drops the line, a remote home that lost its backlog addressing is
+# silent to the captain running /updatefirstmate - the exact failure the carry
+# exists to make loud. The host emits it AFTER its result line, because ssh does
+# not promise the two streams arrive in write order.
+test_remote_tasks_config_diagnostic_is_surfaced() {
+  local w out fake_ssh
+  w=$(new_world t3f)
+  fake_ssh="$w/fakebin/fake-ssh"
+  cat > "$fake_ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+cat > /dev/null
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+shift 2
+argv_b64=$4
+decode() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D; }
+rargs=()
+while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$argv_b64")
+case "${rargs[1]:-}" in
+  update)
+    printf 'synced: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb instr=\n'
+    printf 'TASKS_CONFIG: the update removed /srv/sm1/.tasks.toml and it could not be restored\n'
+    ;;
+  state) printf 'alive\n' ;;
+  *) exit 91 ;;
+esac
+SH
+  chmod +x "$fake_ssh"
+  cat > "$w/home/state/sm1.meta" <<EOF
+window=remote:sm1
+endpoint_task_id=sm1
+worktree=/srv/sm1
+project=/srv/sm1
+harness=claude
+kind=secondmate
+home=/srv/sm1
+remote_host=remote-mac
+remote_backend=herdr
+EOF
+  printf -- '- sm1 - remote domain (host: remote-mac; root: /srv/fm; home: /srv/sm1; scope: things; projects: p; added 2026-09-03)\n' \
+    > "$w/home/data/secondmates.md"
+
+  out=$(FM_TEST_SSH_BIN="$fake_ssh" run_update "$w")
+
+  assert_contains "$out" "TASKS_CONFIG: the update removed /srv/sm1/.tasks.toml and it could not be restored" \
+    "the remote home's lost backlog config never reached the operator"
+  assert_contains "$out" "remote secondmate sm1: updated on remote-mac" \
+    "the host's result must still parse when a diagnostic shares its output"
+  pass "T3f a remote host's TASKS_CONFIG diagnostic reaches the operator"
+}
+
+# --- T3g: a failed remote update reports the REASON, not the diagnostic ------
+# The host writes its TASKS_CONFIG line and its failure reason to one stream, and
+# the diagnostic is written first. Reporting the first captured line therefore
+# hands the captain a success fact as the cause of a skip and drops the reason
+# that would let them fix it. Both signals matter and neither may be lost.
+test_remote_update_failure_reports_the_real_reason() {
+  local w out err fake_ssh
+  w=$(new_world t3g)
+  fake_ssh="$w/fakebin/fake-ssh"
+  cat > "$fake_ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+cat > /dev/null
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+shift 2
+argv_b64=$4
+decode() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D; }
+rargs=()
+while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$argv_b64")
+case "${rargs[1]:-}" in
+  update)
+    # The remote code root advanced and carried its own config, then the home's
+    # sync refused. Both land on the host's stderr, diagnostic first.
+    printf 'TASKS_CONFIG: restored /srv/fm/.tasks.toml, which the update removed\n'
+    printf 'remote secondmate home sync skipped: dirty working tree\n'
+    exit 1
+    ;;
+  state) printf 'alive\n' ;;
+  *) exit 91 ;;
+esac
+SH
+  chmod +x "$fake_ssh"
+  cat > "$w/home/state/sm1.meta" <<EOF
+window=remote:sm1
+endpoint_task_id=sm1
+worktree=/srv/sm1
+project=/srv/sm1
+harness=claude
+kind=secondmate
+home=/srv/sm1
+remote_host=remote-mac
+remote_backend=herdr
+EOF
+  printf -- '- sm1 - remote domain (host: remote-mac; root: /srv/fm; home: /srv/sm1; scope: things; projects: p; added 2026-09-03)\n' \
+    > "$w/home/data/secondmates.md"
+
+  out=$(PATH="$w/fakebin:$PATH" FM_FAKE_DIR="$w/fake" \
+    FM_SSH_BIN="$fake_ssh" FM_TEST_SSH_BIN="$fake_ssh" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>"$w/err")
+  err=$(cat "$w/err")
+
+  assert_contains "$err" "remote secondmate sm1: skipped on remote-mac: remote secondmate home sync skipped: dirty working tree" \
+    "the skip reported something other than the real failure reason"
+  assert_not_contains "$err" "skipped on remote-mac: TASKS_CONFIG" \
+    "a config diagnostic was presented as the cause of the skip"
+  assert_contains "$out" "TASKS_CONFIG: restored /srv/fm/.tasks.toml, which the update removed" \
+    "the host's diagnostic never reached the operator on the failure path"
+  pass "T3g a failed remote update reports its real reason and still surfaces TASKS_CONFIG"
+}
+
 # --- T4: dirty secondmate is skipped, its edit preserved -------------------
 test_dirty_secondmate_skipped() {
   local w out
@@ -471,12 +588,133 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# Seed the pre-rename world: .tasks.toml is a TRACKED file and the home is
+# running on it, with the operational dirs gitignored exactly as in the real
+# repo so a running home is a clean tree and the advance is eligible.
+seed_tracked_tasks_config() {  # <world> <path-value>
+  local w=$1 path_value=$2
+  printf 'state/\ndata/\nconfig/\nprojects/\n' > "$w/seed/.gitignore"
+  printf 'backend = "markdown"\n\n[markdown]\npath = "%s"\ndone_keep = 10\n' \
+    "$path_value" > "$w/seed/.tasks.toml"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm seed-tasks-toml
+  git -C "$w/seed" push -q origin main
+  git -C "$w/main" pull -q --ff-only origin main
+}
+
+# The advance under test: the tracked file becomes a tracked example plus a
+# gitignore entry, which is exactly what deletes a live home's copy.
+untrack_tasks_config() {  # <world>
+  local w=$1
+  git -C "$w/seed" mv .tasks.toml .tasks.toml.example
+  printf '.tasks.toml\n' >> "$w/seed/.gitignore"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm untrack-tasks-toml
+  git -C "$w/seed" push -q origin main
+}
+
+# --- T12: a live home's .tasks.toml survives the advance that untracks it ---
+# The primary home's FM_HOME IS the checkout, so its .tasks.toml is a tracked
+# file until the per-home rename lands. bootstrap's tasks_config_setup runs once
+# at session start and leaves an existing file alone, so if the fast-forward that
+# renames .tasks.toml -> .tasks.toml.example deletes it, the home spends the rest
+# of the session with no backlog addressing, archive path, or done_keep, and says
+# nothing about it. The update must carry the file across the advance.
+test_tasks_config_survives_the_untracking_advance() {
+  local w out before
+  w=$(new_world t12)
+  mkdir -p "$w/main/state"
+  touch "$w/main/state/.last-watcher-beat"
+
+  seed_tracked_tasks_config "$w" data/backlog.md
+  before=$(cat "$w/main/.tasks.toml")
+  untrack_tasks_config "$w"
+
+  # FM_HOME defaults to the checkout for a primary home, which is the shape that
+  # loses the file; the other tests deliberately split home from root.
+  out=$(PATH="$w/fakebin:$PATH" FM_FAKE_DIR="$w/fake" \
+    FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/main" "$UPDATE" 2>/dev/null)
+
+  assert_contains "$out" "firstmate: updated" "the firstmate repo did advance"
+  [ -f "$w/main/.tasks.toml" ] \
+    || fail "the update removed the home's live .tasks.toml"
+  [ "$(cat "$w/main/.tasks.toml")" = "$before" ] \
+    || fail "the update did not preserve .tasks.toml byte-for-byte"
+  assert_contains "$out" "TASKS_CONFIG: restored $w/main/.tasks.toml, which the update removed" \
+    "the update reports the restore it actually made"
+  pass "T12 an existing .tasks.toml survives the advance that untracks it"
+}
+
+# --- T13: a SECONDMATE home keeps its .tasks.toml across the same advance ----
+# The same update advances every registered secondmate home, and a treehouse home
+# is a checkout too, so it holds the still-tracked .tasks.toml and loses it to the
+# identical rename. That mate's bootstrap already ran, so nothing re-seeds it for
+# the rest of its session. The guarantee belongs to every home the update
+# advances, not only the one the primary happens to be running from.
+test_tasks_config_survives_on_a_secondmate_home() {
+  local w out before
+  w=$(new_world t13)
+  seed_tracked_tasks_config "$w" data/backlog.md
+  add_sm "$w" a1
+  before=$(cat "$w/a1/.tasks.toml")
+  untrack_tasks_config "$w"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate a1: updated" "the secondmate home did advance"
+  [ -f "$w/a1/.tasks.toml" ] \
+    || fail "the update removed the secondmate home's live .tasks.toml"
+  [ "$(cat "$w/a1/.tasks.toml")" = "$before" ] \
+    || fail "the update did not preserve the secondmate home's .tasks.toml byte-for-byte"
+  pass "T13 a secondmate home's .tasks.toml survives the advance that untracks it"
+}
+
+# --- T14: the carry restores a REMOVED file, it never reverts a live writer ---
+# The carry exists to stop data loss, so it must not cause any. A writer other
+# than the fast-forward that owns .tasks.toml inside the advance window keeps its
+# write, and the run must not claim a removal that did not happen. The post-merge
+# hook fires after the ff-only merge, which is exactly that window.
+test_tasks_config_restore_never_reverts_a_live_writer() {
+  local w out
+  w=$(new_world t14)
+  mkdir -p "$w/main/state"
+  touch "$w/main/state/.last-watcher-beat"
+
+  seed_tracked_tasks_config "$w" data/backlog.md
+  untrack_tasks_config "$w"
+
+  cat > "$w/main/.git/hooks/post-merge" <<'SH'
+#!/usr/bin/env bash
+printf 'backend = "markdown"
+
+[markdown]
+path = "data/live-writer.md"
+' > .tasks.toml
+SH
+  chmod +x "$w/main/.git/hooks/post-merge"
+
+  out=$(PATH="$w/fakebin:$PATH" FM_FAKE_DIR="$w/fake" \
+    FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/main" "$UPDATE" 2>/dev/null)
+
+  assert_contains "$out" "firstmate: updated" "the firstmate repo did advance"
+  assert_contains "$(cat "$w/main/.tasks.toml")" "data/live-writer.md" \
+    "the update reverted a .tasks.toml write it did not make"
+  case "$out" in
+    *TASKS_CONFIG:*) fail "the update reported a TASKS_CONFIG action that never happened: $out" ;;
+  esac
+  pass "T14 a live .tasks.toml writer is never reverted and no removal is claimed"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_bin_only_advance_restarts
 test_unprovable_runtime_gets_fallback_nudge
 test_dead_secondmate_gets_no_action
 test_legacy_remote_advance_restarts
+test_remote_tasks_config_diagnostic_is_surfaced
+test_remote_update_failure_reports_the_real_reason
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
 test_already_current_secondmate_still_restarts
@@ -485,5 +723,8 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_tasks_config_survives_the_untracking_advance
+test_tasks_config_survives_on_a_secondmate_home
+test_tasks_config_restore_never_reverts_a_live_writer
 
 echo "# all fm-update tests passed"

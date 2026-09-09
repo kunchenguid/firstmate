@@ -105,7 +105,9 @@ init_changed_fixture_repo() {
     fm-harness-adapter-references.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
+    fm-secondmate-sync.test.sh \
     fm-session-start.test.sh \
+    fm-update.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
     fm-pr-merge.test.sh \
@@ -124,6 +126,7 @@ init_changed_fixture_repo() {
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/bin/fm-ff-lib.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/fm-control-lib.sh"
   : >"$repo/bin/fm-timeout-lib.sh"
@@ -270,6 +273,30 @@ test_changed_runner_surfaces_select_their_family() {
 
   rm -rf "$tmp"
   pass "runner and its documentation surfaces select their curated family, not just their contract owners"
+}
+
+# A shared helper is only as covered as the families its change selects. The one
+# fast-forward implementation is exercised by the update and secondmate-sync
+# suites, neither of which lives in the contract family it is grouped with, so
+# mapping it to that family alone runs none of its own behavior.
+test_changed_ff_lib_selects_the_tests_that_cover_it() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-ff-lib.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/bin/fm-ff-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+
+  assert_contains "$listed" "tests/fm-update.test.sh" \
+    "a fast-forward change must select the update coverage that exercises it"
+  assert_contains "$listed" "tests/fm-secondmate-sync.test.sh" \
+    "a fast-forward change must select the secondmate sync coverage that exercises it"
+  assert_contains "$listed" "tests/fm-brief.test.sh" \
+    "a fast-forward change must keep selecting its own contract family"
+
+  rm -rf "$tmp"
+  pass "a fast-forward library change selects the families that actually cover it"
 }
 
 test_shell_line_ending_policy_selects_runner_contract() {
@@ -1588,6 +1615,7 @@ test_task_marker_refuses_the_primary_checkout
 test_changed_runner_surfaces_select_their_family
 test_shell_line_ending_policy_selects_runner_contract
 test_changed_dependency_selection_and_unmapped_failure
+test_changed_ff_lib_selects_the_tests_that_cover_it
 test_changed_bin_reference_selects_per_script_not_per_family
 test_changed_uses_bounded_automatic_concurrency
 test_windows_posix_mode_emulation_does_not_fail_parallel_runs

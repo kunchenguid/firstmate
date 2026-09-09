@@ -18,12 +18,19 @@
 #
 # The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "origin" here);
 # the same library drives local and remote parent-targeted secondmate sync, so
-# there is one ff implementation, not several.
+# there is one ff implementation, not several. That library also carries each
+# advanced home's .tasks.toml across its own advance, so the primary home and
+# every secondmate home this script advances keep the same guarantee.
 #
 # It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
 # tmux actions the skill performs. The script's job is the safe git mechanics
 # plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)
+#   - zero or more "TASKS_CONFIG: <what happened to a home's .tasks.toml>" lines,
+#     emitted by bin/fm-ff-lib.sh when an advance removed a home's per-home
+#     backlog config. A restore is a fact, not a fault; a removal that could not
+#     be restored leaves that home unaddressed. A home that kept its file is
+#     silent. .agents/skills/bootstrap-diagnostics/SKILL.md owns how to handle it.
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
 #   - restart-secondmates: fm-<id>...|none (every live secondmate this pass left
 #     on origin's tip - advanced OR already there - whose recorded runtime can
@@ -160,7 +167,11 @@ if [ -f "$SECONDMATES_MD" ]; then
     home=$SECONDMATE_REGISTRY_HOME
     if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
       if remote_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh update "$id" < /dev/null 2>&1); then
-        remote_result=$(printf '%s\n' "$remote_out" | tail -1)
+        tasks_config_report_lines "$remote_out"
+        # Select the host's protocol line by its own prefix rather than by
+        # position: the diagnostic above shares this capture, and ssh does not
+        # promise the host's stdout and stderr arrive interleaved in write order.
+        remote_result=$(printf '%s\n' "$remote_out" | grep -E '^(synced|current): ' | tail -1)
         case "$remote_result" in
           synced:*)
             remote_detail=${remote_result#synced: }
@@ -196,7 +207,13 @@ if [ -f "$SECONDMATES_MD" ]; then
           *) echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2 ;;
         esac
       else
-        echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
+        # The host writes its TASKS_CONFIG diagnostic and its failure reason to
+        # one stream, so the first captured line is not reliably the reason.
+        # Both signals matter: report the diagnostic, and skip past it to the
+        # reason the operator actually needs.
+        tasks_config_report_lines "$remote_out"
+        remote_reason=$(tasks_config_strip_report_lines "$remote_out")
+        echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_reason%%$'\n'*}" >&2
       fi
     else
       process_secondmate "$id" "$home" "" origin yes
