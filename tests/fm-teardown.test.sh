@@ -753,7 +753,7 @@ test_teardown_records_a_pr_url_the_backlog_can_hold() {
 
     run_teardown "$case_dir" >/dev/null \
       || fail "close-link-$label: teardown failed on a $label pull request URL"
-    [ "$(backlog_row_state "$case_dir")" = done ] \
+    [ "$(backlog_row_state "$case_dir")" = "done" ] \
       || fail "close-link-$label: teardown returned success with its backlog item still open"
     [ "$(backlog_row_field "$case_dir" links)" = "$expected_links" ] \
       || fail "close-link-$label: closed row recorded links $(backlog_row_field "$case_dir" links)"
