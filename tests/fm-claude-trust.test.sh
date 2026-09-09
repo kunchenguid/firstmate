@@ -440,6 +440,87 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
   pass "fm-spawn.sh: a claude spawn pre-trusts its worktree and launches with the brief"
 }
 
+meta_has_key() {  # <meta> <key>
+  grep -q "^$2=" "$1"
+}
+
+# The account a claude worker was launched against must reach the task's own
+# record, because a relaunch rebuilds the launch from that record inside
+# firstmate's process rather than the worker's.
+test_claude_spawn_records_the_account_it_launched_against() {
+  local case_dir home proj wt config fakebin out meta
+  case_dir="$TMP_ROOT/records-account"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  config="$case_dir/claude-config"
+  mkdir -p "$config"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  fm_test_spawn_home "$home" claude
+  fm_git_worktree "$proj" "$wt" wt-records
+  fm_test_spawn_brief "$home" accountspawn
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$config" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" accountspawn "$proj" claude \
+    --mode no-mistakes --yolo off)
+  expect_code 0 $? "the claude spawn must succeed: $out"
+  meta="$home/state/accountspawn.meta"
+  assert_present "$meta" "the spawn published no task record"
+  [ "$(sed -n 's/^claude_config_dir=//p' "$meta")" = "$config" ] \
+    || fail "the task record did not name the account the worker was launched against: $(cat "$meta")"
+  pass "fm-spawn.sh: a claude spawn records the account it launched against"
+}
+
+# An absent account is the default single-store install, so the default path's
+# record must stay exactly as it was before this field existed.
+test_default_account_spawn_records_no_account_field() {
+  local case_dir home proj wt fakebin out meta
+  case_dir="$TMP_ROOT/default-account"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  fm_test_spawn_home "$home" claude
+  fm_git_worktree "$proj" "$wt" wt-default
+  fm_test_spawn_brief "$home" defaultspawn
+  out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" defaultspawn "$proj" claude \
+    --mode no-mistakes --yolo off)
+  expect_code 0 $? "the default-account claude spawn must succeed: $out"
+  meta="$home/state/defaultspawn.meta"
+  assert_present "$meta" "the spawn published no task record"
+  meta_has_key "$meta" claude_config_dir \
+    && fail "the default single-store path wrote an account field: $(cat "$meta")"
+  pass "fm-spawn.sh: a default-account claude spawn writes no account field"
+}
+
+# The account is claude-specific because the forwarding is. No other adapter
+# may start recording or reading it.
+test_non_claude_spawn_records_no_account_field() {
+  local case_dir home proj wt config fakebin launch_log out meta
+  case_dir="$TMP_ROOT/other-harness-account"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  config="$case_dir/claude-config"
+  launch_log="$case_dir/launch.log"
+  mkdir -p "$config"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" codex)
+  fm_test_spawn_home "$home" codex
+  fm_git_worktree "$proj" "$wt" wt-other
+  fm_test_spawn_brief "$home" codexspawn
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$config" FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" codexspawn "$proj" codex \
+    --mode no-mistakes --yolo off)
+  expect_code 0 $? "the codex spawn must succeed: $out"
+  meta="$home/state/codexspawn.meta"
+  assert_present "$meta" "the spawn published no task record"
+  meta_has_key "$meta" claude_config_dir \
+    && fail "a non-claude spawn recorded a claude account: $(cat "$meta")"
+  assert_present "$launch_log" "the codex spawn sent no launch command"
+  grep -Fq 'CLAUDE_CONFIG_DIR=' "$launch_log" \
+    && fail "a non-claude launch carried a claude account prefix: $(cat "$launch_log")"
+  pass "fm-spawn.sh: a non-claude spawn records no claude account"
+}
+
 test_fresh_worktree_is_trusted
 test_registration_is_idempotent
 test_primary_checkout_is_refused
@@ -459,4 +540,7 @@ test_corrupt_store_fails_closed
 test_missing_node_is_refused
 test_scope_refusal_stays_fail_closed_without_node
 test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief
+test_claude_spawn_records_the_account_it_launched_against
+test_default_account_spawn_records_no_account_field
+test_non_claude_spawn_records_no_account_field
 test_refused_spawn_leaves_no_task_state

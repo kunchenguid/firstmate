@@ -193,9 +193,12 @@ run_spawn() {  # <case-dir> <args...>
   # A claude spawn pre-registers workspace trust in the launching user's own
   # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
   # without it this suite would write the developer's real ~/.claude.json.
+  # CLAUDE_CONFIG_DIR is pinned, and pinned EMPTY by default, so a value
+  # inherited from the developer's shell cannot beat the throwaway HOME. A test
+  # that needs a set ambient account opts in through FM_TEST_CLAUDE_CONFIG_DIR.
   mkdir -p "$dir/user-home"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
 }
@@ -912,6 +915,81 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+# The claude account a task was launched against is an identity axis like the
+# rest: a relaunch rebuilds the launch inside FIRSTMATE's process, whose own
+# CLAUDE_CONFIG_DIR names firstmate's account. Inheriting it would move the task
+# to an account whose store never trusted the worktree, and the replacement
+# would wedge on the workspace-trust dialog instead of reading its instructions.
+# The ambient account here is deliberately a DIFFERENT one, so neither assertion
+# can pass by the two paths agreeing.
+test_spawn_relaunch_reuses_the_recorded_claude_account() {
+  local dir out recorded ambient
+  dir=$(new_case claudeaccount rl43)
+  add_ship_task "$dir" rl43 claude
+  recorded="$dir/account-recorded"
+  ambient="$dir/account-ambient"
+  mkdir -p "$recorded" "$ambient"
+  printf 'claude_config_dir=%s\n' "$recorded" >> "$dir/home/state/rl43.meta"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$ambient" run_spawn "$dir" rl43 --relaunch)
+  assert_contains "$out" "spawned rl43 harness=claude" "the relaunch should have succeeded"$'\n'"$out"
+  [ "$(meta_field "$dir" rl43 claude_config_dir)" = "$recorded" ] \
+    || fail "the relaunch replaced the recorded account with '$(meta_field "$dir" rl43 claude_config_dir)'"
+  assert_grep "CLAUDE_CONFIG_DIR='$recorded'" "$dir/fake/literal" \
+    "the replacement launch did not point the worker at the recorded account"
+  assert_no_grep "CLAUDE_CONFIG_DIR='$ambient'" "$dir/fake/literal" \
+    "the replacement launch carried firstmate's own account instead"
+  # The half that actually wedges a worker: the worktree must be trusted in the
+  # store the replacement will read, and nowhere else.
+  assert_grep "$dir/wt" "$recorded/.claude.json" \
+    "the replacement's worktree was not trusted in the recorded account's store"
+  [ ! -e "$ambient/.claude.json" ] \
+    || fail "the relaunch wrote a trust record into firstmate's own account: $(cat "$ambient/.claude.json")"
+  pass "fm-spawn --relaunch: the recorded claude account survives, for both the launch and the trust record"
+}
+
+# An unset account is the default single-store install, so a task recorded
+# before this field existed relaunches on the default store rather than
+# inheriting whatever account firstmate happens to be running under.
+test_spawn_relaunch_without_a_recorded_account_ignores_the_ambient_one() {
+  local dir out ambient
+  dir=$(new_case noaccount rl44)
+  add_ship_task "$dir" rl44 claude
+  ambient="$dir/account-ambient"
+  mkdir -p "$ambient"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$ambient" run_spawn "$dir" rl44 --relaunch)
+  assert_contains "$out" "spawned rl44 harness=claude" "the relaunch should have succeeded"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl44 claude_config_dir)" ] \
+    || fail "the relaunch invented an account record from the ambient environment"
+  assert_no_grep 'CLAUDE_CONFIG_DIR=' "$dir/fake/literal" \
+    "the replacement launch carried firstmate's own account"
+  [ ! -e "$ambient/.claude.json" ] \
+    || fail "the relaunch wrote a trust record into firstmate's own account"
+  pass "fm-spawn --relaunch: an unrecorded account stays the default store, never the ambient one"
+}
+
+# A relative recorded account resolves against firstmate's cwd here but against
+# the worker's own once the launch carries it, so the trust store written and
+# the one read can differ. Refuse rather than resolve.
+test_spawn_relaunch_refuses_a_relative_recorded_claude_account() {
+  local dir out rc
+  dir=$(new_case relaccount rl45)
+  add_ship_task "$dir" rl45 claude
+  printf 'claude_config_dir=%s\n' 'relative/account' >> "$dir/home/state/rl45.meta"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl45 --relaunch); rc=$?
+  expect_code 1 "$rc" "a relative recorded account should refuse"$'\n'"$out"
+  assert_contains "$out" "relative path" "the refusal should name the relative path"
+  assert_contains "$out" "relative/account" "the refusal should quote the recorded value it judged"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "a refused relaunch delivered launch bytes: $(cat "$dir/fake/literal")"
+  pass "fm-spawn --relaunch: a relative recorded claude account is refused, not resolved"
+}
+
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
 # from a raw command records that command's basename rather than the exact
 # adapter name. Retirement must resolve the same way, or a task recorded as
@@ -1581,6 +1659,9 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_reuses_the_recorded_claude_account
+test_spawn_relaunch_without_a_recorded_account_ignores_the_ambient_one
+test_spawn_relaunch_refuses_a_relative_recorded_claude_account
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
