@@ -30,12 +30,12 @@
 #   clauses:                       accepted clauses, recorded from the fields given
 #     - id: <input ordinal>
 #       action: <verb>
-#       object: <text, verbatim>
-#       when: <precondition text, verbatim>
-#       stop: <text, verbatim> | -
+#       object: e:<reversible escaped text>
+#       when: e:<reversible escaped precondition>
+#       stop: e:<reversible escaped text> | -
 #   refused:                       clauses missing a part, with the part named
 #     - id: <input ordinal>
-#       text: <the fields as given>
+#       text: e:<the fields as given, reversibly escaped>
 #       missing: <part - reason>
 # A proposal (state/.afk-contract.proposed) has the same shape without the
 # confirmed fields; confirmation stamps the first entry time. Archived final
@@ -96,8 +96,9 @@
 #   fm-afk-contract.sh field <name> [--proposal]
 #   fm-afk-contract.sh words [--proposal | --path <record>]
 #   fm-afk-contract.sh clauses [--proposal | --path <record>]   TSV: id action object when stop
-#     (a verbatim field containing a tab or newline is stored with those
-#     collapsed to spaces, the one normalization the record's line shape needs)
+#     Backslashes and control whitespace in TSV fields use reversible escapes
+#     (`\\`, `\t`, `\r`, and `\n`) so every record remains one row per clause;
+#     a literal `-` is `\x2d` to distinguish it from the empty-stop marker.
 #   fm-afk-contract.sh refused [--proposal | --path <record>]   TSV: id text missing
 #   fm-afk-contract.sh archive              move the record aside; print its path
 #   fm-afk-contract.sh archived <entered_epoch>   print that archived record's path
@@ -150,10 +151,26 @@ fm_afk_contract_lower() {  # <text>
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
-# One line, trimmed, tabs and newlines collapsed to spaces: the shape every
-# clause part is stored in.
-fm_afk_contract_oneline() {  # <text>
-  printf '%s' "$1" | tr '\t\r\n' '   ' | sed 's/^ *//; s/ *$//; s/  */ /g'
+fm_afk_contract_action() {  # <text>
+  fm_afk_contract_lower "$1" | tr '\t\r\n' '   ' | sed 's/^ *//; s/ *$//; s/  */ /g'
+}
+
+fm_afk_contract_blank() {  # <text>
+  [ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]
+}
+
+fm_afk_contract_escape() {  # <text>
+  local value=$1
+  value=${value//\\/\\\\}
+  value=${value//$'\t'/\\t}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\n'/\\n}
+  [ "$value" != - ] || value='\x2d'
+  printf '%s' "$value"
+}
+
+fm_afk_contract_unescape() {  # <escaped-text>
+  printf '%b' "$1"
 }
 
 # --- clause structural check and never-set scan ------------------------------
@@ -205,11 +222,10 @@ fm_afk_contract_never_set_hit() {  # <text...>
 # presence, the listed verb, and the never-set are the whole check.
 fm_afk_contract_clause_check() {  # <action> <object> <when> <stop>
   local hit
-  C_ACTION=$(fm_afk_contract_lower "$(fm_afk_contract_oneline "$1")")
-  C_OBJECT=$(fm_afk_contract_oneline "$2")
-  C_WHEN=$(fm_afk_contract_oneline "$3")
-  C_STOP=$(fm_afk_contract_oneline "$4")
-  [ -n "$C_STOP" ] || C_STOP=-
+  C_ACTION=$(fm_afk_contract_action "$1")
+  C_OBJECT=$2
+  C_WHEN=$3
+  C_STOP=$4
   C_MISSING=
   if hit=$(fm_afk_contract_never_set_hit "$C_ACTION" "$C_OBJECT" "$C_WHEN" "$C_STOP"); then
     C_MISSING="object - the never-set refuses it: credentials, logins, legal or financial acceptance, payments, and attended prompts are the captain's ('$hit')"
@@ -225,11 +241,11 @@ fm_afk_contract_clause_check() {  # <action> <object> <when> <stop>
       C_MISSING="action - '$C_ACTION' is not a mandate verb (one of: ${FM_AFK_CONTRACT_VERBS// /, })"
       return 1 ;;
   esac
-  if [ -z "$C_OBJECT" ]; then
+  if fm_afk_contract_blank "$C_OBJECT"; then
     C_MISSING='object - the clause names no thing to act on'
     return 1
   fi
-  if [ -z "$C_WHEN" ]; then
+  if fm_afk_contract_blank "$C_WHEN"; then
     C_MISSING='when - the clause states no precondition'
     return 1
   fi
@@ -242,7 +258,7 @@ fm_afk_contract_clause_as_given() {  # <action> <object> <when> <stop>
   local text
   text="action=${1:-(none)} object=${2:-(none)} when=${3:-(none)}"
   [ -z "$4" ] || text="$text stop=$4"
-  fm_afk_contract_oneline "$text"
+  printf '%s' "$text"
 }
 
 # --- record writing ---------------------------------------------------------
@@ -255,18 +271,25 @@ fm_afk_contract_validate_iso() {  # <ts>
 # confirmed fields). Inputs: WORDS (verbatim), the parallel clause field arrays
 # CLAUSE_ACTIONS CLAUSE_OBJECTS CLAUSE_WHENS CLAUSE_STOPS, EXPECTED_RETURN, SPEND.
 fm_afk_contract_render_body() {  # <entered-iso> <entered-epoch>
-  local entered=$1 entered_epoch=$2 ordinal=0 i
+  local entered=$1 entered_epoch=$2 ordinal=0 i as_given
   local accepted_block="" refused_block=""
   i=0
   while [ "$i" -lt "${#CLAUSE_ACTIONS[@]}" ]; do
     ordinal=$((ordinal + 1))
     if fm_afk_contract_clause_check "${CLAUSE_ACTIONS[$i]}" "${CLAUSE_OBJECTS[$i]}" "${CLAUSE_WHENS[$i]}" "${CLAUSE_STOPS[$i]}"; then
-      accepted_block="$accepted_block$(printf '  - id: %s\n    action: %s\n    object: %s\n    when: %s\n    stop: %s' \
-        "$ordinal" "$C_ACTION" "$C_OBJECT" "$C_WHEN" "$C_STOP")
+      accepted_block="$accepted_block$(printf '  - id: %s\n    action: %s\n    object: e:%s\n    when: e:%s\n' \
+        "$ordinal" "$C_ACTION" "$(fm_afk_contract_escape "$C_OBJECT")" "$(fm_afk_contract_escape "$C_WHEN")"
+      if [ -n "$C_STOP" ]; then
+        printf '    stop: e:%s' "$(fm_afk_contract_escape "$C_STOP")"
+      else
+        printf '    stop: -'
+      fi)
 "
     else
-      refused_block="$refused_block$(printf '  - id: %s\n    text: %s\n    missing: %s' \
-        "$ordinal" "$(fm_afk_contract_clause_as_given "${CLAUSE_ACTIONS[$i]}" "${CLAUSE_OBJECTS[$i]}" "${CLAUSE_WHENS[$i]}" "${CLAUSE_STOPS[$i]}")" "$C_MISSING")
+      as_given=$(fm_afk_contract_clause_as_given "${CLAUSE_ACTIONS[$i]}" "${CLAUSE_OBJECTS[$i]}" "${CLAUSE_WHENS[$i]}" "${CLAUSE_STOPS[$i]}"; printf x)
+      as_given=${as_given%x}
+      refused_block="$refused_block$(printf '  - id: %s\n    text: e:%s\n    missing: %s' \
+        "$ordinal" "$(fm_afk_contract_escape "$as_given")" "$C_MISSING")
 "
     fi
     i=$((i + 1))
@@ -346,10 +369,11 @@ fm_afk_contract_read_list() {  # <path> <section>
     insection && /^[^ ]/ { flush(); exit }
     insection && /^  - id: / { flush(); id = substr($0, 9); next }
     insection && /^    action: / { action = substr($0, 13); next }
-    insection && /^    object: / { object = substr($0, 13); next }
-    insection && /^    when: / { when = substr($0, 11); next }
-    insection && /^    stop: / { stop = substr($0, 11); next }
-    insection && /^    text: / { text = substr($0, 11); next }
+    insection && /^    object: e:/ { object = substr($0, 15); next }
+    insection && /^    when: e:/ { when = substr($0, 13); next }
+    insection && /^    stop: e:/ { stop = substr($0, 13); next }
+    insection && /^    stop: -$/ { stop = "-"; next }
+    insection && /^    text: e:/ { text = substr($0, 13); next }
     insection && /^    missing: / { missing = substr($0, 14); next }
     END { flush() }
   ' "$path"
@@ -390,10 +414,12 @@ fm_afk_contract_render_readback() {  # <path> <title>
   printf '  expected return: %s\n' "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")"
   printf '  spend cap: %s concurrent workers\n' "$spend"
   printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
-  words=$(fm_afk_contract_read_words "$path")
+  words=$(fm_afk_contract_read_words "$path"; printf x)
+  words=${words%x}
   if [ -n "$words" ]; then
     printf '  your words (verbatim):\n'
-    printf '%s\n' "$words" | sed 's/^/    /'
+    printf '%s' "$words" | sed 's/^/    /'
+    case "$words" in *$'\n') ;; *) printf '\n' ;; esac
   else
     printf '  your words: (none)\n'
   fi
@@ -402,9 +428,15 @@ fm_afk_contract_render_readback() {  # <path> <title>
   while IFS="$(printf '\t')" read -r id action object when stop; do
     [ -n "$id" ] || continue
     count=$((count + 1))
-    line="$id. $action $object when $when"
-    [ "$stop" = - ] || line="$line stop $stop"
-    printf '    %s\n' "$line"
+    printf '    %s. %s ' "$id" "$action"
+    fm_afk_contract_unescape "$object"
+    printf ' when '
+    fm_afk_contract_unescape "$when"
+    if [ "$stop" != - ]; then
+      printf ' stop '
+      fm_afk_contract_unescape "$stop"
+    fi
+    printf '\n'
   done <<EOF
 $(fm_afk_contract_read_list "$path" clauses)
 EOF
@@ -414,7 +446,9 @@ EOF
   while IFS="$(printf '\t')" read -r id text missing; do
     [ -n "$id" ] || continue
     count=$((count + 1))
-    printf '    %s. "%s" - refused: missing %s\n' "$id" "$text" "$missing"
+    printf '    %s. "' "$id"
+    fm_afk_contract_unescape "$text"
+    printf '" - refused: missing %s\n' "$missing"
   done <<EOF
 $(fm_afk_contract_read_list "$path" refused)
 EOF

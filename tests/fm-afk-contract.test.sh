@@ -104,6 +104,24 @@ test_fields_record_the_captain_wording_verbatim() {
   pass "clause fields are recorded verbatim, and no static parser judges the wording"
 }
 
+test_clause_fields_round_trip_reversible_whitespace() {
+  local home rows out object when stop expected
+  home=$(make_home clause-whitespace)
+  object='task  x PR'
+  when=$'checks\tgreen\nthen done'
+  stop=$'stop\\literal\n'
+  contract "$home" propose --action merge --object "$object" --when "$when" --stop "$stop" >/dev/null \
+    || fail "proposal with whitespace-bearing clause fields failed"
+  rows=$(contract "$home" clauses --proposal)
+  expected=$(printf '1\tmerge\ttask  x PR\tchecks\\tgreen\\nthen done\tstop\\\\literal\\n')
+  [ "$rows" = "$expected" ] || fail "clause TSV did not reversibly preserve whitespace: $rows"
+  out=$(contract "$home" readback --proposal; printf x)
+  out=${out%x}
+  assert_contains "$out" $'1. merge task  x PR when checks\tgreen\nthen done stop stop\\literal' \
+    "read-back did not render clause fields verbatim"
+  pass "clause fields preserve repeated spaces, tabs, newlines, and backslashes"
+}
+
 test_clause_ids_are_input_ordinals_across_accepted_and_refused() {
   local home out rc
   home=$(make_home ordinals)
@@ -155,19 +173,25 @@ test_readback_renders_words_verbatim_and_both_lists() {
 }
 
 test_words_preserve_final_newline_shape() {
-  local home without with
+  local home without with trailing out
   home=$(make_home words-newline-shape)
   without="$home/without.txt"
   with="$home/with.txt"
+  trailing="$home/trailing.txt"
   printf 'merge when green' > "$without"
   printf 'merge when green\n' > "$with"
+  printf 'first line\n\n' > "$trailing"
   contract "$home" propose --words-file "$without" >/dev/null || fail "proposal without a final newline failed"
   [ "$(contract "$home" words --proposal; printf x)" = "$(cat "$without"; printf x)" ] \
     || fail "words without a final newline did not round-trip byte-exact"
   contract "$home" propose --words-file "$with" >/dev/null || fail "proposal with a final newline failed"
   [ "$(contract "$home" words --proposal; printf x)" = "$(cat "$with"; printf x)" ] \
     || fail "words with a final newline did not round-trip byte-exact"
-  pass "words preserve whether the final newline is present"
+  out=$(contract "$home" propose --words-file "$trailing"; printf x) || fail "proposal with trailing blank lines failed"
+  out=${out%x}
+  assert_contains "$out" $'    first line\n    \n  accepted clauses:' \
+    "read-back dropped a trailing blank line from the captain's words"
+  pass "words preserve their final newline shape in storage and read-back"
 }
 
 test_propose_confirm_writes_the_record_and_announces_hold_for_return() {
@@ -310,6 +334,7 @@ test_inputs_are_validated() {
 
 test_fields_refuse_each_missing_part_by_name
 test_fields_record_the_captain_wording_verbatim
+test_clause_fields_round_trip_reversible_whitespace
 test_clause_ids_are_input_ordinals_across_accepted_and_refused
 test_readback_renders_words_verbatim_and_both_lists
 test_words_preserve_final_newline_shape

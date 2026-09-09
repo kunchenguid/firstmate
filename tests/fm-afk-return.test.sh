@@ -403,7 +403,7 @@ test_return_brief_keeps_refresh_history() {
   outcome_in "$dir" append --task first --verdict routine \
     --summary 'completed before the mandate refresh' --wake 'signal: first.status' >/dev/null \
     || fail "could not seed the pre-refresh outcome"
-  contract_in "$dir" propose --words 'replacement mandate' \
+  contract_in "$dir" propose --words $'replacement mandate\n\n' \
     --action wake-me --object 'task second' --when 'at 2026-09-08T08:00Z' >/dev/null 2>&1 || fail "could not propose the replacement mandate"
   contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the replacement mandate"
   [ "$(contract_in "$dir" field entered_epoch)" = "$first_epoch" ] || fail "refresh changed the away-window boundary"
@@ -413,6 +413,7 @@ test_return_brief_keeps_refresh_history() {
   assert_contains "$out" 'merge task first PR when checks green - superseded at ' "the superseded mandate was omitted"
   assert_contains "$out" 'wake-me task second when at 2026-09-08T08:00Z - recorded' "the final mandate was omitted"
   assert_contains "$out" 'first: completed before the mandate refresh' "the pre-refresh outcome was omitted"
+  assert_contains "$out" $'    replacement mandate\n    \nWaiting on you:' "the return brief dropped a trailing blank line from the final words"
   [ -f "$dir/home/state/afk-contracts/$first_epoch.afk-contract" ] || fail "return did not archive the final session record at the canonical path"
   pass "a refreshed posture keeps its original window, superseded mandate, and earlier outcomes"
 }

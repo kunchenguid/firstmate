@@ -253,32 +253,42 @@ strip_axi_help() {
 
 MANDATE_COUNT=0
 render_mandate_record() {  # <record> [superseded-time]
-  local record=$1 superseded=${2:-} id action object when stop text missing suffix=""
+  local record=$1 superseded=${2:-} id action object when stop text missing suffix="" words
   [ -z "$superseded" ] || suffix=" - superseded at $superseded"
   while IFS="$(printf '\t')" read -r id action object when stop; do
     [ -n "$id" ] || continue
     MANDATE_COUNT=$((MANDATE_COUNT + 1))
-    text="$id. $action $object when $when"
-    [ "$stop" = - ] || text="$text stop $stop"
-    printf '  - %s%s - recorded, not executed by this release\n' "$text" "$suffix"
+    printf '  - %s. %s ' "$id" "$action"
+    fm_afk_contract_unescape "$object"
+    printf ' when '
+    fm_afk_contract_unescape "$when"
+    if [ "$stop" != - ]; then
+      printf ' stop '
+      fm_afk_contract_unescape "$stop"
+    fi
+    printf '%s - recorded, not executed by this release\n' "$suffix"
   done <<EOF
 $("$CONTRACT" clauses --path "$record")
 EOF
   while IFS="$(printf '\t')" read -r id text missing; do
     [ -n "$id" ] || continue
     MANDATE_COUNT=$((MANDATE_COUNT + 1))
-    printf '  - %s. "%s"%s - refused at entry: missing %s\n' "$id" "$text" "$suffix" "$missing"
+    printf '  - %s. "' "$id"
+    fm_afk_contract_unescape "$text"
+    printf '"%s - refused at entry: missing %s\n' "$suffix" "$missing"
   done <<EOF
 $("$CONTRACT" refused --path "$record")
 EOF
-  text=$("$CONTRACT" words --path "$record")
-  if [ -n "$text" ]; then
+  words=$("$CONTRACT" words --path "$record"; printf x)
+  words=${words%x}
+  if [ -n "$words" ]; then
     if [ -n "$superseded" ]; then
       printf '  your words superseded at %s:\n' "$superseded"
     else
       printf '  your words at entry:\n'
     fi
-    printf '%s\n' "$text" | sed 's/^/    /'
+    printf '%s' "$words" | sed 's/^/    /'
+    case "$words" in *$'\n') ;; *) printf '\n' ;; esac
   fi
 }
 

@@ -1116,27 +1116,27 @@ test_housekeeping_declared_time_controls_pause_recheck() {
   key=$(printf '%s' "$task" | tr ':/.' '___')
   now=$(date +%s)
   if [ "$(uname)" = Darwin ]; then
-    future=$(date -u -r "$((now + 7200))" +%Y-%m-%dT%H:%M:%SZ)
+    future=$(date -u -r "$((now + 172800))" +%Y-%m-%dT%H:%M:%SZ)
     past=$(date -u -r "$((now - 120))" +%Y-%m-%dT%H:%M:%SZ)
   else
-    future=$(date -u -d "@$((now + 7200))" +%Y-%m-%dT%H:%M:%SZ)
+    future=$(date -u -d "@$((now + 172800))" +%Y-%m-%dT%H:%M:%SZ)
     past=$(date -u -d "@$((now - 120))" +%Y-%m-%dT%H:%M:%SZ)
   fi
   printf 'paused: waiting for release until %s\n' "$future" > "$state/$task.status"
-  echo $((now - 5000)) > "$state/.subsuper-paused-$key"
+  echo $((now - 90000)) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=3600 FM_PAUSE_UNTIL_MAX_SECS=86400 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "a declared future time was rechecked on the flat pause cadence"
 
   printf 'paused: waiting for release until %s\n' "$past" > "$state/$task.status"
   date +%s > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=3600 FM_PAUSE_UNTIL_MAX_SECS=86400 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
   escalations=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
   [ "$escalations" -eq 1 ] || fail "a reached declared time did not trigger an immediate recheck"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=3600 FM_PAUSE_UNTIL_MAX_SECS=86400 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
   escalations=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
   [ "$escalations" -eq 1 ] || fail "a reached declared time bypassed the reset pause cadence"
   pass "housekeeping defers until a declared time, then rechecks immediately and resumes the long cadence"

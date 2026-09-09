@@ -4593,9 +4593,8 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record() {
 
 # --- declared waits are condition-aware: `until <UTC ISO 8601>` --------------
 # A paused: line naming when the wait clears is not rechecked before that time
-# even past the flat cadence, is rechecked as soon as the time passes even when
-# the cadence has not elapsed, and is bounded by PAUSE_UNTIL_MAX_SECS so a far
-# future typo still re-surfaces.
+# even past the flat cadence and is rechecked as soon as the time passes even
+# when the cadence has not elapsed, including when that time is days away.
 paused_until_fixture() {  # <name> <until-epoch> <status-age-secs>
   local name=$1 until=$2 age=$3 dir state statusf window key back
   dir=$(make_case "$name"); state="$dir/state"
@@ -4614,20 +4613,20 @@ paused_until_fixture() {  # <name> <until-epoch> <status-age-secs>
   printf '%s\n' "$dir"
 }
 
-until_watch() {  # <dir> <cadence> <until-max> -> pid in UNTIL_PID
+until_watch() {  # <dir> <cadence> -> pid in UNTIL_PID
   local dir=$1
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-until FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
-    FM_PAUSE_RESURFACE_SECS="$2" FM_PAUSE_UNTIL_MAX_SECS="$3" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_PAUSE_RESURFACE_SECS="$2" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2>&1 &
   UNTIL_PID=$!
 }
 
 test_paused_until_in_the_future_is_not_rechecked_past_the_cadence() {
   local dir state
-  dir=$(paused_until_fixture until-future "$(( $(date +%s) + 3600 ))" 500); state="$dir/state"
-  until_watch "$dir" 240 86400
+  dir=$(paused_until_fixture until-future "$(( $(date +%s) + 172800 ))" 90000); state="$dir/state"
+  until_watch "$dir" 240
   if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
     reap "$UNTIL_PID"; fail "a declared wait with a future until time was rechecked on the flat cadence: $(cat "$dir/watch.out")"
   fi
@@ -4641,7 +4640,7 @@ test_paused_until_in_the_future_is_not_rechecked_past_the_cadence() {
 test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   local dir state
   dir=$(paused_until_fixture until-passed "$(( $(date +%s) - 30 ))" 60); state="$dir/state"
-  until_watch "$dir" 999 86400
+  until_watch "$dir" 999
   wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a declared wait whose until time passed was not rechecked ahead of the cadence"; }
   grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null || fail "the due recheck did not print a stale wake: $(cat "$dir/watch.out")"
   grep -F 'declared clearing time has passed' "$dir/watch.out" >/dev/null \
@@ -4651,21 +4650,12 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   # unchanged declaration absorbs it again.
   ack_stopped_cycle "$state" || fail "could not acknowledge the due recheck"
   : > "$dir/watch.out"
-  until_watch "$dir" 999 86400
+  until_watch "$dir" 999
   if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
     reap "$UNTIL_PID"; fail "the due recheck repeated on every poll instead of once per declaration: $(cat "$dir/watch.out")"
   fi
   reap "$UNTIL_PID"
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
-}
-
-test_paused_until_far_future_is_bounded() {
-  local dir state
-  dir=$(paused_until_fixture until-far "$(( $(date +%s) + 8640000 ))" 500); state="$dir/state"
-  until_watch "$dir" 240 100
-  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a far-future until time silenced the recheck past its bound"; }
-  grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null || fail "the bounded recheck did not print a stale wake: $(cat "$dir/watch.out")"
-  pass "a far-future until time cannot silence a declared wait past FM_PAUSE_UNTIL_MAX_SECS"
 }
 
 
@@ -4779,4 +4769,3 @@ test_backlog_hold_never_rechecked_while_away_record_exists
 test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_paused_until_in_the_future_is_not_rechecked_past_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
-test_paused_until_far_future_is_bounded

@@ -260,9 +260,6 @@ PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT
 # status_paused_until in fm-classify-lib.sh) is condition-aware: it is not
 # rechecked before that time, and it is rechecked once as soon as that time
 # passes even when the flat cadence has not elapsed, then held to the cadence.
-# PAUSE_UNTIL_MAX_SECS bounds how far a declared time may silence the recheck,
-# so a typo naming next year still re-surfaces within a day.
-PAUSE_UNTIL_MAX_SECS=${FM_PAUSE_UNTIL_MAX_SECS:-86400}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -986,12 +983,12 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="captain-held, awaiting the captain"
     reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
   elif until=$(status_paused_until "$last"); then
-    if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_UNTIL_MAX_SECS" ]; then
+    if [ "$now" -lt "$until" ]; then
       triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
       return 0
     fi
-    # The declared time has passed (or the bound caps it): recheck now, once
-    # per declaration, then hold the cadence.
+    # The declared time has passed: recheck now, once per declaration, then
+    # hold the cadence.
     detail="paused, declared time reached"
     reason="paused ${age}s, awaiting external - the declared clearing time has passed, rechecked on a long cadence not a wedge; confirm the wait cleared"
     declaration="$declaration:due"
@@ -1264,7 +1261,7 @@ captain_call_stale_bound() {  # <window-key> <task>
 # above): the status line the worker declared, and the backlog hold firstmate
 # recorded once the captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1 until now mtime age
+  local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1 until now
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
@@ -1275,13 +1272,10 @@ surface_nonterminal_stale() {  # <window> <hash>
     STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
     if until=$(status_paused_until "$last"); then
       now=$(date +%s)
-      mtime=$(stat_mtime "$STATE/$task.status")
-      case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
-      age=$(( now - mtime ))
-      if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_UNTIL_MAX_SECS" ]; then
+      if [ "$now" -lt "$until" ]; then
         throttled=0
       else
-        [ "$now" -lt "$until" ] || STALE_WAIT_DECLARATION="$STALE_WAIT_DECLARATION:due"
+        STALE_WAIT_DECLARATION="$STALE_WAIT_DECLARATION:due"
         stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
       fi
     else
