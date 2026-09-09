@@ -92,7 +92,19 @@ test_fields_refuse_each_missing_part_by_name() {
   compile_refusal 'object - the clause names no thing to act on' 'blank object' --action merge --object '   ' --when 'checks green'
   compile_refusal 'when - the clause states no precondition' 'no when' --action merge --object 'task x PR'
   compile_refusal 'when - the clause states no precondition' 'blank when' --action merge --object 'task x PR' --when ' '
+  compile_refusal 'stop - --stop was given with no text' 'blank explicit stop' --action merge --object 'task x PR' --when 'checks green' --stop ' '
   pass "structural refusals name their missing part"
+}
+
+test_omitted_stop_confirms_as_no_stop() {
+  local home row out
+  home=$(make_home omitted-stop)
+  contract "$home" propose --action merge --object 'task x PR' --when 'checks green' >/dev/null || fail "proposal without stop failed"
+  row=$(contract "$home" clauses --proposal)
+  [ "$(printf '%s' "$row" | cut -f5)" = - ] || fail "an omitted stop was not serialized as the no-stop marker"
+  out=$(contract "$home" confirm 2>&1) || fail "confirmation without stop failed: $out"
+  assert_contains "$out" '1 mandate clause(s) recorded, 0 refused' "confirmation did not accept the omitted stop"
+  pass "an omitted stop uses the no-stop marker and confirms"
 }
 
 # The never-set is a coarse best-effort flag: a listed concept, exact or plainly
@@ -514,6 +526,7 @@ test_inputs_are_validated() {
 }
 
 test_fields_refuse_each_missing_part_by_name
+test_omitted_stop_confirms_as_no_stop
 test_never_set_flags_without_refusing_and_never_over_matches
 test_fields_record_the_captain_wording_verbatim
 test_clause_fields_round_trip_reversible_whitespace

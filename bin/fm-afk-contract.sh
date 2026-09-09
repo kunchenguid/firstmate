@@ -217,7 +217,7 @@ fm_afk_contract_never_set_hit() {  # <text...>
 # Check one clause's fields. Sets C_ACTION C_OBJECT C_WHEN C_STOP; on refusal
 # C_MISSING names the missing field and the reason. The fields are never parsed:
 # presence, the listed verb, and the coarse best-effort flag are the whole check.
-fm_afk_contract_clause_check() {  # <action> <object> <when> <stop>
+fm_afk_contract_clause_check() {  # <action> <object> <when> <stop> <stop-given 0|1>
   C_ACTION=$(fm_afk_contract_action "$1")
   C_OBJECT=$2
   C_WHEN=$3
@@ -242,15 +242,19 @@ fm_afk_contract_clause_check() {  # <action> <object> <when> <stop>
     C_MISSING='when - the clause states no precondition'
     return 1
   fi
+  if [ "$5" -eq 1 ] && fm_afk_contract_blank "$C_STOP"; then
+    C_MISSING='stop - --stop was given with no text'
+    return 1
+  fi
   return 0
 }
 
 # The refused list keeps the fields exactly as given, so the captain sees what
 # was refused; an absent field reads as "(none)".
-fm_afk_contract_clause_as_given() {  # <action> <object> <when> <stop>
+fm_afk_contract_clause_as_given() {  # <action> <object> <when> <stop> <stop-given 0|1>
   local text
   text="action=${1:-(none)} object=${2:-(none)} when=${3:-(none)}"
-  [ -z "$4" ] || text="$text stop=$4"
+  [ "$5" -eq 0 ] || text="$text stop=${4:-(none)}"
   printf '%s' "$text"
 }
 
@@ -269,7 +273,7 @@ fm_afk_contract_render_body() {  # <entered-iso> <entered-epoch>
   i=0
   while [ "$i" -lt "${#CLAUSE_ACTIONS[@]}" ]; do
     ordinal=$((ordinal + 1))
-    if fm_afk_contract_clause_check "${CLAUSE_ACTIONS[$i]}" "${CLAUSE_OBJECTS[$i]}" "${CLAUSE_WHENS[$i]}" "${CLAUSE_STOPS[$i]}"; then
+    if fm_afk_contract_clause_check "${CLAUSE_ACTIONS[$i]}" "${CLAUSE_OBJECTS[$i]}" "${CLAUSE_WHENS[$i]}" "${CLAUSE_STOPS[$i]}" "${CLAUSE_STOP_GIVENS[$i]}"; then
       accepted_block="$accepted_block$(printf '  - id: %s\n    action: %s\n    object: e:%s\n    when: e:%s\n' \
         "$ordinal" "$C_ACTION" "$(fm_afk_contract_escape "$C_OBJECT")" "$(fm_afk_contract_escape "$C_WHEN")"
       if [ -n "$C_STOP" ]; then
@@ -284,7 +288,7 @@ fm_afk_contract_render_body() {  # <entered-iso> <entered-epoch>
       fi)
 "
     else
-      as_given=$(fm_afk_contract_clause_as_given "${CLAUSE_ACTIONS[$i]}" "${CLAUSE_OBJECTS[$i]}" "${CLAUSE_WHENS[$i]}" "${CLAUSE_STOPS[$i]}"; printf x)
+      as_given=$(fm_afk_contract_clause_as_given "${CLAUSE_ACTIONS[$i]}" "${CLAUSE_OBJECTS[$i]}" "${CLAUSE_WHENS[$i]}" "${CLAUSE_STOPS[$i]}" "${CLAUSE_STOP_GIVENS[$i]}"; printf x)
       as_given=${as_given%x}
       refused_block="$refused_block$(printf '  - id: %s\n    text: e:%s\n    missing: %s' \
         "$ordinal" "$(fm_afk_contract_escape "$as_given")" "$C_MISSING")
@@ -600,7 +604,7 @@ fm_afk_contract_render_announcement() {  # <path>
 fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, the CLAUSE_* arrays, EXPECTED_RETURN, SPEND
   local words_file='' open=-1
   WORDS=; EXPECTED_RETURN=-; SPEND=$FM_AFK_CONTRACT_SPEND_DEFAULT
-  CLAUSE_ACTIONS=(); CLAUSE_OBJECTS=(); CLAUSE_WHENS=(); CLAUSE_STOPS=()
+  CLAUSE_ACTIONS=(); CLAUSE_OBJECTS=(); CLAUSE_WHENS=(); CLAUSE_STOPS=(); CLAUSE_STOP_GIVENS=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --words-file)
@@ -613,7 +617,7 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, the CLAUSE_* arrays, 
         shift 2 ;;
       --action)
         [ "$#" -gt 1 ] || { fm_afk_contract_log '--action requires a verb; it opens a clause for the --object, --when, and --stop that follow it'; return 2; }
-        CLAUSE_ACTIONS+=("$2"); CLAUSE_OBJECTS+=(''); CLAUSE_WHENS+=(''); CLAUSE_STOPS+=('')
+        CLAUSE_ACTIONS+=("$2"); CLAUSE_OBJECTS+=(''); CLAUSE_WHENS+=(''); CLAUSE_STOPS+=(''); CLAUSE_STOP_GIVENS+=(0)
         open=$(( ${#CLAUSE_ACTIONS[@]} - 1 ))
         shift 2 ;;
       --object|--when|--stop)
@@ -622,7 +626,7 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, the CLAUSE_* arrays, 
         case "$1" in
           --object) CLAUSE_OBJECTS[open]=$2 ;;
           --when) CLAUSE_WHENS[open]=$2 ;;
-          --stop) CLAUSE_STOPS[open]=$2 ;;
+          --stop) CLAUSE_STOPS[open]=$2; CLAUSE_STOP_GIVENS[open]=1 ;;
         esac
         shift 2 ;;
       --expected-return)
