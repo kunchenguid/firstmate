@@ -39,11 +39,12 @@
 #       ssh      SSH_CONNECTION, SSH_CLIENT, or SSH_TTY in the environment, or
 #                an ancestor that is sshd or herdr's remote-client-bridge
 #                (matched on argv[0] and whole arguments only)
-#       launchd  XPC_SERVICE_NAME in the environment (any value): launchd
-#                spawned it, in the domain the job was bootstrapped into
-#       worker   FM_REMOTE_JOB_ACTIVE=1: started by the Aqua
-#                dev.firstmate.remote-job worker under its env -i contract
-#       unknown  none of the above
+#       launchd  XPC_SERVICE_NAME=<label>, with launchctl proving that job is
+#                the owner in gui/<uid> or is loaded only in that domain
+#       worker   FM_REMOTE_JOB_ACTIVE=1, with launchctl proving that
+#                dev.firstmate.remote-job is loaded only in gui/<uid>
+#       unknown  none of the above; XPC_SERVICE_NAME alone, including value 0,
+#                does not prove an Aqua birth
 #   fm_remote_herdr_birth_is_aqua <birth>
 #     Succeeds only for launchd and worker. `unknown` is deliberately not
 #     Aqua: a server that cannot prove its birth is treated like a foreign one,
@@ -101,18 +102,43 @@ fm_remote_herdr_process_ancestry() { # <pid>
   done
 }
 
+fm_remote_herdr_gui_job_proves_owner() { # <uid> <label> <pid>
+  local uid=$1 label=$2 pid=$3 job
+  [ -n "$label" ] && [ "$label" != 0 ] || return 1
+  job=$(launchctl print "gui/$uid/$label" 2>/dev/null) || return 1
+  if printf '%s\n' "$job" | awk -v expected="$pid" '
+    $1 == "pid" && $2 == "=" && $3 == expected { found = 1 }
+    END { exit found ? 0 : 1 }
+  '; then
+    return 0
+  fi
+  ! launchctl print "user/$uid/$label" >/dev/null 2>&1
+}
+
+fm_remote_herdr_gui_job_is_exclusive() { # <uid> <label>
+  local uid=$1 label=$2
+  launchctl print "gui/$uid/$label" >/dev/null 2>&1 \
+    && ! launchctl print "user/$uid/$label" >/dev/null 2>&1
+}
+
 fm_remote_herdr_owner_birth() { # <pid>
-  local pid=$1 env
+  local pid=$1 env uid xpc_line label
   env=$(fm_remote_herdr_process_env "$pid") || { printf 'unknown\n'; return 0; }
   if printf '%s\n' "$env" | grep -q -E '^SSH_(CONNECTION|CLIENT|TTY)='; then
     printf 'ssh\n'
     return 0
   fi
-  if printf '%s\n' "$env" | grep -q -E '^XPC_SERVICE_NAME='; then
+  uid=$(id -u 2>/dev/null) || uid=
+  xpc_line=$(printf '%s\n' "$env" | grep -E '^XPC_SERVICE_NAME=' | head -1 || true)
+  label=${xpc_line#XPC_SERVICE_NAME=}
+  if [ -n "$uid" ] && [ -n "$xpc_line" ] \
+    && fm_remote_herdr_gui_job_proves_owner "$uid" "$label" "$pid"; then
     printf 'launchd\n'
     return 0
   fi
-  if printf '%s\n' "$env" | grep -q -E '^FM_REMOTE_JOB_ACTIVE=1$'; then
+  if printf '%s\n' "$env" | grep -q -E '^FM_REMOTE_JOB_ACTIVE=1$' \
+    && [ -n "$uid" ] \
+    && fm_remote_herdr_gui_job_is_exclusive "$uid" dev.firstmate.remote-job; then
     printf 'worker\n'
     return 0
   fi

@@ -12,6 +12,8 @@
 # the login shell, is what gives this process and every server it execs the
 # Aqua audit session and login-keychain access; the login shell only gives the
 # server the account's own environment.
+# `herdr server` stays in the foreground under launchd, as verified in
+# docs/verification/runtime-backends.md under "fm-remote server birth and login-keychain access", so the final exec provides the complete supervision lifecycle.
 #
 # Decision, made once per launch (exit codes matter under SuccessfulExit=false:
 # 0 tells launchd the job is done until something restarts it, non-zero asks

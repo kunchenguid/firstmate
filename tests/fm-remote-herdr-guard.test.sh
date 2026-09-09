@@ -32,7 +32,7 @@ SESSION=fm-remote
 # so a case can also present a host with NO lsof.
 TOOLS="$TMP_ROOT/tools"
 mkdir -p "$TOOLS"
-for tool in ps awk sed grep tr dirname basename sleep cat cp rm env bash sh; do
+for tool in ps awk sed grep tr dirname basename sleep cat cp rm env bash sh id head; do
   real=$(command -v "$tool") || fail "test host lacks $tool"
   ln -sf "$real" "$TOOLS/$tool"
 done
@@ -48,6 +48,17 @@ while IFS= read -r pid; do
   printf 'p%s\n' "$pid"
   printf 'n%s\n' "$FM_FAKE_HERDR_SOCKET"
 done < "$FM_FAKE_SOCKET_OWNER"
+SH
+cat > "$FAKE/launchctl" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = print ] || exit 0
+domain=${2:-}
+scope=${domain%%/*}
+label=${domain#*/}
+label=${label#*/}
+state="$FM_FAKE_STATE/launchctl-$scope-$label"
+[ -f "$state" ] || exit 113
+cat "$state"
 SH
 cat > "$FAKE/herdr" <<'SH'
 #!/usr/bin/env bash
@@ -84,7 +95,7 @@ case "$*" in
 esac
 exit 0
 SH
-chmod +x "$FAKE/lsof" "$FAKE/herdr"
+chmod +x "$FAKE/lsof" "$FAKE/launchctl" "$FAKE/herdr"
 cp "$FAKE/lsof" "$TMP_ROOT/lsof.fake"
 
 # hold <marker-env...> -> HOLDER_PID: a real non-platform process (jq blocked
@@ -133,6 +144,14 @@ new_case() { # [running|stopped]
   CASE_OWNER="$CASE_STATE/socket-owner"
   CASE_SOCKET="$CASE_STATE/herdr.sock"
   CASE_PATH="$FAKE:$TOOLS"
+}
+
+load_job() { # <gui|user> <label> [pid]
+  if [ -n "${3:-}" ]; then
+    printf 'pid = %s\n' "$3" > "$CASE_STATE/launchctl-$1-$2"
+  else
+    printf 'state = running\n' > "$CASE_STATE/launchctl-$1-$2"
+  fi
 }
 
 guard() { # [extra env assignments...]
@@ -193,6 +212,10 @@ pass "an empty session is started inside the launch agent"
 
 hold XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote
 LAUNCHD_PID=$HOLDER_PID
+hold XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote
+BACKGROUND_PID=$HOLDER_PID
+hold XPC_SERVICE_NAME=0
+XPC_ZERO_PID=$HOLDER_PID
 hold FM_REMOTE_JOB_ACTIVE=1
 WORKER_PID=$HOLDER_PID
 hold SSH_CONNECTION='100.102.217.78 51234 100.100.1.2 22' SSH_CLIENT='100.102.217.78 51234 22'
@@ -205,19 +228,46 @@ hold_under 'sshd-session:' kunchen@notty
 SSHD_CHILD_PID=$HOLDER_PID
 sleep 0.3
 
-for aqua in "launchd $LAUNCHD_PID" "worker $WORKER_PID"; do
-  new_case running
-  printf '%s\n' "${aqua#* }" > "$CASE_OWNER"
-  guard
-  expect_code 0 "$GUARD_RC" "the guard did not exit 0 for a ${aqua%% *}-born owner"
-  assert_not_started "the guard started a second server over a ${aqua%% *}-born owner"
-  assert_not_contains "$(herdr_calls)" 'server stop' "the guard stopped a ${aqua%% *}-born owner"
-  assert_contains "$GUARD_OUT" "pid ${aqua#* } born in the Aqua login session (${aqua%% *})" \
-    "the guard did not name the Aqua-born owner and its marker"
-done
-pass "a launchd-born or worker-born owner is left in place with exit 0"
+new_case running
+printf '%s\n' "$LAUNCHD_PID" > "$CASE_OWNER"
+load_job gui dev.firstmate.herdr.fm-remote "$LAUNCHD_PID"
+guard
+expect_code 0 "$GUARD_RC" "the guard did not exit 0 for a gui-domain launchd owner"
+assert_not_started "the guard started a second server over a gui-domain launchd owner"
+assert_not_contains "$(herdr_calls)" 'server stop' "the guard stopped a gui-domain launchd owner"
+assert_contains "$GUARD_OUT" "pid $LAUNCHD_PID born in the Aqua login session (launchd)" \
+  "the guard did not name the launchd owner"
+
+new_case running
+printf '%s\n' "$WORKER_PID" > "$CASE_OWNER"
+load_job gui dev.firstmate.remote-job
+guard
+expect_code 0 "$GUARD_RC" "the guard did not exit 0 for the gui-domain worker owner"
+assert_not_started "the guard started a second server over a gui-domain worker owner"
+assert_not_contains "$(herdr_calls)" 'server stop' "the guard stopped a gui-domain worker owner"
+assert_contains "$GUARD_OUT" "pid $WORKER_PID born in the Aqua login session (worker)" \
+  "the guard did not name the worker owner"
+pass "launchd and worker markers require gui-domain launchctl proof"
 
 # --- a foreign owner is stopped, then the guard becomes the server -----------
+
+new_case running
+printf '%s\n' "$BACKGROUND_PID" > "$CASE_OWNER"
+load_job gui dev.firstmate.herdr.fm-remote
+load_job user dev.firstmate.herdr.fm-remote
+guard
+expect_code 0 "$GUARD_RC" "the guard failed to take over a label also loaded in the user domain"
+assert_stop_before_start
+assert_contains "$GUARD_OUT" "pid $BACKGROUND_PID born outside the Aqua login session (unknown)" \
+  "a user-domain label was trusted as Aqua"
+
+new_case running
+printf '%s\n' "$XPC_ZERO_PID" > "$CASE_OWNER"
+guard
+expect_code 0 "$GUARD_RC" "the guard failed to take over an XPC_SERVICE_NAME=0 owner"
+assert_stop_before_start
+assert_contains "$GUARD_OUT" "pid $XPC_ZERO_PID born outside the Aqua login session (unknown)" \
+  "XPC_SERVICE_NAME=0 was trusted as Aqua"
 
 for foreign in "ssh $SSH_PID" "ssh $BRIDGE_CHILD_PID" "ssh $SSHD_CHILD_PID" "unknown $UNMARKED_PID"; do
   new_case running
@@ -229,7 +279,7 @@ for foreign in "ssh $SSH_PID" "ssh $BRIDGE_CHILD_PID" "ssh $SSHD_CHILD_PID" "unk
   assert_contains "$GUARD_OUT" "pid ${foreign#* } born outside the Aqua login session (${foreign%% *})" \
     "the guard did not name the foreign owner and its birth"
 done
-pass "SSH-born, SSH-descended, and unprovable owners are taken over: stop, wait, start"
+pass "background, inherited-XPC, SSH-born, SSH-descended, and unprovable owners are taken over"
 
 # --- an owner nobody can prove is treated as foreign -------------------------
 

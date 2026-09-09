@@ -52,6 +52,12 @@ hold() { # <marker-env...> -> HOLDER_PID
 }
 hold XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote
 AQUA_HOLDER_PID=$HOLDER_PID
+hold XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote
+BACKGROUND_HOLDER_PID=$HOLDER_PID
+hold XPC_SERVICE_NAME=0
+XPC_ZERO_HOLDER_PID=$HOLDER_PID
+hold FM_REMOTE_JOB_ACTIVE=1
+WORKER_HOLDER_PID=$HOLDER_PID
 hold SSH_CONNECTION='100.102.217.78 51234 100.100.1.2 22' SSH_CLIENT='100.102.217.78 51234 22'
 SSH_HOLDER_PID=$HOLDER_PID
 
@@ -104,6 +110,10 @@ loaded="$FM_FAKE_STATE/loaded-$label"
 case "${1:-}" in
   print)
     case "$domain" in
+      user/*/*)
+        [ -f "$FM_FAKE_STATE/user-loaded-$label" ] || exit 113
+        cat "$FM_FAKE_STATE/user-loaded-$label"
+        ;;
       */dev.firstmate.herdr.fm-remote)
         [ -f "$loaded" ] || exit 113
         cat "$loaded"
@@ -606,6 +616,27 @@ doctor --fix
 expect_code 0 "$DOCTOR_RC" "the Aqua-owner fixture could not be initialized"
 assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $AQUA_HOLDER_PID, launchd)" \
   "a launchd-born owner was not reported with its pid and birth"
+
+printf '%s\n' "$BACKGROUND_HOLDER_PID" > "$CASE_STATE/socket-owner"
+printf 'background job\n' > "$CASE_STATE/user-loaded-$LABEL"
+doctor
+expect_code 1 "$DOCTOR_RC" "a label loaded in the user domain was reported Aqua-born"
+assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is served by pid $BACKGROUND_HOLDER_PID born outside the Aqua login session (unknown)" \
+  "the user-domain owner was not tagged fixable"
+rm -f "$CASE_STATE/user-loaded-$LABEL"
+
+printf '%s\n' "$XPC_ZERO_HOLDER_PID" > "$CASE_STATE/socket-owner"
+doctor
+expect_code 1 "$DOCTOR_RC" "an XPC_SERVICE_NAME=0 owner was reported Aqua-born"
+assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is served by pid $XPC_ZERO_HOLDER_PID born outside the Aqua login session (unknown)" \
+  "the inherited XPC marker was not tagged fixable"
+
+printf '%s\n' "$WORKER_HOLDER_PID" > "$CASE_STATE/socket-owner"
+doctor
+expect_code 0 "$DOCTOR_RC" "the gui-only remote-job worker owner was not reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $WORKER_HOLDER_PID, worker)" \
+  "the gui-only worker was not recognized"
+
 printf '%s\n' "$SSH_HOLDER_PID" > "$CASE_STATE/socket-owner"
 : > "$CASE_LAUNCHCTL_LOG"
 doctor

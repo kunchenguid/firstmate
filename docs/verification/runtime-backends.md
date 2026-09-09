@@ -621,15 +621,31 @@ Same user, same `HOME`, same login keychain item, three births, probed with `lau
 
 Claude Code 2.1.266 maps that exit 36 (and 44) to "no keychain data" and reads `~/.claude/.credentials.json` instead; with a stale file it prints `Failed to authenticate: OAuth session expired and could not be refreshed` (interactive: `Login expired · Please run /login`).
 
-Birth markers, read with `ps -Eww -o command= -p <pid>` (own-uid processes; macOS hides the environment of Apple platform binaries such as `/bin/sleep`, and a herdr server is never one):
+Candidate birth markers were read with `ps -Eww -o command= -p <pid>` for own-uid processes, noting that macOS hides the environment of Apple platform binaries such as `/bin/sleep` and that a herdr server is never one.
 
 ```text
 launchd-born herdr server (child of launchd, gui/501):  XPC_SERVICE_NAME=org.nix-community.home.herdr-server  no SSH_*
 SSH-born herdr server (child of `herdr --session fm-remote remote-client-bridge` under `sshd-session: user@notty`):  SSH_CLIENT=... SSH_CONNECTION=...  no XPC_SERVICE_NAME
 ```
 
+`XPC_SERVICE_NAME` identifies a launchd label but does not identify its domain, because the Background `user/501` job also carried that variable while lacking keychain access.
+The owner classifier therefore accepts that label only when `launchctl print gui/<uid>/<label>` identifies the owner pid or the label is loaded in `gui/<uid>` but not `user/<uid>`.
+`XPC_SERVICE_NAME=0`, including a value inherited by a herdr live-handoff child, remains unknown.
+`FM_REMOTE_JOB_ACTIVE=1` proves the Aqua worker only when `dev.firstmate.remote-job` is loaded in `gui/<uid>` but not `user/<uid>`.
+
 The SSH-born row was read on the remote host whose `dev.firstmate.herdr.fm-remote` job showed `state = spawn scheduled`, `runs = 239`, `last exit code = 1` and a log repeating `error: herdr server is already running`: herdr's remote attach had started the session's server as its own child before the login session existed, and launchd's copy lost the socket on every retry.
 `pgrep -f` did not list the herdr server's argv on macOS; `lsof -U -a -c herdr -F pn` named the socket owner.
+
+A separate foreground-supervision check ran on 2026-09-09 on macOS 26 (Darwin 25.6.0) with Herdr 0.9.0 using the throwaway Aqua launch agent `dev.fm-rca.herdr-fg`.
+Its `ProgramArguments` ran `/run/current-system/sw/bin/zsh -l -c "exec /etc/profiles/per-user/kunchen/bin/herdr server --session fm-lab-fg-90381-18985"`, with `KeepAlive={SuccessfulExit=false}` and `ThrottleInterval=10`, after `launchctl bootstrap gui/501 <plist>` and `launchctl kickstart -k gui/501/dev.fm-rca.herdr-fg`.
+`launchctl print gui/501/dev.fm-rca.herdr-fg` reported `state = running` and `pid = 4806`.
+`lsof -U -a -c herdr -F pn` named pid 4806 as the owner of `~/.config/herdr/sessions/fm-lab-fg-90381-18985/herdr.sock`.
+`ps -o pid,ppid,command -p 4806` reported `4806 1 /etc/profiles/per-user/kunchen/bin/herdr server --session fm-lab-fg-90381-18985`, and its environment carried `XPC_SERVICE_NAME=dev.fm-rca.herdr-fg`.
+No other herdr process existed for that session, and after 15 seconds the job remained running with pid 4806.
+After a guarded `herdr session stop`, the job reported `state = not running` and `last exit code = 0`, and it stayed at rest through the throttle interval.
+A second `launchctl kickstart -k gui/501/dev.fm-rca.herdr-fg` started pid 45574, which was also the new socket owner.
+This proves that `herdr server` remains in the foreground as the launchd job, so the guard's final `exec` supplies the intended supervision and the earlier server that survived `launchctl bootout` was the unrelated SSH-bridge-born process.
+
 `bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh` pins the resulting decision table against real marker-carrying processes, and `tests/fm-remote-doctor.test.sh` pins the doctor's verdicts on the same markers.
 
 ### Client selection
