@@ -54,6 +54,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Set up Node with native TypeScript support
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -97,6 +101,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Set up Node with native TypeScript support
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -148,6 +156,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Set up Node with native TypeScript support
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
       - name: Install pinned ShellCheck
         run: |
           set -eu

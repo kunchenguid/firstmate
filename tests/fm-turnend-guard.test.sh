@@ -989,6 +989,37 @@ EOF
   pass ".codex/hooks.json: Stop hook ignores nested git root guard scripts"
 }
 
+test_codex_hook_scrubs_foreign_harness_markers() {
+  local settings command dir payload out status
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-foreign-markers")
+  mark_codex_hook_root "$dir"
+  cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'claude=%s pi=%s signed=%s grok=%s cursor=%s invoked=%s gemini=%s rovo=%s rovodev=%s omp=%s\n' \
+  "${CLAUDECODE:-}" "${PI_CODING_AGENT:-}" "${FM_PI_HARNESS:-}" \
+  "${GROK_AGENT:-}" "${CURSOR_AGENT:-}" "${CURSOR_INVOKED_AS:-}" \
+  "${GEMINI_CLI:-}" "${ATLASSIAN_AGENT_TYPE:-}" "${ROVODEV_CLI:-}" \
+  "${FM_OMP_HARNESS:-}"
+cat
+EOF
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  payload='{"session_id":"nested-codex","stop_hook_active":false}'
+  out=$(printf '%s' "$payload" | (
+    cd "$dir" && CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed \
+      GROK_AGENT=1 CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent GEMINI_CLI=1 \
+      ATLASSIAN_AGENT_TYPE=rovo ROVODEV_CLI=1 FM_OMP_HARNESS=omp bash -c "$command"
+  ) 2>&1); status=$?
+  expect_code 0 "$status" "codex hook must execute with inherited foreign harness markers"
+  assert_contains "$out" 'claude= pi= signed= grok= cursor= invoked= gemini= rovo= rovodev= omp=' \
+    "codex hook passed inherited foreign harness markers to Firstmate"
+  assert_contains "$out" "$payload" "codex hook lost the original payload while scrubbing markers"
+  pass ".codex/hooks.json: Stop hook scrubs inherited foreign harness markers"
+}
+
 test_opencode_plugin_anchors_guard_to_worktree() {
   local plugin parent worktree_dir wrong_dir out status
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
@@ -2118,6 +2149,7 @@ test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
+test_codex_hook_scrubs_foreign_harness_markers
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure

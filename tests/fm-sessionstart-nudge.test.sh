@@ -978,6 +978,36 @@ test_run_unknown_source_takes_the_helm() {
   pass "run wrapper: an unrecognized or absent source takes the helm rather than skipping it"
 }
 
+test_codex_sessionstart_hook_scrubs_foreign_harness_markers() {
+  local root="$TMP_ROOT/codex-hook-foreign-markers" command payload out status=0
+  make_run_primary "$root"
+  mkdir -p "$root/.codex"
+  cp "$ROOT/.codex/hooks.json" "$root/.codex/hooks.json"
+  cat > "$root/bin/fm-sessionstart-run.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'claude=%s pi=%s signed=%s grok=%s cursor=%s invoked=%s gemini=%s rovo=%s rovodev=%s omp=%s\n' \
+  "${CLAUDECODE:-}" "${PI_CODING_AGENT:-}" "${FM_PI_HARNESS:-}" \
+  "${GROK_AGENT:-}" "${CURSOR_AGENT:-}" "${CURSOR_INVOKED_AS:-}" \
+  "${GEMINI_CLI:-}" "${ATLASSIAN_AGENT_TYPE:-}" "${ROVODEV_CLI:-}" \
+  "${FM_OMP_HARNESS:-}"
+cat
+EOF
+  chmod +x "$root/bin/fm-sessionstart-run.sh"
+  command=$(jq -r '.hooks.SessionStart[0].hooks[0].command // empty' "$ROOT/.codex/hooks.json")
+  [ -n "$command" ] || fail "SessionStart hook command is missing from .codex/hooks.json"
+  payload='{"session_id":"nested-codex","hook_event_name":"SessionStart","source":"startup"}'
+  out=$(printf '%s' "$payload" | (
+    cd "$root" && CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed \
+      GROK_AGENT=1 CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent GEMINI_CLI=1 \
+      ATLASSIAN_AGENT_TYPE=rovo ROVODEV_CLI=1 FM_OMP_HARNESS=omp bash -c "$command"
+  ) 2>&1) || status=$?
+  expect_code 0 "$status" "Codex SessionStart hook with inherited foreign markers"
+  assert_contains "$out" 'claude= pi= signed= grok= cursor= invoked= gemini= rovo= rovodev= omp=' \
+    "Codex SessionStart hook passed inherited foreign harness markers to Firstmate"
+  assert_contains "$out" "$payload" "Codex SessionStart hook lost the payload while scrubbing markers"
+  pass ".codex/hooks.json: SessionStart hook scrubs inherited foreign harness markers"
+}
+
 test_run_gate_and_scope_are_silent() {
   local root="$TMP_ROOT/run-gate" base="$TMP_ROOT/run-linked-base" linked="$TMP_ROOT/run-linked"
   local out status=0
@@ -1031,6 +1061,7 @@ test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
+test_codex_sessionstart_hook_scrubs_foreign_harness_markers
 test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text
 test_pi_startup_classifies_cli_continuations
