@@ -8,6 +8,7 @@ Credentialed live verification is still required before dispatching production w
 
 The bridge runs the actual Hermes classic CLI in quiet one-shot mode and uses a unique named conversation per endpoint incarnation.
 Follow-up turns target that same name, while deterministic relaunch creates a new name and reloads the durable brief.
+Unverified gap, deliberately left open: every turn passes only its own payload with `--continue <name> --create-if-missing`, so if the opening brief turn is interrupted or fails before Hermes persists the named session, the next steer may create that session from the steer alone and run without the brief or worker-role contract; the Antigravity path re-carries the brief until a conversation id exists, and Hermes has no equivalent yet.
 Hermes loads project instructions from the supplied worktree; the bridge does not ask Hermes to create another worktree.
 A successful turn requires exit zero, a nonempty response, and Hermes's post-conversation `session_id` line on stderr, so a successful process exit during first-run setup cannot masquerade as completed work.
 Output that breaks the 1 MiB limit is a failed turn with a blocked status wake; the endpoint stays alive and keeps its composer.

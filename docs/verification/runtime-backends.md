@@ -1627,6 +1627,7 @@ model, or set an API key (OPENROUTER_API_KEY, OPENAI_API_KEY, etc.) in
 ```
 
 Once Hermes authentication is configured, refresh both tools with `FM_WORKER_BRIDGE_LIVE=1 bin/fm-test-run.sh tests/fm-worker-bridge-live-e2e.test.sh` before trusting Hermes dispatch.
+That refresh should also settle an open, unverified Hermes gap: the bridge re-carries the Antigravity brief until a conversation id exists, but every Hermes turn passes only its own payload with `--continue <name> --create-if-missing`, so an opening brief turn interrupted before Hermes persists the named session may let the next steer create that session without the brief. This is recorded as unfixed and unverified by decision, not as resolved.
 Neither bridge establishes a primary or secondmate supervision protocol.
 
 The full Antigravity scout path also passed on Herdr 0.9.0, protocol 22, using a guarded named lab and a canonical temporary home:
@@ -1645,5 +1646,17 @@ Herdr's native registration and the bridge's semantic record are distinct observ
 
 The installed Antigravity release has since advanced to 1.1.28, whose changelog states that an expired `--print-timeout` now returns partial output and exits successfully with a warning on stderr.
 The bridge therefore dispatches an explicit 24h `--print-timeout` and records a run carrying agy's truncated-response note as a failed turn.
-That dispatch also now carries the canonical `launch-brief` envelope inside the `--print` argument, so the credentialed evidence above, taken on 1.1.27 against the earlier invocation, no longer covers the command Firstmate actually runs.
-Re-run both `FM_WORKER_BRIDGE_LIVE=1 bin/fm-test-run.sh tests/fm-worker-bridge-live-e2e.test.sh` and `FM_WORKER_BRIDGE_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-worker-bridge-herdr-live-e2e.test.sh` on the installed release and record their output here before installing this change.
+That dispatch also now carries the canonical `launch-brief` envelope inside the `--print` argument, so the credentialed evidence above, taken on 1.1.27 against the earlier invocation, no longer covers the command Firstmate actually runs on its own.
+Both guards were re-run on 2026-09-09 against installed agy 1.1.28 with the shipped invocation (24h `--print-timeout`, truncation classifier, launch-brief envelope), with Hermes excluded from the first guard because it remains uncredentialed:
+
+```sh
+FM_WORKER_BRIDGE_LIVE=1 FM_BRIDGE_HARNESSES=antigravity bash tests/fm-worker-bridge-live-e2e.test.sh
+FM_WORKER_BRIDGE_HERDR_LIVE=1 bash tests/fm-worker-bridge-herdr-live-e2e.test.sh
+```
+
+```text
+PASS: antigravity real CLI initial turn, exact conversation follow-up, tmux liveness, inbox acknowledgement, fm-send, fm-control interrupt and exit
+PASS: real Herdr fm-spawn Antigravity scout, report, busy/idle lifecycle, acknowledged follow-up, control exit and teardown
+```
+
+Repeat both guards after any further agy upgrade before trusting Antigravity dispatch on the new release.
