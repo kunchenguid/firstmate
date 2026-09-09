@@ -2775,15 +2775,21 @@ pass "an expired runner's guard escalates past a signal-proof child"
 # fits inside the one interval budgeted here. A guard that put a whole interval
 # between them would spend two, and this deadline is sized to catch exactly that.
 #
-# THE PHASE IS PINNED, NOT SAMPLED. Where the lease expiry falls relative to the
-# guard's own check clock decides whether a run lands near the bound or well
-# inside it, and a sampled phase would let a guard spending two intervals slip
-# under this deadline on a lucky alignment. `reconcile` refreshes the lease and
-# only then starts the guard, so the expiry lands (lease + 1) after the refresh
-# and (lease + 1 - startup) after the guard's clock. A lease term two seconds
-# past one check interval puts that expiry between the guard's first and second
-# check for any startup under two seconds - measured at about 0.7s on this host -
-# which is the late half of the interval and therefore the meaningful case.
+# THE PHASE IS OBSERVED AND ENFORCED, NOT ASSUMED. Where the lease expiry falls
+# relative to the guard's own check clock decides whether a run lands near the
+# bound or well inside it, and a sampled phase would let a guard spending two
+# intervals slip under this deadline on a lucky alignment. So the lease is
+# synchronized to the guard's own FIRST observed lease read, every later real
+# read is recorded, and the case then REFUSES unless one of those reads proves
+# the required phase: fresh, before expiry, and late enough that two further
+# full intervals could not finish before the deadline.
+#
+# Pinning the phase by construction instead - from an assumed startup time - is
+# what an earlier version of this case did, and it is not enough: the day
+# startup reaches two seconds it silently stops rejecting a two-interval guard
+# and goes on passing. A bound that cannot fail for the reason it names is the
+# defect this whole delivery exists to correct, so an unestablished precondition
+# refuses here rather than proceeding on trust.
 BOUND_LEASE_SECONDS=7
 BOUND_CHECK_SECONDS=6
 # The whole-second lease comparison is part of the bound, not slack: a lease of
@@ -2794,8 +2800,12 @@ bound_detect=$((bound_lease_term + BOUND_CHECK_SECONDS))
 # not spent here; one second covers signalling and exit against a measured
 # ~0.4s for a whole retire command on this host.
 bound_total=$((bound_detect + PROOF_PROMPT_STOP))
-# Additive load slack, under half a check interval for the reason above.
+# Additive load slack, under half a check interval for the reason above. The
+# invariant is asserted rather than left to a comment, because a later widening
+# is exactly what would disarm the deadline below.
 bound_deadline_s=$((bound_total + PROOF_LOAD_SLACK))
+[ "$((PROOF_LOAD_SLACK * 2))" -lt "$BOUND_CHECK_SECONDS" ] \
+  || fail "the bound fixture's load slack must stay below half a check interval"
 
 now_mono() {
   perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \
@@ -2807,14 +2817,46 @@ mono_since() {  # <monotonic-reference>: seconds elapsed, one decimal
 
 HBOUND="$TMP_ROOT/guard-bound"; new_home "$HBOUND"
 fm_test_track_procevent_home "$HBOUND"
+BOUND_STATE="$TMP_ROOT/guard-bound-state"; mkdir -p "$BOUND_STATE"
+BOUND_BIN=$(fm_fakebin "$TMP_ROOT/guard-bound-bin")
+REAL_PERL=$(command -v perl) || fail "this host has no perl to observe the guard's lease reads"
+# Observes the real lease-age reads, identified by the lease-age program's own
+# text, and changes nothing about what they return. The FIRST such read becomes
+# the lease reference - that is the synchronization - and every later one is
+# recorded with the value it read and the interval it spanned, which is the
+# evidence the phase assertion below consumes.
+cat > "$BOUND_BIN/perl" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case \$arg in
+    *'int(\$now - \$value)'*)
+      started=\$("$REAL_PERL" -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \\
+        'printf "%.6f\\n", clock_gettime(CLOCK_MONOTONIC)') || exit 1
+      age=\$("$REAL_PERL" "\$@") || exit \$?
+      finished=\$("$REAL_PERL" -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \\
+        'printf "%.6f\\n", clock_gettime(CLOCK_MONOTONIC)') || exit 1
+      if [ ! -s "\$GUARD_BOUND_STATE/reference" ]; then
+        printf '%s\\n' "\$finished" > "\$FM_HOME/state/procevent/.owner-lease" || exit 1
+        printf '%s\\n' "\$finished" > "\$GUARD_BOUND_STATE/reference" || exit 1
+      else
+        printf '%s\\t%s\\t%s\\t%s\\n' "\$started" "\$finished" "\$age" "\${!#}" \\
+          >> "\$GUARD_BOUND_STATE/reads" || exit 1
+      fi
+      printf '%s\\n' "\$age"
+      exit 0
+      ;;
+  esac
+done
+exec "$REAL_PERL" "\$@"
+SH
+chmod +x "$BOUND_BIN/perl"
 bound_pe() {
-  FM_PROCEVENT_OWNER_LEASE_SECONDS="$BOUND_LEASE_SECONDS" \
+  PATH="$BOUND_BIN:$PATH" GUARD_BOUND_STATE="$BOUND_STATE" \
+    FM_PROCEVENT_OWNER_LEASE_SECONDS="$BOUND_LEASE_SECONDS" \
     FM_PROCEVENT_OWNER_CHECK_SECONDS="$BOUND_CHECK_SECONDS" \
     FM_HOME="$HBOUND" "$ROOT/bin/fm-procevent.sh" "$@"
 }
 bound_pe register lavish bound-src -- "$QUIET_STUB" "$TMP_ROOT/guard-bound-marker" >/dev/null
-# The last thing that refreshes this home's lease, and also what starts the
-# guard. Nothing below touches this home again, so the bound runs from here.
 bound_pe reconcile >/dev/null
 wait_for "$HBOUND/state/procevent/bound-src.runner" \
   || fail "the bound fixture's listener never recorded its runner"
@@ -2827,17 +2869,97 @@ BOUND_DESCENDANT=$(cat "$TMP_ROOT/guard-bound-marker.descendant")
 # mistaken for guard latency in either direction.
 bound_reference=$(cat "$HBOUND/state/procevent/.owner-lease") \
   || fail "the bound fixture recorded no owner lease to measure against"
+[ "$bound_reference" = "$(cat "$BOUND_STATE/reference" 2>/dev/null)" ] \
+  || fail "the bound fixture did not synchronize its lease to an observed guard read"
 while kill -0 -"$BOUND_PID" 2>/dev/null; do
   [ "$(mono_since "$bound_reference" | cut -d. -f1)" -lt "$bound_deadline_s" ] \
     || fail "the guard exceeded its bound: group still running $(mono_since "$bound_reference")s after the last owner activity, against a documented bound of ${bound_total}s (lease term ${bound_lease_term}s + one ${BOUND_CHECK_SECONDS}s check interval + ${PROOF_PROMPT_STOP}s stop)"
   sleep 0.2
 done
 bound_elapsed=$(mono_since "$bound_reference")
+# The loop above only ever checks the clock while the group is still alive, so a
+# sampler descheduled past the deadline would see the group already gone and
+# report success. Check the OBSERVED completion time too: a late observation
+# must not certify timely completion.
+[ "${bound_elapsed%%.*}" -lt "$bound_deadline_s" ] \
+  || fail "the guard's completion was first observed ${bound_elapsed}s after the last owner activity, beyond its ${bound_deadline_s}s deadline"
+# FAIL CLOSED ON THE PHASE. One recorded read must prove the run was in the part
+# of the interval this deadline can actually judge: it read the synchronized
+# reference, it was still fresh (pre-expiry), and it began late enough that two
+# further FULL intervals could not finish before the deadline. Without such a
+# read the case refuses - it does not pass on trust, however quickly the group
+# happened to stop.
+perl - "$BOUND_STATE/reads" "$bound_reference" "$BOUND_LEASE_SECONDS" \
+  "$BOUND_CHECK_SECONDS" "$bound_deadline_s" <<'PL' \
+  || fail "the bound fixture could not establish the required pre-expiry guard-read phase"
+use strict;
+use warnings;
+my ($path, $reference, $lease, $check, $deadline) = @ARGV;
+open my $reads, '<', $path or exit 1;
+while (<$reads>) {
+  chomp;
+  my ($started, $finished, $age, $value) = split /\t/;
+  next unless defined $value && $value eq $reference && $age <= $lease;
+  next unless $started >= $reference && $finished >= $started;
+  next unless $finished < $reference + $lease + 1;
+  next unless $started + 2 * $check >= $reference + $deadline;
+  printf "guard phase: fresh read %.3f-%.3fs, expiry %ss, two full intervals could not finish before %.3fs (deadline %ss)\n",
+    $started - $reference, $finished - $reference, $lease + 1,
+    $started - $reference + 2 * $check, $deadline;
+  exit 0;
+}
+exit 1;
+PL
 wait_gone "$BOUND_DESCENDANT" \
   || fail "the guard stopped at the leader and left its descendant running"
 printf 'guard bound: lease=%ss check=%ss reaped %ss after the last owner activity, documented bound %ss\n' \
   "$BOUND_LEASE_SECONDS" "$BOUND_CHECK_SECONDS" "$bound_elapsed" "$bound_total"
 pass "an orphaned runner is reaped within the lease plus ONE check interval"
+
+# --- a zero-prefixed interval still starts a listener, and halves correctly ---
+#
+# OUR OWN REGRESSION, found in review before this change was published. The
+# interval validator accepts a zero-prefixed value and `[` compares it as
+# decimal, but the half-interval arithmetic introduced above reads `$(( ))`,
+# which is octal for a leading zero: 010 halved to 4 instead of 5, and 08 was
+# not a number at all, so the guard died before reporting ready and the runner
+# failed closed and never listened.
+#
+# Asserted through the executable interface rather than by reading the source:
+# a real listener is started at each value, and the guard's actual sleep
+# argument is observed. Reading `10#` out of the script would prove nothing.
+INTERVAL_BIN=$(fm_fakebin "$TMP_ROOT/decimal-interval-bin")
+REAL_SLEEP=$(command -v sleep) || fail "this host has no sleep to observe guard intervals"
+cat > "$INTERVAL_BIN/sleep" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$INTERVAL_SLEEP_LOG"
+exec "$REAL_SLEEP" "\$@"
+SH
+chmod +x "$INTERVAL_BIN/sleep"
+for interval in 08 010; do
+  case "$interval" in
+    08) expected_half=4 ;;
+    010) expected_half=5 ;;
+  esac
+  HINTERVAL="$TMP_ROOT/decimal-interval-$interval"; new_home "$HINTERVAL"
+  pe_register "$HINTERVAL" lavish "interval-$interval" \
+    -- "$QUIET_STUB" "$HINTERVAL/poll" >/dev/null
+  PATH="$INTERVAL_BIN:$PATH" INTERVAL_SLEEP_LOG="$HINTERVAL/sleeps" \
+    FM_PROCEVENT_OWNER_CHECK_SECONDS="$interval" \
+    pe "$HINTERVAL" reconcile >/dev/null
+  wait_for "$HINTERVAL/poll.descendant" \
+    || fail "a zero-prefixed decimal interval ($interval) prevented the listener from starting"
+  for _ in $(seq 1 100); do
+    grep -qx "$expected_half" "$HINTERVAL/sleeps" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -qx "$expected_half" "$HINTERVAL/sleeps" \
+    || fail "the guard did not sleep half of the decimal interval $interval (expected ${expected_half}s)"
+  pe "$HINTERVAL" retire "interval-$interval" >/dev/null \
+    || fail "retiring the decimal-interval listener ($interval) reported failure"
+  printf 'decimal interval: %s halves to %ss and its listener started\n' "$interval" "$expected_half"
+done
+pass "a zero-prefixed decimal interval starts its listener and halves as decimal"
 
 # --- one unreadable read still does not end a live runner --------------------
 #

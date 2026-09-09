@@ -1134,6 +1134,12 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
     || die "FM_PROCEVENT_OWNER_LEASE_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_LEASE_MIN_SECONDS to $FM_PROCEVENT_OWNER_LEASE_MAX_SECONDS"
   tick=$(fm_procevent_owner_check_seconds) \
     || die "FM_PROCEVENT_OWNER_CHECK_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS to $FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS"
+  # Force base ten before any arithmetic. The validator accepts a zero-prefixed
+  # value and `[` reads it as decimal, but `$(( ))` would read it as octal: 010
+  # would halve to 4 rather than 5, and 08 would not be a number at all and
+  # would end the guard before it reports ready, so the runner would fail closed
+  # and never listen. Every value the validator accepts must keep working.
+  tick=$((10#$tick))
   # Half the configured interval, kept exact for an odd interval so the smallest
   # configurable interval still yields two reads rather than collapsing to one.
   half=$((tick / 2))
