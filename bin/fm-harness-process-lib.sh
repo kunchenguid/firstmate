@@ -56,10 +56,15 @@ fm_harness_copilot_path_matches() {  # <path>
   [ "${1##*/}" = copilot ]
 }
 
+fm_harness_normalize_args() {  # <args>
+  local args=${1-}
+  printf '%s' "${args#"${args%%[![:space:]]*}"}"
+}
+
 fm_harness_interpreter_script_path() {  # <comm> <args>
   local comm=$1 args=$2 argv0 rest token
   [ -n "$args" ] || return 1
-  args=${args#"${args%%[![:space:]]*}"}
+  args=$(fm_harness_normalize_args "$args")
   argv0=${args%%[[:space:]]*}
   case "${comm##*/}:${argv0##*/}" in
     MainThread:*|*:node|*:node-*|*:node[0-9]*|*:python|*:python[0-9]*|*:python[0-9].[0-9]*) ;;
@@ -88,6 +93,7 @@ fm_harness_set_match_name() {  # <name>
 
 fm_harness_process_matches_name_surfaces() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
+  args=$(fm_harness_normalize_args "$args")
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in
@@ -124,6 +130,7 @@ fm_harness_process_matches_live() {  # <comm> <args>
   local comm=$1 args=$2 argv0 script
   FM_HARNESS_IS_CLAUDE=0
   FM_HARNESS_MATCH_NAME=
+  args=$(fm_harness_normalize_args "$args")
   if fm_harness_process_matches_name_surfaces "$comm" "$args"; then
     return 0
   fi
@@ -157,6 +164,7 @@ fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 argv0 name script
   FM_HARNESS_IS_CLAUDE=0
   FM_HARNESS_MATCH_NAME=
+  args=$(fm_harness_normalize_args "$args")
   if fm_harness_process_matches_name_surfaces "$comm" "$args"; then
     return 0
   fi
