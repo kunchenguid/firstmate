@@ -2866,6 +2866,32 @@ spawn_current_path() {  # <target>
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
+# Print the first 'in-use' treehouse worktree of the project at $1, or nothing.
+# Runs treehouse in the project dir so its own config/root resolution applies.
+# Prefers the machine-readable pool listing; falls back to the text status
+# table (first line per block: "<n>  in-use  <path>").
+spawn_treehouse_inuse_worktree() {  # <project-real-path>
+  local json out
+  json=$(cd "$1" 2>/dev/null && timeout 15 treehouse status --json 2>/dev/null) || json=''
+  out=$(printf '%s' "$json" | jq -r '
+    [.[]? | select(.status == "in-use" or .state == "in-use") | .path]
+    | if length > 0 then .[0] else empty end' 2>/dev/null)
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  local text out2
+  text=$(cd "$1" 2>/dev/null && timeout 15 treehouse status 2>/dev/null) || return 1
+  out2=$(printf '%s\n' "$text" | awk '/in-use/ { last=""; for (i = 1; i <= NF; i++) if ($i ~ /[\\\/]/) last=$i } END { if (last != "") print last }')
+  [ -n "$out2" ] || return 1
+  # The text table abbreviates the user's home as '~'; expand it so the
+  # caller's cd and git checks see a real path.
+  case "$out2" in
+    '~'[/\\]*) printf '%s\n' "${HOME%/}${out2#\~}" ;;
+    '~') printf '%s\n' "$HOME" ;;
+    *) printf '%s\n' "$out2" ;;
+  esac
+}
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -3082,6 +3108,19 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   last_reason="the pane reported no path"
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
+    # On the Windows herdr server the pane's cwd fields never track a child
+    # subshell (verified live: process-info reports only the direct pane shell
+    # and `pane get` cwd is frozen at creation time), so pane-path discovery
+    # cannot see `treehouse get` enter its worktree. Treehouse's own pool
+    # status is the live source there: an 'in-use' worktree of this project
+    # appearing after the acquire was sent is the pane's worktree. The pane
+    # path may arrive in Windows form (C:\...) here, so compare against the
+    # project through the isolation screen rather than a string match.
+    th_wt=""
+    if [ "$BACKEND" = herdr ] && { [ -z "$p" ] || ! spawn_worktree_isolated "$p"; }; then
+      th_wt=$(spawn_treehouse_inuse_worktree "$PROJ_ABS_REAL" || true)
+      [ -z "$th_wt" ] || p=$th_wt
+    fi
     [ -z "$p" ] || last_seen="$p"
     if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
       p_real=$(real_path_or_raw "$p")

@@ -818,6 +818,13 @@ fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   [ -n "$socket" ] || return 1
   case "$socket" in
     /*) ;;
+    # herdr on Windows injects a drive-letter path (C:\...); convert it to the
+    # MSYS spelling so both sides of a socket-identity comparison canonicalize
+    # the same way (the herdr CLI's own session listing reports the same form).
+    [A-Za-z]:[\\/]*)
+      command -v cygpath >/dev/null 2>&1 || return 1
+      socket=$(cygpath -u "$socket" 2>/dev/null) || return 1
+      ;;
     *) return 1 ;;
   esac
   sock_dir=$(dirname "$socket")
@@ -2137,7 +2144,19 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
 $dup_tabs
 EOF
   fi
-  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  # herdr worker panes inherit the SERVER's environment, which on Windows can
+  # predate tool installs the current session already relies on (verified
+  # live: a long-running server's PATH lacked the user's tool directories, so
+  # `treehouse get` failed as an unknown command inside the fresh pane).
+  # Pass this session's own PATH explicitly, already converted to Windows
+  # form (cygpath -wp) because relying on MSYS argument conversion inside a
+  # spawned script context proved unreliable (verified live: the same arg
+  # converted correctly from an interactive shell but arrived empty from
+  # fm-spawn's process tree).
+  worker_path=$PATH
+  command -v cygpath >/dev/null 2>&1 && worker_path=$(cygpath -wp "$PATH" 2>/dev/null) || worker_path=$PATH
+  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus --env "PATH=$worker_path" 2>/dev/null) || return 1
+  [ -z "${FM_DEBUG_TAB_ENV:-}" ] || { printf 'PATHLEN=%s\n' "${#PATH}" >> "$FM_DEBUG_TAB_ENV"; }
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
@@ -2648,10 +2667,30 @@ fm_backend_herdr_target_ready() {  # <target>
 # `.result.pane.foreground_cwd` tracks the ACTUALLY RUNNING foreground
 # process's cwd instead, which is what changes when `treehouse get` enters its
 # worktree subshell - confirmed live against a real treehouse acquisition.
+#
+# On the Windows herdr server build `foreground_cwd` is always null, but
+# `pane process-info`'s foreground process list carries the live per-process
+# cwd (verified live on Windows 11, herdr protocol 22). Prefer foreground_cwd
+# where it exists, then fall back to that process list, so worktree discovery
+# works on both platforms.
 fm_backend_herdr_current_path() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
-    | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+  local cwd
+  cwd=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+    | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null)
+  [ -n "$cwd" ] && { printf '%s\n' "$cwd"; return 0; }
+  # Windows herdr server build: foreground_cwd is always null, but the pane's
+  # foreground process list carries the live per-process cwd (verified live on
+  # Windows 11, herdr protocol 22). The innermost listed process is the one
+  # actually running, so take its cwd when present.
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+    | jq -er '
+        [.result.process_info.foreground_processes[]?
+          | select((.cwd | type) == "string")
+          | select((.cwd | length) > 0)
+          | .cwd]
+        | if length > 0 then .[-1] else empty end
+      ' 2>/dev/null || return 0
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,
