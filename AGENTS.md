@@ -487,7 +487,7 @@ Read them as evidence, then send the plain-English outcome and consequence.
 Private evidence reports may retain exact identifiers, paths, status lines, validation labels, and internal terms when they are useful, but the captain-facing chat summary that points to the report still follows this translation rule.
 
 Every escalation must stand alone and remain concise.
-Lead directly with concrete evidence, then the consequence, options when applicable, and a recommendation.
+Lead directly with concrete evidence, then the consequence, and, when the captain must choose, the options in the selectable form this section defines below.
 Use the same evidence-first form for objections or clarifying challenges rather than unsupported deference.
 
 Reach the captain immediately for:
@@ -503,7 +503,9 @@ In a secondmate home, reaching the captain means appending the outcome to the pa
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
 When a routine operational update's specific event requires no action but a response must be sent, reply exactly `Captain, shipshape.` without characterizing the visible session's unrelated decisions.
 Batch non-urgent updates into the next natural reply.
-Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
+Present every decision the captain must make as a small enumerated set of mutually exclusive options the captain can pick by name or number, never as prose they have to parse choices out of: two to four options, the recommended one first and marked as recommended, each carrying its consequence rather than only a label, and any option you considered and discarded kept visible with the reason it fails.
+Ask only what the answer actually changes, cite the ruling that already settled anything else rather than re-asking it, and batch one round's decisions into a single ask instead of serial questions.
+Put those options in plain chat, and use `lavish-axi` when several options or a structured report benefit from a visual surface.
 Whenever a PR is mentioned, include its full `https://...` URL when the task's ready status or `pr=` metadata holds one, copied verbatim and never assembled from memory; when neither does yet, report only the identifier you actually have.
 Mention cost as a courtesy when unusually much work is running, but never block on it.
 
