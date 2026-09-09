@@ -994,7 +994,7 @@ esac
 #
 # _wedge_cap_rollback <window> <key> <escalation-file> <since-file>
 _wedge_cap_rollback() {
-  local _win=$1 _key=$2 _esc=$3 _since=$4 _failed=0 _first_fail=""
+  local _win=$1 _key=$2 _esc=$3 _since=$4 _failed=0 _first_fail="" _sentinel_rc=0
   : > "$_esc" 2>/dev/null || { _failed=1; _first_fail="${_first_fail:-(escalation-file)}"; }
   date +%s > "$_since" 2>/dev/null || { _failed=1; _first_fail="${_first_fail:-(since-file)}"; }
   clear_write_tracking "$_key" 2>/dev/null || true
@@ -1002,8 +1002,30 @@ _wedge_cap_rollback() {
     # Write the sentinel so the next poll sees it (within TTL) and
     # short-circuits without writing a durable wake. The sentinel's content
     # is the timestamp of the failure + the first failing reset.
+    #
+    # v16 (2026-09-09, Greptile review of v15): the v15 sentinel write
+    # used `{ printf ...; } 2>/dev/null > "$sentinel" || true` which
+    # swallows BOTH the printf's stderr AND bash's redirect-failure
+    # diagnostic. If the SAME fs failure that broke the marker write
+    # also blocks the sentinel write, the rollback returns 1 (success-
+    # like) and the next poll re-escalates with no suppression - the
+    # queue-flood v15 closed is re-introduced under persistent fs
+    # failure. v16 captures the redirect's exit status explicitly so
+    # the rollback can return a distinct code (1 = rollback reset
+    # failed AND sentinel write failed; 2 would be ambiguous here) so
+    # the cap path can distinguish the failure modes.
     local _sentinel="$STATE/.wedge-rollback-failed-$_key"
-    { printf '%s %s\n' "$(date +%s 2>/dev/null || echo 0)" "$_first_fail"; } 2>/dev/null > "$_sentinel" || true
+    _sentinel_rc=0
+    { printf '%s %s\n' "$(date +%s 2>/dev/null || echo 0)" "$_first_fail" > "$_sentinel"; } 2>/dev/null || _sentinel_rc=$?
+    if [ "$_sentinel_rc" -ne 0 ]; then
+      # Sentinel write ALSO failed - the supervision daemon will restart
+      # the watcher with the saturated counter and expired timer intact.
+      # The cap path takes exit 2 below; the next poll re-escalates and
+      # re-publishes PERMANENTLY-WEDGED, but the operator's heartbeat /
+      # wedge-cap-fail log lines surface every retry so the fs condition
+      # is visible in operator-facing logs.
+      return 2
+    fi
     return 1
   fi
   return 0
@@ -1215,11 +1237,22 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
             exit 1
           fi
           # Wake is now durable. Write the per-hash marker (v2 contract).
-          # v15: the per-hash marker is the FIRST marker after the wake; if
+          # v15/v16: the per-hash marker is the FIRST marker after the wake; if
           # it fails we attempt the rollback and exit 1 or 2 accordingly.
+          # v16 distinguishes:
+          #   exit 1: rollback succeeded (next poll re-escalates from 1)
+          #   exit 2: rollback reset failed AND sentinel written (next poll
+          #           short-circuits for FM_ROLLBACK_SENTINEL_TTL_SECS)
+          #   exit 3: rollback reset failed AND sentinel write ALSO failed
+          #           (next poll will re-fire; operator-visible heartbeat /
+          #           wedge-cap-fail log lines surface every retry)
           if ! date +%s > "$permanent_marker" 2>/dev/null; then
             _rm_status=0
             _wedge_cap_rollback "$win" "$key" "$escalation_file" "$since_file" || _rm_status=$?
+            if [ "$_rm_status" -eq 2 ]; then
+              triage_log "wedge per-hash marker write FAILED AND rollback AND sentinel write ALL FAILED on $win - no queue-flood suppression (sentinel write itself failed under the same fs failure); operator MUST intervene immediately to resolve the fs condition; every retry will re-fire PERMANENTLY-WEDGED"
+              exit 3
+            fi
             if [ "$_rm_status" -ne 0 ]; then
               triage_log "wedge per-hash marker write FAILED AND rollback ALSO FAILED on $win - sentinel .wedge-rollback-failed-$key set (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); no wake-amplification, operator must intervene (rm both)"
               exit 2
@@ -1242,6 +1275,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
             rm -f "$permanent_marker"
             _rm_status=0
             _wedge_cap_rollback "$win" "$key" "$escalation_file" "$since_file" || _rm_status=$?
+            if [ "$_rm_status" -eq 2 ]; then
+              triage_log "wedge window-scoped marker write FAILED AND rollback AND sentinel write ALL FAILED on $win - no queue-flood suppression (sentinel write itself failed under the same fs failure); operator MUST intervene immediately to resolve the fs condition; every retry will re-fire PERMANENTLY-WEDGED"
+              exit 3
+            fi
             if [ "$_rm_status" -ne 0 ]; then
               triage_log "wedge window-scoped marker write FAILED on $win AND rollback ALSO FAILED - sentinel .wedge-rollback-failed-$key set (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); no wake-amplification, operator must intervene (rm both .wedge-permanent-<key> and .wedge-rollback-failed-$key)"
               exit 2
