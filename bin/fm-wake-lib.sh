@@ -1172,6 +1172,13 @@ fm_firstmate_root_home() {
   printf '%s\n' "$home"
 }
 
+# One refusal line for fm_treehouse_project_lock_path, naming what it could not
+# resolve. Its callers capture that function's stdout through command
+# substitution, so the diagnosis has to leave by stderr to reach the operator.
+_fm_treehouse_lock_named() {  # <what-could-not-be-resolved> <path>
+  printf 'fm_treehouse_project_lock_path: %s: %s\n' "$1" "$2" >&2
+}
+
 # The one lock serializing Treehouse slot allocation and return for a project.
 #
 # It is anchored in the local root home's state directory so that every home on
@@ -1180,25 +1187,78 @@ fm_firstmate_root_home() {
 # derives the identical path. Its identity is the project's resolved origin, so
 # separate clones of one origin share a single lock; an origin-less local-only
 # project falls back to its own worktree top instead of failing to resolve.
+#
+# Why every refusal below names the one thing it could not resolve.
+#
+# This function has eight failure exits, and every caller collapses all eight
+# into one sentence: "could not resolve the shared Treehouse project lock for
+# <project>". That sentence is true of all eight and diagnostic of none, and it
+# points the reader at the PROJECT even when the missing thing is in the HOME -
+# the root home itself, or its state directory. An investigation lost time to
+# exactly that and had to hand-patch this function to learn which exit fired
+# (data/fm-test-passes-alone-fails-in-lane, recommendation 2). So each exit
+# prints, to stderr, the concrete thing it could not resolve.
+#
+# The naming is the whole point of these lines; deleting it restores a silent
+# refusal that reads as a project fault. tests/fm-treehouse-lock-naming.test.sh
+# drives every exit and fails when a message stops naming its own cause.
+#
+# What is deliberately NOT changed here is the DECISION. In particular the root
+# state directory is named, not created: a root home that genuinely does not
+# exist must still be refused rather than conjured. Only the message changed.
 fm_treehouse_project_lock_path() {  # <project-dir>
-  local project=$1 root origin identity hash top
-  [ -d "$project" ] || return 1
-  root=$(fm_firstmate_root_home "$FM_HOME") || return 1
+  local project=$1 root origin identity hash top resolved
+  [ -d "$project" ] || {
+    _fm_treehouse_lock_named "project directory does not exist" "$project"
+    return 1
+  }
+  root=$(fm_firstmate_root_home "$FM_HOME") || {
+    _fm_treehouse_lock_named "cannot resolve the root firstmate home from FM_HOME" "$FM_HOME"
+    return 1
+  }
   origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
   if [ -n "$origin" ]; then
     case "$origin" in
-      /*) [ ! -d "$origin" ] || origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 1 ;;
+      /*)
+        if [ -d "$origin" ]; then
+          resolved=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || {
+            _fm_treehouse_lock_named "project origin directory cannot be entered" "$origin"
+            return 1
+          }
+          origin=$resolved
+        fi
+        ;;
       *://*|*:* ) ;;
-      *) [ ! -d "$project/$origin" ] || origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 1 ;;
+      *)
+        if [ -d "$project/$origin" ]; then
+          resolved=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || {
+            _fm_treehouse_lock_named "project origin directory cannot be entered" "$project/$origin"
+            return 1
+          }
+          origin=$resolved
+        fi
+        ;;
     esac
     identity=$origin
   else
-    top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
-    top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
-    identity=$top
+    top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || {
+      _fm_treehouse_lock_named "project has no origin and is not inside a git worktree" "$project"
+      return 1
+    }
+    resolved=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || {
+      _fm_treehouse_lock_named "project worktree top cannot be entered" "$top"
+      return 1
+    }
+    identity=$resolved
   fi
-  hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
-  [ -d "$root/state" ] || return 1
+  hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || {
+    _fm_treehouse_lock_named "cannot hash the project lock identity, so git is unusable here" "$identity"
+    return 1
+  }
+  [ -d "$root/state" ] || {
+    _fm_treehouse_lock_named "the root firstmate home has no state directory" "$root/state"
+    return 1
+  }
   printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
