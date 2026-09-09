@@ -1641,6 +1641,39 @@ test_hook_claude_mode_unrecordable_reset_blocks_loudly() {
   pass "fm-turnend-guard --claude: an unrecordable episode reset blocks with a named cause, never in silence"
 }
 
+test_hook_claude_mode_reset_contention_without_an_episode_names_no_failure() {
+  local dir pid identity holder out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-no-episode-contention")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the no-episode contention watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  # A perfectly healthy home with no failure marker of any kind: the reset the
+  # guard takes on every healthy stop loses the lock race against the auto-arm
+  # on this same Stop event. The turn is still held, but nothing failed.
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.turnend-claude-blocks.lock"
+  printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a busy episode-reset lock must still hold the turn open"
+  [ -n "$out" ] || fail "the guard blocked the turn with empty output"
+  assert_contains "$out" "HELD THIS TURN OPEN" "the guard block did not name why the turn is held"
+  assert_contains "$out" "no failure episode is open" \
+    "the guard block did not say that nothing had failed"
+  assert_contains "$out" ".turnend-claude-blocks.lock" \
+    "the guard block did not name the lock that actually refused"
+  assert_not_contains "$out" "previous failure cannot be proven closed" \
+    "the guard block claimed a failure episode this home never had"
+  pass "fm-turnend-guard --claude: reset contention with no open episode blocks without inventing a failure"
+}
+
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   local dir pid identity holder out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-recovery-contention")
@@ -2166,6 +2199,7 @@ test_hook_claude_mode_terminal_fail_open_clears_abandoned_claim
 test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
+test_hook_claude_mode_reset_contention_without_an_episode_names_no_failure
 test_hook_claude_mode_unrecordable_reset_blocks_loudly
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks

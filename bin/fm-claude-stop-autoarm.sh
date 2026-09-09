@@ -221,7 +221,12 @@ AUTOARM_TYPED_LINE='^(watcher:|signal:|stale:|check:|heartbeat)'
 # original incident undiagnosable.
 autoarm_refusal_evidence() {
   local typed= untyped=
-  if [ -n "$OUT" ] && [ -s "$OUT" ]; then
+  if [ -z "$OUT" ]; then
+    printf 'The arm ran with its output discarded: this hook could not create its capture file %s/.claude-autoarm-output.XXXXXX, so nothing the arm printed survived. That refused write is itself the first thing to inspect - the state directory, not the arm.\n' \
+      "$STATE"
+    return 0
+  fi
+  if [ -s "$OUT" ]; then
     typed=$(grep -E "$AUTOARM_TYPED_LINE" "$OUT" 2>/dev/null | head -8)
     untyped=$(grep -Ev "$AUTOARM_TYPED_LINE" "$OUT" 2>/dev/null \
       | grep -v '^[[:space:]]*$' | tail -8)

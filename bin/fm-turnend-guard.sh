@@ -186,14 +186,27 @@ fi
 # leaves the session re-waking with no message naming a cause. Supervision is
 # provably healthy on every path that reaches this, and only the bookkeeping
 # write refused, so the text says exactly that and names the artifacts the reset
-# actually touches - the lock it serializes on and the three markers it clears -
-# plus the episode ledger to read the outcome from.
+# actually touches - the lock it serializes on and the three markers it clears.
+# The reset runs on EVERY healthy Claude-mode stop, so reaching here does not
+# imply a failure episode: with none of the markers present the lock is the only
+# possible refusal, and the most common holder is the auto-arm on this same Stop
+# event. Only the episode case names the ledger, which may not even exist.
 block_unrecorded_episode_reset() {
+  local pending=0 path
+  for path in "$BUDGET_FILE" "$FAILURE_NOTICE" "$FAILURE_ALARM"; do
+    [ -e "$path" ] || continue
+    pending=1
+    break
+  done
   {
-    printf 'firstmate turn-end guard HELD THIS TURN OPEN - supervision for this home is verified healthy, but the failure-episode reset could not be recorded, so the previous failure cannot be proven closed.\n'
-    printf 'The reset serializes on %s and clears %s, %s and %s: a busy lock, or any of those three existing as a directory, refuses it. Read the episode outcome in %s. A state directory that refuses these writes keeps every turn blocked until it is repaired.\n' \
-      "$STATE/.turnend-claude-blocks.lock" "$STATE/.turnend-claude-blocks" "$FAILURE_NOTICE" "$FAILURE_ALARM" \
-      "$STATE/.claude-autoarm-epoch"
+    if [ "$pending" -eq 1 ]; then
+      printf 'firstmate turn-end guard HELD THIS TURN OPEN - supervision for this home is verified healthy, but the failure-episode reset could not be recorded, so the previous failure cannot be proven closed. Read the episode outcome in %s.\n' \
+        "$STATE/.claude-autoarm-epoch"
+    else
+      printf 'firstmate turn-end guard HELD THIS TURN OPEN - supervision for this home is verified healthy and no failure episode is open, but the reset that records that could not be taken. With none of those markers present the lock is the only thing left that can refuse, so the usual cause is benign contention: the auto-arm on this same Stop event holding it for its own reset, which clears on the next turn.\n'
+    fi
+    printf 'The reset serializes on %s and clears %s, %s and %s: a busy lock, or any of those three existing as a directory, refuses it. A state directory that refuses these writes keeps every turn blocked until it is repaired.\n' \
+      "$BUDGET_LOCK" "$BUDGET_FILE" "$FAILURE_NOTICE" "$FAILURE_ALARM"
   } >&2
   exit 2
 }

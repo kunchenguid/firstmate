@@ -1331,6 +1331,43 @@ test_nested_refusal_is_named_beside_the_arms_own_close() {
   pass "auto-arm: a refusal raised below the arm is named beside the arm's own typed close"
 }
 
+test_uncapturable_arm_output_blames_the_capture_file_not_the_arm() {
+  local dir shim real out status
+  dir=$(make_primary_dir "$TMP_ROOT/loud-uncapturable")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  # The hook redirects the arm to /dev/null when it cannot create its capture
+  # file, so a loud arm reaches the operator as silence. Reproduce exactly that:
+  # only the capture pattern is refused, every other mktemp still works.
+  real=$(command -v mktemp) || fail "no mktemp on this host"
+  shim="$dir/shim"
+  mkdir -p "$shim"
+  cat > "$shim/mktemp" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *.claude-autoarm-output.*) exit 1 ;;
+  esac
+done
+exec "$real" "\$@"
+SH
+  chmod +x "$shim/mktemp"
+  out=$(printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+    | FM_HOME="$dir" FM_TEST_SHIM="$shim" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        PATH="$FM_TEST_SHIM:$PATH" "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1); status=$?
+  expect_code 2 "$status" "an uncapturable arm failure must still hold the turn open"
+  [ -n "$out" ] || fail "an uncapturable arm failure blocked the turn with empty output"
+  assert_contains "$out" "could not create its capture file" \
+    "the block did not admit that the hook, not the arm, lost the output"
+  assert_contains "$out" "$dir/state/.claude-autoarm-output" \
+    "the block did not name the capture file that could not be created"
+  assert_not_contains "$out" "no diagnostic output of its own" \
+    "the block blamed the arm for output the hook itself discarded"
+  pass "auto-arm: output the hook could not capture is never reported as an arm that said nothing"
+}
+
 test_arm_without_any_output_still_names_the_block() {
   local dir out1 out2 status
   dir=$(make_primary_dir "$TMP_ROOT/loud-mute")
@@ -1370,8 +1407,12 @@ fm_test_file_mode() {
 # that it landed on such a filesystem is a DIRECTORY that will not hold 700. A
 # host that reverts one and preserves the other is not this condition, and must
 # skip rather than fail the suite for a property of the host.
+# Reverting modes is necessary but not sufficient: the fixture runs the hook and
+# its arm FROM this mount, so a candidate that cannot execute a script it owns
+# (noexec, or an fmask that clears the execute bit while still reverting 600 to
+# 644) is rejected here and skips, instead of failing the suite at exit 126.
 mode_incapable_root() {
-  local candidate root probe
+  local candidate root probe rc
   for candidate in "${FM_TEST_MODE_INCAPABLE_PARENT:-}" /mnt/*/ /Volumes/*/; do
     [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ] || continue
     root=$(mktemp -d "${candidate%/}/fm-autoarm-modeless.XXXXXX" 2>/dev/null) || continue
@@ -1380,10 +1421,16 @@ mode_incapable_root() {
     if mkdir -p "$probe/d" 2>/dev/null && : > "$probe/f" 2>/dev/null &&
       chmod 600 "$probe/f" 2>/dev/null && chmod 700 "$probe/d" 2>/dev/null &&
       [ -f "$probe/f" ] && [ "$(fm_test_file_mode "$probe/f")" != 600 ] &&
-      [ "$(fm_test_file_mode "$probe/d")" != 700 ]; then
-      rm -rf "$probe"
-      printf '%s\n' "$root"
-      return 0
+      [ "$(fm_test_file_mode "$probe/d")" != 700 ] &&
+      printf '#!/bin/sh\nexit 7\n' > "$probe/x" 2>/dev/null &&
+      chmod +x "$probe/x" 2>/dev/null; then
+      "$probe/x" >/dev/null 2>&1
+      rc=$?
+      if [ "$rc" -eq 7 ]; then
+        rm -rf "$probe"
+        printf '%s\n' "$root"
+        return 0
+      fi
     fi
     rm -rf "$root"
   done
@@ -1393,7 +1440,7 @@ mode_incapable_root() {
 test_mode_incapable_state_dir_never_blocks_silently() {
   local root dir all probe reverted
   if ! root=$(mode_incapable_root); then
-    printf 'skip: no filesystem on this host reverts chmod on both files and directories; set FM_TEST_MODE_INCAPABLE_PARENT to one to run\n'
+    printf 'skip: no filesystem on this host reverts chmod on both files and directories while still executing what it stores; set FM_TEST_MODE_INCAPABLE_PARENT to one to run\n'
     return 0
   fi
   dir=$(mktemp -d "$root/home.XXXXXX") || fail "could not create a home under $root"
@@ -1430,9 +1477,15 @@ test_mode_incapable_state_dir_never_blocks_silently() {
 test_mode_capable_home_keeps_every_silent_path_silent() {
   local dir out status pid identity
   dir=$(make_primary_dir "$TMP_ROOT/mode-capable-unchanged")
-  chmod 700 "$dir/state" || fail "could not restrict the fixture state directory"
-  [ "$(fm_test_file_mode "$dir/state")" = 700 ] \
-    || fail "this host cannot hold restricted modes, so the control case proves nothing"
+  # The control needs a state dir that HOLDS 700. A runner whose TMPDIR sits on
+  # a mode-reverting mount cannot offer that condition, which is a property of
+  # the host and not a regression: skip it exactly as the mode-incapable case
+  # skips when the host offers no reverting mount.
+  chmod 700 "$dir/state" 2>/dev/null || true
+  if [ "$(fm_test_file_mode "$dir/state")" != 700 ]; then
+    printf 'skip: TMPDIR on this host does not hold restricted modes, so the mode-capable control proves nothing; point TMPDIR at a filesystem that does to run\n'
+    return 0
+  fi
   : > "$dir/state/task.meta"
 
   # An idle-but-verified home still ends its turn silently at exit 0.
@@ -1505,5 +1558,6 @@ test_consecutive_failures_never_block_silently
 test_untyped_arm_refusal_is_still_named
 test_nested_refusal_is_named_beside_the_arms_own_close
 test_arm_without_any_output_still_names_the_block
+test_uncapturable_arm_output_blames_the_capture_file_not_the_arm
 test_mode_incapable_state_dir_never_blocks_silently
 test_mode_capable_home_keeps_every_silent_path_silent
