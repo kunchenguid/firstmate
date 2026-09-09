@@ -1306,6 +1306,40 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
+# Same reused-pid shape as test_reclaims_when_lock_pid_was_reused_by_another_harness,
+# but exercised through the `status` diagnostic subcommand directly: this is
+# the human-facing command someone investigating a stuck lock would run, and
+# it must report the identical hardened verdict as the acquire/reclaim path.
+test_fm_lock_status_reclaims_reused_pid_with_mismatched_identity() {
+  local dir other out
+  dir=$(make_primary_dir "$TMP_ROOT/lock-status-reused-pid")
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  other=$!
+  printf '%s\n' "$other" > "$dir/state/.lock"
+  printf 'owner_pid=%s\nstale unrelated process identity\n' "$other" > "$dir/state/.lock-identity"
+  out=$(bash "$dir/bin/fm-lock.sh" status 2>&1)
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  assert_contains "$out" "stale" "fm-lock.sh status must reclaim a live pid whose identity sidecar proves reuse"
+  pass "fm-lock: status reports a reused-pid lock as stale despite the pid still being alive"
+}
+
+# Control case for the reused-pid test above: identity evidence that matches
+# the live pid must still report it as genuinely held. Acquiring for real
+# first (rather than hand-writing state/.lock) is what makes fm-lock.sh write
+# the matching state/.lock-identity sidecar, exactly as the acquire path does
+# in production.
+test_fm_lock_status_reports_live_owner_with_matching_identity() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/lock-status-live-owner")
+  out=$(FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    "$FM_HOME/bin/fm-lock.sh" status
+  ' 2>&1)
+  assert_contains "$out" "held by live harness pid" "fm-lock.sh status must report a genuinely live, identity-matched owner as held"
+  pass "fm-lock: status reports a live owner with matching identity as held"
+}
+
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
@@ -1350,3 +1384,5 @@ test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
 test_fm_lock_status_still_works_with_shared_lib
+test_fm_lock_status_reclaims_reused_pid_with_mismatched_identity
+test_fm_lock_status_reports_live_owner_with_matching_identity
