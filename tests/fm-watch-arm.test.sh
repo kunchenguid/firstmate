@@ -19,6 +19,14 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+LIB="$ROOT/bin/fm-wake-lib.sh"
+
+# An arm whose cycle ends with no wake only exits after wait_for_healthy_successor
+# has spent the whole confirmation budget, so cases that wait for that exit must
+# outlast the largest production default (30s on MSYS, 10s elsewhere - see
+# ARM_CONFIRM_DEFAULT in bin/fm-watch-arm.sh). This is a ceiling spent only when
+# an arm genuinely fails to exit; a passing case returns as soon as it does.
+ARM_FAIL_EXIT_POLLS=400
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-arm-tests)
 
@@ -658,7 +666,7 @@ test_restart_leaves_a_distinct_home_lock_untouched() {
   ln -s "$owner" "$state/.watch.lock"
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
-  wait_for_exit "$ARM_PID" 80
+  wait_for_exit "$ARM_PID" "$ARM_FAIL_EXIT_POLLS"
   status=$?
   [ "$status" -ne 124 ] || fail "restart stayed live against a foreign home's lock"
   [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$unrelated" ] \
@@ -676,7 +684,7 @@ test_restart_leaves_a_distinct_home_lock_untouched() {
 # holder recorded under this exact home and script spelling, so restart recovery
 # must not declare it stale, remove it, or publish downtime for it.
 test_restart_leaves_a_lock_untouched_when_the_watcher_script_is_absent() {
-  local dir home state fakebin armout unrelated owner bin entry status
+  local dir home state fakebin armout unrelated owner bin entry identity status
   dir=$(make_case restart-absent-watcher-script)
   home="$dir/home"
   state="$dir/state"
@@ -694,10 +702,12 @@ test_restart_leaves_a_lock_untouched_when_the_watcher_script_is_absent() {
 
   sleep 300 &
   unrelated=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$unrelated") \
+    || fail "could not identify the staged lock holder"
   printf '%s\n' "$unrelated" > "$owner/pid"
   printf '%s\n' "$home" > "$owner/fm-home"
   printf '%s\n' "$bin/fm-watch.sh" > "$owner/watcher-path"
-  printf '%s\n' 'live-watcher-identity' > "$owner/pid-identity"
+  printf '%s\n' "$identity" > "$owner/pid-identity"
   ln -s "$owner" "$state/.watch.lock"
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
