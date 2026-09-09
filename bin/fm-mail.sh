@@ -485,7 +485,7 @@ mail_poll() {
   # interrupted between its phases (mail_heal), so an overlapping poll or an
   # interrupted run can never lose a mail. wake_for owns the remaining
   # kill-window duplicate residual.
-  local list generation uid fr subj status woke=0 need_wake line wake_rc=0
+  local list generation first_line uid fr subj status woke=0 need_wake line wake_rc=0
   if [ ! -f "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
     echo "fm-mail: $SCRIPT_DIR/fm-wake-lib.sh missing; cannot poll" >&2
     return 1
@@ -501,8 +501,15 @@ mail_poll() {
     fm_lock_release "$STATE_DIR/.mail-seen.lock"
     return 1
   fi
-  generation="$(printf '%s\n' "$list" | head -n1 | cut -f2)"
-  list="$(printf '%s\n' "$list" | tail -n +2)"
+  # Split the generation guard without `head`.
+  # Under `set -o pipefail`, `printf | head -n1` can EPIPE a multi-row list and abort the poll.
+  first_line="${list%%$'\n'*}"
+  generation="${first_line#*$'\t'}"
+  if [ "$list" = "$first_line" ]; then
+    list=""
+  else
+    list="${list#*$'\n'}"
+  fi
 
   # A recreated/restored mailbox has a new UIDVALIDITY; a numeric uid can be
   # reused, so a stale cursor must not suppress its wake. Journal entries from
