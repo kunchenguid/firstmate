@@ -35,7 +35,7 @@ drain_and_ack() {  # <state>
 }
 
 test_singleton_start() {
-  local dir state fakebin out1 out2 pid1 pid2 live i
+  local dir state fakebin out1 out2 pid1 pid2 live i pid1_state pid2_state
   dir=$(make_case singleton)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -47,13 +47,17 @@ test_singleton_start() {
   pid2=$!
   i=0
   while [ "$i" -lt 50 ]; do
-    live=0
-    is_live_non_zombie "$pid1" && live=$((live + 1))
-    is_live_non_zombie "$pid2" && live=$((live + 1))
-    [ "$live" -eq 1 ] && break
+    pid1_state=0
+    pid2_state=0
+    is_live_non_zombie "$pid1" || pid1_state=$?
+    is_live_non_zombie "$pid2" || pid2_state=$?
+    live=$(( (pid1_state == 0) + (pid2_state == 0) ))
+    [ "$pid1_state" -ne 2 ] && [ "$pid2_state" -ne 2 ] && [ "$live" -eq 1 ] && break
     sleep 0.1
     i=$((i + 1))
   done
+  [ "$pid1_state" -ne 2 ] && [ "$pid2_state" -ne 2 ] \
+    || fail "singleton watcher liveness was unreadable"
   [ "$live" -eq 1 ] || fail "expected exactly one live watcher, got $live"
   i=0
   while [ "$i" -lt 50 ] && ! grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null 2>&1; do
@@ -419,7 +423,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
 }
 
 test_watch_restart_rejects_reused_pid() {
-  local dir state fakebin out live pid i
+  local dir state fakebin out live pid i process_state
   dir=$(make_case restart-reused-pid)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -434,12 +438,18 @@ test_watch_restart_rejects_reused_pid() {
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
   pid=$!
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$pid"; do
+  while [ "$i" -lt 80 ]; do
+    process_state=0
+    is_live_non_zombie "$pid" || process_state=$?
+    [ "$process_state" -eq 1 ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  is_live_non_zombie "$pid" \
-    && fail "restart did not surface recovery after replacing a reused-pid lock"
+  process_state=0
+  is_live_non_zombie "$pid" || process_state=$?
+  [ "$process_state" -ne 2 ] || fail "restart arm liveness was unreadable after replacing a reused-pid lock"
+  [ "$process_state" -eq 1 ] \
+    || fail "restart did not surface recovery after replacing a reused-pid lock"
   wait "$pid" 2>/dev/null || true
   grep -F 'check: rearm-resurface' "$out" >/dev/null \
     || fail "restart replaced reused-pid lock without surfacing recovery: $(cat "$out")"
@@ -731,7 +741,7 @@ test_arm_starts_and_self_heals() {
   # before reporting 'started' - whether the lock is empty (clean start) or held
   # by a dead pid with a fresh-looking leftover beacon (self-heal). It must never
   # report 'healthy' off a dead pid. One row per pre-state, one assertion block.
-  local row dir state fakebin armout armpid i lock_pid dead_pid
+  local row dir state fakebin armout armpid i lock_pid dead_pid process_state
   for row in clean dead-pid; do
     dir=$(make_case "arm-$row")
     state="$dir/state"
@@ -753,15 +763,20 @@ test_arm_starts_and_self_heals() {
     i=0
     while [ "$i" -lt 80 ]; do
       if [ "$row" = dead-pid ]; then
-        is_live_non_zombie "$armpid" || break
+        process_state=0
+        is_live_non_zombie "$armpid" || process_state=$?
+        [ "$process_state" -eq 1 ] && break
       else
         grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
       fi
       sleep 0.1; i=$((i + 1))
     done
     if [ "$row" = dead-pid ]; then
-      is_live_non_zombie "$armpid" \
-        && fail "arm did not surface recovery after reclaiming a dead-pid lock"
+      process_state=0
+      is_live_non_zombie "$armpid" || process_state=$?
+      [ "$process_state" -ne 2 ] || fail "arm liveness was unreadable after reclaiming a dead-pid lock"
+      [ "$process_state" -eq 1 ] \
+        || fail "arm did not surface recovery after reclaiming a dead-pid lock"
       wait "$armpid" 2>/dev/null || true
       grep -F 'check: rearm-resurface' "$armout" >/dev/null \
         || fail "arm reclaimed dead-pid lock without surfacing recovery: $(cat "$armout")"
@@ -782,7 +797,7 @@ test_arm_starts_and_self_heals() {
 }
 
 test_arm_hup_cleans_child_and_temp_output() {
-  local dir state fakebin armout i armpid lock_pid status
+  local dir state fakebin armout i armpid lock_pid status process_state
   dir=$(make_case arm-hup-cleanup)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -802,11 +817,17 @@ test_arm_hup_cleans_child_and_temp_output() {
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do
+  while [ "$i" -lt 80 ]; do
+    process_state=0
+    is_live_non_zombie "$lock_pid" || process_state=$?
+    [ "$process_state" -eq 1 ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
+  process_state=0
+  is_live_non_zombie "$lock_pid" || process_state=$?
+  [ "$process_state" -ne 2 ] || fail "HUP cleanup watcher child liveness was unreadable"
+  [ "$process_state" -eq 1 ] || fail "HUP cleanup left watcher child running"
   ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
   pass "arm cleans child watcher and temp output on HUP"
 }

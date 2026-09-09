@@ -1091,7 +1091,7 @@ SH
 }
 
 test_returned_custom_check_descendants_are_drained() {
-  local backend dir state fakebin ready direct_done child_pid_file sentinel watcher_pid child_pid i rc alive force_fallback
+  local backend dir state fakebin ready direct_done child_pid_file sentinel watcher_pid child_pid i rc child_state force_fallback
   local watcher_state signaled_at
   for backend in installed-timeout fallback-timeout; do
     dir=$(make_case "returned-custom-descendant-$backend")
@@ -1199,14 +1199,12 @@ SH
     rc=0
     wait "$watcher_pid" || rc=$?
     [ "$rc" -ne 0 ] || fail "$backend signaled watcher exited successfully"
-    # Only a definite LIVE counts as a surviving descendant; an unreadable ps is
-    # not evidence of one, and the sentinel assertion below proves the drain
-    # independently of this reading.
-    alive=0
-    is_live_non_zombie "$child_pid" && alive=1
-    [ "$alive" -eq 0 ] || kill -KILL "$child_pid" 2>/dev/null || true
+    child_state=0
+    is_live_non_zombie "$child_pid" || child_state=$?
+    [ "$child_state" -eq 1 ] || kill -KILL "$child_pid" 2>/dev/null || true
     wait "$child_pid" 2>/dev/null || true
-    [ "$alive" -eq 0 ] || fail "$backend watcher left a returned check descendant alive"
+    [ "$child_state" -ne 2 ] || fail "$backend returned check descendant liveness was unreadable"
+    [ "$child_state" -eq 1 ] || fail "$backend watcher left a returned check descendant alive"
     [ ! -e "$sentinel" ] || fail "$backend returned check descendant reached its sentinel"
     ! find "$state" -maxdepth 1 -name '.fm-custom-check.*' -print | grep . >/dev/null \
       || fail "$backend watcher left a private custom check snapshot"

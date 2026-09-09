@@ -622,7 +622,7 @@ _fm_recovery_marker_write_locked() {
 # watcher stops" into "the watcher never stops" and makes a supervisor's signal
 # a no-op. On the deadline the transition returns 124 with FM_LOCK_HELD_PID
 # naming whoever still holds the lock.
-FM_RECOVERY_MARKER_LOCK_TIMEOUT="${FM_RECOVERY_MARKER_LOCK_TIMEOUT:-}"
+FM_RECOVERY_MARKER_LOCK_TIMEOUT=
 
 # The one place a recovery-marker transition takes the marker lock, so a bound
 # cannot be added to one acquisition and silently missed by the other.
