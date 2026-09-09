@@ -258,6 +258,11 @@
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
+#     __RCFLAG__    claude-only `--remote-control <task-id>.<home>.<launch-token>`,
+#                   a NEW session per launch; ON BY DEFAULT, emptied by
+#                   config/crew-remote-control=off or by a claude whose own --help
+#                   does not advertise the option, and never added to a secondmate
+#                   launch or to any other harness
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -432,6 +437,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1428,7 +1435,14 @@ launch_template() {
     # sources are not guaranteed to load that scope, so a worker would
     # otherwise run with attribution back on; carrying it per launch keeps the
     # policy in force regardless of which settings scopes end up loaded.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # __RCFLAG__ is claude's Remote Control flag (see
+    # remote_control_flag_for_spawn); it is on by default and expands to nothing
+    # when the home writes config/crew-remote-control=off or the installed claude
+    # does not advertise the option. It is a FLAG rather than a settings key for
+    # the same reason the attribution policy above is carried per launch: the
+    # captain's own remoteControlAtStartup lives in the `user` scope this launch
+    # cannot rely on, so only the explicit flag makes a worker reachable.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __RCFLAG____MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1890,6 +1904,222 @@ effort_flag_for_harness() {
     # in model ids such as cursor-grok-4.5-high, so it also receives no separate
     # effort flag.
   esac
+}
+
+# Remote Control is claude's own feature for driving a running interactive
+# session from claude.ai/code and the phone app. It is ON BY DEFAULT for claude
+# crewmate and scout launches, because a worker the operator cannot reach from a
+# phone is the exception rather than the rule; config/crew-remote-control=off is
+# the explicit opt-out and the only value that suppresses it.
+# Only claude has it. No other verified adapter exposes an equivalent, and a
+# harness that cannot do Remote Control is not an error here - it simply
+# receives no flag, exactly as with the model and effort axes above.
+# Secondmates are deliberately excluded: this is the CREW knob, the sibling of
+# config/crew-harness, and it governs the crewmate and scout launches a home
+# makes. A secondmate is reached through firstmate, not driven directly.
+
+# crew_remote_control_preference: the single owner of config/crew-remote-control
+# parsing. Echoes exactly one of "on" or "off".
+# The value is read with the whole-file whitespace-stripped and case-folded
+# convention the other scalar config items already use (config/crew-harness,
+# config/herdr-presentation-spaces): an absent file, an empty file, and "on" all
+# mean on, and only "off" opts out. An unrecognized value warns naming the file
+# and the value, then falls back to the default rather than failing a spawn, so
+# a typo is visible instead of silently deciding anything.
+crew_remote_control_preference() {
+  local file="$CONFIG/crew-remote-control" value
+  [ -f "$file" ] || { printf 'on\n'; return 0; }
+  value=$(tr -d '[:space:]' < "$file" 2>/dev/null | tr '[:upper:]' '[:lower:]') || value=""
+  case "$value" in
+    off) printf 'off\n' ;;
+    ''|on) printf 'on\n' ;;
+    *)
+      echo "warning: $file: unrecognized value \"$value\"; crewmate Remote Control falls back to the default (on) (write \"off\" to opt out)" >&2
+      printf 'on\n'
+      ;;
+  esac
+}
+
+# remote_control_session_name <task-id> <spawn-gen>: the name the worker carries
+# in the claude.ai/code session list, shaped as
+#   <task-id>.<home-basename>.<launch-token>
+# for example rc-on-spawn.firstmate.4b1c9d.
+# Every LAUNCH gets its own name, so a relaunched worker starts a new Remote
+# Control session instead of reattaching to, resurrecting, or relabelling the one
+# its dead predecessor used: what belongs in the operator's session list is the
+# worker running now.
+# The three parts each earn their place. The task id LEADS because it is the
+# handle the operator already uses for the work, so it is what they scan for.
+# The home basename gives the home human meaning at a glance. The launch token is
+# what makes the name unique, and it is derived from SPAWN_GEN, the incarnation
+# token this spawn already computed and already records as spawn_gen= in
+# state/<id>.meta; it is regenerated on every fresh spawn AND every relaunch,
+# which is exactly the per-launch distinctness this name needs. Reusing it costs
+# no NEW clock read, randomness, or state - SPAWN_GEN itself is built from a
+# clock read and $RANDOM, and this only digests what is already there.
+# Because uniqueness now comes from the launch token, the home part no longer has
+# to be collision-proof, so the home path digest that once carried it is gone.
+# The accepted cost: two homes whose directory basenames are identical now show
+# the same home part, so their names differ only by the launch token. They still
+# never collide; they are just less visually distinct.
+# The task id is capped at FM_RC_TASK_ID_MAX and the sanitized basename at
+# FM_RC_HOME_BASENAME_MAX, which bounds the whole emitted name at 52 characters:
+# 32 + 1 + 12 + 1 + 6. A live run accepted a 138-character name, so this bound
+# sits well inside proven-accepted lengths; docs/verification/remote-control.md
+# owns that evidence.
+# With neither hashing tool present the token falls back to the tail of the
+# sanitized SPAWN_GEN, which is still per-launch, because a cosmetic name must
+# never fail a spawn.
+FM_RC_TASK_ID_MAX=32
+FM_RC_HOME_BASENAME_MAX=12
+FM_RC_LAUNCH_TOKEN_MAX=6
+
+remote_control_session_name() {  # <task-id> <spawn-gen>
+  local id=$1 gen=$2 home base token=
+  home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || home=$FM_HOME
+  base=${home##*/}
+  [ -n "$base" ] || base=root
+  base=$(printf '%s' "$base" | tr -c 'A-Za-z0-9._-' '-')
+  if command -v shasum >/dev/null 2>&1; then
+    token=$(printf '%s' "$gen" | shasum -a 256 | awk -v n="$FM_RC_LAUNCH_TOKEN_MAX" '{print substr($1,1,n)}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    token=$(printf '%s' "$gen" | sha256sum | awk -v n="$FM_RC_LAUNCH_TOKEN_MAX" '{print substr($1,1,n)}')
+  fi
+  if [ -z "$token" ]; then
+    token=$(printf '%s' "$gen" | tr -cd 'A-Za-z0-9')
+    if [ "${#token}" -gt "$FM_RC_LAUNCH_TOKEN_MAX" ]; then
+      token=${token: -$FM_RC_LAUNCH_TOKEN_MAX}
+    fi
+    [ -n "$token" ] || token=launch
+  fi
+  printf '%s.%s.%s' "${id:0:$FM_RC_TASK_ID_MAX}" "${base:0:$FM_RC_HOME_BASENAME_MAX}" "$token"
+}
+
+# Remote Control arrived in a specific claude release, and claude refuses an
+# unknown option outright instead of ignoring it, so typing this flag at a claude
+# that predates the feature would fail EVERY launch it is typed onto rather than
+# degrade. Because the flag is on by default, that would take out every crewmate
+# and scout on such a home, for every task, with no config the operator knew to
+# write. The verdict therefore comes from the installed binary's OWN advertised
+# interface, exactly like pi_supports_tui_mode above, and never from a version
+# floor or a version table, because a floor is the thing nobody keeps current.
+# Every failure direction resolves to NOT typing the flag: no binary on PATH, a
+# timeout, a non-zero exit, empty output, or help that does not advertise the
+# option. A worker without Remote Control is a working worker; a worker that will
+# not launch is not. That is the same rule already applied to a harness that
+# cannot do Remote Control, applied to a claude that cannot either.
+# Only a verdict about the BINARY is ever persisted, though: see
+# claude_remote_control_support.
+FM_CLAUDE_PROBE_TIMEOUT_DEFAULT=10
+FM_CLAUDE_PROBE_TIMEOUT=${FM_CLAUDE_PROBE_TIMEOUT:-$FM_CLAUDE_PROBE_TIMEOUT_DEFAULT}
+FM_CLAUDE_REMOTE_CONTROL_PROBE_CACHE=".claude-remote-control-probe"
+
+# The identity a cached verdict belongs to: the resolved binary path, its byte
+# size, and its mtime, so any upgrade, downgrade, or reinstall invalidates the
+# verdict by itself rather than pinning a stale answer. No fingerprint means no
+# caching, which costs one bounded probe per spawn and nothing else.
+claude_binary_fingerprint() {  # <binary>
+  local path=$1 size mtime
+  if [ "$(uname)" = Darwin ]; then
+    size=$(stat -f %z "$path" 2>/dev/null) || return 1
+    mtime=$(stat -f %m "$path" 2>/dev/null) || return 1
+  else
+    size=$(stat -c %s "$path" 2>/dev/null) || return 1
+    mtime=$(stat -c %Y "$path" 2>/dev/null) || return 1
+  fi
+  case "$size$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s|%s|%s' "$path" "$size" "$mtime"
+}
+
+# claude_remote_control_probe <binary>: what this binary's own --help says.
+# Return codes: 0 it advertises the option, 1 help ran and does not advertise it,
+# 2 the probe could not complete so the answer is unknown. Separating 1 from 2 is
+# what keeps a transient failure out of the cache below.
+# The match requires whitespace, `=`, or end of line after the option name, so
+# the sibling --remote-control-session-name-prefix can never be read as this
+# option.
+# The bound comes from bin/fm-timeout-lib.sh, the single owner of bounded
+# execution, so this probe inherits its coreutils/BSD/perl/pure-bash selection
+# instead of re-deriving one: a host with neither timeout nor gtimeout - stock
+# macOS without coreutils - still probes rather than silently reporting the
+# option missing. Exit 124 is that library's "the bound was hit".
+claude_remote_control_probe() {  # <binary>
+  local binary=$1 help bound=$FM_CLAUDE_PROBE_TIMEOUT status=0
+  case "$bound" in ''|*[!0-9]*|0) bound=$FM_CLAUDE_PROBE_TIMEOUT_DEFAULT ;; esac
+  help=$(fm_run_timed "$bound" "$binary" --help 2>/dev/null) || status=$?
+  [ "$status" -eq 0 ] || return 2
+  [ -n "$help" ] || return 2
+  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--remote-control([[:space:]=]|$)' && return 0
+  return 1
+}
+
+# claude_remote_control_support: echoes "supported" or "unsupported" for the
+# claude this home would launch. It always returns 0, so neither the probe nor a
+# missing binary can trip set -e or fail a spawn.
+# ONLY a durable answer is persisted, meaning one that is a property of the
+# binary: help advertised the option, or help ran and did not. A probe that could
+# not complete - the bound was hit, a non-zero exit, empty output - suppresses the
+# flag for THIS spawn and writes nothing, so the next spawn probes again. Caching
+# a transient failure would be strictly worse than probing slightly too often: it
+# would leave one loaded moment disabling Remote Control on that home until the
+# binary itself changed.
+claude_remote_control_support() {
+  local binary fingerprint cache line verdict probe=0
+  binary=$(type -P -- claude 2>/dev/null) || binary=
+  if [ -z "$binary" ] || [ ! -x "$binary" ]; then
+    printf 'unsupported\n'
+    return 0
+  fi
+  fingerprint=$(claude_binary_fingerprint "$binary") || fingerprint=
+  cache="$STATE/$FM_CLAUDE_REMOTE_CONTROL_PROBE_CACHE"
+  if [ -n "$fingerprint" ] && [ -r "$cache" ]; then
+    line=$(head -n 1 "$cache" 2>/dev/null) || line=
+    case "$line" in
+      "v1 $fingerprint supported") printf 'supported\n'; return 0 ;;
+      "v1 $fingerprint unsupported") printf 'unsupported\n'; return 0 ;;
+    esac
+  fi
+  claude_remote_control_probe "$binary" || probe=$?
+  case "$probe" in
+    0) verdict=supported ;;
+    1) verdict=unsupported ;;
+    *) printf 'unsupported\n'; return 0 ;;
+  esac
+  if [ -n "$fingerprint" ]; then
+    printf 'v1 %s %s\n' "$fingerprint" "$verdict" > "$cache" 2>/dev/null || true
+  fi
+  printf '%s\n' "$verdict"
+}
+
+# Passing an EXPLICIT name removes the optional-argument hazard:
+# `--remote-control` takes an optional value, so leaving it bare would let it
+# swallow whatever followed it on the command line, including the positional
+# brief prompt. --remote-control-session-name-prefix only names auto-generated
+# sessions and is therefore irrelevant once a name is supplied.
+# Verified live on claude 2.1.235: with this flag the positional brief prompt is
+# still delivered and processed, the pane stays an ordinary interactive TUI that
+# fm-send can steer, the worktree-scoped hooks armed below still fire, and two
+# concurrent workers get two distinct Remote Control sessions.
+# See docs/verification/remote-control.md.
+# One residue the probe cannot close: it validates the claude that fm-spawn
+# resolves on its OWN PATH, while the launch line types bare `claude` for the
+# pane's shell to resolve on ITS path. On a host with two claude installs whose
+# PATH order differs between the two - an older npm-global claude ahead of a
+# newer native one in the tmux server's inherited PATH - the probe can pass while
+# the pane runs the other binary, and the symptom is a spawn that fails at launch
+# with claude's own "error: unknown option" rather than any silent damage. That
+# needs both a second installation and a diverging PATH; typing a resolved
+# absolute path instead would change how every claude worker starts, including
+# every worker that never touches Remote Control, so this limit is stated rather
+# than closed.
+remote_control_flag_for_spawn() {  # <harness> <kind> <task-id> <spawn-gen>
+  local harness=$1 kind=$2 id=$3 gen=$4 name
+  [ "$harness" = claude ] || return 0
+  [ "$kind" != secondmate ] || return 0
+  [ "$(crew_remote_control_preference)" = on ] || return 0
+  [ "$(claude_remote_control_support)" = supported ] || return 0
+  name=$(remote_control_session_name "$id" "$gen")
+  printf -- '--remote-control %s ' "$(shell_quote "$name")"
 }
 
 case "$LAUNCH" in
@@ -3720,6 +3950,11 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+# Substituted unconditionally, exactly like the model and effort flags: only
+# claude's template carries the placeholder, and every other adapter's launch is
+# untouched because there is nothing to replace.
+RCFLAG=$(remote_control_flag_for_spawn "$HARNESS" "$KIND" "$ID" "$SPAWN_GEN")
+LAUNCH=${LAUNCH//__RCFLAG__/$RCFLAG}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 if [ "$HARNESS" = rovo ]; then

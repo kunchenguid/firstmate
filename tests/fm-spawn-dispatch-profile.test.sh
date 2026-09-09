@@ -62,6 +62,12 @@ make_spawn_case() {
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   fm_test_spawn_home "$home" "$harness"
+  # This suite owns the profile axes (harness, model, effort) and asserts whole
+  # claude launch lines, so it pins Remote Control off rather than tracking the
+  # session name a claude launch carries by default. That contract - default on,
+  # and the home-qualified session name - is owned by
+  # tests/fm-crew-remote-control.test.sh.
+  printf 'off\n' > "$home/config/crew-remote-control"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   for id in "$@"; do
     fm_test_spawn_brief "$home" "$id"

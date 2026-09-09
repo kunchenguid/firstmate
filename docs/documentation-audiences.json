@@ -453,6 +453,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/remote-control.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/rovo.md",
       "audience": "maintainer-verification"
     },

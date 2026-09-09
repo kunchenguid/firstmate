@@ -387,6 +387,36 @@ Regression coverage executes emitted launch commands with synthetic nonsecret va
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
+## Crewmate Remote Control (config/crew-remote-control)
+
+Claude Code's Remote Control is on by default for this home's claude crewmate and scout launches, so the operator can drive any worker from `claude.ai/code` and the phone app rather than only the firstmate session's own pane.
+`config/crew-remote-control` is an optional local, gitignored file whose only purpose is to opt out: write `off` in it to launch every worker this home spawns without Remote Control.
+The file being absent, being empty, or holding `on` all mean enabled, and any other value warns on stderr naming the file and the offending value before falling back to the default, so a typo is visible instead of silently deciding anything.
+
+Enabled means `fm-spawn.sh` adds `--remote-control <session-name>` to a claude crewmate or scout launch, where the session name is `<task-id>.<home-basename>.<launch-token>`, for example `rc-on-spawn.firstmate.4b1c9d`.
+Every launch gets its own name, so a relaunched worker starts a new Remote Control session instead of reattaching to the one its dead predecessor used: what belongs in the session list is the worker running now.
+The task id leads because it is the handle the operator already uses for that work, the sanitized home basename gives the home human meaning, and the launch token is six hex characters of the sha256 of that spawn's own `spawn_gen` incarnation token, the value `fm-spawn.sh` already records in `state/<id>.meta` and already regenerates on every fresh spawn and every relaunch.
+What the name guarantees is this: inside one `claude.ai` account no two launches share a session name, whether they are two homes spawning the same task id, two tasks in one home, or two incarnations of one task.
+The task id is capped at 32 characters and the home basename at 12, which bounds the whole name at 52.
+The accepted cost of that simpler shape is that two homes whose directory basenames are identical show the same home part, so their names differ only by the launch token; they still never collide, they are just less visually distinct.
+
+Only claude receives the flag, and only a claude that advertises it.
+`fm-spawn.sh` reads the installed binary's own `--help` before typing the option, because claude refuses an unknown option outright rather than ignoring it, so a claude predating Remote Control would otherwise fail every launch instead of merely missing a feature.
+A claude that does not advertise the option, or a probe that cannot complete for any reason, launches the worker without the flag.
+Only a verdict about the binary is remembered - it advertised the option, or its help ran and did not - cached under `state/` against the binary's path, size, and mtime, so an upgrade or reinstall re-probes on the next spawn.
+A probe that could not complete at all, whether it hit its bound, exited non-zero, or printed nothing, is never cached, so one loaded moment cannot disable Remote Control on that home until the binary changes.
+The probe validates the claude that `fm-spawn.sh` resolves on its own `PATH`, while the launch line types bare `claude` for the pane's shell to resolve on its own; on a host carrying two claude installs whose `PATH` order differs between the two, the probe can pass while the pane runs the other binary, and the symptom is a spawn that fails at launch with claude's own unknown-option error rather than any silent damage.
+No other verified adapter exposes an equivalent flag, and a harness that cannot do Remote Control is not an error: it simply launches unchanged, exactly as with the model and effort axes.
+Secondmate launches are also excluded, because this is the crewmate knob and a secondmate is reached through firstmate rather than driven directly.
+A raw launch command passed to `fm-spawn.sh` instead of an adapter name is the operator's own and is never rewritten, so it receives no flag either.
+
+Every crewmate and scout launch already bypasses permission prompts (`--dangerously-skip-permissions`), so the standing consequence of this default is that each worker is a permissionless agent in a live project worktree drivable by anyone holding that `claude.ai` account or an unlocked phone, with that worker's whole transcript routed through the account; write `off` on any home where that is not acceptable.
+
+Because the knob is read fresh on every spawn, a control-plane relaunch of a claude worker comes back reachable under its own new session name, and a home that opted out stays opted out across relaunches.
+The knob is inherited into secondmate homes on the same primary-authoritative terms as `config/crew-harness`, so an explicit `off` propagates and a fleet is reachable, or not, as a whole.
+Remote Control changes no part of firstmate's own supervision: the launch stays an ordinary interactive TUI that `fm-send` steers, and the per-task turn-end hook and `claude-hook` busy-state source that `bin/fm-crew-state.sh` reads are worktree-scoped and unaffected.
+[`docs/verification/remote-control.md`](verification/remote-control.md) owns that evidence.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

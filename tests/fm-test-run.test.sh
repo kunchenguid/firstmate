@@ -25,8 +25,11 @@ test_list_all_exact_suite_coverage() {
     done | LC_ALL=C sort
   )
   [ -n "$listed" ] || fail "--list --all printed nothing"
-  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
-  extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  # Both listings are sorted with LC_ALL=C, so the comparison has to run under
+  # that same collation; `comm` otherwise refuses C-sorted test paths as
+  # unsorted under a desktop locale and `|| true` would swallow the complaint.
+  missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
   [ -z "$missing" ] || fail "--list --all missing scripts: $missing"
   [ -z "$extra" ] || fail "--list --all unexpected scripts: $extra"
   # No duplicates.
@@ -971,7 +974,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -996,6 +999,46 @@ test_portable_shard_union_and_coverage_guard() {
   [ "$first" = "tests/fm-x-mode.test.sh" ] \
     || fail "shard 1 must start with the longest proven script, got $first"
   pass "portable shard union, disjointness, and coverage guard hold"
+}
+
+# The coverage guard builds every listing with `LC_ALL=C sort` and then compares
+# them with `comm`, which refuses input it believes is unsorted under ITS OWN
+# collation. When the guard does not pin the locale, a machine whose locale
+# comes from LANG - the normal desktop and agent-box case - fails the guard
+# spuriously with "comm: file 2 is not in sorted order", while CI's C.UTF-8
+# default happens to collate these ASCII paths like C and stays green. This case
+# pins the guard against that whole class of regression.
+#
+# It first PROVES the chosen locale actually collates differently from C, using
+# a real pair of test filenames the guard sorts, so it can never pass vacuously
+# on a machine where the locale is missing and glibc silently falls back to C.
+test_coverage_guard_is_locale_stable() {
+  local loc probe_c probe_loc out status found=
+  for loc in en_US.UTF-8 en_US.utf8 en_GB.UTF-8 de_DE.UTF-8; do
+    probe_c=$(printf 'fm-backend.test.sh\nfm-backend-tmux-smoke.test.sh\n' | LC_ALL=C sort)
+    probe_loc=$(printf 'fm-backend.test.sh\nfm-backend-tmux-smoke.test.sh\n' | LC_ALL="$loc" sort 2>/dev/null)
+    if [ -n "$probe_loc" ] && [ "$probe_loc" != "$probe_c" ]; then
+      found=$loc
+      break
+    fi
+  done
+  if [ -z "$found" ]; then
+    # Explicit, never a silent pass: this machine has no installed locale that
+    # collates differently from C, so the regression is unreproducible here.
+    echo "skip: no installed locale collates differently from C; coverage-guard locale stability unreproducible"
+    return 0
+  fi
+
+  # LC_ALL is deliberately UNSET so the locale reaches the guard through LANG,
+  # which is what makes `local LC_ALL=C` alone insufficient inside the guard.
+  out=$(env -u LC_ALL LANG="$found" LC_COLLATE="$found" "$RUNNER" --check-coverage 2>&1)
+  status=$?
+  expect_code 0 "$status" "coverage guard must succeed under LANG=$found with LC_ALL unset"$'\n'"$out"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" \
+    "coverage guard must report success under LANG=$found"
+  assert_not_contains "$out" "not in sorted order" \
+    "coverage guard leaked a collation mismatch under LANG=$found"
+  pass "coverage guard is locale-stable (proven divergent locale: $found)"
 }
 
 test_portable_serial_shards_partition_the_serial_lane() {
@@ -1603,6 +1646,7 @@ test_live_guards_expect_a_capability_skip_class
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_coverage_guard_is_locale_stable
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
 test_portable_serial_shard_lane_refusals

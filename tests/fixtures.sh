@@ -141,6 +141,10 @@ SH
 # empty. Env knobs:
 #   FM_FAKE_TMUX_SEND_FAIL=1  send-keys exits 1
 #   FM_FAKE_TMUX_COMPOSER=pending  capture-pane shows leftover composer text
+#   FM_FAKE_TMUX_WINDOWS=<newline-separated names>  list-windows reports these,
+#     so a caller whose recorded window must appear in the session inventory can
+#     reach a readable endpoint verdict. Unset keeps the empty inventory that
+#     every existing caller already expects.
 fm_test_fake_tmux_send() {
   local fakebin=$1
   cat > "$fakebin/tmux" <<'SH'
@@ -178,7 +182,12 @@ case "${1:-}" in
     fi
     exit 0
     ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    if [ -n "${FM_FAKE_TMUX_WINDOWS:-}" ]; then
+      printf '%s\n' "$FM_FAKE_TMUX_WINDOWS"
+    fi
+    exit 0
+    ;;
 esac
 exit 0
 SH

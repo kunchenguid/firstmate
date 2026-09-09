@@ -320,7 +320,7 @@ family_for_basename() {
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
-    fm-cursor-primary-live-e2e.test.sh|\
+    fm-cursor-primary-live-e2e.test.sh|fm-crew-remote-control-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|\
@@ -340,6 +340,7 @@ family_for_basename() {
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
+    fm-crew-remote-control.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
@@ -871,6 +872,20 @@ select_lane() {
 run_coverage_guard() {
   local tmp missing extra a b shard unhinted serial_total
   local -a saved_scripts=()
+  # Every listing below is sorted with LC_ALL=C, and `comm` refuses input it
+  # believes is unsorted under ITS OWN collation. Pinning the whole function to
+  # the C locale is what keeps the two agreeing: under a normal desktop locale
+  # such as en_US.UTF-8, glibc ignores punctuation while ordering, so a
+  # C-sorted list of test paths reads as out of order and the guard fails
+  # spuriously with "comm: file 2 is not in sorted order". CI's C.UTF-8 default
+  # happens to collate these ASCII paths like C, which is why only local runs
+  # saw it.
+  # `local` scopes the override and bash restores the caller's value and export
+  # attribute on return; the explicit `export` is required because `local`
+  # alone would not reach `comm` on a machine whose locale comes from LANG with
+  # LC_ALL unset - exactly the machines this bug bites.
+  local LC_ALL=C
+  export LC_ALL
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
 
   all_repo_tests | LC_ALL=C sort -u >"$tmp/all"
@@ -1370,7 +1385,15 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
+    bin/fm-spawn.sh)
+      # fm-spawn reads claude's own rendered --help to decide whether Remote
+      # Control can be typed at all, so a change here re-selects that live guard
+      # (fm-crew-remote-control-live-e2e) alongside the portable families.
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
