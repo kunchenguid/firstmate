@@ -388,6 +388,43 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+# fm_backend_orca_worktree_id_valid: validate a recorded Orca worktree
+# identifier. Orca records the composite form `<repo-id>::<absolute-path>`
+# (for example `83cc33e8-...::/Users/me/orca/workspaces/node/fm-task`), so the
+# atom validator alone would reject every real Orca task and block its
+# cleanup. The composite form is accepted only when the repo component is a
+# valid atom and the path component is absolute, non-empty, built exclusively
+# from an allowlist of safe path characters, and free of `..` segments. The
+# allowlist admits the ordinary space that legitimate macOS and POSIX paths
+# carry, because cleanup passes the recorded identifier as one quoted argument
+# and must forward it byte for byte; it still leaves no ASCII control,
+# newline, shell metacharacter, command substitution, or extra delimiter able
+# to reach a runtime command. Bare atom ids stay accepted.
+fm_backend_orca_worktree_id_valid() {  # <value>
+  local value=$1 repo path
+  fm_backend_endpoint_atom_valid "$value" && return 0
+  case "$value" in
+    *'::'*) ;;
+    *) return 1 ;;
+  esac
+  repo=${value%%::*}
+  path=${value#*::}
+  fm_backend_endpoint_atom_valid "$repo" || return 1
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  # Space is the only whitespace admitted; a stray colon also rejects a second
+  # `::` delimiter.
+  case "$path" in
+    *[!A-Za-z0-9._@%+/" "-]*) return 1 ;;
+  esac
+  case "$path" in
+    */../*|*/..) return 1 ;;
+  esac
+  return 0
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -508,7 +545,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       if [ "$window" != "fm-$id" ] \
         || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
+        || ! fm_backend_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
