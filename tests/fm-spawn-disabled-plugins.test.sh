@@ -5,10 +5,6 @@
 #   (a) absent file → base JSON only, no enabledPlugins key
 #   (b) two IDs plus a comment line → both IDs set false, base keys preserved
 #   (c) whitespace, blank lines, and inline comments are ignored
-#
-# The three helpers under test (json_escape, shell_quote, build_crew_settings_json)
-# are extracted verbatim from bin/fm-spawn.sh; do not assert implementation
-# source bytes — this file drives the observable JSON output only.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,35 +13,8 @@ FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-# --- pull the three self-contained helpers from fm-spawn.sh -----------------
-
-json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
-}
-
-build_crew_settings_json() {
-  local config_dir=$1 disabled_file plugins_json="" id_escaped line
-  disabled_file="$config_dir/crew-disabled-plugins"
-  if [ -f "$disabled_file" ]; then
-    while IFS= read -r line; do
-      line=${line%%#*}
-      # shellcheck disable=SC2001
-      line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-      [ -n "$line" ] || continue
-      id_escaped=$(json_escape "$line")
-      if [ -z "$plugins_json" ]; then
-        plugins_json="\"$id_escaped\":false"
-      else
-        plugins_json="$plugins_json,\"$id_escaped\":false"
-      fi
-    done < "$disabled_file"
-  fi
-  if [ -n "$plugins_json" ]; then
-    printf '{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},"enabledPlugins":{%s}}' "$plugins_json"
-  else
-    printf '%s' '{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'
-  fi
-}
+# shellcheck source=bin/fm-spawn-settings-lib.sh
+source "$ROOT/bin/fm-spawn-settings-lib.sh"
 
 BASE_JSON='{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'
 
