@@ -327,6 +327,10 @@ sync_project() {
   mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
   mode=${mode_line%% *}
   if [ "$mode" = "local-only" ]; then
+    # This skip is pull-direction only (origin -> local); it never runs in
+    # reverse. Keeping a local-only project's local-mirror origin caught up
+    # (local -> mirror, after a merge advances the local default branch) is
+    # bin/fm-merge-local.sh's job, not this one - see its header comment.
     echo "$label: skipped: local-only project"
     return 0
   fi
