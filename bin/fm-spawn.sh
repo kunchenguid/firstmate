@@ -70,6 +70,13 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   The treehouse pool a ship/scout spawn acquires from is scoped by
+#   FM_TREEHOUSE_ROOT, else config/treehouse-root (first non-blank, non-# line, an
+#   absolute path), else treehouse's own default root. A pool is named from the
+#   remote URL alone, so two homes each holding a clone of one project otherwise
+#   share a pool whose worktrees are linked to only one of those clones, and the
+#   other home's spawn is refused by bin/fm-claude-trust.sh's common-dir test.
+#   docs/configuration.md "Treehouse pool root" owns when to set it.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -400,6 +407,60 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     exit 1
   fi
 fi
+# The treehouse pool root this home's ship/scout spawns acquire a worktree from.
+# Empty means today's behavior exactly: `treehouse get` with no `--root`, resolving
+# treehouse's own default root.
+#
+# WHY THIS EXISTS. Treehouse names a pool `<repo>-<sha256(remote-url)[:6]>` under one
+# root, so every clone of one remote on a machine resolves to the SAME pool, while the
+# pool's worktrees stay linked to whichever clone first created them. Two firstmate
+# homes each holding a clone of one project therefore share a pool that can only serve
+# one of them: the second home's spawn is handed a worktree of the FIRST home's clone,
+# and fm-claude-trust.sh refuses it because that worktree does not share this project's
+# git common dir. That refusal is correct and must not be relaxed - it is the fence that
+# keeps a worker out of another home's checkout - so the pool is what has to be scoped.
+# Pointing this home at its own root makes `treehouse get` create worktrees linked to
+# THIS home's clone, which the structural test then admits.
+#
+# Absent by default because changing an existing home's root would orphan the pool it
+# already has. A home that needs its own pool opts in.
+SPAWN_TREEHOUSE_ROOT="${FM_TREEHOUSE_ROOT:-}"
+if [ -z "$SPAWN_TREEHOUSE_ROOT" ]; then
+  if ! treehouse_root_present=$(fm_config_source_present "$CONFIG/treehouse-root"); then
+    exit 1
+  fi
+  if [ "$treehouse_root_present" = 1 ]; then
+    if [ ! -f "$CONFIG/treehouse-root" ] || [ ! -r "$CONFIG/treehouse-root" ]; then
+      echo "error: config/treehouse-root must be a readable regular file" >&2
+      exit 1
+    fi
+    while IFS= read -r treehouse_root_line || [ -n "$treehouse_root_line" ]; do
+      case "$treehouse_root_line" in
+        ''|'#'*) continue ;;
+      esac
+      SPAWN_TREEHOUSE_ROOT=$treehouse_root_line
+      break
+    done < "$CONFIG/treehouse-root"
+    if [ -z "$SPAWN_TREEHOUSE_ROOT" ]; then
+      echo "error: config/treehouse-root is present but names no root; remove the file to use treehouse's default" >&2
+      exit 1
+    fi
+  fi
+fi
+if [ -n "$SPAWN_TREEHOUSE_ROOT" ]; then
+  # Absolute only. Treehouse resolves a relative --root from the REPO root, so a
+  # relative value here would put the pool inside the project clone - a write into
+  # a project, and a pool shared by every home that clones it, which is the very
+  # collision this setting exists to end.
+  case "$SPAWN_TREEHOUSE_ROOT" in
+    /*) ;;
+    *)
+      echo "error: config/treehouse-root must be an absolute path; treehouse resolves a relative --root from the repository root" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 SUB_HOME_MARKER=".fm-secondmate-home"
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
@@ -3044,7 +3105,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  if [ -n "$SPAWN_TREEHOUSE_ROOT" ]; then
+    spawn_send_text_line "$WT_TARGET" "treehouse get --root $(shell_quote "$SPAWN_TREEHOUSE_ROOT")"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
