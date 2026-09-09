@@ -67,6 +67,10 @@ The crewmate/scout-only Rovo CLI 202609.1.2 adapter added `*rovo*` to the same g
 `#{pane_current_command}` reported the truncated on-disk binary name `atlassian_cli_r` - macOS's 15-char `comm` truncation cuts `atlassian_cli_rovodev` off just before the `rovo` substring begins, the same truncation-volatility class codex/kimi's own patch-release name drift shows above - while the foreground ps-based `comm` correctly reported `rovo`, so `fm_backend_tmux_agent_state` returned `alive` through that primary source; the two-independent-name-sources design is exactly why the truncated title does not break the verdict.
 [`rovo.md`](rovo.md#backend-liveness-tmux-verified-live-herdr-placement-verified-live-with-a-herdr-side-agent-detection-gap) owns the fuller record, including the busy/interrupt/exit facts captured in that same live tmux session and the herdr agent-detection gap found when herdr placement was verified live in an isolated lab session.
 
+The crewmate/scout-only agy (Antigravity CLI) 1.1.28 adapter anchors the bare `agy` name in `fm_backend_tmux_classify_process_name`, verified on 2026-09-09 against tmux on Linux x86_64.
+The shipped CLI is a natively compiled ELF, so both `#{pane_current_command}` and foreground `ps -o comm=` report `agy` for the live TUI and `fm_backend_tmux_agent_state` returns `alive`; `agy-wrapper` and `tagy` stay ambiguous in the portable regression.
+[`agy.md`](agy.md) owns the fuller record, including the trust, hooks, interrupt, and exit facts captured in live tmux sessions.
+
 Bounded observed output:
 
 ```text

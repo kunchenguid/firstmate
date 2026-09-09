@@ -237,6 +237,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-agy-lib.sh
+. "$SCRIPT_DIR/fm-agy-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -3204,6 +3206,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+    # agy's hooks file may be the project's own committed file, so it retires
+    # through the lib's byte-exact restore rather than removal - and only
+    # when this task actually installed agy hooks, so a project file this
+    # task never touched is never rewritten.
+    if [ -f "$STATE/$ID.agy-hooks-mode" ]; then
+      fm_agy_hooks_remove "$WT" "$STATE" "$ID" || exit 1
+    fi
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -3217,6 +3226,12 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  # Same agy rule as above: restore through the lib, only when this task
+  # installed agy hooks, and before the worktree return below so a merged
+  # tracked file is back to its committed bytes before any dirty check.
+  if [ -f "$STATE/$ID.agy-hooks-mode" ]; then
+    fm_agy_hooks_remove "$WT" "$STATE" "$ID" || exit 1
+  fi
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -3341,6 +3356,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
+  "$STATE/$ID.agy-hooks-mode" "$STATE/$ID.agy-hooks-backup" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \

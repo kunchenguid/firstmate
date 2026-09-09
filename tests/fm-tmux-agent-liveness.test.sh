@@ -70,6 +70,12 @@ ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
 ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
+# agy (Antigravity CLI) is a single natively compiled binary whose live process
+# name is the bare word `agy`, so like omp it is anchored rather than globbed
+# and the two decoys prove the anchor holds on both sides.
+ln -s "$SLEEP_BIN" "$LAB/bin/agy"
+ln -s "$SLEEP_BIN" "$LAB/bin/agy-wrapper"
+ln -s "$SLEEP_BIN" "$LAB/bin/tagy"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -193,6 +199,25 @@ for decoy in ompd comp; do
     || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated omp-containing command names stay ambiguous"
+
+# --- agy's bare binary name ---------------------------------------------------
+# agy (Antigravity CLI) runs as a single binary whose live process name is
+# exactly `agy` (verified, agy 1.1.28: a natively compiled ELF), with no
+# harness-identity marker of its own, so the anchored name is the only
+# liveness signal and the two decoys prove it never widens into a substring
+# match on either side.
+
+new_window agy "$LAB/bin/agy" 900
+wait_for_state "$SESSION:agy" alive \
+  || fail "agy's bare binary name must classify alive"
+pass "tmux liveness: agy's bare binary name classifies alive"
+
+for decoy in agy-wrapper tagy; do
+  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  wait_for_state "$SESSION:decoy-$decoy" ambiguous \
+    || fail "'$decoy' merely extends 'agy' and must not classify as a live agent pane"
+done
+pass "tmux liveness: unrelated agy-extending command names stay ambiguous"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that

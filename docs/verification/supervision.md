@@ -217,6 +217,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
+| agy | 1.1.28 | hooks.json `PreInvocation` / `PostInvocation` / `Stop` under the `fm-busy-state` key | Live tmux ship on `gemini-3.8-flash-low` (2026-09-09): the spawn seed `busy source=fm-spawn`, then `busy source=agy-hook event=pre-invocation`, then `idle source=agy-hook event=stop` at the natural end of the brief with the turn-end marker still touched. A mid-tool-call Escape interrupt fired neither closer, so a cancelled turn is closed by the control plane's own `idle source=fm-interrupt` record, exactly as for Claude. |
 
 Codex was probed two ways, both refused:
 
@@ -235,6 +236,7 @@ Deterministic entry points:
 ```sh
 tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
+tests/fm-agy-harness.test.sh
 tests/fm-crew-state.test.sh
 ```
 
