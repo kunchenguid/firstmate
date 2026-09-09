@@ -861,6 +861,16 @@ test_orca_composite_worktree_id_validation() {
     [ "$rc" -ne 0 ] || fail "Orca id with $label was accepted"
     assert_contains "$out" "$reason" "refusal for $label did not name its concrete reason"
     assert_contains "$out" "preserving task state" "refusal for $label did not preserve task state"
+    # A refused id is by definition malformed, so the refusal must still be
+    # self-diagnosing: it names the offending id and the worktree it failed
+    # against, rendered printable so a control byte cannot reach the terminal.
+    assert_contains "$out" "id '$(printf '%s' "$value" | tr '[:cntrl:]' '?')'" \
+      "refusal for $label did not name the offending Orca worktree id"
+    assert_contains "$out" "recorded worktree '$dir/worktree'" \
+      "refusal for $label did not name the recorded worktree"
+    case $out in
+      *[[:cntrl:]]*) fail "refusal for $label leaked a raw control byte into its message" ;;
+    esac
     [ -z "$FM_BACKEND_VALIDATED_TARGET" ] || fail "refused Orca id with $label still published a target"
   }
 
@@ -894,6 +904,8 @@ test_orca_composite_worktree_id_validation() {
     "$ORCA_REPO_ID::$(printf '%s\tx' "$dir/worktree")" "control character"
   refuses_orca_id "a carriage return in the path half" \
     "$ORCA_REPO_ID::$(printf '%s\rx' "$dir/worktree")" "control character"
+  refuses_orca_id "an ANSI escape in the path half" \
+    "$ORCA_REPO_ID::$(printf '%s\033[31mx' "$dir/worktree")" "control character"
 
   # The repo id half stays bound by the shared endpoint-atom rule, so widening
   # the composite format did not open the left half up.

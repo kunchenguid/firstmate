@@ -382,6 +382,13 @@ fm_backend_meta_exact_value() {  # <meta-file> <key>
   printf '%s' "$value"
 }
 
+# Refusals name the value they rejected, but an endpoint value only ever reaches
+# a refusal because it is malformed, so it can carry control bytes an operator's
+# terminal would interpret. Render it printable before quoting it into stderr.
+fm_backend_printable() {  # <value>
+  printf '%s' "$1" | tr '[:cntrl:]' '?'
+}
+
 fm_backend_endpoint_atom_valid() {  # <value>
   case "$1" in
     ''|*[!A-Za-z0-9._@%+-]*) return 1 ;;
@@ -560,7 +567,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       fi
       if ! fm_backend_orca_worktree_id_valid "$worktree_id" "$worktree"; then
-        echo "REFUSED: Orca worktree id for task $id $FM_BACKEND_ORCA_ID_REASON; preserving task state." >&2
+        echo "REFUSED: Orca worktree id for task $id $FM_BACKEND_ORCA_ID_REASON; id '$(fm_backend_printable "$worktree_id")', recorded worktree '$(fm_backend_printable "$worktree")'; preserving task state." >&2
         return 1
       fi
       window=$terminal
