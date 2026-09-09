@@ -87,6 +87,14 @@ remove_evidence() {  # <kind> <text> <file>
   mv "$pending" "$file"
 }
 
+remove_evidence_prefix() {  # <kind> <text-prefix> <file>
+  local kind=$1 text=$2 file=$3 prefix pending
+  prefix=$(printf 'evidence\t%s\t%s' "$kind" "$text")
+  pending=$(mktemp "$(dirname "$file")/.afk-return-evidence-filter.XXXXXX") || return 1
+  awk -v prefix="$prefix" 'index($0, prefix) != 1 { print }' "$file" > "$pending" 2>/dev/null || true
+  mv "$pending" "$file"
+}
+
 preserve_evidence() {  # <destination>
   local destination=$1
   [ -f "$GATE" ] || return 0
@@ -129,20 +137,29 @@ store_rows_load() {  # <since-epoch>
     || { STORE_ROWS=; return 1; }
 }
 
+STATUS_SCAN_ERROR=
 scan_open_blockers() {  # -> tab-separated blocker rows
-  local meta id status key verb summary clean_summary
+  local meta id status key verb summary clean_summary open
+  STATUS_SCAN_ERROR=
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta")
     id=${id%.meta}
     status="$STATE/$id.status"
-    [ -f "$status" ] || continue
+    if [ ! -f "$status" ] || [ ! -r "$status" ] || [ -L "$status" ]; then
+      STATUS_SCAN_ERROR=$status
+      return 1
+    fi
+    if ! open=$(status_open_decisions "$status"); then
+      STATUS_SCAN_ERROR=$status
+      return 1
+    fi
     while IFS="$(printf '\t')" read -r key verb summary; do
       [ "$verb" = blocked ] || continue
       clean_summary=$(printf '%s' "$summary" | clean_field)
       printf 'blocker\t%s\t%s\t%s\n' "$id" "$key" "$clean_summary"
     done <<EOF
-$(status_open_decisions "$status")
+$open
 EOF
   done
 }
@@ -261,6 +278,8 @@ strip_axi_help() {
 }
 
 MANDATE_COUNT=0
+HELD_READ_FAILED=0
+HELD_READ_PATH=
 render_mandate_record() {  # <record> [superseded-time]
   local record=$1 superseded=${2:-} id action object when stop text missing suffix="" words
   [ -z "$superseded" ] || suffix=" - superseded at $superseded"
@@ -313,7 +332,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
 
   # 1. health, first, always.
   printf 'Supervisor health:\n'
-  awk -F '\t' '$1 == "evidence" && ($2 == "health" || ($2 == "lifecycle" && $3 ~ /^outcome store unreadable/)) { print "  - " $3 }' "$evidence"
+  awk -F '\t' '$1 == "evidence" && ($2 == "health" || ($2 == "lifecycle" && ($3 ~ /^outcome store unreadable/ || $3 ~ /^status file unreadable:/))) { print "  - " $3 }' "$evidence"
 
   # 2. the mandate.
   printf 'Mandate clauses:\n'
@@ -339,6 +358,8 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
   # 3. waiting on the captain.
   printf 'Waiting on you:\n'
   count=0
+  HELD_READ_FAILED=0
+  HELD_READ_PATH=$(fm_backlog_file "$DATA" 2>/dev/null || printf '%s/backlog.md' "$DATA")
   if held=$(fm_backlog_row_list "$DATA" --state held --fields hold_kind,hold_reason,hold_until 2>&1); then
     rows=$(printf '%s\n' "$held" | strip_axi_help | grep -v '^count: ' | grep -v '^tasks\[0\]' || true)
     if printf '%s\n' "$held" | grep -q '^count: 0'; then
@@ -351,7 +372,8 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
   else
     held_err=$(printf '%s' "$held" | head -1 | clean_field)
     count=$((count + 1))
-    printf '  held listing unavailable: %s\n' "$held_err"
+    HELD_READ_FAILED=1
+    printf '  held listing unavailable: %s: %s; catch-up stays gated\n' "$HELD_READ_PATH" "$held_err"
   fi
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -458,8 +480,19 @@ return_reconcile() {
     append_evidence lifecycle 'outcome store unreadable, catch-up stays gated' "$evidence"
     lifecycle_ok=0
   fi
-  scan_open_blockers > "$blockers"
+  if scan_open_blockers > "$blockers"; then
+    remove_evidence_prefix lifecycle 'status file unreadable:' "$evidence" || lifecycle_ok=0
+  else
+    append_evidence lifecycle "status file unreadable: $STATUS_SCAN_ERROR; catch-up stays gated" "$evidence"
+    lifecycle_ok=0
+  fi
   render_return_brief "$evidence" "$blockers" "$since"
+  if [ "$HELD_READ_FAILED" -eq 1 ]; then
+    append_evidence lifecycle "held set unreadable: $HELD_READ_PATH; catch-up stays gated" "$evidence"
+    lifecycle_ok=0
+  else
+    remove_evidence_prefix lifecycle 'held set unreadable:' "$evidence" || lifecycle_ok=0
+  fi
   if [ "$lifecycle_ok" -ne 1 ] || grep -q "^blocker$(printf '\t')" "$blockers"; then
     write_gate "$evidence" "$blockers" || { rm -f "$evidence" "$blockers" "$drain_err"; return 1; }
     printf 'fm-afk-return: catch-up must finish before the captain request\n' >&2

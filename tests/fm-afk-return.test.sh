@@ -441,8 +441,8 @@ test_unreadable_outcome_store_keeps_catchup_gated() {
   pass "an unreadable outcome store gates catch-up until a successful reread"
 }
 
-test_failed_held_listing_is_not_reported_as_empty() {
-  local dir out waiting
+test_failed_held_listing_keeps_catchup_gated() {
+  local dir out waiting rc gate
   dir="$TMP_ROOT/held-list-failure"
   install_runner "$dir"
   mkdir -p "$dir/fakebin"
@@ -454,12 +454,48 @@ SH
   chmod +x "$dir/fakebin/tasks-axi"
   touch "$dir/home/state/.last-watcher-beat"
   : > "$dir/home/state/.fake-drain"
+  gate="$dir/home/state/.afk-return-catchup"
+  set +e
   out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-    "$dir/bin/fm-afk-return.sh" begin 2>&1) || fail "held-list failure should still render a return brief: $out"
+    "$dir/bin/fm-afk-return.sh" begin 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a failed held-set read should keep catch-up gated (rc=$rc): $out"
+  [ -f "$gate" ] || fail "a failed held-set read did not retain the return gate"
   waiting=$(printf '%s\n' "$out" | awk '/^Waiting on you:/{show=1} /^Tried and failed, or could not be fixed:/{show=0} show')
-  assert_contains "$waiting" 'held listing unavailable: synthetic held backlog failure' "the failed held listing was not disclosed"
+  assert_contains "$waiting" "held listing unavailable: $dir/home/data/backlog.md: synthetic held backlog failure; catch-up stays gated" "the failed held listing was not disclosed"
   assert_not_contains "$waiting" '(nothing)' "an unavailable held set was also reported as empty"
-  pass "an unavailable held listing is never presented as empty"
+  out=$(run_return "$dir" check) || fail "catch-up did not clear after the held-set reader recovered: $out"
+  assert_contains "$out" 'catch-up clear' "the recovered held-set reader did not clear catch-up"
+  [ ! -e "$gate" ] || fail "the recovered held-set reader left the return gate behind"
+  pass "an unavailable held listing gates catch-up until a successful reread"
+}
+
+test_unreadable_status_file_keeps_catchup_gated() {
+  local dir out rc gate status
+  dir="$TMP_ROOT/unreadable-status"
+  install_runner "$dir"
+  gate="$dir/home/state/.afk-return-catchup"
+  status="$dir/home/state/unreadable.status"
+  printf 'window=synthetic:fm-unreadable\nbackend=tmux\nkind=ship\n' > "$dir/home/state/unreadable.meta"
+  printf 'blocked [key=hidden]: hidden blocker\n' > "$dir/status-source"
+  ln -s "$dir/status-source" "$status"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "an unreadable status should keep catch-up gated (rc=$rc): $out"
+  [ -f "$gate" ] || fail "an unreadable status did not retain the return gate"
+  assert_contains "$out" "status file unreadable: $status; catch-up stays gated" "the partial brief did not name the unreadable status"
+  rm "$status"
+  : > "$status"
+  out=$(run_return "$dir" check) || fail "catch-up did not clear after the status file was repaired: $out"
+  assert_contains "$out" 'catch-up clear' "the repaired status did not clear catch-up"
+  assert_not_contains "$out" 'status file unreadable:' "the repaired status retained stale failure evidence"
+  [ ! -e "$gate" ] || fail "the repaired status left the return gate behind"
+  pass "an unreadable status gates catch-up until a successful reread"
 }
 
 test_return_guard_refuses_while_the_record_exists() {
@@ -523,7 +559,8 @@ test_check_retries_recorded_terminal_teardown
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_keeps_refresh_history
 test_unreadable_outcome_store_keeps_catchup_gated
-test_failed_held_listing_is_not_reported_as_empty
+test_failed_held_listing_keeps_catchup_gated
+test_unreadable_status_file_keeps_catchup_gated
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_without_a_record_reports_the_legacy_flag
