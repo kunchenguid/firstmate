@@ -1147,6 +1147,10 @@ fm_task_set_lock_path() {  # <state-dir>
 #
 # Everything else still fails closed: an unreadable or malformed binding, an
 # unreachable local parent, a cycle, and a chain deeper than the bound.
+# Failures normally leave stdout empty. With --print-unresolved-parent as the
+# second argument, an unenterable recorded local parent is printed on stdout
+# for the caller's diagnostic, but the status remains nonzero. Callers must
+# check that status before treating any output as a resolved root home.
 fm_firstmate_root_home() {
   local home=${1:-$FM_HOME} marker parent seen="|" depth=0
   home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
@@ -1175,9 +1179,6 @@ fm_firstmate_root_home() {
   printf '%s\n' "$home"
 }
 
-# One refusal line for fm_treehouse_project_lock_path, naming what it could not
-# resolve. Its callers capture that function's stdout through command
-# substitution, so the diagnosis has to leave by stderr to reach the operator.
 _fm_treehouse_lock_named() {  # <what-could-not-be-resolved> <path>
   printf 'fm_treehouse_project_lock_path: %s: %s\n' "$1" "$2" >&2
 }
@@ -1191,24 +1192,16 @@ _fm_treehouse_lock_named() {  # <what-could-not-be-resolved> <path>
 # separate clones of one origin share a single lock; an origin-less local-only
 # project falls back to its own worktree top instead of failing to resolve.
 #
-# Why every refusal below names the one thing it could not resolve.
-#
-# This function has eight failure exits, and every caller collapses all eight
-# into one sentence: "could not resolve the shared Treehouse project lock for
-# <project>". That sentence is true of all eight and diagnostic of none, and it
-# points the reader at the PROJECT even when the missing thing is in the HOME -
-# the root home itself, or its state directory. An investigation lost time to
-# exactly that and had to hand-patch this function to learn which exit fired
-# (data/fm-test-passes-alone-fails-in-lane, recommendation 2). So each exit
-# prints, to stderr, the concrete thing it could not resolve.
-#
-# The naming is the whole point of these lines; deleting it restores a silent
-# refusal that reads as a project fault. tests/fm-treehouse-lock-naming.test.sh
-# drives every exit and fails when a message stops naming its own cause.
-#
-# What is deliberately NOT changed here is the DECISION. In particular the root
-# state directory is named, not created: a root home that genuinely does not
-# exist must still be refused rather than conjured. Only the message changed.
+# Refusals leave stdout empty and name the failed resource on stderr, which
+# reaches the operator alongside the caller's context line even when stdout
+# is captured as the lock path. An unenterable recorded local parent is named
+# instead of the existing child home; other root-resolution failures name
+# FM_HOME. Success prints only the lock path, without a diagnostic.
+# The shared lock anchor remains <local-root-home>/state regardless of
+# FM_STATE_OVERRIDE. A missing home or root state directory remains a refusal;
+# resolving this lock must not create either directory to satisfy the guard.
+# tests/fm-treehouse-lock-naming.test.sh covers these diagnostic and refusal
+# invariants through the library interface and a spawn refusal.
 fm_treehouse_project_lock_path() {  # <project-dir>
   local project=$1 root origin identity hash top resolved
   [ -d "$project" ] || {

@@ -1,24 +1,6 @@
 #!/usr/bin/env bash
-# tests/fm-treehouse-lock-naming.test.sh - every failure exit of
-# fm_treehouse_project_lock_path (bin/fm-wake-lib.sh) must name the one thing it
-# could not resolve.
-#
-# The function has eight failure exits and every caller collapses all eight into
-# the same sentence, "could not resolve the shared Treehouse project lock for
-# <project>", which is true of all eight and diagnostic of none - and which
-# points the reader at the PROJECT even when the missing thing is in the HOME.
-# An investigation lost time to that and had to hand-patch the function to learn
-# which exit fired. These cases drive each exit through the library's public
-# shell interface and assert the message names its own cause and path.
-#
-# Each case is written to go red if the naming is removed: with the diagnostics
-# deleted the refusals fall back to silence, and every assertion below reads an
-# empty stderr. The success case is the other half of that pin - it asserts the
-# naming never leaks onto the path that resolves, so a message emitted
-# unconditionally cannot satisfy the file either.
-#
-# Only the messages are under test. What each exit REFUSES is unchanged and
-# deliberately so: the root state directory is named, not created.
+# tests/fm-treehouse-lock-naming.test.sh - regression coverage for the diagnostic
+# and refusal contract owned by fm_treehouse_project_lock_path in bin/fm-wake-lib.sh.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -247,10 +229,6 @@ done')
   pass "an identity that cannot be hashed is named in the refusal"
 }
 
-# The exit the investigation actually hit: a directory the same library creates
-# unconditionally at bin/fm-wake-lib.sh:16, absent here because the state root
-# was pointed elsewhere. The refusal must name the HOME's missing directory and
-# must not read as a fault in the project.
 test_missing_root_state_directory_is_named() {
   local dir out
   dir=$(make_case root-state-missing)
@@ -267,8 +245,7 @@ test_missing_root_state_directory_is_named() {
   pass "a missing root state directory is named, not created, and the project is not blamed"
 }
 
-# The other half of the mutation pin: a diagnostic printed unconditionally would
-# satisfy every case above, so the resolving path must stay silent.
+# Success coverage prevents diagnostics from polluting captured lock paths.
 test_resolved_lock_path_stays_silent() {
   local dir out
   dir=$(make_case resolves)
@@ -295,8 +272,7 @@ test_spawn_refusal_carries_the_named_cause() {
   fm_test_spawn_brief "$home" lock-naming-e2e
   fm_git_init_commit "$dir/project"
   fakebin=$(make_spawn_fakebin "$dir" orca)
-  # The divergence that produced the original defect: the state root points away
-  # from the home, so the library creates that directory and not the home's.
+  # Preserve the missing root-state fixture as resolve_lock does above.
   mkdir -p "$dir/state-elsewhere"
   rmdir "$home/state" 2>/dev/null || rm -rf "$home/state"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$dir/user-home" \
