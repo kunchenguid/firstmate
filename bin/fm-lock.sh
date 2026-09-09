@@ -22,6 +22,8 @@ mkdir -p "$STATE" 2>/dev/null || {
 # same identity contract.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 if [ "${1:-}" = "status" ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
@@ -29,7 +31,7 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  if fm_session_lock_pid_verified_alive "$STATE" "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
   exit 0
 fi
 
@@ -42,8 +44,6 @@ rm -f "$probe" 2>/dev/null || {
   echo "error: cannot clean session-lock publication probe; operate read-only until resolved" >&2
   exit 1
 }
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 CLAIM_LOCK="$STATE/.lock.acquire"
 CLAIM_LOCK_HELD=0
 release_claim_lock() {
@@ -58,10 +58,12 @@ trap 'exit 1' HUP INT TERM
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
   if [ "$old" = "$me" ]; then
+    fm_session_lock_renew_heartbeat "$STATE" "$me" 2>/dev/null \
+      || fm_session_lock_write_identity "$STATE" "$me" 2>/dev/null || true
     echo "lock acquired: harness pid $me"
     exit 0
   fi
-  if fm_harness_pid_alive "$old"; then
+  if fm_session_lock_pid_verified_alive "$STATE" "$old"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
@@ -86,11 +88,16 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  if [ "$old" != "$me" ] && fm_session_lock_pid_verified_alive "$STATE" "$old"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
 fi
+# Best effort, and deliberately before the lock write below: a reader that
+# observes the new pid in state/.lock finds matching identity evidence
+# already in place rather than racing this process for it. Never a hard
+# failure - the plain pid in state/.lock stays authoritative either way.
+fm_session_lock_write_identity "$STATE" "$me" 2>/dev/null || true
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1

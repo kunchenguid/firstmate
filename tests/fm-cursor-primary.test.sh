@@ -555,6 +555,35 @@ test_park_inert_without_session_lock() {
   pass "cursor park: inert when this session does not hold the home lock"
 }
 
+# Mirrors tests/fm-claude-stop-autoarm.test.sh's
+# test_reclaims_when_lock_pid_was_reused_by_another_harness for the Cursor
+# park's own copy of the identity-verified reclaim gate
+# (bin/fm-turnend-guard-cursor.sh). state/.lock names a live pid, but its
+# state/.lock-identity sidecar proves that live pid is not the process that
+# acquired the lock - simulating the OS reusing a dead session's pid for some
+# other unrelated live process. The park must reclaim it exactly like a dead
+# owner, not defer to it forever.
+test_park_reclaims_when_lock_pid_was_reused() {
+  local dir other out
+  dir=$(make_primary_dir "$TMP_ROOT/park-reused-pid")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  "$FAKE_CURSOR" -c 'sleep 60; :' &
+  other=$!
+  printf '%s\n' "$other" > "$dir/state/.lock"
+  printf 'owner_pid=%s\nstale unrelated process identity\n' "$other" > "$dir/state/.lock-identity"
+  out=$(printf '%s' "$CURSOR_PAYLOAD" | env -u PI_CODING_AGENT FM_HOME="$dir" FM_CURSOR_PARK_POLL=1 \
+    "$FAKE_CURSOR" -c '"$FM_HOME/bin/fm-turnend-guard-cursor.sh"' 2>/dev/null)
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  [ "$(cat "$dir/state/.lock" 2>/dev/null)" != "$other" ] \
+    || fail "park deferred to a reused pid it had disproving identity evidence for"
+  [ -e "$dir/state/arm-ran" ] || fail "park did not arm after reclaiming a reused-pid session lock"
+  [ "$(kind_of_followup "$out")" = watcher ] \
+    || fail "reclaiming a reused-pid lock must still deliver the actionable wake as a follow-up, got: $out"
+  pass "cursor park: a live pid proven to be a reused, unrelated process is reclaimed exactly like a dead owner"
+}
+
 test_park_stands_down_after_session_takeover() {
   local dir park_pid out waited budget_count
   dir=$(make_primary_dir "$TMP_ROOT/park-session-takeover")
@@ -699,6 +728,7 @@ test_park_inert_under_pi_coding_agent
 test_park_still_parks_with_pi_leak_and_cursor_identity
 test_park_stands_down_when_away_mode_activates_before_commit
 test_park_inert_without_session_lock
+test_park_reclaims_when_lock_pid_was_reused
 test_park_stands_down_after_session_takeover
 test_park_inert_in_child_worktree
 test_park_ignores_malformed_payload

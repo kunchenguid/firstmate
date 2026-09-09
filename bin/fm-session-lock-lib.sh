@@ -154,6 +154,187 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+# --- session-lock PID-reuse hardening ---------------------------------------
+#
+# state/.lock itself stays a bare one-line pid (bin/fm-lock.sh writes it), so
+# the dozen-plus call sites across the fleet that read it with a plain `cat`
+# expecting exactly one numeric line - bin/fm-sessionstart-run.sh,
+# bin/fm-bootstrap.sh, bin/fm-startup-network.sh, bin/fm-session-start.sh,
+# bin/fm-turnend-guard-cursor.sh's OWNER_ID, and others - never change. A
+# companion sidecar, state/.lock-identity, instead records the process-start
+# identity (fm_pid_identity, bin/fm-wake-lib.sh) of whichever pid state/.lock
+# currently names, mirroring the hardening bin/fm-wake-lib.sh already applies
+# to state/.watch.lock (fm_watcher_lock_matches_pid) and
+# state/.claude-autoarm-epoch (fm_autoarm_claim_open) - both of which record
+# and verify this same identity to survive a dead owner's pid being reused by
+# an unrelated live process. Format, four lines, written via tmp+rename:
+#   owner_pid=<pid>
+#   <fm_pid_identity output for that pid>
+#   token=<unique per-acquisition token>
+#   heartbeat_at=<unix seconds of the last renewal>
+# The sidecar is self-describing (it names the pid it is evidence for) so a
+# reader never depends on write ordering relative to state/.lock: a sidecar
+# whose owner_pid no longer matches the pid being tested is simply ignored,
+# exactly like a missing sidecar. Best effort throughout: a platform where
+# fm_pid_identity cannot resolve (no /proc, ps failure) leaves no evidence,
+# and every consumer treats missing evidence as neither proof of life nor
+# proof of death - it falls back to the plain fm_harness_pid_alive check that
+# was this decision's whole story before this sidecar existed.
+#
+# token distinguishes a genuine new acquisition from a heartbeat renewal of
+# the SAME ownership: fm_session_lock_write_identity mints a fresh one only
+# when a pid actually newly acquires state/.lock, and fm_session_lock_renew_
+# heartbeat, called from the routine per-turn touchpoints in
+# bin/fm-claude-stop-autoarm.sh and bin/fm-turnend-guard-cursor.sh, re-verifies
+# the recorded pid+identity first and then rewrites heartbeat_at alone,
+# carrying the same token forward untouched. A sidecar missing the token or
+# heartbeat_at fields (an older-format sidecar, or one written mid-upgrade)
+# is treated exactly like a missing sidecar for that field's own check: never
+# proof of death, only a disabled hardening layer.
+#
+# heartbeat_at backs a THIRD, independent reclaim condition alongside dead-pid
+# and identity-mismatch: fm_session_lock_pid_verified_alive also returns false
+# once heartbeat_at is older than FM_SESSION_LOCK_LEASE_GRACE (default 21600s
+# = 6h), so a genuinely alive, identity-matched owner that has stopped
+# renewing its lease - the rarer "hung but alive forever" failure mode, as
+# opposed to the dead/reused-pid failure this hardening was first built for -
+# is still eventually reclaimable. This grace is deliberately far looser than
+# FM_GUARD_GRACE (default 300s, the watcher-beacon and autoarm-epoch staleness
+# window used elsewhere in this fleet): a firstmate primary session is
+# long-lived and interactive with legitimately unbounded idle gaps between
+# turns, so copying the watcher/autoarm grace verbatim would false-evict a
+# session that is simply waiting on the next captain message. Nothing renews
+# the heartbeat while idle between turns; it renews at the next Stop/park
+# event, which is exactly the boundary a hung, unresponsive session can never
+# reach.
+
+# fm_session_lock_write_identity <state> <pid>
+# Best-effort: record process-start identity for <pid>, the pid about to hold
+# (or already holding) state/.lock, so a later reclaim decision elsewhere can
+# distinguish it from an unrelated process later assigned the same pid. Mints
+# a FRESH token: call this only for a genuine new acquisition, never to renew
+# an existing ownership's lease (fm_session_lock_renew_heartbeat does that,
+# preserving the token). Never a hard failure for the caller: bin/fm-lock.sh's
+# actual lock write is authoritative regardless of whether this best-effort
+# sidecar succeeds.
+fm_session_lock_write_identity() {  # <state> <pid>
+  local state=$1 pid=$2 identity now token tmp
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
+  now=$(date +%s 2>/dev/null) || now=0
+  token="${pid}.${now}.${BASHPID:-$$}.${RANDOM:-0}.${RANDOM:-0}"
+  tmp="$state/.lock-identity.tmp.${BASHPID:-$$}"
+  if ! { printf 'owner_pid=%s\n%s\ntoken=%s\nheartbeat_at=%s\n' "$pid" "$identity" "$token" "$now"; } > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$state/.lock-identity" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+# fm_session_lock_renew_heartbeat <state> <pid>
+# Renew the lease on an ownership that already exists: re-derive the sidecar's
+# own recorded owner_pid, identity, and token - never trust a caller-supplied
+# value for any of them - and refuse unless they still describe <pid> exactly
+# as it stands right now, then rewrite only heartbeat_at, carrying the same
+# token forward. Called from the routine per-turn touchpoints (Claude Stop,
+# Cursor park) of a session that already owns its lock, so a healthy, still-
+# owning session is never evicted by FM_SESSION_LOCK_LEASE_GRACE merely for
+# having gone quiet between turns.
+fm_session_lock_renew_heartbeat() {  # <state> <pid>
+  local state=$1 pid=$2 sidecar recorded_owner recorded_identity token current_identity now tmp
+  sidecar="$state/.lock-identity"
+  [ -r "$sidecar" ] || return 1
+  recorded_owner=$(sed -n '1s/^owner_pid=//p' "$sidecar" 2>/dev/null || true)
+  [ "$recorded_owner" = "$pid" ] || return 1
+  recorded_identity=$(sed -n '2p' "$sidecar" 2>/dev/null || true)
+  [ -n "$recorded_identity" ] || return 1
+  token=$(sed -n '3s/^token=//p' "$sidecar" 2>/dev/null || true)
+  [ -n "$token" ] || return 1
+  current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ "$current_identity" = "$recorded_identity" ] || return 1
+  now=$(date +%s 2>/dev/null) || return 1
+  tmp="$state/.lock-identity.tmp.${BASHPID:-$$}"
+  if ! { printf 'owner_pid=%s\n%s\ntoken=%s\nheartbeat_at=%s\n' "$pid" "$recorded_identity" "$token" "$now"; } > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$sidecar" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+# fm_session_lock_release <state> <pid>
+# Token-gated release for a normal exit: remove state/.lock and its identity
+# sidecar only when <pid> is THIS process (fm_current_pid) and the sidecar's
+# own recorded owner_pid, identity, and token still describe it - never a
+# bare pid-number check, so a late release call from a process that has
+# already been superseded (its old pid reused, or a successor already
+# reclaimed and rewrote the sidecar with a fresh token) can never remove a
+# successor's live lock. Refuses on any mismatch, a missing sidecar, or a
+# sidecar with no token (an older-format record this process itself could
+# not have written). No call site invokes this yet: this harness surface has
+# no session-exit lifecycle hook to call it from, so it is the primitive
+# alone, tested in isolation, pending that separate hook-wiring change.
+fm_session_lock_release() {  # <state> <pid>
+  local state=$1 pid=$2 self sidecar recorded_owner recorded_identity token current_identity lock_pid
+  fm_current_pid self || return 1
+  [ "$self" = "$pid" ] || return 1
+  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  [ "$lock_pid" = "$pid" ] || return 1
+  sidecar="$state/.lock-identity"
+  [ -r "$sidecar" ] || return 1
+  recorded_owner=$(sed -n '1s/^owner_pid=//p' "$sidecar" 2>/dev/null || true)
+  [ "$recorded_owner" = "$pid" ] || return 1
+  recorded_identity=$(sed -n '2p' "$sidecar" 2>/dev/null || true)
+  [ -n "$recorded_identity" ] || return 1
+  token=$(sed -n '3s/^token=//p' "$sidecar" 2>/dev/null || true)
+  [ -n "$token" ] || return 1
+  current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ "$current_identity" = "$recorded_identity" ] || return 1
+  rm -f "$sidecar" 2>/dev/null
+  rm -f "$state/.lock" 2>/dev/null
+  return 0
+}
+
+# fm_session_lock_pid_verified_alive <state> <pid>
+# The PID-reuse-hardened replacement for a bare fm_harness_pid_alive check at
+# a reclaim decision. True when <pid> is alive AND either no identity
+# evidence exists for it (a missing sidecar, or one whose recorded owner_pid
+# does not match <pid> - a stale leftover from a prior owner) - the same
+# conservative "still defer to it" answer fm_harness_pid_alive alone always
+# gave - or the recorded identity for <pid> matches its CURRENT live
+# identity AND its recorded lease has not expired. False when <pid> is dead,
+# when identity evidence for exactly this pid is present and proves a
+# mismatch (a reused pid), OR when heartbeat_at is present and older than
+# FM_SESSION_LOCK_LEASE_GRACE - a live, identity-matched owner that has
+# stopped renewing its lease is still eventually reclaimable. Missing
+# identity OR heartbeat evidence never turns a live pid into a reclaimable
+# one - each missing field only disables that field's own hardening, the
+# same "never block on absent evidence" contract bin/fm-wake-lib.sh's legacy
+# autoarm-abandonment proof uses.
+fm_session_lock_pid_verified_alive() {  # <state> <pid>
+  local state=$1 pid=$2 sidecar recorded_owner recorded_identity current_identity
+  local heartbeat_at grace now
+  fm_harness_pid_alive "$pid" || return 1
+  sidecar="$state/.lock-identity"
+  [ -r "$sidecar" ] || return 0
+  recorded_owner=$(sed -n '1s/^owner_pid=//p' "$sidecar" 2>/dev/null || true)
+  [ "$recorded_owner" = "$pid" ] || return 0
+  recorded_identity=$(sed -n '2p' "$sidecar" 2>/dev/null || true)
+  [ -n "$recorded_identity" ] || return 0
+  current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 0
+  [ -n "$current_identity" ] || return 0
+  [ "$current_identity" = "$recorded_identity" ] || return 1
+  heartbeat_at=$(sed -n '4s/^heartbeat_at=//p' "$sidecar" 2>/dev/null || true)
+  case "$heartbeat_at" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  grace=${FM_SESSION_LOCK_LEASE_GRACE:-21600}
+  case "$grace" in ''|*[!0-9]*) grace=21600 ;; esac
+  now=$(date +%s 2>/dev/null) || return 0
+  [ $((now - heartbeat_at)) -lt "$grace" ]
+}
+
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
 # of the current process: this script runs inside the session that owns the
 # home's fleet lock. Membership is the honest test of that question, because the

@@ -1567,7 +1567,8 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   for i in 1 2 3 4; do
     out=$(run_integrated_autoarm "$dir"); status=$?
     expect_code 2 "$status" "failed epoch $i must retain the automatic retry handoff"
-    [ -z "$out" ] || fail "failed epoch $i repeated the operator notice: $out"
+    assert_not_contains "$out" "automatic supervision mechanism is broken" "failed epoch $i repeated the operator notice"
+    assert_contains "$out" "no action needed, silent automatic retry in progress" "a forced continuation with no real content must carry the silent-retry directive, not empty output"
     guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
     if [ "$i" -lt 4 ]; then
       expect_code 2 "$guard_status" "failed epoch $i must consume a bounded blind-stop block"
@@ -1632,7 +1633,7 @@ test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
   out=$(run_hook_claude "$dir" false); status=$?
   expect_code 2 "$status" "a healthy guard must continue when the episode reset lock is busy"
-  [ -z "$out" ] || fail "guard recovery contention produced output: $out"
+  assert_contains "$out" "no action needed, silent automatic retry in progress" "a forced continuation with no real content must carry the silent-retry directive, not empty output"
   assert_present "$dir/state/.turnend-claude-blocks" "guard contention partially cleared the block budget"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "guard contention partially cleared the failure notice"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "guard contention partially cleared the attended alarm"

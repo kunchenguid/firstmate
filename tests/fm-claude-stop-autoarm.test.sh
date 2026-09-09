@@ -277,6 +277,35 @@ test_reclaims_stale_session_lock_before_arming() {
   pass "auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming"
 }
 
+# The captain-reported shape specifically: an owner killed by SIGKILL (the
+# signal an OOM killer sends, and the one signal that never runs an exit
+# trap). Recovery here proves it never depended on the dying process cleaning
+# up after itself - every liveness proof in this chain is a positive kill -0
+# check, never a leftover-cleanup assumption.
+test_reclaims_session_lock_after_owner_is_sigkilled() {
+  local dir out status owner_pid expected_owner actual_owner
+  dir=$(make_primary_dir "$TMP_ROOT/sigkilled-owner")
+  : > "$dir/state/task.meta"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner_pid=$!
+  printf '%s\n' "$owner_pid" > "$dir/state/.lock"
+  kill -9 "$owner_pid" 2>/dev/null
+  wait "$owner_pid" 2>/dev/null || true
+  kill -0 "$owner_pid" 2>/dev/null && fail "test setup did not actually kill the fixture owner"
+  write_arm_fixture "$dir" actionable
+  out=$(printf '%s\n' '{"session_id":"sigkilled"}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/expected-owner"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1); status=$?
+  expect_code 2 "$status" "a SIGKILLed session owner must be reclaimed before the actionable rewake"
+  expected_owner=$(cat "$dir/state/expected-owner")
+  actual_owner=$(cat "$dir/state/.lock")
+  [ "$actual_owner" = "$expected_owner" ] || fail "SIGKILLed session lock was not claimed by the current harness: expected $expected_owner, got $actual_owner"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after reclaiming a SIGKILLed session lock"
+  pass "auto-arm: a SIGKILLed (OOM-shaped) session owner is recovered without depending on any exit-time cleanup"
+}
+
 test_inert_when_lock_held_by_other_harness() {
   local dir other out status owner_after
   dir=$(make_primary_dir "$TMP_ROOT/other-lock")
@@ -296,6 +325,99 @@ test_inert_when_lock_held_by_other_harness() {
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed while another session owned the lock"
   [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch while another session owned the lock"
   pass "auto-arm: inert without arm, rewake, or lock replacement when another live harness owns the home"
+}
+
+# The reported failure: a session's harness pid dies and state/.lock still
+# names it; that exact pid number is later reused by some OTHER, wholly
+# unrelated live harness process (plausible on a host running many concurrent
+# agent processes). Before the identity sidecar, this was byte-for-byte
+# indistinguishable from test_inert_when_lock_held_by_other_harness above -
+# fm_harness_pid_alive alone cannot tell "still the genuine owner" from
+# "coincidentally reused by someone else" - so automatic recovery refused
+# forever. state/.lock-identity proves the difference: it names the pid that
+# actually acquired the lock and, when live evidence for that same pid no
+# longer matches, the hook must reclaim it exactly like a dead owner.
+test_reclaims_when_lock_pid_was_reused_by_another_harness() {
+  local dir other out status owner_after
+  dir=$(make_primary_dir "$TMP_ROOT/reused-pid-lock")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  other=$!
+  printf '%s\n' "$other" > "$dir/state/.lock"
+  # Simulate the reuse: identity evidence for this exact live pid that proves
+  # it is NOT the process that originally acquired the lock (the same
+  # technique tests/fm-turnend-guard.test.sh uses for the autoarm epoch claim
+  # in test_hook_claude_mode_blocks_on_pid_reused_arming_claim).
+  printf 'owner_pid=%s\nstale unrelated process identity\n' "$other" > "$dir/state/.lock-identity"
+  out=$(printf '%s\n' '{"session_id":"s"}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/expected-owner"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1); status=$?
+  owner_after=$(cat "$dir/state/.lock")
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 2 "$status" "a live pid proven by its identity sidecar to be a different, reused process must be reclaimed"
+  [ "$owner_after" != "$other" ] || fail "hook deferred to a reused pid it had disproving identity evidence for"
+  [ "$owner_after" = "$(cat "$dir/state/expected-owner")" ] || fail "reused-pid lock was not claimed by the current harness"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after reclaiming a reused-pid session lock"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "reused-pid recovery must record outcome=rewake"
+  pass "auto-arm: a live pid proven to be a reused, unrelated process is reclaimed exactly like a dead owner"
+}
+
+# Same reused-pid shape, but now the disputed pid genuinely IS still the
+# original live owner (no identity evidence at all recorded for it) racing a
+# separate stale/dead-pid reclaim attempt from a second session. Exactly one
+# claimant may win, and the live genuine owner must never be the one
+# displaced - the "old-owner cleanup cannot remove a successor's lock"
+# requirement, proven here at the session-lock layer via two real concurrent
+# fm-lock.sh invocations (mirrors test_single_flight_admits_exactly_one_owner
+# above, which proves the analogous property for the autoarm epoch layer).
+test_concurrent_stale_lock_reclaim_yields_exactly_one_owner() {
+  local dir dead p1 p2 i rc1 rc2 out1 out2 winner
+  dir=$(make_primary_dir "$TMP_ROOT/concurrent-reclaim")
+  dead=999999
+  while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+  printf '%s\n' "$dead" > "$dir/state/.lock"
+  # Each contender stays alive (via the trailing sleep) for the whole
+  # exchange, so the loser's "another live session holds it" check lands
+  # against a genuinely live winner rather than racing the winner's own
+  # process exit - the same reason the other-harness fixtures above keep
+  # their fake harness process alive with `sleep 60; :`.
+  "$FAKE_CLAUDE" -c '
+    FM_HOME="$1"
+    out=$("$FM_HOME/bin/fm-lock.sh" 2>&1); echo $? > "$FM_HOME/state/rc1"; printf "%s\n" "$out" > "$FM_HOME/state/out1"
+    sleep 30
+  ' _ "$dir" &
+  p1=$!
+  "$FAKE_CLAUDE" -c '
+    FM_HOME="$1"
+    out=$("$FM_HOME/bin/fm-lock.sh" 2>&1); echo $? > "$FM_HOME/state/rc2"; printf "%s\n" "$out" > "$FM_HOME/state/out2"
+    sleep 30
+  ' _ "$dir" &
+  p2=$!
+  i=0
+  while [ ! -e "$dir/state/rc1" ] || [ ! -e "$dir/state/rc2" ]; do
+    i=$((i + 1))
+    [ "$i" -lt 100 ] || break
+    sleep 0.1
+  done
+  rc1=$(cat "$dir/state/rc1" 2>/dev/null || echo unset)
+  rc2=$(cat "$dir/state/rc2" 2>/dev/null || echo unset)
+  out1=$(cat "$dir/state/out1" 2>/dev/null || true)
+  out2=$(cat "$dir/state/out2" 2>/dev/null || true)
+  kill "$p1" "$p2" 2>/dev/null || true
+  wait "$p1" 2>/dev/null || true
+  wait "$p2" 2>/dev/null || true
+  { [ "$rc1" = 0 ] && [ "$rc2" = 0 ]; } && fail "both concurrent reclaim attempts reported success: out1=$out1 out2=$out2"
+  { [ "$rc1" = 0 ] || [ "$rc2" = 0 ]; } || fail "neither concurrent reclaim attempt succeeded: rc1=$rc1 out1=$out1 rc2=$rc2 out2=$out2"
+  if [ "$rc1" = 0 ]; then winner=$out1; else winner=$out2; fi
+  case "$winner" in
+    'lock acquired: harness pid '*) : ;;
+    *) fail "winning reclaim did not report a clean acquisition: $winner" ;;
+  esac
+  pass "auto-arm: two concurrent reclaim attempts over one dead session lock yield exactly one owner, and the loser never steals the winner's fresh claim"
 }
 
 test_inert_when_afk() {
@@ -455,7 +577,8 @@ test_failed_cycles_notify_once_and_keep_retrying() {
   expect_code 2 "$status1" "the first exhausted failure must notify"
   expect_code 2 "$status2" "a consecutive exhausted failure must force another Stop-owned retry"
   [ -n "$out1" ] || fail "the first exhausted failure did not notify"
-  [ -z "$out2" ] || fail "consecutive exhausted failure repeated an operator notice: $out2"
+  assert_not_contains "$out2" "automatic supervision mechanism is broken" "consecutive exhausted failure repeated an operator notice"
+  assert_contains "$out2" "no action needed, silent automatic retry in progress" "a forced continuation with no real content must carry the silent-retry directive, not empty output"
   [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 4 ] || fail "each cycle must retain bounded automatic retries"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "failure episode marker was not recorded"
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "second failure must record failed-suppressed"
@@ -484,7 +607,8 @@ test_failure_notice_marker_write_refuses_delivery_and_retries() {
   [ "$(epoch_field "$dir" epoch)" -gt "$gen1" ] || fail "the successor did not supersede the refused terminal entry"
   assert_present "$marker" "the successful successor did not record the failure notice"
   assert_contains "$out2" "automatic supervision mechanism is broken" "the successful successor did not deliver the failure notice"
-  [ -z "$out3" ] || fail "the firing after the successful marker commit repeated the notice: $out3"
+  assert_not_contains "$out3" "automatic supervision mechanism is broken" "the firing after the successful marker commit repeated the notice"
+  assert_contains "$out3" "no action needed, silent automatic retry in progress" "a forced continuation with no real content must carry the silent-retry directive, not empty output"
   delivered=$(printf '%s\n%s\n' "$out2" "$out3" | grep -c 'automatic supervision mechanism is broken' || true)
   [ "$delivered" -eq 1 ] || fail "the restored episode delivered $delivered failure notices instead of one"
   pass "auto-arm: marker-write refusal defers delivery until one successor commits the notice"
@@ -566,7 +690,8 @@ test_positive_recovery_budget_contention_preserves_episode() {
   printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 2 "$status" "a healthy auto-arm must continue when the episode reset lock is busy"
-  [ -z "$out" ] || fail "recovery contention produced an operator notice: $out"
+  assert_not_contains "$out" "automatic supervision mechanism is broken" "recovery contention produced an operator notice"
+  assert_contains "$out" "no action needed, silent automatic retry in progress" "a forced continuation with no real content must carry the silent-retry directive, not empty output"
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "recovery contention must not record ordinary clean recovery"
   assert_present "$dir/state/.turnend-claude-blocks" "recovery contention partially cleared the block budget"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "recovery contention partially cleared the failure notice"
@@ -1184,10 +1309,47 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
+# Same reused-pid shape as test_reclaims_when_lock_pid_was_reused_by_another_harness,
+# but exercised through the `status` diagnostic subcommand directly: this is
+# the human-facing command someone investigating a stuck lock would run, and
+# it must report the identical hardened verdict as the acquire/reclaim path.
+test_fm_lock_status_reclaims_reused_pid_with_mismatched_identity() {
+  local dir other out
+  dir=$(make_primary_dir "$TMP_ROOT/lock-status-reused-pid")
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  other=$!
+  printf '%s\n' "$other" > "$dir/state/.lock"
+  printf 'owner_pid=%s\nstale unrelated process identity\n' "$other" > "$dir/state/.lock-identity"
+  out=$(bash "$dir/bin/fm-lock.sh" status 2>&1)
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  assert_contains "$out" "stale" "fm-lock.sh status must reclaim a live pid whose identity sidecar proves reuse"
+  pass "fm-lock: status reports a reused-pid lock as stale despite the pid still being alive"
+}
+
+# Control case for the reused-pid test above: identity evidence that matches
+# the live pid must still report it as genuinely held. Acquiring for real
+# first (rather than hand-writing state/.lock) is what makes fm-lock.sh write
+# the matching state/.lock-identity sidecar, exactly as the acquire path does
+# in production.
+test_fm_lock_status_reports_live_owner_with_matching_identity() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/lock-status-live-owner")
+  out=$(FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    "$FM_HOME/bin/fm-lock.sh" status
+  ' 2>&1)
+  assert_contains "$out" "held by live harness pid" "fm-lock.sh status must report a genuinely live, identity-matched owner as held"
+  pass "fm-lock: status reports a live owner with matching identity as held"
+}
+
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
+test_reclaims_when_lock_pid_was_reused_by_another_harness
+test_concurrent_stale_lock_reclaim_yields_exactly_one_owner
+test_reclaims_session_lock_after_owner_is_sigkilled
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
@@ -1225,3 +1387,5 @@ test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
 test_fm_lock_status_still_works_with_shared_lib
+test_fm_lock_status_reclaims_reused_pid_with_mismatched_identity
+test_fm_lock_status_reports_live_owner_with_matching_identity

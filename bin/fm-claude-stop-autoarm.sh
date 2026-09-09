@@ -11,10 +11,14 @@
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
 #   - Identity: only when THIS session's harness ancestor holds state/.lock.
-#     When an existing numeric owner fails the shared harness-liveness predicate,
-#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#     When an existing numeric owner fails the shared, PID-reuse-hardened
+#     liveness predicate (fm_session_lock_pid_verified_alive in
+#     bin/fm-session-lock-lib.sh - dead, or alive but proven by its
+#     state/.lock-identity sidecar to be an unrelated process that inherited
+#     the pid), the hook delegates guarded recovery to bin/fm-lock.sh and then
+#     re-verifies ownership. A live identity-verified owner, missing lock,
+#     malformed lock, or unresolved ancestry remains inert, so a competing
+#     session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -117,19 +121,29 @@ fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
-# A prior session may have died after leaving its numeric harness pid in .lock.
-# Use the shared liveness predicate to recognize only that stale-owner case.
-# Defer the mutating claim until after the unchanged AFK and need gates, so an
-# idle or away home remains byte-for-byte inert. Missing or malformed locks are
-# uncertainty rather than stale-owner evidence and remain inert.
+# A prior session may have died after leaving its numeric harness pid in .lock,
+# and that pid may since have been reused by an unrelated live harness process.
+# Use the shared, identity-verified predicate (fm_session_lock_pid_verified_alive)
+# to recognize both the dead-pid and the reused-pid case as stale-owner
+# evidence, while a live pid whose identity still matches what acquired the
+# lock is never treated as stale. Defer the mutating claim until after the
+# unchanged AFK and need gates, so an idle or away home remains byte-for-byte
+# inert. Missing or malformed locks are uncertainty rather than stale-owner
+# evidence and remain inert.
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$LOCK_PID" in
     ''|*[!0-9]*) exit 0 ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_session_lock_pid_verified_alive "$STATE" "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
+else
+  # Renew this owning session's lease on every firing: Stop fires at every
+  # turn end regardless of activity, which is exactly the routine touchpoint
+  # FM_SESSION_LOCK_LEASE_GRACE relies on to tell a healthy quiet session
+  # apart from one that has genuinely stopped responding.
+  fm_session_lock_renew_heartbeat "$STATE" "$(cat "$STATE/.lock" 2>/dev/null || true)" >/dev/null 2>&1 || true
 fi
 
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
@@ -276,6 +290,7 @@ if [ "$HEALTHY" -eq 1 ]; then
   if autoarm_commit failed-suppressed; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     [ -e "$FAILURE_ALARM" ] && exit 0
+    printf 'firstmate watcher auto-arm: no action needed, silent automatic retry in progress - do not produce a user-facing report for this continuation.\n' >&2
     exit 2
   fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
@@ -334,6 +349,7 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
 fi
 if autoarm_commit failed-suppressed; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  printf 'firstmate watcher auto-arm: no action needed, silent automatic retry in progress - do not produce a user-facing report for this continuation.\n' >&2
   exit 2
 fi
 [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
