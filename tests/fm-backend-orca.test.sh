@@ -1334,7 +1334,7 @@ test_orca_worktree_id_validator_structural_boundaries() {
     do
       ! fm_backend_orca_worktree_id_valid "$value" \
         || fail "validator accepted the unsafe Orca worktree id '$value'"
-    done )
+    done ) || fail "fm_backend_orca_worktree_id_valid misclassified a structural boundary case"
   pass "fm_backend_orca_worktree_id_valid: accepts printable composite ids and refuses structural corruption"
 }
 
