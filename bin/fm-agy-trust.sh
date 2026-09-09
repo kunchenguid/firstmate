@@ -85,13 +85,52 @@ STORE="$STORE_DIR/settings.json"
 mkdir -p "$STORE_DIR" 2>/dev/null || true
 [ -d "$STORE_DIR" ] || refuse "Antigravity config directory '$STORE_DIR' does not exist and could not be created"
 LOCK="$STORE_DIR/.fm-trust.lock"
+# Stale-proof mutual exclusion for concurrent spawns. The lock directory
+# carries an owner file with "<pid>:<epoch>"; mkdir stays the single atomic
+# arbiter, while a contender breaks only a lock whose owner pid is dead or
+# whose timestamp is older than a legitimate hold can ever be (a hold is a
+# single read-modify-rename of one small file). A SIGKILLed or OOM-killed
+# holder therefore blocks the next writer for at most one grace window rather
+# than permanently, and a live holder is never broken: only a dead pid or an
+# expired timestamp authorizes removal.
+lock_owner() { cat "$LOCK/owner" 2>/dev/null; }
+lock_stale() {  # <owner-line> -> 0 when the lock may be broken
+  local owner=$1 opid ots now
+  case "$owner" in
+    *:*) opid=${owner%%:*}; ots=${owner##*:} ;;
+    *) return 0 ;;
+  esac
+  case "$opid" in ''|*[!0-9]*) return 0 ;; esac
+  case "$ots" in ''|*[!0-9]*) return 0 ;; esac
+  if kill -0 "$opid" 2>/dev/null; then
+    now=$(date +%s)
+    [ $((now - ots)) -gt 60 ] && return 0
+    return 1
+  fi
+  return 0
+}
 lock_attempt=0
-until mkdir "$LOCK" 2>/dev/null; do
+while :; do
+  if mkdir "$LOCK" 2>/dev/null; then
+    printf '%s:%s\n' "$$" "$(date +%s)" > "$LOCK/owner" 2>/dev/null || {
+      rmdir "$LOCK" 2>/dev/null || true
+      refuse "could not record trust lock ownership in '$LOCK'"
+    }
+    break
+  fi
+  owner=$(lock_owner)
+  if [ -n "$owner" ] && ! lock_stale "$owner"; then
+    lock_attempt=$((lock_attempt + 1))
+    [ "$lock_attempt" -lt 100 ] || refuse "timed out waiting for '$LOCK'"
+    sleep 0.1
+    continue
+  fi
+  rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK" 2>/dev/null || true
   lock_attempt=$((lock_attempt + 1))
-  [ "$lock_attempt" -lt 100 ] || refuse "timed out waiting for '$LOCK'"
+  [ "$lock_attempt" -lt 200 ] || refuse "timed out waiting for '$LOCK'"
   sleep 0.1
 done
-trap 'rmdir "$LOCK"' EXIT
+trap 'rm -f "$LOCK/owner" 2>/dev/null; rmdir "$LOCK" 2>/dev/null' EXIT
 trap 'exit 1' HUP INT TERM
 if [ -e "$STORE" ]; then
   [ -f "$STORE" ] || refuse "'$STORE' is not a regular file"

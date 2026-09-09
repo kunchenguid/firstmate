@@ -1115,7 +1115,12 @@ crew_dispatch_validate() {
       elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "rovo" then (["low","medium","high","max"] | index($e))
-      elif $h == "agy" then (["low","medium","high"] | index($e))
+      # agy accepts the full shared vocabulary in profiles even though its
+      # native --effort flag covers only low|medium|high: the spawn records
+      # xhigh/max in task metadata and omits the flag per the record-and-omit
+      # contract, so rejecting them here would forbid a launch the spawn
+      # adapter intentionally accepts.
+      elif $h == "agy" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
       else true
       end;

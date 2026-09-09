@@ -379,6 +379,29 @@ test_agy_concurrent_trust() {
   pass "agy concurrent trust retains every workspace"
 }
 
+test_agy_stale_trust_lock_is_broken() {
+  local dir proj wt home store out
+  dir="$TMP_ROOT/stale-lock"
+  proj="$dir/project"
+  wt="$dir/wt"
+  home="$dir/home"
+  mkdir -p "$home"
+  fm_git_worktree "$proj" "$wt" "wt-stale"
+  store="$home/.gemini/antigravity-cli"
+  mkdir -p "$store"
+  # A lock whose owner can never return: a dead pid with an ancient stamp, the
+  # shape a SIGKILLed or OOM-killed helper leaves behind.
+  mkdir -p "$store/.fm-trust.lock"
+  printf '999999999:1\n' > "$store/.fm-trust.lock/owner"
+  out=$(HOME="$home" "$ROOT/bin/fm-agy-trust.sh" "$wt" "$proj" 2>&1) \
+    || fail "trust behind a stale lock refused: $out"
+  assert_contains "$out" "trusted: " "stale-lock trust lacked its registration line"
+  jq -e --arg wt "$wt" '.trustedWorkspaces | index($wt)' "$store/settings.json" >/dev/null \
+    || fail "trust behind a stale lock lost the worktree entry"
+  assert_absent "$store/.fm-trust.lock" "a broken stale lock was left behind"
+  pass "agy breaks a dead-owner trust lock instead of wedging behind it"
+}
+
 test_agy_refused_teardown_preserves_wiring() {
   local rec id=agy-refuse-z11 mode out rc hooks state
   for mode in created merged; do
@@ -424,6 +447,7 @@ test_agy_refused_teardown_preserves_wiring
 test_agy_tracked_hooks_refused
 test_agy_merge_retains_worker_edits
 test_agy_concurrent_trust
+test_agy_stale_trust_lock_is_broken
 
 test_agy_launch_carries_brief_with_native_model_effort
 test_agy_effort_xhigh_is_recorded_but_omitted
