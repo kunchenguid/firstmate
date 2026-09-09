@@ -916,8 +916,17 @@ exit 0
 SH
   chmod +x "$fakebin/treehouse"
   printf 'FMX_PAIRING_TOKEN=tok-missing\n' > "$home/.env"
-  out=$(PATH="$fakebin" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
-    "$BASH" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  # fakebin stays first so its stubs shadow host tools, but the host PATH must
+  # remain for system utilities: bootstrap runs the Slack-board migration
+  # (bin/fm-bootstrap.sh:1648), whose lock and wake libraries need coreutils a
+  # fakebin-only PATH cannot enumerate. jq alone is hidden through the
+  # hermetic command seam, scoped to this invocation so later cases still see
+  # the host jq.
+  out=$(
+    fm_test_hide_host_commands "$fakebin" jq
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+      "$BASH" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
+  )
   assert_contains "$out" "MISSING: jq" "bootstrap must report missing jq when X mode is opted in"
   assert_not_contains "$out" "FMX: X mode on" "bootstrap must not announce X mode when a dependency is missing"
   assert_absent "$home/state/x-watch.check.sh" "missing jq must not arm the check shim"

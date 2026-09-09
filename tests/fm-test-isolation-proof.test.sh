@@ -235,7 +235,7 @@ test_list_exclusions_documents_reasons() {
 }
 
 test_family_map_labels_this_contract() {
-  local fam safe safe_max scheduled_first
+  local fam safe safe_max scheduled triage_line arm_line
   fam=$("$RUNNER" --list --family pure-contract-unit)
   printf '%s\n' "$fam" | grep -Fq 'tests/fm-test-isolation-proof.test.sh' \
     || fail "fm-test-isolation-proof.test.sh must map to pure-contract-unit"
@@ -248,9 +248,18 @@ test_family_map_labels_this_contract() {
   [ "$safe_max" -eq 4 ] || fail "runner exposed the wrong watcher family worker cap: $safe_max"
   safe_max=$("$RUNNER" --concurrent-safe-family-jobs-max pure-contract-unit)
   [ "$safe_max" -eq 4 ] || fail "runner exposed the wrong contract-unit family worker cap: $safe_max"
-  scheduled_first=$("$RUNNER" --list-scheduled --family watcher-wake-lock | head -n 1)
-  [ "$scheduled_first" = tests/fm-watch-triage.test.sh ] \
-    || fail "runner scheduled the watcher family out of longest-hint order: $scheduled_first"
+  # Longest-hint-first is the contract; an exact first-script pin is stale by
+  # design because an unhinted family member takes the conservative default
+  # weight (docs/fm-test-portable-shards.md) and legitimately outranks every
+  # measured hint. Prove descending-weight order on a widely separated hinted
+  # pair instead: fm-watch-triage must schedule before fm-watch-arm.
+  scheduled=$("$RUNNER" --list-scheduled --family watcher-wake-lock)
+  triage_line=$(printf '%s\n' "$scheduled" | grep -n -Fx 'tests/fm-watch-triage.test.sh' | cut -d: -f1)
+  arm_line=$(printf '%s\n' "$scheduled" | grep -n -Fx 'tests/fm-watch-arm.test.sh' | cut -d: -f1)
+  [ -n "$triage_line" ] || fail "runner dropped fm-watch-triage from the watcher family schedule"
+  [ -n "$arm_line" ] || fail "runner dropped fm-watch-arm from the watcher family schedule"
+  [ "$triage_line" -lt "$arm_line" ] \
+    || fail "runner scheduled the watcher family out of longest-hint order (triage at $triage_line, watch-arm at $arm_line)"
   pass "isolation-proof contract test is family-mapped"
 }
 
