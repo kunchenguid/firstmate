@@ -24,7 +24,7 @@ build_crew_settings_json() {
   local config_dir=$1 disabled_file plugins_json="" id_escaped line
   disabled_file="$config_dir/crew-disabled-plugins"
   if [ -f "$disabled_file" ]; then
-    while IFS= read -r line; do
+    while IFS= read -r line || [ -n "$line" ]; do
       line=${line%%#*}   # strip inline comments
       # shellcheck disable=SC2001
       line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')

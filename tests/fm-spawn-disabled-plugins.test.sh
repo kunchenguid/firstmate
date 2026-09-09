@@ -5,6 +5,7 @@
 #   (a) absent file → base JSON only, no enabledPlugins key
 #   (b) two IDs plus a comment line → both IDs set false, base keys preserved
 #   (c) whitespace, blank lines, and inline comments are ignored
+#   (e) file with no trailing newline: last id not dropped
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -95,7 +96,22 @@ unit_empty_file_emits_base_json() {
 }
 
 # ---------------------------------------------------------------------------
-# (e) lint: build_crew_settings_json source is shellcheck-clean
+# (e) file with no trailing newline: last id not dropped
+unit_no_trailing_newline() {
+  local dir out want
+  dir=$(mktemp -d)
+  printf 'plugin-a@pub\nplugin-b@pub' > "$dir/crew-disabled-plugins"
+  out=$(build_crew_settings_json "$dir")
+  rm -rf "$dir"
+  want='{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},"enabledPlugins":{"plugin-a@pub":false,"plugin-b@pub":false}}'
+  if [ "$out" = "$want" ]; then
+    pass "no trailing newline: last plugin id is not dropped"
+  else
+    fail "no trailing newline: expected '$want', got: $out"
+  fi
+}
+
+# (f) lint: all three files are shellcheck-clean
 # ---------------------------------------------------------------------------
 unit_lint() {
   local out
@@ -108,6 +124,7 @@ unit_absent_file_emits_base_json
 unit_two_ids_and_comment_produce_enabledplugins
 unit_whitespace_and_blank_lines_ignored
 unit_empty_file_emits_base_json
+unit_no_trailing_newline
 unit_lint
 
 [ "$FAILED" -eq 0 ] || exit 1

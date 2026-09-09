@@ -1347,7 +1347,7 @@ fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
 # shellcheck source=bin/fm-spawn-settings-lib.sh
-source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fm-spawn-settings-lib.sh"
+. "$SCRIPT_DIR/fm-spawn-settings-lib.sh"
 
 resolve_pi_executable() {
   local candidate dir
