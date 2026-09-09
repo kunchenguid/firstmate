@@ -881,6 +881,34 @@ test_empty_pi_compaction_scout_allows() {
   pass "pi-compaction empty scout is classified EMPTY and cleaned without an endpoint"
 }
 
+test_empty_scout_closes_backlog_without_report() {
+  local case_dir rc
+  case_dir=$(make_case empty-scout-backlog)
+  write_sparse_recovery_meta "$case_dir" task-x1 no-mistakes scout "$case_dir/wt"
+  printf '%s\n' 'spawn_gen=teardown-test-empty-scout' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir" scout
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "empty-scout-backlog: teardown should close the empty scout"
+  assert_grep 'Cleanup classification: EMPTY' "$case_dir/stdout" \
+    "empty-scout-backlog: cleanup did not report EMPTY"
+  [ "$(backlog_row_state "$case_dir")" = done ] \
+    || fail "empty-scout-backlog: cleanup left the backlog item open"
+  ! grep -Fq 'report.md' "$case_dir/data/backlog.md" \
+    || fail "empty-scout-backlog: completion recorded a nonexistent report"
+  assert_absent "$case_dir/data/task-x1/report.md" \
+    "empty-scout-backlog: cleanup fabricated a report"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "empty-scout-backlog: cleanup left the task record behind"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "empty-scout-backlog: completion left its pending-close record behind"
+  pass "EMPTY scout backlog completion records no nonexistent report"
+}
+
 test_empty_portfolio_scout_allows_when_behind_upstream() {
   local case_dir id rc land
   id=portfolio-linear-stale-ticket-reconcile-s1
@@ -3973,6 +4001,7 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_empty_pi_compaction_scout_allows
+test_empty_scout_closes_backlog_without_report
 test_empty_portfolio_scout_allows_when_behind_upstream
 test_reports_pr43_sparse_record_allows_only_api_confirmed_merge
 test_sparse_merge_record_refuses_when_api_evidence_is_unavailable

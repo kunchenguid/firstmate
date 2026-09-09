@@ -1629,8 +1629,10 @@ backlog_done_args() {
   BACKLOG_DONE_ARGS=()
   case "$KIND" in
     scout)
-      data_relative=$(fm_backlog_data_relative "$DATA") || return 1
-      BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
+      if [ "$CLEANUP_CLASSIFICATION" != EMPTY ]; then
+        data_relative=$(fm_backlog_data_relative "$DATA") || return 1
+        BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
+      fi
       ;;
     *)
       if [ "$MODE" = local-only ]; then
