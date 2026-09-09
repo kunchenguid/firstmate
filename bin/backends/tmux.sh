@@ -384,7 +384,7 @@ EOF
     printf 'unreadable'
     return 0
   }
-  if [ "$(fm_backend_tmux_classify_process_name "$comm")" = agent ]; then
+  if [ "$comm" != copilot ] && [ "$(fm_backend_tmux_classify_process_name "$comm")" = agent ]; then
     printf 'alive'
     return 0
   fi
