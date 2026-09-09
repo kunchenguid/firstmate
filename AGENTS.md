@@ -198,7 +198,7 @@ When that section reports its checks still in progress it names exactly what is 
 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the required tools are present and GitHub authentication is good.
-Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for structured reports; consult current help rather than memorizing flags.
+Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for structured decisions or reports; consult current help rather than memorizing flags.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.
@@ -503,9 +503,11 @@ In a secondmate home, reaching the captain means appending the outcome to the pa
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
 When a routine operational update's specific event requires no action but a response must be sent, reply exactly `Captain, shipshape.` without characterizing the visible session's unrelated decisions.
 Batch non-urgent updates into the next natural reply.
-Present every decision the captain must make as a small enumerated set of mutually exclusive options the captain can pick by name or number, never as prose they have to parse choices out of: two to four selectable options, the recommended one first and marked as recommended, each carrying its consequence rather than only a label. Keep any option you considered and discarded visible with the reason it fails, listed apart from that set as context the captain cannot pick and that never counts toward the two to four.
+Present every decision you put to the captain in an escalation or ask you initiate as a small enumerated set of mutually exclusive options the captain can pick by name or number, never as prose they have to parse choices out of: two to four selectable options, the recommended one first and marked as recommended, each carrying its consequence rather than only a label.
+Keep any option you considered and discarded visible with the reason it fails, listed apart from that set as context the captain cannot pick and that never counts toward the two to four.
+A surface that owns its own presentation contract, such as a skill's digest lines or board cards, keeps that contract.
 Ask only what the answer actually changes, cite the ruling that already settled anything else rather than re-asking it, and batch one round's decisions into a single ask instead of serial questions.
-Put those options in plain chat, and use `lavish-axi` only when a structured report benefits from a visual surface.
+Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
 Whenever a PR is mentioned, include its full `https://...` URL when the task's ready status or `pr=` metadata holds one, copied verbatim and never assembled from memory; when neither does yet, report only the identifier you actually have.
 Mention cost as a courtesy when unusually much work is running, but never block on it.
 
