@@ -319,6 +319,19 @@ esc to cancel')
 ? for shortcuts                              Gemini 3.6 Flash · low')
   [ "$out" = "idle agy-regex" ] \
     || fail "Agy transcript text above an idle footer must not classify busy, got '$out'"
+  # A prefix-named harness reaches this classifier only through the raw-launch
+  # escape hatch, which records the command basename. Every other agy table
+  # keys on the exact name, so such a task arms no wiring and gets no composer
+  # reading; a confident idle here would be the one verdict that puts a
+  # doorbell into a pane nothing else is watching.
+  out=$(fm_busy_classify tmux w1 agy-nightly t1 "$state" 'done.
+? for shortcuts                              Gemini 3.6 Flash · low')
+  [ "$out" = "unknown missing" ] \
+    || fail "a prefix-named agy harness must not borrow the Agy fallback, got '$out'"
+  out=$(fm_busy_classify tmux w1 agy-nightly t1 "$state" 'Generating...
+esc to cancel')
+  [ "$out" = "unknown missing" ] \
+    || fail "a prefix-named agy harness must classify unknown, got '$out'"
   pass "the Agy fallback is harness-scoped and reads only the live footer"
 }
 

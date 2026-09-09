@@ -1492,7 +1492,7 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
 fm_composer_separated_state() {  # <capture> [cursor-row]
   [ "${FM_COMPOSER_HARNESS:-}" = agy ] || return 1
   local capture=$1 cursor=${2:-} plain line trimmed rule_probe
-  local row=0 previous_separator=-1 top=-1 bottom=-1 footer=0 footer_row=-1 content="" content_row
+  local row=0 previous_separator=-1 top=-1 bottom=-1 footer_row=-1 hint_row=-1 label_row=-1 content="" content_row
   plain=$(printf '%s\n' "$capture" | fm_composer_strip_ansi)
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
@@ -1504,27 +1504,31 @@ fm_composer_separated_state() {  # <capture> [cursor-row]
          && [ $((row - previous_separator)) -le 7 ]; then
         top=$previous_separator
         bottom=$row
-        footer=0
-        footer_row=-1
+        hint_row=-1
+        label_row=-1
       fi
       previous_separator=$row
     elif [ "$bottom" -ge 0 ] && [ "$row" -gt "$bottom" ] \
          && [ $((row - bottom)) -le 8 ]; then
       case "$trimmed" in
+        # A hint-bearing row is Agy's unambiguous footer marker, so the first
+        # one below the container claims the footer.
+        *'? for shortcuts'*|*'esc to cancel'*)
+          [ "$hint_row" -ge 0 ] || hint_row=$row
+          ;;
         # Agy drops the `? for shortcuts` hint while the composer holds
         # unsubmitted text, leaving only the right-aligned model label
         # (`Gemini 3.8 Flash · low`), verified live on 1.1.28. Requiring a hint
         # made a real PENDING composer unreadable, and an unreadable verdict is
         # the one fm_task_inbox_ring types into, so a captain's half-typed line
-        # was at risk. The label carries `·` and is present in the idle, busy
-        # and pending footers alike, so it identifies the footer row in every
-        # state. This whole function already returns early unless the caller
+        # was at risk. A bare `·` row is far weaker evidence than a hint, so it
+        # only claims the footer when no hint row follows it and it is the last
+        # nonblank row of the capture - hence the LAST such row is the
+        # candidate, and the pass below rejects it if anything nonblank sits
+        # under it. This whole function already returns early unless the caller
         # declared the pane's harness is agy, so no other harness reaches here.
-        *'? for shortcuts'*|*'esc to cancel'*|*' · '*)
-          if [ "$footer" -eq 0 ]; then
-            footer=1
-            footer_row=$row
-          fi
+        *' · '*)
+          label_row=$row
           ;;
       esac
     fi
@@ -1533,7 +1537,12 @@ fm_composer_separated_state() {  # <capture> [cursor-row]
 $plain
 EOF
 
-  [ "$top" -ge 0 ] && [ "$bottom" -gt "$top" ] && [ "$footer" -eq 1 ] || return 1
+  if [ "$hint_row" -ge 0 ]; then
+    footer_row=$hint_row
+  else
+    footer_row=$label_row
+  fi
+  [ "$top" -ge 0 ] && [ "$bottom" -gt "$top" ] && [ "$footer_row" -ge 0 ] || return 1
   if [ -n "$cursor" ]; then
     case "$cursor" in
       *[!0-9]*) printf 'unknown'; return 0 ;;

@@ -951,7 +951,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       esac
       return 0
       ;;
-    grok*|agy*)
+    grok*|agy)
       if [ -z "$tail40" ]; then
         if command -v fm_backend_capture >/dev/null 2>&1; then
           tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
@@ -971,7 +971,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
             printf 'idle grok-regex'
           fi
           ;;
-        agy*)
+        agy)
           if printf '%s' "$tail40" | fm_busy_agy_tail_busy; then
             printf 'busy agy-regex'
           else

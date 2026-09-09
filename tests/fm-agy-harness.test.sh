@@ -49,6 +49,32 @@ agy_pending_with_hint_capture() {
     '? for shortcuts                              Gemini 3.6 Flash · low'
 }
 
+# CONSTRUCTED panes, not observed renders. Every Agy footer captured in
+# docs/verification/agy-harness.md is the bottom-most nonblank row of its
+# capture, so a real agy cannot be made to emit a `·`-bearing row between the
+# composer's lower rule and its footer on demand. These two fixtures are the
+# adversarial input for the footer resolution; the fixtures above carry the
+# observed shapes.
+agy_intervening_separator_capture() {
+  printf '%s\n' \
+    'Antigravity CLI' \
+    '────────────────────────────────────────────────────────────────' \
+    '> captain steer' \
+    '────────────────────────────────────────────────────────────────' \
+    'ran tests · 3 passed' \
+    '? for shortcuts                              Gemini 3.6 Flash · low'
+}
+
+agy_intervening_separator_pending_capture() {
+  printf '%s\n' \
+    'Antigravity CLI' \
+    '────────────────────────────────────────────────────────────────' \
+    '> captain steer' \
+    '────────────────────────────────────────────────────────────────' \
+    'ran tests · 3 passed' \
+    '                                             Gemini 3.6 Flash · low'
+}
+
 claude_lookalike_capture() {
   printf '%s\n' \
     '────────────────────────────────────────────────────────────────' \
@@ -81,6 +107,17 @@ test_separated_composer_is_structural() {
   [ -z "$state" ] || fail "a stale Agy footer authorized a later separator pair"
   state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_empty_capture)"$'\n$ ')
   [ -z "$state" ] || fail "a stale Agy composer above a returned shell prompt read as $state"
+  # A row that merely carries the model label's separator must not claim the
+  # footer ahead of the real one: an unreadable verdict is what
+  # fm_task_inbox_ring types into, so this shape must stay readable.
+  state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_intervening_separator_capture)")
+  [ "$state" = pending ] || fail "a separator-bearing row above the real footer read as '$state'"
+  state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_intervening_separator_pending_capture)")
+  [ "$state" = pending ] || fail "a separator-bearing row above a hintless footer read as '$state'"
+  # The label row is only ever the footer when it is the last nonblank row, so
+  # a returned shell prompt below it still refuses the whole proof.
+  state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_pending_capture)"$'\n$ ')
+  [ -z "$state" ] || fail "a stale hintless Agy composer above a shell prompt read as $state"
   pass "Agy composer classification requires the complete separated container"
 }
 
