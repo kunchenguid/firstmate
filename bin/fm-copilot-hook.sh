@@ -46,6 +46,52 @@ copilot_notification_has_named_watcher_completion() {
   printf '%s\n' "$message" | grep -Eq '^Shell command "Arm( the)? Firstmate watcher" \(shellId: [0-9]+\) has completed successfully\. Use read_bash with shellId "[0-9]+" to retrieve the output\.$'
 }
 
+copilot_notification_receipt_missing() {
+  local state=${1:-} state_real receipt dir
+  [ -n "$state" ] || return 1
+  state_real=$(fm_copilot_watch_receipt_real_dir "$state") || return 1
+  receipt=$(fm_copilot_watch_receipt_path "$state_real") || return 1
+  dir=${receipt%/*}
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    [ "$(fm_copilot_watch_receipt_mode "$dir")" = 700 ] || return 1
+  fi
+  [ ! -e "$receipt" ] && [ ! -L "$receipt" ]
+}
+
+copilot_notification_has_explicit_failure() {
+  local payload=${1:-}
+  [ -n "$payload" ] || return 1
+  printf '%s' "$payload" | jq -e '
+    def sources: [., .data?, .task?, .result?, .toolResult?];
+    any(sources[]?;
+      (.success? == false)
+      or (((.exitCode? // .exit_code? // .exitStatus? // .exit_status?) as $code
+           | ($code | type) == "number" and $code != 0))
+      or (((.status? // empty) as $status
+           | ($status | type) == "string"
+             and ($status | ascii_downcase | test("^(fail(ed|ure)?|error)$"))))
+    )
+  ' >/dev/null 2>&1
+}
+
+copilot_notification_has_success_evidence() {
+  local payload=${1:-}
+  [ -n "$payload" ] || return 1
+  copilot_notification_has_named_watcher_completion "$payload" && return 0
+  printf '%s' "$payload" | jq -e '
+    def sources: [., .data?, .task?, .result?, .toolResult?];
+    any(sources[]?;
+      (.success? == true)
+      or (((.exitCode? // .exit_code? // .exitStatus? // .exit_status?) as $code
+           | ($code | type) == "number" and $code == 0))
+      or (((.status? // empty) as $status
+           | ($status | type) == "string"
+             and ($status | ascii_downcase) == "success"))
+    )
+  ' >/dev/null 2>&1
+}
+
 copilot_notification_has_watcher_completion() {
   local payload=${1:-} root=${2:-} home=${3:-} state=${4:-}
   local policy command verdict saw_command=0 can_classify=0
@@ -63,7 +109,12 @@ copilot_notification_has_watcher_completion() {
     [ "$can_classify" -eq 1 ] || continue
     verdict=$(node "$policy" watcher-arm --root "$root" --home "$home" --command "$command" 2>/dev/null || true)
     if [ "$verdict" = watch-arm ]; then
-      fm_copilot_watch_receipt_claim "$root" "$home" "$state" >/dev/null 2>&1 || return 1
+      if fm_copilot_watch_receipt_claim "$root" "$home" "$state" >/dev/null 2>&1; then
+        return 0
+      fi
+      copilot_notification_receipt_missing "$state" || return 1
+      copilot_notification_has_explicit_failure "$payload" && return 1
+      copilot_notification_has_success_evidence "$payload" || return 1
       return 0
     fi
   done < <(printf '%s' "$payload" | jq -j '

@@ -582,7 +582,44 @@ test_copilot_launch_clears_inherited_claude_project_dir() {
 }
 
 test_copilot_accepts_only_verified_session_trust() {
-  local rec id out status capture dialog key_log kill_log launch_marker hooks
+  local rec id out status capture dialog key_log kill_log launch_marker hooks wrapped_parent wrapped_leaf
+  id=profile-copilot-trust-wrapped-z6hs
+  rec=$(make_spawn_case profile-copilot-trust-wrapped copilot "$id")
+  read_case_record "$rec"
+  capture="$CASE_DIR/trust-pane"
+  dialog="$CASE_DIR/trust-dialog"
+  key_log="$CASE_DIR/trust-keys"
+  kill_log="$CASE_DIR/trust-kills"
+  launch_marker="$CASE_DIR/copilot-launched"
+  wrapped_parent=${WT_DIR%/*}
+  wrapped_leaf=${WT_DIR##*/}
+  : > "$capture"
+  cat > "$dialog" <<EOF
+Confirm folder trust
+$wrapped_parent/
+$wrapped_leaf
+Do you trust the files in this folder?
+❯ 1. Yes
+2. Yes, and remember this folder for future sessions
+3. No (Esc)
+EOF
+
+  out=$(FM_FAKE_TMUX_CAPTURE_FILE="$capture" \
+    FM_FAKE_TMUX_TRUST_DIALOG_FILE="$dialog" \
+    FM_FAKE_TMUX_TRUST_KEY_LOG="$key_log" \
+    FM_FAKE_TMUX_TRUST_CLEAR_ON_ENTER=1 \
+    FM_FAKE_TMUX_COPILOT_LAUNCH_MARKER="$launch_marker" \
+    FM_FAKE_TMUX_KILL_LOG="$kill_log" \
+    FM_TEST_COPILOT_TRUST_POLLS=2 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "copilot spawn should accept a wrapped verified session-only trust default"
+  [ "$(cat "$key_log")" = Enter ] || fail "copilot trust handling did not send exactly one verified Enter for a wrapped dialog"
+  [ "$(cat "$capture")" = 'Copilot ready' ] || fail "copilot trust handling did not verify a wrapped dialog cleared"
+  assert_absent "$HOME_DIR/user-home/.copilot/config.json" \
+    "copilot trust handling persisted a disposable worktree after a wrapped dialog"
+  assert_absent "$kill_log" "a successful wrapped Copilot trust acceptance killed the endpoint"
+
   id=profile-copilot-trust-z6ht
   rec=$(make_spawn_case profile-copilot-trust copilot "$id")
   read_case_record "$rec"

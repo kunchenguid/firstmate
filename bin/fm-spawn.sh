@@ -2929,7 +2929,6 @@ COPILOT_TRUST_ERROR=
 copilot_trust_dialog_exact() {  # <pane>
   local pane=$1
   printf '%s\n' "$pane" | grep -Fq 'Confirm folder trust' || return 1
-  printf '%s\n' "$pane" | grep -Fq "$WT" || return 1
   printf '%s\n' "$pane" | grep -Fq 'Do you trust the files in this folder?' || return 1
   printf '%s\n' "$pane" | grep -Fq '❯ 1. Yes' || return 1
   printf '%s\n' "$pane" | grep -Fq '2. Yes, and remember this folder for future sessions' || return 1
@@ -2945,6 +2944,9 @@ copilot_wait_for_session_trust() {
       return 1
     fi
     if printf '%s\n' "$pane" | grep -Fq 'Confirm folder trust'; then
+      # The pane target has already been physically proven to be sitting in WT by
+      # the shared spawn_current_path checks above, so this dialog capture comes
+      # from the exact worktree being launched even when the rendered path wraps.
       if ! copilot_trust_dialog_exact "$pane"; then
         COPILOT_TRUST_ERROR="Copilot trust dialog did not match the verified session-only default selection"
         return 1

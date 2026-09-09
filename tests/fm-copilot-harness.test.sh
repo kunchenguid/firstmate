@@ -768,7 +768,22 @@ test_notification_injects_watcher_followup_only_for_watcher_arm_completion() {
 
   out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
     ./bin/fm-copilot-hook.sh notification < "$dir/in.json")
-  [ -z "$out" ] || fail "a command-bearing watcher completion without a success receipt must stay inert, got: $out"
+  [ -z "$out" ] || fail "a command-bearing watcher completion without receipt or success evidence must stay inert, got: $out"
+
+  printf '%s' '{"notification_type":"shell_completed","command":"[ -f config/x-mode.env ] && . config/x-mode.env; exec ./bin/fm-watch-arm.sh","success":true}' > "$dir/command-success-without-receipt.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/command-success-without-receipt.json")
+  assert_watcher_followup "$out" "Copilot command-bearing watcher notification without receipt but with success evidence"
+
+  printf '%s' '{"notification_type":"shell_completed","command":"[ -f config/x-mode.env ] && . config/x-mode.env; exec ./bin/fm-watch-arm.sh","success":false}' > "$dir/command-explicit-failure.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/command-explicit-failure.json")
+  [ -z "$out" ] || fail "an explicitly failed watcher completion without a receipt must stay inert, got: $out"
+
+  printf '%s' '{"notification_type":"shell_completed","command":"[ -f config/x-mode.env ] && . config/x-mode.env; exec ./bin/fm-watch-arm.sh","exitCode":17}' > "$dir/command-nonzero-exit.json"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    ./bin/fm-copilot-hook.sh notification < "$dir/command-nonzero-exit.json")
+  [ -z "$out" ] || fail "a nonzero watcher completion without a receipt must stay inert, got: $out"
 
   printf '%s' '{"notification_type":"shell_completed","hook_event_name":"Notification","title":"Arm Firstmate watcher","message":"Shell command \"Arm Firstmate watcher\" (shellId: 0) has completed successfully. Use read_bash with shellId \"0\" to retrieve the output.","command":null,"commandLine":null,"command_line":null}' > "$dir/live-shape.json"
   out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
@@ -882,7 +897,7 @@ test_notification_injects_watcher_followup_only_for_watcher_arm_completion() {
   out=$(cd "$dir" && PATH="$fakebin:$no_node_path" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
     ./bin/fm-copilot-hook.sh notification < "$dir/live-shape.json")
   assert_watcher_followup "$out" "Copilot title-only watcher notification without node"
-  pass "Copilot notifications require claimed watcher receipts for title-only payloads"
+  pass "Copilot notifications accept receiptless command success evidence but still require receipts for title-only payloads"
 }
 
 test_notification_requires_primary_scope() {
