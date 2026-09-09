@@ -632,12 +632,21 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
+# A self-hosted daemon (supervisor_pane_hosts_daemon) is a background job of
+# the agent it injects into, so the backend's native agent-state reports that
+# pane busy for as long as away mode runs - the daemon's own existence is what
+# it is measuring. Reading that as "the agent is mid-turn" defers every
+# escalation forever, which is exactly what a whole night of
+# "supervisor pane busy (agent mid-turn)" was. So native busy is conclusive
+# only when the daemon runs somewhere else; when it is self-hosted the verdict
+# falls through to the rendered delivery signature, which bin/fm-composer-lib.sh
+# already owns as the authority on whether a pane can accept a keystroke.
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
   harness=$(fm_daemon_primary_harness)
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$native" in
-    busy) return 0 ;;
+    busy) supervisor_pane_hosts_daemon "$target" || return 0 ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \

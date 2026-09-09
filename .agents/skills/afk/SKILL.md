@@ -94,6 +94,12 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
 
 - **Primary-pane busy guard** - `pane_is_busy` trusts Herdr native `busy` when available, otherwise matches rendered output against only the detected primary harness's signature.
   This narrow delivery guard never classifies a recorded worker task and never uses a global union of vendor patterns.
+  Native `busy` is evidence about the AGENT only while the daemon runs OUTSIDE the pane it injects into.
+  On the native hosting above the daemon is a background job of that very agent, and a backend's native state reports anything running in the pane rather than the agent's own turn, so a self-hosted daemon would read its own existence as "agent mid-turn" and defer every escalation for as long as away mode lasts.
+  `supervisor_pane_hosts_daemon` (`bin/fm-supervisor-target-lib.sh`) recognizes that hosting, and `pane_is_busy` applies it backend-generally, because the hosting rather than the backend is what makes native state uninformative.
+  Inside the Herdr adapter the same boundary is owned ONCE, at its native-state reader (`fm_backend_herdr_agent_status_raw`), rather than repeated at each of that adapter's native-state call sites: for a self-hosted pane the reader reports no status at all, which classifies as `unknown` and never as `idle`.
+  So neither this guard nor the submit confirmation that follows it may read that state as the agent being busy OR free; both fall through to a signal that really is about the agent - the rendered delivery signature, which `bin/fm-composer-lib.sh` already owns as the authority on whether a pane can accept a keystroke, or the composer verdict.
+  A genuinely swallowed Enter therefore still resolves to `pending`, so its escalation stays buffered and its wedge marker stays raised rather than being discarded as delivered.
 - **Composer-state guard** - `inject_msg` reads the full `empty`/`pending`/`pending-unproven`/`unknown` verdict from `fm_backend_composer_state` and injects only when it is affirmatively `empty`.
   Every other or future verdict defers, including an unreadable pane, ambiguous geometry, a blank unidentified row, and a bare shell prompt left after the agent exits.
   Each adapter contributes only capture and capability facts to the fleet-wide screen classifier in `bin/fm-composer-lib.sh`, which owns every shape and verdict.
