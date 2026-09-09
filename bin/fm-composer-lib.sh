@@ -1511,7 +1511,16 @@ fm_composer_separated_state() {  # <capture> [cursor-row]
     elif [ "$bottom" -ge 0 ] && [ "$row" -gt "$bottom" ] \
          && [ $((row - bottom)) -le 8 ]; then
       case "$trimmed" in
-        *'? for shortcuts'*|*'esc to cancel'*)
+        # Agy drops the `? for shortcuts` hint while the composer holds
+        # unsubmitted text, leaving only the right-aligned model label
+        # (`Gemini 3.8 Flash · low`), verified live on 1.1.28. Requiring a hint
+        # made a real PENDING composer unreadable, and an unreadable verdict is
+        # the one fm_task_inbox_ring types into, so a captain's half-typed line
+        # was at risk. The label carries `·` and is present in the idle, busy
+        # and pending footers alike, so it identifies the footer row in every
+        # state. This whole function already returns early unless the caller
+        # declared the pane's harness is agy, so no other harness reaches here.
+        *'? for shortcuts'*|*'esc to cancel'*|*' · '*)
           if [ "$footer" -eq 0 ]; then
             footer=1
             footer_row=$row

@@ -27,7 +27,20 @@ agy_empty_capture() {
     '? for shortcuts                              Gemini 3.6 Flash · low'
 }
 
+# Agy DROPS the `? for shortcuts` hint while the composer holds unsubmitted
+# text and leaves only the right-aligned model label, verified live on 1.1.28.
+# This fixture carries that real shape; the hint-bearing variant below is kept
+# only to prove the classifier still accepts a footer that does carry a hint.
 agy_pending_capture() {
+  printf '%s\n' \
+    'Antigravity CLI' \
+    '────────────────────────────────────────────────────────────────' \
+    '> captain steer' \
+    '────────────────────────────────────────────────────────────────' \
+    '                                             Gemini 3.6 Flash · low'
+}
+
+agy_pending_with_hint_capture() {
   printf '%s\n' \
     'Antigravity CLI' \
     '────────────────────────────────────────────────────────────────' \
@@ -55,6 +68,13 @@ test_separated_composer_is_structural() {
   [ "$state" = empty ] || fail "Agy empty separated composer read as $state"
   state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_pending_capture)")
   [ "$state" = pending ] || fail "Agy typed separated composer read as $state"
+  state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_pending_with_hint_capture)")
+  [ "$state" = pending ] || fail "Agy typed composer with a hint-bearing footer read as $state"
+  # The inverse of the pending fix: if an EMPTY composer ever reads pending,
+  # fm_task_inbox_ring defers forever and every steer to an Agy worker dies
+  # silently, which is quieter and worse than typing over a draft.
+  state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_empty_capture)")
+  [ "$state" = empty ] || fail "Agy empty composer read as $state after the pending-footer widening"
   state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state $'>\n$ ')
   [ -z "$state" ] || fail "bare shell prompt was accepted as Agy structure"
   state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_empty_capture)"$'\n────────────────────\n>\n────────────────────')

@@ -208,6 +208,21 @@ Three changes in `bin/fm-spawn.sh` close it, all still environment-overridable:
 
 `tests/fm-agy-harness.test.sh` drives the real `bin/fm-spawn.sh` against a frame script whose only isolated good frame sits inside the repaint, and asserts both directions: with the stability requirement the pointer is typed only after the verdict holds, and with it disabled the gate still releases inside the repaint window, so the guard cannot go vacuous.
 
+## What stays portable, and why
+
+Three behaviors are covered by the portable suite rather than the live guard, and the reason differs for each.
+
+The re-ring deferral on a pending composer and the relaunch retirement-and-rearm path were portable-only until 2026-09-09 and are now driven live, because both rest on something the real binary renders or does.
+Their portable regressions remain as the CI-side coverage the guideline requires.
+
+Two failure-injection halves stay portable by necessity.
+Proving that an interrupted spawn cannot leave armed wiring without a retirement record needs a write to `state/` to fail at a chosen instant inside a real launch, and proving that an away-mode escalation defers into a busy supervisor pane needs that pane to be mid-tool-call.
+Neither instant can be hit reliably against a live model turn, so both are pinned deterministically instead.
+
+The away-mode harness forwarding and non-leak behavior stays portable for a different and better reason: its only harness-dependent input is already proven live.
+`bin/fm-harness.sh` returning `agy` from inside a real Agy tool call is driven in the guard's brief turn, and the forwarding decision layered on it is deterministic shell over environment variables with no rendered surface for a live drive to observe.
+Adding a live stage there would re-prove the same detection through a longer path and report it as new evidence, which is why this record does not claim one.
+
 ## Primary-side seatbelt: untested
 
 The tracked `.agents/hooks.json` seatbelts have NOT been driven inside a live Agy PRIMARY, and this record does not claim they have.

@@ -17,7 +17,7 @@
 # standing while retiring only the task hook it installed.
 #
 # Run explicitly with FM_AGY_LIVE_E2E=1. It spends a small number of real model
-# tokens: five short turns on the cheapest listed Flash tier (override with
+# tokens: seven short turns on the cheapest listed Flash tier (override with
 # FM_AGY_LIVE_MODEL). Nothing under ~/.gemini is edited; the only side effect
 # outside the lab is Agy's own trust record for the lab's disposable worktree
 # path. FM_AGY_LIVE_TIMEOUT bounds each wait (seconds, default 240). A passing
@@ -458,7 +458,122 @@ else
 fi
 pass "agy $VERSION: single Escape ended the busy turn and returned the composer to idle"
 
-# --- 8. Exit through fm-control, then teardown -------------------------------
+# --- 8. Watcher re-ring against a real pending composer ----------------------
+# Whether a real Agy composer holding unsubmitted text classifies as `pending`
+# is a RENDERED fact, and fm_task_inbox_ring defers ONLY on an exact `pending`
+# verdict, because there its Enter would submit whatever the captain had
+# half-typed. A fixture can only confirm the assumption written into it, so
+# both directions are driven here against the real binary: the deferral, and
+# the ring proceeding once the text is gone. Without the second half the first
+# would pass just as well against a composer nobody could read at all.
+# The composer proof is harness-scoped by contract, and the declaration is the
+# FM_COMPOSER_HARNESS environment variable rather than fm_task_inbox_ring's
+# expected-label argument. bin/fm-watch.sh composes it from the task's recorded
+# harness through fm_control_harness_family, so the drive below composes it the
+# same way: what is proven here is the watcher's real declaration against a real
+# pending pane, not a value this test invented.
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$ROOT/bin/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$ROOT/bin/fm-control-lib.sh"
+RING_HARNESS=$(fm_control_harness_family agy) || RING_HARNESS=agy
+[ "$RING_HARNESS" = agy ] \
+  || fail "agy $VERSION: fm_control_harness_family resolved agy to '$RING_HARNESS', so the watcher would declare the wrong harness for this pane"
+RING_REC="$LAB/state/$TASK.inbox/handled/001.msg"
+[ -f "$RING_REC" ] || fail "agy $VERSION: the handled steering record needed for the re-ring drive is missing"
+RING_DRAFT='captain half typed line'
+tmux send-keys -t "$WINDOW" -l "$RING_DRAFT" || fail "could not type the pending draft into the Agy composer"
+i=0
+while [ "$i" -lt 30 ] && [ "$(composer_state)" != pending ]; do
+  sleep 1
+  i=$((i + 1))
+done
+[ "$(composer_state)" = pending ] \
+  || fail "agy $VERSION: a composer holding unsubmitted text did not classify pending (got $(composer_state)); the watcher would type over a captain's draft"
+FM_COMPOSER_HARNESS="$RING_HARNESS" FM_HOME="$LAB" fm_task_inbox_ring tmux "$WINDOW" "$RING_REC" agy
+RING_RC=$?
+[ "$RING_RC" -eq 1 ] \
+  || fail "agy $VERSION: the re-ring returned $RING_RC instead of deferring on a proven pending composer"
+pane | grep -Fq "$RING_DRAFT" \
+  || fail "agy $VERSION: the deferred re-ring did not leave the pending draft intact in the composer"
+note "re-ring deferred on the real pending composer and left the draft untouched"
+
+# Clear the draft one keystroke per character, so the same record now rings.
+i=0
+while [ "$i" -lt "${#RING_DRAFT}" ]; do
+  tmux send-keys -t "$WINDOW" BSpace
+  i=$((i + 1))
+done
+# The inverse assertion, and it matters more than the one above. If the pending
+# fix over-corrects and an empty Agy composer starts reading pending, every
+# steer defers forever and steering dies silently, which is quieter and worse
+# than typing over a draft.
+if ! wait_idle_composer; then
+  fail "agy $VERSION: the composer did not classify empty after the draft was cleared (last verdict: ${LAST_VERDICT:-unreadable}); if an empty Agy composer now reads pending, every steer to an Agy worker defers forever"
+fi
+[ "$(composer_state)" = empty ] \
+  || fail "agy $VERSION: the cleared composer classified $(composer_state) rather than empty, so the pending widening over-corrected"
+note "empty composer still classifies empty after the pending-footer widening"
+rm -f "$MARKER"
+FM_COMPOSER_HARNESS="$RING_HARNESS" FM_HOME="$LAB" fm_task_inbox_ring tmux "$WINDOW" "$RING_REC" agy
+RING_RC=$?
+[ "$RING_RC" -eq 0 ] \
+  || fail "agy $VERSION: the re-ring returned $RING_RC on an empty composer; the deferral above proves nothing if the ring never proceeds"
+pass "agy $VERSION: the watcher re-ring defers on a real pending Agy composer and proceeds once it is empty"
+# The doorbell it just typed starts a turn; let it finish before the next stage.
+wait_marker || note "the re-ring doorbell turn did not close within ${TIMEOUT}s; continuing"
+wait_idle_composer || true
+
+# --- 9. Relaunch after a completed turn, then its own controllability -------
+# Agy arms its task wiring at spawn and retires it at relaunch, and the token
+# record is the ONLY record of what to retire. A stale turn-end marker left by
+# the previous incarnation must not read as the new one's delivery either.
+# Both are driven here against the real binary rather than assumed, reusing the
+# worker already running: relaunch is a control-plane operation, so it costs
+# one brief turn and no new session.
+PREV_TOKEN=$TOKEN
+PREV_WINDOW=$WINDOW
+[ -f "$WT/$HOOK_ROOT/hooks.json" ] || fail "agy $VERSION: the task hook is missing before the relaunch drive"
+# A stale marker from the turns above must not be mistaken for the new agent's
+# first delivery; spawn's relaunch path removes it before it waits.
+: > "$MARKER"
+# A scout relaunch requires --note by contract: the replacement inherits the
+# local copy but none of the conversation, so it must be told what happened.
+RELAUNCH_OUT=$(FM_HOME="$LAB" bounded 300 "$ROOT/bin/fm-control.sh" "$TASK" relaunch \
+  --harness agy --model "$MODEL" --effort "$EFFORT" \
+  --note 'Live adapter guard relaunch drive. The probe already ran; just reply with exactly the single line AGY_RELAUNCH_OK and stop.' 2>&1) \
+  || fail "agy $VERSION: fm-control relaunch failed: $RELAUNCH_OUT"
+note "fm-control: $(printf '%s\n' "$RELAUNCH_OUT" | tail -1)"
+
+WINDOW=$(awk -F= '/^window=/ { print $2 }' "$META")
+[ -n "$WINDOW" ] || fail "agy $VERSION: the relaunch published no endpoint in the task metadata"
+TOKEN=$(sed -n '1p' "$TOKEN_FILE")
+NEW_HOOK_ROOT=$(sed -n '2p' "$TOKEN_FILE")
+NEW_HOOK_OWNER=$(sed -n '3p' "$TOKEN_FILE")
+[ -n "$TOKEN" ] || fail "agy $VERSION: the relaunch left no token record for the wiring it armed"
+[ "$TOKEN" != "$PREV_TOKEN" ] \
+  || fail "agy $VERSION: the relaunch reused the retired token, so the previous incarnation's wiring was never rotated"
+[ ! -e "$LAB/state/agy-turn-end.d/$PREV_TOKEN" ] \
+  || fail "agy $VERSION: the relaunch left the previous token armed in the private registry, which teardown would never retire"
+[ -f "$LAB/state/agy-turn-end.d/$TOKEN" ] \
+  || fail "agy $VERSION: the relaunch armed a hook with no matching private registry entry"
+[ "$NEW_HOOK_OWNER" = preexisting ] \
+  || fail "agy $VERSION: the relaunch recorded the borrowed root as '$NEW_HOOK_OWNER' rather than preexisting"
+[ -f "$WT/$NEW_HOOK_ROOT/hooks.json" ] || fail "agy $VERSION: the relaunch installed no task hook"
+cmp -s "$WT/.agents/hooks.json" "$PROJ/.agents/hooks.json" \
+  || fail "agy $VERSION: the relaunch altered the project-owned .agents/hooks.json"
+note "relaunch rotated the task token and registry entry and left the project root untouched"
+pass "agy $VERSION: relaunch after a completed turn retires the previous wiring and arms replacement wiring it can retire"
+
+# The relaunched agent must be a live, controllable worker, not just new wiring.
+rm -f "$MARKER"
+wait_marker \
+  || fail "agy $VERSION: the relaunched agent's Stop hook never touched the marker within ${TIMEOUT}s, so the stale marker cleared but no new delivery landed"
+wait_idle_composer \
+  || fail "agy $VERSION: the relaunched agent never reached an idle composer (last verdict: ${LAST_VERDICT:-unreadable})"
+pass "agy $VERSION: the relaunched agent delivered its brief through fresh wiring and returned to idle"
+
+# --- 10. Exit through fm-control, then teardown ------------------------------
 EXIT_OUT=$(FM_HOME="$LAB" "$ROOT/bin/fm-control.sh" "$TASK" exit 2>&1) \
   || fail "fm-control exit failed: $EXIT_OUT"
 case "$EXIT_OUT" in
@@ -487,4 +602,4 @@ pass "agy $VERSION: teardown retired only the task hook, pointer, and registry e
 
 [ "$SURVEY_SEEN" -eq 0 ] || note "the post-turn feedback survey appeared once during this run and was skipped"
 PASSED=1
-pass "live Agy adapter guard: agy $VERSION drove spawn, hooks, steer, seatbelt decisions, busy, interrupt, exit, and teardown end to end"
+pass "live Agy adapter guard: agy $VERSION drove spawn, hooks, steer, seatbelt decisions, busy, interrupt, re-ring, relaunch, exit, and teardown end to end"
