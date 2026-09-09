@@ -12,6 +12,14 @@
 # consumer re-derives the identity from the stored URL and refuses any record
 # whose parts do not reconstruct that exact URL.
 #
+# A GitLab merge request has two canonical spellings, because GitLab introduced
+# the reserved "-" route separator in 12.0: the current
+# <path>/-/merge_requests/<n> and the legacy <path>/merge_requests/<n> that an
+# instance older than 12.0 still serves and links. Both are accepted and each is
+# stored exactly as given, because only the serving instance knows which route
+# it answers. The two never collide: a "-" path segment is refused, so a stored
+# URL can equal at most one of the two reconstructions of its own identity.
+#
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
@@ -195,7 +203,14 @@ fm_pr_url_parse() {
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
   pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$'
-  [[ "$raw" =~ $pattern ]] || return 1
+  if ! [[ "$raw" =~ $pattern ]]; then
+    # The legacy route an instance older than GitLab 12.0 serves. It is tried
+    # only after the current route fails to match, and the two cannot be
+    # confused: the legacy reading of a current URL ends its path in the
+    # reserved "-" segment, which fm_pr_gitlab_path_valid refuses.
+    pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/merge_requests/([1-9][0-9]*)$'
+    [[ "$raw" =~ $pattern ]] || return 1
+  fi
   host=${BASH_REMATCH[1]}
   path=${BASH_REMATCH[2]}
   fm_pr_gitlab_host_valid "$host" || return 1

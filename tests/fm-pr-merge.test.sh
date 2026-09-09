@@ -68,6 +68,13 @@
 #   (av) a base branch with no queue rule says nothing about a merge queue
 #   (aw) a refusal built on the gh-axi view says the merge queue could not be
 #       observed, and judges that view's state like the queue-aware one
+#   (ax) a legacy-route GitLab URL, as an instance older than 12.0 serves,
+#       resolves to the same instance and merges
+#   (ay) no pipeline at all is reported as absent CI, apart from a pipeline that
+#       ran and did not pass, and never as a pass
+#   (az) an instance that reports no detailed_merge_status refuses and says its
+#       mergeability could not be read, rather than believing the defaults glab
+#       fills the fields it omits with
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -84,6 +91,8 @@ MR_HOST=gitlab.example
 MR_PATH=group/subgroup/project
 MR_PROJECT_URL="https://$MR_HOST/$MR_PATH"
 MR_URL="$MR_PROJECT_URL/-/merge_requests/7"
+# The route an instance older than GitLab 12.0 serves, with no "-" separator.
+MR_LEGACY_URL="$MR_PROJECT_URL/merge_requests/7"
 MR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
@@ -1585,7 +1594,8 @@ test_gitlab_each_condition_refuses_independently() {
     "discussions|discussions=false|blocking_discussions_resolved is \"false\", not true" \
     "pipeline-status|pipeline_status=failed|the head pipeline status is \"failed\", not success" \
     "pipeline-sha|pipeline_sha=$MR_STALE_HEAD|the head pipeline ran at \"$MR_STALE_HEAD\", not at the current head $MR_HEAD" \
-    "no-pipeline|pipeline=null|the head pipeline status is \"none\", not success"
+    "no-pipeline|pipeline=null|there is no CI pipeline for this merge request" \
+    "legacy-fields|detail=|this GitLab reported no detailed_merge_status"
   for spec in "$@"; do
     name=${spec%%|*}
     expected=${spec##*|}
@@ -1638,6 +1648,107 @@ test_gitlab_reports_every_failing_condition() {
       "gitlab-refuse-all: '$expected' was not reported"
   done
   pass "fm-pr-merge reports every failing GitLab condition, not only the first"
+}
+
+# An instance older than GitLab 12.0 has no reserved "-" route, so its merge
+# requests live directly under the project path. That spelling must reach the
+# same instance and the same merge request as the current one.
+test_gitlab_legacy_route_merges() {
+  local case_dir rc merge_line
+  case_dir=$(make_gitlab_case gitlab-legacy-route)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_LEGACY_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-legacy-route: a legacy-route merge request URL should merge, not error"
+  assert_grep "pr=$MR_LEGACY_URL" "$case_dir/state/task-x1.meta" \
+    "gitlab-legacy-route: the legacy-route URL was not recorded verbatim"
+  assert_grep "GITLAB_HOST=$MR_HOST mr view 7 -R $MR_PROJECT_URL -F json" "$case_dir/glab.log" \
+    "gitlab-legacy-route: the pre-merge state was not read from the project URL"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes" ] \
+    || fail "gitlab-legacy-route: unexpected merge invocation: '$merge_line'"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "gitlab-legacy-route: a legacy-route merge request reached the GitHub CLI"
+  pass "fm-pr-merge resolves a legacy-route GitLab merge request to the same instance"
+}
+
+# No pipeline at all and a pipeline that ran and did not pass are different
+# answers, and an instance running no CI has to be told it has none.
+test_gitlab_absent_ci_is_reported_as_absent() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-no-ci pipeline=null)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-no-ci: a merge request with no pipeline must not merge"
+  assert_grep "there is no CI pipeline for this merge request" "$case_dir/stderr" \
+    "gitlab-no-ci: absent CI was not reported as absent"
+  assert_grep "a project that runs no CI cannot satisfy this condition" "$case_dir/stderr" \
+    "gitlab-no-ci: the refusal did not say why absent CI can never pass"
+  assert_no_grep 'the head pipeline status is' "$case_dir/stderr" \
+    "gitlab-no-ci: absent CI was reported as a pipeline status instead"
+  assert_no_grep 'the head pipeline ran at' "$case_dir/stderr" \
+    "gitlab-no-ci: absent CI was reported as a stale pipeline commit instead"
+  assert_no_grep 'verified:' "$case_dir/stderr" \
+    "gitlab-no-ci: absent CI was treated as a verified merge request"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-no-ci: a merge was attempted with no CI pipeline"
+
+  # A red pipeline keeps its own distinct report, so the two never blur.
+  case_dir=$(make_gitlab_case gitlab-red-ci pipeline_status=failed)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "gitlab-red-ci: a failed pipeline must not merge"
+  assert_grep 'the head pipeline status is "failed", not success' "$case_dir/stderr" \
+    "gitlab-red-ci: a failed pipeline was not reported as failed"
+  assert_no_grep 'there is no CI pipeline' "$case_dir/stderr" \
+    "gitlab-red-ci: a failed pipeline was reported as absent CI"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-red-ci: a merge was attempted on a failed pipeline"
+  pass "fm-pr-merge reports absent CI as absent and keeps it apart from a failed pipeline"
+}
+
+# detailed_merge_status arrived in GitLab 15.6, and the instances without it
+# also omit has_conflicts and blocking_discussions_resolved. glab deserializes an
+# omitted field into its type default, so "has_conflicts": false there is not an
+# answer and must never be reported or believed as one.
+test_gitlab_absent_merge_status_fields_refuse() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-legacy-fields detail= conflicts=false discussions=false)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_LEGACY_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-legacy-fields: unreadable mergeability must not merge"
+  assert_grep 'this GitLab reported no detailed_merge_status' "$case_dir/stderr" \
+    "gitlab-legacy-fields: the absent mergeability field was not named"
+  assert_grep 'cannot be told apart from unset defaults' "$case_dir/stderr" \
+    "gitlab-legacy-fields: the refusal did not say the remaining values are untrustworthy"
+  assert_no_grep 'detailed_merge_status is ""' "$case_dir/stderr" \
+    "gitlab-legacy-fields: an absent field was reported as an empty value"
+  assert_no_grep 'has_conflicts is' "$case_dir/stderr" \
+    "gitlab-legacy-fields: a default has_conflicts was reported as an answer"
+  assert_no_grep 'blocking_discussions_resolved is' "$case_dir/stderr" \
+    "gitlab-legacy-fields: a default blocking_discussions_resolved was reported as an answer"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-legacy-fields: a merge was attempted on unreadable mergeability"
+  assert_grep "pr=$MR_LEGACY_URL" "$case_dir/state/task-x1.meta" \
+    "gitlab-legacy-fields: a refusal should still leave the recorded PR reference"
+  pass "fm-pr-merge refuses an instance that reports no detailed_merge_status"
 }
 
 test_gitlab_stale_recorded_head_is_reported() {
@@ -2127,6 +2238,9 @@ test_gitlab_extra_args_forwarded
 test_gitlab_merge_failure_propagates
 test_gitlab_each_condition_refuses_independently
 test_gitlab_reports_every_failing_condition
+test_gitlab_legacy_route_merges
+test_gitlab_absent_ci_is_reported_as_absent
+test_gitlab_absent_merge_status_fields_refuse
 test_gitlab_stale_recorded_head_is_reported
 test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses

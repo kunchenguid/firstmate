@@ -92,7 +92,12 @@ case "$provider" in
       esac
     done
     [ "$segments" -ge 2 ] || exit 0
-    [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
+    # Both canonical merge request routes are reconstructed: the current one and
+    # the legacy one an instance older than GitLab 12.0 serves. The reserved "-"
+    # segment is refused above, so the two strings can never both equal the
+    # stored URL and the identity still determines it exactly.
+    [ "$url" = "https://$host/$path/-/merge_requests/$number" ] \
+      || [ "$url" = "https://$host/$path/merge_requests/$number" ] || exit 0
     # glab resolves the instance from the project URL passed to -R, so the host
     # comes from the validated record rather than glab's configured default.
     # It cannot take a merge request URL the way gh does: that form shells out

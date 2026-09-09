@@ -46,7 +46,13 @@
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
 # blocking_discussions_resolved is true, and the head pipeline succeeded at the
 # exact current head commit. Every failing condition is reported, not just the
-# first. The verified head is then passed to glab as --sha, so a push that lands
+# first, and two absences are reported as themselves rather than folded into a
+# failed check. An instance with no pipeline for the head is told it has no CI
+# at all, which is distinct from a pipeline that ran and did not pass; and an
+# instance that reports no detailed_merge_status - one older than GitLab 15.6 -
+# is told its mergeability could not be read, because glab deserializes the
+# fields such an instance omits into their type defaults, where "false" cannot
+# be told apart from a real answer. Neither absence is ever a pass. The verified head is then passed to glab as --sha, so a push that lands
 # between that read and the merge fails the merge instead of landing commits
 # nothing verified. A recorded pr_head that disagrees with the live head is
 # reported rather than trusted, because a rebase moves the head and leaves the
@@ -225,7 +231,7 @@ gitlab_verify_mergeable() {
   local json fields line
   local total=0 named=0 refusals=''
   local state='' detail='' conflicts='' discussions=''
-  local live_head='' pipeline_sha='' pipeline_status=''
+  local live_head='' pipeline_sha='' pipeline_status='' pipeline_present=''
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
@@ -246,6 +252,7 @@ gitlab_verify_mergeable() {
         "conflicts=" + (.has_conflicts | tostring),
         "discussions=" + (.blocking_discussions_resolved | tostring),
         "head=" + ((.sha // "") | tostring),
+        "pipeline=" + (if .head_pipeline == null then "absent" else "present" end),
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring)
       else
@@ -262,6 +269,7 @@ gitlab_verify_mergeable() {
       conflicts=*) conflicts=${line#conflicts=} ;;
       discussions=*) discussions=${line#discussions=} ;;
       head=*) live_head=${line#head=} ;;
+      pipeline=*) pipeline_present=${line#pipeline=} ;;
       pipeline_sha=*) pipeline_sha=${line#pipeline_sha=} ;;
       pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
       *) continue ;;
@@ -273,7 +281,7 @@ FIELDS
   # Every field named exactly once and no unnamed line: a value carrying a
   # newline would split into a line no name matches, so it is refused here
   # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 7 ] || [ "$total" -ne 7 ]; then
+  if [ "$named" -ne 8 ] || [ "$total" -ne 8 ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
@@ -292,21 +300,38 @@ FIELDS
   [ "$state" = opened ] \
     || refusals="$refusals  - state is \"${state:-unreadable}\", not open
 "
-  [ "$detail" = mergeable ] \
-    || refusals="$refusals  - detailed_merge_status is \"${detail:-unreadable}\", not mergeable
+  # An instance that reports no detailed_merge_status is older than GitLab 15.6,
+  # and the older instances omit has_conflicts and blocking_discussions_resolved
+  # too. glab fills an omitted field with its type default, so reporting those
+  # two values here would present "false" as an answer the instance never gave.
+  if [ -z "$detail" ]; then
+    refusals="$refusals  - this GitLab reported no detailed_merge_status, so mergeability could not be read; an instance older than GitLab 15.6 has no such field, and the has_conflicts and blocking_discussions_resolved values reported alongside it cannot be told apart from unset defaults
 "
-  [ "$conflicts" = false ] \
-    || refusals="$refusals  - has_conflicts is \"${conflicts:-unreadable}\", not false
+  else
+    [ "$detail" = mergeable ] \
+      || refusals="$refusals  - detailed_merge_status is \"$detail\", not mergeable
 "
-  [ "$discussions" = true ] \
-    || refusals="$refusals  - blocking_discussions_resolved is \"${discussions:-unreadable}\", not true
+    [ "$conflicts" = false ] \
+      || refusals="$refusals  - has_conflicts is \"${conflicts:-unreadable}\", not false
 "
-  [ "$pipeline_status" = success ] \
-    || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-none}\", not success
+    [ "$discussions" = true ] \
+      || refusals="$refusals  - blocking_discussions_resolved is \"${discussions:-unreadable}\", not true
 "
-  [ "$pipeline_sha" = "$live_head" ] \
-    || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
+  fi
+  # No pipeline at all is its own answer, not a pipeline that failed: an
+  # instance or project running no CI is said to have none, so the refusal names
+  # the absent CI rather than an unreadable status.
+  if [ "$pipeline_present" != present ]; then
+    refusals="$refusals  - there is no CI pipeline for this merge request: GitLab reports no pipeline at head $live_head, which is an absent check rather than a passing one, so a project that runs no CI cannot satisfy this condition
 "
+  else
+    [ "$pipeline_status" = success ] \
+      || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-unreadable}\", not success
+"
+    [ "$pipeline_sha" = "$live_head" ] \
+      || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
+"
+  fi
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2

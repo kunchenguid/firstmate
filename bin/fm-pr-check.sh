@@ -4,7 +4,9 @@
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# including a merge request on a self-hosted GitLab instance, in either the
+# current /-/merge_requests/ route or the legacy /merge_requests/ one an
+# instance older than GitLab 12.0 serves (bin/fm-pr-lib.sh).
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
