@@ -621,6 +621,117 @@ test_shutdown_is_bounded_when_marker_lock_is_held() {
   pass "signaled watcher stops on a held recovery marker lock and reports what it could not persist"
 }
 
+test_lock_resource_failure_returns() (
+  local dir state pid='' i process_state rc result
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "lock owner-directory failure returns # SKIP root bypasses directory permissions"
+    return
+  fi
+  dir=$(make_case lock-resource-failure)
+  state="$dir/state"
+  result="$dir/acquire.rc"
+  trap 'if [ -n "$pid" ]; then kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; chmod u+w "$state"' EXIT
+  chmod a-w "$state" || fail "could not make lock fixture state unwritable"
+
+  FM_STATE_OVERRIDE="$state" bash -eu -c '
+    . "$1"
+    if fm_lock_owner_dir "$2"; then
+      exit 10
+    fi
+    printf "ready\n" > "$3"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=$?; fi
+    printf "%s\n" "$rc" > "$4"
+    exit "$rc"
+  ' _ "$LIB" "$state/.resource.lock" "$dir/fault.ready" "$result" \
+    > "$dir/acquire.out" 2> "$dir/acquire.err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    process_state=0
+    is_live_non_zombie "$pid" || process_state=$?
+    [ "$process_state" -eq 1 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  process_state=0
+  is_live_non_zombie "$pid" || process_state=$?
+  [ -s "$dir/fault.ready" ] || fail "fixture could not induce owner-directory creation failure"
+  [ "$process_state" -ne 2 ] || fail "resource-fault acquirer liveness was unreadable"
+  [ "$process_state" -eq 1 ] && [ -s "$result" ] \
+    || fail "lock acquisition did not return on owner-directory creation failure"
+  rc=0
+  wait "$pid" || rc=$?
+  pid=
+  [ "$rc" -ne 0 ] && [ "$rc" = "$(cat "$result")" ] \
+    || fail "lock acquisition did not return nonzero on owner-directory creation failure"
+  [ ! -e "$state/.resource.lock" ] && [ ! -L "$state/.resource.lock" ] \
+    || fail "failed acquisition published a lock"
+  pass "lock acquisition returns nonzero when owner-directory creation fails"
+)
+
+test_shutdown_is_bounded_when_state_is_unwritable() (
+  local dir state fakebin err pid='' i process_state rc started elapsed
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "watcher shutdown on unwritable state # SKIP root bypasses directory permissions"
+    return
+  fi
+  dir=$(make_case unwritable-state-shutdown)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  err="$dir/watch.err"
+  trap 'if [ -n "$pid" ]; then kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; chmod u+w "$state"' EXIT
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2> "$err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -e "$state/.last-watcher-beat" ] \
+      && [ ! -e "$state/.watcher-down.lock" ] && [ ! -L "$state/.watcher-down.lock" ] \
+      && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    && [ -e "$state/.last-watcher-beat" ] \
+    || fail "watcher did not publish its singleton lock and beacon before the resource fault"
+  chmod a-w "$state" || fail "could not make watcher state unwritable"
+  [ ! -e "$state/.watcher-down.lock" ] && [ ! -L "$state/.watcher-down.lock" ] \
+    || fail "resource-fault fixture encountered marker-lock contention"
+  if FM_STATE_OVERRIDE="$state" bash -eu -c '. "$1"; fm_lock_owner_dir "$2"' \
+    _ "$LIB" "$state/.watcher-down.lock" >/dev/null 2>&1; then
+    fail "fixture could not induce watcher owner-directory creation failure"
+  fi
+  is_live_non_zombie "$pid" || fail "watcher exited before the resource-fault shutdown signal"
+  started=$SECONDS
+  kill -TERM "$pid" || fail "could not signal the watcher with unwritable state"
+  i=0
+  while [ "$i" -lt 200 ]; do
+    process_state=0
+    is_live_non_zombie "$pid" || process_state=$?
+    [ "$process_state" -eq 1 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  process_state=0
+  is_live_non_zombie "$pid" || process_state=$?
+  elapsed=$((SECONDS - started))
+  [ "$process_state" -ne 2 ] || fail "resource-fault watcher liveness was unreadable"
+  [ "$process_state" -eq 1 ] \
+    || fail "signaled watcher did not stop after owner-directory creation failed"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "signaled watcher exited successfully with unwritable state"
+  assert_grep 'recovery state could not be persisted within 5s' "$err" \
+    "resource-fault shutdown did not reach its deadline reporting branch"
+  assert_grep 'stopping and retaining stale lock evidence' "$err" \
+    "resource-fault shutdown did not report retained lock evidence"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    || fail "resource-fault shutdown removed the singleton lock evidence"
+  pid=
+  pass "signaled watcher reaches its deadline on owner-directory creation failure (${elapsed}s)"
+)
+
 test_arm_self_eviction_is_loud_without_successor() {
   local dir state fakebin armout armpid watcher_pid status i
   dir=$(make_case arm-self-evict)
@@ -1229,6 +1340,8 @@ test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_shutdown_is_bounded_when_marker_lock_is_held
+test_lock_resource_failure_returns || exit $?
+test_shutdown_is_bounded_when_state_is_unwritable || exit $?
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
