@@ -154,6 +154,79 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+# --- session-lock PID-reuse hardening ---------------------------------------
+#
+# state/.lock itself stays a bare one-line pid (bin/fm-lock.sh writes it), so
+# the dozen-plus call sites across the fleet that read it with a plain `cat`
+# expecting exactly one numeric line - bin/fm-sessionstart-run.sh,
+# bin/fm-bootstrap.sh, bin/fm-startup-network.sh, bin/fm-session-start.sh,
+# bin/fm-turnend-guard-cursor.sh's OWNER_ID, and others - never change. A
+# companion sidecar, state/.lock-identity, instead records the process-start
+# identity (fm_pid_identity, bin/fm-wake-lib.sh) of whichever pid state/.lock
+# currently names, mirroring the hardening bin/fm-wake-lib.sh already applies
+# to state/.watch.lock (fm_watcher_lock_matches_pid) and
+# state/.claude-autoarm-epoch (fm_autoarm_claim_open) - both of which record
+# and verify this same identity to survive a dead owner's pid being reused by
+# an unrelated live process. Format, two lines, written via tmp+rename:
+#   owner_pid=<pid>
+#   <fm_pid_identity output for that pid>
+# The sidecar is self-describing (it names the pid it is evidence for) so a
+# reader never depends on write ordering relative to state/.lock: a sidecar
+# whose owner_pid no longer matches the pid being tested is simply ignored,
+# exactly like a missing sidecar. Best effort throughout: a platform where
+# fm_pid_identity cannot resolve (no /proc, ps failure) leaves no evidence,
+# and every consumer treats missing evidence as neither proof of life nor
+# proof of death - it falls back to the plain fm_harness_pid_alive check that
+# was this decision's whole story before this sidecar existed.
+
+# fm_session_lock_write_identity <state> <pid>
+# Best-effort: record process-start identity for <pid>, the pid about to hold
+# (or already holding) state/.lock, so a later reclaim decision elsewhere can
+# distinguish it from an unrelated process later assigned the same pid.
+# Never a hard failure for the caller: bin/fm-lock.sh's actual lock write is
+# authoritative regardless of whether this best-effort sidecar succeeds.
+fm_session_lock_write_identity() {  # <state> <pid>
+  local state=$1 pid=$2 identity tmp
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
+  tmp="$state/.lock-identity.tmp.${BASHPID:-$$}"
+  if ! { printf 'owner_pid=%s\n%s\n' "$pid" "$identity"; } > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$state/.lock-identity" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+# fm_session_lock_pid_verified_alive <state> <pid>
+# The PID-reuse-hardened replacement for a bare fm_harness_pid_alive check at
+# a reclaim decision. True when <pid> is alive AND either no identity
+# evidence exists for it (a missing sidecar, or one whose recorded owner_pid
+# does not match <pid> - a stale leftover from a prior owner) - the same
+# conservative "still defer to it" answer fm_harness_pid_alive alone always
+# gave - or the recorded identity for <pid> matches its CURRENT live
+# identity. False when <pid> is dead, or when identity evidence for exactly
+# this pid is present and proves a mismatch: definitive proof the live
+# process now at <pid> is not the one that acquired the lock (a reused pid),
+# so the caller must treat state/.lock as reclaimable rather than live-owned.
+# Missing identity evidence never turns a live pid into a reclaimable one -
+# it only disables the extra hardening, the same "never block on absent
+# evidence" contract bin/fm-wake-lib.sh's legacy autoarm-abandonment proof
+# uses.
+fm_session_lock_pid_verified_alive() {  # <state> <pid>
+  local state=$1 pid=$2 sidecar recorded_owner recorded_identity current_identity
+  fm_harness_pid_alive "$pid" || return 1
+  sidecar="$state/.lock-identity"
+  [ -r "$sidecar" ] || return 0
+  recorded_owner=$(sed -n '1s/^owner_pid=//p' "$sidecar" 2>/dev/null || true)
+  [ "$recorded_owner" = "$pid" ] || return 0
+  recorded_identity=$(sed -n '2p' "$sidecar" 2>/dev/null || true)
+  [ -n "$recorded_identity" ] || return 0
+  current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 0
+  [ -n "$current_identity" ] || return 0
+  [ "$current_identity" = "$recorded_identity" ]
+}
+
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
 # of the current process: this script runs inside the session that owns the
 # home's fleet lock. Membership is the honest test of that question, because the
