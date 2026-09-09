@@ -106,7 +106,9 @@ Get "https://api.github.com/": proxyconnect tcp: dial tcp 192.0.2.1:9: connect: 
 
 The status line is an RFC 9112 construct rather than a gh string, so it is the primary signal.
 Only a 401, or a 403 that is not a rate limit, in it means GitHub refused the active credential.
-GitHub also answers 403 to a valid credential whose primary rate limit is spent, marked by an `x-ratelimit-remaining: 0` header, and 429 for secondary throttling, so those two are reported as `GH_AUTH_UNKNOWN` with a rate-limit detail rather than as a rejection.
+GitHub's REST API rate-limit documentation states that an exhausted primary limit answers 403 or 429 with `x-ratelimit-remaining: 0`, and that secondary throttling answers 403 or 429 with a `retry-after` header, to a credential it has not refused.
+The probe therefore reports a 429, or a 403 carrying `x-ratelimit-remaining: 0`, as `GH_AUTH_UNKNOWN` with a rate-limit detail rather than as a rejection.
+That branch rests on the vendor documentation and the header shape in `tests/fm-bootstrap.test.sh`'s fakes, not on a captured exchange, because exhausting the limit on demand is not repeatable.
 A 2xx after a failed `gh auth status` means GitHub accepted the active credential, so the probe reports it as `GH_AUTH_UNKNOWN` rather than as a rejection.
 When gh's failure line names a host other than github.com, the line says the failure belongs to another host or account, per the section above, and names it.
 When gh's failure line names github.com itself, or names no host, the line says only that `gh auth status` still failed and quotes it, because there is no other entry to point at.
@@ -120,7 +122,7 @@ To get started with GitHub CLI, please run:  gh auth login
 
 That instruction is the second, independent signal, and either one carries the re-authenticate verdict.
 The unreachable output above contains neither, which is what keeps the two apart.
-The `GH_AUTH_UNKNOWN` detail for a failed-elsewhere credential is the first `X` line of the `gh auth status` output with anything token-shaped redacted; the plain output carries no token without `--show-token`, so the redaction is a guard rather than a dependency.
+The excerpt quoted on the 2xx and other-status `GH_AUTH_UNKNOWN` lines is the first `X` line of the `gh auth status` output, or its first non-blank line when there is none, with anything token-shaped redacted; the plain output carries no token without `--show-token`, so the redaction is a guard rather than a dependency.
 
 `gh auth token` is NOT usable as a credential-presence probe: with `GH_CONFIG_DIR` pointing at an empty directory it still exits 0 and prints the keyring token, because the keyring is not scoped by the config directory.
 

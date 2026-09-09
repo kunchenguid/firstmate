@@ -61,8 +61,8 @@
 #          or account (the line names which) or for github.com itself (the
 #          line quotes gh) - so the active credential is neither confirmed nor
 #          rejected. The operator action is to check the network or the named
-#          host and retry, never to re-authenticate a credential nothing
-#          rejected. `gh auth status`
+#          host, or wait out the rate limit, and retry, never to re-authenticate
+#          a credential nothing rejected. `gh auth status`
 #          cannot make this distinction itself: it exits non-zero and reports
 #          the token invalid when its own API call could not complete, it exits
 #          non-zero when ANY configured host or account fails rather than only
