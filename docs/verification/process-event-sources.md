@@ -176,18 +176,27 @@ The 2026-08-27 review inspected `bin/fm-harness.sh`, `bin/fm-supervision-instruc
 
 ## Runner lifetime and cleanup
 
-The [operating contract](../configuration.md#process-to-event-sources-stateprocevent) owns stop authority, the guard's lease and two-check debounce, claim reclamation, and the permanent leak and silent loss of listening after an unrelated leader death.
+The [operating contract](../configuration.md#process-to-event-sources-stateprocevent) owns stop authority, the guard's lease and two-read debounce, claim reclamation, and the permanent leak and silent loss of listening after an unrelated leader death.
 
 Measured on 2026-09-08 on macOS (Darwin 25.5.0) against a stand-in poll child that traps TERM, INT, and HUP and keeps blocking: before the repair the guard signalled, lost the leader to that signal, and exited leaving the child running past 70 seconds.
 The guard caused the permanent leak by destroying the leader needed to prove ownership; a guard that causes that leak is worse than no guard.
 After the repair, the guard cleared that child in 7.7 seconds with a 5-second lease and 1-second check, and `retire` cleared the same shape in about 2.4 seconds.
-The bound is the lease plus two consecutive failed checks plus the stop's grace period, roughly 630 seconds at the shipped 600-second lease and 15-second check, with two checks required so a single unreadable read cannot kill a live runner.
+The bound is the lease term plus ONE check interval plus the stop's grace period, roughly 620 seconds at the shipped 600-second lease and 15-second check - a 601-second lease term, one 15-second interval, and up to 4 seconds of stop, with two reads still required so a single unreadable read cannot kill a live runner.
+What was tightened is the spacing of those two reads, not their number: half a check interval apart they both fit inside the single interval the bound budgets, where a full interval between them cost a second one.
+The lease term is the configured lease plus one second because the age comparison is in whole seconds, and that rounding is part of the bound rather than slack.
 The figure and that reason belong together: a number recorded without why it is that number is the one a later reader shortens.
 On the same date and host, retiring a healthy runner fell from about 2.8 seconds with a forced group signal every time to about 0.6 seconds with the ordinary signal alone.
 The circular lock wait described at `release_start_claim` in [`bin/fm-procevent.sh`](../../bin/fm-procevent.sh) explains why healthy runners required the forced signal; the measured delay was the stop waiting for exit cleanup that could not acquire its lock.
 
+Measured on 2026-09-09 on the same host, reaping an orphaned listener whose home stopped refreshing its lease and sampling the phase between the guard's check clock and the lease clock across eight runs per variant: 3.5 to 4.7 seconds with the two reads half an interval apart against 4.4 to 5.3 seconds with a full interval between them, at a 2-second lease and 1-second check, and 5.9 to 6.1 against 7.7 to 8.1 seconds at a 2-second lease and 4-second check.
+The regression pins that phase rather than sampling it, because a sampled phase lets a guard spending two intervals pass on a lucky alignment; it prints its own figure, 13.2 seconds after the last owner activity against a documented 15-second bound at a 7-second lease and 6-second check, and a guard given a full interval between its two reads breached that deadline.
+A guard that acted on a single failed read instead reached the same reaping in 9.9 seconds, so the UNSAFE variant is the faster one.
+That is why the bound and the debounce are pinned by separate cases: a change trading one away for the other would otherwise register only as an improvement.
+
 [`tests/fm-procevent.test.sh`](../../tests/fm-procevent.test.sh) exercises these reproductions through the executable interface: a TERM-surviving child under both `retire` and the guard, escalation with an absent or zombie leader or probes configured to become unreadable after TERM, and refusal of mismatched live identities or nonleaders before the first signal.
 The healthy-runner case requires the attached `start` to return status 143 (TERM); the printed retirement duration and sampled stop windows are supplementary evidence, not a timing-based pass condition.
+Two cases pin the guard's own numbers rather than only its outcome: one reaps an orphaned listener within the lease term plus a single check interval, with the lease expiry deliberately placed late in that interval, and one fails exactly one lease read against a home that is still alive and requires the runner to survive it.
+They fail for opposite reasons, which is the point of keeping them apart.
 The crashed-leader cases separately pin refusal and claim preservation when a leader dies outside the stop's own signal, so successful escalation cannot be mistaken for closing that limit.
 Refresh the regressions with `bash tests/fm-procevent.test.sh`; the dated measurements above are recorded observations, not fixed timing thresholds.
 

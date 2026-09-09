@@ -1101,11 +1101,17 @@ start_owner_guard() {  # <source-id>
 
 # The runner's owner guard, which bounds an accidentally orphaned detached
 # runner after its home ends. It revalidates the recorded physical state root
-# and its lease on a bounded cadence and, after two consecutive checks cannot prove
+# and its lease on a bounded cadence and, after two consecutive reads cannot prove
 # both, invokes the identity-gated stop for the runner's whole process group -
 # which is what reaches the blocking child and everything that child spawned,
 # exactly as retirement does. A failed verified stop stays on the retry cadence;
 # an absent leader ends the guard without signalling an ambiguous group.
+#
+# Those two reads are spaced HALF a check interval apart, so the pair completes
+# within one check interval rather than costing two. That keeps the debounce -
+# one unreadable read still cannot end a live runner - while bounding detection
+# at the lease plus a single check interval. The spacing is what was tightened;
+# the second read is what must not be traded away for it.
 #
 # Scope is the owning state root and this one runner generation. It never
 # matches on a script name, a command line, or a process name: those are shared
@@ -1113,7 +1119,7 @@ start_owner_guard() {  # <source-id>
 # proves its own owner through that home's own lease.
 cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file> <state-device> <state-inode>
   local id=${1-} pid=${2-} identity=${3-} ready=${4-} state_device=${5-} state_inode=${6-}
-  local lease tick misses=0 pid_state state_identity current_device current_inode
+  local lease tick half misses=0 pid_state state_identity current_device current_inode
   [ "$#" -eq 6 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$pid" in ''|*[!0-9]*) die "runner pid must be a positive integer: $pid" ;; esac
@@ -1128,6 +1134,10 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
     || die "FM_PROCEVENT_OWNER_LEASE_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_LEASE_MIN_SECONDS to $FM_PROCEVENT_OWNER_LEASE_MAX_SECONDS"
   tick=$(fm_procevent_owner_check_seconds) \
     || die "FM_PROCEVENT_OWNER_CHECK_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS to $FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS"
+  # Half the configured interval, kept exact for an odd interval so the smallest
+  # configurable interval still yields two reads rather than collapsing to one.
+  half=$((tick / 2))
+  [ $((tick % 2)) -eq 0 ] || half="$half.5"
   fm_procevent_pid_state "$pid" "$identity"
   pid_state=$?
   [ "$pid_state" -eq 0 ] || die "runner identity changed before owner guard initialization"
@@ -1141,7 +1151,7 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
   printf 'ready\n' > "$ready" || die "cannot confirm owner guard initialization"
   trap - EXIT
   while :; do
-    sleep "$tick"
+    sleep "$half"
     fm_procevent_pid_state "$pid" "$identity"
     pid_state=$?
     case "$pid_state" in
@@ -1161,6 +1171,8 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
       continue
     fi
     # Two consecutive misses, so one unreadable read cannot end a live runner.
+    # They are half an interval apart, so requiring the second costs detection
+    # time inside the interval already budgeted rather than a second interval.
     misses=$((misses + 1))
     [ "$misses" -ge 2 ] || continue
     if stop_runner_pid "$pid" "$identity"; then

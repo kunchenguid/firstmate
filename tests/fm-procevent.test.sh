@@ -2413,6 +2413,27 @@ chmod +x "$QUIET_STUB"
 PROOF_LEASE_SECONDS=2
 PROOF_CHECK_SECONDS=1
 
+# The documented bound, derived here rather than restated as a flat number.
+#
+# The whole-second lease comparison is part of the bound, not slack: a lease of
+# N is honoured until its age reads N+1, so the lease term is N+1.
+PROOF_LEASE_BOUND=$((PROOF_LEASE_SECONDS + 1))
+# Detection is the lease plus ONE check interval. The guard still takes two
+# consecutive failing reads before it acts - one unreadable read must not end a
+# live runner - but they are spaced half an interval apart, so the pair fits
+# inside the single interval this term budgets.
+PROOF_DETECT_BOUND=$((PROOF_LEASE_BOUND + PROOF_CHECK_SECONDS))
+# The stop's own ceiling: two seconds for the ordinary signal, then two for the
+# forced one. Only a group that outlives the ordinary signal spends it, so a
+# case whose stub exits on that signal uses PROOF_PROMPT_STOP instead.
+PROOF_STOP_CEILING=4
+PROOF_PROMPT_STOP=1
+# Additive scheduling slack, never multiplicative. It absorbs a loaded host, not
+# a slower guard: widening it past half a check interval would let a guard that
+# spent a whole interval between its two reads hide inside it, which is the
+# regression these deadlines exist to catch.
+PROOF_LOAD_SLACK=2
+
 orphan_pe() {  # <home> <command...>
   local home=$1
   shift
@@ -2464,13 +2485,21 @@ pass "a detached listener starts reparented, with a live descendant tree under i
 # owning session is the single difference between the two listeners.
 keep_owner_present() { orphan_pe "$HKEEP" reconcile >/dev/null 2>&1 || true; sleep 0.25; }
 
-deadline=$((SECONDS + 40))
+# This stub exits on the ordinary signal, so the stop ceiling is not spent here.
+# The deadline is DERIVED from the documented bound; the timing case below is
+# the one that pins the bound's worst case, while this one asserts that the
+# reaping happens at all and cannot quietly take an unbounded amount of time.
+orphan_bound=$((PROOF_DETECT_BOUND + PROOF_PROMPT_STOP))
+deadline=$((SECONDS + orphan_bound + PROOF_LOAD_SLACK))
+orphan_started=$SECONDS
 while kill -0 -"$ORPHAN_PID" 2>/dev/null; do
   [ "$SECONDS" -lt "$deadline" ] \
-    || fail "a listener whose owning session was gone kept its process group running"
+    || fail "a listener whose owning session was gone kept its process group running for $((SECONDS - orphan_started))s, against a documented bound of ${orphan_bound}s"
   keep_owner_present
 done
-deadline=$((SECONDS + 20))
+# The descendant goes down with the same group signal, so it needs no bound of
+# its own beyond the slack that covers a loaded host.
+deadline=$((SECONDS + PROOF_LOAD_SLACK))
 while kill -0 "$ORPHAN_DESCENDANT" 2>/dev/null; do
   [ "$SECONDS" -lt "$deadline" ] \
     || fail "a listener whose owning session was gone left a descendant running"
@@ -2709,16 +2738,19 @@ GUARD_CHILD=$(cat "$TMP_ROOT/proof-guard.child")
 # Nothing refreshes this home's lease from here on, which is the whole input.
 #
 # The deadline is DERIVED from the bound this case exists to defend, not a flat
-# wall-clock number. The documented bound is the lease, plus the two consecutive
-# failed checks the guard debounces on, plus the stop's own grace - its ordinary
-# signal window and then its forced one, two seconds each. A flat 60 seconds here
-# would pass a guard that took 55, so it could not go red for the reason it
-# names; the point of this case is the bound, so the bound is what it measures.
-# The doubling is a load allowance and nothing more: it must never be widened to
-# make a slow guard pass, because that converts this assertion back into the
-# decoration it was.
-guard_bound=$((PROOF_LEASE_SECONDS + 2 * PROOF_CHECK_SECONDS + 4))
-deadline=$((SECONDS + 2 * guard_bound))
+# wall-clock number. The documented bound is the lease term, plus ONE check
+# interval for detection - the guard's two confirming reads are half an interval
+# apart and both fit inside it - plus the stop's own grace, its ordinary signal
+# window and then its forced one. THIS case does spend that grace, because its
+# child ignores the ordinary signal; that is what separates its allowance from
+# the ordinary-stop case above.
+#
+# A flat 60 seconds here would pass a guard that took 55, so it could not go red
+# for the reason it names. The slack is additive and stays under half a check
+# interval for the same reason: it must never be widened to make a slow guard
+# pass, because that converts this assertion back into the decoration it was.
+guard_bound=$((PROOF_DETECT_BOUND + PROOF_STOP_CEILING))
+deadline=$((SECONDS + guard_bound + PROOF_LOAD_SLACK))
 guard_started=$SECONDS
 while kill -0 -"$GUARD_PID" 2>/dev/null; do
   [ "$SECONDS" -lt "$deadline" ] \
@@ -2730,6 +2762,149 @@ wait_gone "$GUARD_CHILD" \
 [ -s "$TMP_ROOT/proof-guard.signals" ] \
   || fail "the guarded child was never signalled, so nothing about escalation was exercised"
 pass "an expired runner's guard escalates past a signal-proof child"
+
+# --- the guard's bound is one check interval, not two ------------------------
+#
+# The case above proves the guard reaps at all. This one measures HOW LONG it
+# may take, because that is the number the operating contract states and the one
+# a later change can quietly double.
+#
+# The bound: the lease term, plus ONE check interval. The guard still refuses to
+# act on a single failed read - the case after this one is what defends that -
+# but its two confirming reads are spaced half an interval apart, so the pair
+# fits inside the one interval budgeted here. A guard that put a whole interval
+# between them would spend two, and this deadline is sized to catch exactly that.
+#
+# THE PHASE IS PINNED, NOT SAMPLED. Where the lease expiry falls relative to the
+# guard's own check clock decides whether a run lands near the bound or well
+# inside it, and a sampled phase would let a guard spending two intervals slip
+# under this deadline on a lucky alignment. `reconcile` refreshes the lease and
+# only then starts the guard, so the expiry lands (lease + 1) after the refresh
+# and (lease + 1 - startup) after the guard's clock. A lease term two seconds
+# past one check interval puts that expiry between the guard's first and second
+# check for any startup under two seconds - measured at about 0.7s on this host -
+# which is the late half of the interval and therefore the meaningful case.
+BOUND_LEASE_SECONDS=7
+BOUND_CHECK_SECONDS=6
+# The whole-second lease comparison is part of the bound, not slack: a lease of
+# N is honoured until its age reads N+1.
+bound_lease_term=$((BOUND_LEASE_SECONDS + 1))
+bound_detect=$((bound_lease_term + BOUND_CHECK_SECONDS))
+# This stub exits on the ordinary signal, so the stop's escalation ceiling is
+# not spent here; one second covers signalling and exit against a measured
+# ~0.4s for a whole retire command on this host.
+bound_total=$((bound_detect + PROOF_PROMPT_STOP))
+# Additive load slack, under half a check interval for the reason above.
+bound_deadline_s=$((bound_total + PROOF_LOAD_SLACK))
+
+now_mono() {
+  perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \
+    'printf "%.3f\n", clock_gettime(CLOCK_MONOTONIC)'
+}
+mono_since() {  # <monotonic-reference>: seconds elapsed, one decimal
+  perl -e 'printf "%.1f\n", $ARGV[0] - $ARGV[1]' "$(now_mono)" "$1"
+}
+
+HBOUND="$TMP_ROOT/guard-bound"; new_home "$HBOUND"
+fm_test_track_procevent_home "$HBOUND"
+bound_pe() {
+  FM_PROCEVENT_OWNER_LEASE_SECONDS="$BOUND_LEASE_SECONDS" \
+    FM_PROCEVENT_OWNER_CHECK_SECONDS="$BOUND_CHECK_SECONDS" \
+    FM_HOME="$HBOUND" "$ROOT/bin/fm-procevent.sh" "$@"
+}
+bound_pe register lavish bound-src -- "$QUIET_STUB" "$TMP_ROOT/guard-bound-marker" >/dev/null
+# The last thing that refreshes this home's lease, and also what starts the
+# guard. Nothing below touches this home again, so the bound runs from here.
+bound_pe reconcile >/dev/null
+wait_for "$HBOUND/state/procevent/bound-src.runner" \
+  || fail "the bound fixture's listener never recorded its runner"
+wait_for "$TMP_ROOT/guard-bound-marker.descendant" \
+  || fail "the bound fixture's listener never spawned its descendant"
+BOUND_PID=$(cat "$HBOUND/state/procevent/bound-src.runner")
+BOUND_DESCENDANT=$(cat "$TMP_ROOT/guard-bound-marker.descendant")
+# Elapsed is measured from the refresh the guard itself reads, not from a
+# wall-clock moment near it, so the fixture's own startup cost cannot be
+# mistaken for guard latency in either direction.
+bound_reference=$(cat "$HBOUND/state/procevent/.owner-lease") \
+  || fail "the bound fixture recorded no owner lease to measure against"
+while kill -0 -"$BOUND_PID" 2>/dev/null; do
+  [ "$(mono_since "$bound_reference" | cut -d. -f1)" -lt "$bound_deadline_s" ] \
+    || fail "the guard exceeded its bound: group still running $(mono_since "$bound_reference")s after the last owner activity, against a documented bound of ${bound_total}s (lease term ${bound_lease_term}s + one ${BOUND_CHECK_SECONDS}s check interval + ${PROOF_PROMPT_STOP}s stop)"
+  sleep 0.2
+done
+bound_elapsed=$(mono_since "$bound_reference")
+wait_gone "$BOUND_DESCENDANT" \
+  || fail "the guard stopped at the leader and left its descendant running"
+printf 'guard bound: lease=%ss check=%ss reaped %ss after the last owner activity, documented bound %ss\n' \
+  "$BOUND_LEASE_SECONDS" "$BOUND_CHECK_SECONDS" "$bound_elapsed" "$bound_total"
+pass "an orphaned runner is reaped within the lease plus ONE check interval"
+
+# --- one unreadable read still does not end a live runner --------------------
+#
+# The bound above was tightened by moving the guard's two reads closer together,
+# NOT by dropping the second one. This is what that second read is for, asserted
+# separately so the two cannot be traded for each other by accident: against a
+# home that is still alive, one failed read must reset the count, not stop the
+# runner.
+#
+# The failure is injected where the real path actually reads. ONE lease read
+# fails, exactly once, identified by the lease-age program's own text so no
+# other call in the runner is touched; every read before and after it is the
+# real command, and the home's lease stays long and fresh throughout. The single
+# failed read is therefore the only thing wrong that the guard can see.
+
+DEBOUNCE_HOME="$TMP_ROOT/lease-debounce"; new_home "$DEBOUNCE_HOME"
+fm_test_track_procevent_home "$DEBOUNCE_HOME"
+DEBOUNCE_STATE="$TMP_ROOT/lease-debounce-state"; mkdir -p "$DEBOUNCE_STATE"
+DEBOUNCE_BIN=$(fm_fakebin "$TMP_ROOT/lease-debounce-bin")
+REAL_PERL=$(command -v perl) || fail "this host has no perl to build the debounce fixture on"
+cat > "$DEBOUNCE_BIN/perl" <<SH
+#!/usr/bin/env bash
+if [ -s "\$LEASE_DEBOUNCE_STATE/armed" ] && [ ! -s "\$LEASE_DEBOUNCE_STATE/spent" ]; then
+  for arg in "\$@"; do
+    case \$arg in
+      *'int(\$now - \$value)'*)
+        printf 'spent\n' > "\$LEASE_DEBOUNCE_STATE/spent"
+        exit 1
+        ;;
+    esac
+  done
+fi
+exec "$REAL_PERL" "\$@"
+SH
+chmod +x "$DEBOUNCE_BIN/perl"
+
+# A long lease and a short check: many reads happen inside the observation
+# window, and none of them can go stale on their own during it.
+DEBOUNCE_LEASE_SECONDS=30
+DEBOUNCE_CHECK_SECONDS=1
+debounce_pe() {
+  PATH="$DEBOUNCE_BIN:$PATH" LEASE_DEBOUNCE_STATE="$DEBOUNCE_STATE" \
+    FM_PROCEVENT_OWNER_LEASE_SECONDS="$DEBOUNCE_LEASE_SECONDS" \
+    FM_PROCEVENT_OWNER_CHECK_SECONDS="$DEBOUNCE_CHECK_SECONDS" \
+    FM_HOME="$DEBOUNCE_HOME" "$ROOT/bin/fm-procevent.sh" "$@"
+}
+debounce_pe register lavish debounce-src -- "$QUIET_STUB" "$TMP_ROOT/lease-debounce-marker" >/dev/null
+debounce_pe reconcile >/dev/null
+wait_for "$DEBOUNCE_HOME/state/procevent/debounce-src.runner" \
+  || fail "the debounce fixture's listener never recorded its runner"
+DEBOUNCE_PID=$(cat "$DEBOUNCE_HOME/state/procevent/debounce-src.runner")
+# Armed only now. The guard proves the lease once before it reports ready, and
+# failing THAT read would refuse the runner outright instead of exercising the
+# debounce this case is about.
+printf 'armed\n' > "$DEBOUNCE_STATE/armed"
+wait_for "$DEBOUNCE_STATE/spent" \
+  || fail "the single failed lease read this case injects never happened"
+# Several further checks at the configured interval. A guard that acted on one
+# failed read would have stopped the group during them.
+sleep $((DEBOUNCE_CHECK_SECONDS * 4))
+kill -0 -"$DEBOUNCE_PID" 2>/dev/null \
+  || fail "one unreadable lease read ended a runner whose home was still alive"
+debounce_pe retire debounce-src >/dev/null \
+  || fail "retiring the debounce fixture's source reported failure"
+wait_gone "-$DEBOUNCE_PID" \
+  || fail "retiring the debounce fixture left its process group running"
+pass "one unreadable read does not end a live runner"
 
 # --- the ordinary stop signal is what stops a runner ------------------------
 #
