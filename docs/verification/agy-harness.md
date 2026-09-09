@@ -213,7 +213,8 @@ Three changes in `bin/fm-spawn.sh` close it, all still environment-overridable:
 The tracked `.agents/hooks.json` seatbelts have NOT been driven inside a live Agy PRIMARY, and this record does not claim they have.
 Three attempts on 2026-09-09 stalled in `Generating...` for three to five minutes without ever reaching a tool call, and a hookless control lab on the same account stalled identically, so the stall is the account or the model rather than anything in this change.
 
-What IS proven live is the transport those hooks depend on: the four PreToolUse renderings above were driven four times against the real binary inside the e2e guard, which is what establishes that only silence allows and that a returned object blocks at either exit status.
+What IS proven live is the transport those hooks depend on: the four PreToolUse renderings above were driven against the real binary from a WORKER session inside the e2e guard, which is what establishes that only silence allows and that a returned object blocks at either exit status.
+That is the transport, not the primary-side wiring: no claim here rests on the seatbelt scripts having run in a primary.
 The wrapper logic that sits between that transport and the seatbelt scripts is covered by the portable suite, which executes the tracked command strings themselves.
 Re-drive this scenario when the account reaches tool calls again, and record the result here rather than inferring it.
 
