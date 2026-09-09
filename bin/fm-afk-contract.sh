@@ -62,9 +62,9 @@
 # whose fields mention credentials, passwords, logins, legal or financial
 # acceptance, payments, invoices, one-time codes, or an attended prompt is
 # refused for every actor because those are physically the captain's. The scan
-# lowercases the fields, turns punctuation into spaces, and matches each
-# protected concept at token prefixes, so compound and plural spellings such as
-# credential-prompt, credentials/keys, and payments are caught.
+# lowercases the fields, turns punctuation into spaces, and matches every stem
+# in the fixed deny-list at consecutive token prefixes, hardening single-token
+# and multi-token concepts against compounds, plurals, and other inflections.
 # A clause missing a required field is refused with that field named, recorded
 # under refused:, read back beside the accepted list, and never executes. Ids
 # are the input ordinals across accepted and refused clauses.
@@ -177,42 +177,36 @@ fm_afk_contract_unescape() {  # <escaped-text>
 
 # fm_afk_contract_never_set_hit <text...>: prints the protected concept the
 # text mentions, or nothing. This is the one forbidden-concept scan: lowercase,
-# punctuation to spaces, then each token compared at its prefix against the
-# protected stems, plus the two-word concepts. It understands nothing about the
+# punctuation to spaces, then one fixed list whose every stem must prefix the
+# corresponding consecutive input token. It understands nothing about the
 # sentence; it only refuses to record authority over the captain's own things.
 fm_afk_contract_never_set_hit() {  # <text...>
-  local normalized word
-  local -a tokens
+  local normalized concept matched i j
+  local -a tokens stems concepts=(
+    credential password passcode login signin otp totp hotp 2fa mfa token secret
+    passphrase apikey legal financial payment invoice pin
+    'log in' 'sign in' 'attended prompt' 'one time code' 'one time password'
+    'one time passcode' 'verification code' 'security code' 'auth code'
+    'authentication code' 'recovery code' 'backup code' 'api key' 'access token'
+    'secret key' 'private key'
+  )
   normalized=$(printf '%s ' "$@" | tr '[:upper:]' '[:lower:]' | sed 's/[^[:alnum:]]/ /g; s/  */ /g')
-  case " $normalized " in
-    *" log in "*) printf 'log in'; return 0 ;;
-    *" sign in "*) printf 'sign in'; return 0 ;;
-    *" attended prompt"*) printf 'attended prompt'; return 0 ;;
-    *" one time code "*) printf 'one time code'; return 0 ;;
-    *" one time password "*) printf 'one time password'; return 0 ;;
-    *" one time passcode "*) printf 'one time passcode'; return 0 ;;
-    *" verification code "*) printf 'verification code'; return 0 ;;
-    *" security code "*) printf 'security code'; return 0 ;;
-    *" auth code "*) printf 'auth code'; return 0 ;;
-    *" authentication code "*) printf 'authentication code'; return 0 ;;
-    *" recovery code "*) printf 'recovery code'; return 0 ;;
-    *" backup code "*) printf 'backup code'; return 0 ;;
-    *" api key "*) printf 'api key'; return 0 ;;
-    *" access token "*) printf 'access token'; return 0 ;;
-    *" secret key "*) printf 'secret key'; return 0 ;;
-    *" private key "*) printf 'private key'; return 0 ;;
-    *" passphrase "*) printf 'passphrase'; return 0 ;;
-  esac
   read -r -a tokens <<< "$normalized"
-  for word in "${tokens[@]}"; do
-    case "$word" in
-      credential*|password*|passcode*|login*|signin*|2fa*|mfa*|financial*|payment*|invoice*|otp*|totp*|hotp*|token*|secret*|passphrase*|pin*|apikey*)
-        printf '%s' "$word"
-        return 0 ;;
-      legal)
-        printf '%s' "$word"
-        return 0 ;;
-    esac
+  for concept in "${concepts[@]}"; do
+    read -r -a stems <<< "$concept"
+    for ((i = 0; i + ${#stems[@]} <= ${#tokens[@]}; i++)); do
+      matched=1
+      for ((j = 0; j < ${#stems[@]}; j++)); do
+        case "${tokens[$((i + j))]}" in
+          "${stems[$j]}"*) ;;
+          *) matched=0; break ;;
+        esac
+      done
+      if [ "$matched" -eq 1 ]; then
+        printf '%s' "$concept"
+        return 0
+      fi
+    done
   done
   return 1
 }

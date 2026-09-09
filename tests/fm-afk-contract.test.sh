@@ -69,8 +69,10 @@ test_fields_refuse_each_missing_part_by_name() {
   compile_refusal 'object - the never-set refuses it' 'never-set: attended compound' --action answer --object 'task q attended-prompt' --when 'prompt starts'
   compile_refusal 'object - the never-set refuses it' 'never-set: payment prefix' --action answer --object 'task q payments' --when 'prompt starts'
   compile_refusal 'object - the never-set refuses it' 'never-set: one-time code' --action answer --object 'task q one-time-code prompt' --when 'it appears'
-  compile_refusal 'object - the never-set refuses it' 'never-set: verification code' --action answer --object 'task q verification/code prompt' --when 'it appears'
-  compile_refusal 'object - the never-set refuses it' 'never-set: API key' --action answer --object 'task q api-key prompt' --when 'it appears'
+  compile_refusal 'object - the never-set refuses it' 'never-set: plural one-time codes' --action answer --object 'task q one-time-codes prompt' --when 'it appears'
+  compile_refusal 'object - the never-set refuses it' 'never-set: plural verification codes' --action answer --object 'task q verification-codes prompt' --when 'it appears'
+  compile_refusal 'object - the never-set refuses it' 'never-set: plural API keys' --action answer --object 'task q api-keys prompt' --when 'it appears'
+  compile_refusal 'object - the never-set refuses it' 'never-set: inflected attended prompts' --action answer --object 'task q attended-prompts' --when 'it appears'
   compile_refusal 'object - the never-set refuses it' 'never-set: TOTP prefix' --action answer --object 'task q TOTP-entry prompt' --when 'it appears'
   compile_refusal 'object - the never-set refuses it' 'never-set: token prefix' --action answer --object 'task q tokenize prompt' --when 'it appears'
   compile_refusal 'object - the never-set refuses it' 'never-set: in the precondition' --action merge --object 'task x PR' --when 'after the Login/2FA prompt clears'
@@ -99,8 +101,6 @@ test_fields_record_the_captain_wording_verbatim() {
     --action merge --object 'task x PR' --when 'looks red enough, honestly'
   compile_accept '1. dispatch these queued items when the windows lane is green' 'dispatch' \
     --action dispatch --object 'these queued items' --when 'the windows lane is green'
-  compile_accept '1. answer task legally-unrelated prompt when it appears' 'unrelated legal stem' \
-    --action answer --object 'task legally-unrelated prompt' --when 'it appears'
   pass "clause fields are recorded verbatim, and no static parser judges the wording"
 }
 

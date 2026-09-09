@@ -79,6 +79,14 @@ $text
 EOF
 }
 
+remove_evidence() {  # <kind> <text> <file>
+  local kind=$1 text=$2 file=$3 record pending
+  record=$(printf 'evidence\t%s\t%s' "$kind" "$text")
+  pending=$(mktemp "$(dirname "$file")/.afk-return-evidence-filter.XXXXXX") || return 1
+  grep -Fvx "$record" "$file" > "$pending" 2>/dev/null || true
+  mv "$pending" "$file"
+}
+
 preserve_evidence() {  # <destination>
   local destination=$1
   [ -f "$GATE" ] || return 0
@@ -110,13 +118,14 @@ window_start_epoch() {
 # misleads.
 STORE_ROWS=
 store_rows_load() {  # <since-epoch>
-  local since=$1
+  local since=$1 raw
   STORE_ROWS=
   [ -s "$STATE/branch-outcomes.jsonl" ] || return 0
   case "$since" in ''|*[!0-9]*) since=0 ;; esac
-  STORE_ROWS=$("$SCRIPT_DIR/fm-branch-outcome.sh" list --recent 1000000 2>/dev/null \
-    | jq -r --argjson since "$since" \
-      'select(.epoch >= $since) | [.seq, .task, .verdict, (.statusEndpoint // 0), (.summary // "")] | @tsv' 2>/dev/null) \
+  raw=$("$SCRIPT_DIR/fm-branch-outcome.sh" list --recent 1000000 2>/dev/null) \
+    || return 1
+  STORE_ROWS=$(printf '%s\n' "$raw" | jq -r --argjson since "$since" \
+    'select(.epoch >= $since) | [.seq, .task, .verdict, (.statusEndpoint // 0), (.summary // "")] | @tsv' 2>/dev/null) \
     || { STORE_ROWS=; return 1; }
 }
 
@@ -304,7 +313,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
 
   # 1. health, first, always.
   printf 'Supervisor health:\n'
-  awk -F '\t' '$1 == "evidence" && $2 == "health" { print "  - " $3 }' "$evidence"
+  awk -F '\t' '$1 == "evidence" && ($2 == "health" || ($2 == "lifecycle" && $3 ~ /^outcome store unreadable/)) { print "  - " $3 }' "$evidence"
 
   # 2. the mandate.
   printf 'Mandate clauses:\n'
@@ -443,7 +452,12 @@ return_reconcile() {
     append_evidence escalation "$escalations" "$evidence"
   fi
 
-  store_rows_load "$since" || append_evidence lifecycle 'supervision outcome store unreadable; the brief omits it' "$evidence"
+  if store_rows_load "$since"; then
+    remove_evidence lifecycle 'outcome store unreadable, catch-up stays gated' "$evidence" || lifecycle_ok=0
+  else
+    append_evidence lifecycle 'outcome store unreadable, catch-up stays gated' "$evidence"
+    lifecycle_ok=0
+  fi
   scan_open_blockers > "$blockers"
   render_return_brief "$evidence" "$blockers" "$since"
   if [ "$lifecycle_ok" -ne 1 ] || grep -q "^blocker$(printf '\t')" "$blockers"; then

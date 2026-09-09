@@ -418,6 +418,29 @@ test_return_brief_keeps_refresh_history() {
   pass "a refreshed posture keeps its original window, superseded mandate, and earlier outcomes"
 }
 
+test_unreadable_outcome_store_keeps_catchup_gated() {
+  local dir out rc gate
+  dir="$TMP_ROOT/unreadable-outcome-store"
+  install_runner "$dir"
+  gate="$dir/home/state/.afk-return-catchup"
+  printf '{malformed json\n' > "$dir/home/state/branch-outcomes.jsonl"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "an unreadable outcome store should keep catch-up gated (rc=$rc): $out"
+  [ -f "$gate" ] || fail "an unreadable outcome store did not retain the return gate"
+  assert_contains "$out" 'outcome store unreadable, catch-up stays gated' "the partial brief did not disclose its unreadable store"
+  : > "$dir/home/state/branch-outcomes.jsonl"
+  out=$(run_return "$dir" check) || fail "catch-up did not clear after the outcome store was repaired: $out"
+  assert_contains "$out" 'catch-up clear' "the repaired outcome store did not clear catch-up"
+  assert_not_contains "$out" 'outcome store unreadable' "the repaired store retained stale failure evidence"
+  [ ! -e "$gate" ] || fail "the repaired outcome store left the return gate behind"
+  pass "an unreadable outcome store gates catch-up until a successful reread"
+}
+
 test_failed_held_listing_is_not_reported_as_empty() {
   local dir out waiting
   dir="$TMP_ROOT/held-list-failure"
@@ -499,6 +522,7 @@ test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_keeps_refresh_history
+test_unreadable_outcome_store_keeps_catchup_gated
 test_failed_held_listing_is_not_reported_as_empty
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
