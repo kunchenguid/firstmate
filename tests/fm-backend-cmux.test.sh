@@ -511,6 +511,40 @@ test_target_ready_fails_when_target_absent() {
   pass "fm_backend_cmux_target_ready: fails when the workspace/surface is not found (list-panes structural check)"
 }
 
+test_target_ready_fails_when_list_panes_errors_empty() {
+  local dir fb status real_jq
+  dir="$TMP_ROOT/ready-list-panes-error"; mkdir -p "$dir/responses"
+  fb=$(make_cmux_fakebin "$dir")
+  real_jq=$(command -v jq)
+  # 1: list-panes --json --id-format uuids -> exits nonzero with no stdout
+  # (a failed call, not "no matching pane"). Regression coverage for the
+  # incident where a bare `cli ... | jq -e ...` pipe took its exit status
+  # from jq alone, and jq 1.6 treated empty stdin as success under -e, so a
+  # failed list-panes call misreported the surface as existing. A real jq
+  # 1.7+ already refuses empty stdin under -e, which would mask the bug on
+  # this machine, so this stub jq mimics 1.6's `-e`-on-empty-stdin=success
+  # quirk to make the regression check version-independent: it fails unless
+  # the code checks the CLI's own exit status before ever handing off to jq.
+  cat > "$fb/jq" <<SH
+#!/usr/bin/env bash
+set -u
+input=\$(cat)
+for a in "\$@"; do
+  if [ "\$a" = "-e" ] && [ -z "\$input" ]; then
+    exit 0
+  fi
+done
+printf '%s' "\$input" | exec "$real_jq" "\$@"
+SH
+  chmod +x "$fb/jq"
+  printf '1' > "$dir/responses/1.exit"
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_ready "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "target_ready should fail when list-panes itself errors out, not just when it reports no match"
+  pass "fm_backend_cmux_target_ready: fails when list-panes itself errors (not just when it reports no match)"
+}
+
 test_target_ready_checks_expected_label() {
   local dir fb title
   dir="$TMP_ROOT/ready-label-ok"; mkdir -p "$dir/responses"
@@ -1131,6 +1165,7 @@ test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_target_ready_fails_when_target_absent
+test_target_ready_fails_when_list_panes_errors_empty
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
 test_capture_trims_locally

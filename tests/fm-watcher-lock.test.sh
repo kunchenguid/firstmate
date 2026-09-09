@@ -218,6 +218,53 @@ test_lock_single_winner_under_concurrency() {
   pass "concurrent fm_lock_try_acquire yields exactly one winner"
 }
 
+test_lock_acquire_wait_zero_timeout_tries_once() {
+  local dir state lockdir live rc start end elapsed
+  dir=$(make_case lock-acquire-wait-zero-timeout)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  rc=0
+  start=$(date +%s)
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" 0
+  ' _ "$LIB" "$lockdir" 2>/dev/null || rc=$?
+  end=$(date +%s)
+  elapsed=$((end - start))
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ "$rc" -eq 1 ] || fail "fm_lock_acquire_wait timeout=0 against a live-held lock should return 1, got rc=$rc"
+  [ "$elapsed" -le 3 ] || fail "fm_lock_acquire_wait timeout=0 took ${elapsed}s; should try once and return immediately"
+  pass "fm_lock_acquire_wait: timeout=0 tries once and returns immediately instead of waiting forever"
+}
+
+test_lock_acquire_wait_times_out_and_reports() {
+  local dir state lockdir live rc err
+  dir=$(make_case lock-acquire-wait-timeout)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  err="$dir/err"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" 1
+  ' _ "$LIB" "$lockdir" 2>"$err" || rc=$?
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ "$rc" -eq 1 ] || fail "fm_lock_acquire_wait should return 1 once its timeout expires against a live-held lock, got rc=$rc"
+  assert_grep "timed out after 1s waiting for" "$err" \
+    "fm_lock_acquire_wait did not report its timeout to stderr for callers that don't check the return value"
+  pass "fm_lock_acquire_wait: an expired timeout returns 1 and reports itself to stderr"
+}
+
 test_lock_steals_dead_pid_lock() {
   local dir state lockdir dead rc newpid
   dir=$(make_case lock-dead-steal)
@@ -1111,6 +1158,8 @@ test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
+test_lock_acquire_wait_zero_timeout_tries_once
+test_lock_acquire_wait_times_out_and_reports
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
