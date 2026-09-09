@@ -442,14 +442,17 @@ test_malformed_posture_record_keeps_catchup_gated() {
 }
 
 test_missing_epoch_record_stays_required_after_disappearing() {
-  local dir out rc gate record backup
+  local dir out rc gate record backup epoch entered
   dir="$TMP_ROOT/missing-epoch-posture-record"
   install_runner "$dir"
   gate="$dir/home/state/.afk-return-catchup"
   record="$dir/home/state/.afk-contract"
   backup="$dir/valid-record.backup"
-  contract_in "$dir" propose --words 'captain words survive' >/dev/null || fail "could not propose the posture record"
+  contract_in "$dir" propose --words 'captain words survive' \
+    --action merge --object 'task restored PR' --when 'checks green' >/dev/null || fail "could not propose the posture record"
   contract_in "$dir" confirm >/dev/null || fail "could not confirm the posture record"
+  epoch=$(contract_in "$dir" field entered_epoch)
+  entered=$(contract_in "$dir" field entered)
   cp "$record" "$backup"
   grep -v '^entered_epoch: ' "$record" > "$dir/damaged-record"
   mv "$dir/damaged-record" "$record"
@@ -472,6 +475,10 @@ test_missing_epoch_record_stays_required_after_disappearing() {
   [ -f "$gate" ] || fail "the missing retained record did not preserve the gate"
   cp "$backup" "$record"
   out=$(run_return "$dir" check) || fail "check did not clear after the retained record was restored valid: $out"
+  assert_contains "$out" "=== Return brief (away $entered ->" "the restored record did not recover its away window"
+  assert_contains "$out" 'merge task restored PR when checks green - recorded' "the restored clause was omitted from the brief"
+  assert_contains "$out" 'captain words survive' "the restored captain words were omitted from the brief"
+  [ -f "$dir/home/state/afk-contracts/$epoch.afk-contract" ] || fail "the restored record was not archived under its recovered epoch"
   assert_contains "$out" 'catch-up clear' "the restored valid record did not clear catch-up"
   [ ! -e "$gate" ] || fail "the restored valid record left the gate behind"
   pass "an epochless malformed record remains required until restored valid"

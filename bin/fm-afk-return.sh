@@ -456,7 +456,7 @@ EOF
 
 return_reconcile() {
   local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since contract_since superseded_record retained_record
-  local archived_contract tag kind text retained_live
+  local archived_contract tag kind text retained_live restored_epoch
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   drain_err=$(mktemp "$STATE/.afk-return-drain.XXXXXX") || { rm -f "$evidence" "$blockers"; return 1; }
@@ -488,8 +488,19 @@ return_reconcile() {
       append_evidence lifecycle "away-posture record unreadable: $retained_live; catch-up stays gated" "$evidence"
       lifecycle_ok=0
     else
-      remove_evidence lifecycle "away-posture record missing: $retained_live; catch-up stays gated" "$evidence" || lifecycle_ok=0
-      remove_evidence lifecycle "away-posture record unreadable: $retained_live; catch-up stays gated" "$evidence" || lifecycle_ok=0
+      restored_epoch=$("$CONTRACT" field entered_epoch --path "$retained_live" 2>/dev/null || true)
+      case "$restored_epoch" in
+        ''|*[!0-9]*) lifecycle_ok=0 ;;
+        *)
+          if write_pending_seed "$restored_epoch" "$restored_epoch"; then
+            since=$restored_epoch
+            contract_since=$restored_epoch
+            remove_evidence lifecycle "away-posture record missing: $retained_live; catch-up stays gated" "$evidence" || lifecycle_ok=0
+            remove_evidence lifecycle "away-posture record unreadable: $retained_live; catch-up stays gated" "$evidence" || lifecycle_ok=0
+          else
+            lifecycle_ok=0
+          fi ;;
+      esac
     fi
   done <<EOF
 $(cat "$evidence")
