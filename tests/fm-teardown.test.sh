@@ -704,6 +704,58 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+# A retire that refuses (an owner directory written before start tokens were
+# recorded, whose pid the operating system has since recycled, so it can never be
+# proven gone) aborts the teardown after earlier irreversible steps have already
+# run. Those steps are ordered around constraints of their own, so the guarantee
+# this pins is the recoverable one: once the operator clears the wedge the
+# advisory named, a rerun completes the teardown cleanly.
+test_teardown_rerun_completes_after_a_refused_presentation_retire() {
+  local case_dir lock owner impostor rc
+  case_dir=$(make_case retire-refusal-rerun)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  printf 'note: retire refusal fixture\n' > "$case_dir/state/task-x1.status"
+
+  lock="$case_dir/state/.status-presentation-lock"
+  owner="$lock.owner.legacy"
+  sleep 300 &
+  impostor=$!
+  mkdir "$owner" || { kill "$impostor" 2>/dev/null || true; fail "could not stage the legacy owner directory"; }
+  printf '%s\n' "$impostor" > "$owner/pid"
+  ln -s "$owner" "$lock" || { kill "$impostor" 2>/dev/null || true; fail "could not strand the presentation lock"; }
+
+  set +e
+  FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 \
+    run_teardown "$case_dir" > "$case_dir/first.out" 2> "$case_dir/first.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || { kill "$impostor" 2>/dev/null || true; fail "teardown reported success while the presentation lock was unreclaimable"; }
+  grep -F "STATUS PRESENTATION RETIRE SKIPPED: lock remains held by live pid $impostor" "$case_dir/first.err" >/dev/null \
+    || { kill "$impostor" 2>/dev/null || true; fail "the refused retire did not name the wedged holder: $(cat "$case_dir/first.err")"; }
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || { kill "$impostor" 2>/dev/null || true; fail "the aborted teardown removed the task record it could not finish retiring"; }
+
+  # The operator runs what the advisory printed, and reruns teardown.
+  kill "$impostor" 2>/dev/null || true
+  wait "$impostor" 2>/dev/null || true
+  rm -rf "$owner" "$lock"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/second.out" 2> "$case_dir/second.err"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "retire-refusal-rerun: teardown rerun should complete after the wedge is cleared"
+  ! grep -q REFUSED "$case_dir/second.err" || fail "retire-refusal-rerun: the rerun printed a REFUSED line"
+  [ ! -e "$case_dir/state/task-x1.status" ] \
+    || fail "retire-refusal-rerun: the rerun left the retired status file behind"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "retire-refusal-rerun: the rerun left the task record behind"
+  pass "a teardown aborted by a refused presentation retire completes on a rerun once the wedge is cleared"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -3656,6 +3708,7 @@ EOF
 }
 
 test_local_only_fork_remote_allows
+test_teardown_rerun_completes_after_a_refused_presentation_retire
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses

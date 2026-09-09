@@ -1,5 +1,19 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
+#
+# Lock ownership contract: an owner directory records its pid AND that process's
+# start token (fm_lock_record_start), and the stale-owner steal treats an owner
+# as gone when the pid is dead or when the live pid's recomputed start token
+# DIFFERS from the recorded one, in either direction, and only when both tokens
+# were computed in the same format (fm_lock_owner_gone).
+# Recording only the pid leaves a lock
+# permanently unreclaimable once the operating system recycles the owner's pid
+# onto an unrelated process, because kill -0 then succeeds forever. The recorded
+# fact is deliberately the start token and not the full fm_pid_identity: a holder
+# may legally replace its own process image while holding the lock, and only the
+# start time proves reuse. An owner with no recorded start token keeps the weaker
+# pid-only proof, so a lock written by an older build still behaves exactly as it
+# did before.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
@@ -53,41 +67,84 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
-fm_pid_identity() {
-  local pid=$1 out proc_root stat_line starttime cmdline_hex identity_key
+# Prefer a Linux-compatible /proc when present: stat field 22 (starttime, clock ticks since boot) is
+# immune to the wall-clock steps that re-render the ps lstart fallback's date
+# (observed as WSL2 btime drift) and would evict a live watcher.
+# Git Bash/MSYS exposes these compatible files but its Cygwin ps rejects the
+# portable fallback's -o fields, so capability detection must not key on uname.
+# Exit 1 means this platform has no readable /proc entry for the pid, so a caller
+# may fall back to ps; exit 2 means /proc answered but could not be parsed, which
+# must stay a hard failure, because returning an identity in the ps format where
+# the /proc format was recorded reads as a mismatch rather than as a compute
+# failure, and mismatch evicts a live holder.
+_fm_proc_start_token() {  # <pid>; prints "<key>=<starttime-ticks>"
+  local pid=$1 proc_root stat_line starttime identity_key
   local -a stat_fields
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ] || return 1
+  stat_line=
+  { read -r stat_line < "$proc_root/$pid/stat"; } 2>/dev/null || [ -n "$stat_line" ] || return 2
+  # After the final comm delimiter, array index 19 is proc stat field 22.
+  read -r -a stat_fields <<< "${stat_line##*)}"
+  [ "${#stat_fields[@]}" -ge 20 ] || return 2
+  starttime=${stat_fields[19]}
+  case "$starttime" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  identity_key=proc-starttime
+  [ "$_FM_UNAME" != Linux ] || identity_key=linux-starttime
+  printf '%s=%s\n' "$identity_key" "$starttime"
+}
+
+# The reuse-proving half of a process identity. A recycled PID necessarily starts
+# later, while exec keeps the start time and replaces only the process image -
+# including the exec bash performs for the last command of a subshell, which is
+# how an ordinary "( take the lock; run one thing ) &" holder changes image. Lock
+# reclaim needs exactly this half, so a holder that replaces its own image is
+# never mistaken for a recycled PID; fm_pid_identity below composes the same
+# start fact with that image for callers that must also pin the image.
+fm_pid_start_token() {  # <pid>
+  local pid=$1 out rc=0
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  out=$(_fm_proc_start_token "$pid") || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  [ "$rc" -eq 1 ] || return 1
+  # Pin LC_ALL=C so lstart's date format is locale-invariant, for the same reason
+  # fm_pid_identity does: the token is written under one locale and re-read under
+  # the machine's ambient locale.
+  out=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "${out#"${out%%[![:space:]]*}"}"
+}
+
+# The full identity: the start token above plus the process image, so a caller
+# that must also detect a replaced image (the watcher lock, the auto-arm claim)
+# still gets a mismatch on a starttime tick collision.
+fm_pid_identity() {
+  local pid=$1 out proc_root start cmdline_hex rc=0
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
-  # Prefer a Linux-compatible /proc when present: stat field 22 (starttime, clock ticks since boot) is
-  # immune to the wall-clock steps that re-render the ps lstart fallback's date
-  # (observed as WSL2 btime drift) and would evict a live watcher; combining the
-  # full NUL-separated cmdline keeps PID reuse a mismatch even on a tick collision.
-  # Git Bash/MSYS exposes these compatible files but its Cygwin ps rejects the
-  # portable fallback's -o fields, so capability detection must not key on uname.
-  if [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
-    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
-    # After the final comm delimiter, array index 19 is proc stat field 22.
-    read -r -a stat_fields <<< "${stat_line##*)}"
-    [ "${#stat_fields[@]}" -ge 20 ] || return 1
-    starttime=${stat_fields[19]}
-    case "$starttime" in
-      ''|*[!0-9]*) return 1 ;;
-    esac
+  start=$(_fm_proc_start_token "$pid") || rc=$?
+  if [ "$rc" -eq 0 ]; then
     cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
     [ -n "$cmdline_hex" ] || return 1
-    identity_key=proc-starttime
-    [ "$_FM_UNAME" != Linux ] || identity_key=linux-starttime
-    printf '%s=%s cmdline-hex=%s\n' "$identity_key" "$starttime" "$cmdline_hex"
+    printf '%s cmdline-hex=%s\n' "$start" "$cmdline_hex"
     return 0
   fi
+  [ "$rc" -eq 1 ] || return 1
   # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
   # written under one locale but re-read under the machine's ambient locale, which
   # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
   out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
-  printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+  printf '%s\n' "${out#"${out%%[![:space:]]*}"}"
 }
 
 fm_path_mtime() {
@@ -391,6 +448,7 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
+    "$lockdir/pid-start" \
     "$lockdir/role" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
@@ -428,12 +486,67 @@ fm_lock_owner_dir() {
   mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
 }
 
+# Every lock owner records its process start token beside its pid, so the
+# stale-owner steal below can prove a recorded owner is gone even after the
+# operating system recycled its pid onto an unrelated process. It records the
+# start token rather than the full identity because a lock holder may legally
+# replace its own process image while holding (see fm_pid_start_token). Best
+# effort by design: a platform that cannot compute a start token keeps the weaker
+# pid-only liveness proof rather than losing the ability to take the lock at all.
+FM_LOCK_SELF_START_PID=
+FM_LOCK_SELF_START=
+fm_lock_record_start() {  # <lockdir-or-ownerdir> <pid>
+  local dir=$1 pid=$2 token=
+  if [ "$pid" = "$FM_LOCK_SELF_START_PID" ]; then
+    token=$FM_LOCK_SELF_START
+  fi
+  if [ -z "$token" ]; then
+    # Memoize only a successful computation: caching a transient failure would
+    # drop this process to pid-only proof for every lock it takes afterwards.
+    token=$(fm_pid_start_token "$pid" 2>/dev/null || true)
+    if [ -n "$token" ]; then
+      FM_LOCK_SELF_START_PID=$pid
+      FM_LOCK_SELF_START=$token
+    fi
+  fi
+  [ -n "$token" ] || return 0
+  { printf '%s\n' "$token" > "$dir/pid-start"; } 2>/dev/null || true
+}
+
+# The reclaim predicate: an owner is GONE when its pid is dead, or when the start
+# token recomputed for that live pid DIFFERS from the recorded one. The
+# comparison is equality, not ordering: any difference evicts, in either
+# direction. Pid reuse is the difference this exists to catch, but on the ps
+# lstart fallback a re-rendered date for an unchanged live holder would read as a
+# difference too, so nothing here may be relied on as an ordering guarantee.
+# Two tokens are comparable only in the same format: a token recorded through
+# /proc and recomputed through the ps fallback (or the reverse, when /proc stops
+# being readable for that pid) differs for a reason that says nothing about
+# reuse, so a format change reads as PRESENT. An owner with no recorded start
+# token, or whose token cannot be recomputed, is treated as present too - absent
+# or incomparable evidence never evicts a possibly live holder, because a false
+# present only costs a wait while a false gone steals a live holder's lock.
+# The reads stay fork-free: this runs on every 0.1s poll of fm_lock_acquire_wait.
+fm_lock_owner_gone() {  # <lockdir> <pid>
+  local lockdir=$1 pid=$2 recorded='' current recorded_key='' current_key=''
+  fm_pid_alive "$pid" || return 0
+  { read -r recorded < "$lockdir/pid-start"; } 2>/dev/null || true
+  [ -n "$recorded" ] || return 1
+  current=$(fm_pid_start_token "$pid" 2>/dev/null) || return 1
+  [ -n "$current" ] || return 1
+  case "$recorded" in *-starttime=*) recorded_key=${recorded%%=*} ;; esac
+  case "$current" in *-starttime=*) current_key=${current%%=*} ;; esac
+  [ "$recorded_key" = "$current_key" ] || return 1
+  [ "$current" != "$recorded" ]
+}
+
 fm_lock_prepare_owner() {
   local ownerdir=$1 mypid back
   fm_current_pid mypid || return 1
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  [ "$back" = "$mypid" ]
+  [ "$back" = "$mypid" ] || return 1
+  fm_lock_record_start "$ownerdir" "$mypid"
 }
 
 fm_lock_link_owner() {
@@ -564,7 +677,7 @@ fm_lock_recheck_stale_owner() {
   fi
   actual_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$actual_pid" = "$expected_pid" ] || return 1
-  if fm_pid_alive "$actual_pid"; then
+  if ! fm_lock_owner_gone "$lockdir" "$actual_pid"; then
     return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$actual_pid"; then
@@ -910,7 +1023,7 @@ fm_lock_try_acquire() {
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
   fi
-  if fm_pid_alive "$pid"; then
+  if ! fm_lock_owner_gone "$lockdir" "$pid"; then
     FM_LOCK_HELD_PID=$pid
     return 1
   fi
@@ -928,7 +1041,7 @@ fm_lock_try_acquire() {
   steal_owner=${FM_LOCK_OWNER_DIR:-}
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if fm_pid_alive "$cur"; then
+  if ! fm_lock_owner_gone "$lockdir" "$cur"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=
@@ -1009,13 +1122,51 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
   fi
   fm_current_pid current || { fm_lock_release "$lockdir"; return 1; }
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  if [ "$back" != "$current" ] \
-    || ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
+  if [ "$back" != "$current" ]; then
+    fm_lock_release "$lockdir"
+    return 1
+  fi
+  # Only once this helper is proven to be the recorded owner: drop its own start
+  # token BEFORE the pid changes hands, because an owner record naming the
+  # caller's pid beside the helper's token would read as a reused pid and be
+  # stolen out from under the caller it was just handed to. The tokenless window
+  # is safe because the caller pid is verified live above, and the caller records
+  # its own token once it observes the transfer.
+  rm -f "$ownerdir/pid-start" 2>/dev/null || true
+  if ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
     || [ "$(cat "$ownerdir/pid" 2>/dev/null || true)" != "$caller_pid" ]; then
     fm_lock_release "$lockdir"
     return 1
   fi
+  fm_lock_record_start "$ownerdir" "$caller_pid"
   trap - TERM INT
+}
+
+# The bound every status-presentation-lock taker waits under, so the drain and
+# the teardown retire path cannot drift apart on the override or its default.
+fm_status_presentation_lock_timeout() {
+  local seconds=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
+  case "$seconds" in ''|*[!0-9]*|0) seconds=10 ;; esac
+  printf '%s\n' "$seconds"
+}
+
+# The one advisory a refused lock wait prints, wherever it is refused. The manual
+# clear it names covers the symlink AND its resolved owner directory - exactly
+# what fm_lock_remove_path removes - so an operator who runs it strands no
+# .owner.XXXXXX directory in the state directory. Callers own only their own
+# leading label.
+fm_lock_live_holder_advisory() {  # <lockdir> <holder-pid> <seconds>
+  local lockdir=$1 holder=$2 seconds=$3 ownerdir clear
+  # Shell-quote every path: the command is printed to be pasted verbatim, and a
+  # home path carrying whitespace or a glob character would otherwise split into
+  # arguments that name something other than the lock.
+  printf -v clear 'rm -rf %q' "$lockdir"
+  if [ -L "$lockdir" ]; then
+    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    [ -z "$ownerdir" ] || printf -v clear 'rm -rf %q %q' "$ownerdir" "$lockdir"
+  fi
+  printf 'lock remains held by live pid %s after %ss. If ps -p %s shows no firstmate process, clear it with %s.\n' \
+    "$holder" "$seconds" "$holder" "$clear"
 }
 
 # fm_lock_acquire_wait_bounded <lockdir> <positive-seconds>
@@ -1051,6 +1202,7 @@ fm_lock_acquire_wait_bounded() {
 
   owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   if [ "$owner_pid" = "$caller_pid" ]; then
+    fm_lock_record_start "$lockdir" "$caller_pid"
     return 0
   fi
   [ "$rc" -ne 0 ] || rc=1
@@ -1065,7 +1217,7 @@ fm_lock_acquire_wait_bounded() {
     case "$owner_pid" in
       ''|*[!0-9]*|0) ;;
       *)
-        if [ "$owner_pid" -gt 0 ] 2>/dev/null && fm_pid_alive "$owner_pid"; then
+        if [ "$owner_pid" -gt 0 ] 2>/dev/null && ! fm_lock_owner_gone "$lockdir" "$owner_pid"; then
           FM_LOCK_HELD_PID=$owner_pid
           return 124
         fi
@@ -1076,6 +1228,36 @@ fm_lock_acquire_wait_bounded() {
     return 1
   fi
   return "$rc"
+}
+
+# The retire path's wait. A gone owner costs no wait at all, because the bounded
+# acquire below starts with an ordinary reclaiming try. A genuinely live holder is
+# waited out across a budget of that shared bound repeated _FM_LOCK_RETIRE_INTERVALS
+# times - minutes, not seconds - because a retire deletes durable records and its
+# caller has no next pass to retry on, unlike a presentation. The wait is never
+# silent: every window names the holder through the shared advisory. Only a holder
+# that stays unreclaimable for the whole budget fails, and a failure of the
+# bounding machinery itself falls back to the ordinary unbounded wait rather than
+# refusing work the unbounded wait would have completed.
+_FM_LOCK_RETIRE_INTERVALS=30
+fm_lock_acquire_wait_retire() {  # <lockdir>
+  local lockdir=$1 seconds i=0 rc
+  seconds=$(fm_status_presentation_lock_timeout)
+  while [ "$i" -lt "$_FM_LOCK_RETIRE_INTERVALS" ]; do
+    rc=0
+    fm_lock_acquire_wait_bounded "$lockdir" "$seconds" || rc=$?
+    [ "$rc" -ne 0 ] || return 0
+    if [ "$rc" -ne 124 ]; then
+      fm_lock_acquire_wait "$lockdir"
+      return 0
+    fi
+    printf 'STATUS PRESENTATION RETIRE WAITING: %s\n' \
+      "$(fm_lock_live_holder_advisory "$lockdir" "${FM_LOCK_HELD_PID:-unknown}" "$seconds")" >&2
+    i=$((i + 1))
+  done
+  printf 'STATUS PRESENTATION RETIRE SKIPPED: %s\n' \
+    "$(fm_lock_live_holder_advisory "$lockdir" "${FM_LOCK_HELD_PID:-unknown}" "$seconds")" >&2
+  return 124
 }
 
 fm_lock_release() {
@@ -1247,10 +1429,11 @@ fm_failure_episode_reset() {
 #
 #   - The CURRENT claim is the ledger's latest entry: line 1 is the classic
 #     "epoch=N owner_pid=P outcome=O updated_at=T" record, and line 2 is the
-#     claiming process's pid-identity, the same identity every other
-#     supervision lock in this repo records (fm_pid_identity above). The
-#     identity is MANDATORY: a claimant that cannot record it does not claim
-#     (continuity falls to the synchronous guard), and the identity is read
+#     claiming process's pid-identity, the same identity the watcher, afk
+#     launch, and away-mode daemon locks record (fm_pid_identity above; an
+#     ordinary lock owner records only its start half, see this file's
+#     header). The identity is MANDATORY: a claimant that cannot record it
+#     does not claim (continuity falls to the synchronous guard), and it is read
 #     from the ledger entry alone - never substituted from any lock - so a
 #     reused pid can never authenticate someone else's stale entry.
 #   - A claim is OPEN (fm_autoarm_claim_open) while its outcome is "arming",

@@ -13,6 +13,9 @@ WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
 
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
 # An arm only reports its typed failure after wait_for_healthy_successor has
 # spent the whole confirmation budget, so cases that wait for that failure must
 # outlast the largest production default (30s on MSYS, 10s elsewhere - see
@@ -237,6 +240,197 @@ test_lock_steals_dead_pid_lock() {
   pass "dead-pid stale lock is reclaimed by a single acquirer"
 }
 
+# A lock holder must record its process start token beside its pid, and a
+# contender must still refuse a holder whose live pid still matches that token -
+# including one that replaced its own process image while holding.
+test_lock_records_owner_start_and_refuses_that_holder() {
+  local dir state lockdir holder ready recorded live_start out i
+  dir=$(make_case lock-start-recorded)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  ready="$dir/holder.ready"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    printf "ready\n" > "$3"
+    exec sleep 30
+  ' _ "$LIB" "$lockdir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$ready" ] || { kill "$holder" 2>/dev/null || true; fail "lock holder never acquired its lock"; }
+
+  recorded=$(cat "$lockdir/pid-start" 2>/dev/null || true)
+  [ -n "$recorded" ] \
+    || { kill "$holder" 2>/dev/null || true; fail "acquired lock recorded no owner start token"; }
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  live_start=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_pid_start_token "$(cat "$2/pid")"
+  ' _ "$LIB" "$lockdir" 2>/dev/null || true)
+  [ "$live_start" = "$recorded" ] \
+    || { kill "$holder" 2>/dev/null || true; fail "recorded start token does not describe the recorded pid"; }
+
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "a live holder that replaced its process image was evicted: $out" ;;
+  esac
+  pass "a lock owner records a verifiable start token and survives replacing its own process image"
+}
+
+# The reported wedge: the recorded owner is gone but its pid was recycled onto an
+# unrelated live process, so kill -0 answers forever. Without the recorded
+# identity there is nothing left to disprove the holder and the wait never ends.
+test_lock_steals_reused_pid_lock() {
+  local dir state lockdir impostor rc newpid
+  dir=$(make_case lock-reused-pid)
+  state="$dir/state"
+  lockdir="$state/.status-presentation-lock"
+  sleep 300 &
+  impostor=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$impostor" > "$lockdir/pid"
+  foreign_start_token "$impostor" > "$lockdir/pid-start" \
+    || { kill "$impostor" 2>/dev/null || true; fail "could not stage a comparable gone-owner token"; }
+  rc=0
+  # Bounded on purpose: an unreclaimed lock makes fm_lock_acquire_wait spin
+  # forever, and this case must FAIL in seconds rather than hang the suite.
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  newpid=$(fm_run_timed 5 env "FM_STATE_OVERRIDE=$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 7
+    cat "$2/pid"
+  ' _ "$LIB" "$lockdir") || rc=$?
+  kill "$impostor" 2>/dev/null || true
+  wait "$impostor" 2>/dev/null || true
+  [ "$rc" -ne 124 ] || fail "a recycled-pid lock was never reclaimed: the wait never returned"
+  [ "$rc" -eq 0 ] || fail "a recycled-pid lock was never reclaimed (rc=$rc)"
+  [ "$newpid" != "$impostor" ] || fail "recycled-pid lock was not replaced (still $impostor)"
+  [ -n "$newpid" ] || fail "reclaimed lock has no pid recorded"
+  pass "a lock whose owner pid was recycled onto an unrelated process is reclaimed"
+}
+
+# A lock handed from the bounded-acquire helper to its waiting caller must carry
+# the caller's start token before the helper exits. If the record is only
+# restored by the surviving caller, a caller killed in that window leaves a lock
+# with a live pid and no token - pid-only proof again, which wedges every later
+# drain once the operating system recycles that pid (upstream #3966).
+test_handoff_records_the_receiving_caller_start() {
+  local dir state lockdir receiver impostor rc newpid
+  dir=$(make_case lock-handoff-start)
+  state="$dir/state"
+  lockdir="$state/.handoff.lock"
+
+  sleep 300 &
+  receiver=$!
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    _fm_lock_acquire_wait_handoff "$2" "$3"
+  ' _ "$LIB" "$lockdir" "$receiver" \
+    || { kill "$receiver" 2>/dev/null || true; fail "the handoff helper did not transfer the lock"; }
+  [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$receiver" ] \
+    || { kill "$receiver" 2>/dev/null || true; fail "the handoff did not record the receiving caller pid"; }
+
+  # The receiver is gone and its pid landed on an unrelated live process. Only a
+  # start token recorded by the helper itself can disprove that impostor.
+  kill "$receiver" 2>/dev/null || true
+  wait "$receiver" 2>/dev/null || true
+  sleep 300 &
+  impostor=$!
+  printf '%s\n' "$impostor" > "$lockdir/pid"
+  rc=0
+  # Bounded on purpose: an unreclaimed lock spins forever, and this case must
+  # FAIL in seconds rather than hang the suite.
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  newpid=$(fm_run_timed 5 env "FM_STATE_OVERRIDE=$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 7
+    cat "$2/pid"
+  ' _ "$LIB" "$lockdir") || rc=$?
+  kill "$impostor" 2>/dev/null || true
+  wait "$impostor" 2>/dev/null || true
+  [ "$rc" -ne 124 ] || fail "a handed-off lock left tokenless was never reclaimed: the wait never returned"
+  [ "$rc" -eq 0 ] || fail "a handed-off lock left tokenless was never reclaimed (rc=$rc)"
+  [ "$newpid" != "$impostor" ] || fail "handed-off lock was not replaced (still $impostor)"
+  pass "the bounded-acquire handoff records the receiving caller start token before exiting"
+}
+
+# A /proc entry that exists but does not parse must stay a hard compute failure.
+# Falling through to the ps fallback would answer in the other identity format,
+# and a caller holding a recorded /proc-format identity reads that as a mismatch
+# and evicts a live holder, where a compute failure is conservative.
+test_unparseable_proc_entry_fails_instead_of_answering_in_ps_format() {
+  local dir proc_root no_proc pid rc out
+  dir=$(make_case proc-parse-hard-fail)
+  proc_root="$dir/proc"
+  no_proc="$dir/no-proc"
+  pid=$$
+  mkdir -p "$proc_root/$pid" "$no_proc"
+  printf 'not a stat line\n' > "$proc_root/$pid/stat"
+  printf 'bash\0' > "$proc_root/$pid/cmdline"
+
+  rc=0
+  out=$(FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid" 2>/dev/null) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unparseable /proc entry still produced an identity: $out"
+  rc=0
+  out=$(FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c '. "$1"; fm_pid_start_token "$2"' _ "$LIB" "$pid" 2>/dev/null) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unparseable /proc entry still produced a start token: $out"
+
+  # An ABSENT /proc entry is a different fact and must still fall back to ps.
+  out=$(FM_PROC_ROOT_OVERRIDE="$no_proc" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid" 2>/dev/null) \
+    || fail "an absent /proc entry stopped falling back to the portable identity"
+  [ -n "$out" ] || fail "the portable identity fallback returned nothing"
+  pass "an unreadable /proc parse fails hard while an absent /proc still falls back"
+}
+
+# One transient start-token failure must not poison the process: a later lock
+# taken by the same process still records its start token, or that process spends
+# its whole life recording locks that only pid-only proof can defend.
+test_transient_start_token_failure_does_not_poison_later_locks() {
+  local dir state fakebin no_proc first second
+  dir=$(make_case start-token-transient)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  no_proc="$dir/no-proc"
+  first="$state/.first.lock"
+  second="$state/.second.lock"
+  mkdir -p "$fakebin" "$no_proc"
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+[ ! -e "\$FM_FAKE_PS_FAIL" ] || exit 1
+exec $(command -v ps) "\$@"
+SH
+  chmod +x "$fakebin/ps"
+  : > "$dir/ps.fail"
+
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" FM_FAKE_PS_FAIL="$dir/ps.fail" \
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2" || exit 1
+      rm -f "$FM_FAKE_PS_FAIL"
+      fm_lock_try_acquire "$3" || exit 1
+    ' _ "$LIB" "$first" "$second" \
+    || fail "the transient-token fixture could not take its locks"
+
+  [ ! -s "$first/pid-start" ] \
+    || fail "the fixture recorded a start token while the token computation was failing"
+  [ -s "$second/pid-start" ] \
+    || fail "a transient start-token failure suppressed the token for every later lock"
+  pass "a transient start-token failure is not cached for the life of the process"
+}
+
 test_lock_stale_steal_single_winner_under_concurrency() {
   local dir state lockdir dead marker i pids pid wins
   dir=$(make_case lock-stale-concurrency)
@@ -317,13 +511,17 @@ test_lock_does_not_steal_live_lock() {
   live=$!
   mkdir "$lockdir"
   printf '%s\n' "$live" > "$lockdir/pid"
+  # No pid-start: this is the owner-directory shape an older build wrote, which
+  # stays supported on pid-only proof and must stay silent while it is polled.
   out=$(FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
     printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
-  ' _ "$LIB" "$lockdir")
+  ' _ "$LIB" "$lockdir" 2> "$dir/acquire.err")
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
+  [ ! -s "$dir/acquire.err" ] \
+    || fail "contending with a tokenless live owner leaked diagnostics: $(cat "$dir/acquire.err")"
   case "$out" in
     *"rc=1"*) ;;
     *) fail "live-held lock was acquired instead of refused: $out" ;;
@@ -335,6 +533,50 @@ test_lock_does_not_steal_live_lock() {
   lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$lockpid" = "$live" ] || fail "live holder's lock pid was clobbered (got '$lockpid')"
   pass "live-held lock is not stolen"
+}
+
+# A start token recorded in one format and recomputed in the other (a /proc that
+# stops being readable for that pid, or the reverse) differs for a reason that
+# says nothing about pid reuse. A false "present" only costs a wait; a false
+# "gone" steals a LIVE holder's lock, so an incomparable pair must never evict.
+test_cross_format_start_token_does_not_evict_a_live_holder() {
+  local dir state lockdir live host_token recorded out lockpid
+  dir=$(make_case lock-cross-format-token)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+
+  host_token=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start_token "$2"' _ "$LIB" "$live") \
+    || { kill "$live" 2>/dev/null || true; fail "could not compute this host's start token"; }
+  # Record the OTHER format than this host recomputes, whichever that is.
+  case "$host_token" in
+    *-starttime=*) recorded='Tue Sep  8 06:41:08 2026' ;;
+    *) recorded='linux-starttime=987654' ;;
+  esac
+  printf '%s\n' "$recorded" > "$lockdir/pid-start"
+
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "a live holder was evicted on a cross-format start token: $out" ;;
+  esac
+  case "$out" in
+    *"held=$live"*) ;;
+    *) fail "the surviving live holder was not reported: $out" ;;
+  esac
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$lockpid" = "$live" ] || fail "cross-format comparison clobbered the live holder's lock pid (got '$lockpid')"
+  pass "a start token recomputed in the other format never evicts a live holder"
 }
 
 test_lock_empty_pid_uses_minimum_grace() {
@@ -1112,9 +1354,15 @@ test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
+test_lock_records_owner_start_and_refuses_that_holder
+test_lock_steals_reused_pid_lock
+test_handoff_records_the_receiving_caller_start
+test_unparseable_proc_entry_fails_instead_of_answering_in_ps_format
+test_transient_start_token_failure_does_not_poison_later_locks
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
+test_cross_format_start_token_does_not_evict_a_live_holder
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal

@@ -53,6 +53,20 @@ append_wake() {
   ' _ "$lib" "$kind" "$key" "$payload"
 }
 
+# foreign_start_token <live-pid>: a start token in the SAME format this host
+# computes, but naming a different process start. Staging a gone owner needs a
+# comparable token, because fm_lock_owner_gone treats a format change as a live
+# holder rather than as pid reuse.
+foreign_start_token() {
+  local pid=$1 token lib="$ROOT/bin/fm-wake-lib.sh"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  token=$(bash -c '. "$1"; fm_pid_start_token "$2"' _ "$lib" "$pid") || return 1
+  case "$token" in
+    *-starttime=*) printf '%s=1\n' "${token%%=*}" ;;
+    *) printf 'Tue Sep  8 06:41:08 2020\n' ;;
+  esac
+}
+
 make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"

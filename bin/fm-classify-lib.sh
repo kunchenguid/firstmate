@@ -1225,7 +1225,9 @@ EOF
     fi
   fi
 
-  fm_lock_acquire_wait "$lock" || return 1
+  # Reclaim a gone owner immediately and wait a live one out; only an owner that
+  # stays unreclaimable for the whole budget refuses, loudly and by pid.
+  fm_lock_acquire_wait_retire "$lock" || return 1
   if [ -e "$manifest" ] || [ -L "$manifest" ]; then
     if [ ! -f "$manifest" ] || [ ! -r "$manifest" ] || [ -L "$manifest" ]; then
       rc=1
