@@ -194,7 +194,7 @@ for track in plan["tracks"].values():
         packet_id = packet["id"]
         packet_dir = bench / "packets" / packet_id
         packet_dir.mkdir(parents=True, exist_ok=True)
-        (packet_dir / "packet.md").write_text(f"packet {packet_id}\n")
+        (bench / "packets" / f"{packet_id}.md").write_text(f"packet {packet_id}\n")
         truth = bench / "ground-truth" / f"{packet_id}.md"
         truth.parent.mkdir(parents=True, exist_ok=True)
         truth.write_text(f"sealed truth {packet_id}\n")
@@ -963,7 +963,7 @@ write_freeze_inputs "$BENCH"
 rm "$BENCH/ground-truth/C6.md"
 out=$(run_gate "$BENCH" freeze) && status=0 || status=$?
 expect_code 1 "$status" "a freeze missing one planned private input is refused"
-assert_contains "$out" "ground-truth is missing planned packet inputs: C6" \
+assert_contains "$out" "ground-truth is missing planned packet inputs: required primary Markdown files for C6" \
   "the missing plan-derived ground truth is named"
 assert_absent "$BENCH/freeze.json" "an incomplete private input set writes no freeze"
 pass "every planned packet and ground-truth input must exist before freezing"
@@ -974,19 +974,19 @@ if [ "$(id -u)" != 0 ]; then
   BENCH="$TMP_ROOT/freeze-unreadable-input"
   write_plan "$BENCH"
   write_freeze_inputs "$BENCH"
-  chmod 000 "$BENCH/packets/A1/packet.md"
+  chmod 000 "$BENCH/packets/A1.md"
   out=$(run_gate "$BENCH" freeze) && status=0 || status=$?
   expect_code 1 "$status" "a private input the gate cannot read is refused"
   assert_not_contains "$out" "Traceback" "an unreadable private input is a verdict, not a crash"
   assert_contains "$out" "benchmark evidence cannot be read" "the refusal names the unreadable input"
-  assert_contains "$out" "packets/A1/packet.md" "the refusal is file-specific"
+  assert_contains "$out" "packets/A1.md" "the refusal is file-specific"
   assert_contains "$out" "BENCH_RESULT freeze refused" "the refusal still carries a verdict line"
   assert_absent "$BENCH/freeze.json" "an unreadable private input writes no freeze"
-  chmod 644 "$BENCH/packets/A1/packet.md"
+  chmod 644 "$BENCH/packets/A1.md"
   out=$(run_gate "$BENCH" freeze) || fail "the same inputs must freeze once readable: $out"
-  chmod 000 "$BENCH/packets/A1/packet.md"
+  chmod 000 "$BENCH/packets/A1.md"
   out=$(run_gate "$BENCH" freeze-check) && status=0 || status=$?
-  chmod 644 "$BENCH/packets/A1/packet.md"
+  chmod 644 "$BENCH/packets/A1.md"
   expect_code 1 "$status" "a private input that becomes unreadable withdraws the freeze"
   assert_not_contains "$out" "Traceback" "rechecking an unreadable private input is a verdict, not a crash"
   assert_contains "$out" "benchmark evidence cannot be read" "the recheck names the unreadable input"
@@ -2084,9 +2084,9 @@ pass "private paths outside the proven entrant root are refused during isolation
 
 BENCH="$TMP_ROOT/iso-private-tree"
 write_plan "$BENCH"
-write_isolation "$BENCH" none
 git -C "$ISO/e1" add -f tmp/canary.txt
 git -C "$ISO/e1" -c user.name=t -c user.email=t@x commit -qm private-tree-fixture
+write_isolation "$BENCH" none
 out=$(run_gate "$BENCH" isolation-verify) && status=0 || status=$?
 expect_code 1 "$status" "private storage committed into a candidate tree is refused"
 assert_contains "$out" "isolation.bench-b1-k7.private_tree_exclusion fail" \
@@ -2515,7 +2515,7 @@ import json, sys
 from pathlib import Path
 sample = sorted(Path(sys.argv[1]).iterdir())[0]
 Path(sys.argv[2]).write_text(json.dumps({"sample": sample.name, "files": {
-    name: (sample / name).read_text() for name in ("timing.json", "capture.json", "judging.json", "manifest.json")}}))
+    name: (sample / name).read_text() for name in ("timing.json", "capture.json", "judging.json", "manifest.json", "scoring.py")}}))
 PY
 for failure_case in hidden_blocker positive_failure zero_failure; do
   python3 - "$BENCH/archive" "$TMP_ROOT/archive-original-evidence.json" "$failure_case" <<'PY'
@@ -2523,19 +2523,22 @@ import hashlib, json, sys
 from pathlib import Path
 archive, original, case = Path(sys.argv[1]), json.loads(Path(sys.argv[2]).read_text()), sys.argv[3]
 sample = archive / original["sample"]
-documents = {name: json.loads(value) for name, value in original["files"].items()}
+documents = {name: json.loads(value) for name, value in original["files"].items() if name.endswith(".json")}
 documents["timing.json"]["failure"]["class"] = "sibling_access" if case == "hidden_blocker" else "candidate_caused"
 if case == "zero_failure":
     documents["capture.json"]["deterministic"] = 0
     documents["judging.json"]["scores"] = [0 for _ in documents["judging.json"]["scores"]]
+    scoring = original["files"]["scoring.py"].replace("|| score=1", "|| score=0")
+    (sample / "scoring.py").write_text(scoring)
 manifest = documents.pop("manifest.json")
 for name, document in documents.items():
-    payload = json.dumps(document).encode()
+    payload = (json.dumps(document, sort_keys=True, indent=2) + "\n").encode()
     (sample / name).write_bytes(payload)
     manifest["files"][name] = hashlib.sha256(payload).hexdigest()
 manifest["evaluator_rerun"]["result_hash"] = manifest["files"]["capture.json"]
 (sample / "manifest.json").write_text(json.dumps(manifest))
 PY
+  bind_archived_scoring "$BENCH"
   out=$(run_gate "$BENCH" archive-verify) && status=0 || status=$?
   if [ "$failure_case" = zero_failure ]; then
     expect_code 0 "$status" "a candidate-caused failure with zero scores remains archivable"
@@ -2552,6 +2555,7 @@ sample = Path(sys.argv[1]) / original["sample"]
 for name, content in original["files"].items():
     (sample / name).write_text(content)
 PY
+bind_archived_scoring "$BENCH"
 
 ATTEMPT_BENCH="$TMP_ROOT/archive-attempts"
 write_plan "$ATTEMPT_BENCH"
@@ -2589,6 +2593,8 @@ for number, supersedes in ((1, None), (2, "attempt-void-1")):
         "tree_binding": {},
     }, indent=2, sort_keys=True) + "\n")
 PY
+[ -z "$RESTORE_MECHANISM" ] || write_restore_confinement "$ATTEMPT_BENCH"
+bind_archived_scoring "$ATTEMPT_BENCH"
 out=$(run_gate "$ATTEMPT_BENCH" archive-verify) \
   || fail "a retained void plus its linked terminal rerun must verify: $out"
 assert_contains "$out" "void attempt preserves only content-addressed failure and timing evidence" \
@@ -2611,6 +2617,8 @@ manifest = json.loads(manifest_path.read_text())
 manifest["attempt"]["supersedes"] = None
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 PY
+[ -z "$RESTORE_MECHANISM" ] || write_restore_confinement "$UNLINKED_ATTEMPT_BENCH"
+bind_archived_scoring "$UNLINKED_ATTEMPT_BENCH"
 out=$(run_gate "$UNLINKED_ATTEMPT_BENCH" archive-verify) && status=0 || status=$?
 expect_code 1 "$status" "a retained void without an explicit rerun link is refused"
 assert_contains "$out" "unresolved void attempts attempt-void-2" "the unlinked attempt is named"
@@ -2639,6 +2647,8 @@ manifest = json.loads(manifest_path.read_text())
 manifest["attempt"]["supersedes"] = "attempt-void-1"
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 PY
+[ -z "$RESTORE_MECHANISM" ] || write_restore_confinement "$FORKED_ATTEMPT_BENCH"
+bind_archived_scoring "$FORKED_ATTEMPT_BENCH"
 out=$(run_gate "$FORKED_ATTEMPT_BENCH" archive-verify) && status=0 || status=$?
 expect_code 1 "$status" "two reruns cannot fork from one void attempt"
 assert_contains "$out" "forked void attempts attempt-void-1" "the forked attempt is named"
@@ -2667,6 +2677,8 @@ manifest = json.loads(manifest_path.read_text())
 manifest["attempt"]["supersedes"] = "absent-attempt"
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 PY
+[ -z "$RESTORE_MECHANISM" ] || write_restore_confinement "$DANGLING_ATTEMPT_BENCH"
+bind_archived_scoring "$DANGLING_ATTEMPT_BENCH"
 out=$(run_gate "$DANGLING_ATTEMPT_BENCH" archive-verify) && status=0 || status=$?
 expect_code 1 "$status" "a rerun cannot supersede an absent attempt"
 assert_contains "$out" "dangling supersession links attempt-scored->absent-attempt" \
@@ -2691,6 +2703,8 @@ manifest = json.loads(manifest_path.read_text())
 manifest["attempt"]["supersedes"] = "attempt-void-2"
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 PY
+[ -z "$RESTORE_MECHANISM" ] || write_restore_confinement "$CYCLIC_ATTEMPT_BENCH"
+bind_archived_scoring "$CYCLIC_ATTEMPT_BENCH"
 out=$(run_gate "$CYCLIC_ATTEMPT_BENCH" archive-verify) && status=0 || status=$?
 expect_code 1 "$status" "void attempts cannot form a supersession cycle"
 assert_contains "$out" "cyclic attempt links attempt-void-1, attempt-void-2" \
@@ -2705,6 +2719,8 @@ copy_archive_fixture() {  # <source-bench> <target-bench>
 import shutil, sys
 shutil.copytree(sys.argv[1], sys.argv[2])
 PY
+  [ -z "$RESTORE_MECHANISM" ] || write_restore_confinement "$target"
+  bind_archived_scoring "$target"
 }
 
 IDENTITY_BENCH="$TMP_ROOT/archive-identity"
@@ -2903,6 +2919,7 @@ pass "the benchmark confinement wrapper rejects sandbox-exec"
 
 BENCH="$TMP_ROOT/archive"
 write_restore_confinement "$BENCH" none
+bind_archived_scoring "$BENCH"
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "the restore drill must reject a non-enforcing wrapper"
 assert_contains "$out" "enforcing confinement mechanism, not none" \
@@ -2910,6 +2927,7 @@ assert_contains "$out" "enforcing confinement mechanism, not none" \
 assert_absent "$BENCH/archive/restore-drill.json" "a non-enforcing wrapper writes no cleanup receipt"
 pass "restore drill rejects an unconfined evaluator fallback"
 [ -z "$RESTORE_MECHANISM" ] || write_restore_confinement "$BENCH"
+bind_archived_scoring "$BENCH"
 
 BENCH="$TMP_ROOT/archive-unlisted-evaluator"
 write_plan "$BENCH"
@@ -2926,7 +2944,7 @@ manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "a rerun evaluator absent from the content-addressed files is refused"
-assert_contains "$out" "not content-addressed" "the drill requires the executed evaluator to be addressed"
+assert_contains "$out" "not a preregistered evaluator entrypoint" "the drill requires the executed evaluator to be preregistered"
 assert_absent "$BENCH/archive/restore-drill.json" "an unaddressed evaluator writes no cleanup receipt"
 pass "every archive statically declares a content-addressed evaluator"
 
@@ -2944,7 +2962,7 @@ p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "an arbitrary archived command line is refused"
-assert_contains "$out" "exactly one executable evaluator file" "the evaluator interface is fixed before execution"
+assert_contains "$out" "not a preregistered evaluator entrypoint" "the evaluator interface is fixed before execution"
 assert_absent "$BENCH/archive/restore-drill.json" "a malformed evaluator declaration writes no receipt"
 pass "the restore drill rejects arbitrary evaluator commands portably"
 
@@ -3236,7 +3254,7 @@ PY
 bind_scoring_fixture "$BENCH" first
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "PNG chunk layout cannot identify the differential role"
-assert_contains "$out" "does not match" \
+assert_contains "$out" "archived measurements differ from genuine evaluator output" \
   "the genuine hash is measured over the same deterministic PNG encoding as its perturbation"
 assert_absent "$BENCH/archive/restore-drill.json" "a PNG-encoding classifier writes no cleanup receipt"
 pass "PNG differential copies share one deterministic encoding pipeline"
@@ -3677,7 +3695,7 @@ import hashlib, json, sys
 from pathlib import Path
 sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 scoring = sample / "stability-wait-evaluator.sh"
-scoring.write_text("#!/bin/sh\nsleep 3\nsed -n 's/^{\"value\":\"\\([^\"]*\\)\"}$/\\1/p' \"$1/work.json\"\n")
+scoring.write_text("#!/bin/sh\nsleep 3\n" + (sample / "raw-evaluator.sh").read_text())
 scoring.chmod(0o755)
 manifest = sample / "manifest.json"
 record = json.loads(manifest.read_text())
@@ -3745,11 +3763,11 @@ from pathlib import Path
 
 manifest = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
 record = json.loads(manifest.read_text())
-record["tree_binding"]["base_tree"] = "f" * 40
+record["attempt"]["id"] = "attempt-renamed"
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" cleanup-gate) && status=0 || status=$?
-expect_code 1 "$status" "editing a manifest binding after a genuine drill withdraws cleanup"
+expect_code 1 "$status" "editing a valid manifest after a genuine drill withdraws cleanup"
 assert_contains "$out" "changed after the restore drill" "the gate-written receipt binds manifest bytes"
 pass "a changed archive manifest withdraws genuine cleanup authority"
 
@@ -3816,6 +3834,7 @@ pass "an archive that cannot be rejudged writes no receipt and authorises no cle
 if [ -z "$RESTORE_MECHANISM" ]; then
   BENCH="$TMP_ROOT/archive"
   write_restore_confinement "$BENCH" bwrap
+  bind_archived_scoring "$BENCH"
   out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
   expect_code 1 "$status" "the restore drill must fail closed without a proven confinement"
   assert_contains "$out" "bwrap is not installed" \
@@ -3829,7 +3848,7 @@ fi
 write_results() {  # <bench-dir> <mode>
   local bench=$1 mode=$2
   python3 - "$bench" "$mode" <<'PY'
-import hashlib, json, subprocess, sys
+import hashlib, json, shlex, subprocess, sys
 from pathlib import Path
 
 bench, mode = Path(sys.argv[1]), sys.argv[2]
@@ -3882,7 +3901,8 @@ def write(
     binding = {}
     if status == "scored":
         (repo / "candidate.txt").write_text(slug)
-        git("add", "candidate.txt")
+        (repo / "score.js").write_text(json.dumps(composite) + "\n")
+        git("add", "candidate.txt", "score.js")
         git("commit", "--allow-empty", "-qm", slug)
         sha, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
         git("bundle", "create", str(sample / "candidate.bundle"), "HEAD")
@@ -3904,16 +3924,27 @@ def write(
         (sample / name).write_bytes(payload)
         files[name] = __import__("hashlib").sha256(payload).hexdigest()
     if status == "scored":
-        for name in ("candidate.bundle", "projection.diff"):
+        template = dict(evidence["capture.json"], deterministic="__SCORE__")
+        template = (json.dumps(template, indent=2, sort_keys=True) + "\n").replace('"__SCORE__"', "%s")
+        scoring = sample / "scoring.sh"
+        scoring.write_text('#!/bin/sh\nscore=$(cat "$1/score.js")\nprintf ' + shlex.quote(template) + ' "$score"\n')
+        scoring.chmod(0o755)
+        for name in ("candidate.bundle", "projection.diff", "scoring.sh"):
             files[name] = hashlib.sha256((sample / name).read_bytes()).hexdigest()
     (sample / "manifest.json").write_text(json.dumps({
         "schema": "fm-bench-archive.v1", "sample": slug,
         "identity": {"track": track, "packet": packet, "candidate": candidate, "role": role},
         "attempt": {"id": attempt_id or ("attempt-void" if status == "void" else "attempt-1"),
                     "status": status, "supersedes": supersedes},
-        "groups": {"failure_and_timing": ["timing.json"]} if status == "void" else {"candidate_bundle_and_projection": ["candidate.bundle", "projection.diff"]},
+        "groups": {"failure_and_timing": ["timing.json"]} if status == "void" else {
+            "candidate_bundle_and_projection": ["candidate.bundle", "projection.diff"],
+            "packet_and_ground_truth": ["packet.md", "ground-truth.md"],
+            "capture_and_scoring": ["capture.json", "scoring.sh"]},
         "files": files,
-        "evaluator_rerun": {"result_hash": files.get("capture.json")},
+        "evaluator_rerun": {"result_hash": files.get("capture.json"),
+                            "argv": ["scoring.sh"], "package_files": ["scoring.sh"],
+                            "scored_inputs": ["score.js"],
+                            "input_perturbations": {"score.js": {"kind": "text-token", "token": json.dumps(composite)}}},
         "tree_binding": binding,
     }, indent=2, sort_keys=True) + "\n")
     (out / f"{slug}.json").write_text(json.dumps({
@@ -4011,6 +4042,7 @@ for name in sorted(plan["tracks"]):
             )
 PY
   bind_result_plan "$1"
+  [ -z "$RESTORE_MECHANISM" ] || write_restore_confinement "$1"
   bind_archived_scoring "$1"
 }
 
