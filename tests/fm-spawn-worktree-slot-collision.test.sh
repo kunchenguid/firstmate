@@ -59,6 +59,55 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# make_staged_pane_fakebin <dir>: a fake tmux whose `#{pane_current_path}`
+# query walks an ordered list of "path count" stages given in
+# FM_FAKE_PANE_STAGES (one per line), returning each stage's path for that
+# many consecutive reads before moving to the next, and repeating the last
+# stage's path forever once every stage is consumed. Lets a single test model
+# an arbitrary sequence of pane reads, including several worktree slots in a
+# row, rather than the two-value collide/clean shape make_collision_fakebin
+# is limited to.
+make_staged_pane_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*)
+    countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
+    n=0
+    [ -f "$countfile" ] && n=$(cat "$countfile")
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$countfile"
+    stages="${FM_FAKE_PANE_STAGES:?FM_FAKE_PANE_STAGES unset}"
+    chosen=""
+    cum=0
+    while IFS=' ' read -r stage_path stage_count; do
+      [ -n "$stage_path" ] || continue
+      chosen="$stage_path"
+      cum=$((cum + stage_count))
+      [ "$n" -gt "$cum" ] || break
+    done <<STAGES
+$stages
+STAGES
+    printf '%s\n' "$chosen"
+    exit 0
+    ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse
+  printf '%s\n' "$fakebin"
+}
+
 # make_collision_case <name>: one project repo with two pool-shaped detached
 # worktrees (a contested slot and a clean one) and a home ready to spawn into.
 make_collision_case() {
@@ -99,6 +148,22 @@ run_collision_spawn() {
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off "$@" 2>&1
 }
 
+# run_staged_collision_spawn <id> [extra fm-spawn args...]: like
+# run_collision_spawn, but drives make_staged_pane_fakebin's arbitrary
+# FM_FAKE_PANE_STAGES sequence instead of the two-value collide/clean shape.
+run_staged_collision_spawn() {
+  local id=$1
+  shift
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_PANE_STAGES="$FM_FAKE_PANE_STAGES" \
+    FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off "$@" 2>&1
+}
+
 # A slot treehouse hands back that another live task's meta already claims
 # must never be adopted: fm-spawn.sh should reject it and request another
 # slot, landing the new task on the clean one instead.
@@ -125,28 +190,100 @@ test_contested_slot_is_rejected_and_a_clean_slot_is_adopted() {
   pass "fm-spawn: a contested treehouse slot is rejected and a clean slot is adopted instead"
 }
 
-# When treehouse keeps handing back only the contested slot, fm-spawn.sh must
-# fail loudly and bounded rather than adopt the collision or loop forever.
+# When treehouse keeps handing back only contested slots (a different one
+# each retry, but each one already claimed by some other live task), fm-spawn.sh
+# must fail loudly and bounded rather than adopt a collision or loop forever.
 test_persistently_contested_slot_fails_bounded() {
-  local rec other=live-holder-b2 id=collide-stuck-a2 out status
+  local rec other_a=live-holder-b2 other_b=live-holder-b2x id=collide-stuck-a2 out status
+  local collide_2
   rec=$(make_collision_case retry-exhausted)
   read_collision_record "$rec"
-  FAKEBIN_DIR=$(make_collision_fakebin "$TMP_ROOT/retry-exhausted/fake")
+  collide_2="$TMP_ROOT/retry-exhausted/pool-collide-2"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$collide_2" HEAD
+  FAKEBIN_DIR=$(make_staged_pane_fakebin "$TMP_ROOT/retry-exhausted/fake")
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
   COUNTFILE="$TMP_ROOT/retry-exhausted/pane-call-count"
+
+  fm_write_meta "$HOME_DIR/state/$other_a.meta" \
+    "window=firstmate:fm-$other_a" "worktree=$COLLIDE_DIR" "project=$PROJECT_DIR" "kind=ship"
+  fm_write_meta "$HOME_DIR/state/$other_b.meta" \
+    "window=firstmate:fm-$other_b" "worktree=$collide_2" "project=$PROJECT_DIR" "kind=ship"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+
+  FM_FAKE_PANE_STAGES="$COLLIDE_DIR 2
+$collide_2 100000"
+  out=$(FM_SPAWN_SLOT_CONFLICT_RETRIES=2 run_staged_collision_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded after treehouse kept handing back only contested slots"$'\n'"$out"
+  assert_contains "$out" "refusing to launch into a contested slot" \
+    "refusal did not explain the contested-slot exhaustion"
+  assert_contains "$out" "$other_b" "refusal did not name the task holding the last contested slot"
+  assert_contains "$out" "2" "refusal did not report the configured retry bound"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "fm-spawn: a persistently contested treehouse slot fails loudly instead of looping or adopting it"
+}
+
+# The settle loop must never treat a pane still reporting the just-rejected
+# worktree as having settled there again: if treehouse's resent 'treehouse
+# get' never actually moves the pane (a genuinely stuck pane, not merely a
+# slow one), fm-spawn.sh must fail at the settle deadline rather than
+# silently re-adopting the same contested slot as if it were freshly handed
+# out - the exact race tests/fm-spawn-worktree-slot-collision previously left
+# unexercised.
+test_pane_stuck_on_rejected_slot_fails_at_settle_deadline() {
+  local rec other=live-holder-b2y id=collide-stuck-forever-a2 out status
+  rec=$(make_collision_case retry-stuck-forever)
+  read_collision_record "$rec"
+  FAKEBIN_DIR=$(make_staged_pane_fakebin "$TMP_ROOT/retry-stuck-forever/fake")
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  COUNTFILE="$TMP_ROOT/retry-stuck-forever/pane-call-count"
 
   fm_write_meta "$HOME_DIR/state/$other.meta" \
     "window=firstmate:fm-$other" "worktree=$COLLIDE_DIR" "project=$PROJECT_DIR" "kind=ship"
   fm_test_spawn_brief "$HOME_DIR" "$id"
 
-  out=$(FM_FAKE_PANE_COLLIDE_READS=100000 FM_SPAWN_SLOT_CONFLICT_RETRIES=2 run_collision_spawn "$id")
+  FM_FAKE_PANE_STAGES="$COLLIDE_DIR 100000"
+  out=$(run_staged_collision_spawn "$id")
   status=$?
-  [ "$status" -ne 0 ] || fail "spawn succeeded after treehouse kept handing back only the contested slot"$'\n'"$out"
-  assert_contains "$out" "refusing to launch into a contested slot" \
-    "refusal did not explain the contested-slot exhaustion"
-  assert_contains "$out" "$other" "refusal did not name the task holding the contested slot"
-  assert_contains "$out" "2" "refusal did not report the configured retry bound"
+  [ "$status" -ne 0 ] || fail "spawn succeeded even though the pane never left the rejected slot"$'\n'"$out"
+  assert_contains "$out" "did not enter an isolated worktree within" \
+    "refusal did not explain the settle deadline was reached"
+  assert_contains "$out" "same worktree slot rejected on the previous attempt" \
+    "refusal did not explain the pane never left the rejected slot"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
-  pass "fm-spawn: a persistently contested treehouse slot fails loudly instead of looping or adopting it"
+  pass "fm-spawn: a pane stuck on the just-rejected slot fails at the settle deadline instead of re-adopting it"
+}
+
+# A pane that transiently keeps reporting the just-rejected slot for a few
+# reads after the resent 'treehouse get' - the realistic shape of the race in
+# spawn-retry-stale-path-reaccept, since spawn_send_text_line returns before
+# the shell has interpreted the resend - must not be mistaken for having
+# settled there again; once treehouse's cd actually lands the pane on a
+# genuinely different, uncontested slot, the spawn must still succeed.
+test_transient_stale_rejected_reads_do_not_block_a_genuine_settle() {
+  local rec other=live-holder-b2z id=collide-transient-a2 out status
+  rec=$(make_collision_case retry-transient-stale)
+  read_collision_record "$rec"
+  FAKEBIN_DIR=$(make_staged_pane_fakebin "$TMP_ROOT/retry-transient-stale/fake")
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  COUNTFILE="$TMP_ROOT/retry-transient-stale/pane-call-count"
+
+  fm_write_meta "$HOME_DIR/state/$other.meta" \
+    "window=firstmate:fm-$other" "worktree=$COLLIDE_DIR" "project=$PROJECT_DIR" "kind=ship"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+
+  FM_FAKE_PANE_STAGES="$COLLIDE_DIR 6
+$CLEAN_DIR 2"
+  out=$(run_staged_collision_spawn "$id")
+  status=$?
+  expect_code 0 "$status" \
+    "spawn should succeed once the pane genuinely moves off the rejected slot"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_grep "worktree=$CLEAN_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the clean slot handed out once the pane genuinely settled there"
+  assert_no_grep "worktree=$COLLIDE_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta wrongly recorded the slot rejected on the previous attempt"
+  pass "fm-spawn: transient stale reads of the rejected slot do not block a genuine settle on a clean one"
 }
 
 # The same collision, but the live holder's meta lives in a different, locally
@@ -185,6 +322,8 @@ test_cross_home_contested_slot_is_rejected() {
 
 test_contested_slot_is_rejected_and_a_clean_slot_is_adopted
 test_persistently_contested_slot_fails_bounded
+test_pane_stuck_on_rejected_slot_fails_at_settle_deadline
+test_transient_stale_rejected_reads_do_not_block_a_genuine_settle
 test_cross_home_contested_slot_is_rejected
 
 echo "# all fm-spawn-worktree-slot-collision tests passed"
