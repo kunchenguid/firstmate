@@ -1435,7 +1435,15 @@ launch_template() {
     # sources are not guaranteed to load that scope, so a worker would
     # otherwise run with attribution back on; carrying it per launch keeps the
     # policy in force regardless of which settings scopes end up loaded.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # config/crew-disabled-plugins extends the --settings JSON with an
+    # enabledPlugins object so that user-enabled plugins whose hooks fire in
+    # crew sessions but whose MCP server does not start there are suppressed
+    # fleet-wide. Empirically confirmed (2026-09-09): --settings is the only
+    # scope that prevents a plugin's hooks from loading; project-level
+    # settings.local.json enabledPlugins does not override the user-level
+    # enable. __CLAUDE_SETTINGS_JSON__ is substituted with the shell-quoted
+    # JSON built by build_crew_settings_json() at the substitution point below.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings __CLAUDE_SETTINGS_JSON__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1954,6 +1962,38 @@ esac
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# Build the --settings JSON for claude crew launches. Merges enabledPlugins
+# entries from config/crew-disabled-plugins (one plugin id per line; # comments
+# and blank lines ignored) into the base attribution+feedbackDrafts object.
+# Prints the full JSON value (no surrounding shell quotes) to stdout.
+# Empirically confirmed mechanism (2026-09-09): --settings is the only scope
+# that prevents a user-enabled plugin's hooks from loading in a crew session;
+# project-level settings.local.json enabledPlugins does not override the
+# user-level enable. See docs/configuration.md "Crew plugin suppression".
+build_crew_settings_json() {
+  local config_dir=$1 disabled_file plugins_json="" id_escaped line
+  disabled_file="$config_dir/crew-disabled-plugins"
+  if [ -f "$disabled_file" ]; then
+    while IFS= read -r line; do
+      line=${line%%#*}   # strip inline comments
+      # shellcheck disable=SC2001
+      line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      [ -n "$line" ] || continue
+      id_escaped=$(json_escape "$line")
+      if [ -z "$plugins_json" ]; then
+        plugins_json="\"$id_escaped\":false"
+      else
+        plugins_json="$plugins_json,\"$id_escaped\":false"
+      fi
+    done < "$disabled_file"
+  fi
+  if [ -n "$plugins_json" ]; then
+    printf '{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},"enabledPlugins":{%s}}' "$plugins_json"
+  else
+    printf '%s' '{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'
+  fi
 }
 
 # rovo confines every file-tool operation (open_files, create_file, grep, ...)
@@ -3751,6 +3791,10 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+if [ "$HARNESS" = claude ]; then
+  _crew_settings_sq=$(shell_quote "$(build_crew_settings_json "$CONFIG")")
+  LAUNCH=${LAUNCH//__CLAUDE_SETTINGS_JSON__/$_crew_settings_sq}
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 if [ "$HARNESS" = rovo ]; then

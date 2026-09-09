@@ -391,6 +391,28 @@ Regression coverage executes emitted launch commands with synthetic nonsecret va
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
+## Crew plugin suppression (config/crew-disabled-plugins)
+
+`config/crew-disabled-plugins` is an optional local, gitignored file listing Claude plugin ids to disable in crew sessions.
+Each non-blank, non-comment line is a plugin id in the `<plugin>@<publisher>` format.
+Lines beginning with `#` and lines that are blank or all whitespace are ignored.
+
+When the file is present and non-empty, `fm-spawn.sh` merges an `enabledPlugins` object into the claude launch's inline `--settings` JSON, setting each listed id to `false`.
+An absent or empty file leaves plugin state unchanged.
+
+The `--settings` scope is the only mechanism proven to suppress a user-enabled plugin's hooks in a crew session.
+Project-level `settings.local.json` `enabledPlugins` does not override the user-level enable.
+Empirically confirmed on Claude Code 2.1.266 (2026-09-09): a session launched with `--settings '{"enabledPlugins":{"id":false}}'` receives no `SessionStart` context injection and no `PreToolUse` hook output from that plugin, whereas a control session without the override receives both.
+
+Secondmate homes inherit this file from the primary under the same contract as `config/crew-harness` and `config/crew-dispatch.json`.
+
+Example:
+```
+# context-mode's hooks redirect Bash curl/wget to its ctx_* MCP tools, which
+# are absent in crew sessions, causing 400 errors on the next model call.
+context-mode@context-mode
+```
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
