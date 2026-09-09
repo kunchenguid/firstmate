@@ -24,23 +24,32 @@ positive_bounded_wait_before_resolved() {
     *"do not sleep"*|*"do not poll"*|*"never sleep"*|*"never poll"*|\
     *"sleep forever"*|*"poll forever"*|*"wait forever"*|*"wait indefinitely"*) return 1 ;;
   esac
-  pattern="(sleep[[:space:]]+[0-9]+|poll[[:space:]]+every[[:space:]]+[0-9]+[[:space:]]*(seconds?|minutes?)).*append \`resolved:\`"
+  pattern="(sleep[[:space:]]+[0-9]+|poll[[:space:]]+every[[:space:]]+[0-9]+[[:space:]]*(seconds?|minutes?)).*append \`resolved:[^\`]*\`"
   printf '%s\n' "$guidance" | grep -Eiq "$pattern"
 }
 
 end_turn_claim_is_exact() {
-  local claim=$1 pause_verb=$2 terminal token_count
+  local claim=$1 pause_verb=$2 allowed suffix terminal claim_count token_count
   [ -n "$claim" ] || return 1
+  claim_count=$(printf '%s\n' "$claim" | grep -Eo 'may end a turn' | wc -l | tr -d ' ')
+  [ "$claim_count" = 1 ] || return 1
+  allowed=${claim%%"may end a turn"*}
+  suffix=${claim#*"may end a turn"}
   for terminal in needs-decision blocked "done" failed; do
-    case "$claim" in
+    case "$allowed" in
       *"\`$terminal:\`"*) ;;
       *) return 1 ;;
     esac
   done
-  token_count=$(printf '%s\n' "$claim" | grep -Eo "\`[a-z-]+:\`" | wc -l | tr -d ' ')
+  token_count=$(printf '%s\n' "$allowed" | grep -Eo "\`[a-z-]+:\`" | wc -l | tr -d ' ')
   [ "$token_count" = 4 ] || return 1
-  case "$claim" in
-    *"\`working:\`"*|*"\`$pause_verb:\`"*|*"\`paused:\`"*) return 1 ;;
+  case "$suffix" in
+    *"\`working:\`"*|*"\`$pause_verb:\`"*|*"\`paused:\`"*)
+      case "$suffix" in
+        *"never do"*|*"may not end"*|*"do not end"*|*"cannot end"*|*"nonterminal"*) ;;
+        *) return 1 ;;
+      esac
+      ;;
   esac
   return 0
 }
@@ -85,7 +94,7 @@ assert_paused_guidance() {
 
 test_assertions_reject_counterexamples() {
   local positive_wait negative_wait unbounded_wait extra_terminals changed_case
-  positive_wait="stay in the turn and sleep 30; append \`resolved:\`"
+  positive_wait="stay in the turn and sleep 30; append \`resolved: {how it cleared}\`"
   negative_wait="stay in the turn; do not sleep or poll; append \`resolved:\`"
   unbounded_wait="stay in the turn; sleep forever and wait indefinitely; append \`resolved:\`"
   extra_terminals="Only \`needs-decision:\`, \`blocked:\`, \`done:\`, and \`failed:\` may end a turn; \`paused:\` and \`working:\` may end a turn too."
