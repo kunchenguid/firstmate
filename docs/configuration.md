@@ -340,6 +340,7 @@ For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a pe
 Agy crews receive a Stop hook in the first unoccupied `.agents`, `.agent`, `_agents`, or `_agent` customization root, a per-task `.fm-agy-turnend` pointer, and a private state registry token.
 Spawn refuses rather than merging with or overwriting an existing Agy `hooks.json`.
 Spawn records whether it created the chosen root or borrowed a pre-existing hookless project directory, along with the exact `hooks.json` bytes it installed; teardown and relaunch remove only a hook file still byte-identical to that recorded install (never a project-authored or project-replaced `hooks.json`, even one retaining the generated task-token entry) and only remove a root Firstmate itself created.
+The `FM_AGY_READY_STABLE_POLLS`, `FM_AGY_SUBMIT_SETTLE`, and `FM_AGY_SUBMIT_RETRIES` defaults are the observed floor for Agy's post-trust composer repaint; [`docs/verification/agy-harness.md`](verification/agy-harness.md) records how they were measured and what to do when a spawn still aborts with `not proven empty after Enter`.
 Kimi continues to use the captain's normal Kimi home, including the existing config, skills, and memory; Firstmate does not create an isolated Kimi home.
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
@@ -933,11 +934,12 @@ FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail insid
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_AGY_WATCH_CHECKPOINT=180     # seconds per foreground watcher checkpoint in Agy primary supervision
 FM_AGY_READY_POLLS=80           # agy-only: spawn readiness polls for the trust dialog and empty composer before brief delivery
+FM_AGY_READY_STABLE_POLLS=2     # agy-only: consecutive empty-composer polls required before the composer counts as ready
 FM_AGY_DELIVERY_POLLS=40        # agy-only: spawn polls confirming the brief pointer was accepted
 FM_AGY_POLL_INTERVAL=0.5        # agy-only: seconds between spawn readiness and delivery polls
-FM_AGY_SUBMIT_RETRIES=3         # agy-only: Enter re-sends when the brief pointer submission is not yet proven empty; the text is never retyped
+FM_AGY_SUBMIT_RETRIES=6         # agy-only: Enter re-sends when the brief pointer submission is not yet proven empty; the text is never retyped
 FM_AGY_SUBMIT_SLEEP=0.5         # agy-only: seconds between those Enter re-sends; defaults to FM_AGY_POLL_INTERVAL
-FM_AGY_SUBMIT_SETTLE=0          # agy-only: seconds between typing the brief pointer and the first Enter
+FM_AGY_SUBMIT_SETTLE=0.4        # agy-only: seconds between typing the brief pointer and the first Enter
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed directly
