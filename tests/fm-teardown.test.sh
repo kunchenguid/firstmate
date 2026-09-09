@@ -881,6 +881,55 @@ test_empty_pi_compaction_scout_allows() {
   pass "pi-compaction empty scout is classified EMPTY and cleaned without an endpoint"
 }
 
+test_empty_scout_refuses_hidden_submodule_edits() {
+  local case_dir rc
+  case_dir=$(make_case empty-scout-submodule)
+  write_sparse_recovery_meta "$case_dir" task-x1 no-mistakes scout "$case_dir/wt"
+  git init -q "$case_dir/submodule-origin"
+  printf 'preserved\n' > "$case_dir/submodule-origin/work.txt"
+  git -C "$case_dir/submodule-origin" add work.txt
+  git -C "$case_dir/submodule-origin" commit -qm 'submodule baseline'
+  git -C "$case_dir/wt" -c protocol.file.allow=always submodule add -q \
+    "$case_dir/submodule-origin" module
+  git -C "$case_dir/wt" commit -qm 'add preserved submodule'
+  git -C "$case_dir/wt" push -q origin HEAD:main
+  git -C "$case_dir/wt" config submodule.module.ignore all
+  printf 'unpreserved scout edits\n' >> "$case_dir/wt/module/work.txt"
+
+  [ -z "$(git -C "$case_dir/wt" status --porcelain --ignored --untracked-files=all)" ] \
+    || fail "empty-scout-submodule: fixture did not hide the submodule edits"
+  [ -n "$(git -C "$case_dir/wt" status --porcelain --ignore-submodules=none)" ] \
+    || fail "empty-scout-submodule: fixture has no detectable submodule edits"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "empty-scout-submodule: hidden submodule edits must refuse cleanup"
+  assert_grep 'cleanup classification REFUSED' "$case_dir/stderr" \
+    "empty-scout-submodule: refusal did not identify its category"
+  assert_grep 'isolated scout copy contains tracked, untracked, or ignored material' "$case_dir/stderr" \
+    "empty-scout-submodule: refusal did not identify the dirty copy"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "empty-scout-submodule: refusal erased the recovery record"
+  assert_grep 'unpreserved scout edits' "$case_dir/wt/module/work.txt" \
+    "empty-scout-submodule: refusal lost the submodule edits"
+
+  git -C "$case_dir/wt/module" checkout -- work.txt
+  set +e
+  run_teardown "$case_dir" > "$case_dir/clean.stdout" 2> "$case_dir/clean.stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "empty-scout-submodule: clean submodule should allow cleanup"
+  assert_grep 'Cleanup classification: EMPTY' "$case_dir/clean.stdout" \
+    "empty-scout-submodule: clean copy did not classify EMPTY"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "empty-scout-submodule: clean copy retained its recovery record"
+  pass "EMPTY refuses hidden submodule edits and allows a clean submodule"
+}
+
 test_empty_scout_closes_backlog_without_report() {
   local case_dir rc
   case_dir=$(make_case empty-scout-backlog)
@@ -4001,6 +4050,7 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_empty_pi_compaction_scout_allows
+test_empty_scout_refuses_hidden_submodule_edits
 test_empty_scout_closes_backlog_without_report
 test_empty_portfolio_scout_allows_when_behind_upstream
 test_reports_pr43_sparse_record_allows_only_api_confirmed_merge

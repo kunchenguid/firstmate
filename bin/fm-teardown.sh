@@ -995,7 +995,7 @@ classify_cleanup_recovery() {
       CLEANUP_CLASSIFICATION_REASON="scout copy is not registered to its recorded project"
       return 0
     }
-    dirty=$(git -C "$worktree" status --porcelain --ignored --untracked-files=all 2>/dev/null) || {
+    dirty=$(git -C "$worktree" status --porcelain --ignored --untracked-files=all --ignore-submodules=none 2>/dev/null) || {
       CLEANUP_CLASSIFICATION_REASON="cannot inspect the isolated scout copy for tracked, untracked, or ignored material"
       return 0
     }
