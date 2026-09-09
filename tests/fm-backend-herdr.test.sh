@@ -14,6 +14,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/herdr-test-safety.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
+# shellcheck source=tests/herdr-client-pair-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
@@ -23,6 +25,14 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 herdr_forget_inherited_pane
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
+# Pin the ambient-home default to a marker-free fixture: FM_HOME resolves to
+# the suite's own root when unset, and a secondmate-marked checkout (any
+# treehouse crew home carries .fm-secondmate-home) would flip the default
+# workspace label to 2ndmate-*, silently changing placement behavior for
+# every test that does not set FM_HOME itself. Per-test FM_HOME prefixes
+# still override this default.
+mkdir -p "$TMP_ROOT/ambient-home"
+export FM_HOME="$TMP_ROOT/ambient-home"
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
@@ -58,6 +68,38 @@ if [ -f "$RESP/$n.exit" ]; then
 fi
 [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+# make_herdr_server_env_fakebin: a stateful server stub that records only the
+# long-lived server launch environment, then reports the server as running.
+make_herdr_server_env_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    if [ -e "$FM_HERDR_SERVER_MARKER" ]; then
+      printf '{"server":{"running":true}}\n'
+    else
+      printf '{"server":{"running":false}}\n'
+    fi
+    ;;
+  server)
+    {
+      for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_HERDR_SENTINEL HERDR_SESSION; do
+        eval 'value=${'"$name"'-<unset>}'
+        printf '%s=%s\n' "$name" "$value"
+      done
+      printf 'args=%s\n' "$*"
+    } > "$FM_HERDR_SERVER_ENV_LOG"
+    : > "$FM_HERDR_SERVER_MARKER"
+    ;;
+esac
 SH
   chmod +x "$fb/herdr"
   printf '%s\n' "$fb"
@@ -287,6 +329,177 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
   assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''list'$'\x1f''--session'$'\x1f''fmtest' \
     "fm_backend_herdr_cli did not append a trailing --session <name> flag (the fix for the env-var-alone routing bug)"
   pass "fm_backend_herdr_cli: sets HERDR_SESSION AND appends a trailing --session flag on every call"
+}
+
+# --- client selection: a stale client shadowing a compatible one -------------
+#
+# Two herdr clients on PATH is a real host shape (a self-updated ~/.local/bin
+# copy next to a package-managed one), and the fixed remote-job PATH resolves
+# ~/.local/bin first. A client older than the running server answers every
+# command with error code protocol_mismatch (verified: herdr 0.8.2, protocol
+# 20, against a 0.9.0 server, protocol 22), and until the adapter learned to
+# step around it, a live remote secondmate read `unreadable`, every doorbell
+# into it failed, and the relaunch that would repair it was refused.
+
+# run_with_clients <dir> <path-dirs...> -- <bash -c body>: sources the adapter
+# in a fresh shell whose PATH holds exactly the named client directories plus
+# jq and the system tail, so no herdr from the runner's own PATH can leak in.
+# Bodies are bash -c sources, so their single-quoted $ expansions are
+# deliberate (SC2016).
+# shellcheck disable=SC2016
+run_with_clients() {  # <dir> <path> <body>
+  local dir=$1 path=$2 body=$3
+  FM_HERDR_PAIR_DIR="$dir" PATH="$path:$dir/tools:/usr/bin:/bin" \
+    bash -c ". \"\$0/bin/backends/herdr.sh\"; $body" "$ROOT"
+}
+
+test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one() {
+  local dir out err
+  dir="$TMP_ROOT/client-pair-bypass"; make_herdr_client_pair "$dir"
+  out=$(run_with_clients "$dir" "$dir/stale:$dir/current" 'fm_backend_herdr_agent_state fm-remote:wCY:p2' 2>"$dir/stderr") \
+    || fail "agent-state read with a shadowing stale client should not fail"
+  err=$(cat "$dir/stderr")
+  [ "$out" = alive ] || fail "a live remote pane behind a stale shadowing client should read alive, got: $out (stderr: $err)"
+  assert_contains "$(cat "$dir/current.log")" "pane get wCY:p2" "the compatible client should have served the pane read"
+  assert_contains "$(cat "$dir/current.log")" "agent get wCY:p2" "the compatible client should have served the agent read"
+  [ -z "$err" ] || fail "a successful bypass must print nothing on stderr (callers merge stderr into parsed JSON), got: $err"
+  pass "herdr client selection: a live pane behind a stale shadowing client reads alive"
+}
+
+# shellcheck disable=SC2016
+test_cli_caches_the_selected_client_within_a_process() {
+  local dir out
+  dir="$TMP_ROOT/client-pair-cache"; make_herdr_client_pair "$dir"
+  out=$(run_with_clients "$dir" "$dir/stale:$dir/current" \
+    'fm_backend_herdr_cli fm-remote pane get wCY:p2 >/dev/null 2>&1
+     fm_backend_herdr_cli fm-remote agent get wCY:p2 >/dev/null 2>&1
+     printf "%s" "${FM_BACKEND_HERDR_BIN:-unset}"')
+  [ "$out" = "$dir/current/herdr" ] \
+    || fail "the compatible client should be selected and exported, got: $out"
+  [ "$(grep -c 'pane get\|agent get' "$dir/stale.log")" -eq 1 ] \
+    || fail "after selection the stale client must not be retried in the same process, got: $(cat "$dir/stale.log")"
+  assert_contains "$(cat "$dir/current.log")" "agent get wCY:p2" "the second call should go straight to the selected client"
+  pass "herdr client selection: one selected client is reused per process"
+}
+
+# shellcheck disable=SC2016
+test_cli_scopes_the_selected_client_to_its_session() {
+  local dir out
+  dir="$TMP_ROOT/client-pair-cross-session"
+  mkdir -p "$dir/stale" "$dir/current" "$dir/tools"
+  ln -sf "$(command -v jq)" "$dir/tools/jq"
+  cat > "$dir/stale/herdr" <<'SH'
+#!/usr/bin/env bash
+session=${!#}
+printf '%s\n' "$*" >> "${FM_HERDR_PAIR_DIR:?}/stale.log"
+if [ "${1:-} ${2:-}" = "status --json" ]; then
+  if [ "$session" = fresh ]; then
+    printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":false}}\n'
+  elif [ -e "$FM_HERDR_PAIR_DIR/switched" ]; then
+    printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true,"protocol":20,"compatible":true}}\n'
+  else
+    printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true,"protocol":22,"compatible":false}}\n'
+  fi
+elif [ "$session" = fresh ] && [ "${1:-}" = server ]; then
+  printf 'path-default-server\n'
+elif [ "$session" = modern ] && [ -e "$FM_HERDR_PAIR_DIR/switched" ]; then
+  printf 'legacy\n'
+else
+  printf '{"error":{"code":"protocol_mismatch"}}\n' >&2
+  exit 1
+fi
+SH
+  cat > "$dir/current/herdr" <<'SH'
+#!/usr/bin/env bash
+session=${!#}
+printf '%s\n' "$*" >> "${FM_HERDR_PAIR_DIR:?}/current.log"
+if [ "${1:-} ${2:-}" = "status --json" ]; then
+  if [ "$session" = fresh ]; then
+    printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":false}}\n'
+  elif [ -e "$FM_HERDR_PAIR_DIR/switched" ]; then
+    printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true,"protocol":20,"compatible":false}}\n'
+  else
+    printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true,"protocol":22,"compatible":true}}\n'
+  fi
+elif [ "$session" = fresh ] && [ "${1:-}" = server ]; then
+  printf 'selected-server\n'
+elif [ "$session" = modern ] && [ ! -e "$FM_HERDR_PAIR_DIR/switched" ]; then
+  printf 'modern\n'
+else
+  printf '{"error":{"code":"protocol_mismatch"}}\n' >&2
+  exit 1
+fi
+SH
+  chmod +x "$dir/stale/herdr" "$dir/current/herdr"
+  out=$(run_with_clients "$dir" "$dir/stale:$dir/current" \
+    'fm_backend_herdr_cli modern pane get w1:p1 > "$FM_HERDR_PAIR_DIR/modern.out" || exit 1
+     fm_backend_herdr_cli fresh status --json > "$FM_HERDR_PAIR_DIR/fresh-status.out" || exit 1
+     fm_backend_herdr_cli fresh server > "$FM_HERDR_PAIR_DIR/server.out" || exit 1
+     touch "$FM_HERDR_PAIR_DIR/switched"
+     fm_backend_herdr_cli modern pane get w1:p1 > "$FM_HERDR_PAIR_DIR/legacy.out" || exit 1
+     printf "%s|%s|%s|%s|%s" "$(cat "$FM_HERDR_PAIR_DIR/modern.out")" "$(jq -r .server.running "$FM_HERDR_PAIR_DIR/fresh-status.out")" "$(cat "$FM_HERDR_PAIR_DIR/server.out")" "$(cat "$FM_HERDR_PAIR_DIR/legacy.out")" "${FM_BACKEND_HERDR_BIN:-PATH-default}"')
+  [ "$out" = 'modern|false|path-default-server|legacy|PATH-default' ] \
+    || fail "a selected client should stay scoped to its session while forced reselection still returns to the PATH default, got: $out"
+  assert_contains "$(cat "$dir/stale.log")" 'server --session fresh' "a stopped second session should start with the PATH-default client"
+  assert_not_contains "$(cat "$dir/current.log")" 'server --session fresh' "another session's selected client must not start the stopped session"
+  [ "$(grep -c 'pane get w1:p1' "$dir/current.log")" -eq 2 ] \
+    || fail "the selected client should be retried after its own server compatibility changes: $(cat "$dir/current.log")"
+  assert_contains "$(cat "$dir/stale.log")" 'pane get w1:p1' "the changed session call should retry on the newly compatible PATH-default client"
+  pass "herdr client selection: selected clients remain scoped to their session"
+}
+
+# shellcheck disable=SC2016
+test_cli_unrelated_failure_never_triggers_reselection() {
+  local dir out rc
+  dir="$TMP_ROOT/client-pair-unrelated"; make_herdr_client_pair "$dir"
+  # current first: its pane_not_found refusal is an ordinary business result,
+  # so the stale client behind it must never be consulted or selected.
+  out=$(run_with_clients "$dir" "$dir/current:$dir/stale" \
+    'fm_backend_herdr_cli fm-remote pane get wZZ:p9 2>&1; rc=$?; printf "\nrc=%s bin=%s\n" "$rc" "${FM_BACKEND_HERDR_BIN:-unset}"'); rc=$?
+  assert_contains "$out" 'pane_not_found' "the ordinary refusal must be replayed to the caller verbatim"
+  assert_contains "$out" 'rc=1 bin=unset' "an unrelated failure must keep the exit status and select nothing"
+  [ ! -e "$dir/stale.log" ] || fail "the shadowed client must not be consulted on an unrelated failure: $(cat "$dir/stale.log")"
+  pass "herdr client selection: only protocol_mismatch triggers reselection; other failures pass through untouched"
+}
+
+# shellcheck disable=SC2016
+test_cli_single_client_pays_no_selection_read() {
+  local dir out
+  dir="$TMP_ROOT/client-single"; make_herdr_client_pair "$dir"
+  out=$(run_with_clients "$dir" "$dir/current" 'fm_backend_herdr_cli fm-remote pane get wCY:p2 >/dev/null; printf "%s" "${FM_BACKEND_HERDR_BIN:-unset}"')
+  [ "$out" = unset ] || fail "a single healthy client must stay the PATH default, got: $out"
+  [ "$(grep -c status "$dir/current.log")" -eq 0 ] \
+    || fail "a healthy call must make no status read: $(cat "$dir/current.log")"
+  pass "herdr client selection: the happy path makes no extra call"
+}
+
+test_client_status_reads_both_status_shapes() {
+  local dir out
+  dir="$TMP_ROOT/client-status-shapes"; mkdir -p "$dir/bin" "$dir/tools"
+  ln -sf "$(command -v jq)" "$dir/tools/jq"
+  # An older client that reports protocols but no .server.compatible field
+  # (the pre-0.8 status shape) must be judged by protocol equality.
+  cat > "$dir/bin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${FM_HERDR_STATUS_SHAPE:?}" in
+  legacy-equal) printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true,"protocol":16}}\n' ;;
+  legacy-older) printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true,"protocol":22}}\n' ;;
+  no-protocol)  printf '{"client":{"version":"0.7.1"},"server":{"running":true}}\n' ;;
+  stopped)      printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":false}}\n' ;;
+esac
+SH
+  chmod +x "$dir/bin/herdr"
+  for shape in legacy-equal legacy-older no-protocol stopped; do
+    out=$(FM_HERDR_STATUS_SHAPE=$shape PATH="$dir/tools:/usr/bin:/bin" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_client_status "$1" fm-remote' "$ROOT" "$dir/bin/herdr")
+    case "$shape" in
+      legacy-equal) [ "$out" = 'true|true' ] || fail "legacy equal protocols should read compatible, got: $out" ;;
+      legacy-older) [ "$out" = 'true|false' ] || fail "legacy older client should read incompatible, got: $out" ;;
+      no-protocol)  [ "$out" = 'true|' ] || fail "a client reporting no protocol must read unknown, never false, got: $out" ;;
+      stopped)      [ "$out" = 'false|' ] || fail "a stopped server must read not running, got: $out" ;;
+    esac
+  done
+  pass "herdr client status: .server.compatible, legacy protocol equality, unknown, and stopped shapes all normalize"
 }
 
 # --- launcher_identity: the exact workspace a worker must be placed in -------
@@ -522,6 +735,27 @@ test_container_ensure_starts_server_and_workspace() {
   assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''firstmate' \
     "container_ensure did not create the firstmate workspace with the given cwd"
   pass "fm_backend_herdr_container_ensure: version-gates, starts the server, ensures the firstmate workspace, echoes session:workspace_id + the seeded default tab id"
+}
+
+test_server_ensure_scrubs_home_and_harness_identity() {
+  local dir log marker fb output name
+  dir="$TMP_ROOT/server-env"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
+  fb=$(make_herdr_server_env_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_SERVER_ENV_LOG="$log" FM_HERDR_SERVER_MARKER="$marker" FM_HERDR_SENTINEL=kept \
+    FM_HOME=/tmp/wrong-home FM_ROOT_OVERRIDE=/tmp/wrong-root FM_STATE_OVERRIDE=/tmp/wrong-state \
+    FM_DATA_OVERRIDE=/tmp/wrong-data FM_PROJECTS_OVERRIDE=/tmp/wrong-projects FM_CONFIG_OVERRIDE=/tmp/wrong-config \
+    CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed GROK_AGENT=1 FM_SUPERVISION_MODEL=autoarm \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
+  expect_code 0 $? "server_ensure should start under a polluted launcher environment"
+  output=$(cat "$log")
+  for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
+    CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL; do
+    assert_contains "$output" "$name=<unset>" "server_ensure leaked $name into the long-lived Herdr server"
+  done
+  assert_contains "$output" "FM_HERDR_SENTINEL=kept" "server_ensure removed an unrelated environment variable"
+  assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
+  assert_contains "$output" "args=server --session fmtest" "server_ensure lost the trailing Herdr session flag"
+  pass "fm_backend_herdr_server_ensure: scrubs home and harness identity without disturbing unrelated environment or session routing"
 }
 
 test_container_ensure_reuses_existing_workspace() {
@@ -3083,6 +3317,28 @@ test_composer_state_pi_separator_idle_is_empty() {
   pass "fm_backend_herdr_composer_state: a native idle Pi separator composer reads empty"
 }
 
+# A pi worker parked on an interactive prompt (permission dialog, question
+# menu, trust dialog) reports agent_status=blocked: it is waiting on a human
+# keystroke. The menu is drawn ABOVE the separator pair, so the composer region
+# itself is blank and structure alone looks like a free composer. Typing there
+# does not compose a message - the menu consumes the keys and Enter selects the
+# highlighted default, so the text is discarded and a decision nobody made is
+# recorded (issue #2797). Every "is it safe to type here?" consumer reads this
+# verdict: the away-mode injection guard (bin/fm-supervise-daemon.sh) and
+# fm-send's pre-type refusal both proceed ONLY on an affirmative `empty`.
+test_composer_state_pi_parked_prompt_is_not_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-pi-parked-prompt"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'Should I keep going?\n  1. Yes, continue\n\x1b[7m  2. Stop, do not act\x1b[0m\n\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[7m \x1b[0m                                                    \n\x1b[0m\x1b[38;2;129;162;190m─────────────────────────────────────────────────────\x1b[0m\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"blocked"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" != empty ] \
+    || fail "a pi pane parked on a prompt must not report an affirmatively empty composer, got '$out'"
+  pass "fm_backend_herdr_composer_state: a blocked pi pane parked on a prompt is not an empty composer"
+}
+
 test_composer_state_pi_separator_real_text_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-pi-separated-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -3584,11 +3840,11 @@ test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued() {
 # --- the never-idle-native-state harness (real cursor on herdr) --------------
 # Measured live on cursor-agent 2026.08.11-e8db854 under herdr: `agent get`
 # reports a cursor pane `blocked` in EVERY state - idle, mid-turn, and after -
-# so the idle-baseline native path is structurally unreachable and every send
-# lands in the composer branch. Cursor's mid-turn composer row renders its own
+# so the idle-baseline native path is structurally unreachable and every typed
+# send lands in the composer branch. Cursor's mid-turn composer row renders its own
 # `Add a follow-up` placeholder beside a right-aligned `ctrl+c to stop`, so the
 # content verdict is `pending` on a composer holding no user text, and every
-# steer reported delivery unconfirmed on a message that had actually landed.
+# typed steer reported delivery unconfirmed on a message that had actually landed.
 # The bytes below are the real captures from that pane.
 
 # The idle capture: no busy token anywhere, which is the pre-Enter baseline.
@@ -4410,6 +4666,12 @@ test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
+test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
+test_cli_caches_the_selected_client_within_a_process
+test_cli_scopes_the_selected_client_to_its_session
+test_cli_unrelated_failure_never_triggers_reselection
+test_cli_single_client_pays_no_selection_read
+test_client_status_reads_both_status_shapes
 test_launcher_identity_absent_without_a_herdr_pane
 test_launcher_identity_absent_when_herdr_env_alone_is_set
 test_launcher_identity_resolves_the_exact_pane_tab_and_workspace
@@ -4424,6 +4686,7 @@ test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher
 test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
+test_server_ensure_scrubs_home_and_harness_identity
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
@@ -4520,6 +4783,7 @@ test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
+test_composer_state_pi_parked_prompt_is_not_empty
 test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown

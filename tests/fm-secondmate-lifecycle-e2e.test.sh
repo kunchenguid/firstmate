@@ -137,18 +137,25 @@ phase_send() {
   : > "$LOG"
   printf '❯\n' > "$PANE"
   # The meta window (firstmate:fm-design) must win over a foreign same-named
-  # window returned by list-windows.
-  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_WINDOW="other-session:fm-design" \
+  # window returned by list-windows. Include the recorded endpoint in the fake
+  # inventory so the recovery-grade liveness check can verify it exists.
+  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_WINDOW="firstmate:fm-design
+other-session:fm-design" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-send.sh" fm-design 'route this work' >/dev/null 2>&1 \
     || fail "fm-send failed for a bare firstmate window with home metadata"
-  # design is a kind=secondmate target, so the request is prefixed with the
-  # from-firstmate marker (bin/fm-marker-lib.sh): the send targets the meta window
-  # AND carries the marker label, and the original payload still follows it.
-  assert_grep 'send-keys -t firstmate:fm-design -l [fm-from-firstmate]' "$LOG" "send did not use the window recorded in this home's meta, or did not mark the secondmate request"
-  assert_grep 'route this work' "$LOG" "the original request text did not survive the marker"
+  # design is a kind=secondmate target, so the durable inbox record carries the
+  # from-firstmate marker and original payload. The terminal receives only the
+  # constant doorbell, routed through this home's authoritative meta window.
+  local record="$HOME_DIR/state/design.inbox/001.msg" body
+  assert_present "$record" "send did not enqueue the secondmate request"
+  body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$record")
+  assert_contains "$body" '[fm-from-firstmate]' "the inbox request was not marked as from-firstmate"
+  assert_contains "$body" 'route this work' "the original request text did not survive the marker"
+  assert_grep 'send-keys -t firstmate:fm-design -l : Firstmate instruction waiting:' "$LOG" "send did not ring the window recorded in this home's meta"
+  assert_no_grep 'route this work' "$LOG" "send typed the payload instead of only the doorbell"
   assert_no_grep 'send-keys -t other-session:fm-design' "$LOG" "send targeted a foreign same-named window"
-  pass "send: a bare fm-<id> secondmate routes to the meta window with the from-firstmate marker"
+  pass "send: a bare fm-<id> secondmate enqueues a marked request and rings the meta window"
 }
 
 phase_handoff() {
@@ -171,7 +178,9 @@ phase_handoff() {
 - [x] old-task - shipped thing - local main (merged 2026-06-19)
 EOF
   local out before
-  out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-backlog-handoff.sh" design feat-x feat-y) \
+  out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" \
+    FM_FAKE_TMUX_CAPTURE="$PANE" \
+    "$ROOT/bin/fm-backlog-handoff.sh" design feat-x feat-y) \
     || fail "handoff failed for in-scope items"
   assert_contains "$out" "handed off 2 item(s) to design" "handoff did not report the moved items"
 
@@ -187,7 +196,9 @@ EOF
 
   # Idempotent: a second handoff neither errors nor duplicates, and leaves main alone.
   before=$(cat "$HOME_DIR/data/backlog.md")
-  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-backlog-handoff.sh" design feat-x feat-y >/dev/null 2>&1 \
+  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" \
+    FM_FAKE_TMUX_CAPTURE="$PANE" \
+    "$ROOT/bin/fm-backlog-handoff.sh" design feat-x feat-y >/dev/null 2>&1 \
     || fail "idempotent re-run failed"
   [ "$(grep -cF -- '- [ ] feat-x - add feature x (repo: alpha)' "$SUB/data/backlog.md")" -eq 1 ] \
     || fail "idempotent re-run duplicated feat-x in the subhome backlog"
@@ -210,7 +221,20 @@ phase_recovery() {
 }
 
 phase_teardown() {
-  local teardown_out
+  local teardown_out corr rec
+  corr=$(FM_HOME="$HOME_DIR" bash -c '
+    . "$1"
+    fm_pending_reply_create "$2" "$2/state" design "New routed work is in your backlog."
+  ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$HOME_DIR") \
+    || fail "could not seed receiver wake retirement state"
+  rec="$HOME_DIR/state/pending-replies/$corr"
+  FM_HOME="$HOME_DIR" bash -c '
+    . "$1"
+    fm_pending_reply_set "$2" phase resolved
+    fm_pending_reply_set "$2" delivered_epoch 1
+  ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$rec" \
+    || fail "could not settle receiver wake retirement state"
+  printf 'confirmed:%s\n' "$corr" > "$HOME_DIR/state/.backlog-handoff-design.wake-pending"
   : > "$LOG"
   teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-teardown.sh" design 2>&1) \
@@ -219,6 +243,9 @@ phase_teardown() {
     && fail "secondmate teardown emitted a main-backlog completion reminder"
   assert_absent "$SUB" "teardown did not remove the retired secondmate home"
   assert_absent "$HOME_DIR/state/design.meta" "teardown did not clear the parent meta"
+  assert_absent "$HOME_DIR/state/.backlog-handoff-design.wake-pending" \
+    "teardown left receiver wake state that could poison a replacement route"
+  assert_absent "$rec" "teardown left the retired receiver wake correlation"
   assert_no_grep '- design ' "$HOME_DIR/data/secondmates.md" "teardown did not remove the registry route"
   # The parent's source projects are untouched (no write through a parent home).
   assert_present "$HOME_DIR/projects/alpha" "teardown disturbed a parent project"

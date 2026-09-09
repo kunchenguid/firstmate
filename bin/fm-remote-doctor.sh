@@ -451,8 +451,16 @@ fix_remote_job_worker() {
 # --- checks -----------------------------------------------------------------
 
 check_herdr() {
-  local resolved
+  local resolved selected
   if resolved=$(command -v herdr 2>/dev/null) && [ -x "$resolved" ]; then
+    if herdr_adapter_load; then
+      fm_backend_herdr_client_select "$HERDR_SESSION_NAME"
+      selected=$(fm_backend_herdr_bin)
+      if [ "$selected" != herdr ] && [ "$selected" != "$resolved" ]; then
+        record herdr "ok: $selected (bypassing $resolved)"
+        return 0
+      fi
+    fi
     record herdr "ok: $resolved"
     return 0
   fi

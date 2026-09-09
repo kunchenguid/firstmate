@@ -3646,7 +3646,7 @@ pass "the configured read scope is honoured"
 # The point of the boundary: real work is queued for firstmate, not done by the
 # voice agent. It reuses bin/fm-inbox.sh rather than carrying a second queue.
 
-before=$(find "$HOME_FIXTURE/state" -maxdepth 2 -name '*.note' | wc -l)
+before=$(find "$HOME_FIXTURE/state" -maxdepth 2 -name '*.note' | wc -l | tr -d '[:space:]')
 [ "$before" = 0 ] || fail "fixture should start with an empty inbox"
 
 handed=$(FM_HOME="$HOME_FIXTURE" python3 "$ROOT/bin/fm_voice_records.py" queue \
@@ -3656,7 +3656,7 @@ assert_contains "$handed" '"queued": true' "handover should report the request q
 assert_contains "$handed" 'did not do the work yourself' \
   "handover should tell the model it handed over rather than acted"
 
-notes=$(find "$HOME_FIXTURE/state/inbox" -maxdepth 1 -name '*.note' | wc -l)
+notes=$(find "$HOME_FIXTURE/state/inbox" -maxdepth 1 -name '*.note' | wc -l | tr -d '[:space:]')
 [ "$notes" = 1 ] || fail "handover should leave exactly one note, found $notes"
 note_file=$(find "$HOME_FIXTURE/state/inbox" -maxdepth 1 -name '*.note' | head -1)
 assert_grep 'Refactor the login module' "$note_file" \
@@ -3687,7 +3687,7 @@ FM_STATE_OVERRIDE="$alt_state" python3 "$ROOT/bin/fm_voice_records.py" queue \
   "Chase the flaky retry test" --home "$alt_home" >/dev/null \
   || fail "handover with an overridden state directory failed"
 
-moved=$(find "$alt_state/inbox" -maxdepth 1 -name '*.note' | wc -l)
+moved=$(find "$alt_state/inbox" -maxdepth 1 -name '*.note' | wc -l | tr -d '[:space:]')
 [ "$moved" = 1 ] || \
   fail "the queue should write into the overridden state directory, found $moved"
 [ ! -e "$alt_home/state/inbox" ] || \

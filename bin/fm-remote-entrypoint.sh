@@ -19,10 +19,19 @@
 # disconnect remains unknown completion to fm-on.sh, which preserves OpenSSH's
 # exit 255 behavior. The shared library header owns job fields, bounds, PATH,
 # LaunchAgent contract, and worker environment.
+#
+# A staged job whose caller goes away is cancelled rather than abandoned: any
+# exit after staging and before the published result marks the job cancelled
+# (signal traps cover a delivered HUP/TERM/PIPE/INT, and the exit trap covers a
+# failed bounded wait), and while waiting this process probes its parent about
+# once per second, so an ssh channel that dies without delivering any signal -
+# sshd exiting and reparenting this process - also cancels the job. The worker
+# then skips or stops the cancelled job instead of running it to completion for
+# nobody.
 set -eu
 
 PROTOCOL=1
-DOCTOR_SHA256=7bb13d9fad8455978bf109d4681a3aa3cb170565c8a74be4ec7b520427db14c2
+DOCTOR_SHA256=99ced2b91d7a4d7b77cc9ccc013d2e0d9c54e5bb9980f9d1ce601e5fa88691f1
 REAL_SOURCE=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}" 2>/dev/null) ||
   REAL_SOURCE=$(realpath "${BASH_SOURCE[0]}" 2>/dev/null) ||
   REAL_SOURCE=${BASH_SOURCE[0]}
@@ -74,7 +83,36 @@ sha256_file() { # <path>
 [ "$#" -eq 4 ] || die "remote entrypoint expects protocol, root, home, and argv"
 [ "$1" = "$PROTOCOL" ] || die "incompatible remote protocol: local=$1 remote=$PROTOCOL"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-entrypoint.XXXXXX") || die "cannot create protocol staging directory" 70
-trap 'rm -rf -- "$TMP"' EXIT
+
+JOB_ID=
+JOB_COMPLETED=0
+ACCOUNT_HOME=
+ENTRYPOINT_PPID=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ' || true)
+
+# The recorded parent is the ssh session process; when it disappears this
+# process is reparented and the caller is provably gone. An unreadable probe
+# never cancels: only an observed parent change does.
+# shellcheck disable=SC2329 # Invoked by fm_remote_job_wait through FM_REMOTE_JOB_DISCONNECT_PROBE.
+entrypoint_caller_connected() {
+  local current
+  case "$ENTRYPOINT_PPID" in ''|*[!0-9]*) return 0 ;; esac
+  current=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ' || true)
+  case "$current" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$current" = "$ENTRYPOINT_PPID" ]
+}
+
+# shellcheck disable=SC2329 # Invoked through the EXIT trap below.
+entrypoint_cleanup() {
+  rm -rf -- "$TMP"
+  if [ -n "$JOB_ID" ] && [ "$JOB_COMPLETED" -eq 0 ] && [ -n "$ACCOUNT_HOME" ]; then
+    fm_remote_job_cancel "$ACCOUNT_HOME" "$JOB_ID" 2>/dev/null || true
+  fi
+}
+trap entrypoint_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 141' PIPE
+trap 'exit 143' TERM
 
 decode_text "remote root" "$2" "$TMP/root"
 decode_text "remote home" "$3" "$TMP/home"
@@ -138,11 +176,14 @@ if ! fm_remote_job_ensure_worker "$ROOT" "$ACCOUNT_HOME"; then
   die "${FM_REMOTE_JOB_ERROR:-remote job worker is unavailable; run fm-on.sh <route> fm-remote-doctor.sh --fix}"
 fi
 if ! JOB_ID=$(fm_remote_job_stage "$ACCOUNT_HOME" "$ROOT" "$HOME_PATH" "$COMMAND" "${ARGV[@]:1}"); then
+  JOB_ID=
   die "${FM_REMOTE_JOB_ERROR:-cannot stage remote job}" 70
 fi
+FM_REMOTE_JOB_DISCONNECT_PROBE=entrypoint_caller_connected
 if ! fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID"; then
   die "${FM_REMOTE_JOB_ERROR:-remote job did not complete}" 70
 fi
+JOB_COMPLETED=1
 cat "$FM_REMOTE_JOB_STDOUT"
 cat "$FM_REMOTE_JOB_STDERR" >&2
 RESULT=$FM_REMOTE_JOB_EXIT

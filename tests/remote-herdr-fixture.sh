@@ -52,7 +52,7 @@ for ((i=0; i<${#args[@]}; i++)); do
 done
 case "${1:-} ${2:-}" in
   "status --json")
-    printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}\n' ;;
+    printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true,"protocol":16,"compatible":true}}\n' ;;
   "server "*|"server") : ;;
   "workspace list") jq_state '{result:{workspaces:.workspaces}}' ;;
   "workspace create")

@@ -21,23 +21,10 @@ export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims"
 pe()   { FM_HOME="$1" "$ROOT/bin/fm-procevent.sh" "${@:2}"; }
 when() { FM_HOME="$1" "$ROOT/bin/fm-procevent-when.sh" "${@:2}"; }
 
-# Every home this suite arms is tracked so teardown can stop any runner still
-# blocked on a condition that never fires.
-WHEN_HOMES=()
-when_teardown() {
-  local home seen=$'\n'
-  for home in ${WHEN_HOMES[@]+"${WHEN_HOMES[@]}"}; do
-    case "$seen" in
-      *$'\n'"$home"$'\n'*) continue ;;
-    esac
-    seen+="$home"$'\n'
-    FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-  done
-  fm_test_cleanup
-}
-trap when_teardown EXIT
-
-new_home() { mkdir -p "$1/state"; WHEN_HOMES+=("$1"); }
+# Every home this suite arms is registered with tests/lib.sh, which sweeps it
+# from every cleanup path so a runner still blocked on a condition that never
+# fires cannot survive the run.
+new_home() { mkdir -p "$1/state"; fm_test_track_procevent_home "$1"; }
 
 wake_payloads() { awk -F '\t' '{print $5}' "$1/state/.wake-queue" 2>/dev/null; }
 

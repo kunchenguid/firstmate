@@ -131,7 +131,7 @@ test_path_skew_is_reported_from_every_copy() {
   assert_contains "$report" "0.8.2 is installed at $fresh/$TOOL" "the report does not name the newer installed copy, so no other PATH copy was asked for its version"
   assert_not_contains "$report" "update available" "PATH skew must not be reported as a published update"
   assert_contains "$report" "$(printf 'tool updates:')" "the report is missing its one-line prefix"
-  [ "$(wc -l < "$out")" = 1 ] || fail "the report must be exactly one line for the wake record"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "the report must be exactly one line for the wake record"
   pass "PATH skew is reported by asking every copy on PATH for its own version"
 }
 
@@ -311,7 +311,7 @@ test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep() {
   report=$(cat "$out")
   assert_contains "$report" "herdr update not in effect: PATH resolves 0.8.0 at $stale/$TOOL" "a broken pattern on another tool suppressed the PATH skew report"
   assert_contains "$report" "no-mistakes check failed: announce_pattern is not a usable extended regular expression" "the tool whose pattern cannot be used was not named"
-  [ "$(wc -l < "$out")" = 1 ] || fail "the report must stay exactly one line"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "the report must stay exactly one line"
   pass "a broken pattern is reported for its own tool and the rest of the sweep still reports"
 }
 
@@ -336,7 +336,15 @@ SH
   chmod 0755 "$dir/no-mistakes-fixture"
   write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
   out="$home/out.txt"
-  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
+  # The deadline is whole-second granular (real_epoch is `date +%s`), so a
+  # budget of 1 leaves headroom anywhere in (0, 1] seconds: when the sweep
+  # starts near the end of a second the very first budget check already reads
+  # as exhausted and the sweep reports "before every copy answered" instead of
+  # reaching the announcement step this case is about. A budget of 2 guarantees
+  # more than a full second of headroom for the millisecond-scale work before
+  # the copy loop, while the version probe below (bounded, then sleeping 30)
+  # still exhausts the budget before the announcement check.
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=2
   report=$(cat "$out")
   assert_contains "$report" "no-mistakes check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
   pass "an announcement source the budget could not reach is reported, not read as current"
@@ -677,25 +685,25 @@ test_findings_are_reported_once_until_they_change() {
 }
 
 test_an_overlong_report_says_it_was_cut() {
-  local home out report i tools=
+  local home out report i tools_json=
   # Many watched tools can outgrow one line. The report must say it was cut
   # rather than end mid-finding as if that were everything found.
   home=$(make_home long)
   for i in $(seq 1 30); do
-    [ -z "$tools" ] || tools="$tools,"
-    tools="$tools{\"name\":\"absent-tool-$i\",\"command\":\"fm-absent-fixture-$i\"}"
+    [ -z "$tools_json" ] || tools_json="$tools_json,"
+    tools_json="$tools_json{\"name\":\"absent-tool-$i\",\"command\":\"fm-absent-fixture-$i\"}"
   done
-  write_config "$home" "{\"tools\":[$tools]}"
+  write_config "$home" "{\"tools\":[$tools_json]}"
   out="$home/out.txt"
   run_check "$home" "$PATH" "$out"
   report=$(cat "$out")
   assert_contains "$report" "[truncated]" "an over-long report was cut without saying so"
-  [ "$(wc -l < "$out")" = 1 ] || fail "the cut report must still be exactly one line"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "the cut report must still be exactly one line"
   pass "an over-long report is cut with the shared truncation marker"
 }
 
 test_a_finding_past_the_cut_is_still_reported() {
-  local home stale fresh out report i tools=
+  local home stale fresh out report i tools_json=
   # Once a report is long enough to be cut, a new finding lands past the cut and
   # leaves the printed line unchanged. It still has to count as news, or the PATH
   # skew this check exists for would be suppressed for good on a busy home.
@@ -705,17 +713,17 @@ test_a_finding_past_the_cut_is_still_reported() {
   make_copy "$stale" "$TOOL" 'herdr 0.8.0'
   make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
   for i in $(seq 1 30); do
-    [ -z "$tools" ] || tools="$tools,"
-    tools="$tools{\"name\":\"absent-tool-$i\",\"command\":\"fm-absent-fixture-$i\"}"
+    [ -z "$tools_json" ] || tools_json="$tools_json,"
+    tools_json="$tools_json{\"name\":\"absent-tool-$i\",\"command\":\"fm-absent-fixture-$i\"}"
   done
   out="$home/out.txt"
-  write_config "$home" "{\"tools\":[$tools]}"
+  write_config "$home" "{\"tools\":[$tools_json]}"
   run_check "$home" "$(fixture_path "$stale:$fresh")" "$out"
   assert_contains "$(cat "$out")" "[truncated]" "the first report was not long enough to be cut, so this case proves nothing"
 
   # The skew tool goes last, so its finding falls past the cut and the printed
   # line is byte identical to the one the first sweep already recorded.
-  write_config "$home" "{\"tools\":[$tools,{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  write_config "$home" "{\"tools\":[$tools_json,{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
   run_check "$home" "$(fixture_path "$stale:$fresh")" "$out"
   report=$(cat "$out")
   [ -n "$report" ] || fail "a finding past the cut produced no report at all, so it can never reach the watcher"
@@ -983,9 +991,6 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
   make_copy "$stale" "$TOOL" 'herdr 0.8.0'
   make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
   write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
-  printf '%s\n' fm-pr-check-migration-scan-v1 > "$home/state/.pr-check-migration-scan-v1"
-  printf '%s\n' fm-pr-check-migration-v1 > "$home/state/.pr-check-migration-v1"
-  chmod 0600 "$home/state/.pr-check-migration-scan-v1" "$home/state/.pr-check-migration-v1"
   FM_HOME="$home" "$CHECK" arm >/dev/null || fail "could not arm the watched tool check"
 
   out="$home/out.txt"

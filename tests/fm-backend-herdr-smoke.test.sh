@@ -67,6 +67,18 @@ esac
 [ -n "$SEEDED_TAB_ID" ] || fail "the first container_ensure in a brand-new isolated session must CREATE the workspace and report its seeded default tab id"
 pass "real herdr: container_ensure starts the isolated session's server, creates the firstmate workspace ($CONTAINER), and reports its seeded default tab id ($SEEDED_TAB_ID)"
 
+# --- client selection: the real status shape the selection reads ------------
+# bin/backends/herdr.sh "client selection" steps around a client the running
+# server refuses by reading .server.running/.server.compatible per session; a
+# fixture can only restate that shape, so prove the installed binary against
+# its own running lab server normalizes to running and compatible with equal
+# protocols.
+CLIENT_STATUS=$(fm_backend_herdr_client_status "$(command -v herdr)" "$SESSION")
+IFS='|' read -r CS_RUNNING CS_COMPATIBLE <<< "$CLIENT_STATUS"
+[ "$CS_RUNNING" = true ] || fail "real herdr: status for the running lab server normalized running=$CS_RUNNING (raw: $CLIENT_STATUS)"
+[ "$CS_COMPATIBLE" = true ] || fail "real herdr: the installed client normalized compatible=$CS_COMPATIBLE against its own server (raw: $CLIENT_STATUS)"
+pass "real herdr: session status normalizes running and compatible"
+
 # A second container_ensure must reuse (ADOPT) the same workspace (idempotent)
 # and report an EMPTY seeded tab id - the created-vs-adopted gate that fixes
 # the 2026-07-02 self-kill incident (docs/herdr-backend.md "Default-tab
@@ -288,7 +300,7 @@ pass "real herdr: current_path reads the pane's live cwd"
 # --- busy_state on a real claude harness (verified in herdr-verification-p2.md) ---
 
 if [ "${FM_HERDR_SMOKE_REAL_CLAUDE:-0}" = 1 ] && command -v claude >/dev/null 2>&1; then
-  fm_backend_herdr_send_literal "$TARGET" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --print 'say the word HERDRSMOKEOK and nothing else'"
+  fm_backend_herdr_send_literal "$TARGET" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --print 'say the word HERDRSMOKEOK and nothing else'"
   sleep 0.2
   fm_backend_herdr_send_key "$TARGET" Enter
   found_working=0

@@ -27,14 +27,12 @@
 # unreadable-composer state and correctly fails that harness's check.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [ "${FM_COMPOSER_MATRIX_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_COMPOSER_MATRIX_LIVE=1 to run the live composer-matrix guard"
-  exit 0
-fi
-
-command -v tmux >/dev/null 2>&1 || { echo "not ok - FM_COMPOSER_MATRIX_LIVE=1 but tmux is not installed" >&2; exit 1; }
+fm_live_gate opt-in FM_COMPOSER_MATRIX_LIVE tmux
 
 SOCKET="fm-cmx-live-$$"
 SESSION="cmxlive"
