@@ -260,7 +260,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "immediately invoke /no-mistakes on this same task" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -370,6 +370,57 @@ test_no_mistakes_dod_wording() {
   assert_no_grep "no-mistakes refuses" "$brief" \
     "no-mistakes DOD must not claim the tool itself refuses --yes"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
+}
+
+# The no-mistakes DOD is ONE contract from commit to ready. It used to carry two
+# stopping points that contradicted the rest of it - "append done and stop,
+# firstmate will then instruct you to run /no-mistakes", and "CI green, you are
+# finished" - and a worker that obeyed the section titled Definition of done
+# stopped there while firstmate waited for work it believed was already moving.
+# Neither may come back, in this or any second variant: the render is
+# unconditional, so there is no flag or mode that restores them.
+test_no_mistakes_dod_is_one_continuous_contract() {
+  local home id brief
+  home="$TMP_ROOT/continuity-home"
+  mkdir -p "$home/data"
+  id="brief-continuity-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  # 1. Committing starts validation on this same worker, with no wait for an
+  # instruction and no intervening done report.
+  assert_grep "An implementation commit is not completion" "$brief" \
+    "no-mistakes DOD must deny that committing completes the task"
+  assert_grep "immediately invoke /no-mistakes on this same task" "$brief" \
+    "no-mistakes DOD must start validation on the same worker straight after the commit"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD still tells the worker firstmate will start validation for it"
+  assert_no_grep "The task is complete only when committed on your branch." "$brief" \
+    "no-mistakes DOD still calls the implementation commit completion"
+
+  # 2. A gate hold is not a hold on the worker's own read-only verification, and
+  # keeping that evidence out of the repository needs no gate approval.
+  assert_grep "read-only verification against the exact HEAD the run attributes to itself" "$brief" \
+    "no-mistakes DOD must allow read-only verification while parked at a gate"
+  assert_grep "needs no gate approval, no aborted run, and no commit of the evidence" "$brief" \
+    "no-mistakes DOD must say the parked-gate verification needs no approval, abort, or commit"
+
+  # 3. Ready needs the final HEAD, so a green earlier HEAD is not a ready line.
+  assert_grep "re-run the verification this brief requires and re-collect its evidence against the exact final HEAD" "$brief" \
+    "no-mistakes DOD must require re-verification after the last fix round"
+  assert_grep "only once CI is green AND that final-HEAD verification and evidence exist" "$brief" \
+    "no-mistakes DOD must gate the ready line on final-HEAD evidence, not CI alone"
+  assert_no_grep "You are finished" "$brief" \
+    "no-mistakes DOD still declares the worker finished at CI green"
+  assert_no_grep "the CI-ready return point" "$brief" \
+    "no-mistakes DOD still carries the CI-green stopping point"
+
+  # 4. Ready is not merged, and the wait after it is reported rather than
+  # silently treated as done.
+  assert_grep "validation passed is never merged" "$brief" \
+    "no-mistakes DOD must keep a passing run distinct from a merged PR"
+  pass "fm-brief.sh: the no-mistakes DOD runs commit to ready with no stopping point in between"
 }
 
 test_ask_user_escalation_format() {
@@ -878,6 +929,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_is_one_continuous_contract
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

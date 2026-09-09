@@ -10,6 +10,11 @@
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
+# The no-mistakes mode is ONE continuous contract with no second variant and no
+# opt-in flag: committing starts validation on the same worker, and ready needs
+# the task's own verification and evidence against the exact final HEAD. It
+# deliberately carries no "append done and stop" step between the two, because a
+# brief that says both is what stalls a worker that has been told to keep going.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -218,9 +223,8 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+An implementation commit is not completion: it is the point where validation starts.
+After committing, immediately invoke /no-mistakes on this same task and drive it through every gate to an outcome; never stop to wait for a separate firstmate instruction to begin validation.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -231,6 +235,8 @@ The \`--intent\` string you pass must be self-sufficient: that string plus the c
 When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
 This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+Being parked at a gate does not suspend your own verification: you may run read-only verification against the exact HEAD the run attributes to itself, and write that evidence outside the repository, in the same task directory rule 6's findings snapshot names.
+That needs no gate approval, no aborted run, and no commit of the evidence; report the completed evidence for firstmate's gate decision instead of answering the gate yourself.
 
 One drive call blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.
 So background the drive call and poll \`no-mistakes axi status\` from a separate call instead of sitting in one blocking hold your harness will kill.
@@ -245,7 +251,9 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+Every pipeline fix round moves the branch, so verification against an earlier HEAD no longer covers what ships: after the last fix round, re-run the verification this brief requires and re-collect its evidence against the exact final HEAD.
+Append \`done: PR {url} checks green\` only once CI is green AND that final-HEAD verification and evidence exist, and name the final HEAD and where the evidence is; CI green alone, local checks alone, an implementation commit alone, or a green earlier HEAD are not ready.
+Then keep the worktree and wait for the configured merge authority - validation passed is never merged - and report a new gate, a failure, or an external approval wait rather than treating it as completion.
 EOF
       ;;
     *)

@@ -577,7 +577,6 @@ export default function (pi: ExtensionAPI) {
   // never named is never stored or delivered. Null outside a wake prompt and
   // during a heartbeat review, which is not scoped by task.
   let wakeTaskScope: { rows: string[]; tasks: Set<string> } | null = null;
-  let mainStreaming = false;
   let shuttingDown = false;
   // Bumps at every session replacement so a stale chain continuation from the
   // prior generation cannot act into the new one.
@@ -672,10 +671,24 @@ export default function (pi: ExtensionAPI) {
     if (ctx?.modelRegistry) mainModelRegistry = ctx.modelRegistry;
   }
 
+  // A note whose text describes the fleet RIGHT NOW has to be shown while it is
+  // still true. Pi's `deliverAs: "nextTurn"` does not do that: it parks the
+  // message until the captain sends their NEXT prompt, so a "waiting for merge"
+  // note written while main was busy merging surfaced minutes later, after that
+  // merge and cleanup had already landed, and read as work that had stalled.
+  // `triggerTurn: false` is Pi's display-only delivery, which never steers the
+  // running turn: idle, Pi appends the note at once; streaming, Pi holds it and
+  // flushes it at the running turn's own boundary - the first point in a run
+  // where a context-only message can land without splitting a tool call from its
+  // result. Either way the note is shown inside the run it was written in rather
+  // than replayed onto a later prompt. (pi 0.85.1, sendCustomMessage and
+  // _flushPendingCustomMessages in dist/core/agent-session.js.)
+  function deliverDisplayNote(message: { customType: string; content: string; display: boolean }): void {
+    pi.sendMessage(message, { triggerTurn: false });
+  }
+
   function deliverBranchHealthNote(text: string): void {
-    const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${text}`, display: true };
-    if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
-    else pi.sendMessage(message, {});
+    deliverDisplayNote({ customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${text}`, display: true });
   }
 
   function recordSettledProviderError(detail: string): void {
@@ -967,13 +980,11 @@ export default function (pi: ExtensionAPI) {
   }
 
   function deliverRoutineOutcome(row: OutcomeRow): void {
-    const message = {
+    deliverDisplayNote({
       customType: "fm-branch-merge",
       content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
       display: !(row.task === "fleet" && row.silent),
-    };
-    if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
-    else pi.sendMessage(message, {});
+    });
   }
 
   // Captain rows that are read (their visible entry exists) but not yet
@@ -1584,13 +1595,9 @@ ${context.command}
   });
 
   pi.on?.("agent_start", () => {
-    mainStreaming = true;
     // Pi delivers a queued nextTurn copy with the prompt that starts this run,
     // so a fresh copy may be queued again once this run settles unacknowledged.
     if (processing) processing.nextTurnQueued = false;
-  });
-  pi.on?.("agent_end", () => {
-    mainStreaming = false;
   });
   // The run boundary is where an ignored processing request is detected: every
   // presentation sent before this point has been consumed by the run that just
@@ -1599,7 +1606,6 @@ ${context.command}
   // other than its acknowledgement - an unrelated reply, an empty reply, or a
   // reply that only paraphrased it - and is presented again.
   pi.on?.("agent_settled", async () => {
-    mainStreaming = false;
     if (processing) processing.pending = false;
     const settledGeneration = generation;
     await enqueueDelivery(async () => {
