@@ -185,12 +185,15 @@ fi
 # view of why, so no blocking path may be silent: a block that prints nothing
 # leaves the session re-waking with no message naming a cause. Supervision is
 # provably healthy on every path that reaches this, and only the bookkeeping
-# write refused, so the text says exactly that and names the record to read.
+# write refused, so the text says exactly that and names the artifacts the reset
+# actually touches - the lock it serializes on and the three markers it clears -
+# plus the episode ledger to read the outcome from.
 block_unrecorded_episode_reset() {
   {
     printf 'firstmate turn-end guard HELD THIS TURN OPEN - supervision for this home is verified healthy, but the failure-episode reset could not be recorded, so the previous failure cannot be proven closed.\n'
-    printf 'Read %s and the markers beside it (%s, %s). A state directory that refuses these writes keeps every turn blocked until it is repaired.\n' \
-      "$STATE/.claude-autoarm-epoch" "$FAILURE_NOTICE" "$FAILURE_ALARM"
+    printf 'The reset serializes on %s and clears %s, %s and %s: a busy lock, or any of those three existing as a directory, refuses it. Read the episode outcome in %s. A state directory that refuses these writes keeps every turn blocked until it is repaired.\n' \
+      "$STATE/.turnend-claude-blocks.lock" "$STATE/.turnend-claude-blocks" "$FAILURE_NOTICE" "$FAILURE_ALARM" \
+      "$STATE/.claude-autoarm-epoch"
   } >&2
   exit 2
 }

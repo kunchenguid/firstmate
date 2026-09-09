@@ -203,6 +203,8 @@ autoarm_record() {  # <outcome>
   fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
 }
 
+AUTOARM_TYPED_LINE='^(watcher:|signal:|stale:|check:|heartbeat)'
+
 # Every exit-2 path is a BLOCKED turn whose only operator-visible text is the
 # stderr the harness collects, so an exit 2 that prints nothing blocks the turn
 # undiagnosably: the home re-wakes forever with no message naming a cause. Each
@@ -212,19 +214,24 @@ autoarm_record() {  # <outcome>
 #
 # The arm's typed lines are the primary evidence, but a refusal raised further
 # down the stack (a helper script that cannot create its mode-restricted
-# artifacts, for example) reaches this file as untyped output. Fall back to the
-# arm's last plain lines so such a cause is still named instead of dropped.
+# artifacts, for example) reaches this file as untyped output, relayed verbatim
+# by the arm alongside its own typed close. Both are emitted: the arm almost
+# always appends a typed line of its own, so choosing the typed lines INSTEAD of
+# the plain ones would drop the nested cause in exactly the shape that made the
+# original incident undiagnosable.
 autoarm_refusal_evidence() {
-  local shown=
+  local typed= untyped=
   if [ -n "$OUT" ] && [ -s "$OUT" ]; then
-    shown=$(grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8)
-    [ -n "$shown" ] || shown=$(grep -v '^[[:space:]]*$' "$OUT" 2>/dev/null | tail -8)
+    typed=$(grep -E "$AUTOARM_TYPED_LINE" "$OUT" 2>/dev/null | head -8)
+    untyped=$(grep -Ev "$AUTOARM_TYPED_LINE" "$OUT" 2>/dev/null \
+      | grep -v '^[[:space:]]*$' | tail -8)
   fi
-  if [ -n "$shown" ]; then
-    printf '%s\n' "$shown"
-  else
+  if [ -z "$typed" ] && [ -z "$untyped" ]; then
     printf 'The arm produced no diagnostic output of its own.\n'
+    return 0
   fi
+  [ -z "$typed" ] || printf '%s\n' "$typed"
+  [ -z "$untyped" ] || printf '%s\n' "$untyped"
 }
 
 # X mode cadence: source the generated config so an X instance polls at its

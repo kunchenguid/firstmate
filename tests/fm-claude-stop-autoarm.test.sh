@@ -187,6 +187,20 @@ printf 'fm-artifact-writer: refusing to publish: %s/private.tmp is mode 777, exp
 exit 1
 SH
       ;;
+    nested-refusal)
+      # The shape the REAL arm produces when a helper deeper in the stack
+      # refuses: fm-watch-arm.sh relays the child's untyped stderr verbatim
+      # (print_watch_output) and then appends its own typed close line, so $OUT
+      # carries both. Evidence that keeps only the typed lines drops the actual
+      # cause here.
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'fm-pr-check-migrate: cannot publish %s/pr-check.tmp: mode 777, expected 600\n' "$FM_HOME/state"
+printf 'watcher: FAILED - watcher cycle exited 1 without an actionable reason\n'
+exit 1
+SH
+      ;;
     mute-failure)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1271,6 +1285,23 @@ test_untyped_arm_refusal_is_still_named() {
   pass "auto-arm: a refusal with none of the arm's typed prefixes is still named in every block"
 }
 
+test_nested_refusal_is_named_beside_the_arms_own_close() {
+  local dir out1 out2 status
+  dir=$(make_primary_dir "$TMP_ROOT/loud-nested")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" nested-refusal
+  out1=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a nested refusal must still reach the failure notice"
+  assert_contains "$out1" "mode 777, expected 600" \
+    "the full notice dropped the nested cause because the arm also closed with a typed line"
+  assert_contains "$out1" "watcher: FAILED" "the full notice dropped the arm's own typed close"
+  out2=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the consecutive nested refusal must keep the retry handoff"
+  assert_contains "$out2" "mode 777, expected 600" \
+    "the suppressed continuation dropped the nested cause"
+  pass "auto-arm: a refusal raised below the arm is named beside the arm's own typed close"
+}
+
 test_arm_without_any_output_still_names_the_block() {
   local dir out1 out2 status
   dir=$(make_primary_dir "$TMP_ROOT/loud-mute")
@@ -1305,6 +1336,11 @@ fm_test_file_mode() {
 # location (a Windows drive under /mnt, a volume under /Volumes), so a fixture
 # leaked there by a failing assertion would be a permanent artifact outside any
 # temp root.
+# Both object types are probed, because the fixture depends on both: the real
+# incident is a FILE that will not hold 600, while the fixture's own evidence
+# that it landed on such a filesystem is a DIRECTORY that will not hold 700. A
+# host that reverts one and preserves the other is not this condition, and must
+# skip rather than fail the suite for a property of the host.
 mode_incapable_root() {
   local candidate root probe
   for candidate in "${FM_TEST_MODE_INCAPABLE_PARENT:-}" /mnt/*/ /Volumes/*/; do
@@ -1312,9 +1348,10 @@ mode_incapable_root() {
     root=$(mktemp -d "${candidate%/}/fm-autoarm-modeless.XXXXXX" 2>/dev/null) || continue
     fm_test_track_dir "$root"
     probe="$root/probe"
-    mkdir -p "$probe" 2>/dev/null || { rm -rf "$root"; continue; }
-    : > "$probe/f" 2>/dev/null && chmod 600 "$probe/f" 2>/dev/null
-    if [ -f "$probe/f" ] && [ "$(fm_test_file_mode "$probe/f")" != 600 ]; then
+    if mkdir -p "$probe/d" 2>/dev/null && : > "$probe/f" 2>/dev/null &&
+      chmod 600 "$probe/f" 2>/dev/null && chmod 700 "$probe/d" 2>/dev/null &&
+      [ -f "$probe/f" ] && [ "$(fm_test_file_mode "$probe/f")" != 600 ] &&
+      [ "$(fm_test_file_mode "$probe/d")" != 700 ]; then
       rm -rf "$probe"
       printf '%s\n' "$root"
       return 0
@@ -1327,7 +1364,7 @@ mode_incapable_root() {
 test_mode_incapable_state_dir_never_blocks_silently() {
   local root dir all
   if ! root=$(mode_incapable_root); then
-    printf 'skip: no filesystem on this host reverts chmod 600; set FM_TEST_MODE_INCAPABLE_PARENT to one to run\n'
+    printf 'skip: no filesystem on this host reverts chmod on both files and directories; set FM_TEST_MODE_INCAPABLE_PARENT to one to run\n'
     return 0
   fi
   dir=$(mktemp -d "$root/home.XXXXXX") || fail "could not create a home under $root"
@@ -1422,6 +1459,7 @@ test_long_poll_grace_reaches_arm_wrapper
 test_fm_lock_status_still_works_with_shared_lib
 test_consecutive_failures_never_block_silently
 test_untyped_arm_refusal_is_still_named
+test_nested_refusal_is_named_beside_the_arms_own_close
 test_arm_without_any_output_still_names_the_block
 test_mode_incapable_state_dir_never_blocks_silently
 test_mode_capable_home_keeps_every_silent_path_silent
