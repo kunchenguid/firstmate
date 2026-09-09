@@ -39,6 +39,7 @@ fm_live_gate opt-in FM_AGY_LIVE_E2E agy tmux jq treehouse git
 unset TMUX TMUX_PANE NO_MISTAKES_GATE
 
 SOCKET="fm-agy-live-$$"
+REAL_TMUX=$(command -v tmux) || fail "tmux disappeared between the live gate and the lab setup"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-agy-live.XXXXXX") || fail "could not create the Agy live lab"
 LAB=$(cd "$LAB" && pwd -P)
 TASK="agylive-$$"
@@ -48,6 +49,7 @@ MODEL=${FM_AGY_LIVE_MODEL:-}
 PROJ="$LAB/projects/agyprobe"
 PAYLOADS="$LAB/payloads.jsonl"
 MARKER="$LAB/state/$TASK.turn-ended"
+SERVER_STARTED=0
 SPAWNED=0
 TORN_DOWN=0
 PASSED=0
@@ -60,7 +62,9 @@ cleanup() {
   if [ "$SPAWNED" -eq 1 ] && [ "$TORN_DOWN" -eq 0 ]; then
     FM_HOME="$LAB" "$ROOT/bin/fm-teardown.sh" "$TASK" --force >/dev/null 2>&1 || true
   fi
-  tmux kill-server >/dev/null 2>&1 || true
+  if [ "$SERVER_STARTED" -eq 1 ]; then
+    "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  fi
   if [ "$PASSED" -eq 1 ]; then
     rm -rf -- "$LAB"
   else
@@ -114,7 +118,6 @@ mkdir -p "$LAB/config" "$LAB/data" "$LAB/state" "$LAB/shim" "$LAB/treehouse" \
 touch "$LAB/state/.last-watcher-beat"
 export TREEHOUSE_ROOT="$LAB/treehouse"
 
-REAL_TMUX=$(command -v tmux)
 cat > "$LAB/shim/tmux" <<SH
 #!/usr/bin/env bash
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
@@ -187,6 +190,7 @@ git -C "$PROJ" config user.name 'agy live guard'
 git -C "$PROJ" add README.md .agents/hooks.json .agent/keep.md
 git -C "$PROJ" commit -qm 'fixture: Agy live adapter probe' || fail "could not commit the lab project"
 
+SERVER_STARTED=1
 tmux new-session -d -s firstmate -x 200 -y 50 -c "$LAB" || fail "could not start the private tmux server"
 
 FM_HOME="$LAB" "$ROOT/bin/fm-brief.sh" "$TASK" agyprobe --scout >/dev/null 2>&1 \
