@@ -1359,7 +1359,7 @@ test_completion_closes_a_local_only_ship_before_reporting_success() {
   out=$(run_teardown "$case_dir" "$id") || fail "teardown failed: $out"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "teardown reported success with the item still $(row_state "$case_dir" "$id")"
-  assert_grep 'local main' "$(backlog_of "$case_dir")" \
+  assert_grep 'local-landing:main' "$(backlog_of "$case_dir")" \
     "a local-only landing was closed without its local-main note"
   pass "completion closes a local-only ship, with its landing note, before reporting success"
 }
@@ -1376,7 +1376,7 @@ test_completion_records_a_named_local_base() {
   out=$(run_teardown "$case_dir" "$id") || fail "named-base teardown failed: $out"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "named-base teardown left its backlog item open"
-  assert_grep 'local develop' "$(backlog_of "$case_dir")" \
+  assert_grep 'local-landing:develop' "$(backlog_of "$case_dir")" \
     "named-base teardown did not record the actual local landing base"
   pass "completion records the named local landing base"
 }

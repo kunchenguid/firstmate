@@ -395,7 +395,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
       | sub("[[:space:]]+-[[:space:]]*$"; "");
     def strip_local_title_artifact:
-      sub("[[:space:]]+-[[:space:]]+local [^[:space:]]+$"; "");
+      sub("[[:space:]]+-[[:space:]]+local-landing:[^[:space:]]+$"; "");
     def clean_title($is_local_landing):
       strip_trailing_metadata
       | strip_title_artifacts
@@ -415,7 +415,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         else {verb:null,date:null} end;
     def local_note($rest):
       if (completion($rest).verb == "done") then
-        cap(($rest | strip_trailing_metadata); ".*[[:space:]]+-[[:space:]]+(?<v>local [^[:space:]]+)$")
+        cap(($rest | strip_trailing_metadata); ".*[[:space:]]+-[[:space:]]+local-landing:(?<v>[^[:space:]]+)$") as $base
+        | if $base == null then null else "local " + $base end
       else null end;
     def title_of($rest):
       $rest

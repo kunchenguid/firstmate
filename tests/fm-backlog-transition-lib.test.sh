@@ -41,6 +41,7 @@ assert_replay_note() {  # <serialized-value> <expected-note>
 test_legacy_and_named_notes_replay() {
   assert_replay_note local%20main 'local main'
   assert_replay_note local%20develop 'local develop'
+  assert_replay_note local-landing:develop 'local-landing:develop'
   pass "pending-close replay accepts legacy and named local landing notes"
 }
 

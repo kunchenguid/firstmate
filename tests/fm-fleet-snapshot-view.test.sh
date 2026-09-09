@@ -521,9 +521,10 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [x] done-comma - Done Comma Task https://github.com/kunchenguid/firstmate/pull/42 (repo: gamma, merged 2026-07-09) (kind: ship)
 - [x] done-bracket-pr - Done Bracket PR - <https://github.com/kunchenguid/firstmate/pull/43> (repo: gamma, merged 2026-07-12) (kind: ship)
 - [x] reported-comma - Reported Scout data/reported-comma/report.md (repo: gamma, reported 2026-07-10) (kind: scout)
-- [x] done-note - Done Note - local main (repo: delta, done 2026-07-11) (kind: ship)
-- [x] done-named - Done Named - local develop (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-note - Done Note - local-landing:main (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-named - Done Named - local-landing:develop (repo: delta, done 2026-07-11) (kind: ship)
 - [x] done-title-prose - Investigate local develop (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-title-suffix - Investigate local develop - local branch (repo: delta, done 2026-07-11) (kind: ship)
 - [ ] queued-local-prose - Investigate local develop (repo: sample, kind: ship)
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
@@ -636,6 +637,10 @@ EOF
     .backlog.records[] | select(.id == "done-title-prose")
     | .title == "Investigate local develop" and .local_note == null
   ' >/dev/null || fail "completed prose was misclassified as a local landing note"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-title-suffix")
+    | .title == "Investigate local develop - local branch" and .local_note == null
+  ' >/dev/null || fail "completed local-looking title was misclassified as a local landing note"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "queued-local-prose")
     | .title == "Investigate local develop" and .local_note == null

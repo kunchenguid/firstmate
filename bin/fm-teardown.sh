@@ -1397,7 +1397,7 @@ backlog_done_args() {
         local landing_base
         landing_base=$(meta_value "$META" base_branch || true)
         [ -n "$landing_base" ] || landing_base=main
-        BACKLOG_DONE_ARGS=(--note "local $landing_base")
+        BACKLOG_DONE_ARGS=(--note "local-landing:$landing_base")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
       fi
