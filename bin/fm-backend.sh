@@ -393,13 +393,15 @@ fm_backend_endpoint_atom_valid() {  # <value>
 # (for example `83cc33e8-...::/Users/me/orca/workspaces/node/fm-task`), so the
 # atom validator alone would reject every real Orca task and block its
 # cleanup. The composite form is accepted only when the repo component is a
-# valid atom and the path component is absolute, non-empty, built exclusively
-# from an allowlist of safe path characters, and free of `..` segments. The
-# allowlist admits the ordinary space that legitimate macOS and POSIX paths
-# carry, because cleanup passes the recorded identifier as one quoted argument
-# and must forward it byte for byte; it still leaves no ASCII control,
-# newline, shell metacharacter, command substitution, or extra delimiter able
-# to reach a runtime command. Bare atom ids stay accepted.
+# valid atom and the path component is absolute, non-empty, free of `..`
+# segments, and free of the structural characters that would corrupt a
+# `state/<id>.meta` record or hide a second delimiter: ASCII control
+# characters (NUL, newline, tab included) and any further `::`. Every other
+# ordinary printable path character - Unicode, spaces, parentheses,
+# apostrophes, commas, `#`, `~`, `&` - belongs to legitimate macOS and POSIX
+# paths and is accepted, because cleanup forwards the recorded identifier as
+# one quoted argument byte for byte and never as shell text. Bare atom ids
+# stay accepted.
 fm_backend_orca_worktree_id_valid() {  # <value>
   local value=$1 repo path
   fm_backend_endpoint_atom_valid "$value" && return 0
@@ -414,13 +416,8 @@ fm_backend_orca_worktree_id_valid() {  # <value>
     /*) ;;
     *) return 1 ;;
   esac
-  # Space is the only whitespace admitted; a stray colon also rejects a second
-  # `::` delimiter.
   case "$path" in
-    *[!A-Za-z0-9._@%+/" "-]*) return 1 ;;
-  esac
-  case "$path" in
-    */../*|*/..) return 1 ;;
+    *[[:cntrl:]]*|*'::'*|*/../*|*/..) return 1 ;;
   esac
   return 0
 }
