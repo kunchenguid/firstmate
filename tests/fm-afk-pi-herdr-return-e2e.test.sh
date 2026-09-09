@@ -37,6 +37,7 @@ PI_DIR="$TMP_ROOT/pi-agent"
 FAKEBIN="$TMP_ROOT/fakebin"
 CAPTURE="$TMP_ROOT/pi-prompts.jsonl"
 ORIGINAL_PATH=$PATH
+unset CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE ROVODEV_CLI CLAUDECODE
 PRIMARY_PANE=
 CHILD_PANE=
 PRIMARY_TARGET=
@@ -46,7 +47,7 @@ cleanup() {
   trap - EXIT
   if [ -f "$STATE/.afk-contract" ] || [ -e "$STATE/.afk" ]; then
     PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-      FM_AFK_PRIMARY_HARNESS=pi "$ROOT/bin/fm-afk-launch.sh" stop >/dev/null 2>&1 || true
+      PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" stop >/dev/null 2>&1 || true
   fi
   if ! "$LAB_HELPER" teardown "$SESSION"; then
     rc=1
@@ -170,19 +171,19 @@ EOF
 
 # The away daemon is never launched on Pi. The launcher detects the primary
 # harness from its own ancestry in production; this test process is not under
-# Pi, so the harness is pinned the way the launcher's own unit tests pin it.
+# Pi, so it supplies Pi's verified PI_CODING_AGENT environment marker.
 set +e
 START_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  FM_AFK_PRIMARY_HARNESS=pi FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" \
+  PI_CODING_AGENT=true FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="$PRIMARY_TARGET" \
   "$ROOT/bin/fm-afk-launch.sh" start 2>&1)
 START_RC=$?
 set -e
 [ "$START_RC" -ne 0 ] || fail "the away daemon launched on a Pi primary"
 assert_contains "$START_OUT" 'the away daemon is no longer launched on pi' "the Pi refusal did not name its reason"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  FM_AFK_PRIMARY_HARNESS=pi "$ROOT/bin/fm-afk-launch.sh" propose >/dev/null || fail "the away posture read-back failed on Pi"
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" propose >/dev/null || fail "the away posture read-back failed on Pi"
 CONFIRM_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  FM_AFK_PRIMARY_HARNESS=pi "$ROOT/bin/fm-afk-launch.sh" confirm 2>&1) || fail "the away posture could not be recorded on Pi: $CONFIRM_OUT"
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" confirm 2>&1) || fail "the away posture could not be recorded on Pi: $CONFIRM_OUT"
 assert_contains "$CONFIRM_OUT" 'hold-for-return only' "the entry announcement did not say hold-for-return"
 [ -f "$STATE/.afk-contract" ] || fail "confirm did not write the away-posture record"
 [ ! -e "$STATE/.afk" ] || fail "confirm wrote the daemon flag on Pi"
@@ -243,7 +244,7 @@ assert_blocker_open 'before return catch-up'
 
 set +e
 RETURN_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  FM_AFK_PRIMARY_HARNESS=pi "$ROOT/bin/fm-afk-return.sh" begin 2>&1)
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-return.sh" begin 2>&1)
 RETURN_RC=$?
 set -e
 [ "$RETURN_RC" -eq 3 ] || fail "return catch-up did not gate the still-live blocker (rc=$RETURN_RC): $RETURN_OUT"
@@ -268,11 +269,11 @@ PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJE
 # A clean re-entry records a fresh posture, and an immediate return is
 # idempotently clear because the keyed blocker is resolved.
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  FM_AFK_PRIMARY_HARNESS=pi "$ROOT/bin/fm-afk-launch.sh" propose >/dev/null || fail "clean away re-entry read-back failed"
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" propose >/dev/null || fail "clean away re-entry read-back failed"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  FM_AFK_PRIMARY_HARNESS=pi "$ROOT/bin/fm-afk-launch.sh" confirm >/dev/null || fail "clean away re-entry failed"
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" confirm >/dev/null || fail "clean away re-entry failed"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  FM_AFK_PRIMARY_HARNESS=pi "$ROOT/bin/fm-afk-return.sh" begin >/dev/null \
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-return.sh" begin >/dev/null \
   || fail "clean away re-entry/return was not idempotent"
 [ "$(find "$STATE/afk-contracts" -name '*.afk-contract' | wc -l | tr -d ' ')" -eq 2 ] || fail "each away window did not leave exactly one archived record"
 pass "resolved return catch-up allows Bearings and a clean idempotent away re-entry"

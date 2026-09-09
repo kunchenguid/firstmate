@@ -25,7 +25,8 @@ START="$ROOT/bin/fm-afk-start.sh"
 CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 # The daemon paths refuse on a Pi primary, so pin a daemon-running harness for
 # every unit below; the Pi refusal has its own units (unit_pi_never_launches_the_daemon).
-export FM_AFK_PRIMARY_HARNESS=claude
+unset PI_CODING_AGENT FM_PI_HARNESS CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE ROVODEV_CLI
+export CLAUDECODE=1
 
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
@@ -58,7 +59,7 @@ unit_propose_confirm_records_the_posture_without_a_daemon() {
   local st out rc
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-propose.XXXXXX")
   mkdir -p "$st/state"
-  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_PRIMARY_HARNESS=pi "$LAUNCH" propose \
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" propose \
     --words 'merge the windows fix when green' --action merge --object 'task fix-windows PR' --when 'checks green' \
     --action merge --object regardless 2>&1)
   rc=$?
@@ -70,7 +71,7 @@ unit_propose_confirm_records_the_posture_without_a_daemon() {
   else
     fail "propose: read-back or proposal wrong (rc=$rc): $out"
   fi
-  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_PRIMARY_HARNESS=pi "$LAUNCH" confirm 2>&1)
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" confirm 2>&1)
   rc=$?
   if [ "$rc" -eq 0 ] && [ -f "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk-contract.proposed" ] \
     && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
@@ -93,18 +94,20 @@ unit_pi_never_launches_the_daemon() {
   for harness in pi pi-signed; do
     st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-pi.XXXXXX")
     mkdir -p "$st/state"
-      out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_PRIMARY_HARNESS="$harness" \
-      FM_SUPERVISOR_TARGET=unused FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start 2>&1)
+    out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_TEST_HARNESS="$harness" \
+      FM_SUPERVISOR_TARGET=unused FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
+      bash -c '. "$1"; fm_afk_launch_primary_harness() { printf "%s" "$FM_TEST_HARNESS"; }; fm_afk_launch_main start' _ "$LAUNCH" 2>&1)
     rc=$?
-      if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F "the away daemon is no longer launched on $harness" >/dev/null \
+    if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F "the away daemon is no longer launched on $harness" >/dev/null \
       && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] && [ ! -e "$st/state/.afk-contract" ]; then
       pass "$harness: start refuses to launch the daemon and writes no state"
     else
       fail "$harness: start did not refuse cleanly (rc=$rc): $out"
     fi
-      out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_PRIMARY_HARNESS="$harness" "$LAUNCH" start-native 2>&1)
+    out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_TEST_HARNESS="$harness" \
+      bash -c '. "$1"; fm_afk_launch_primary_harness() { printf "%s" "$FM_TEST_HARNESS"; }; fm_afk_launch_main start-native' _ "$LAUNCH" 2>&1)
     rc=$?
-      if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
       pass "$harness: start-native refuses to prepare a daemon"
     else
       fail "$harness: start-native did not refuse (rc=$rc): $out"

@@ -433,11 +433,13 @@ EOF
 
 return_reconcile() {
   local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since
+  local had_contract=0 archived_contract
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   drain_err=$(mktemp "$STATE/.afk-return-drain.XXXXXX") || { rm -f "$evidence" "$blockers"; return 1; }
   preserve_evidence "$evidence"
   since=$(gate_contract_epoch)
+  fm_afk_contract_present "$STATE" && had_contract=1
 
   # Health is read before the shutdown below so the shutdown cannot read as a gap;
   # a repeated begin/check keeps the first snapshot.
@@ -464,6 +466,26 @@ return_reconcile() {
     lifecycle_ok=0
   fi
   append_evidence wake "$drained" "$evidence"
+
+  if [ "$had_contract" -eq 1 ]; then
+    if fm_afk_contract_present "$STATE"; then
+      if ! fm_afk_contract_validate "$(fm_afk_contract_path "$STATE")" 1; then
+        append_evidence lifecycle "away-posture record unreadable: $(fm_afk_contract_path "$STATE"); catch-up stays gated" "$evidence"
+        lifecycle_ok=0
+      else
+        remove_evidence_prefix lifecycle 'away-posture record unreadable:' "$evidence" || lifecycle_ok=0
+      fi
+    else
+      archived_contract=$("$CONTRACT" archived "$since" 2>/dev/null || true)
+      if [ -z "$archived_contract" ] || ! fm_afk_contract_validate "$archived_contract" 1; then
+        append_evidence lifecycle "archived away-posture record unreadable for entered_epoch $since; catch-up stays gated" "$evidence"
+        lifecycle_ok=0
+      else
+        remove_evidence_prefix lifecycle 'away-posture record unreadable:' "$evidence" || lifecycle_ok=0
+        remove_evidence_prefix lifecycle 'archived away-posture record unreadable' "$evidence" || lifecycle_ok=0
+      fi
+    fi
+  fi
 
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
     wedge=$(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)

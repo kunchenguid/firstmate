@@ -70,8 +70,6 @@
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
 # placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
 # override the captured captain pane/backend (an isolated lab pane in tests).
-# FM_AFK_PRIMARY_HARNESS overrides the detected primary harness (bin/fm-harness.sh)
-# that decides whether a daemon may launch at all.
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -184,11 +182,7 @@ fm_afk_launch_usage() {
 }
 
 fm_afk_launch_primary_harness() {
-  if [ -n "${FM_AFK_PRIMARY_HARNESS:-}" ]; then
-    printf '%s' "$FM_AFK_PRIMARY_HARNESS"
-  else
-    "$FM_AFK_LAUNCH_DIR/fm-harness.sh" 2>/dev/null || printf unknown
-  fi
+  "$FM_AFK_LAUNCH_DIR/fm-harness.sh" 2>/dev/null || printf unknown
 }
 
 # The away daemon is no longer launched on Pi: the posture record is the whole

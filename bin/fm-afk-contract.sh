@@ -377,16 +377,30 @@ fm_afk_contract_read_list() {  # <path> <section>
 # required scalar fields are present. Refuses rather than guessing at a foreign
 # schema.
 fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
-  local path=$1 require_confirmed=$2 version entered_epoch
+  local path=$1 require_confirmed=$2 version entered entered_epoch expected reach announced spend words_header confirmed
   [ -f "$path" ] || return 1
   version=$(fm_afk_contract_read_field "$path" version)
   [ "$version" = "$FM_AFK_CONTRACT_VERSION" ] || {
     fm_afk_contract_log "record $path carries version '${version:-none}', expected $FM_AFK_CONTRACT_VERSION; refusing to read it"
     return 1
   }
+  entered=$(fm_afk_contract_read_field "$path" entered)
+  fm_afk_contract_validate_iso "$entered" || { fm_afk_contract_log "record $path has no valid entered time"; return 1; }
   entered_epoch=$(fm_afk_contract_read_field "$path" entered_epoch)
   case "$entered_epoch" in ''|*[!0-9]*) fm_afk_contract_log "record $path has no entered_epoch"; return 1 ;; esac
+  expected=$(fm_afk_contract_read_field "$path" expected_return)
+  [ "$expected" = - ] || fm_afk_contract_validate_iso "$expected" || { fm_afk_contract_log "record $path has no valid expected_return"; return 1; }
+  reach=$(fm_afk_contract_read_field "$path" reach_channels)
+  [ "$reach" = none ] || { fm_afk_contract_log "record $path has no valid reach_channels"; return 1; }
+  announced=$(fm_afk_contract_read_field "$path" reach_announced)
+  [ -n "$announced" ] || { fm_afk_contract_log "record $path has no reach announcement"; return 1; }
+  spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
+  case "$spend" in ''|*[!0-9]*|0) fm_afk_contract_log "record $path has no valid spend cap"; return 1 ;; esac
+  words_header=$(sed -n '/^words: /{p;q;}' "$path")
+  case "$words_header" in 'words: -'|'words: |'|'words: |-') ;; *) fm_afk_contract_log "record $path has no valid words field"; return 1 ;; esac
   if [ "$require_confirmed" -eq 1 ]; then
+    confirmed=$(fm_afk_contract_read_field "$path" confirmed)
+    fm_afk_contract_validate_iso "$confirmed" || { fm_afk_contract_log "record $path has no valid confirmed time"; return 1; }
     case "$(fm_afk_contract_read_field "$path" confirmed_epoch)" in
       ''|*[!0-9]*) fm_afk_contract_log "record $path was never confirmed"; return 1 ;;
     esac
@@ -623,6 +637,10 @@ fm_afk_contract_cmd_archive() {
   local record target
   record=$(fm_afk_contract_path)
   [ -f "$record" ] || return 0
+  if ! fm_afk_contract_validate "$record" 1; then
+    fm_afk_contract_log "confirmed away-posture record at $record is invalid; refusing to archive"
+    return 1
+  fi
   target=$(fm_afk_contract_archive_target "$record") || return 1
   mv "$record" "$target" || return 1
   printf '%s\n' "$target"

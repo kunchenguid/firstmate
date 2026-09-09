@@ -418,6 +418,29 @@ test_return_brief_keeps_refresh_history() {
   pass "a refreshed posture keeps its original window, superseded mandate, and earlier outcomes"
 }
 
+test_malformed_posture_record_keeps_catchup_gated() {
+  local dir out rc gate record before
+  dir="$TMP_ROOT/malformed-posture-record"
+  install_runner "$dir"
+  gate="$dir/home/state/.afk-return-catchup"
+  record="$dir/home/state/.afk-contract"
+  printf 'version: 1\nentered: 2026-09-08T08:00:00Z\nentered_epoch: 123\nwords: |-\n  captain words survive\n' > "$record"
+  before=$(cat "$record"; printf x)
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a malformed posture record should keep catch-up gated (rc=$rc): $out"
+  [ -f "$gate" ] || fail "a malformed posture record did not retain the return gate"
+  [ -f "$record" ] || fail "a malformed posture record was archived or deleted"
+  [ "$(cat "$record"; printf x)" = "$before" ] || fail "a malformed posture record lost its captain words"
+  [ ! -e "$dir/home/state/afk-contracts/123.afk-contract" ] || fail "a malformed posture record was archived"
+  assert_contains "$out" "away-posture record unreadable: $record; catch-up stays gated" "return did not name the malformed posture record"
+  pass "a malformed posture record stays live and gates return catch-up"
+}
+
 test_unreadable_outcome_store_keeps_catchup_gated() {
   local dir out rc gate
   dir="$TMP_ROOT/unreadable-outcome-store"
@@ -558,6 +581,7 @@ test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_keeps_refresh_history
+test_malformed_posture_record_keeps_catchup_gated
 test_unreadable_outcome_store_keeps_catchup_gated
 test_failed_held_listing_keeps_catchup_gated
 test_unreadable_status_file_keeps_catchup_gated

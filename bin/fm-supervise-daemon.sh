@@ -95,10 +95,11 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
-#          FM_PAUSE_RESURFACE_SECS  seconds a declared wait (external or
-#                                   captain-held) stays declared, idle or busy,
-#                                   before it re-surfaces as a recheck
-#                                   (default 3600)
+#          FM_PAUSE_RESURFACE_SECS  seconds a declared wait stays declared,
+#                                   idle or busy, before it re-surfaces as a
+#                                   recheck (default 14400, four hours); a
+#                                   captain-held transfer is never rechecked
+#                                   while the away-posture record exists
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
