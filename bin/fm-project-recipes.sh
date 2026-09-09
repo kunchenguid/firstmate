@@ -43,7 +43,9 @@
 #   - Every entry carries `<!--r:YYYY-MM-DD-->`, the date it was last verified
 #     against the real project. Verified means exercised or re-derived in that
 #     session, not believed.
-#   - An entry unverified for 90 days is stale. `check` names it, and the next
+#   - An entry unverified for 90 days is stale. The digest still carries it, but
+#     marked UNVERIFIED, so a worker never reads a lapsed recipe as current fact.
+#     `check` names it, and the next
 #     session that touches that capability either re-verifies it and refreshes
 #     the date or deletes it. A recipe that stopped being true is worse than no
 #     recipe, so inertia is not a reason to keep one.
@@ -179,13 +181,50 @@ pointer_line() {
   printf '%s\n' "Agent recipes - what this project can do and how each capability is asked for: [\`$RECIPES_REL\`]($RECIPES_REL). Read it before starting work, and record what you learn there."
 }
 
-recipe_blocks() {  # <recipes file>
-  awk -v brk="$RECIPE_BREAK" '
-    /^## / { if (n > 0) print brk; n++; print; next }
+recipe_blocks() {  # <recipes file> [notes file]
+  awk -v brk="$RECIPE_BREAK" -v notes="${2:-}" '
+    BEGIN {
+      if (notes != "") {
+        while ((getline line < notes) > 0) {
+          t = index(line, "\t")
+          if (t > 0) note[substr(line, 1, t - 1)] = substr(line, t + 1)
+        }
+        close(notes)
+      }
+    }
+    /^## / {
+      if (n > 0) print brk
+      n++
+      h = substr($0, 4)
+      if (h in note) print $0 " " note[h]
+      else print $0
+      next
+    }
     n > 0 && /^[ \t]*-[ \t]*(when|ask):/ { print; next }
     { next }
     END { if (n > 0) print brk }
   ' "$1"
+}
+
+# An entry past the re-verification horizon still belongs in the digest - the
+# worker may be exactly who confirms or corrects it - but it must never arrive
+# looking as current as the rest. Marking it is what keeps the digest worth
+# trusting; silently passing on a recipe that stopped being true is the failure
+# the catalog exists to prevent.
+unverified_notes() {  # <recipes file> <out file>
+  local heading recorded age
+  : >"$2"
+  while IFS="$(printf '\t')" read -r heading recorded; do
+    [ -n "$heading" ] || continue
+    if [ -n "$recorded" ] && age=$(age_in_days "$recorded"); then
+      if [ "$age" -ge "$STALE_DAYS" ]; then
+        printf '%s\t(UNVERIFIED since %s - confirm it still holds before relying on it)\n' \
+          "$heading" "$recorded" >>"$2"
+      fi
+    else
+      printf '%s\t(UNVERIFIED - no date recorded)\n' "$heading" >>"$2"
+    fi
+  done < <(recipe_dates "$1")
 }
 
 recipe_dates() {  # <recipes file>; prints "<heading>\t<date-or-empty>"
@@ -271,7 +310,9 @@ case "$CMD" in
     [ "${TOTAL:-0}" -gt 0 ] || exit 0
     LIMIT_BYTES=$((BUDGET * 3))
     TMP=$(mktemp "${TMPDIR:-/tmp}/fm-project-recipes.XXXXXX") || die "could not create a scratch file"
-    recipe_blocks "$RECIPES" >"$TMP"
+    NOTES=$(mktemp "${TMPDIR:-/tmp}/fm-project-recipes-notes.XXXXXX") || die "could not create a scratch file"
+    unverified_notes "$RECIPES" "$NOTES"
+    recipe_blocks "$RECIPES" "$NOTES" >"$TMP"
     OUT=$(
       used=0
       shown=0
@@ -301,7 +342,7 @@ $line"
       done <"$TMP"
       printf '%s\n' "FM_RECIPE_SHOWN=$shown"
     )
-    rm -f -- "$TMP"
+    rm -f -- "$TMP" "$NOTES"
     SHOWN=${OUT##*FM_RECIPE_SHOWN=}
     BODY=${OUT%FM_RECIPE_SHOWN=*}
     printf '# Project capabilities\n'

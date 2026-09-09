@@ -85,7 +85,8 @@ Every spawn renders `digest` into the launch brief, so a worker reads what this 
 
 The digest is bounded by `config/project-recipe-budget` (absent means the default in the script's header), using the same conservative local token estimate as firstmate's own startup memory.
 When the catalog outgrows the budget that is the signal to consolidate, not to raise the ceiling; without a ceiling this recreates the original problem inverted, as a wall of text.
-`check` names entries unverified past the horizon and exits nonzero, so a recipe that stopped being true is caught rather than trusted - the catalog is curated the way `data/learnings.md` is, rewritten and pruned rather than accumulated.
+The digest still carries an entry past that horizon, marked UNVERIFIED, so a worker never reads a lapsed recipe as current fact and may be the one who confirms or corrects it.
+`check` names those entries and exits nonzero, so a recipe that stopped being true is caught rather than trusted - the catalog is curated the way `data/learnings.md` is, rewritten and pruned rather than accumulated.
 
 ## What firstmate does not do here
 

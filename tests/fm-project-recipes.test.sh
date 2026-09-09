@@ -77,6 +77,21 @@ test_digest_is_bounded_and_says_what_it_left_out() {
   pass "fm-project-recipes.sh: the digest stays inside its budget and says what it omitted"
 }
 
+test_digest_marks_an_entry_nobody_reverified() {
+  local world out
+  world=$(make_project digeststale)
+  mkdir -p "$world/project/.agents"
+  printf '# Agent recipes\n' >"$world/project/.agents/recipes.md"
+  write_recipe "$world/project/.agents/recipes.md" "Still true" "$(today)"
+  write_recipe "$world/project/.agents/recipes.md" "Nobody checked this in a year" "2020-01-02"
+  out=$(recipes_cmd "$world/home" digest "$world/project") || fail "digest failed: $out"
+  assert_contains "$out" "Nobody checked this in a year (UNVERIFIED since 2020-01-02" \
+    "the digest presented a lapsed recipe as current"
+  assert_contains "$out" "## Still true" "the digest dropped the current entry"
+  assert_not_contains "$out" "## Still true (UNVERIFIED" "a current entry was marked unverified"
+  pass "fm-project-recipes.sh: the digest marks an entry nobody re-verified"
+}
+
 test_a_configured_budget_is_read_from_the_home() {
   local world out
   world=$(make_project configured)
@@ -155,3 +170,4 @@ test_an_absent_catalog_costs_nothing
 test_check_names_an_entry_nobody_reverified
 test_check_names_an_undated_entry
 test_check_reports_a_catalog_that_outgrew_its_budget
+test_digest_marks_an_entry_nobody_reverified
