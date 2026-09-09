@@ -156,7 +156,13 @@ render_once() {
     ($width) as $w
     | (if $w < 60 then 1 else 0 end) as $narrow
     | ([.rows[] | select($stale_only == 0 or .stale)]) as $shown
-    | ([.rows[] | select(.notify) | select($stale_only == 0 or .stale)]) as $closeable
+    # The unasked session-start line and this overview are two different things
+    # and do not share a cutoff: notify is the rule for that line, not for this
+    # one. Everything shown here that HAS a close command gets it, whatever its
+    # age and whether or not the captain is holding it - asking for the overview
+    # is asking to be able to close things. Safety is unchanged: close_safety
+    # and its note still travel with every command.
+    | ([.rows[] | select(.close != null) | select($stale_only == 0 or .stale)]) as $closeable
     | 7 as $kindw
     # AGE is what the "!" marks: running time for a worker with a live process,
     # and the age of the work itself for one with none. TASK is how long the

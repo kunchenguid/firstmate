@@ -150,6 +150,14 @@ run_inventory() {  # <home> <mode> [extra env assignments are the caller's]
     PATH="$FAKEBIN:$PATH" "$INVENTORY" "$mode"
 }
 
+# The same run, through a named shell. The system shell on macOS is bash 3.2,
+# which is what firstmate's scripts have to keep working under.
+run_inventory_with_shell() {  # <shell> <home> <mode>
+  local shell=$1 home=$2 mode=$3
+  FM_HOME="$home" FM_SESSION_INVENTORY_NOW_EPOCH="$NOW_EPOCH" \
+    PATH="$FAKEBIN:$PATH" "$shell" "$INVENTORY" "$mode"
+}
+
 run_view() {  # <home> <args...>
   local home=$1
   shift
@@ -412,6 +420,175 @@ test_stale_lock_pid_is_not_attributed() {
     || fail "an unscopable harness must be disclosed as an unreadable source"
 
   pass "inventory: a stale lock pid is disclosed instead of attributed"
+}
+
+# A live lock-owning harness whose processes all work somewhere else is an
+# ordinary state - a pool that has not been claimed for this home yet. It is
+# also the one path with no session rows at all, and the command still has to
+# produce its whole inventory there. Run through the SYSTEM shell on purpose:
+# on macOS that is bash 3.2, where an unguarded empty-array expansion under
+# `set -u` aborts the script, which would take the session-start notice with it.
+test_a_harness_with_no_session_in_this_home_still_reports() {
+  local home spec pool daemon json out
+  home=$(make_home no-session-here)
+  write_worker "$home" old-anchor 9
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  pool=$(make_pool "$home")
+  spec="$home/children"
+  cat > "$spec" <<EOF
+$pool|pool-a --bg-spare /tmp/cc-daemon/spare/1111.claim.sock
+$pool|pool-b --bg-spare /tmp/cc-daemon/spare/2222.claim.sock
+EOF
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
+  printf '%s\n' "$daemon" > "$home/state/.lock"
+
+  json=$(run_inventory_with_shell /bin/bash "$home" --json) \
+    || fail "the inventory must still produce its output when no session works in this home"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')" = none ] \
+    || fail "a live harness with no process working in this home must read as none"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')" = 0 ] \
+    || fail "no session may be claimed for this home"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.elsewhere')" = 2 ] \
+    || fail "both pool processes must still be counted as belonging elsewhere"
+
+  # And the unasked session-start line survives the same path: the rest of the
+  # inventory is exactly what a session start would otherwise silently lose.
+  out=$(run_inventory_with_shell /bin/bash "$home" --stale-lines) \
+    || fail "--stale-lines must still run when no session works in this home"
+  assert_contains "$out" "SESSIONS_STALE: worker old-anchor" \
+    "overdue work must still be reported when this home has no session of its own"
+
+  kill_spawned
+  pass "inventory: a lock-owning harness with no session here still reports everything else"
+}
+
+# The overview is the surface the captain asks for in order to close things, and
+# it is not the session-start line: it has no age cutoff and does not defer held
+# work to the backlog. Every row it shows that CAN be closed shows how.
+test_view_offers_a_close_command_for_every_closeable_row() {
+  local home out
+  home=$(make_home closeable-view)
+  mkdir -p "$home/data"
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+- [ ] fresh-task - Fresh Task (repo: alpha) (kind: ship) (since $(date_days_ago 0))
+- [ ] held-task - Held Task (repo: alpha) (kind: ship) (since $(date_days_ago 40)) (hold: captain choice pending) (hold-kind: captain)
+
+## Queued
+
+## Done
+EOF
+  local id
+  for id in fresh-task held-task; do
+    mkdir -p "$home/projects/$id-worktree"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" \
+      "worktree=$home/projects/$id-worktree" \
+      "project=alpha" \
+      "harness=claude" \
+      "kind=ship" \
+      "mode=no-mistakes" \
+      "yolo=off"
+  done
+  write_lavish_stub "$FAKEBIN"
+
+  out=$(COLUMNS=100 run_view "$home" --color never)
+  assert_contains "$out" "FM_HOME=$home bin/fm-teardown.sh fresh-task" \
+    "a worker that is nowhere near the stale threshold must still come with its close command"
+  assert_contains "$out" "FM_HOME=$home bin/fm-teardown.sh held-task" \
+    "captain-held work the captain can see must also be closeable from the same view"
+
+  # The startup line keeps its own, narrower rule: nothing fresh, nothing held.
+  out=$(run_inventory "$home" --stale-lines) || fail "--stale-lines failed"
+  assert_not_contains "$out" "fresh-task" "the unasked line must stay bound to the stale threshold"
+  assert_not_contains "$out" "held-task" "the unasked line must still leave held work to the backlog"
+
+  # --stale-only narrows the whole view, close commands included.
+  out=$(COLUMNS=100 run_view "$home" --color never --stale-only)
+  assert_not_contains "$out" "fresh-task" "--stale-only must not offer to close what it does not show"
+
+  pass "view: every row it shows with a close command carries that command"
+}
+
+# Close commands are printed to be pasted, and real artifact and home paths on
+# this machine contain spaces. Both are executed here against stand-ins, so what
+# is proven is what the printed line does when a shell runs it - never the real
+# teardown or the real Lavish.
+test_close_commands_stay_pasteable_when_paths_contain_spaces() {
+  local home stage artifact close out
+  home=$(make_home 'a home with spaces')
+  mkdir -p "$home/data/board with notes"
+  artifact="$home/data/board with notes/review page.html"
+  printf '<html></html>\n' > "$artifact"
+  write_worker "$home" ship-task 1
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN" "$artifact" open 0
+
+  stage="$TMP_ROOT/paste-stage"
+  mkdir -p "$stage/bin"
+  cat > "$stage/bin/fm-teardown.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'home=%s\nargc=%s\narg1=%s\n' "${FM_HOME:-}" "$#" "${1:-}"
+SH
+  cat > "$stage/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'argc=%s\narg1=%s\narg2=%s\n' "$#" "${1:-}" "${2:-}"
+SH
+  chmod +x "$stage/bin/fm-teardown.sh" "$stage/lavish-axi"
+
+  local json
+  json=$(run_inventory "$home" --json) || fail "inventory failed for paths with spaces"
+
+  close=$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "ship-task") | .close')
+  out=$(cd "$stage" && bash -c "$close") \
+    || fail "the printed worker close command must run as a single command"
+  assert_contains "$out" "home=$home" \
+    "a home path with spaces must reach the close command as one value"
+  assert_contains "$out" "argc=1" \
+    "the close command must pass exactly the task id"
+
+  close=$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "review") | .close')
+  out=$(PATH="$stage:$PATH" bash -c "$close") \
+    || fail "the printed review close command must run as a single command"
+  assert_contains "$out" "argc=2" \
+    "an artifact path with spaces must reach lavish-axi as one argument, not several"
+  assert_contains "$out" "arg2=$artifact" \
+    "the artifact path must arrive unaltered"
+
+  pass "inventory: close commands stay pasteable when a path contains spaces"
+}
+
+# close_safety is advisory, and an advisory that reads "safe" over work that is
+# only paused, blocked, or unreadable is worse than none. The vocabulary it
+# judges is bin/fm-crew-state.sh's, so it has to be judged in those words.
+test_unsettled_worker_state_is_never_presented_as_safe() {
+  local home json gen state safety
+  home=$(make_home unsettled-state)
+  write_worker "$home" blocked-task 1
+  write_worker "$home" done-task 1
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  for id in blocked-task done-task; do
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" "$id")
+    "$ROOT/bin/fm-busy-event.sh" apply "$home/state" "$id" idle --gen "$gen" \
+      --source claude-hook --event stop
+  done
+  printf 'blocked: waiting on access\n' > "$home/state/blocked-task.status"
+  printf 'done: landed\n' > "$home/state/done-task.status"
+
+  json=$(run_inventory "$home" --json) || fail "inventory failed for unsettled worker state"
+  state=$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "blocked-task") | .detail')
+  safety=$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "blocked-task") | .close_safety')
+  [ "$safety" = confirm ] \
+    || fail "a blocked worker may still hold unlanded work and must need a decision, got '$safety' ($state)"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "blocked-task") | .close_note')" != null ] \
+    || fail "a row that needs a decision must say why"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "done-task") | .close_safety')" = safe ] \
+    || fail "finished work must still be reported as safe to clean up"
+
+  pass "inventory: a worker that is not settled is never presented as safe to close"
 }
 
 test_nothing_old_prints_nothing_at_session_start() {
@@ -827,7 +1004,11 @@ test_claimed_pool_process_is_a_live_session
 test_several_claimed_sessions_in_one_home_are_ambiguous
 test_contradictory_argv_does_not_decide_the_role
 test_stale_lock_pid_is_not_attributed
+test_a_harness_with_no_session_in_this_home_still_reports
 test_nothing_old_prints_nothing_at_session_start
+test_view_offers_a_close_command_for_every_closeable_row
+test_close_commands_stay_pasteable_when_paths_contain_spaces
+test_unsettled_worker_state_is_never_presented_as_safe
 test_stale_rows_carry_their_exact_close_command
 test_stale_session_line_names_the_pid
 test_worker_age_is_running_time_not_task_age

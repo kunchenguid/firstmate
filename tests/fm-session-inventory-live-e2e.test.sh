@@ -27,10 +27,11 @@
 #      every harness process under it must be accounted for - either as a
 #      session of that home or as belonging elsewhere - with none unexplained.
 #
-# Both checks drive the ordinary `--json` contract against a scratch home whose
-# recorded session lock names the process under test. Nothing here reads the
-# implementation, so this guard cannot drift from the production rule by
-# transcribing it.
+# Both checks drive the ordinary `--json` contract: the first against a scratch
+# home whose recorded session lock names the probe process, the second against
+# the real home itself, read-only, because whether a session is working in THAT
+# home is the question. Nothing here reads the implementation, so this guard
+# cannot drift from the production rule by transcribing it.
 #
 # Each harness is launched bare, with no prompt, so this consumes no model
 # tokens. Standard CI has no harness binaries or credentials, so this guard is
@@ -91,6 +92,42 @@ printf '## In flight\n\n## Queued\n\n## Done\n' > "$HOME_DIR/data/backlog.md"
 inventory_for() {  # <pid>
   printf '%s\n' "$1" > "$HOME_DIR/state/.lock"
   FM_HOME="$HOME_DIR" "$INVENTORY" --json
+}
+
+# The same command against a home that already records its own lock. Nothing is
+# written: the inventory is read-only over the home it is pointed at, and the
+# lock it reads is the one that home wrote itself. That matters for check 2,
+# where the sessions really are working in THAT home - pointed at the scratch
+# home instead, no real session could ever be inside FM_HOME and the accounting
+# it checks would be zero against zero.
+inventory_of_home() {  # <home>
+  FM_HOME="$1" "$INVENTORY" --json
+}
+
+# Independently enumerate the harness processes under <root>, the way the
+# overview scopes itself: harness children of a harness, depth-bounded. Identity
+# comes from bin/fm-session-lock-lib.sh, the fleet's single owner of that
+# question, so this counts processes without transcribing the rule the overview
+# is being checked against.
+HARNESS_UNDER=0
+count_harness_under() {  # <pid> <depth>
+  local pid=$1 depth=$2 child comm args
+  [ "$depth" -lt 6 ] || return 0
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    comm=$(ps -o comm= -p "$child" 2>/dev/null) || continue
+    [ -n "$comm" ] || continue
+    args=$(ps -o args= -p "$child" 2>/dev/null || true)
+    fm_harness_process_matches "$comm" "$args" || continue
+    HARNESS_UNDER=$((HARNESS_UNDER + 1))
+    count_harness_under "$child" $((depth + 1))
+  done
+}
+harness_processes_under() {  # <root-pid>
+  HARNESS_UNDER=0
+  count_harness_under "$1" 0
+  # A harness with no harness children is itself the only process there is.
+  [ "$HARNESS_UNDER" -gt 0 ] || HARNESS_UNDER=1
+  printf '%s\n' "$HARNESS_UNDER"
 }
 
 # --- 1. a real, live harness working in a home must be reported as its session -
@@ -191,8 +228,10 @@ fi
 # command never touches - a desktop app embedding a vendor CLI, for one - and
 # report drift for something firstmate does not classify at all.
 #
-# Only the home's recorded lock pid is read here. The inventory itself still
-# runs against the scratch home, so a real home is never written to.
+# The inventory runs against that real home, because whether a session is
+# working in it is the whole question. That is safe: the command is read-only
+# over the home it is pointed at, and the lock it reads is the one that home
+# recorded itself. Nothing here writes to a real home.
 ROLE_HOME=${FM_SESSION_ROLE_HOME:-${FM_HOME:-}}
 
 if [ -z "$ROLE_HOME" ]; then
@@ -206,23 +245,33 @@ else
       note "$ROLE_HOME records no usable session lock, so the lock-owner half of this guard checked nothing"
       ;;
     *)
-      json=$(inventory_for "$lock_pid") || fail "the inventory command failed for lock pid $lock_pid"
+      json=$(inventory_of_home "$ROLE_HOME") || fail "the inventory command failed for $ROLE_HOME"
       owner=$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')
       root=$(printf '%s' "$json" | jq -r '.harness_sessions.root_pid // "none"')
       sessions=$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')
       elsewhere=$(printf '%s' "$json" | jq -r '.harness_sessions.elsewhere')
-      rows=$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session")] | length')
       if [ "$owner" = stale ] || [ "$owner" = absent ]; then
         note "the session lock in $ROLE_HOME names no live harness right now, so the lock-owner half of this guard checked nothing"
       elif [ "$owner" = not_checked ]; then
         fail "LIVE-SESSION DRIFT: the working directory of the processes under harness $root could not be read here, so a live session cannot be told from an idle pool process at all. That is the one input the verdict rests on."
       else
-        # Every listed row must be a session of this home, and the counted total
-        # must match: a process that is neither claimed nor counted is one the
-        # overview has quietly lost.
-        [ "$rows" = "$sessions" ] || fail \
-          "LIVE-SESSION DRIFT: harness $root reports $sessions session(s) but lists $rows row(s); the overview is counting and showing different things."
-        note "harness $root: $sessions session(s) in this home, $elsewhere elsewhere, lock_owner=$owner"
+        # Every harness process under that root must land on one side or the
+        # other: claimed as a session of this home, or counted as belonging
+        # elsewhere. One that is neither is a process the overview has quietly
+        # lost. Counted twice, because a process starting or exiting between the
+        # two reads is an ordinary race on a live machine, while real drift
+        # survives a second look.
+        found=$(harness_processes_under "$root")
+        if [ "$((sessions + elsewhere))" != "$found" ]; then
+          json=$(inventory_of_home "$ROLE_HOME") || fail "the inventory command failed for $ROLE_HOME"
+          sessions=$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')
+          elsewhere=$(printf '%s' "$json" | jq -r '.harness_sessions.elsewhere')
+          root=$(printf '%s' "$json" | jq -r '.harness_sessions.root_pid // "none"')
+          found=$(harness_processes_under "$root")
+          [ "$((sessions + elsewhere))" = "$found" ] || fail \
+            "LIVE-SESSION DRIFT: $found harness process(es) run under harness $root, but the overview accounts for $((sessions + elsewhere)) of them ($sessions in this home, $elsewhere elsewhere). A process that is neither claimed nor counted is one the overview has lost."
+        fi
+        note "harness $root: $sessions session(s) in this home, $elsewhere elsewhere, $found under the harness, lock_owner=$owner"
         pass "live session: every harness process under this home lock-owning harness is accounted for"
       fi
       ;;

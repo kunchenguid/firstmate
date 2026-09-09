@@ -1494,10 +1494,19 @@ detect_local_config() {
 FM_STALE_SESSION_TIMEOUT=${FM_STALE_SESSION_TIMEOUT:-8}
 case "$FM_STALE_SESSION_TIMEOUT" in ''|*[!0-9]*|0) FM_STALE_SESSION_TIMEOUT=8 ;; esac
 detect_stale_sessions() {
-  local out rc=0
+  local out rc=0 inner
   [ "${FM_BOOTSTRAP_STALE_SESSIONS:-1}" = 1 ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
-  out=$(fm_run_timed "$FM_STALE_SESSION_TIMEOUT" \
+  # The inventory's own per-source bounds have to sit BELOW this one, or a slow
+  # but living source can never reach the disclosure it was built for: this
+  # outer bound would kill the whole pass first and the captain would be told
+  # only that the check did not finish, instead of which source was unreadable
+  # and what the rest of the rows are.
+  inner=$((FM_STALE_SESSION_TIMEOUT - 2))
+  [ "$inner" -ge 2 ] || inner=2
+  out=$(FM_SESSION_INVENTORY_FLEET_TIMEOUT="${FM_SESSION_INVENTORY_FLEET_TIMEOUT:-$inner}" \
+    FM_SESSION_INVENTORY_LAVISH_TIMEOUT="${FM_SESSION_INVENTORY_LAVISH_TIMEOUT:-$inner}" \
+    fm_run_timed "$FM_STALE_SESSION_TIMEOUT" \
     "$SCRIPT_DIR/fm-session-inventory.sh" --stale-lines 2>/dev/null) || rc=$?
   if [ "$rc" = 124 ]; then
     echo "SESSIONS_STALE: could not finish the running-session check within ${FM_STALE_SESSION_TIMEOUT}s; run bin/fm-session-view.sh to see what is still open"

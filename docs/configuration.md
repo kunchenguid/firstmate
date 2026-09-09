@@ -259,7 +259,8 @@ The skill text owns the marker spelling, the tick order, and the reinforcement r
 
 `bin/fm-session-view.sh` shows everything running for one home in a single list: workers, open Lavish review pages, the background services that keep the fleet moving, and the harness background sessions under a shared harness daemon.
 It renders `bin/fm-session-inventory.sh --json`, which is the structured owner of that inventory; both are read-only and neither ever closes, kills, or signals anything it reports.
-Close commands are printed for you to run, and a row that could lose work in progress says so on the line below its command.
+Close commands are printed for you to run - one for every row that has one, whatever its age - and a row that could lose work in progress says so on the line below its command.
+The stale threshold below governs the `!` marks and the unasked session-start lines, not what you are offered a way to close.
 
 Anything at or over the stale threshold is marked with a leading `!`.
 The age it is measured against is how long a worker has been RUNNING whenever a live process is working in its own local copy, and the age of the work itself when nothing is running, so abandoned work still holding a local copy is surfaced rather than hidden.

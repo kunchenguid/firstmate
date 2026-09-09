@@ -179,6 +179,20 @@ note_source() {  # <name> <ok:0|1> <reason>
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$SOURCES"
 }
 
+# Every close command in the output is meant to be pasted into a shell exactly
+# as printed, and real paths here contain spaces (a Lavish artifact under
+# "Project Files", a home with a space in it). A value that needs quoting is
+# quoted; one that does not is left bare, so an ordinary command still reads as
+# the plain command it is.
+shell_quote() {  # <value>
+  case $1 in
+    ''|*[!A-Za-z0-9_/.:@%+,=-]*)
+      printf "'%s'" "$(printf '%s' "$1" | LC_ALL=C sed "s/'/'\\\\''/g")"
+      ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 # One row per line. Empty field = null in JSON. The trailing `held` column is 1
 # for work the captain is deliberately holding.
 emit_row() {  # kind id label belongs_to detail pid age_seconds age_source close close_safety close_note [held] [task_age_seconds]
@@ -228,6 +242,12 @@ fi
 # task it is running.
 CWDMAP="$WORK/cwd.tsv"
 : > "$CWDMAP"
+# A reader that produced no directory at all read nothing, whatever the exit
+# status of the last pipeline stage was. Saying so is what keeps a denied or
+# sandboxed lsof from being reported as "nothing is running here".
+cwdmap_has_a_directory() {
+  LC_ALL=C awk -F'\t' '$2 != "" { found = 1; exit } END { exit(found ? 0 : 1) }' "$CWDMAP"
+}
 read_cwds() {  # <pid>...
   local pid joined
   [ "$#" -gt 0 ] || return 0
@@ -235,7 +255,8 @@ read_cwds() {  # <pid>...
     for pid in "$@"; do
       printf '%s\t%s\n' "$pid" "$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
     done > "$CWDMAP"
-    return 0
+    cwdmap_has_a_directory
+    return
   fi
   command -v lsof >/dev/null 2>&1 || return 1
   joined=$(printf '%s,' "$@"); joined=${joined%,}
@@ -244,6 +265,7 @@ read_cwds() {  # <pid>...
   lsof -a -d cwd -Fpn -p "$joined" 2>/dev/null | LC_ALL=C awk '
     /^p/ { pid = substr($0, 2); next }
     /^n/ { if (pid != "") { printf "%s\t%s\n", pid, substr($0, 2); pid = "" } }' > "$CWDMAP"
+  cwdmap_has_a_directory
 }
 # Every process's working directory in one call. Used where the interesting set
 # is not known in advance, so that filtering on the directory can come before
@@ -255,13 +277,14 @@ read_all_cwds() {
       [ -n "$pid" ] || continue
       printf '%s\t%s\n' "$pid" "$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
     done < <(LC_ALL=C awk -F'\t' '{ print $1 }' "$PSTABLE") > "$CWDMAP"
-    return 0
+    cwdmap_has_a_directory
+    return
   fi
   command -v lsof >/dev/null 2>&1 || return 1
   lsof -a -d cwd -Fpn 2>/dev/null | LC_ALL=C awk '
     /^p/ { pid = substr($0, 2); next }
     /^n/ { if (pid != "") { printf "%s\t%s\n", pid, substr($0, 2); pid = "" } }' > "$CWDMAP"
-  [ -s "$CWDMAP" ]
+  cwdmap_has_a_directory
 }
 
 cwd_of() {  # <pid>
@@ -417,11 +440,24 @@ collect_workers() {
       safety=manual
       cnote='persistent second mate; retire only through an explicit decision'
     else
-      close="$(close_prefix)bin/fm-teardown.sh $id"
+      close="$(close_prefix)bin/fm-teardown.sh $(shell_quote "$id")"
+      # The vocabulary here is bin/fm-crew-state.sh's, which is where this state
+      # comes from: working | parked | done | blocked | paused | failed |
+      # unknown. Anything that can still be holding unlanded work, and anything
+      # whose state could not be read at all, has to be decided on rather than
+      # presented as safe.
       case "$busy" in
-        busy|working|running|fixing)
+        working)
           safety=confirm
           cnote='work in progress; cleanup refuses while anything is unlanded'
+          ;;
+        paused|blocked)
+          safety=confirm
+          cnote="$busy, so it can still be holding unlanded work"
+          ;;
+        ''|unknown)
+          safety=confirm
+          cnote='its state could not be read, so what it still holds is unknown'
           ;;
         *)
           safety=safe
@@ -450,7 +486,7 @@ collect_workers() {
 # the code root needs its FM_HOME stated, or the command would act on the wrong
 # home.
 close_prefix() {
-  [ "$FM_HOME" = "$FM_ROOT" ] || printf 'FM_HOME=%s ' "$FM_HOME"
+  [ "$FM_HOME" = "$FM_ROOT" ] || printf 'FM_HOME=%s ' "$(shell_quote "$FM_HOME")"
 }
 
 # --- 2. open Lavish review pages ---------------------------------------------
@@ -496,7 +532,7 @@ collect_reviews() {
     fi
     emit_row review "$sid" "$(basename -- "$file")" "$(dirname -- "$file")" \
       "${status:-open}${url:+ $url}" "$pid" "${age:-}" "$age_source" \
-      "lavish-axi end $file" "$safety" "$cnote"
+      "lavish-axi end $(shell_quote "$file")" "$safety" "$cnote"
   done < <(LC_ALL=C awk '
       /^sessions\[/ { inblock = 1; next }
       inblock && /^[^[:space:]]/ { inblock = 0 }
@@ -686,7 +722,7 @@ collect_harness_sessions() {
     *) HARNESS_LOCK_OWNER=ambiguous ;;
   esac
 
-  for pid in "${mine[@]}"; do
+  for pid in ${mine[@]+"${mine[@]}"}; do
     age=$(ps_field "$pid" 2)
     close="kill $pid"
     safety=confirm
