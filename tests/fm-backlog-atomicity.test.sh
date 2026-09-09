@@ -597,6 +597,7 @@ test_backend_resolution_preserves_config_errors() {
   project_config="$case_dir/home/.tasks.toml"
   user_config="$case_dir/user-home/.tasks-axi/config.toml"
   mkdir -p "$case_dir/home" "$case_dir/user-home/.tasks-axi"
+  # shellcheck disable=SC2016 # $1..$3 must expand when bash -c evaluates the probe with its supplied arguments.
   probe='. "$1/bin/fm-tasks-axi-lib.sh"; "$2" "$3"'
   printf '%s\n' 'backend = "beads"' > "$user_config"
   printf '%s\n' 'backend = "markdown"' > "$project_config"
@@ -622,6 +623,7 @@ test_backend_resolution_preserves_precedence_and_defaults() {
   local case_dir resolver out probe
   case_dir="$TMP_ROOT/backend-resolution-precedence"
   mkdir -p "$case_dir/home" "$case_dir/user-home/.tasks-axi"
+  # shellcheck disable=SC2016 # $1..$3 must expand when bash -c evaluates the probe with its supplied arguments.
   probe='. "$1/bin/fm-tasks-axi-lib.sh"; "$2" "$3"'
   for resolver in fm_tasks_axi_backend fm_tasks_axi_backend_resolve; do
     out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" bash -c "$probe" _ \
