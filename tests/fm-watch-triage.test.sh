@@ -3998,6 +3998,45 @@ test_malformed_seen_signature_reads_the_whole_log
 test_stale_is_terminal_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier
+test_completed_ship_owner_enters_bounded_wait() {
+  local dir state fakebin capture_file out statusf window key pid show
+  dir=$(make_case completed-ship-owner); state="$dir/state"; fakebin="$dir/fakebin"
+  capture_file="$dir/pane.txt"; out="$dir/watch.out"; statusf="$state/held.status"
+  window='test:fm-held'; key='test_fm-held'
+  mkdir -p "$dir/data" "$dir/config"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  (cd "$dir" && tasks-axi add held 'Completed branch awaiting approval' --kind ship --repo sample --start >/dev/null) \
+    || fail "could not create completed ship fixture"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\nmode=local-only\n' "$window" > "$state/held.meta"
+  printf 'done: ready in branch fm/held\n' > "$statusf"
+  prime_status_seen "$state" "$statusf" || fail "could not mark original completion seen"
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-captain-hold.sh" hold held \
+    --reason 'Awaiting merge approval' >/dev/null || fail "completed ship hold failed"
+  printf 'idle shell after finished worker exit\n' > "$capture_file"
+  hash_text 'idle shell after finished worker exit' > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" \
+    FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_PAUSE_RESURFACE_SECS=999
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "new hold re-woke immediately: $(cat "$out")"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "completed ship never entered declared-wait handling"; }
+  printf 'idle shell after harmless pane change\n' > "$capture_file"
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "held pane change caused an immediate wake"; }
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "held pane became a terminal stale wake"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "quiet completed ship queued a wake"; }
+  # A new real worker problem is never covered by the already-recorded hold.
+  printf 'blocked: new permission prompt\n' >> "$statusf"
+  wait_for_exit "$pid" 150 || { reap "$pid"; fail "new worker problem was hidden by the hold"; }
+  assert_grep "signal: $statusf" "$state/.wake-queue" "new permission problem did not surface"
+  show=$(cd "$dir" && tasks-axi show held --full) || fail "held ship vanished"
+  assert_contains "$show" 'held: yes' "watcher lifted merge authority"
+  assert_contains "$show" 'state: in_flight' "watcher closed the unmerged ship"
+  pass "real completed-ship hold stays quiet after exit and pane change, but a new permission event wakes"
+}
+
+test_completed_ship_owner_enters_bounded_wait
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
 test_crew_worktree_written_since_classifier

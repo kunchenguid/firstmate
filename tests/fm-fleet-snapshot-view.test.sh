@@ -896,6 +896,34 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_inflight_captain_hold_actionability() {
+  local home fakebin out
+  home=$(make_home inflight-captain-hold); fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] ready - Merge approval (repo: alpha) (kind: ship) (hold: choose merge) (hold-kind: captain)
+- [ ] dated - Later approval (repo: alpha) (kind: ship) (hold: revisit later) (hold-kind: captain) (hold-until: 2099-01-01)
+- [ ] blocked - Dependent approval blocked-by: missing (repo: alpha) (kind: ship) (hold: choose route) (hold-kind: captain)
+- [ ] external - External wait (repo: alpha) (kind: ship) (hold: awaiting server) (hold-kind: external)
+- [ ] working - Normal work (repo: alpha) (kind: ship)
+
+## Queued
+
+## Done
+- [x] closed - Answered call (repo: alpha) (kind: ship) (hold: choose release) (hold-kind: captain) (done 2026-09-09)
+EOF
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-09T12:00:00Z "$SNAPSHOT" --json) \
+    || fail "in-flight captain-hold snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.backlog.records | length) == 6
+      and ([.backlog.records[] | select(.captain_actionable) | .id] == ["ready"])
+      and (.backlog.records[] | select(.id == "ready")
+        | .state == "in_flight" and .current_role == "held")
+  ' >/dev/null || fail "in-flight hold actionability lost its date, dependency, kind, or closed-state boundary: $out"
+  pass "in-flight captain holds are actionable without promoting deferred, blocked, external, unheld, or closed work"
+}
+
+test_inflight_captain_hold_actionability
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory

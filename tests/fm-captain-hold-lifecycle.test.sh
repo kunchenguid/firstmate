@@ -1523,6 +1523,44 @@ SH
   pass "cleanup refuses a ship row when its captain hold cannot be read"
 }
 
+test_completed_ship_hold_declares_wait() {
+  local home id before after last show variant json
+  for variant in hold complete; do
+    home=$(make_home "completed-ship-$variant")
+    id='finished-ship'
+    tasks_in "$home" add "$id" 'Completed branch awaiting approval' --kind ship --repo sample --start >/dev/null
+    write_origin_meta "$home" "$id" ship
+    printf 'mode=local-only\n' >> "$home/state/$id.meta"
+    printf 'done: ready in branch fm/finished-ship\n' > "$home/state/$id.status"
+    if [ "$variant" = hold ]; then
+      run_captain "$home" hold "$id" --reason 'Awaiting local merge approval' >/dev/null
+    else
+      tasks_in "$home" hold "$id" --kind captain --reason 'Awaiting local merge approval' >/dev/null
+      run_captain "$home" complete "$id" "$id" >/dev/null
+    fi
+    last=$(tail -n 1 "$home/state/$id.status")
+    assert_contains "$last" 'captain-held [key=completed-ship-hold]: tracked by finished-ship' "plain-done ship did not enter its declared wait"
+    before=$(wc -c < "$home/state/$id.status")
+    run_captain "$home" hold "$id" --reason 'Awaiting local merge approval' >/dev/null
+    run_captain "$home" complete "$id" "$id" >/dev/null
+    after=$(wc -c < "$home/state/$id.status")
+    [ "$before" = "$after" ] || fail "retry appended duplicate captain-held status"
+    show=$(tasks_in "$home" show "$id" --full)
+    assert_contains "$show" 'held: yes' "completed ship lost its approval requirement"
+    assert_contains "$show" 'state: in_flight' "declaring a wait closed the ship"
+    json=$(run_bearings "$home") || fail "Bearings failed for the completed held ship"
+    printf '%s' "$json" | jq -e --arg id "$id" '.decisions_open | any(.id == $id)' >/dev/null \
+      || fail "completed ship awaiting approval is missing from Captain's Call"
+    # A new worker event must not be hidden by a repeated hold/complete.
+    printf 'blocked: new permission prompt\n' >> "$home/state/$id.status"
+    run_captain "$home" hold "$id" --reason 'Awaiting local merge approval' >/dev/null
+    [ "$(tail -n 1 "$home/state/$id.status")" = 'blocked: new permission prompt' ] \
+      || fail "hold hid a new permission gate"
+  done
+  pass "holding a completed ship declares an idempotent wait without closing work or hiding a new gate"
+}
+
+test_completed_ship_hold_declares_wait
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes

@@ -79,8 +79,8 @@
 # Codex negotiation (fm_busy_codex_appserver_observable,
 # fm_busy_codex_hooks_verified): the approved contract prefers Codex's
 # app-server turn lifecycle with capability negotiation, and sanctions its
-# stable lifecycle hooks as the intermediate. Neither is usable on the
-# installed binary, so Codex classifies unknown codex-unverified rather than
+# stable lifecycle hooks as the intermediate. Neither has complete live
+# verification, so Codex classifies unknown codex-unverified rather than
 # falling back to idle, and fm-spawn installs no Codex busy wiring.
 # docs/verification/supervision.md owns the evidence for both probes.
 #
@@ -135,6 +135,10 @@ fm_busy_codex_appserver_observable() {
 # while global hooks fired in the same runs. Codex additionally exposes no
 # StopFailure hook, so an API-error turn end would need separate coverage
 # even after the discovery problem is solved.
+# The 2026-09-09 refresh on 0.153.4 verifies project-inline prompt, normal Stop,
+# and Interrupt hooks, but an API-rejected turn emits no closing hook and
+# returns to the composer. Opening this gate would falsely retain busy state.
+# See docs/verification/supervision.md for the current probe and remaining gap.
 fm_busy_codex_hooks_verified() {
   return 1
 }

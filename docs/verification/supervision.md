@@ -222,6 +222,36 @@ In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycl
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
+### Codex lifecycle refresh: 2026-09-09
+
+On codex-cli 0.153.4, a disposable interactive tmux worker with project-inline hooks in `.codex/config.toml` fired `SessionStart`, `UserPromptSubmit`, `Stop`, and `Interrupt` after explicit directory and hook trust.
+This supersedes the older claim that no project-local lifecycle hook can fire; it does not verify the separate `.codex/hooks.json` registration or enable Firstmate's busy-state gate.
+The five probe hooks recorded their event name and JSON payload locally and returned `{}`; they covered those four events plus `SessionEnd`, with no global configuration changes.
+The current [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks) describes project-inline configuration, hook trust, and these lifecycle events.
+
+```sh
+codex --no-alt-screen --approve-for-me -c model_reasoning_effort='low' \
+  'Reply exactly FM_BUSY_PROBE_READY without using tools.'
+```
+
+The launch prompt produced `SessionStart -> UserPromptSubmit -> Stop`.
+A subsequent requested local `sleep 20` completed with another prompt/Stop pair.
+During a requested `sleep 60`, `fm-control.sh probe interrupt` delivered Escape to the test-owned endpoint and the hook recorded `Interrupt` for that same turn id.
+The control command still correctly reported cancellation unconfirmed because its own acknowledgement path was not changed by this logging probe.
+
+The disconfirming error case used a separate disposable window in the same trusted project:
+
+```sh
+codex --no-alt-screen --approve-for-me -m fm-intentionally-invalid-probe-model \
+  'Reply exactly FM_ERROR_PROBE.'
+```
+
+This returned HTTP 400 with an unsupported-model error and returned to the input composer.
+Only `SessionStart` and `UserPromptSubmit` were logged for that session; no Stop or Interrupt closed the failed turn before explicit process exit.
+A prompt/Stop/Interrupt busy flag would therefore remain falsely busy after this failure, so `fm_busy_codex_hooks_verified` remains closed.
+No busy events or extra hooks were installed into real project worktrees or the user's global settings.
+A complete app-server observer, or another verified failure-aware source, remains necessary before claiming reliable Codex busy/idle supervision; shared app-server configuration was not changed during this probe.
+
 Deterministic entry points:
 
 ```sh

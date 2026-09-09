@@ -12,6 +12,9 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand places an existing task under an active captain hold, or creates the task when nothing exists to hold, then verifies the hold through `tasks-axi hold <id> --reason <reason> --kind captain`.
 Repeats are idempotent, a closed task is refused rather than reopened, and `--until` stores the captain's own deferral date through tasks-axi's date gate.
+For a live ship record whose last event is plain `done:` with no open keyed decision, an active hold also appends one reserved-key `captain-held` declaration through the self-announced status writer.
+`complete <id> <id>` repairs the same transition for an explicitly inventoried, still-completed ship whose hold was recorded directly in the backlog.
+This does not exit an agent, merge a branch, or close the task; the existing watcher admits the bounded declared-wait cadence only for a confidently stopped ordinary worker, and a later worker event remains actionable.
 
 The `answer` subcommand records the captain's exact words and closes the call in the same act.
 It requires a non-empty captain decision file of at most 8192 bytes, writes a resolution block carrying the decision digest and a `Resolution mode:` at the top of the task body (the previous body is preserved below the block and archived through tasks-axi `--archive-body`), then runs `tasks-axi done` - or `tasks-axi unhold` under `--release`, so a captain-gated work item resumes instead of closing.
@@ -56,7 +59,7 @@ Trusted external process-event adapters intentionally expose no answer operation
 ## Structured read surfaces
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)`, `(hold-kind: ...)`, and `(hold-until: ...)` metadata alongside existing backlog fields.
-It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies a captain hold as `captain_actionable` - waiting on the captain now - only when it is queued, unblocked, and due, whatever kind its row carries.
+It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies a captain hold as `captain_actionable` - waiting on the captain now - only when it is queued or in flight, unblocked, and due, whatever kind its row carries.
 It also emits a presentation-only `deferred_marker` when a hold's reason or body carries an explicit SUPERSEDED / NOT REQUIRED / DEFERRED marker.
 Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves blocked or deferred captain holds as queued work in the owning home.
 
@@ -93,6 +96,11 @@ The shim recognizes an exact replay of a pre-collapse routed resolution by its h
 `bin/fm-decision-hold.sh` itself remains for one release as a thin command-mapping shim over `bin/fm-captain-hold.sh`, so in-flight work briefed before the collapse keeps working; its header owns the exact mapping.
 
 ## Verification record
+
+On 2026-09-09, the lifecycle suite additionally verifies the plain-done ship transition through both owner `hold` and direct backlog hold followed by owner `complete`, retry idempotence, preserved merge authority, and refusal to cover a later permission event.
+The same end-to-end case verifies that an unmerged, in-flight captain-held ship appears in Bearings' Captain's Call rather than disappearing into a generic gate.
+`tests/fm-watch-triage.test.sh` bridges the real task/hold commands to a real watcher with a synthetic stopped Codex endpoint: the declared wait stays quiet after exit and a pane change, but a subsequent blocked event wakes immediately.
+Its existing stopped/live-gate and deferred-resurface cases retain the bounded recheck and live-permission safety boundaries.
 
 Verification date: 2026-09-03.
 

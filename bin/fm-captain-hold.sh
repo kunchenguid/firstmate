@@ -40,6 +40,11 @@
 # idempotent; a task already closed is refused rather than reopened. `--until`
 # records the captain's own deferral date through `tasks-axi hold --until`, so
 # a "revisit later" answer is stored as a date instead of a live card.
+# For a ship whose latest event is done and which has no open keyed decision,
+# an active hold also appends one reserved-key captain-held declaration. `complete`
+# repairs the same transition when its inventory explicitly includes that ship.
+# Neither command exits an agent, merges work, or suppresses a new worker event;
+# the watcher admits a quiet ordinary-worker wait only after verified agent exit.
 #
 # `answer` records the captain's exact words and closes the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes,
@@ -415,6 +420,28 @@ resolution_block() {  # <mode>
     "$DECISION_DIGEST" "$1" "$DECISION_TEXT"
 }
 
+# A backlog hold alone cannot move a plain done event off the terminal stale
+# path. Only the explicitly held ship itself may acquire this declaration;
+# investigations and unrelated inventory entries retain their own semantics.
+declare_completed_ship_hold() {  # <task-id>
+  local id=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" show last rc=0
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  [ "$(meta_value "$meta" kind)" = ship ] || return 0
+  [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 0
+  last=$(last_status_line "$status_file")
+  [ "$(status_line_verb "$last")" = 'done' ] || return 0
+  [ -z "$(status_open_decisions "$status_file")" ] || return 0
+  show=$(task_show "$id") || fail "cannot verify completed ship $id before declaring its wait"
+  [ "$(show_field "$show" state)" != 'done' ] || return 0
+  [ "$(show_field_value "$show" hold_kind)" = captain ] || return 0
+  [ "$(show_field_value "$show" held)" = yes ] || return 0
+  # Don't deliberately cover a later event that arrived during the backlog read.
+  [ "$(last_status_line "$status_file")" = "$last" ] || return 0
+  fm_wake_status_append_self_announced "$STATE" "$status_file" \
+    "captain-held [key=completed-ship-hold]: tracked by $id" || rc=$?
+  [ "$rc" -ne 2 ] || fail "cannot declare the completed ship $id held for the captain"
+}
+
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
@@ -519,6 +546,7 @@ command_hold() {
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  declare_completed_ship_hold "$id"
   printf '%s\n' "$id"
 }
 
@@ -871,6 +899,7 @@ command_complete() {
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
+  acquire_task_control_lock "$origin"
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] && has_meta=1
   if [ "$has_meta" = 1 ]; then
@@ -934,6 +963,9 @@ EOF
       done <<EOF
 $raw_open
 EOF
+      case ",$keys," in
+        *",$origin,"*) declare_completed_ship_hold "$origin" ;;
+      esac
     fi
   fi
   printf 'complete: %s captain-call inventory reviewed%s\n' "$origin" "${keys:+ ($keys)}"
