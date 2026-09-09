@@ -140,7 +140,7 @@ test_spawn_home_layout() {
 }
 
 test_is_live_non_zombie_separates_gone_from_unreadable() {
-  local dir fakebin live zombie_file zombie rc note i
+  local dir fakebin live zombie_file zombie zombie_pid zombie_state rc note i
   dir="$TMP_ROOT/liveness"
   mkdir -p "$dir"
   fakebin=$(fm_fakebin "$dir")
@@ -166,8 +166,26 @@ test_is_live_non_zombie_separates_gone_from_unreadable() {
     i=$((i + 1))
   done
   [ -s "$zombie_file" ] || fail "zombie fixture never reported its child pid"
+  zombie_pid=$(cat "$zombie_file")
+  zombie_state=
+  i=0
+  while [ "$i" -lt 200 ]; do
+    zombie_state=$(ps -p "$zombie_pid" -o stat= 2>/dev/null | tr -d '[:space:]') || zombie_state=
+    case "$zombie_state" in Z*) break ;; esac
+    sleep 0.05
+    i=$((i + 1))
+  done
+  case "$zombie_state" in
+    Z*) ;;
+    *)
+      kill -KILL "$live" "$zombie" 2>/dev/null || true
+      wait "$live" 2>/dev/null || true
+      wait "$zombie" 2>/dev/null || true
+      fail "zombie fixture child $zombie_pid never became a zombie (last state: ${zombie_state:-unreadable})"
+      ;;
+  esac
   rc=0
-  is_live_non_zombie "$(cat "$zombie_file")" || rc=$?
+  is_live_non_zombie "$zombie_pid" || rc=$?
   [ "$rc" -eq 1 ] || fail "an unreaped zombie was not reported gone (rc=$rc)"
 
   # ps that answers nothing for a pid that is still present. The empty answer

@@ -1162,6 +1162,8 @@ SH
       sleep 0.02
       i=$((i + 1))
     done
+    watcher_state=0
+    is_live_non_zombie "$watcher_pid" || watcher_state=$?
     if [ "$watcher_state" -ne 1 ]; then
       # Say what was seen. This costs nothing on the green path - it runs only
       # when the case is already failing - and without it a failure here reports
@@ -1171,8 +1173,18 @@ SH
         "$backend" \
         "$([ "$watcher_state" -eq 2 ] && printf 'unreadable' || printf 'live')" \
         "$(( $(date +%s) - signaled_at ))" "$i" >&2
-      ps -o pid=,ppid=,pgid=,stat=,wchan=,args= -p "$watcher_pid" >&2 2>/dev/null || true
-      ps -eo pid=,ppid=,stat=,args= 2>/dev/null | awk -v w="$watcher_pid" '$2 == w' >&2 || true
+      printf '# descendant tree (watcher pid %s; recorded child pid %s): pid ppid pgid stat wchan args\n' \
+        "$watcher_pid" "$child_pid" >&2
+      ps -eo pid=,ppid=,pgid=,stat=,wchan=,args= 2>/dev/null | awk -v w="$watcher_pid" -v c="$child_pid" '
+        function tree(pid, indent, child) {
+          if (seen[pid]++) return
+          if (pid in rows) print indent rows[pid]
+          for (child in parents)
+            if (parents[child] == pid) tree(child, indent "  ")
+        }
+        { rows[$1] = $0; parents[$1] = $2 }
+        END { tree(w, ""); tree(c, "") }
+      ' >&2 || true
       printf '# %s watcher stderr tail:\n' "$backend" >&2
       tail -20 "$dir/watch.err" >&2 2>/dev/null || true
       kill -KILL "$watcher_pid" 2>/dev/null || true

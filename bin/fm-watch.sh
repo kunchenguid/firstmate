@@ -206,10 +206,7 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # supervisor with a watcher that cannot be stopped. Generous enough that an
 # ordinary brief holder (a guard, an arm, a wake drain) still completes the
 # transition; short enough that a wedged holder cannot hold shutdown hostage.
-WATCHER_SHUTDOWN_LOCK_SECS=${FM_WATCHER_SHUTDOWN_LOCK_SECS:-5}
-case "$WATCHER_SHUTDOWN_LOCK_SECS" in
-  ''|*[!0-9]*|0) WATCHER_SHUTDOWN_LOCK_SECS=5 ;;
-esac
+WATCHER_SHUTDOWN_LOCK_SECS=5
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
