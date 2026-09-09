@@ -1077,7 +1077,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   case_dir="$TMP_ROOT/dispatch-active"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
+  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"medium","codexHome":"~/.codex-1"}]}' > "$case_dir/home/config/crew-dispatch.json"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
@@ -1088,7 +1088,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
 
-  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]'
+  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high, codex/gpt-5.5/medium@~/.codex-1]'
   [ "$out" = "$expect" ] || fail "active dispatch verbose info block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
@@ -1144,6 +1144,14 @@ empty default array is flagged^{"default":[]}^exact^CREW_DISPATCH: invalid confi
 non-object default array entry is flagged^{"default":["codex"]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile must be an object
 default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile needs harness
 default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings when present
+codexHome on a codex profile is accepted^{"rules":[{"when":"codex work","use":{"harness":"codex","model":"gpt-5.5","codexHome":"~/.codex-1"}}]}^empty^
+codexHome account array is accepted^{"default":[{"harness":"codex","codexHome":"~/.codex"},{"harness":"codex","codexHome":"~/.codex-1"},{"harness":"codex","codexHome":"/srv/accounts/codex-2"}]}^empty^
+codexHome on a non-codex use profile is flagged^{"rules":[{"when":"claude work","use":{"harness":"claude","codexHome":"~/.codex-1"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile codexHome applies only to harness codex
+codexHome on a non-codex array member is flagged^{"rules":[{"when":"mixed","use":[{"harness":"codex","codexHome":"~/.codex"},{"harness":"pi","codexHome":"~/.codex"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile codexHome applies only to harness codex
+non-string codexHome is flagged^{"rules":[{"when":"codex work","use":[{"harness":"codex","codexHome":3}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile codexHome must be a non-empty string when present
+empty codexHome is flagged^{"rules":[{"when":"codex work","use":{"harness":"codex","codexHome":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile codexHome must be a non-empty string when present
+default codexHome on a non-codex profile is flagged^{"default":{"harness":"pi","codexHome":"~/.codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile codexHome applies only to harness codex
+default empty codexHome is flagged^{"default":[{"harness":"codex","codexHome":""}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile codexHome must be a non-empty string when present
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }

@@ -5,7 +5,7 @@
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>]
+#                                         [--effort <level>] [--codex-home <path>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -40,6 +40,16 @@
 #              plus its optional model and effort tokens) exactly as any other
 #              respawn does, while a ship or scout keeps the exact adapter
 #              already recorded for it.
+#              --codex-home <path> names the Codex account home (the directory
+#              holding that account's auth.json) for a replacement on harness
+#              codex; bin/fm-codex-home-lib.sh owns its expansion and check.
+#              With no --codex-home, a relaunch that stays on codex carries the
+#              recorded codex_home= forward unchanged, a relaunch onto another
+#              harness drops it, and the flag on a non-codex target is refused.
+#              A secondmate has no Codex account axis (bin/fm-spawn.sh refuses
+#              it), so the flag on a secondmate is refused here as well.
+#              Either way the account is validated BEFORE the old agent is
+#              stopped, so a signed-out account never strands the task.
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
 #              --note is required for a ship or scout, whose replacement
@@ -132,6 +142,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-codex-home-lib.sh
+. "$SCRIPT_DIR/fm-codex-home-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -192,9 +204,11 @@ fi
 NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
+NEW_CODEX_HOME=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+CODEX_HOME_SET=0
 NOTE=
 NOTE_SET=0
 control_want_value=
@@ -207,6 +221,7 @@ for control_arg in "$@"; do
       harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
+      codex_home) NEW_CODEX_HOME=$control_arg; CODEX_HOME_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
@@ -224,6 +239,8 @@ for control_arg in "$@"; do
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --codex-home) control_want_value=codex_home ;;
+    --codex-home=*) NEW_CODEX_HOME=${control_arg#--codex-home=}; CODEX_HOME_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -237,14 +254,15 @@ for control_arg in "$@"; do
 done
 if [ -n "$control_want_value" ]; then
   [ "$control_want_value" = note_file ] && die "--note-file requires a value"
-  die "--$control_want_value requires a value"
+  die "--${control_want_value//_/-} requires a value"
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$CODEX_HOME_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--harness, --model, --effort, --codex-home, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
+[ "$CODEX_HOME_SET" = 0 ] || [ -n "$NEW_CODEX_HOME" ] || die "--codex-home requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
 case "$NEW_EFFORT" in
@@ -520,9 +538,11 @@ CONFIG_MODEL=
 CONFIG_EFFORT=
 PRIOR_MODEL=
 PRIOR_EFFORT=
+PRIOR_CODEX_HOME=
 TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
+TARGET_CODEX_HOME=
 
 journal_write() {  # <phase> [extra-line]...
   local phase=$1
@@ -542,6 +562,8 @@ journal_write() {  # <phase> [extra-line]...
     echo "to_harness=$TARGET_HARNESS"
     echo "to_model=$TARGET_MODEL"
     echo "to_effort=$TARGET_EFFORT"
+    echo "from_codex_home=$PRIOR_CODEX_HOME"
+    echo "to_codex_home=$TARGET_CODEX_HOME"
     local line
     for line in "$@"; do
       echo "$line"
@@ -616,6 +638,7 @@ resolve_relaunch_profile() {
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
   PRIOR_MODEL=$(fm_meta_get "$META" model)
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
+  PRIOR_CODEX_HOME=$(fm_meta_get "$META" codex_home)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
   if [ "$HARNESS_SET" = 0 ] \
@@ -681,6 +704,28 @@ resolve_relaunch_profile() {
     TARGET_EFFORT=$PRIOR_EFFORT
   else
     TARGET_EFFORT=default
+  fi
+  # The Codex account home is a codex-only axis. An explicit one wins; otherwise
+  # a replacement that stays on codex keeps the account it was running on, and
+  # any other harness has no account to carry. Validated here, on the pre-stop
+  # side, so a signed-out or missing account refuses while the old agent is
+  # still running rather than after it has been stopped for a launch fm-spawn
+  # must refuse (bin/fm-codex-home-lib.sh owns the check).
+  if [ "$CODEX_HOME_SET" = 1 ]; then
+    [ "$KIND" != secondmate ] \
+      || die "--codex-home applies to ship and scout relaunches only; a secondmate launch has no Codex account axis, so relaunching $ID with it would stop the running agent for a launch that must be refused"
+    [ "$TARGET_HARNESS" = codex ] \
+      || die "--codex-home applies only to harness codex; this relaunch targets '$TARGET_HARNESS'"
+    TARGET_CODEX_HOME=$NEW_CODEX_HOME
+  elif [ "$TARGET_HARNESS" = codex ] && [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
+    TARGET_CODEX_HOME=$PRIOR_CODEX_HOME
+  else
+    TARGET_CODEX_HOME=
+  fi
+  if [ -n "$TARGET_CODEX_HOME" ]; then
+    fm_codex_home_validate "$TARGET_CODEX_HOME" \
+      || die "relaunch of $ID refused before its agent was touched: $FM_CODEX_HOME_ERROR"
+    TARGET_CODEX_HOME=$FM_CODEX_HOME_PATH
   fi
 }
 
@@ -832,6 +877,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  [ -z "$TARGET_CODEX_HOME" ] || spawn_args+=(--codex-home "$TARGET_CODEX_HOME")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
@@ -848,7 +894,7 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT${TARGET_CODEX_HOME:+ codex_home=$TARGET_CODEX_HOME} backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
 # --- verbs ------------------------------------------------------------------
