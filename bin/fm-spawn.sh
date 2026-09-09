@@ -14,11 +14,9 @@
 #   scaffolded before that line existed warns once and launches on the flag. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, or an incomplete pair of Task subsections.
-#   For a no-mistakes ship, spawn renders `launch-brief.md` with the current
-#   `--intent` contract and the extracted captain intent. A legacy mixed Task is
-#   accepted there only under bin/fm-dod-lib.sh's provenance-marking rules;
-#   unmarked legacy Tasks stop for migration rather than becoming intent. That
-#   library owns the parsing and intent rules. When the explicit mode carries
+#   A legacy no-mistakes ship receives `launch-brief.md` with a current
+#   direct-PR delivery overlay. Filled legacy Tasks need no pipeline intent
+#   extraction. The original brief remains unchanged. When the explicit mode carries
 #   less rigor than the project's standing posture, a loud one-line deviation
 #   notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
@@ -1816,23 +1814,14 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
     exit 1
   fi
-  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-    if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then
-      CAPTAIN_INTENT=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
-    else
-      LEGACY_TASK_BODY=$(fm_brief_heading_body "$BRIEF" "# Task")
-      CAPTAIN_INTENT=$(fm_brief_marked_captain_words "$LEGACY_TASK_BODY")
-      if [ -z "$(printf '%s' "$CAPTAIN_INTENT" | tr -d '[:space:]')" ]; then
-        echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add Captain: lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
-        exit 1
-      fi
-    fi
+  if [ "$KIND" = ship ] && { [ "$MODE" = no-mistakes ] || grep -qx 'Delivery contract: mode=no-mistakes' "$BRIEF"; }; then
     SOURCE_BRIEF=$BRIEF
     BRIEF="$DATA/$ID/launch-brief.md"
     BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
     {
       cat "$SOURCE_BRIEF"
-      fm_brief_intent_overlay "$CAPTAIN_INTENT"
+      printf '\n# Current delivery instructions\nThese instructions supersede earlier no-mistakes pipeline and --intent instructions.\n'
+      fm_dod_block direct-PR "$ID"
     } > "$BRIEF_TMP" || { rm -f -- "$BRIEF_TMP"; echo "error: could not render current intent contract for $SOURCE_BRIEF" >&2; exit 1; }
     if ! mv "$BRIEF_TMP" "$BRIEF"; then
       rm -f -- "$BRIEF_TMP"
@@ -1842,10 +1831,9 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   fi
 fi
 
-delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
+delivery_rigor_rank() {  # <mode> -> 2 (PR) or 1 (local); 0 = not a task mode
   case "$1" in
-    no-mistakes) echo 3 ;;
-    direct-PR) echo 2 ;;
+    no-mistakes|direct-PR) echo 2 ;;
     local-only) echo 1 ;;
     *) echo 0 ;;
   esac
@@ -1860,7 +1848,7 @@ if [ "$KIND" = ship ]; then
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
-  elif [ "$BRIEF_MODE" != "$MODE" ]; then
+  elif [ "$(delivery_rigor_rank "$BRIEF_MODE")" != "$(delivery_rigor_rank "$MODE")" ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
   fi

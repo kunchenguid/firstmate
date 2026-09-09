@@ -28,10 +28,10 @@ make_home() {  # <name>
 
 # Build the board from <charted-json> and return what the renderer produced.
 render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
-  local home=$1 charted=$2 more=${3:-0} warning_more=${4:-0} data="$1/payload.json"
-  jq -n --argjson charted "$charted" --argjson more "$more" --argjson warning_more "$warning_more" '{
+  local home=$1 charted=$2 more=${3:-0} warning_more=${4:-0} calls=${5:-[]} data="$1/payload.json"
+  jq -n --argjson charted "$charted" --argjson more "$more" --argjson warning_more "$warning_more" --argjson calls "$calls" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:[], landed:[],
+    prs_live:false, captains_call:$calls, underway:[], landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -57,7 +57,7 @@ test_a_warning_row_reads_as_a_repair_not_as_queued_work() {
   printf '%s' "$out" | jq -e '
     (.charted | length) == 2
       and (.charted[0] | .title == "Queued work"
-        and [.badges[] | .text] == ["waiting"] and .pickable == true)
+        and [.badges[] | .text] == ["waiting"] and .pickable == false)
       and (.charted[1] | .title == "Main inventory integrity"
         and [.badges[] | .text] == ["needs repair"]
         and [.badges[] | .tone] == ["danger"]
@@ -128,6 +128,19 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
   pass "an omitted kind renders exactly as queued work always did"
 }
 
+test_read_only_decisions() {
+  local home out
+  home=$(make_home readonly)
+  out=$(render "$home" '[{"id":"queued","repo":"sample","title":"Queued","reason":"","dispatchable":true}]' 0 0 '[
+    {"key":"choice","type":"decision","repo":"sample","title":"Choose a path","options":[{"value":"yes","label":"Proceed"}],"allow_freeform":true},
+    {"key":"review","type":"decision","repo":"sample","title":"Review","options":[{"value":"wait","label":"Wait"}]}
+  ]')
+  printf '%s' "$out" | jq -e '.error == "" and (.calls | length) == 2 and .callControls == [] and (.charted | all(.pickable == false)) and (.calls[0] | contains("Reply in chat"))' >/dev/null \
+    || fail "read-only board lost decisions or offered nonfunctional controls: $out"
+  pass "read-only board renders decisions and queued work without answer or dispatch controls"
+}
+
+test_read_only_decisions
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued

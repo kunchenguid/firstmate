@@ -14,7 +14,7 @@ metadata:
 Generate a complete current snapshot from the fleet's current state, so the captain can resume in one read after a break, a night, or a context reset.
 Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
-Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
+Only `/bearings lavish` builds the read-only fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
 A digest/build invocation is operationally read-only apart from observational remote-ledger cache refreshes, durable per-target reconcile-notify requests when the captured state needs them, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the local HTML board file.
 During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state.
 Captain answers stay in chat.
@@ -83,16 +83,17 @@ Captain answers stay in chat.
 ## Lavish board mode
 
 `/bearings lavish` adds one deliverable beside the unchanged chat digest: a local HTML fleet board the captain can open in a browser.
-Answers stay in chat; this home does not run lavish-axi or arm a board poll.
+The board is a read-only snapshot, not a live control panel; answers and dispatch requests stay in chat.
+This home does not run lavish-axi or arm a board poll.
 `bin/fm-bearings-board.sh` owns the stable board path, fm-bearings-board.v1 payload validation, and template injection, so the per-invocation work is composing the payload and running its `build`.
 
 Compose the payload from the same snapshot with the same ranking judgment as the chat digest, plus these board rules:
 
-- A Captain's Call decision key is the captain-held TASK ID from `decisions_open` (legacy `<origin>-decision-<key>` rows are already task ids); a merge card's key is `merge.<task-id>`; the Charted Next dispatch picker's key is `dispatch.charted`.
+- A Captain's Call decision key is the captain-held TASK ID from `decisions_open` (legacy `<origin>-decision-<key>` rows are already task ids); a merge card's key is `merge.<task-id>`.
 - Compose exactly one decision card per captain-held task id. When one task carries multiple questions, consolidate all of them and their options into that card; never emit duplicate cards with the same task-id key.
 - Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
 - Card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
-- When the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it), set the card's `close: "release"` so the answer lifts the hold instead of closing the task; question-shaped items omit it.
+- Cards are display-only; any answer, release, or dispatch is handled in chat through the ordinary lifecycle commands.
 - A Charted Next row's optional `kind` separates work from alarms: omit it (or set `"queued"`) for real queued work, and set `"warning"` on every action-free fleet-integrity notice - the `(main-inventory)` gate, an unavailable secondmate home, and an inventory-mismatch repair notice. The board badges a warning row `needs repair` instead of `waiting` and leaves it out of the Charted Next count, so those rows never read as dispatchable queued work.
 - `charted_more` counts omitted queued rows only, while `charted_warning_more` counts omitted warning rows only; keep both counts separate whenever the board payload truncates Charted Next.
 - Every Captain's Call item and every Underway, Recently Landed, and Charted Next row carries an explicit `repo` field. Fill it from the snapshot and task records wherever known; use null or an empty string only as the deliberate genuinely-no-repo marker, in which case the template may show the internal id. Ids otherwise stay in the payload only as the routing channel, and composed reasons name blockers in plain words.

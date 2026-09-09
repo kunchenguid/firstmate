@@ -2,24 +2,15 @@
 # Single owner of a ship task's mode-specific "Definition of done" block.
 # Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
 # bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
-# receives. Both paths must hand the worker the same contract: a promoted
-# no-mistakes worker that never received the ask-user escalation rule or the
-# `--yes` ban is the exact delivery hole this single owner exists to close.
+# receives. Both paths hand the worker the same delivery and verification contract.
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
-# This file is the one owner of the no-mistakes `--intent` contract: only the
-# brief's `## Captain's intent` subsection plus later captain words, never
-# `## Firstmate spec` and never the worker's own tradeoffs.
-# The string passed must be self-sufficient - it plus the codebase reconstructs
-# roughly the same specification - so a report, decision, or PR the intent
-# refers to is written into it as substance, never left as a pointer.
-# bin/fm-brief.sh scaffolds those two `# Task` subsections; bin/fm-spawn.sh and
-# bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
-# through the helpers below. Other mentions of `--intent` point here rather than
-# restating the rule.
+# bin/fm-brief.sh scaffolds the two Task subsections; bin/fm-spawn.sh and
+# bin/fm-promote.sh refuse leftover placeholders through the helpers below.
+# no-mistakes remains a compatibility token and delivers through direct-PR.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 
@@ -129,22 +120,6 @@ fm_brief_marked_captain_words() {  # <task-body>
   '
 }
 
-fm_brief_intent_overlay() {  # <captain-intent>
-  cat <<'EOF'
-
-# Current no-mistakes intent contract
-This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
-Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
-
-## Captain intent authorized for --intent
-EOF
-  printf '%s\n' "$1"
-  cat <<'EOF'
-
-Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
-The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent above refers to into its substance rather than passing the pointer.
-EOF
-}
 
 # Accept the current two-subsection contract only when both bodies have content;
 # briefs predating that contract remain valid when their # Task body has content.
@@ -183,6 +158,7 @@ fm_dod_block() {  # <mode> <task-id>
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
+Run the project's relevant tests and lint checks before reporting ready; report the commands, results, and anything you could not verify.
 When it is implemented and committed, push your branch and open a PR with \`gh\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
@@ -193,6 +169,7 @@ EOF
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
+Run the project's relevant tests and lint checks before reporting ready; report the commands, results, and anything you could not verify.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
@@ -205,6 +182,7 @@ Delivery contract: mode=no-mistakes
 This home does not run the no-mistakes pipeline.
 Ship the same way as direct-PR: you raise the PR yourself with \`gh\`.
 The task is complete only when committed on your branch.
+Run the project's relevant tests and lint checks before reporting ready; report the commands, results, and anything you could not verify.
 When it is implemented and committed, push your branch and open a PR with \`gh\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF

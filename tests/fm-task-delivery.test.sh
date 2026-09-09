@@ -133,12 +133,12 @@ test_spawn_refuses_a_brief_mode_mismatch() {
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
-  write_brief "$home" delivery-mismatch-b1 no-mistakes
+  write_brief "$home" delivery-mismatch-b1 local-only
   out=$(run_spawn "$home" "$fakebin" delivery-mismatch-b1 "$proj" claude --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a brief/spawn mode mismatch should exit non-zero"
   assert_contains "$out" "delivery mismatch for delivery-mismatch-b1" "mismatch refusal did not name the task"
-  assert_contains "$out" "the brief says mode=no-mistakes but this spawn passed --mode direct-PR" \
+  assert_contains "$out" "the brief says mode=local-only but this spawn passed --mode direct-PR" \
     "mismatch refusal did not show both sides of the disagreement"
   assert_absent "$home/state/delivery-mismatch-b1.meta" "mismatched spawn wrote task metadata"
 
@@ -182,7 +182,7 @@ EOF
           "$label: printed a deviation notice that is not a downgrade" ;;
     esac
   done <<'ROWS'
-no-mistakes project shipped direct-PR|- proj [no-mistakes] - fixture (added 2026-01-01)|direct-PR|notice|no-mistakes
+no-mistakes project shipped direct-PR|- proj [no-mistakes] - fixture (added 2026-01-01)|direct-PR|quiet|no-mistakes
 no-mistakes project shipped local-only|- proj [no-mistakes] - fixture (added 2026-01-01)|local-only|notice|no-mistakes
 no-mistakes project shipped no-mistakes|- proj [no-mistakes] - fixture (added 2026-01-01)|no-mistakes|quiet|no-mistakes
 local-only project shipped no-mistakes|- proj [local-only] - fixture (added 2026-01-01)|no-mistakes|quiet|local-only
@@ -431,7 +431,7 @@ EOF
 # public brief/spawn/promote path. Filling both subsections lets the spawn
 # delivery checks proceed (the fake tmux still fails later).
 test_spawn_and_promote_require_filled_task_subsections() {
-  local rec home proj fakebin out status id brief meta intent_body spec_body authorized
+  local rec home proj fakebin out status id brief meta intent_body spec_body mode
   rec=$(make_home subsections)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
@@ -485,88 +485,29 @@ EOF
   assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
     "fenced example headings made a filled legacy Task look unfilled"
 
-  id=delivery-legacy-no-mistakes
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
-# Task
-Captain: Fix the legacy dispatch boundary.
-Do not copy this Firstmate-authored constraint into intent.
-
-# Definition of done
-Delivery contract: mode=no-mistakes
-Pass the entire Task as --intent.
-EOF
-  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
-  assert_not_contains "$out" "has no provenance-marked captain words" \
-    "legacy no-mistakes spawn rejected explicitly marked captain words"
-  assert_present "$home/data/$id/launch-brief.md" \
-    "marked legacy spawn did not render a current launch contract"
-  assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
-    "$home/data/$id/launch-brief.md" \
-    "marked legacy spawn did not override its stale intent instruction"
-  assert_grep "plus any later words the captain actually supplied" \
-    "$home/data/$id/launch-brief.md" \
-    "marked legacy launch contract excluded later captain clarifications"
-  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
-  assert_contains "$authorized" "Fix the legacy dispatch boundary." \
-    "marked legacy launch contract omitted captain words"
-  assert_not_contains "$authorized" "Firstmate-authored constraint" \
-    "marked legacy launch contract included mixed Task specification"
-
-  id=delivery-migrated-stale-no-mistakes
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
-# Task
-## Captain's intent
-Fix the migrated dispatch boundary.
-
-## Firstmate spec
-Preserve the existing compatibility path.
-
-# Definition of done
-Delivery contract: mode=no-mistakes
-Pass the entire Task and every Firstmate requirement as --intent.
-EOF
-  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
-  assert_present "$home/data/$id/launch-brief.md" \
-    "migrated subsection brief did not receive the current launch contract"
-  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
-  assert_contains "$authorized" "Fix the migrated dispatch boundary." \
-    "migrated launch contract omitted Captain's intent"
-  assert_not_contains "$authorized" "Preserve the existing compatibility path." \
-    "migrated launch contract included Firstmate spec in intent"
-  assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
-    "$home/data/$id/launch-brief.md" \
-    "migrated launch contract did not supersede its stale mixed-Task DoD"
-  assert_grep "plus any later words the captain actually supplied" \
-    "$home/data/$id/launch-brief.md" \
-    "migrated launch contract excluded later captain clarifications"
-  assert_grep "The Definition of done's rule that \`--intent\` must be self-sufficient still governs" \
-    "$home/data/$id/launch-brief.md" \
-    "migrated launch contract's overlay dropped the self-sufficiency pointer"
-
-  id=delivery-legacy-unmarked-no-mistakes
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  # Both legacy spellings must launch on the direct-PR contract.
+  for mode in no-mistakes direct-PR; do
+    id="delivery-legacy-alias-$mode"
+    mkdir -p "$home/data/$id"
+    cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
 Fix the legacy dispatch boundary.
-Do not copy this Firstmate-authored constraint into intent.
+Preserve this specification without pipeline intent provenance.
 
 # Definition of done
 Delivery contract: mode=no-mistakes
-
-# Notes
-## Captain's intent
-Unrelated notes must not become task intent.
-## Firstmate spec
-Unrelated notes must not satisfy task validation.
+Pass the entire Task as --intent and run /no-mistakes.
 EOF
-  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
-  status=$?
-  [ "$status" -ne 0 ] || fail "unmarked legacy no-mistakes spawn should require provenance"
-  assert_contains "$out" "has no provenance-marked captain words" \
-    "unmarked legacy no-mistakes spawn did not explain the missing intent provenance"
-  assert_absent "$home/state/$id.meta" "unmarked legacy no-mistakes spawn wrote task metadata"
+    out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode "$mode" --yolo off)
+    assert_not_contains "$out" 'delivery mismatch' 'equivalent legacy mode was refused'
+    assert_not_contains "$out" 'has no provenance-marked' 'legacy mode still required pipeline provenance'
+    assert_present "$home/data/$id/launch-brief.md" 'legacy mode did not receive an updated contract'
+    assert_grep 'Fix the legacy dispatch boundary.' "$home/data/$id/launch-brief.md" 'task text was lost'
+    assert_grep 'supersede earlier no-mistakes pipeline' "$home/data/$id/launch-brief.md" 'stale pipeline instructions were not superseded'
+    assert_grep 'Delivery contract: mode=direct-PR' "$home/data/$id/launch-brief.md" 'effective delivery was not direct-PR'
+    assert_grep 'Do NOT run /no-mistakes' "$home/data/$id/launch-brief.md" 'legacy launch re-enabled pipeline'
+    assert_no_grep 'Current delivery instructions' "$home/data/$id/brief.md" 'original brief was modified'
+  done
 
   id=delivery-unfilled-scout
   FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \

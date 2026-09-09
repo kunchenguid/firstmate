@@ -200,38 +200,16 @@ a { color: inherit; text-decoration: none; }
 .bb-ctx__v { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4; min-width: 0; }
 .bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .bb-decision__link:hover { text-decoration: underline; }
-/* One rhythm owner: the answer form is a flex column with the same 12px gap as
-   the card pad, and the foot rides margin-top:auto so every Queue answer button
-   sits on the same baseline with identical breathing room. */
-.bb-decision form { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; }
+/* Decision options are descriptive, not selectable controls. */
 .bb-opts { display: flex; flex-direction: column; gap: 7px; }
-.bb-opt {
-  display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px; cursor: pointer;
-  background: var(--surface-card-warm); border: 1.5px solid var(--border-default);
-  border-radius: var(--radius-sm); transition: border-color 120ms, background 120ms;
-}
-.bb-opt:hover { border-color: var(--ink-300); }
-.bb-opt input { accent-color: var(--rust-500); margin-top: 3px; flex: none; }
+
 .bb-opt__body { min-width: 0; flex: 1 1 auto; }
 .bb-opt__label { display: block; font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); line-height: 1.3; }
 .bb-opt__hint { display: block; font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.35; margin-top: 1px; }
 .bb-opt__rec { flex: none; align-self: center; font-size: var(--fs-2xs); font-weight: 800; text-transform: uppercase;
   letter-spacing: 0.07em; color: var(--navy-700); background: var(--gold-300);
   border: 1px solid var(--gold-600); border-radius: var(--radius-xs); padding: 3px 7px 2px; }
-.bb-opt:has(input:checked) { border-color: var(--rust-500); background: var(--rust-050); box-shadow: inset 0 0 0 1px var(--rust-500); }
-.bb-decision__foot { display: flex; align-items: center; gap: 10px; margin-top: auto; }
-.bb-queued {
-  display: none; align-items: center; gap: 6px;
-  font-size: var(--fs-2xs); font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em;
-  color: var(--sea-700); background: var(--sea-050); border: 1.5px solid var(--sea-200);
-  border-radius: var(--radius-xs); padding: 5px 9px 4px;
-}
-.is-queued .bb-queued { display: inline-flex; }
-.bb-limit { display: none; font-size: var(--fs-xs); font-weight: 700; color: var(--status-danger); }
-.bb-limit.is-visible { display: inline; }
-.bb-freeform { width: 100%; font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--text-strong);
-  background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
-.bb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
+
 
 /* ---- compact rows (Underway / Landed / Charted) ---- */
 .bb-rows { display: flex; flex-direction: column; }
@@ -258,17 +236,7 @@ a { color: inherit; text-decoration: none; }
 }
 .bb-empty { padding: 18px; font-size: var(--fs-sm); color: var(--text-muted); }
 
-/* ---- Charted Next dispatch picker ---- */
-/* margin:0 kills the UA default checkbox margin so picker rows and spacer rows
-   share one text left edge */
-.bb-pick { accent-color: var(--rust-500); width: 16px; height: 16px; flex: none; cursor: pointer; margin: 0; }
 .bb-pick-spacer { width: 16px; flex: none; }
-.bb-dispatch {
-  display: flex; align-items: center; gap: 12px; padding: 12px 18px;
-  border-top: 1.5px solid var(--border-default); background: var(--paper-100);
-}
-.bb-dispatch__count { flex: 1 1 auto; font-size: var(--fs-xs); font-weight: 800; color: var(--text-muted);
-  text-transform: uppercase; letter-spacing: 0.07em; }
 
 .bb-foot { display: flex; justify-content: flex-end; border-top: 1px solid var(--border-default); padding-top: 14px; }
 
@@ -293,6 +261,7 @@ a { color: inherit; text-decoration: none; }
 </header>
 
 <main class="bb-main">
+  <p class="bb-decision__detail" id="bb-readonly">Read-only snapshot. Reply in chat to answer decisions or request dispatch. Rebuild the board to refresh it.</p>
 
   <div class="bb-stats" id="bb-stats"></div>
 
@@ -331,14 +300,7 @@ a { color: inherit; text-decoration: none; }
     </div>
     <div class="fm-card fm-card--warm">
       <div class="bb-rows" id="bb-charted"></div>
-      <div class="bb-dispatch" id="bb-dispatch" hidden>
-        <span class="bb-dispatch__count" id="bb-dispatch-count">nothing picked</span>
-        <span class="bb-queued" id="bb-dispatch-queued">
-          <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-          queued
-        </span>
-        <button type="button" class="fm-btn fm-btn--sm fm-btn--gold" id="bb-dispatch-btn">Queue dispatch order</button>
-      </div>
+
     </div>
   </section>
   </div>
@@ -441,8 +403,8 @@ __FM_BEARINGS_BOARD_DATA__
   function chartedQueued(rows) { return (rows || []).filter(function (t) { return !isWarning(t); }); }
   var chartedMoreQueued = data.charted_more || 0;
   var chartedMoreWarnings = data.charted_warning_more || 0;
-  function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
-  var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+
+
 
   document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
 
@@ -504,75 +466,18 @@ __FM_BEARINGS_BOARD_DATA__
       pad.appendChild(ctx);
     }
 
-    var form = document.createElement("form");
-    form.setAttribute("data-lavish-question", item.key);
     var opts = el("div", "bb-opts");
     item.options.forEach(function (o) {
-      var lab = el("label", "bb-opt");
-      var input = document.createElement("input");
-      input.type = "radio"; input.name = "answer"; input.value = o.value;
-      lab.appendChild(input);
-      var body = el("span", "bb-opt__body");
+      var body = el("div", "bb-opt__body");
       body.appendChild(el("span", "bb-opt__label", o.label));
       if (o.hint) body.appendChild(el("span", "bb-opt__hint", o.hint));
-      lab.appendChild(body);
       if (item.recommend_value && o.value === item.recommend_value) {
-        lab.appendChild(el("span", "bb-opt__rec", "rec"));
+        body.appendChild(el("span", "bb-opt__rec", "rec"));
       }
-      opts.appendChild(lab);
+      opts.appendChild(body);
     });
-    form.appendChild(opts);
-
-    if (item.allow_freeform) {
-      var ff = document.createElement("input");
-      ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
-      ff.placeholder = item.freeform_hint || "or answer in your own words…";
-      form.appendChild(ff);
-    }
-
-    var foot = el("div", "bb-decision__foot");
-    var btn = el("button", "fm-btn fm-btn--sm " + (item.type === "merge" ? "fm-btn--gold" : "fm-btn--primary"), "Queue answer");
-    btn.type = "submit";
-    foot.appendChild(btn);
-    var q = el("span", "bb-queued");
-    q.innerHTML = CHECK_SVG + " queued";
-    foot.appendChild(q);
-    var answerLimit = el("span", "bb-limit");
-    answerLimit.setAttribute("role", "alert");
-    foot.appendChild(answerLimit);
-    form.appendChild(foot);
-
-    form.addEventListener("submit", function (ev) {
-      ev.preventDefault();
-      answerLimit.classList.remove("is-visible");
-      var fd = new FormData(form);
-      var value = fd.get("answer");
-      var note = (fd.get("note") || "").trim();
-      /* picked option, optionally annotated; a bare note is itself the answer */
-      var answer = value ? (note ? value + " - " + note : value) : note;
-      if (!answer) return;
-      if (utf8ByteLength(answer) > 512) {
-        answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
-        answerLimit.classList.add("is-visible");
-        return;
-      }
-      if (window.lavish && window.lavish.queuePrompt) {
-        /* close carries the composer-declared close mode: "release" frees a
-           captain-gated work item instead of completing a question task */
-        var ctxData = { question: item.key, answer: answer };
-        if (item.close) ctxData.close = item.close;
-        window.lavish.queuePrompt(
-          "Captain's Call answer - " + item.title + ": " + answer,
-          { tag: "choice", text: item.title + " -> " + answer, element: form,
-            data: ctxData }
-        );
-      }
-      card.classList.add("is-queued");
-      /* deal the next card once this one is answered */
-      setTimeout(function () { showCard(active < cards.length - 1 ? active + 1 : active); }, 450);
-    });
-
-    pad.appendChild(form);
+    pad.appendChild(opts);
+    pad.appendChild(el("p", "bb-decision__detail", "Reply in chat about " + item.title + "."));
     card.appendChild(pad);
     deck.appendChild(card);
   });
@@ -587,9 +492,7 @@ __FM_BEARINGS_BOARD_DATA__
   function showCard(i) {
     active = Math.max(0, Math.min(cards.length - 1, i));
     cards.forEach(function (c, j) { c.hidden = j !== active; });
-    var answered = deck.querySelectorAll(".is-queued").length;
-    stackCount.textContent = "card " + (active + 1) + " of " + cards.length +
-      (answered ? " · " + answered + " answered" : "");
+    stackCount.textContent = "card " + (active + 1) + " of " + cards.length;
     stackPrev.disabled = active === 0;
     stackNext.disabled = active === cards.length - 1;
     /* the pile thins as the deal approaches the bottom */
@@ -641,44 +544,15 @@ __FM_BEARINGS_BOARD_DATA__
     ld.appendChild(row);
   });
 
-  /* Charted Next + dispatch picker */
+  /* Charted Next: display only; dispatch requests belong in chat. */
   var ch = document.getElementById("bb-charted");
-  var bar = document.getElementById("bb-dispatch");
-  var barCount = document.getElementById("bb-dispatch-count");
-  var barBtn = document.getElementById("bb-dispatch-btn");
-  var anyPickable = false;
-
-  function pickedIds() {
-    return Array.prototype.map.call(ch.querySelectorAll(".bb-pick:checked"), function (c) { return c.value; });
-  }
-  function refreshBar(limitMessage) {
-    var n = pickedIds().length;
-    barCount.textContent = limitMessage || (n ? n + " picked for dispatch" : "pick queued work to dispatch");
-    barBtn.disabled = !n;
-  }
 
   if (!chartedQueued(data.charted).length && !chartedMoreQueued) {
     ch.appendChild(el("div", "bb-empty", "Nothing is queued."));
   }
   data.charted.forEach(function (t) {
     var row = el("div", "bb-row");
-    if (t.dispatchable && !isWarning(t)) {
-      anyPickable = true;
-      var pick = document.createElement("input");
-      pick.type = "checkbox"; pick.className = "bb-pick"; pick.value = t.id;
-      pick.setAttribute("aria-label", "Pick " + t.id + " for dispatch");
-      pick.addEventListener("change", function () {
-        if (pick.checked && utf8ByteLength(pickedIds().join(",")) > 512) {
-          pick.checked = false;
-          refreshBar("Selection limit reached (512 bytes maximum). ");
-          return;
-        }
-        refreshBar();
-      });
-      row.appendChild(pick);
-    } else {
-      row.appendChild(el("span", "bb-pick-spacer"));
-    }
+    row.appendChild(el("span", "bb-pick-spacer"));
     var main = el("div", "bb-row__main");
     main.appendChild(el("div", "bb-row__title", t.title));
     /* second line keeps the title uncrowded in the half-width column */
@@ -700,28 +574,6 @@ __FM_BEARINGS_BOARD_DATA__
     ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreWarnings + " more repair warning" + (chartedMoreWarnings === 1 ? "" : "s") + " - ask firstmate for the full chart"));
   }
 
-  if (anyPickable) {
-    bar.hidden = false;
-    refreshBar();
-    barBtn.addEventListener("click", function () {
-      var ids = pickedIds();
-      var dispatchAnswer = ids.join(",");
-      if (!ids.length) return;
-      if (utf8ByteLength(dispatchAnswer) > 512) {
-        refreshBar("Selection is too long to queue (512 bytes maximum). ");
-        return;
-      }
-      if (window.lavish && window.lavish.queuePrompt) {
-        window.lavish.queuePrompt(
-          "Dispatch order - start this queued work now: " + ids.join(", "),
-          { tag: "choice", text: "Dispatch: " + ids.join(", "), element: bar,
-            queueKey: "dispatch.charted",
-            data: { question: "dispatch.charted", answer: dispatchAnswer } }
-        );
-      }
-      bar.classList.add("is-queued");
-    });
-  }
   } catch (e) {
     renderBoardError("The board data could not be rendered");
   }

@@ -77,6 +77,7 @@ fm_git_identity fmtest fmtest@example.invalid
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
 BASE_PATH=$PATH
+REAL_GH=$(command -v gh || true)
 
 # The GitLab fixture. A placeholder host that resolves nowhere, and a namespace
 # deeper than one group, because a GitLab project has no owner/repository pair.
@@ -144,8 +145,8 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
-      *--json*)
-        cat "\$FM_TEST_GH_OUTCOME"
+      *' --json state,baseRefName '*)
+        sed -n '/^state=/p;/^base=/p' "\$FM_TEST_GH_OUTCOME"
         exit 0
         ;;
     esac
@@ -444,8 +445,8 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *headRefOid*) printf '%s\n' '5151515151515151515151515151515151515151' ; exit 0 ;;
-      *--json*)
-        cat "$FM_TEST_GH_OUTCOME"
+      *' --json state,baseRefName '*)
+        sed -n '/^state=/p;/^base=/p' "$FM_TEST_GH_OUTCOME"
         exit 0
         ;;
     esac
@@ -619,8 +620,8 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *headRefOid*) printf '%s\n' '6161616161616161616161616161616161616161' ; exit 0 ;;
-      *--json*)
-        cat "$FM_TEST_GH_OUTCOME"
+      *' --json state,baseRefName '*)
+        sed -n '/^state=/p;/^base=/p' "$FM_TEST_GH_OUTCOME"
         exit 0
         ;;
     esac
@@ -1021,8 +1022,8 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *headRefOid*) printf '%s\n' '5151515151515151515151515151515151515151' ; exit 0 ;;
-      *--json*)
-        cat "$FM_TEST_GH_OUTCOME"
+      *' --json state,baseRefName '*)
+        sed -n '/^state=/p;/^base=/p' "$FM_TEST_GH_OUTCOME"
         exit 0
         ;;
     esac
@@ -1052,6 +1053,32 @@ SH
     "$case_dir/stdout" "github-gh-read-falls-back: the proven merge was not reported"
   assert_grep 'pr=https://github.com/example/repo/pull/63' "$case_dir/state/task-x1.meta" \
     "github-gh-read-falls-back: the merged PR was not recorded for teardown"
+  if [ -n "$REAL_GH" ]; then
+    # gh prints its supported JSON fields without an API request when --json
+    # has no value. Check the actual emitted field list, not just the mock.
+    local fields supported field
+    fields=$(awk '{ for (i=1;i<NF;i++) if ($i == "--json" && $(i+1) != "headRefOid") print $(i+1) }' "$case_dir/gh.log" | tail -1)
+    supported=$("$REAL_GH" pr view --json 2>&1 || true)
+    for field in ${fields//,/ }; do
+      printf '%s\n' "$supported" | grep -qx "  $field" \
+        || fail "fallback requested a field the installed gh does not support: $field"
+    done
+  fi
+  # A readable OPEN/CLOSED fallback must not invent queue visibility or report
+  # success. The same mock rejects the old unsupported JSON-field selection.
+  local fallback_state
+  for fallback_state in OPEN CLOSED; do
+    write_github_outcome "$case_dir" "$fallback_state" false false main
+    rc=0
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/63 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 1 "$rc" "unmerged fallback must refuse"
+    assert_grep "state=$fallback_state, merged=false, isInMergeQueue=unknown" "$case_dir/stderr" 'fallback pretended to observe the queue'
+    if [ "$fallback_state" = OPEN ]; then
+      assert_grep 'could not be observed' "$case_dir/stderr" 'open fallback omitted the queue visibility warning'
+    fi
+    assert_no_grep 'verified:' "$case_dir/stdout" 'unmerged fallback reported success'
+  done
   pass "fm-pr-merge falls back to gh pr view when GraphQL fails"
 }
 
@@ -1508,6 +1535,14 @@ test_explicit_merge_method_not_overridden() {
 
   grep -qxF 'pr merge 22 --repo example/repo --merge' "$case_dir/gh-axi.log" \
     || fail "explicit-merge-method: caller --merge was not forwarded without an extra default --squash"
+  local flag
+  for flag in -m -r -s; do
+    : > "$case_dir/gh-axi.log"
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/22 -- "$flag" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || fail 'short strategy flag was refused'
+    grep -qxF "pr merge 22 --repo example/repo $flag" "$case_dir/gh-axi.log" \
+      || fail 'short strategy flag received an extra default --squash'
+  done
   pass "fm-pr-merge does not add default --squash when the caller passes an explicit merge method"
 }
 
@@ -1521,8 +1556,34 @@ test_method_equals_merge_method_not_overridden() {
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/23 -- --method=merge \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "method-equals-merge-method: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 23 --repo example/repo --method=merge' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 23 --repo example/repo --merge' "$case_dir/gh-axi.log" \
     || fail "method-equals-merge-method: caller --method=merge was not forwarded without an extra default --squash"
+  if [ -n "$REAL_GH" ]; then
+    # Fixture-controlled words only; --help validates flags without a merge.
+    local -a emitted
+    read -r -a emitted < "$case_dir/gh-axi.log"
+    "$REAL_GH" "${emitted[@]}" --help >/dev/null \
+      || fail "translated merge arguments are not accepted by the installed gh"
+  fi
+  local method rc
+  for method in squash rebase; do
+    : > "$case_dir/gh-axi.log"
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/23 -- --method "$method" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || fail 'split --method failed'
+    grep -qxF "pr merge 23 --repo example/repo --$method" "$case_dir/gh-axi.log" \
+      || fail 'split --method was not translated'
+  done
+  : > "$case_dir/gh.log"
+  rc=0
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/23 -- --method invalid \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" 'invalid --method must refuse before any forge call'
+  [ ! -s "$case_dir/gh.log" ] || fail 'invalid --method contacted the forge'
+  rc=0
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/23 -- --method \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" 'missing --method value must refuse'
+  [ ! -s "$case_dir/gh.log" ] || fail 'missing --method value contacted the forge'
   pass "fm-pr-merge respects --method=<value> as an explicit merge method"
 }
 
@@ -1851,7 +1912,7 @@ test_github_still_forwards_sha_arg() {
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/44 -- --sha abc123 \
     > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "github-sha-arg: fm-pr-merge failed"
 
-  grep -qxF 'pr merge 44 --repo example/repo --squash --sha abc123' "$case_dir/gh-axi.log" \
+  grep -qxF 'pr merge 44 --repo example/repo --squash --match-head-commit abc123' "$case_dir/gh-axi.log" \
     || fail "github-sha-arg: the GitHub path stopped forwarding a caller --sha"
   pass "fm-pr-merge leaves GitHub extra-arg handling unchanged, including --sha"
 }

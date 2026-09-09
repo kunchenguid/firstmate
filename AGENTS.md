@@ -349,6 +349,7 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 ### Validate
 
 For a `direct-PR` ship (including a `no-mistakes` token remapped to that path), the worker pushes the branch and opens the PR with `gh` after its implementation commit, then reports `done: PR <url>`.
+The worker's verification contract is owned by `bin/fm-dod-lib.sh`; removing the pipeline does not remove project tests, lint, or accurate reporting of unverified behavior.
 Do not invoke no-mistakes.
 When the captain adds or changes an ask mid-task, append the captain's words to that brief's `## Captain's intent` and steer the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
 Once the PR is open, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work.

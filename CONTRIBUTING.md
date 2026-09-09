@@ -3,7 +3,16 @@
 Thanks for wanting to contribute.
 One rule up front:
 
-**Human-authored pull requests targeting `main` must be raised through [`no-mistakes`](https://github.com/kunchenguid/no-mistakes).**
+This fork supports local use and ordinary Git pushes to a personal repository without no-mistakes, gh-axi, chrome-devtools-axi, or lavish-axi.
+Use the development checks below and standard `git` / `gh` commands; tasks-axi and quota-axi remain required runtime tools.
+The upstream submission instructions and `Require no-mistakes` workflow below are retained for upstream compatibility, not as local setup requirements.
+Pushing this fork needs no pipeline, but PRs to `main` in a repository running the inherited workflow still need its attestation unless that repository's owner separately changes the gate.
+This fork does not remove preexisting global agent hooks, Git hooks, proxy remotes, or running validation jobs.
+Legacy run reconciliation and teardown safeguards remain to avoid abandoning existing work; they are not instructions to start new pipeline runs.
+For day-to-day operation, use a standalone clone with these changes on its local default branch; a feature-branch worktree can trigger Firstmate's checkout-repair policy.
+Keep the original installation and its private fleet state separate during the initial trial.
+
+**Upstream human-authored pull requests targeting `main` must be raised through [`no-mistakes`](https://github.com/kunchenguid/no-mistakes).**
 We require this to reduce the maintainer's burden of reviewing and merging contributions.
 
 `no-mistakes` puts a local git proxy in front of your real remote.
@@ -61,7 +70,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 
 ## Development
 
-Tracked changes to firstmate itself - `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and `skills/` - ship through the `no-mistakes` pipeline on a feature branch and require an explicit merge approval.
+Tracked changes to this local fork ship on a feature branch through the direct-PR or local-only path and require the configured merge approval.
+The no-mistakes pipeline applies only when submitting upstream under the instructions above.
 Before making any such change, load the agent-only `firstmate-coding-guidelines` skill (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
 It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after each diet pass.
 There is no reliable way for `bin/fm-brief.sh`'s scaffold to detect that a task's repo is firstmate itself, so firstmate adds this skill's load line to firstmate-repo briefs by hand.

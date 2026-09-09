@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fm-bearings-board.sh - build the /bearings local HTML fleet board.
 #
-# The board is the captain-facing interactive surface of /bearings lavish: the
+# The board is the captain-facing read-only surface of /bearings lavish: the
 # shipped template (.agents/skills/bearings/assets/board-template.html) plus one
 # injected fm-bearings-board.v1 JSON payload. This script owns the mechanics so
 # the invoking agent's per-run work stays "compose the JSON, run build" - the
@@ -29,8 +29,8 @@
 # existing board is touched.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
-# re-invocation rebuilds the same file in place, which keeps the same Lavish
-# session URL and the same canonical process-event source id. Injection escapes
+# re-invocation rebuilds the same file in place. The directory name is retained
+# for path compatibility only; there is no Lavish session or polling. Injection escapes
 # every `<` in the compact JSON as the \u003c string escape, so a payload string
 # containing "</script>" can never terminate the data block early.
 #
@@ -129,7 +129,7 @@ validate_payload() {  # <data.json>
 }
 
 command_build() {
-  local data=${1-} board json tmp sid extracted
+  local data=${1-} board json tmp extracted
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"

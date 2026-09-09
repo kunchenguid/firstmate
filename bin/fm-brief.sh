@@ -7,8 +7,8 @@
 # own ask plus the context needed to read it, including the substance of any
 # report, decision, or PR the ask refers to) and `{FIRSTMATE_SPEC}`
 # under `## Firstmate spec` (build instructions, which are never the captain's
-# intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
-# subsections feed; bin/fm-spawn.sh refuses leftover placeholders. Secondmate
+# intent). bin/fm-dod-lib.sh owns the delivery and verification contract;
+# bin/fm-spawn.sh refuses leftover placeholders. Secondmate
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).

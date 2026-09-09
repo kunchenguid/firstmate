@@ -24,6 +24,8 @@
   <img alt="firstmate - talk to one agent, ship with a crew" src="assets/banner.png" width="100%" />
 </p>
 
+Local fork: required extras have been removed; see [local-use scope and upstream contribution limits](CONTRIBUTING.md) before setup or publishing.
+
 ## What it is
 
 You can run one coding agent easily.

@@ -8,6 +8,8 @@
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
+# Legacy --method <merge|squash|rebase> (including =value) is translated to gh's
+# strategy flags; --sha is translated to --match-head-commit on GitHub only.
 # The gh merge always performs the merge; the outcome read that
 # follows it never becomes a prerequisite for reaching that call. After
 # gh returns success, GitHub's live state is read back and accepted only
@@ -105,7 +107,7 @@ caller_has_merge_method() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --squash|--merge|--rebase|--method|--method=*) return 0 ;;
+      --squash|-s|--merge|-m|--rebase|-r|--method|--method=*) return 0 ;;
     esac
   done
   return 1
@@ -122,9 +124,9 @@ caller_merge_method() {
       continue
     fi
     case "$arg" in
-      --squash) method=squash ;;
-      --merge) method=merge ;;
-      --rebase) method=rebase ;;
+      --squash|-s) method=squash ;;
+      --merge|-m) method=merge ;;
+      --rebase|-r) method=rebase ;;
       --method) pending=true ;;
       --method=*) method=${arg#--method=} ;;
     esac
@@ -185,6 +187,34 @@ reject_head_overrides() {
 
 reject_repo_overrides "$@" || exit 1
 [ "$PROVIDER" != gitlab ] || reject_head_overrides "$@" || exit 1
+
+# Preserve the former wrapper's method/head spellings at the CLI boundary.
+# Validate before recording metadata or attempting a merge.
+if [ "$PROVIDER" = github ]; then
+  github_args=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --method|--method=*)
+        if [ "$1" = --method ]; then
+          [ "$#" -ge 2 ] || { echo 'error: --method requires merge, squash, or rebase' >&2; exit 1; }
+          shift
+          method=$1
+        else
+          method=${1#--method=}
+        fi
+        case "$method" in
+          merge|squash|rebase) github_args+=("--$method") ;;
+          *) echo 'error: --method requires merge, squash, or rebase' >&2; exit 1 ;;
+        esac
+        ;;
+      --sha) github_args+=(--match-head-commit) ;;
+      --sha=*) github_args+=("--match-head-commit=${1#--sha=}") ;;
+      *) github_args+=("$1") ;;
+    esac
+    shift
+  done
+  set -- "${github_args[@]+"${github_args[@]}"}"
+fi
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -369,39 +399,35 @@ FIELDS
 github_read_outcome_with_gh_pr_view() {
   local fields line
   local total=0 named=0
-  local state='' merged='' queued='' base=''
+  local state='' base=''
 
   if ! fields=$(gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
-    --json state,merged,isInMergeQueue,baseRefName \
-    --jq '"state=" + (.state // ""), "merged=" + (.merged | tostring), "queued=" + (.isInMergeQueue | tostring), "base=" + (.baseRefName // "")' \
+    --json state,baseRefName \
+    --jq '"state=" + (.state // ""), "base=" + (.baseRefName // "")' \
     2>/dev/null) || [ -z "$fields" ]; then
     return 1
   fi
   while IFS= read -r line; do
     total=$((total + 1))
     case "$line" in
-      state=*) state=${line#state=} ;;
-      merged=*) merged=${line#merged=} ;;
-      queued=*) queued=${line#queued=} ;;
-      base=*) base=${line#base=} ;;
+      state=*) [ -z "$state" ] || return 1; state=${line#state=} ;;
+      base=*) [ -z "$base" ] || return 1; base=${line#base=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 4 ] || [ "$total" -ne 4 ] || [ -z "$state" ] \
-    || { [ "$merged" != true ] && [ "$merged" != false ]; } \
-    || { [ "$queued" != true ] && [ "$queued" != false ]; } \
-    || [ -z "$base" ]; then
+  if [ "$named" -ne 2 ] || [ "$total" -ne 2 ] || [ -z "$base" ]; then
     return 1
   fi
-
+  case "$state" in OPEN|CLOSED|MERGED) ;; *) return 1 ;; esac
   FM_PR_GITHUB_STATE=$state
-  FM_PR_GITHUB_MERGED=$merged
-  FM_PR_GITHUB_QUEUED=$queued
+  FM_PR_GITHUB_MERGED=false
+  [ "$state" != MERGED ] || FM_PR_GITHUB_MERGED=true
+  FM_PR_GITHUB_QUEUED=unknown
   FM_PR_GITHUB_BASE=$base
-  FM_PR_GITHUB_QUEUE_OBSERVED=true
+  FM_PR_GITHUB_QUEUE_OBSERVED=false
 }
 
 github_read_outcome() {
@@ -412,9 +438,7 @@ github_read_outcome() {
   # Only a failed GraphQL read falls back. A GraphQL read that completes and
   # reports the pull request as neither merged nor queued is a concrete outcome.
   github_read_outcome_with_gh && return 0
-  if github_read_outcome_with_gh_pr_view && [ "$FM_PR_GITHUB_MERGED" = true ]; then
-    return 0
-  fi
+  github_read_outcome_with_gh_pr_view && return 0
   echo "error: could not read the GitHub pull request outcome after the merge attempt: the gh read failed and the fallback view could not prove the outcome either; PR metadata and merge poll remain recorded" >&2
   return 1
 }

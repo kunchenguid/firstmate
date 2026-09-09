@@ -260,8 +260,8 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
-    "explicit no-mistakes brief did not render the pipeline definition of done"
+  assert_grep "Do NOT run /no-mistakes" "$brief" \
+    "legacy no-mistakes mode did not render the direct-PR contract"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -326,102 +326,28 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
-  local home id brief
-  home="$TMP_ROOT/wording-home"
+  local home="$TMP_ROOT/wording-home" brief
   mkdir -p "$home/data"
-  id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
-  brief="$home/data/$id/brief.md"
-  assert_present "$brief" "brief was not scaffolded"
-  assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
-    "no-mistakes DOD lost its guidance-reference sentence"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`no-mistakes axi run --help`' "$brief" \
-    "no-mistakes DOD must render literal backticks around the help command"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`help`' "$brief" \
-    "no-mistakes DOD must render literal backticks around help"
-  assert_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$brief" \
-    "no-mistakes DOD must require --intent to be the Captain's intent subsection"
-  assert_grep "plus any later words the captain actually said" "$brief" \
-    "no-mistakes DOD must allow later captain words in --intent"
-  assert_grep "Do not include \`## Firstmate spec\`" "$brief" \
-    "no-mistakes DOD must keep Firstmate spec out of --intent"
-  assert_grep "or your own decisions and tradeoffs" "$brief" \
-    "no-mistakes DOD must keep worker tradeoffs out of --intent"
-  assert_grep "This replaces the no-mistakes skill's advice to enrich \`--intent\`" "$brief" \
-    "no-mistakes DOD must override the external skill's enrich-with-decisions guidance"
-  # A bare reference cannot preserve the captain's ask, so the rendered DOD states
-  # the self-sufficiency rule and requires referenced material to be resolved into
-  # its substance.
-  assert_grep "The \`--intent\` string you pass must be self-sufficient" "$brief" \
-    "no-mistakes DOD must require a self-sufficient --intent string"
-  assert_grep "write the substance of the referenced items into \`--intent\`" "$brief" \
-    "no-mistakes DOD must tell the worker to resolve report, decision, and PR references into substance"
-
-  # The --yes ban is a fleet-wide prohibition, not a preference, and it must not
-  # claim an enforcement the tool does not provide: this is instruction only.
-  assert_grep "NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide." "$brief" \
-    "no-mistakes DOD must state the --yes ban as a prohibition"
-  assert_grep "answering your own ask-user finding is a hard rule violation" "$brief" \
-    "no-mistakes DOD must say why --yes is banned"
-  assert_no_grep "Avoid \`--yes\`" "$brief" \
-    "no-mistakes DOD still states the --yes ban as a preference"
-  assert_no_grep "no-mistakes refuses" "$brief" \
-    "no-mistakes DOD must not claim the tool itself refuses --yes"
-  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-wording-b1 some-proj --mode no-mistakes >/dev/null
+  brief="$home/data/brief-wording-b1/brief.md"
+  assert_grep 'Do NOT run /no-mistakes' "$brief" 'legacy mode must not start the pipeline'
+  assert_grep 'open a PR with' "$brief" 'legacy mode must deliver a PR'
+  assert_grep 'relevant tests and lint checks' "$brief" 'ordinary verification is still required'
+  assert_no_grep 'no-mistakes axi run' "$brief" 'legacy mode still invokes the pipeline'
+  pass "fm-brief: legacy mode uses direct PR with normal verification"
 }
 
 test_ask_user_escalation_format() {
-  local home id brief mode other_id other_brief
-  home="$TMP_ROOT/ask-user-home"
+  local home="$TMP_ROOT/ask-user-home" mode brief
   mkdir -p "$home/data"
-  id="brief-ask-user-d1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
-  brief="$home/data/$id/brief.md"
-  assert_present "$brief" "brief was not scaffolded"
-
-  # A no-mistakes ask-user gate must escalate its ask-user findings as one status
-  # event plus one verbatim findings snapshot file, using that same shape even
-  # for a single finding, never paraphrased into the status line.
-  assert_grep "escalate all ask-user findings as one event plus one snapshot file" "$brief" \
-    "ship rule 6 lost the one-event-plus-snapshot-file ask-user contract"
-  assert_grep "using that same shape even when the gate holds only a single ask-user finding" "$brief" \
-    "ship rule 6 must require the same shape for a single finding"
-  assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$brief" \
-    "ship rule 6 must limit the verbatim axi slice to ask-user findings"
-  # shellcheck disable=SC2016  # single quotes are deliberate: backticks and the key/findings/file tokens must stay literal
-  assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/$id/nm-<run>-findings.txt" "$brief" \
-    "ship rule 6 must render the exact needs-decision ask-user status line"
-  assert_grep "$home/data/$id/nm-<run>-findings.txt" "$brief" \
-    "ship rule 6 must point the snapshot file under this task's own data directory"
-  assert_grep "The status line only points at the file; it never restates or summarizes a finding's content." "$brief" \
-    "ship rule 6 must forbid paraphrasing ask-user findings into the status line"
-
-  # The DOD's own ask-user paragraph must point back at rule 6's format
-  # (one-owner rule) rather than restating or bare-citing it.
-  assert_grep "escalate to firstmate using rule 6's ask-user format" "$brief" \
-    "no-mistakes DOD ask-user paragraph must point at rule 6's format instead of a bare citation"
-  assert_no_grep "escalate to firstmate (rule 6) and stop." "$brief" \
-    "no-mistakes DOD ask-user paragraph still uses the old bare rule-6 pointer"
-
-  other_id="brief-no-ask-user-scout"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --scout >/dev/null 2>&1
-  other_brief="$home/data/$other_id/brief.md"
-  assert_no_grep "destructive actions, ask-user findings" "$other_brief" \
-    "scout brief received a no-mistakes-only decision case"
-
-  for mode in direct-PR local-only; do
-    other_id="brief-no-ask-user-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --mode "$mode" >/dev/null 2>&1
-    other_brief="$home/data/$other_id/brief.md"
-    assert_no_grep "nm-<run>-findings.txt" "$other_brief" \
-      "$mode brief received a no-mistakes-only escalation format"
-    assert_no_grep "destructive actions, ask-user findings" "$other_brief" \
-      "$mode brief received a no-mistakes-only decision case"
+  for mode in no-mistakes direct-PR local-only; do
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "brief-$mode" some-proj --mode "$mode" >/dev/null
+    brief="$home/data/brief-$mode/brief.md"
+    assert_no_grep 'nm-<run>-findings.txt' "$brief" 'removed gate instructions leaked into brief'
+    assert_grep 'needs-decision' "$brief" 'normal decision escalation was removed'
+    assert_grep 'relevant tests and lint checks' "$brief" 'verification contract was removed'
   done
-
-  pass "fm-brief.sh: no-mistakes ask-user findings use one event plus a verbatim snapshot"
+  pass "fm-brief: all modes preserve verification and ordinary escalation without pipeline gates"
 }
 
 test_ship_project_memory_wording() {
@@ -822,8 +748,8 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
-  assert_grep "you may host the Lavish review loop yourself" "$brief" \
-    "scout brief must mention the option to host a Lavish review loop"
+  assert_no_grep "host the Lavish review loop" "$brief" \
+    "scout brief must not reinstate Lavish"
   assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
   assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"

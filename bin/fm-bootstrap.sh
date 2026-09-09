@@ -892,36 +892,13 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
-# Unused here (this home does not require these tools). Kept so an upstream
-# floor bump still merges onto a named constant instead of a conflicted hunk.
-NO_MISTAKES_MIN=1.46.0
-GH_AXI_MIN=0.1.29
-LAVISH_AXI_MIN=0.1.46
+
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
-# Shared semantic-version floor for the tool gates below. A version string that
-# cannot be parsed into exactly one major.minor.patch triple is incompatible,
-# never assumed current, so a development or vendored build cannot pass a floor
-# it was never checked against.
-tool_version_at_least() {  # <tool> <min-version>
-  local tool=$1 min=$2 output parts major minor patch extra
-  local min_major min_minor min_patch min_extra
-  command -v "$tool" >/dev/null 2>&1 || return 1
-  output=$("$tool" --version 2>/dev/null) || return 1
-  parts=$(printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
-  IFS=' ' read -r major minor patch extra <<< "$parts"
-  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  IFS='.' read -r min_major min_minor min_patch min_extra <<< "$min"
-  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$min_extra" ] || return 1
-  [ "$major" -gt "$min_major" ] && return 0
-  [ "$major" -eq "$min_major" ] || return 1
-  [ "$minor" -gt "$min_minor" ] && return 0
-  [ "$minor" -eq "$min_minor" ] || return 1
-  [ "$patch" -ge "$min_patch" ]
-}
+
 
 x_mode_write_if_changed() {
   local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
