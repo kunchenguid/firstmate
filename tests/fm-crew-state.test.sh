@@ -168,6 +168,53 @@ SH
   printf '%s\n' "$fb"
 }
 
+# Replace make_fakebin's `no-mistakes` with one that HANGS on exactly one lookup
+# ("axi-status", "axi-status-after-output", or "runs") and otherwise answers
+# identically, so a test can time out ONE bounded call while the rest of the
+# surface stays live. Every invocation is recorded in <case-dir>/no-mistakes.calls,
+# so a test can prove the hanging lookup was really attempted (and really bounded)
+# instead of silently skipped - without that, a timeout case could pass vacuously
+# on a fake never called. "axi-status-after-output" writes its whole answer FIRST
+# and only then wedges, the shape that leaves a killed call holding real bytes.
+make_hanging_nm() {  # <case-dir> <axi-status|axi-status-after-output|runs>
+  local fb="$1/fakebin"
+  FM_FAKE_NM_CALLS="$1/no-mistakes.calls"
+  FM_FAKE_NM_HANG=$2
+  export FM_FAKE_NM_CALLS FM_FAKE_NM_HANG
+  : > "$FM_FAKE_NM_CALLS"
+  cat > "$fb/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_FAKE_NM_CALLS:-/dev/null}"
+hang() { while :; do sleep 1; done; }
+case "${1:-}" in
+  axi)
+    shift
+    case "${1:-}" in
+      status)
+        [ "${FM_FAKE_NM_HANG:-}" = axi-status ] && hang
+        shift
+        if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
+        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi
+        [ "${FM_FAKE_NM_HANG:-}" = axi-status-after-output ] && hang ;;
+      logs)
+        printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+    esac
+    ;;
+  runs)
+    [ "${FM_FAKE_NM_HANG:-}" = runs ] && hang
+    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/no-mistakes"
+}
+
+# Count of recorded fake `no-mistakes` invocations matching <pattern>.
+nm_calls_matching() {  # <case-dir> <pattern>
+  grep -c -- "$2" "$1/no-mistakes.calls" 2>/dev/null || printf '0'
+}
+
 make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
   local dir=$1 tb="$1/notimeoutbin" tool real
   mkdir -p "$tb"
@@ -216,9 +263,14 @@ reset_fakes() {
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   FM_FAKE_DAEMON_DOWN=0
+  FM_FAKE_NM_HANG=""
+  FM_FAKE_NM_CALLS=""
+  # Empty is the helper's own "unset" (its case guard falls back to 10s), so a
+  # per-test bound never leaks into the next case.
+  FM_CREW_STATE_NM_TIMEOUT=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_DAEMON_DOWN
+  export FM_FAKE_DAEMON_DOWN FM_FAKE_NM_HANG FM_FAKE_NM_CALLS FM_CREW_STATE_NM_TIMEOUT
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -1623,6 +1675,165 @@ SH
   pass "no timeout command uses perl bound"
 }
 
+# Regression: a run lookup that TIMED OUT reported `failed`.
+# A killed lookup answers nothing, but it left $RUN_OUT empty - exactly like a
+# crew that genuinely has no run - so the helper fell through to the status-log
+# verb mapping and published an old `failed:` event as the crew's current state.
+# The mapping had nothing to reconcile that event against, because the one source
+# that could supersede it is the source that never answered. A confident terminal
+# verdict is precisely the evidence that would justify restarting or tearing down
+# a run that is alive and mid-flight, so no information must read `unknown`.
+test_lookup_timeout_never_reports_terminal_status_log_state() {
+  reset_fakes
+  local d out start elapsed
+  d=$(new_case lookup-timeout-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-timeout-failed
+  make_fakebin "$d" >/dev/null
+  make_hanging_nm "$d" axi-status
+  fm_write_meta "$d/state/timeout-failed.meta" "window=fm:fm-timeout-failed" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  # A superseded event from an EARLIER run, the shape that is genuinely common:
+  # the crew failed once, fixed, and is validating again right now.
+  printf 'working: implementation committed, validating\nfailed: earlier validation run failed\n' \
+    > "$d/state/timeout-failed.status"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" timeout-failed
+  FM_CREW_STATE_NM_TIMEOUT=1
+  start=$SECONDS
+  out=$(run_crew_state "$d" timeout-failed)
+  elapsed=$((SECONDS - start))
+  assert_not_contains "$out" "state: failed" "a timed-out lookup must never report a terminal state"
+  assert_contains "$out" "state: unknown" "a timed-out lookup reports unknown"
+  assert_contains "$out" "timed out" "the verdict names the timeout as the reason"
+  assert_not_contains "$out" "source: status-log" "an unreconcilable event is not a current-state source"
+  # The evidence is still relayed, labelled as the unreconciled event it is.
+  assert_contains "$out" "failed" "the unreconciled last event is still named"
+  # Guards against a vacuous pass: the lookup must really have been attempted
+  # and really have been bounded, not skipped or left to hang.
+  [ "$(nm_calls_matching "$d" 'axi status')" -ge 1 ] \
+    || fail "the timed-out lookup was never attempted (nothing to time out)"
+  [ "$elapsed" -lt 10 ] || fail "the run lookup was not bounded (elapsed ${elapsed}s)"
+  pass "a timed-out run lookup reports unknown instead of a stale terminal event"
+}
+
+# A killed call can still have WRITTEN before it wedged - `axi status` emitting a
+# whole run record and only then hanging - and those bytes must not be attributed.
+# Nothing proves such a record was complete rather than truncated at a field
+# boundary that changes its meaning, so trusting it would publish a terminal
+# run-step state and walk straight around the unknown-on-timeout rule, which is
+# the one thing this whole guard exists to prevent. The fixture is deliberately
+# the hostile shape: a terminal record whose branch and head BOTH bind to this
+# worktree, so it would be attributed if the output were trusted at all.
+test_timeout_after_output_is_not_attributed() {
+  reset_fakes
+  local d out head
+  d=$(new_case timeout-after-output)
+  make_repo_on_branch "$d/wt" fm/feat-partial
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  make_hanging_nm "$d" axi-status-after-output
+  fm_write_meta "$d/state/partial.meta" "window=fm:fm-partial" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation committed, validating\n' > "$d/state/partial.status"
+  FM_FAKE_AXI_STATUS="$(printf 'run:\n  id: "01RUN"\n  branch: fm/feat-partial\n  status: failed\n  head: "%s"\n  outcome: failed\n' "$head")"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" partial
+  FM_CREW_STATE_NM_TIMEOUT=1
+  out=$(run_crew_state "$d" partial)
+  assert_not_contains "$out" "state: failed" "bytes from a killed call must never become a terminal verdict"
+  assert_not_contains "$out" "source: run-step" "a killed call's record must not be attributed"
+  assert_contains "$out" "state: unknown" "a killed call reports unknown even when it wrote first"
+  assert_contains "$out" "timed out" "the verdict names the timeout as the reason"
+  [ "$(nm_calls_matching "$d" 'axi status')" -ge 1 ] \
+    || fail "the lookup was never attempted (nothing to time out)"
+  pass "a lookup killed after writing its answer is not attributed"
+}
+
+# The SECOND bounded lookup reaches the same fall-through: `axi status` answered
+# for another crew's branch (routine once several crews validate the same
+# underlying repo), so attribution moves to the coarse runs list - and that call
+# is the one killed. A stale `done: PR ... checks green` must not become the
+# verdict either; a false `done` is what invites teardown of live work.
+test_coarse_lookup_timeout_never_reports_terminal_status_log_state() {
+  reset_fakes
+  local d out start elapsed
+  d=$(new_case coarse-timeout-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-timeout-done
+  make_fakebin "$d" >/dev/null
+  make_hanging_nm "$d" runs
+  fm_write_meta "$d/state/timeout-done.meta" "window=fm:fm-timeout-done" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\nworking: review findings being applied\n' \
+    > "$d/state/timeout-done.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" timeout-done
+  FM_CREW_STATE_NM_TIMEOUT=1
+  start=$SECONDS
+  out=$(run_crew_state "$d" timeout-done)
+  elapsed=$((SECONDS - start))
+  assert_not_contains "$out" "state: working" "a timed-out coarse lookup must not publish a stale event"
+  assert_contains "$out" "state: unknown" "a timed-out coarse lookup reports unknown"
+  assert_contains "$out" "timed out" "the coarse verdict also names the timeout"
+  [ "$(nm_calls_matching "$d" 'runs --limit')" -ge 1 ] \
+    || fail "the coarse runs-list lookup was never attempted (nothing to time out)"
+  [ "$elapsed" -lt 10 ] || fail "the coarse lookup was not bounded (elapsed ${elapsed}s)"
+  pass "a timed-out coarse runs-list lookup reports unknown instead of a stale event"
+}
+
+# The other half of the rule, and the test that would fail if the fix had simply
+# turned every uncertain case into `unknown`: a lookup that ANSWERED, and whose
+# answer is that this crew has no run, is information. The status-log verb
+# mapping must still run for it - including onto a terminal state - exactly as
+# before. The two cases are byte-identical in $RUN_OUT and differ only in whether
+# the call was killed, which is the distinction the fix is keyed on.
+test_answered_empty_lookup_still_maps_terminal_status_log_state() {
+  reset_fakes
+  local d out
+  d=$(new_case answered-empty-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-answered
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/answered.meta" "window=fm:fm-answered" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'failed: could not reproduce the reported defect\n' > "$d/state/answered.status"
+  # Answered, exit 0, no run anywhere - the same empty output a timeout leaves.
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" answered
+  out=$(run_crew_state "$d" answered)
+  assert_contains "$out" "state: failed" "an answered empty lookup still maps the terminal log verb"
+  assert_contains "$out" "source: status-log" "an answered empty lookup still uses the status log"
+  assert_not_contains "$out" "timed out" "nothing timed out, so no timeout reason is reported"
+  pass "an answered empty lookup still reports the status-log verb"
+}
+
+# A busy crew keeps its positive, current evidence even when the lookup dies: the
+# semantic busy record is read AFTER the lookup and is real information about now,
+# so it must still outrank the unknown-on-timeout rule. Without this, a timeout
+# would blind the helper to a crew that is demonstrably working.
+test_lookup_timeout_still_reports_busy_pane() {
+  reset_fakes
+  local d out
+  d=$(new_case lookup-timeout-busy)
+  make_repo_on_branch "$d/wt" fm/feat-timeout-busy
+  make_fakebin "$d" >/dev/null
+  make_hanging_nm "$d" axi-status
+  fm_write_meta "$d/state/timeout-busy.meta" "window=fm:fm-timeout-busy" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'failed: earlier validation run failed\n' > "$d/state/timeout-busy.status"
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" timeout-busy)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" timeout-busy busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  FM_CREW_STATE_NM_TIMEOUT=1
+  out=$(run_crew_state "$d" timeout-busy)
+  assert_contains "$out" "state: working" "a busy record still reports working after a timed-out lookup"
+  assert_contains "$out" "source: pane" "the busy record remains the verdict's source"
+  assert_not_contains "$out" "state: failed" "a busy crew is never reported failed"
+  pass "a timed-out lookup still reports a busy crew as working"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -2285,6 +2496,11 @@ test_no_run_tmux_unreadable_reads_unreachable_not_gone
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
+test_lookup_timeout_never_reports_terminal_status_log_state
+test_timeout_after_output_is_not_attributed
+test_coarse_lookup_timeout_never_reports_terminal_status_log_state
+test_answered_empty_lookup_still_maps_terminal_status_log_state
+test_lookup_timeout_still_reports_busy_pane
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_remote_alive_with_log_uses_status_log
