@@ -54,6 +54,7 @@ add_forge_mocks() {
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "$*" in
   *repos/example/repo/pulls/9*)
+    [ ! -e "$FM_TEST_CASE_DIR/pull-read-fails" ] || exit 1
     cat "$FM_TEST_GITHUB_PR"
     ;;
   *repos/example/repo/commits/*/check-runs*)
@@ -92,19 +93,26 @@ SH
 }
 
 write_pr() {
-  local case_dir=$1 state=$2 mergeable_state=$3 head=$4
+  local case_dir=$1 state=$2 mergeable_state=$3 head=$4 head_mode=${5:-value}
+  local head_json
+  case "$head_mode" in
+    value) head_json="{\"sha\":\"$head\"}" ;;
+    missing) head_json='{}' ;;
+    null) head_json='{"sha":null}' ;;
+    *) fail "write_pr: unknown head mode '$head_mode'" ;;
+  esac
   case "$mergeable_state" in
     missing)
-      printf '{"number":9,"state":"%s","head":{"sha":"%s"}}\n' \
-        "$state" "$head" > "$case_dir/pull.json"
+      printf '{"number":9,"state":"%s","head":%s}\n' \
+        "$state" "$head_json" > "$case_dir/pull.json"
       ;;
     null)
-      printf '{"number":9,"state":"%s","mergeable_state":null,"head":{"sha":"%s"}}\n' \
-        "$state" "$head" > "$case_dir/pull.json"
+      printf '{"number":9,"state":"%s","mergeable_state":null,"head":%s}\n' \
+        "$state" "$head_json" > "$case_dir/pull.json"
       ;;
     *)
-      printf '{"number":9,"state":"%s","mergeable_state":"%s","head":{"sha":"%s"}}\n' \
-        "$state" "$mergeable_state" "$head" > "$case_dir/pull.json"
+      printf '{"number":9,"state":"%s","mergeable_state":"%s","head":%s}\n' \
+        "$state" "$mergeable_state" "$head_json" > "$case_dir/pull.json"
       ;;
   esac
 }
@@ -136,6 +144,10 @@ write_bespoke_checks() {
     "$LIVE_HEAD" > "$case_dir/check-runs.json"
 }
 
+write_no_checks() {
+  printf '%s\n' '{"total_count":0,"check_runs":[]}' > "$1/check-runs.json"
+}
+
 run_merge() {
   local case_dir=$1 required_checks=$2
   shift 2
@@ -152,6 +164,24 @@ run_merge() {
   FM_TEST_GITHUB_RULES="$case_dir/github-rules" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" task-x1 "$PR_URL" "$@"
+}
+
+run_merge_with_required_checks_unset() {
+  local case_dir=$1
+  shift
+  env -u FM_PR_REQUIRED_CHECKS \
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$case_dir/home" \
+    FM_STATE_OVERRIDE="$case_dir/home/state" \
+    FM_TEST_CASE_DIR="$case_dir" \
+    FM_TEST_GH_LOG="$case_dir/gh.log" \
+    FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+    FM_TEST_GITHUB_PR="$case_dir/pull.json" \
+    FM_TEST_GITHUB_CHECKS="$case_dir/check-runs.json" \
+    FM_TEST_GITHUB_OUTCOME="$case_dir/github-outcome" \
+    FM_TEST_GITHUB_RULES="$case_dir/github-rules" \
+    PATH="$case_dir/fakebin:$PATH" \
+      "$PR_MERGE" task-x1 "$PR_URL" "$@"
 }
 
 merge_call_count() {
@@ -244,6 +274,7 @@ test_clause_3_refuses_non_success_check_conclusions() {
     write_checks "$case_dir" "$status" "$conclusion"
 
     run_merge "$case_dir" "$DEFAULT_REQUIRED_CHECKS" \
+      < /dev/null \
       > "$case_dir/stdout" 2> "$case_dir/stderr"
     rc=$?
 
@@ -272,6 +303,43 @@ test_clause_3_required_check_list_is_configurable() {
   pass "clause 3: the required-check list comes from repository configuration"
 }
 
+test_clause_3_unset_required_checks_enforces_non_empty_defaults() {
+  local case_dir rc
+  case_dir=$(make_case required-checks-unset)
+  write_pr "$case_dir" open clean "$LIVE_HEAD"
+  write_no_checks "$case_dir"
+
+  run_merge_with_required_checks_unset "$case_dir" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+
+  assert_refused "$case_dir" "$rc" \
+    "clause 3 required-checks-unset-default" "check"
+  pass "clause 3: an unset required-check configuration enforces non-empty defaults"
+}
+
+test_clause_3_empty_required_checks_refuses_before_forge_calls() {
+  local name required_checks case_dir rc
+  for name in empty whitespace; do
+    case "$name" in
+      empty) required_checks='' ;;
+      whitespace) required_checks='   ' ;;
+    esac
+    case_dir=$(make_case "required-checks-$name")
+    write_pr "$case_dir" open clean "$LIVE_HEAD"
+    write_checks "$case_dir"
+
+    run_merge "$case_dir" "$required_checks" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+
+    expect_code 1 "$rc" "clause 3 required-checks-$name: fm-pr-merge must refuse"
+    assert_one_line_reason "$case_dir" "clause 3 required-checks-$name" "configuration"
+    assert_no_forge_call "$case_dir" "clause 3 required-checks-$name"
+  done
+  pass "clause 3: empty and whitespace-only required-check configuration fail closed"
+}
+
 test_clause_3_refuses_unreadable_required_check_results() {
   local name case_dir rc
   for name in api-failure invalid-json; do
@@ -292,6 +360,39 @@ test_clause_3_refuses_unreadable_required_check_results() {
       "clause 3 required-checks-$name" "check"
   done
   pass "clause 3: unreadable required-check results fail closed"
+}
+
+test_clause_3_refuses_unreadable_pull_request_response() {
+  local case_dir rc
+  case_dir=$(make_case pull-response-unreadable)
+  write_pr "$case_dir" open clean "$LIVE_HEAD"
+  write_checks "$case_dir"
+  : > "$case_dir/pull-read-fails"
+
+  run_merge "$case_dir" "$DEFAULT_REQUIRED_CHECKS" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+
+  assert_refused "$case_dir" "$rc" \
+    "clause 3 pull-response-unreadable" "pull request"
+  pass "clause 3: an unreadable pull request response fails closed distinctly"
+}
+
+test_clause_3_refuses_missing_or_null_live_head() {
+  local head_mode case_dir rc
+  for head_mode in missing null; do
+    case_dir=$(make_case "live-head-$head_mode")
+    write_pr "$case_dir" open clean "$LIVE_HEAD" "$head_mode"
+    write_checks "$case_dir"
+
+    run_merge "$case_dir" "$DEFAULT_REQUIRED_CHECKS" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+
+    assert_refused "$case_dir" "$rc" \
+      "clause 3 live-head-$head_mode" "head"
+  done
+  pass "clause 3: a missing or null live pull request head fails closed distinctly"
 }
 
 test_clause_3_refuses_successful_check_at_a_different_head() {
@@ -340,21 +441,25 @@ test_clause_5_refuses_caller_safety_overrides_before_forge_calls() {
       admin)
         token=--admin
         run_merge "$case_dir" "$DEFAULT_REQUIRED_CHECKS" -- --admin \
+          < /dev/null \
           > "$case_dir/stdout" 2> "$case_dir/stderr"
         ;;
       admin-equals)
         token=--admin
         run_merge "$case_dir" "$DEFAULT_REQUIRED_CHECKS" -- --admin=true \
+          < /dev/null \
           > "$case_dir/stdout" 2> "$case_dir/stderr"
         ;;
       match-head)
         token=--match-head-commit
         run_merge "$case_dir" "$DEFAULT_REQUIRED_CHECKS" -- --match-head-commit "$OTHER_HEAD" \
+          < /dev/null \
           > "$case_dir/stdout" 2> "$case_dir/stderr"
         ;;
       match-head-equals)
         token=--match-head-commit
         run_merge "$case_dir" "$DEFAULT_REQUIRED_CHECKS" --match-head-commit="$OTHER_HEAD" \
+          < /dev/null \
           > "$case_dir/stdout" 2> "$case_dir/stderr"
         ;;
     esac
@@ -419,7 +524,11 @@ test_clause_2_refuses_every_non_clean_mergeable_state
 test_clause_3_refuses_missing_configured_check
 test_clause_3_refuses_non_success_check_conclusions
 test_clause_3_required_check_list_is_configurable
+test_clause_3_unset_required_checks_enforces_non_empty_defaults
+test_clause_3_empty_required_checks_refuses_before_forge_calls
 test_clause_3_refuses_unreadable_required_check_results
+test_clause_3_refuses_unreadable_pull_request_response
+test_clause_3_refuses_missing_or_null_live_head
 test_clause_3_refuses_successful_check_at_a_different_head
 test_clause_4_refuses_stale_expected_head
 test_clause_5_refuses_caller_safety_overrides_before_forge_calls
