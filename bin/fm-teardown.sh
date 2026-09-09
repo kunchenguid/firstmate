@@ -937,7 +937,7 @@ cleanup_recovery_identity_is_unambiguous() {
 }
 
 classify_cleanup_recovery() {
-  local kind project worktree top origin url_path owner repo rest number api branch dirty remote_head
+  local kind project worktree top origin url_path owner repo rest number api branch dirty remote_head status_script
   kind=$(fm_meta_get "$META" kind)
   [ -n "$kind" ] || kind=ship
   CLEANUP_CLASSIFICATION=NONE
@@ -995,10 +995,21 @@ classify_cleanup_recovery() {
       CLEANUP_CLASSIFICATION_REASON="scout copy is not registered to its recorded project"
       return 0
     }
+    status_script=$(cat <<'SH'
+git --no-optional-locks status --porcelain --ignored --untracked-files=all --ignore-submodules=none || exit 1
+git_dir=$(git rev-parse --absolute-git-dir) || exit 1
+scratch=$(mktemp -d "$git_dir/fm-empty-index.XXXXXX") || exit 1
+trap 'rm -rf "$scratch"' EXIT
+trap 'exit 1' HUP INT TERM
+export GIT_INDEX_FILE="$scratch/index"
+git -c core.sparseCheckout=false -c core.splitIndex=false -c core.ignorestat=false read-tree HEAD || exit 1
+git -c core.sparseCheckout=false -c core.fsmonitor=false -c core.ignorestat=false \
+  status --porcelain --ignored --untracked-files=all --ignore-submodules=none
+SH
+)
     dirty=$({
-      git -C "$worktree" status --porcelain --ignored --untracked-files=all --ignore-submodules=none &&
-        git -C "$worktree" submodule foreach --quiet --recursive \
-          'git status --porcelain --ignored --untracked-files=all --ignore-submodules=none'
+      (cd "$worktree" && sh -c "$status_script") &&
+        git -C "$worktree" submodule foreach --quiet --recursive "$status_script"
     } 2>/dev/null) || {
       CLEANUP_CLASSIFICATION_REASON="cannot inspect the isolated scout copy for tracked, untracked, or ignored material"
       return 0
@@ -1128,7 +1139,8 @@ case "$CLEANUP_CLASSIFICATION" in
     ;;
 esac
 
-if [ -n "$TEARDOWN_LEGACY_RECORD_REFUSAL" ]; then
+if [ -n "$TEARDOWN_LEGACY_RECORD_REFUSAL" ] \
+   || { [ "$TEARDOWN_SKIP_ENDPOINT_CLEANUP" = 1 ] && [ "$TEARDOWN_LEGACY_PENDING" = 1 ]; }; then
   if [ "$TEARDOWN_SKIP_ENDPOINT_CLEANUP" != 1 ]; then
     echo "error: $TEARDOWN_LEGACY_RECORD_REFUSAL; refusing automatic teardown - relaunch the task to publish an unambiguous incarnation, then retry teardown, or pass --legacy-record once its recorded endpoint is confirmed dead or agent-less" >&2
     exit 1
@@ -1141,6 +1153,7 @@ if [ -n "$TEARDOWN_LEGACY_RECORD_REFUSAL" ]; then
     exit 1
   fi
   TEARDOWN_BACKLOG_APPLIES=0
+  TEARDOWN_LEGACY_PENDING=0
   TEARDOWN_BACKLOG_SKIP_REASON="sparse $CLEANUP_CLASSIFICATION recovery record has no spawned incarnation"
 fi
 

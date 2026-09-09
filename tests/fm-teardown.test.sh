@@ -881,6 +881,47 @@ test_empty_pi_compaction_scout_allows() {
   pass "pi-compaction empty scout is classified EMPTY and cleaned without an endpoint"
 }
 
+test_empty_scout_checks_index_assumptions() {
+  local case_dir flag rc
+  case_dir=$(make_case empty-scout-index-flags)
+  write_sparse_recovery_meta "$case_dir" task-x1 no-mistakes scout "$case_dir/wt"
+  wt_commit_file "$case_dir" work.txt preserved 'preserved baseline'
+  git -C "$case_dir/wt" push -q origin HEAD:main
+
+  for flag in assume-unchanged skip-worktree; do
+    git -C "$case_dir/wt" update-index "--$flag" work.txt
+    printf 'unpreserved flagged edits\n' >> "$case_dir/wt/work.txt"
+    [ -z "$(git -C "$case_dir/wt" status --porcelain --ignored --untracked-files=all --ignore-submodules=none)" ] \
+      || fail "empty-scout-index-flags: $flag did not hide the edits"
+    git -C "$case_dir/wt" ls-files -v -z > "$case_dir/flags.before"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "empty-scout-index-flags: $flag edits must refuse cleanup"
+    assert_grep 'cleanup classification REFUSED' "$case_dir/stderr" \
+      "empty-scout-index-flags: refusal did not identify its category"
+    assert_present "$case_dir/state/task-x1.meta" \
+      "empty-scout-index-flags: refusal erased the recovery record"
+    assert_grep 'unpreserved flagged edits' "$case_dir/wt/work.txt" \
+      "empty-scout-index-flags: refusal lost the edits"
+    git -C "$case_dir/wt" ls-files -v -z > "$case_dir/flags.after"
+    cmp -s "$case_dir/flags.before" "$case_dir/flags.after" \
+      || fail "empty-scout-index-flags: inspection changed the real index flags"
+    git -C "$case_dir/wt" update-index "--no-$flag" work.txt
+    git -C "$case_dir/wt" checkout -- work.txt
+  done
+
+  git -C "$case_dir/wt" update-index --assume-unchanged work.txt
+  run_teardown "$case_dir" > "$case_dir/clean.stdout" 2> "$case_dir/clean.stderr" \
+    || fail "empty-scout-index-flags: clean flagged file should allow cleanup"
+  assert_grep 'Cleanup classification: EMPTY' "$case_dir/clean.stdout" \
+    "empty-scout-index-flags: clean flagged file did not classify EMPTY"
+  pass "EMPTY verifies flagged content without changing real index flags"
+}
+
 test_empty_scout_refuses_hidden_submodule_edits() {
   local case_dir rc
   case_dir=$(make_case empty-scout-submodule)
@@ -950,17 +991,26 @@ test_empty_scout_refuses_hidden_nested_submodule_material() {
   git -C "$case_dir/wt" push -q origin HEAD:main
   git -C "$case_dir/wt/module" config submodule.inner.ignore all
 
-  for material in tracked untracked ignored; do
+  for material in tracked untracked ignored assume-unchanged; do
     case "$material" in
       tracked) path=work.txt ;;
       untracked) path=new.txt ;;
       ignored) path=scratch.tmp ;;
+      assume-unchanged)
+        path=work.txt
+        git -C "$case_dir/wt/module/inner" update-index --assume-unchanged "$path"
+        ;;
     esac
     printf 'unpreserved nested material\n' >> "$case_dir/wt/module/inner/$path"
     [ -z "$(git -C "$case_dir/wt" status --porcelain --ignored --untracked-files=all --ignore-submodules=none)" ] \
       || fail "empty-scout-nested-submodule: fixture did not hide $material material"
-    [ -n "$(git -C "$case_dir/wt/module/inner" status --porcelain --ignored --untracked-files=all --ignore-submodules=none)" ] \
-      || fail "empty-scout-nested-submodule: fixture has no detectable $material material"
+    if [ "$material" = assume-unchanged ]; then
+      [ -z "$(git -C "$case_dir/wt/module/inner" status --porcelain --ignored --untracked-files=all --ignore-submodules=none)" ] \
+        || fail "empty-scout-nested-submodule: index flag did not hide the edits"
+    else
+      [ -n "$(git -C "$case_dir/wt/module/inner" status --porcelain --ignored --untracked-files=all --ignore-submodules=none)" ] \
+        || fail "empty-scout-nested-submodule: fixture has no detectable $material material"
+    fi
 
     set +e
     run_teardown "$case_dir" > "$case_dir/$material.stdout" 2> "$case_dir/$material.stderr"
@@ -976,7 +1026,10 @@ test_empty_scout_refuses_hidden_nested_submodule_material() {
       "empty-scout-nested-submodule: $material refusal erased the recovery record"
     assert_grep 'unpreserved nested material' "$case_dir/wt/module/inner/$path" \
       "empty-scout-nested-submodule: $material refusal lost the nested material"
-    if [ "$material" = tracked ]; then
+    if [ "$material" = assume-unchanged ]; then
+      git -C "$case_dir/wt/module/inner" update-index --no-assume-unchanged "$path"
+    fi
+    if [ "$material" = tracked ] || [ "$material" = assume-unchanged ]; then
       git -C "$case_dir/wt/module/inner" checkout -- "$path"
     else
       rm "$case_dir/wt/module/inner/$path"
@@ -994,6 +1047,55 @@ test_empty_scout_refuses_hidden_nested_submodule_material() {
   assert_absent "$case_dir/state/task-x1.meta" \
     "empty-scout-nested-submodule: clean copy retained its recovery record"
   pass "EMPTY recursively refuses hidden nested material and allows clean submodules"
+}
+
+test_sparse_recovery_backlog_with_legacy_option() {
+  local case_dir category row rc
+  for category in EMPTY PROVABLY-LANDED; do
+    for row in absent done in_flight; do
+      case_dir=$(make_case "sparse-legacy-$category-$row")
+      if [ "$category" = EMPTY ]; then
+        write_sparse_recovery_meta "$case_dir" task-x1 no-mistakes scout "$case_dir/wt"
+      else
+        write_sparse_recovery_meta "$case_dir" task-x1 direct-PR ship ''
+        printf '%s\n' 'pr=https://github.com/abtex/abtex-epicor-reports/pull/43' >> "$case_dir/state/task-x1.meta"
+        git -C "$case_dir/project" remote set-url origin https://github.com/abtex/abtex-epicor-reports.git
+        add_gh_api_response "$case_dir" true
+      fi
+      if [ "$row" = absent ]; then
+        printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$case_dir/data/backlog.md"
+      else
+        seed_backlog_in_flight "$case_dir"
+        if [ "$row" = done ]; then
+          tasks-axi done task-x1 --file "$case_dir/data/backlog.md" >/dev/null
+        fi
+      fi
+      cp "$case_dir/data/backlog.md" "$case_dir/backlog.before"
+      cp "$case_dir/state/task-x1.meta" "$case_dir/meta.before"
+
+      set +e
+      run_teardown "$case_dir" --legacy-record > "$case_dir/stdout" 2> "$case_dir/stderr"
+      rc=$?
+      set -e
+
+      if [ "$row" = in_flight ]; then
+        expect_code 1 "$rc" "sparse-legacy: $category must retain an in-flight row"
+        assert_grep 'cannot retire an in-flight backlog row without an exact spawned incarnation' "$case_dir/stderr" \
+          "sparse-legacy: refusal did not identify the incarnation requirement"
+        cmp -s "$case_dir/meta.before" "$case_dir/state/task-x1.meta" \
+          || fail "sparse-legacy: refusal changed the recovery record"
+      else
+        expect_code 0 "$rc" "sparse-legacy: $category with $row row should clean"
+        assert_grep "Cleanup classification: $category" "$case_dir/stdout" \
+          "sparse-legacy: cleanup did not report its classification"
+        assert_absent "$case_dir/state/task-x1.meta" "sparse-legacy: cleanup retained its record"
+      fi
+      cmp -s "$case_dir/backlog.before" "$case_dir/data/backlog.md" \
+        || fail "sparse-legacy: cleanup changed the backlog without a spawned incarnation"
+      assert_absent "$case_dir/state/task-x1.backlog-close" "sparse-legacy: cleanup wrote a close marker"
+    done
+  done
+  pass "sparse legacy recovery checks backlog ownership without querying an absent endpoint"
 }
 
 test_empty_scout_closes_backlog_without_report() {
@@ -4116,8 +4218,10 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_empty_pi_compaction_scout_allows
+test_empty_scout_checks_index_assumptions
 test_empty_scout_refuses_hidden_submodule_edits
 test_empty_scout_refuses_hidden_nested_submodule_material
+test_sparse_recovery_backlog_with_legacy_option
 test_empty_scout_closes_backlog_without_report
 test_empty_portfolio_scout_allows_when_behind_upstream
 test_reports_pr43_sparse_record_allows_only_api_confirmed_merge
