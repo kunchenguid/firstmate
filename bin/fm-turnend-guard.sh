@@ -198,8 +198,9 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   allow_supervised_stop
 fi
 
-# Away mode transfers supervision ownership from the watcher to the away-mode
-# daemon, which runs the watcher one-shot and starts its replacement after every
+# Away mode and the continuous-supervision opt-in transfer supervision
+# ownership from the watcher to the shared daemon, which runs the watcher
+# one-shot and starts its replacement after every
 # wake (bin/fm-supervise-daemon.sh). A turn boundary regularly lands in that
 # hand-off, when no watcher process holds the lock and nothing is wrong, so
 # requiring one here alarmed on healthy away-mode supervision. A live
