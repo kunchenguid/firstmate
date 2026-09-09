@@ -6,9 +6,15 @@
 # Why this exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
 # terminal it is already in. Harnesses with a native in-pane tracked-background
-# tool (claude, grok) run it there directly and it is fine. A harness with NO
-# native background mechanism (pi) has to manufacture a terminal, and doing that
-# by SPLITTING the captain's active pane visibly shrinks it - the regression this
+# tool (claude, grok) run it there directly on most backends and it is fine.
+# claude on the herdr backend is the proven exception, NOT fine: the in-pane
+# background job leaves a footer token that herdr's own claude agent-detection
+# ruleset misreads as "working" for the life of the session, so the away-mode
+# busy guard can never read that pane idle and the daemon can never deliver an
+# escalation into it (data/firstmate-afk-daemon-wedged-investigation/report.md,
+# 2026-08-26). A harness with NO native background mechanism (pi), and claude
+# on herdr per that exception, has to manufacture a terminal, and doing that by
+# SPLITTING the captain's active pane visibly shrinks it - the regression this
 # script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
 # workspace with --no-focus, or a detached tmux session) that never touches the
 # captain's active tab, and NEVER uses shell `&` (which herdr/codex can reap).
@@ -29,6 +35,8 @@
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
+#                              Refuses on claude+herdr (the exception above) and
+#                              points at `start`, before writing any state.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
@@ -527,8 +535,30 @@ fm_afk_launch_start() {
   return "$result"
 }
 
+# The claude+herdr exception, enforced rather than merely documented. A claude
+# in-pane background job renders a shell token in the captain pane's footer for
+# as long as the daemon lives; herdr's own claude agent-detection ruleset maps
+# that token to "working" above its idle rule, so the away-mode busy guard reads
+# the captain pane busy forever and no escalation is ever delivered. Refuse this
+# ONE combination and name the terminal-backed path; every other harness/backend
+# pair keeps the native exception.
+fm_afk_launch_native_refused() {
+  local harness backend
+  backend=$(discover_supervisor_backend) || true
+  [ "$backend" = herdr ] || return 1
+  harness=$("$FM_AFK_LAUNCH_DIR/fm-harness.sh" 2>/dev/null) || harness=unknown
+  [ "$harness" = claude ] || return 1
+  return 0
+}
+
 fm_afk_launch_start_native() {
   local backup artifact had_afk=0 result=0
+  # Refuse BEFORE touching lifecycle state, so a refusal leaves nothing to undo.
+  if fm_afk_launch_native_refused; then
+    fm_afk_launch_log "refusing start-native on claude+herdr: a claude background shell renders in the captain pane's footer, herdr reads that as the agent working, so the away daemon defers forever and away mode silently delivers nothing"
+    fm_afk_launch_log "use 'bin/fm-afk-launch.sh start' instead (non-visible daemon terminal)"
+    return 1
+  fi
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"

@@ -12,6 +12,14 @@ set -u
 
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 AFK_START="$ROOT/bin/fm-afk-start.sh"
+# fm-afk-start.sh reads the AMBIENT pane and harness environment to decide whether
+# a start would host the daemon in the pane it injects into. These tests are about
+# lock/pidfile reclamation, not that guard, so pin a neutral identity: no harness
+# marker and no pane manager, which the test runner would otherwise inherit from a
+# real captain session.
+AFK_START_ENV=(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u CLAUDECODE -u PI_CODING_AGENT
+  -u GROK_AGENT -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION
+  -u FM_SUPERVISOR_TARGET)
 # Source the daemon's pure functions once. Its main loop is skipped under sourcing
 # via a BASH_SOURCE guard, so only classify_*/housekeeping/escalate_*/afk_* and the
 # pane/submit helpers become defined.
@@ -31,7 +39,7 @@ test_afk_start_refuses_when_flag_cannot_be_written() {
   state="$dir/state"
   mkdir -p "$state/.afk"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$("${AFK_START_ENV[@]}" FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should fail when state/.afk cannot be written"
@@ -46,7 +54,7 @@ test_afk_start_ignores_stale_pidfile_without_lock() {
   state="$dir/state"
   printf '%s\n' "$$" > "$state/.supervise-daemon.pid"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$("${AFK_START_ENV[@]}" FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup instead of trusting a pidfile-only live pid"
@@ -66,7 +74,7 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   printf '%s\n' "$$" > "$lock/pid"
   printf '%s\n' "stale daemon identity" > "$lock/pid-identity"
 
-  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  out=$("${AFK_START_ENV[@]}" FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
   status=$?
 
   [ "$status" -ne 0 ] || fail "fm-afk-start.sh should attempt daemon startup after rejecting a reused-pid lock"

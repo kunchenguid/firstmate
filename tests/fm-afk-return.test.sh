@@ -241,7 +241,8 @@ test_away_reentry_refuses_pending_return_gate() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config"
   printf 'schema\tfm-afk-return.v1\nphase\tblocked\n' > "$dir/home/state/.afk-return-catchup"
   set +e
-  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-afk-launch.sh" start-native 2>&1)
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_SUPERVISOR_BACKEND=tmux \
+    "$ROOT/bin/fm-afk-launch.sh" start-native 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "away re-entry succeeded while return catch-up was pending"
